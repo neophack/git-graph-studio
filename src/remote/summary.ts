@@ -2,7 +2,7 @@
 // R21): open files with their dirty / active state and the pending SCM changes, which the
 // Remote Access window picker shows per window. Polled cheaply and sent only on change; an
 // instance without the command (or no daemon at all) costs one failed call, then silence.
-import { invoke } from '../platform/ipc/core';
+import { remoteHostSetSummary } from '../platform/ipc/remote';
 import { frontendId } from './session';
 
 export interface SummarySource {
@@ -22,7 +22,7 @@ export function startSummaryReporter(source: SummarySource): () => void {
 		const key = JSON.stringify(summary);
 		if (key === last) return;
 		last = key;
-		invoke('remote_host_set_summary', { frontend: frontendId(), summary }).catch(() => {
+		remoteHostSetSummary(frontendId(), summary).catch(() => {
 			failed = true;
 		});
 	};

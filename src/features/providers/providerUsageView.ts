@@ -8,7 +8,8 @@
 // over a gateway's unknown models. Tokens only: no money, no durations — the bridge
 // bills nothing.
 
-import { invoke } from '../../platform/ipc/core';
+import { type UsageHour, providerUsage } from '../../platform/ipc/providers';
+export type { UsageHour };
 import { listen } from '../../platform/ipc/core';
 
 import { commands } from '../../platform/commands';
@@ -27,14 +28,6 @@ import { chatAccountUsageToggle, collapseChatAccountUsage } from '../extensions'
 /* ---------- The data ---------- */
 
 /** One UTC hour's token usage, as `provider_usage` answers it. */
-export interface UsageHour {
-	startMs: number;
-	cacheRead: number;
-	cacheCreation: number;
-	input: number;
-	output: number;
-}
-
 export type UsageRange = 'today' | 'week' | 'month';
 
 /** The curve's ranges, in switcher order. */
@@ -44,7 +37,7 @@ export const USAGE_RANGES: UsageRange[] = ['today', 'week', 'month'];
  *  empty array an honest "nothing used yet". */
 export async function fetchProviderUsage(): Promise<UsageHour[] | null> {
 	try {
-		return (await invoke<UsageHour[] | null>('provider_usage')) ?? [];
+		return (await providerUsage()) ?? [];
 	} catch {
 		return null;
 	}

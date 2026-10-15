@@ -12,57 +12,17 @@
 // management page), and the `bridgedExtIds` knowledge — the app here names no
 // extension id, the backend's answer says whose sidebar sections get the chip.
 
-import { invoke } from '../../platform/ipc/core';
+import { type CcSwitchCandidate, type ConnectionReport, type ProviderDraft, type ProviderList, type ProviderPreset, type ProviderProfile, providerActivate, providerCcswitchScan, providerDelete, providerFetchModels, providerImportCcswitch, providerList, providerSave, providerTestConnection } from '../../platform/ipc/providers';
+export type { CcSwitchCandidate, ConnectionReport, ProviderDraft, ProviderList, ProviderPreset, ProviderProfile } from '../../platform/ipc/providers';
 import { listen } from '../../platform/ipc/core';
 
 import { commands } from '../../platform/commands';
 import { t, tf } from '../../platform/i18n';
 import { el, icon, notify, quickPick, type QuickPickItem } from '../../platform/ui/index';
 
-export interface ProviderProfile {
-	id: string;
-	preset: string;
-	label: string;
-	baseUrl: string | null;
-	model: string | null;
-	smallModel: string | null;
-	hasKey: boolean;
-	keyHint: string | null;
-}
-
-export interface ProviderPreset {
-	id: string;
-	label: string;
-	official: boolean;
-	baseUrl: string | null;
-	models: string[];
-	/** Whether a profile of this shape is usable without an API key — the chat pane's
-	 *  set-key gate keys on it (a custom or NewAPI gateway may be keyless). */
-	requiresKey: boolean;
-}
-
-export interface ProviderList {
-	activeId: string | null;
-	profiles: ProviderProfile[];
-	presets: ProviderPreset[];
-	/** The extension ids whose backends run under the active provider — the UI's
-	 *  switcher affordances key on this, so the frontend names no extension id. */
-	bridgedExtIds: string[];
-}
-
 /** One save's payload. `apiKey` is the only secret-bearing field and it travels once,
  *  into the backend's seal: `null` keeps the stored key, `''` clears it, a value
  *  replaces it. */
-export interface ProviderDraft {
-	id: string;
-	preset: string;
-	label: string;
-	baseUrl: string;
-	model: string;
-	smallModel: string;
-	apiKey: string | null;
-}
-
 /** Dispatched on document whenever the cached list changed (a save, delete or activate
  * landed, here or in another window through the backend event). */
 export const PROVIDERS_CHANGED_EVENT = 'ggs:providers-changed';
@@ -100,7 +60,7 @@ export async function loadProviders(force = false): Promise<ProviderList | null>
 	if (!force && loading !== null) return loading;
 	loading = (async () => {
 		try {
-			const list = providersOrEmpty(await invoke<ProviderList | null>('provider_list'));
+			const list = providersOrEmpty(await providerList());
 			// A changed answer announces itself — every surface (the page, the chips)
 			// follows one propagation mechanism, whichever of them happened to refresh
 			// (the backend's push lands on one window's chip; the page hears the echo).
@@ -126,17 +86,7 @@ function announce(list: ProviderList | null): void {
 
 export async function saveProvider(draft: ProviderDraft): Promise<ProviderList | null> {
 	try {
-		const list = await invoke<ProviderList | null>('provider_save', {
-			profile: {
-				id: draft.id,
-				preset: draft.preset,
-				label: draft.label,
-				baseUrl: draft.baseUrl,
-				model: draft.model,
-				smallModel: draft.smallModel,
-				apiKey: draft.apiKey
-			}
-		});
+		const list = await providerSave(draft);
 		announce(providersOrEmpty(list));
 		return cache;
 	} catch (error) {
@@ -147,7 +97,7 @@ export async function saveProvider(draft: ProviderDraft): Promise<ProviderList |
 
 export async function deleteProvider(id: string): Promise<ProviderList | null> {
 	try {
-		const list = await invoke<ProviderList | null>('provider_delete', { id });
+		const list = await providerDelete(id);
 		announce(providersOrEmpty(list));
 		return cache;
 	} catch (error) {
@@ -164,7 +114,7 @@ export async function deleteProvider(id: string): Promise<ProviderList | null> {
  * page, it booted under). Other windows are never touched. */
 export async function activateProvider(id: string): Promise<ProviderList | null> {
 	try {
-		const list = await invoke<ProviderList | null>('provider_activate', { id });
+		const list = await providerActivate(id);
 		announce(providersOrEmpty(list));
 		const label = cache?.profiles.find((profile) => profile.id === id)?.label ?? id;
 		notify('info', tf('providers.switched', label));
@@ -216,31 +166,12 @@ export function draftFromPreset(preset: ProviderPreset, takenIds: Set<string>): 
 /** One provider configuration found on this machine's cc-switch (or live Claude)
  *  configuration — the scan's answer, keys stripped (a `hasKey` flag stands in for
  *  what the import seals backend-side). */
-export interface CcSwitchCandidate {
-	id: string;
-	label: string;
-	baseUrl: string | null;
-	model: string | null;
-	hasKey: boolean;
-	/** The configuration cc-switch (or Claude Code itself) currently points at. */
-	current: boolean;
-	/** Where it was found: `cc-switch` or `claude`. */
-	source: string;
-}
-
 /** The connectivity probe's answer: reachability, the HTTP status, the round trip and
  *  a diagnosis the page renders verbatim. */
-export interface ConnectionReport {
-	ok: boolean;
-	status: number;
-	ms: number;
-	message: string;
-}
-
 /** What a cc-switch (or live Claude) configuration on this machine would contribute.
  *  Missing files answer empty — the app may run where neither exists. */
 export async function scanCcSwitch(): Promise<CcSwitchCandidate[]> {
-	return (await invoke<CcSwitchCandidate[] | null>('provider_ccswitch_scan')) ?? [];
+	return (await providerCcswitchScan()) ?? [];
 }
 
 /** Import the named candidates (their keys are sealed in the backend, never crossing
@@ -248,7 +179,7 @@ export async function scanCcSwitch(): Promise<CcSwitchCandidate[]> {
  *  bridged backend; the changed store announces itself. */
 export async function importCcSwitch(names: string[]): Promise<ProviderList | null> {
 	try {
-		const list = await invoke<ProviderList | null>('provider_import_ccswitch', { names });
+		const list = await providerImportCcswitch(names);
 		announce(providersOrEmpty(list));
 		return cache;
 	} catch (error) {
@@ -261,14 +192,14 @@ export async function importCcSwitch(names: string[]): Promise<ProviderList | nu
  *  `apiKey` makes the backend fall back to the named profile's stored key. Throws —
  *  the caller renders the failure inline, next to the button that asked. */
 export async function fetchGatewayModels(baseUrl: string, apiKey: string, profileId: string | null): Promise<string[]> {
-	const models = await invoke<string[] | null>('provider_fetch_models', { baseUrl, apiKey, profileId });
+	const models = await providerFetchModels(baseUrl, apiKey, profileId);
 	return models ?? [];
 }
 
 /** The one-shot `/v1/messages` probe. Any HTTP answer is a report (a 401 is a
  *  diagnosis, not a crash); only a transport failure throws. */
 export async function testGatewayConnection(baseUrl: string, apiKey: string, model: string, profileId: string | null): Promise<ConnectionReport> {
-	return await invoke<ConnectionReport>('provider_test_connection', { baseUrl, apiKey, model, profileId });
+	return await providerTestConnection(baseUrl, apiKey, model, profileId);
 }
 
 /* ---------- The sidebar switcher ---------- */

@@ -3,7 +3,6 @@
 // can resolve extension icons without importing the extension host (plan §5.4 — three of the
 // 6-file cycle's edges were exactly this one function).
 
-import { invoke } from './ipc/core';
 import { extReadFileBase64 } from './ipc/ext';
 
 /** The data-URL MIME type of an image file inside an extension (icons, README images). */
@@ -23,7 +22,7 @@ export function extFileDataUrl(extId: string, relPath: string): Promise<string |
 	const key = `${extId}:${relPath}`;
 	let pending = dataUrlCache.get(key);
 	if (!pending) {
-		pending = invoke<string>('ext_read_file_base64', { extId, relPath })
+		pending = extReadFileBase64(extId, relPath)
 			.then((base64) => `data:${imageMime(relPath)};base64,${base64}`)
 			.catch(() => null);
 		dataUrlCache.set(key, pending);

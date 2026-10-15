@@ -3,7 +3,7 @@
 // stylesheet and re-apply the vscode-* body classes; every change dispatches an event so the
 // parts that cache derived values (menus, terminals, the viewer's colors) can refresh.
 
-import { invoke } from '../platform/ipc/core';
+import { providersShellRefresh } from '../platform/ipc/providers';
 import { assocApply, contextMenuApply } from '../platform/ipc/assoc';
 import { settingsRead, settingsWrite } from '../platform/ipc/settings';
 
@@ -404,7 +404,7 @@ export function updateSetting<K extends keyof AppSettings>(key: K, value: AppSet
 function applyTerminalShell(): void {
 	void settingsWrite(JSON.stringify(settings, null, '\t'))
 		.catch(() => undefined)
-		.then(() => invoke('providers_shell_refresh'))
+		.then(() => providersShellRefresh())
 		.catch(() => undefined);
 }
 

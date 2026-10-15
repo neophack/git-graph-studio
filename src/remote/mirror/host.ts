@@ -15,7 +15,7 @@
 // copies of their frames (§22.6): its up messages carry the stream (`w`) and land in that
 // stream's share (webviewShare.ts), loaded with the first one.
 
-import { invoke } from '../../platform/ipc/core';
+import { remoteMirrorFit, remoteMirrorFocus } from '../../platform/ipc/remote';
 import { emit } from '../../platform/ipc/core';
 import { DomRecorder } from './recorder';
 import { InputReplayer } from './replay';
@@ -211,9 +211,9 @@ export function createAppMirrorHost(): MirrorHost {
 			const key = `${width}x${height}`;
 			if (key === lastFit) return;
 			lastFit = key;
-			void invoke('remote_mirror_fit', { width, height }).catch(() => undefined);
+			void remoteMirrorFit(width, height).catch(() => undefined);
 		},
-		focus: (enabled) => void invoke('remote_mirror_focus', { enabled }).catch(() => undefined),
+		focus: (enabled) => void remoteMirrorFocus(enabled).catch(() => undefined),
 		now: () => Date.now()
 	});
 }

@@ -27,7 +27,7 @@ import { openWindowSwitcher, watchLifecycle } from './windowSwitcher';
 import { connectionLooksSlow, dataSaverPreferred, setDataSaver } from './dataSaver';
 import { remoteEnv } from './session';
 import { installPhoneSettingsEntry } from './settingsPage';
-import { invoke } from '../platform/ipc/core';
+import { remoteHostStatus } from '../platform/ipc/remote';
 import { modeUrl } from './mirror/uiMode';
 
 function formatBytes(n: number): string {
@@ -38,7 +38,7 @@ function formatBytes(n: number): string {
 
 async function firstFolder(): Promise<string | null> {
 	try {
-		const status = await invoke<{ folders?: string[] }>('remote_host_status');
+		const status = await remoteHostStatus();
 		return status.folders?.[0] ?? null;
 	} catch {
 		return null;

@@ -8,9 +8,9 @@
 // and pure helpers. Anything that writes, spawns or dialogs is verified structurally only, and
 // the scan names it so the report shows what a button does without doing it.
 
-import { invoke } from '../../platform/ipc/core';
 import { analysisStatus } from '../../platform/ipc/analysis';
 import { extList } from '../../platform/ipc/ext';
+import { providerCcswitchScan, providerList } from '../../platform/ipc/providers';
 import { extProcessStatus } from '../../platform/ipc/extProcess';
 import { mcpTools } from '../../platform/ipc/mcp';
 import { workspaceSymbols } from '../../platform/ipc/search';
@@ -492,12 +492,12 @@ export function registerSelfTestSuites(workbench: Workbench): void {
 				id: 'providers',
 				name: 'the AI provider store answers profiles and names its bridged extension',
 				run: async () => {
-					const list = await invoke<{ profiles: unknown[]; bridgedExtIds: string[] } | null>('provider_list');
+					const list = await providerList();
 					if (!list || !Array.isArray(list.profiles) || list.profiles.length === 0) throw new Error('provider_list answered no profiles');
 					if (!Array.isArray(list.bridgedExtIds) || list.bridgedExtIds.length === 0) throw new Error('provider_list named no bridged extension');
 					// The cc-switch import's scan answers a list (empty where neither
 					// cc-switch nor a live Claude configuration exists) — no keys in it.
-					const candidates = await invoke<{ hasKey?: boolean }[] | null>('provider_ccswitch_scan');
+					const candidates = await providerCcswitchScan();
 					if (!Array.isArray(candidates ?? [])) throw new Error('provider_ccswitch_scan answered no list');
 				}
 			}

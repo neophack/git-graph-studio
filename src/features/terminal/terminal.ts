@@ -4,7 +4,7 @@
 
 import type { Terminal } from '@xterm/xterm';
 import type { FitAddon } from '@xterm/addon-fit';
-import { invoke } from '../../platform/ipc/core';
+import { ptyCreate, ptyKill, ptyResize, ptyWrite } from '../../platform/ipc/pty';
 import { listen, type UnlistenFn } from '../../platform/ipc/core';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 
@@ -90,7 +90,7 @@ export class TerminalView {
 		}).observe(this.host);
 		// A page reload (dev hot reload) would otherwise leave the shells running unattached.
 		window.addEventListener('beforeunload', () => {
-			for (const session of this.sessions) void invoke('pty_kill', { id: session.id });
+			for (const session of this.sessions) void ptyKill(session.id);
 		});
 		// Keys from outside the terminal's own keyboard — the phone's extra key row (Esc,
 		// Tab, Ctrl+…, arrows; src/remote/terminalKeys.ts) — go to the active shell as is.
@@ -98,7 +98,7 @@ export class TerminalView {
 			const data = (event as CustomEvent<string>).detail;
 			const session = this.active;
 			if (!session || session.exited || typeof data !== 'string') return;
-			void invoke('pty_write', { id: session.id, data });
+			void ptyWrite(session.id, data);
 			session.term.focus();
 		});
 		// A theme switch retints the running terminals once the new stylesheet has loaded.
@@ -139,7 +139,7 @@ export class TerminalView {
 		if (!this.active || this.active.exited) await this.create();
 		const session = this.active;
 		if (!session || session.exited) return;
-		await invoke('pty_write', { id: session.id, data: command + '\r' });
+		await ptyWrite(session.id, command + '\r');
 		session.term.focus();
 	}
 
@@ -242,7 +242,7 @@ export class TerminalView {
 		try {
 			// The Terminal Shell setting rides every creation, so a Settings change reaches
 		// the next terminal without a restart.
-		shellName = await invoke<string>('pty_create', { id, cols: term.cols, rows: term.rows, shell: settings.terminalShell });
+		shellName = await ptyCreate(id, term.cols, term.rows, settings.terminalShell);
 		} catch (error) {
 			notify('error', String(error));
 			term.write(`\x1b[31m${String(error)}\x1b[0m\r\n`);
@@ -252,7 +252,7 @@ export class TerminalView {
 		}
 		session.name = shellName;
 		term.onData((data) => {
-			void invoke('pty_write', { id, data });
+			void ptyWrite(id, data);
 			if (data.includes('\r')) window.setTimeout(() => this.onCommandEntered?.(), 800);
 		});
 		term.onResize(({ cols, rows }) => this.resize(id, cols, rows));
@@ -267,7 +267,7 @@ export class TerminalView {
 		if (previous !== undefined) window.clearTimeout(previous);
 		this.resizeTimers.set(id, window.setTimeout(() => {
 			this.resizeTimers.delete(id);
-			void invoke('pty_resize', { id, cols, rows }).catch(() => undefined);
+			void ptyResize(id, cols, rows).catch(() => undefined);
 		}, 100));
 	}
 
@@ -283,7 +283,7 @@ export class TerminalView {
 
 	private async kill(session: Session | null = this.active): Promise<void> {
 		if (!session) return;
-		if (!session.exited) await invoke('pty_kill', { id: session.id }).catch(() => undefined);
+		if (!session.exited) await ptyKill(session.id).catch(() => undefined);
 		await this.remove(session);
 	}
 

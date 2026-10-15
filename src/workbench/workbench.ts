@@ -11,6 +11,7 @@ import { workspaceSymbols } from '../platform/ipc/search';
 import { symbolLookup, symbolsRebuild, type SymbolIndexEvent, type SymbolIndexStatus } from '../platform/ipc/symbols';
 import { gitInit } from '../platform/ipc/scm';
 import { viewerClose, viewerOpen } from '../platform/ipc/viewer';
+import { remoteHostHideMain, remoteHostStatus } from '../platform/ipc/remote';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -1227,7 +1228,7 @@ export class Workbench {
 			// flight) keep running for the browser.
 			if (!hook('session').remote() && (await this.keepRunningHidden())) {
 				event.preventDefault();
-				void invoke('remote_host_hide_main').catch(() => undefined);
+				void remoteHostHideMain().catch(() => undefined);
 				return;
 			}
 			// The window is destroyed right after this handler resolves - long before the
@@ -1282,7 +1283,7 @@ export class Workbench {
 	private async keepRunningHidden(): Promise<boolean> {
 		const mirror = hook('mirror');
 		if (mirror && await mirror.viewersActive()) return true;
-		const status = await invoke<{ remoteHostOnly?: boolean }>('remote_host_status').catch(() => null);
+		const status = await remoteHostStatus().catch(() => null);
 		return status?.remoteHostOnly === true;
 	}
 
