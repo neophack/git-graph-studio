@@ -10,6 +10,8 @@
 
 import { invoke } from '../../platform/ipc/core';
 import { analysisStatus } from '../../platform/ipc/analysis';
+import { extList } from '../../platform/ipc/ext';
+import { extProcessStatus } from '../../platform/ipc/extProcess';
 import { mcpTools } from '../../platform/ipc/mcp';
 import { workspaceSymbols } from '../../platform/ipc/search';
 
@@ -433,7 +435,7 @@ export function registerSelfTestSuites(workbench: Workbench): void {
 				id: 'offer',
 				name: 'the Git Graph package is installed or offered by the store',
 				run: async () => {
-					const list = await invoke<{ id: string; format: string }[]>('ext_list');
+					const list = await extList();
 					const graph = list.find((entry) => entry.id === 'neophack.git-graph-rs');
 					if (!graph) throw new Error('neophack.git-graph-rs is neither installed nor bundled');
 				}
@@ -472,9 +474,9 @@ export function registerSelfTestSuites(workbench: Workbench): void {
 				id: 'store',
 				name: 'the store lists the installed extensions and the host answers backend status',
 				run: async () => {
-					const list = await invoke<unknown[]>('ext_list');
+					const list = await extList();
 					if (!Array.isArray(list) || list.length === 0) throw new Error('the store listing is empty');
-					const status = await invoke<unknown[]>('ext_process_status');
+					const status = await extProcessStatus();
 					if (!Array.isArray(status)) throw new Error('ext_process_status did not answer a list');
 				}
 			},

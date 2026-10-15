@@ -10,8 +10,14 @@
 // its commands dispatch to its own frame (a VSIX) or its own backend process (a `ggs/2`
 // package), and its pages mount as sandboxed frames over the `ggs://` protocol.
 
-import { invoke, Channel } from '../../platform/ipc/core';
+import { Channel } from '../../platform/ipc/core';
 import { writeFile } from '../../platform/ipc/fs';
+import { extChildEndStdin, extChildKill, type ExtChildEvent, extChildSpawn, extChildStopFor, extChildWrite, extNodeRuntimePath } from '../../platform/ipc/extChild';
+import { type ExtInfo, extInstallBundled, extInstallFromVsix, extList, extLoadCode, extLogPath, type NodeEnv, extNodeEnv, extPageFileChunk, extPageRevisionBytes, extReadFile, extStoragePaths, extUninstall, type StudioManifest } from '../../platform/ipc/ext';
+import { type ExtProcessInfo, extNodeRuntime, extProcessHostRespond, extProcessInvoke, extProcessPushEvent, extProcessRegistrations, extProcessRun, extProcessStart, extProcessStatus, extProcessStop } from '../../platform/ipc/extProcess';
+import { type GalleryEntry, extGalleryAsset, extGalleryFeatured, extGalleryInstall, extGalleryLookup } from '../../platform/ipc/gallery';
+import { extFs } from '../../platform/ipc/ext';
+export type { ExtInfo, ExtProcessInfo, GalleryEntry, StudioManifest };
 import { listen } from '../../platform/ipc/core';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
@@ -19,7 +25,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { commands } from '../../platform/commands';
 import { applyContributions, applyExtensionSettings, declaredCommand, extensionSettingDefs, extensionThemeList, extensionViewContributions, languageIdFor, localize, registerContextProvider, registerExtensionSnippets, registerExtensionThemes, removeContributions, type ExtensionThemeDef, type ManifestContributes } from './contributions';
 import { describeDetail, extLog, extLogEnabled, extLogLevel, extLogOnce, flushExtLog, levelForConsole, setExtLogOutput, type ExtLogLevel } from './extLog';
-import { defaultNodeEnv, type NodeEnv } from '../../hosts/extModuleLoader';
+import { defaultNodeEnv } from '../../hosts/extModuleLoader';
 import type { EditorPlacement } from '../editor/types';
 import { setFileDiagnostics, type SerializableDiagnostic } from './editorDiagnostics';
 import { settings as appSettings, syncExtensionThemes, themeById } from '../../platform/settings';
@@ -30,66 +36,6 @@ import { extFileDataUrl, forgetExtDataUrls, imageMime } from '../../platform/ext
 import { hook } from '../../platform/hooks';
 import type { SerializedTreeItem } from './treeView';
 import { answerChatPermission, answerChatQuestion, chatBusy, chatControls, interruptChat, pickChatModel, pressSend, setChatInput, setChatPermissionMode, type ChatAnswer } from './claudeChatInject';
-
-export interface ExtInfo {
-	id: string;
-	name: string;
-	displayName: string | null;
-	publisher: string;
-	version: string;
-	description: string;
-	builtin: boolean;
-	icon: string | null;
-	path: string;
-	categories: string[];
-	keywords: string[];
-	repository: string | null;
-	license: string | null;
-	enginesVscode: string | null;
-	extensionDependencies: string[];
-	extensionPack: string[];
-	/** README / CHANGELOG file names inside the install, when present (the detail page renders them). */
-	readme: string | null;
-	changelog: string | null;
-	/** `bundled` (a not-yet-installed package the installer ships) or `vsix`. */
-	format: 'bundled' | 'vsix' | 'ggs';
-	/** The packer's page bundle (`webview/index.js`) is present in the install — the prewarm
-	 *  fetches it only then (otherwise the fetch is a guaranteed 404: silent under the
-	 *  desktop's `ggs://` protocol, one red console line per package in a browser session).
-	 *  Optional because older `ext_list` recordings predate it. */
-	pageBundle?: boolean;
-	/** The `ggs` key declaration, for packages installed from one. */
-	capabilities: StudioManifest | null;
-}
-
-/** What `ext_process_status` reports for one extension's backend: running (pid > 0) or
- *  remembered-dead (pid 0, `lastError` saying why) — the Extensions view's status lines. */
-export interface ExtProcessInfo {
-	extensionId: string;
-	pid: number;
-	commands: string[];
-	protocolVersion: string;
-	startCount: number;
-	lastError: string | null;
-}
-
-/** One marketplace entry (`ext_gallery_lookup`), as the Extensions view renders it. */
-export interface GalleryEntry {
-	/** `{namespace}.{name}` — the same shape as an installed extension's id. */
-	id: string;
-	name: string;
-	namespace: string;
-	displayName: string | null;
-	description: string | null;
-	version: string;
-	downloadCount: number;
-	averageRating: number | null;
-	verified: boolean;
-	timestamp: string;
-	iconUrl: string | null;
-	/** The `.vsix` download URL (the gallery's own origin) — what `ext_gallery_install` takes. */
-	downloadUrl: string;
-}
 
 /** The marketplace the Extensions view installs its featured packages from: Open VSX, the open-source
  *  registry the VS Code ecosystem publishes to (the same service code-server and Theia
@@ -113,17 +59,6 @@ export const HOST_STATE_EVENT = 'ext-host-state';
 export const BACKEND_RESTARTED_EVENT = 'ext-backend-restarted';
 
 /** The `manifest.json` of an extension package. */
-export interface StudioManifest {
-	format: string;
-	id: string;
-	version: string;
-	/** The process backend declaration the install derived for this package — `ext_process.rs`
-	 *  spawns it on demand. `protocol` names the one wire protocol (`ggs-ext/1` when absent;
-	 *  anything else fails the start with an upgrade hint); `binaries` is the per-platform
-	 *  command map, when the package carries more than one platform's binary. */
-	backend?: { kind: string; command: string; args?: string[]; protocol?: string; binaries?: Record<string, string> } | null;
-}
-
 /** The icon path as `ext_read_file_base64` expects it: relative to the extension's install
  *  root. `ExtInfo.icon` is absolute (`<root>/<manifest path>`), so strip the root — reducing
  *  it to a bare file name loses icons kept in a subfolder (`resources/icon.png`). */
@@ -844,14 +779,14 @@ export class ExtensionHost {
 			// child-process events of the frame's own spawns) do not apply — a real-Node
 			// extension spawns real processes itself.
 			if (data?.type !== '__studioExtEvent') return;
-			void invoke('ext_process_push_event', { extId, event: message }).catch(() => undefined);
+			void extProcessPushEvent(extId, message).catch(() => undefined);
 		};
 		handle.call = (method, args) => {
 			if (method === 'runCommand') {
 				const [command, commandArgs] = args as [string, unknown[] | undefined];
-				return invoke<unknown>('ext_process_run', { extId, command, args: commandArgs ?? [] });
+				return extProcessRun(extId, command, commandArgs ?? []);
 			}
-			return invoke<unknown>('ext_process_invoke', { extId, method, args });
+			return extProcessInvoke(extId, method, args);
 		};
 		this.remoteHandles.set(extId, handle);
 		return handle;
@@ -866,7 +801,7 @@ export class ExtensionHost {
 		this.frames.set(extId, this.remoteHandle(extId));
 		const startedAt = performance.now();
 		try {
-			await invoke('ext_process_start', { extId });
+			await extProcessStart(extId);
 			// The duration is the whole activation (the handshake answers after it) — the
 			// number to read against the backend's handshake deadline.
 			extLog('info', extId, `extension host process started (${Math.round(performance.now() - startedAt)} ms)`);
@@ -885,7 +820,7 @@ export class ExtensionHost {
 
 	/** Apply a backend's registration journal (see `ensureNodeHost`), in order. */
 	private async replayRegistrations(extId: string): Promise<void> {
-		const entries = await invoke<{ method: string; args: unknown[] }[] | null>('ext_process_registrations', { extId }).catch(() => null);
+		const entries = await extProcessRegistrations(extId).catch(() => null);
 		for (const entry of entries ?? []) this.applyMirroredState(extId, entry.method, entry.args ?? []);
 		if (entries?.length) extLog('info', extId, `replayed ${entries.length} registration(s) of the running backend`);
 	}
@@ -984,7 +919,7 @@ export class ExtensionHost {
 			const handle = this.frames.get(extId) ?? this.remoteHandle(extId);
 			this.frames.set(extId, handle);
 			const respond = (ok: boolean, result: unknown) => {
-				void invoke('ext_process_host_respond', { extId, id, ok, result })
+				void extProcessHostRespond(extId, id, ok, result)
 					.catch((error) => extLog('warn', extId, `host request ${method}: the answer could not be delivered: ${String(error)}`));
 			};
 			this.serve(method, args ?? [], extId, handle).then(
@@ -1053,7 +988,7 @@ export class ExtensionHost {
 
 	/** List the installed extensions (the Extensions view renders these). */
 	async list(): Promise<ExtInfo[]> {
-		const installed = await invoke<ExtInfo[]>('ext_list');
+		const installed = await extList();
 		this.installedExts = installed;
 		return installed;
 	}
@@ -1086,17 +1021,17 @@ export class ExtensionHost {
 
 	/** Read a text file inside an installed extension (README, CHANGELOG, manifest). */
 	async readFile(extId: string, relPath: string): Promise<string> {
-		return await invoke<string>('ext_read_file', { extId, relPath });
+		return await extReadFile(extId, relPath);
 	}
 
 	/** Read an extension's `main` entry point the way Node's `require()` would resolve it: the
 	 *  literal path first, then with a `.js` suffix for a manifest that omits it. */
 	private async readMainFile(extId: string, main: string): Promise<string> {
 		try {
-			return await invoke<string>('ext_read_file', { extId, relPath: main });
+			return await extReadFile(extId, main);
 		} catch (error) {
 			if (/\.[a-zA-Z0-9]+$/.test(main)) throw error;
-			return await invoke<string>('ext_read_file', { extId, relPath: `${main}.js` });
+			return await extReadFile(extId, `${main}.js`);
 		}
 	}
 
@@ -1107,7 +1042,7 @@ export class ExtensionHost {
 	 *  without activates in its frame with the `vscode` API shim, or installs for its
 	 *  contributions alone (themes, snippets, grammars). */
 	async installFromVsix(path: string): Promise<ExtInfo> {
-		const info = await invoke<ExtInfo>('ext_install_from_vsix', { path });
+		const info = await extInstallFromVsix(path);
 		await this.reload(info.id);
 		return info;
 	}
@@ -1115,20 +1050,20 @@ export class ExtensionHost {
 	/** The packages the Extensions view offers, in display order (the backend names them;
 	 *  no network — the rows lay out at once and fill in as their lookups land). */
 	async featuredGallery(): Promise<string[]> {
-		return await invoke<string[]>('ext_gallery_featured');
+		return await extGalleryFeatured();
 	}
 
 	/** One exact id's marketplace entry, the build for this machine's platform (the
 	 *  universal build when the registry has no platform one). */
 	async lookupGallery(id: string): Promise<GalleryEntry> {
-		return await invoke<GalleryEntry>('ext_gallery_lookup', { gallery: MARKETPLACE_URL, id });
+		return await extGalleryLookup(MARKETPLACE_URL, id);
 	}
 
 	/** One marketplace icon as a data URL (null when it cannot be read), cached per URL. */
 	async galleryIcon(url: string): Promise<string | null> {
 		let pending = galleryIconCache.get(url);
 		if (!pending) {
-			pending = invoke<string>('ext_gallery_asset', { gallery: MARKETPLACE_URL, url })
+			pending = extGalleryAsset(MARKETPLACE_URL, url)
 				.then((base64) => `data:${imageMime(url)};base64,${base64}`)
 				.catch(() => null);
 			galleryIconCache.set(url, pending);
@@ -1139,7 +1074,7 @@ export class ExtensionHost {
 	/** Download and install a marketplace package — the search result's `.vsix` through the
 	 *  ordinary install path (forward-only upgrade, the unhostable-`.node` door). */
 	async installFromGallery(entry: GalleryEntry): Promise<ExtInfo> {
-		const info = await invoke<ExtInfo>('ext_gallery_install', { gallery: MARKETPLACE_URL, downloadUrl: entry.downloadUrl });
+		const info = await extGalleryInstall(MARKETPLACE_URL, entry.downloadUrl);
 		await this.reload(info.id);
 		return info;
 	}
@@ -1175,7 +1110,7 @@ export class ExtensionHost {
 	 *  nothing by default; this is the ask, and it lands as a standard (uninstallable)
 	 *  package. */
 	async installBundled(extId: string): Promise<ExtInfo> {
-		const info = await invoke<ExtInfo>('ext_install_bundled', { extId });
+		const info = await extInstallBundled(extId);
 		await this.reload(info.id);
 		return info;
 	}
@@ -1184,20 +1119,20 @@ export class ExtensionHost {
 	 *  Extensions view's status lines (pid `0` means not running; `lastError` says why). A
 	 *  null answer (a defaulting test mock, or nothing ever started) is no backends. */
 	async processStatus(): Promise<ExtProcessInfo[]> {
-		return (await invoke<ExtProcessInfo[] | null>('ext_process_status').catch(() => null)) ?? [];
+		return (await extProcessStatus().catch(() => null)) ?? [];
 	}
 
 	/** Restart a plugin's process backend: stop, then start (the handshake runs again). */
 	async restartProcess(extId: string): Promise<void> {
-		await invoke('ext_process_stop', { extId }).catch(() => undefined);
-		await invoke('ext_child_stop_for', { extId }).catch(() => undefined);
+		await extProcessStop(extId).catch(() => undefined);
+		await extChildStopFor(extId).catch(() => undefined);
 		// A backend-hosted package re-activates in the new process: its remote handle must be
 		// registered first, or the activation's first `host.env` request finds no owner (a
 		// restart after a failed start - whose handle was dropped - failed exactly that way).
 		if (this.backendHosted(extId)) {
 			await this.ensureNodeHost(extId);
 		} else {
-			await invoke('ext_process_start', { extId });
+			await extProcessStart(extId);
 		}
 		// The fresh process re-activated, but this restart path emits no
 		// BACKEND_RESTARTED_EVENT (that is the provider switch's, cmd_providers): reset the
@@ -1208,9 +1143,9 @@ export class ExtensionHost {
 	/** Uninstall an extension (the Rust side refuses built-ins), then drop its frame, its
 	 *  backend process, its registry commands and its contributions. */
 	async uninstall(extId: string): Promise<void> {
-		await invoke('ext_uninstall', { extId });
+		await extUninstall(extId);
 		// A ggs/2 process backend dies with its extension (nothing of it is running after).
-		await invoke('ext_process_stop', { extId }).catch(() => undefined);
+		await extProcessStop(extId).catch(() => undefined);
 		this.processBacked.delete(extId);
 		for (const id of this.declaredCommandIds.get(extId) ?? []) this.processCommandIds.delete(id);
 		this.installedExts = this.installedExts.filter((ext) => ext.id !== extId);
@@ -1240,7 +1175,7 @@ export class ExtensionHost {
 		// The real-Node runtime fact, asked once per boot: with one, every program-carrying
 		// package activates in its own Node host process (`.node` NAPI addons, ESM, workers
 		// and `node_modules` native); without one, the sandboxed frames serve as always.
-		this.nodeHostExe = await invoke<string | null>('ext_node_runtime').catch(() => null);
+		this.nodeHostExe = await extNodeRuntime().catch(() => null);
 		// Every extension's manifest contributions (commands, context menu entries,
 		// keybindings) join the workbench, the natively-hosted built-in included: its commands
 		// dispatch through onNativeCommand instead of a frame. The built-ins were already
@@ -1284,10 +1219,10 @@ export class ExtensionHost {
 		let nls: Record<string, string> = {};
 		let nlsZhCn: Record<string, string> = {};
 		try {
-			manifest = JSON.parse(await invoke<string>('ext_read_file', { extId: ext.id, relPath: 'package.json' })) as { contributes?: ManifestContributes; activationEvents?: string[] };
-			const localization = await invoke<string>('ext_read_file', { extId: ext.id, relPath: 'package.nls.json' }).catch(() => null);
+			manifest = JSON.parse(await extReadFile(ext.id, 'package.json')) as { contributes?: ManifestContributes; activationEvents?: string[] };
+			const localization = await extReadFile(ext.id, 'package.nls.json').catch(() => null);
 			if (localization) nls = JSON.parse(localization) as Record<string, string>;
-			const zhCn = await invoke<string>('ext_read_file', { extId: ext.id, relPath: 'package.nls.zh-cn.json' }).catch(() => null);
+			const zhCn = await extReadFile(ext.id, 'package.nls.zh-cn.json').catch(() => null);
 			if (zhCn) nlsZhCn = JSON.parse(zhCn) as Record<string, string>;
 		} catch {
 			return; // unreadable manifest: nothing to contribute
@@ -1342,7 +1277,7 @@ export class ExtensionHost {
 		const snippetFiles: { language: string; text: string }[] = [];
 		for (const declared of contributes?.snippets ?? []) {
 			try {
-				snippetFiles.push({ language: declared.language, text: await invoke<string>('ext_read_file', { extId, relPath: declared.path }) });
+				snippetFiles.push({ language: declared.language, text: await extReadFile(extId, declared.path) });
 			} catch {
 				// Unreadable snippet file: skip it, keep the rest.
 			}
@@ -1351,7 +1286,7 @@ export class ExtensionHost {
 		const themes: ExtensionThemeDef[] = [];
 		for (const declared of contributes?.themes ?? []) {
 			try {
-				const parsed = JSON.parse(await invoke<string>('ext_read_file', { extId, relPath: declared.path })) as {
+				const parsed = JSON.parse(await extReadFile(extId, declared.path)) as {
 					colors?: Record<string, string>;
 					tokenColors?: ExtensionThemeDef['tokenColors'];
 				};
@@ -1413,7 +1348,7 @@ export class ExtensionHost {
 		// data URLs follow the new install, never the retired bytes.
 		forgetExtDataUrls(extId);
 		// An upgraded process package restarts fresh: the old backend does not survive it.
-		await invoke('ext_process_stop', { extId }).catch(() => undefined);
+		await extProcessStop(extId).catch(() => undefined);
 		const ext = (await this.list().catch(() => [] as ExtInfo[])).find((e) => e.id === extId);
 		if (ext) {
 			await this.applyContributions(ext);
@@ -1430,7 +1365,7 @@ export class ExtensionHost {
 		// ABI exports a host loads (a plain native binary declared as an engine) says so
 		// now, on screen, instead of dying quietly into the Extensions view's status row.
 		if (this.processBacked.has(extId)) {
-			await invoke('ext_process_start', { extId }).catch((error) => {
+			await extProcessStart(extId).catch((error) => {
 				extLog('error', extId, `backend failed to start: ${String(error)}`, error);
 				notify('error', tf('extensions.backendStartFailed', extId, String(error)), [{ label: t('extensions.showLog'), run: () => this.showLog() }]);
 			});
@@ -1454,9 +1389,9 @@ export class ExtensionHost {
 		let code: string | undefined;
 		let main = 'extension.js';
 		try {
-			const manifest = JSON.parse(await invoke<string>('ext_read_file', { extId: ext.id, relPath: 'package.json' })) as { main?: string };
+			const manifest = JSON.parse(await extReadFile(ext.id, 'package.json')) as { main?: string };
 			main = (manifest.main ?? 'extension.js').replace(/^\.\//, '');
-			const bundle = await invoke<{ files: Record<string, string>; truncated: boolean; binaries?: string[]; blobFiles?: Record<string, string> }>('ext_load_code', { extId: ext.id });
+			const bundle = await extLoadCode(ext.id);
 			files = bundle.files;
 			truncated = bundle.truncated;
 			binaries = bundle.binaries ?? [];
@@ -1612,24 +1547,13 @@ export class ExtensionHost {
 						repo?: string; revision?: string; path?: string; offset?: number; len?: number;
 					};
 					return command === '__revisionFileBytes'
-						? await invoke('ext_page_revision_bytes', {
-							roots: ExtensionHost.workspaceFolders,
-							repo: params.repo ?? '',
-							revision: params.revision ?? '',
-							path: params.path ?? ''
-						})
-						: await invoke('ext_page_file_chunk', {
-							roots: ExtensionHost.workspaceFolders,
-							repo: params.repo ?? '',
-							path: params.path ?? '',
-							offset: Number(params.offset) || 0,
-							len: Number(params.len) || 0
-						});
+						? await extPageRevisionBytes(ExtensionHost.workspaceFolders, params.repo ?? '', params.revision ?? '', params.path ?? '')
+						: await extPageFileChunk(ExtensionHost.workspaceFolders, params.repo ?? '', params.path ?? '', Number(params.offset) || 0, Number(params.len) || 0);
 				}
 				const started = performance.now();
 				console.debug(`[ggs] backend.run ${page.extId} ${String(command)} …`);
 				try {
-					const answer = await invoke('ext_process_run', { extId: page.extId, command, args: commandArgs ?? [] });
+					const answer = await extProcessRun(page.extId, command, commandArgs ?? []);
 					console.debug(`[ggs] backend.run ${String(command)} answered in ${Math.round(performance.now() - started)} ms`);
 					return answer;
 				} catch (error) {
@@ -1761,7 +1685,7 @@ export class ExtensionHost {
 	 *  uses to surface a message, the way a VS Code command can show one. */
 	private async runProcessCommand(extId: string, command: string, args: unknown[] = []): Promise<void> {
 		try {
-			const result = await invoke<unknown>('ext_process_run', { extId, command, args });
+			const result = await extProcessRun(extId, command, args);
 			if (result && typeof result === 'object') {
 				const { notify: toast } = result as {
 					notify?: { kind: 'info' | 'warning' | 'error'; message: string };
@@ -2623,7 +2547,7 @@ export class ExtensionHost {
 		const ext = this.installedExts.find((candidate) => candidate.id === extId);
 		const defaults: Record<string, unknown> = coreConfigurationDefaults();
 		for (const def of extensionSettingDefs()) defaults[def.id] = def.default;
-		const storage = await invoke<{ global: string; workspace?: string | null; log: string } | null>('ext_storage_paths', { extId, workspace: ExtensionHost.workspaceFolders[0] ?? null })
+		const storage = await extStoragePaths(extId, ExtensionHost.workspaceFolders[0] ?? null)
 			.catch((error) => {
 				extLog('warn', extId, `storage directories unavailable (the install directory stands in): ${String(error)}`);
 				return null;
@@ -2679,7 +2603,7 @@ export class ExtensionHost {
 	async openLogFile(): Promise<void> {
 		await flushExtLog();
 		try {
-			const path = await invoke<string>('ext_log_path');
+			const path = await extLogPath();
 			if (typeof path !== 'string' || path === '') throw new Error('no log path');
 			this.onOpenFile?.(path);
 		} catch (error) {
@@ -2853,7 +2777,7 @@ export class ExtensionHost {
 				const path = String(args[0] ?? '');
 				const open = this.documentText?.(path) ?? null;
 				if (open !== null) return { text: open, languageId: languageIdFor(path) || 'plaintext' };
-				const read = await invoke<{ data: string }>('ext_fs', { op: 'read', roots: this.fsRoots(extId), path, to: undefined, data: undefined });
+				const read = (await extFs('read', this.fsRoots(extId), path)) as { data: string };
 				const bytes = Uint8Array.from(atob(read.data), (char) => char.charCodeAt(0));
 				return { text: new TextDecoder().decode(bytes), languageId: languageIdFor(path) || 'plaintext' };
 			}
@@ -2943,12 +2867,12 @@ export class ExtensionHost {
 					const roots = base !== undefined ? [base] : ExtensionHost.workspaceFolders;
 					const found: { root: string; path: string }[] = [];
 					for (const root of roots) {
-						const paths = await invoke<string[]>('ext_fs', { op: 'find', roots: [root], path, to: undefined, data: undefined });
+						const paths = (await extFs('find', [root], path)) as string[] | null;
 						for (const relative of paths ?? []) found.push({ root, path: relative });
 					}
 					return found;
 				}
-				return invoke('ext_fs', { op, roots: this.fsRoots(extId), path, to, data });
+				return extFs(op, this.fsRoots(extId), path, to, data);
 			}
 			case 'diagnostics.set': {
 				// A frame pushed its diagnostic collection changes: they land in the editor
@@ -3025,19 +2949,19 @@ export class ExtensionHost {
 				onEvent.onmessage = (message) => {
 					this.frames.get(extId)?.frame?.contentWindow?.postMessage({ type: '__studioExtHostEvent', kind: 'childProcess', message }, '*');
 				};
-				return invoke('ext_child_spawn', { extId, spec, onEvent });
+				return extChildSpawn(extId, spec, onEvent);
 			}
 			case 'childProcess.write':
-				return invoke('ext_child_write', { handle: args[0], data: args[1] });
+				return extChildWrite(args[0] as number, args[1] as string);
 			case 'childProcess.end':
-				return invoke('ext_child_end_stdin', { handle: args[0] });
+				return extChildEndStdin(args[0] as number);
 			case 'childProcess.kill':
-				return invoke('ext_child_kill', { handle: args[0] });
+				return extChildKill(args[0] as number);
 			case 'childProcess.nodeRuntime':
 				// The `fork` bridge's runtime: the machine's node (a real language-server
 				// process), or null when the machine has none — the frame answers Node's
 				// fork-shaped `'error'` event.
-				return invoke<string | null>('ext_node_runtime_path');
+				return extNodeRuntimePath();
 			case 'decoration.type': {
 				// GGS-patch: the frame created a decoration type (see editorDecorations.ts).
 				const [declaration] = args as [{ key: string; options: Record<string, string | boolean> }];
@@ -3765,7 +3689,7 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 		if (patterns.length === 0 || roots.length === 0) return false;
 		for (const pattern of patterns) {
 			try {
-				const found = await invoke<string[]>('ext_fs', { op: /[*?]/.test(pattern) ? 'find' : 'exists', roots, path: pattern });
+				const found = (await extFs(/[*?]/.test(pattern) ? 'find' : 'exists', roots, pattern)) as string[];
 				if (found.length > 0) return true;
 			} catch {
 				// The path (or the backend answer) is unavailable: this pattern cannot match.
@@ -4092,7 +4016,7 @@ function dialogFilters(filters: Record<string, string[]> | undefined): { name: s
 let nodeEnvCache: Promise<NodeEnv> | null = null;
 function cachedNodeEnv(): Promise<NodeEnv> {
 	if (nodeEnvCache === null) {
-		nodeEnvCache = invoke<NodeEnv>('ext_node_env').catch(() => defaultNodeEnv());
+		nodeEnvCache = extNodeEnv().catch(() => defaultNodeEnv());
 	}
 	return nodeEnvCache;
 }

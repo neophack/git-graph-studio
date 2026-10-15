@@ -13,7 +13,7 @@
 // `localStorage['ggs-ext-debug']` switch still forces `trace`. An in-memory ring of the
 // last entries backs the tests and anything that wants to show recent history.
 
-import { invoke } from '../../platform/ipc/core';
+import { extLogAppend } from '../../platform/ipc/ext';
 import { settings, SETTINGS_EVENT, type ExtensionLogLevel } from '../../platform/settings';
 
 export type ExtLogLevel = ExtensionLogLevel;
@@ -97,7 +97,7 @@ export async function flushExtLog(): Promise<void> {
 	const lines = pendingLines;
 	pendingLines = [];
 	try {
-		await invoke('ext_log_append', { lines: lines.map((line) => line.replace(/\r?\n/g, ' | ')) });
+		await extLogAppend(lines.map((line) => line.replace(/\r?\n/g, ' | ')));
 	} catch (error) {
 		// No backend (a browser preview) or no writable home: keep the other sinks and stop
 		// retrying — logging must never become a failure loop of its own.

@@ -16,19 +16,8 @@
 // once, before boot.
 
 /** The Node environment facts the activation context carried in (see `ext_node_env`). */
-export interface NodeEnv {
-	platform: string;
-	arch: string;
-	homedir: string;
-	tmpdir: string;
-	hostname: string;
-	release: string;
-	eol: string;
-	separator: string;
-	delimiter: string;
-	/** The host's real environment (`process.env`) — tool discovery reads it. */
-	env?: Record<string, string>;
-}
+export type { NodeEnv } from '../platform/ipc/ext';
+import type { NodeEnv } from '../platform/ipc/ext';
 
 /** The Node environment facts when no host carried them in — a bridge older than
  *  `ext_node_env`, or the backend call failing. The platform word is read from whatever

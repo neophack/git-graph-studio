@@ -7,7 +7,7 @@ import type { Extension, Text } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 import type { MergeView } from '@codemirror/merge';
 import { invoke } from '../../platform/ipc/core';
-import { type FileContents, type FileProbe, fileProbe, readFileBase64 } from '../../platform/ipc/fs';
+import { backupClear, backupWrite, type FileContents, type FileProbe, fileProbe, listFiles, readFileBase64, readFileRaw as fetchFileRaw, writeFile } from '../../platform/ipc/fs';
 import { materializeRevisionFile, readFileAt } from '../../platform/ipc/revision';
 import { viewerClose, viewerOpen, type ViewerOutlineSymbol } from '../../platform/ipc/viewer';
 import { findReferences, workspaceSymbols } from '../../platform/ipc/search';
@@ -123,7 +123,7 @@ const SYMBOL_ICONS: Record<string, string> = {
  *  for seconds on large files; the raw payload is an 8-byte little-endian header length,
  *  the JSON metadata, then the UTF-8 text itself. */
 async function readFileRaw(path: string, encoding?: string): Promise<FileContents> {
-	const raw = await invoke<ArrayBuffer | Uint8Array>('read_file_raw', { path, encoding });
+	const raw = await fetchFileRaw(path, encoding);
 	const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
 	const headerLen = Number(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(0, true));
 	const meta = JSON.parse(new TextDecoder().decode(bytes.subarray(8, 8 + headerLen))) as Omit<FileContents, 'contents'>;
@@ -1287,7 +1287,7 @@ export class EditorGroup {
 			if (!editor.dirty || !editor.view || editor.input.kind !== 'file') return;
 			// The path is read when the timer fires, not when the edit was made: a rename
 			// in between retargets the backup with the editor.
-			void invoke('backup_write', { path: editor.input.path, contents: editor.view.state.doc.toString() }).catch(() => undefined);
+			void backupWrite(editor.input.path, editor.view.state.doc.toString()).catch(() => undefined);
 		}, large ? LARGE_BACKUP_DELAY_MS : BACKUP_DELAY_MS));
 		if (settings.autoSave === 'afterDelay') {
 			const pending = this.autoSaveTimers.get(editor.id);
@@ -2524,7 +2524,7 @@ export class EditorGroup {
 		const savedDoc = editor.view.state.doc;
 		const contents = savedDoc.toString();
 		try {
-			await invoke('write_file', { path: editor.input.path, contents, encoding: editor.encoding ?? 'utf8', eol: editor.eol ?? 'lf' });
+			await writeFile(editor.input.path, contents, editor.encoding ?? 'utf8', editor.eol ?? 'lf');
 		} catch (error) {
 			notify('error', `Failed to save '${editor.label}': ${String(error)}`);
 			return;
@@ -2562,7 +2562,7 @@ export class EditorGroup {
 		const autoSave = this.autoSaveTimers.get(editor.id);
 		if (autoSave !== undefined) window.clearTimeout(autoSave);
 		this.autoSaveTimers.delete(editor.id);
-		void invoke('backup_clear', { path: editor.input.path }).catch(() => undefined);
+		void backupClear(editor.input.path).catch(() => undefined);
 	}
 
 	/** A file that changed on disk under a clean editor is reloaded in place. */
@@ -2858,7 +2858,7 @@ export class EditorGroup {
 		}
 		let files: string[];
 		try {
-			files = await invoke<string[]>('list_files');
+			files = await listFiles();
 		} catch {
 			files = [];
 		}
@@ -3015,7 +3015,7 @@ export class EditorGroup {
 		if (!editor || editor.input.kind !== 'file') return;
 		let symbols: ViewerOutlineSymbol[];
 		try {
-			const info = await invoke<{ docId: number; symbols: ViewerOutlineSymbol[] }>('viewer_open', { path: editor.input.path });
+			const info = await viewerOpen(editor.input.path);
 			symbols = info.symbols ?? [];
 			await viewerClose(info.docId).catch(() => undefined);
 		} catch {
