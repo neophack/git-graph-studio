@@ -9,7 +9,11 @@
 //! Pure std + winreg (Windows) — no repository access here; the runner lives beside
 //! this in `runner` (P2-6).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+// Every `Path` use below sits in a `#[cfg(windows)]` item; on the other targets the
+// plain import is an unused-imports error under `-D warnings`.
+#[cfg(windows)]
+use std::path::Path;
 
 /// The file name Claude Code's Windows shell picker accepts for
 /// `CLAUDE_CODE_GIT_BASH_PATH`: it whitelist-checks the *basename* — exactly
