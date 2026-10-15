@@ -3,25 +3,17 @@
 // against its parent's. The commits come from the backend's own `git log --follow` over the
 // path, so the list survives without any engine: it is the Source Control module's read.
 
-import { invoke } from '../../platform/ipc/core';
+import { fileLog, type HistoryEntry } from '../../platform/ipc/scm';
 
 import type { DiffRequest } from '../editor/types';
 import type { BlameLine } from './types';
 import { basename, el, icon, toPosix } from '../../platform/ui/index';
 
-export interface HistoryEntry {
-	hash: string;
-	parents: string[];
-	author: string;
-	/** Seconds since the epoch. */
-	date: number;
-	message: string;
-}
 
 /** The commits that touched `relativePath` (repo-relative, posix), newest first. A null
  *  answer (an unscripted mock, a backend that answered nothing) lists no commits. */
 export async function loadFileHistory(repo: string, relativePath: string, maxCommits = 300): Promise<HistoryEntry[]> {
-	return (await invoke<HistoryEntry[] | null>('file_log', { path: relativePath, limit: maxCommits, repo })) ?? [];
+	return (await fileLog(relativePath, maxCommits, repo)) ?? [];
 }
 
 /** "3 hours ago", "2 days ago", or the date for anything older than a month. */

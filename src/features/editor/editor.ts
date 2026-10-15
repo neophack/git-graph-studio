@@ -7,6 +7,9 @@ import type { Extension, Text } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 import type { MergeView } from '@codemirror/merge';
 import { invoke } from '../../platform/ipc/core';
+import { type FileContents, type FileProbe, fileProbe, readFileBase64 } from '../../platform/ipc/fs';
+import { materializeRevisionFile, readFileAt } from '../../platform/ipc/revision';
+import { scmBlame } from '../../platform/ipc/scm';
 
 import { hasBookmark, toggleBookmark } from './bookmarks';
 import { samePath } from '../extensions';
@@ -117,24 +120,6 @@ const SYMBOL_ICONS: Record<string, string> = {
 	module: 'symbol-module',
 	type: 'symbol-parameter'
 };
-
-/** What `file_probe` learns from a file's first bytes, before its body is read. */
-interface FileProbe {
-	size: number;
-	binary: boolean;
-	/** The head shows minified-style unbroken runs: too few, too huge lines for the
-	 *  line-windowed editor, which the open path then routes to the full editor. */
-	longLines?: boolean;
-}
-
-interface FileContents {
-	contents: string | null;
-	binary: boolean;
-	size: number;
-	/** The encoding id the backend decoded the file with (`encodings()`), and its line endings. */
-	encoding?: string;
-	eol?: 'lf' | 'crlf';
-}
 
 /** Read a file's text over the raw IPC channel (`read_file_raw`). The JSON path re-escapes
  *  and re-copies the whole document on both sides of the bridge, which stalled the webview
@@ -619,7 +604,7 @@ export class EditorGroup {
 		// fast viewer - neither is ever read whole here.
 		let probe: FileProbe | null = null;
 		try {
-			probe = await invoke<FileProbe>('file_probe', { path });
+			probe = await fileProbe(path);
 		} catch {
 			probe = null; // `read_file` below reports the real error
 		}
@@ -761,7 +746,7 @@ export class EditorGroup {
 		if (editor.input.kind !== 'file' || !editor.fast) return;
 		const path = editor.input.path;
 		try {
-			const probe = await invoke<FileProbe>('file_probe', { path });
+			const probe = await fileProbe(path);
 			if (probe.size > WHOLE_FILE_EDITOR_BYTES) {
 				notify('info', t('viewer.tooLargeWholeFile') + basename(path));
 				return;
@@ -827,7 +812,7 @@ export class EditorGroup {
 		editor.pane.append(wrap);
 		let probe: FileProbe | null = null;
 		try {
-			probe = await invoke<FileProbe>('file_probe', { path });
+			probe = await fileProbe(path);
 		} catch {
 			probe = null; // `read_file` below reports the real error
 		}
@@ -1031,7 +1016,7 @@ export class EditorGroup {
 		editor.pane.classList.add('image-preview');
 		editor.pane.append(toolbar, stage, status);
 		try {
-			const data = await invoke<string>('read_file_base64', { path });
+			const data = await readFileBase64(path);
 			image.src = `data:${imageMime(editor.label)};base64,${data}`;
 			const size = Math.round((data.length * 3) / 4);
 			image.addEventListener('load', () => {
@@ -1152,7 +1137,7 @@ export class EditorGroup {
 				if (!mime) return null;
 				// A markdown link is spelled with forward slashes; the file system path is the folder's.
 				const full = joinPath(folder, folder.includes('\\') ? relative.replaceAll('/', '\\') : relative);
-				return invoke<string>('read_file_base64', { path: full }).then((data) => `data:${mime};base64,${data}`, () => null);
+				return readFileBase64(full).then((data) => `data:${mime};base64,${data}`, () => null);
 			});
 			if (!rendered) article.textContent = text;
 		};
@@ -1197,7 +1182,7 @@ export class EditorGroup {
 		}
 		let lines: BlameLine[];
 		try {
-			lines = await invoke<BlameLine[]>('scm_blame', { path: relativeTo(this.rootPath, editor.input.path) });
+			lines = await scmBlame(relativeTo(this.rootPath, editor.input.path));
 		} catch (error) {
 			notify('error', `Blame failed: ${String(error)}`);
 			return;
@@ -1555,7 +1540,7 @@ export class EditorGroup {
 		// the hex comparison, so a multi-gigabyte pair is never read whole only to be
 		// refused as text.
 		if (input.left.local && input.right.local) {
-			const binary = (path: string) => invoke<FileProbe>('file_probe', { path }).then((probe) => probe.binary).catch(() => false);
+			const binary = (path: string) => fileProbe(path).then((probe) => probe.binary).catch(() => false);
 			const [leftBinary, rightBinary] = await Promise.all([binary(input.left.path), binary(input.right.path)]);
 			if (leftBinary || rightBinary) {
 				await this.openHexCompare(input, undefined, intent);
@@ -1567,7 +1552,7 @@ export class EditorGroup {
 		if (side.content !== undefined) return { contents: side.content, binary: false, size: side.content.length };
 		if (side.local) return readFileRaw(side.path);
 			try {
-				return await invoke<FileContents>('read_file_at', { revision: side.revision, path: side.path, repo: input.repo });
+				return await readFileAt(side.revision, side.path, input.repo);
 			} catch (error) {
 				// A file missing on one side (deleted / added between the revisions) shows empty.
 				if (/not in|not found|no such|does not exist|cannot find/i.test(String(error))) return { contents: '', binary: false, size: 0 };
@@ -1593,7 +1578,7 @@ export class EditorGroup {
 				return;
 			}
 			const resolve = (side: DiffSide): Promise<string> =>
-				side.local ? Promise.resolve(side.path) : invoke<string>('materialize_revision_file', { repo: input.repo ?? '', revision: side.revision, path: side.path });
+				side.local ? Promise.resolve(side.path) : materializeRevisionFile(input.repo ?? '', side.revision, side.path);
 			try {
 				const [leftPath, rightPath] = await Promise.all([resolve(input.left), resolve(input.right)]);
 				await this.openHexCompare(input, { left: leftPath, right: rightPath }, intent);
@@ -1874,7 +1859,7 @@ export class EditorGroup {
 		const intent = this.beginOpen();
 		let file: FileContents;
 		try {
-			file = await invoke<FileContents>('read_file_at', { revision, path, repo });
+			file = await readFileAt(revision, path, repo);
 		} catch (error) {
 			notify('error', String(error));
 			return;

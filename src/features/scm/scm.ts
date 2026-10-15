@@ -14,20 +14,12 @@ import { commandIconContent, contextUri, resolvedMenuEntries } from '../extensio
 import { extFileDataUrl } from '../../platform/extAssets';
 import type { DiffRequest, DiffSide } from '../editor/types';
 import { fileIcon, fileIconColor } from '../../platform/fileIcons';
-import type { StatusMap } from '../../platform/ipc/scm';
+import type { BlameLine, BranchInfo, RemoteInfo, ScmChange, StashInfo, StatusMap } from '../../platform/ipc/scm';
+import { gerritInstallHook, gerritPushRef, gitCommit, gitStageAll, scmAmendLastCommit, scmBranches, scmCheckout, scmCreateBranch, scmFetch, scmPull, scmPush, scmRemotes, scmResetToRemote, scmStashes, scmStatus, scmSync, scmTags } from '../../platform/ipc/scm';
+import { repoHead, repoSubmodules } from '../../platform/ipc/revision';
 import { t, tf, trText } from '../../platform/i18n';
 import * as state from '../../platform/state';
 import { actionButton, basename, confirmDialog, el, icon, liveSidebarTitle, notify, quickInput, quickPick, showContextMenu, showMenuBelow, toPosix, type MenuEntry, type QuickPickItem } from '../../platform/ui/index';
-
-interface ScmChange {
-	path: string;
-	oldPath: string | null;
-	staged: string | null;
-	unstaged: string | null;
-	untracked: boolean;
-	/** The index holds conflict stages for the path: git lists it under "Unmerged paths". */
-	conflicted?: boolean;
-}
 
 /** The three groups of the view, in display order; VS Code's names. */
 export type ScmGroup = 'merge' | 'staged' | 'changes';
@@ -53,10 +45,6 @@ interface SubRepoState {
 	sectionCollapsed: boolean;
 }
 
-interface SubBranchInfo { name: string; remote: boolean; current: boolean; upstream: string | null }
-interface SubRemoteInfo { name: string; url: string }
-interface SubStashInfo { selector: string; index: number; message: string; hash: string }
-
 /** Same validity rule gitCommands.ts uses for a new branch/tag/remote name - a submodule's
  *  "..." menu asks for one exactly like the main repository's. */
 const SUB_REF_NAME = /^(?![-.])(?!.*(\.\.|@\{|[\\^:?*\[\s~]))[^\x00-\x1f\x7f]+(?<![./])(?<!\.lock)$/;
@@ -67,8 +55,8 @@ function validateSubRef(value: string): string | null {
 /** The pick flows a submodule's "..." menu needs, scoped to `repo` - gitCommands.ts's own
  *  pickBranch/pickRemote/pickStash, reimplemented here because those are wired to the single
  *  open repository the global Command Registry manages, not an arbitrary one. */
-async function pickBranchIn(repo: string, placeholder: string, filter: (b: SubBranchInfo) => boolean = () => true): Promise<SubBranchInfo | null> {
-	const branches = await invoke<SubBranchInfo[]>('scm_branches', { repo });
+async function pickBranchIn(repo: string, placeholder: string, filter: (b: BranchInfo) => boolean = () => true): Promise<BranchInfo | null> {
+	const branches = await scmBranches(repo);
 	const items: QuickPickItem[] = branches.filter(filter).map((b) => ({
 		label: b.name,
 		description: b.current ? 'current' : b.remote ? 'remote branch' : b.upstream ? `→ ${b.upstream}` : undefined,
@@ -83,8 +71,8 @@ async function pickBranchIn(repo: string, placeholder: string, filter: (b: SubBr
 	return branches.find((b) => b.name === chosen) ?? null;
 }
 
-async function pickRemoteIn(repo: string, placeholder: string): Promise<SubRemoteInfo | null> {
-	const remotes = await invoke<SubRemoteInfo[]>('scm_remotes', { repo });
+async function pickRemoteIn(repo: string, placeholder: string): Promise<RemoteInfo | null> {
+	const remotes = await scmRemotes(repo);
 	if (remotes.length === 0) {
 		notify('info', 'The repository has no remotes. Add one with Remote > Add Remote...');
 		return null;
@@ -94,8 +82,8 @@ async function pickRemoteIn(repo: string, placeholder: string): Promise<SubRemot
 	return remotes.find((r) => r.name === chosen) ?? null;
 }
 
-async function pickStashIn(repo: string, placeholder: string): Promise<SubStashInfo | null> {
-	const stashes = await invoke<SubStashInfo[]>('scm_stashes', { repo });
+async function pickStashIn(repo: string, placeholder: string): Promise<StashInfo | null> {
+	const stashes = await scmStashes(repo);
 	if (stashes.length === 0) {
 		notify('info', 'There are no stashes in the repository.');
 		return null;
@@ -304,7 +292,7 @@ export class SourceControlView {
 		const generation = this.generation;
 		let changes: ScmChange[];
 		try {
-			changes = await invoke<ScmChange[]>('scm_status');
+			changes = await scmStatus();
 			if (generation !== this.generation) return; // the folder switched mid-flight
 			this.changes = changes;
 			this.error = null;
@@ -318,7 +306,7 @@ export class SourceControlView {
 		// The branch's own state rides along: the commit button's clean-tree roles (Push, Sync
 		// Changes, Publish Branch) read it. A backend build or scripted test without repo_head
 		// keeps the previous values; the workbench no longer needs its own follow-up fetch.
-		const head = await invoke<{ repo: string; branch: string | null; shortHash: string; ahead: number; behind: number; upstream: string | null }>('repo_head').catch(() => null);
+		const head = await repoHead().catch(() => null);
 		if (generation !== this.generation) return;
 		// The fingerprint a swallowed `.git`-only batch is re-checked against (see
 		// `statusDiffers`): exactly what this refresh saw, nothing more.
@@ -367,8 +355,8 @@ export class SourceControlView {
 		const generation = this.generation;
 		try {
 			const [changes, head] = await Promise.all([
-				invoke<ScmChange[]>('scm_status'),
-				invoke<{ repo: string; branch: string | null; shortHash: string; ahead: number; behind: number; upstream: string | null }>('repo_head').catch(() => null)
+				scmStatus(),
+				repoHead().catch(() => null)
 			]);
 			if (generation !== this.generation) return false;
 			return JSON.stringify([changes, head]) !== this.lastSnapshot;
@@ -441,7 +429,7 @@ export class SourceControlView {
 		try {
 			// A test's (or an older backend build's) defaulting layer may answer `null` rather
 			// than throw for a command it does not know: treated the same as no submodules.
-			submodules = (await invoke<string[] | null>('repo_submodules', { repo: this.repoPath })) ?? [];
+			submodules = (await repoSubmodules(this.repoPath!)) ?? [];
 		} catch {
 			submodules = [];
 		}
@@ -467,8 +455,8 @@ export class SourceControlView {
 		await Promise.all(this.subRepos.map(async (sub) => {
 			try {
 				const [changes, head] = await Promise.all([
-					invoke<ScmChange[]>('scm_status', { repo: sub.repoPath }),
-					invoke<{ branch: string | null; shortHash: string; ahead: number; behind: number; upstream: string | null }>('repo_head', { repo: sub.repoPath })
+					scmStatus(sub.repoPath),
+					repoHead(sub.repoPath)
 				]);
 				sub.changes = changes;
 				sub.branch = head.branch;
@@ -1044,7 +1032,7 @@ export class SourceControlView {
 		}
 		if ((!staged && !amend) || (options.all && !options.stagedOnly)) {
 			try {
-				await invoke('git_stage_all');
+				await gitStageAll();
 			} catch (error) {
 				notify('error', String(error));
 				return;
@@ -1052,7 +1040,7 @@ export class SourceControlView {
 		}
 		try {
 			// An amend with an empty box keeps the last commit's message (the backend's --no-edit path).
-			await invoke('git_commit', { message, amend });
+			await gitCommit(message, amend);
 		} catch (error) {
 			notify('error', String(error));
 			await this.refresh();
@@ -1397,14 +1385,14 @@ export class SourceControlView {
 		}
 		if ((!staged && !amend) || (options.all && !options.stagedOnly)) {
 			try {
-				await invoke('git_stage_all', { repo: sub.repoPath });
+				await gitStageAll(sub.repoPath);
 			} catch (error) {
 				notify('error', String(error));
 				return;
 			}
 		}
 		try {
-			await invoke('git_commit', { message, amend, repo: sub.repoPath });
+			await gitCommit(message, amend, sub.repoPath);
 		} catch (error) {
 			notify('error', String(error));
 			await this.refresh();
@@ -1477,14 +1465,14 @@ export class SourceControlView {
 		const run = (work: () => Promise<void>, done?: string) => void this.subMenuRun(work, done);
 		const gitOp = (command: string, args: Record<string, unknown>): Promise<void> => invoke<void>(command, { ...args, repo });
 		return [
-			{ label: 'Pull', run: () => run(() => invoke('scm_pull', { remote: null, branch: null, rebase: false, repo })) },
-			{ label: 'Push', run: () => run(() => invoke('scm_push', { remote: null, setUpstream: false, force: false, repo })) },
+			{ label: 'Pull', run: () => run(() => scmPull(null, null, false, repo)) },
+			{ label: 'Push', run: () => run(() => scmPush(null, false, false, repo)) },
 			{ label: 'Clone', run: () => void this.commands?.execute('git.clone') },
 			{
 				label: 'Checkout to...',
 				run: () => void (async () => {
-					const branches = await invoke<SubBranchInfo[]>('scm_branches', { repo });
-					const tags = await invoke<string[]>('scm_tags', { repo });
+					const branches = await scmBranches(repo);
+					const tags = await scmTags(repo);
 					const items: QuickPickItem[] = [
 						...branches.filter((b) => !b.current).map((b) => ({
 							label: b.name,
@@ -1499,10 +1487,10 @@ export class SourceControlView {
 						return;
 					}
 					const chosen = await quickPick(items, 'Select a branch or tag to checkout');
-					if (chosen) run(() => invoke('scm_checkout', { name: chosen.replace(/^(branch|tag):/, ''), repo }));
+					if (chosen) run(() => scmCheckout(chosen.replace(/^(branch|tag):/, ''), repo));
 				})()
 			},
-			{ label: 'Fetch', run: () => run(() => invoke('scm_fetch', { remote: null, prune: false, repo })) },
+			{ label: 'Fetch', run: () => run(() => scmFetch(null, false, repo)) },
 			'separator',
 			{
 				label: 'Commit', submenu: [
@@ -1525,42 +1513,42 @@ export class SourceControlView {
 			},
 			{
 				label: 'Pull, Push', submenu: [
-					{ label: 'Sync', run: () => run(() => invoke('scm_sync', { rebase: false, repo })) },
-					{ label: 'Sync (Rebase)', run: () => run(() => invoke('scm_sync', { rebase: true, repo })) },
+					{ label: 'Sync', run: () => run(() => scmSync(false, repo)) },
+					{ label: 'Sync (Rebase)', run: () => run(() => scmSync(true, repo)) },
 					'separator',
-					{ label: 'Pull', run: () => run(() => invoke('scm_pull', { remote: null, branch: null, rebase: false, repo })) },
-					{ label: 'Pull (Rebase)', run: () => run(() => invoke('scm_pull', { remote: null, branch: null, rebase: true, repo })) },
+					{ label: 'Pull', run: () => run(() => scmPull(null, null, false, repo)) },
+					{ label: 'Pull (Rebase)', run: () => run(() => scmPull(null, null, true, repo)) },
 					{
 						label: 'Pull from...', run: () => void (async () => {
 							const remote = await pickRemoteIn(repo, 'Pick a remote to pull the branch from');
 							if (!remote) return;
 							const branch = await pickBranchIn(repo, `Pick a branch to pull from ${remote.name}`, (b) => b.remote && b.name.startsWith(remote.name + '/'));
 							if (!branch) return;
-							run(() => invoke('scm_pull', { remote: remote.name, branch: branch.name.slice(remote.name.length + 1), rebase: false, repo }));
+							run(() => scmPull(remote.name, branch.name.slice(remote.name.length + 1), false, repo));
 						})()
 					},
 					'separator',
-					{ label: 'Push', run: () => run(() => invoke('scm_push', { remote: null, setUpstream: false, force: false, repo })) },
+					{ label: 'Push', run: () => run(() => scmPush(null, false, false, repo)) },
 					{
 						label: 'Push to...', run: () => void (async () => {
 							const remote = await pickRemoteIn(repo, 'Pick a remote to publish the branch to');
 							if (!remote) return;
-							run(() => invoke('scm_push', { remote: remote.name, setUpstream: true, force: false, repo }));
+							run(() => scmPush(remote.name, true, false, repo));
 						})()
 					},
 					{
 						label: 'Push (Force With Lease)', run: () => void (async () => {
 							if (!(await confirmDialog('Force-push the current branch to its upstream? Commits the remote has that this push does not contain become unreachable there.', 'Force Push'))) return;
-							run(() => invoke('scm_push', { remote: null, setUpstream: false, force: true, repo }));
+							run(() => scmPush(null, false, true, repo));
 						})()
 					},
 					'separator',
-					{ label: 'Fetch', run: () => run(() => invoke('scm_fetch', { remote: null, prune: false, repo })) },
-					{ label: 'Fetch (Prune)', run: () => run(() => invoke('scm_fetch', { remote: null, prune: true, repo })) },
+					{ label: 'Fetch', run: () => run(() => scmFetch(null, false, repo)) },
+					{ label: 'Fetch (Prune)', run: () => run(() => scmFetch(null, true, repo)) },
 					{
 						label: 'Fetch From...', run: () => void (async () => {
 							const remote = await pickRemoteIn(repo, 'Pick a remote to fetch from');
-							if (remote) run(() => invoke('scm_fetch', { remote: remote.name, prune: false, repo }));
+							if (remote) run(() => scmFetch(remote.name, false, repo));
 						})()
 					}
 				]
@@ -1583,7 +1571,7 @@ export class SourceControlView {
 					{
 						label: 'Create Branch...', run: () => void (async () => {
 							const name = await quickInput({ placeholder: 'Branch name', title: 'Please provide a new branch name', validate: validateSubRef });
-							if (name) run(() => invoke('scm_create_branch', { name: name.trim(), from: null, repo }));
+							if (name) run(() => scmCreateBranch(name.trim(), null, repo));
 						})()
 					},
 					{
@@ -1591,7 +1579,7 @@ export class SourceControlView {
 							const from = await pickBranchIn(repo, 'Select a ref to create the branch from');
 							if (!from) return;
 							const name = await quickInput({ placeholder: 'Branch name', title: `Please provide a new branch name (from ${from.name})`, validate: validateSubRef });
-							if (name) run(() => invoke('scm_create_branch', { name: name.trim(), from: from.name, repo }));
+							if (name) run(() => scmCreateBranch(name.trim(), from.name, repo));
 						})()
 					},
 					{
@@ -1625,7 +1613,7 @@ export class SourceControlView {
 					},
 					{
 						label: 'Remove Remote', run: () => void (async () => {
-							const remotes = await invoke<SubRemoteInfo[]>('scm_remotes', { repo });
+							const remotes = await scmRemotes(repo);
 							if (remotes.length === 0) {
 								notify('info', 'The repository has no remotes.');
 								return;
@@ -1684,13 +1672,13 @@ export class SourceControlView {
 							if (!name) return;
 							const message = await quickInput({ title: 'Create Tag', placeholder: 'Message (leave empty for a lightweight tag)' });
 							if (message === null) return;
-							const head = await invoke<{ shortHash: string }>('repo_head', { repo });
+							const head = await repoHead(repo);
 							run(() => gitOp('scm_add_tag', { tagName: name.trim(), commitHash: head.shortHash, message, force: false }));
 						})()
 					},
 					{
 						label: 'Delete Tag', run: () => void (async () => {
-							const tags = await invoke<string[]>('scm_tags', { repo });
+							const tags = await scmTags(repo);
 							if (tags.length === 0) {
 								notify('info', 'The repository has no tags.');
 								return;
@@ -1707,14 +1695,14 @@ export class SourceControlView {
 			{
 				label: 'Amend Last Commit', run: () => void (async () => {
 					if (!(await confirmDialog('Amend the last commit with the staged changes (the message is kept)?', 'Amend'))) return;
-					run(() => invoke('scm_amend_last_commit', { repo }));
+					run(() => scmAmendLastCommit(repo));
 				})()
 			},
 			{
 				label: 'Fetch commit-msg Hook (Gerrit)', run: () => void (async () => {
 					const remote = await pickRemoteIn(repo, 'Pick the Gerrit remote');
 					if (!remote) return;
-					const installed = await invoke<boolean>('gerrit_install_hook', { remote: remote.name, repo });
+					const installed = await gerritInstallHook(remote.name, repo);
 					notify('info', installed ? 'The Gerrit commit-msg hook was installed.' : 'The Gerrit commit-msg hook is already installed.');
 					await this.refresh();
 				})()
@@ -1722,7 +1710,7 @@ export class SourceControlView {
 			{
 				label: 'Reset Current Branch to Remote (Soft)', run: () => void (async () => {
 					if (!(await confirmDialog('Soft-reset the current branch to its upstream? Your local commits are kept as staged changes.', 'Reset'))) return;
-					const upstream = await invoke<string>('scm_reset_to_remote', { repo });
+					const upstream = await scmResetToRemote(repo);
 					notify('info', `The current branch was reset to ${upstream}; its changes are staged.`);
 					await this.refresh();
 					this.onChanged?.();
@@ -1732,7 +1720,7 @@ export class SourceControlView {
 				label: 'Push to Gerrit Ref for Current Branch (refs/for/...)', run: () => void (async () => {
 					const remote = await pickRemoteIn(repo, 'Pick the Gerrit remote');
 					if (!remote) return;
-					const url = await invoke<string | null>('gerrit_push_ref', { remote: remote.name, repo });
+					const url = await gerritPushRef(remote.name, repo);
 					if (url) notify('info', `Pushed for review: ${url}`, [{ label: 'Open Change', run: () => void openUrl(url) }]);
 					else notify('info', `Pushed the current branch to ${remote.name} for review.`);
 				})()

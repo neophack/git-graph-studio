@@ -4,7 +4,7 @@
 // logs them) plus the channels installed extensions created (`createOutputChannel`), picked
 // from a dropdown in the view's actions.
 
-import { invoke } from '../platform/ipc/core';
+import { gitOutputClear, gitOutputLog } from '../platform/ipc/scm';
 import { listen } from '../platform/ipc/core';
 
 import { ContextView } from '../features/search';
@@ -49,7 +49,7 @@ export class OutputView {
 		if (this.loaded) return;
 		this.loaded = true;
 		try {
-			const lines = await invoke<string[]>('git_output_log');
+			const lines = await gitOutputLog();
 			this.channels.set(GIT_CHANNEL, lines);
 			this.renderActive();
 		} catch {
@@ -109,7 +109,7 @@ export class OutputView {
 	clearChannel(channel: string): void {
 		this.channels.set(channel, []);
 		if (channel === this.activeChannel()) this.log.textContent = '';
-		if (channel === GIT_CHANNEL) void invoke('git_output_clear').catch(() => undefined);
+		if (channel === GIT_CHANNEL) void gitOutputClear().catch(() => undefined);
 	}
 
 	private activeChannel(): string {

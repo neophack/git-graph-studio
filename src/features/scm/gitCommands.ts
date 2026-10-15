@@ -5,14 +5,12 @@
 // runs through the backend, and reports through notifications.
 
 import { invoke } from '../../platform/ipc/core';
+import { type BranchInfo, scmBranches, scmCheckout, scmClone, scmCreateBranch, type RemoteInfo, scmFetch, scmPull, scmPush, type StashInfo, scmRemotes, scmStashes, scmSync, scmTags } from '../../platform/ipc/scm';
+import { repoHead } from '../../platform/ipc/revision';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
 import type { CommandRegistry } from '../../platform/commands';
 import { confirmDialog, notify, quickInput, quickPick, type QuickPickItem } from '../../platform/ui/index';
-
-interface BranchInfo { name: string; remote: boolean; current: boolean; upstream: string | null }
-interface RemoteInfo { name: string; url: string }
-interface StashInfo { selector: string; index: number; message: string; hash: string }
 
 /** What the commands need from the workbench. */
 export interface GitCommandHost {
@@ -46,7 +44,7 @@ async function run(host: GitCommandHost, work: () => Promise<void>, done?: strin
 }
 
 async function pickBranch(placeholder: string, filter: (b: BranchInfo) => boolean = () => true): Promise<BranchInfo | null> {
-	const branches = await invoke<BranchInfo[]>('scm_branches');
+	const branches = await scmBranches();
 	const items: QuickPickItem[] = branches.filter(filter).map((b) => ({
 		label: b.name,
 		description: b.current ? 'current' : b.remote ? 'remote branch' : b.upstream ? `→ ${b.upstream}` : undefined,
@@ -62,7 +60,7 @@ async function pickBranch(placeholder: string, filter: (b: BranchInfo) => boolea
 }
 
 async function pickRemote(placeholder: string): Promise<RemoteInfo | null> {
-	const remotes = await invoke<RemoteInfo[]>('scm_remotes');
+	const remotes = await scmRemotes();
 	if (remotes.length === 0) {
 		notify('info', 'The repository has no remotes. Add one with Remote > Add Remote...');
 		return null;
@@ -73,7 +71,7 @@ async function pickRemote(placeholder: string): Promise<RemoteInfo | null> {
 }
 
 async function pickStash(placeholder: string): Promise<StashInfo | null> {
-	const stashes = await invoke<StashInfo[]>('scm_stashes');
+	const stashes = await scmStashes();
 	if (stashes.length === 0) {
 		notify('info', 'There are no stashes in the repository.');
 		return null;
@@ -95,32 +93,32 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 		commands.register({ id, title, category, keybinding, enabled: hasRepo, run: () => run(host, work) });
 
 	/* Sync */
-	add('git.pull', 'Pull', () => invoke('scm_pull', { remote: null, branch: null, rebase: false }));
-	add('git.pullRebase', 'Pull (Rebase)', () => invoke('scm_pull', { remote: null, branch: null, rebase: true }));
+	add('git.pull', 'Pull', () => scmPull(null, null, false));
+	add('git.pullRebase', 'Pull (Rebase)', () => scmPull(null, null, true));
 	add('git.pullFrom', 'Pull from...', async () => {
 		const remote = await pickRemote('Pick a remote to pull the branch from');
 		if (!remote) return;
 		const branch = await pickBranch(`Pick a branch to pull from ${remote.name}`, (b) => b.remote && b.name.startsWith(remote.name + '/'));
 		if (!branch) return;
-		await invoke('scm_pull', { remote: remote.name, branch: branch.name.slice(remote.name.length + 1), rebase: false });
+		await scmPull(remote.name, branch.name.slice(remote.name.length + 1), false);
 	});
-	add('git.push', 'Push', () => invoke('scm_push', { remote: null, setUpstream: false, force: false }));
+	add('git.push', 'Push', () => scmPush(null, false, false));
 	add('git.pushTo', 'Push to...', async () => {
 		const remote = await pickRemote('Pick a remote to publish the branch to');
 		if (!remote) return;
-		await invoke('scm_push', { remote: remote.name, setUpstream: true, force: false });
+		await scmPush(remote.name, true, false);
 	});
 	add('git.pushForce', 'Push (Force With Lease)', async () => {
 		if (!(await confirmDialog('Force-push the current branch to its upstream? Commits the remote has that this push does not contain become unreachable there.', 'Force Push'))) return;
-		await invoke('scm_push', { remote: null, setUpstream: false, force: true });
+		await scmPush(null, false, true);
 	});
-	add('git.sync', 'Sync', () => invoke('scm_sync', { rebase: false }));
-	add('git.syncRebase', 'Sync (Rebase)', () => invoke('scm_sync', { rebase: true }));
-	add('git.fetch', 'Fetch', () => invoke('scm_fetch', { remote: null, prune: false }));
-	add('git.fetchPrune', 'Fetch (Prune)', () => invoke('scm_fetch', { remote: null, prune: true }));
+	add('git.sync', 'Sync', () => scmSync(false));
+	add('git.syncRebase', 'Sync (Rebase)', () => scmSync(true));
+	add('git.fetch', 'Fetch', () => scmFetch(null, false));
+	add('git.fetchPrune', 'Fetch (Prune)', () => scmFetch(null, true));
 	add('git.fetchFrom', 'Fetch From...', async () => {
 		const remote = await pickRemote('Pick a remote to fetch from');
-		if (remote) await invoke('scm_fetch', { remote: remote.name, prune: false });
+		if (remote) await scmFetch(remote.name, false);
 	});
 
 	commands.register({
@@ -140,7 +138,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 			if (!parent) return;
 			const folder = Array.isArray(parent) ? parent[0]! : parent;
 			try {
-				const path = await invoke<string>('scm_clone', { url: url.trim(), parent: folder, name: null });
+				const path = await scmClone(url.trim(), folder, null);
 				notify('info', `Cloned into ${path}`, [{ label: 'Open', run: () => void host.openFolder(path) }]);
 			} catch (error) {
 				notify('error', String(error));
@@ -150,8 +148,8 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 
 	/* Branches */
 	add('git.checkout', 'Checkout to...', async () => {
-		const branches = await invoke<BranchInfo[]>('scm_branches');
-		const tags = await invoke<string[]>('scm_tags');
+		const branches = await scmBranches();
+		const tags = await scmTags();
 		const items: QuickPickItem[] = [
 			...branches.filter((b) => !b.current).map((b) => ({
 				label: b.name,
@@ -166,17 +164,17 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 			return;
 		}
 		const chosen = await quickPick(items, 'Select a branch or tag to checkout');
-		if (chosen) await invoke('scm_checkout', { name: chosen.replace(/^(branch|tag):/, '') });
+		if (chosen) await scmCheckout(chosen.replace(/^(branch|tag):/, ''));
 	});
 	add('git.branch', 'Create Branch...', async () => {
 		const name = await quickInput({ placeholder: 'Branch name', title: 'Please provide a new branch name', validate: validateRef });
-		if (name) await invoke('scm_create_branch', { name: name.trim(), from: null });
+		if (name) await scmCreateBranch(name.trim(), null);
 	});
 	add('git.branchFrom', 'Create Branch From...', async () => {
 		const from = await pickBranch('Select a ref to create the branch from');
 		if (!from) return;
 		const name = await quickInput({ placeholder: 'Branch name', title: `Please provide a new branch name (from ${from.name})`, validate: validateRef });
-		if (name) await invoke('scm_create_branch', { name: name.trim(), from: from.name });
+		if (name) await scmCreateBranch(name.trim(), from.name);
 	});
 	add('git.renameBranch', 'Rename Branch...', async () => {
 		const branch = await pickBranch('Select a branch to rename', (b) => !b.remote);
@@ -208,7 +206,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 		await gitOp('scm_add_remote', { name: name.trim(), url: url.trim(), fetch: true });
 	});
 	add('git.removeRemote', 'Remove Remote', async () => {
-		const remotes = await invoke<RemoteInfo[]>('scm_remotes');
+		const remotes = await scmRemotes();
 		if (remotes.length === 0) {
 			notify('info', 'The repository has no remotes.');
 			return;
@@ -251,11 +249,11 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 		if (!name) return;
 		const message = await quickInput({ title: 'Create Tag', placeholder: 'Message (leave empty for a lightweight tag)' });
 		if (message === null) return;
-		const head = await invoke<{ shortHash: string }>('repo_head');
+		const head = await repoHead();
 		await gitOp('scm_add_tag', { tagName: name.trim(), commitHash: head.shortHash, message, force: false });
 	});
 	add('git.deleteTag', 'Delete Tag', async () => {
-		const tags = await invoke<string[]>('scm_tags');
+		const tags = await scmTags();
 		if (tags.length === 0) {
 			notify('info', 'The repository has no tags.');
 			return;

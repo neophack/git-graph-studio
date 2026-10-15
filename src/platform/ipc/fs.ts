@@ -61,30 +61,30 @@ export const readFile = (path: string) => invoke<FileContents>('read_file', { pa
 export const readFileRaw = (path: string, encoding?: string) => invoke<ArrayBuffer | Uint8Array>('read_file_raw', { path, encoding });
 export const readFileBase64 = (path: string) => invoke<string>('read_file_base64', { path });
 export const readFileChunk = (path: string, offset: number, len: number) => invoke<FileChunk>('read_file_chunk', { path, offset, len });
-export const patchFile = (path: string, edits: { offset: number; byte: number }[]) => invoke('patch_file', { path, edits });
+export const patchFile = (path: string, edits: { offset: number; byte: number }[]) => invoke<void>('patch_file', { path, edits });
 export const fileProbe = (path: string) => invoke<FileProbe>('file_probe', { path });
 export const encodings = () => invoke<[string, string][]>('encodings');
 /** Keys the current callers omit stay off the wire exactly as before (an `undefined`
  *  property would reach the recorded args of the scripted backend). */
 export const writeFile = (path: string, contents: string, encoding?: string, eol?: string) =>
-	invoke('write_file', { path, contents, ...(encoding !== undefined && { encoding }), ...(eol !== undefined && { eol }) });
-export const createFile = (path: string) => invoke('create_file', { path });
-export const createFolder = (path: string) => invoke('create_folder', { path });
-export const renamePath = (from: string, to: string) => invoke('rename_path', { from, to });
-export const deletePath = (path: string, permanent: boolean) => invoke('delete_path', { path, permanent });
+	invoke<void>('write_file', { path, contents, ...(encoding !== undefined && { encoding }), ...(eol !== undefined && { eol }) });
+export const createFile = (path: string) => invoke<void>('create_file', { path });
+export const createFolder = (path: string) => invoke<void>('create_folder', { path });
+export const renamePath = (from: string, to: string) => invoke<void>('rename_path', { from, to });
+export const deletePath = (path: string, permanent: boolean) => invoke<void>('delete_path', { path, permanent });
 export const copyInto = (sources: string[], destDir: string) => invoke<string[]>('copy_into', { sources, destDir });
 /** The workspace file list every walk reuses (Quick Open, search, symbol tools); the
  *  repo-scoped form narrows to one root of a workspace. */
 export const listFiles = (repo?: string) => invoke<string[]>('list_files', repo === undefined ? undefined : { repo });
-export const backupWrite = (path: string, contents: string) => invoke('backup_write', { path, contents });
+export const backupWrite = (path: string, contents: string) => invoke<void>('backup_write', { path, contents });
 export const backupList = () => invoke<BackupEntry[]>('backup_list');
 export const backupRead = (path: string) => invoke<string>('backup_read', { path });
-export const backupClear = (path: string) => invoke('backup_clear', { path });
-export const fsTransferCancel = () => invoke('fs_transfer_cancel');
+export const backupClear = (path: string) => invoke<void>('backup_clear', { path });
+export const fsTransferCancel = () => invoke<void>('fs_transfer_cancel');
 /** The remote wire's confined chunked upload: the resume offset the backend reports for
  *  a partial upload, and one raw chunk with its confinement headers. */
 export const fsUploadOffset = (path: string, size: number) => invoke<number>('fs_upload_offset', { path, size });
-export const fsWriteChunk = (bytes: Uint8Array, headers: Record<string, string>) => invoke('fs_write_chunk', bytes, { headers });
+export const fsWriteChunk = (bytes: Uint8Array, headers: Record<string, string>) => invoke<void>('fs_write_chunk', bytes, { headers });
 
 /** One progress report of a desktop transfer (`fs_export` / `fs_import`). */
 export interface TransferProgress {

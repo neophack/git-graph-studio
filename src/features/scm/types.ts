@@ -2,13 +2,7 @@
 // the view implementation (plan §5.3/5.4).
 
 /** One line's last change, as `scm_blame` reports it. */
-export interface BlameLine {
-	hash: string;
-	author: string;
-	/** Seconds since the epoch. */
-	time: number;
-	summary: string;
-}
+export type { BlameLine } from '../../platform/ipc/scm';
 
 // The history view's public type (the class loads lazily; the editor imports it type-only).
 export type FileHistoryView = import('./fileHistory').FileHistoryView;

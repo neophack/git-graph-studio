@@ -4,6 +4,6 @@
 import { invoke } from './core';
 
 export const settingsRead = () => invoke<string | null>('settings_read');
-export const settingsWrite = (contents: string) => invoke('settings_write', { contents });
+export const settingsWrite = (contents: string) => invoke<void>('settings_write', { contents });
 export const keybindingsRead = () => invoke<string | null>('keybindings_read');
-export const keybindingsWrite = (contents: string) => invoke('keybindings_write', { contents });
+export const keybindingsWrite = (contents: string) => invoke<void>('keybindings_write', { contents });

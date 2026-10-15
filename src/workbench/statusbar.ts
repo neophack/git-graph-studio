@@ -6,7 +6,7 @@
 // endings, the language, and the notification bell (which opens the notification centre -
 // every toast ever shown stays listed there until cleared).
 
-import { invoke } from '../platform/ipc/core';
+import { type HeadInfo, repoHead } from '../platform/ipc/revision';
 
 import { ENCODING_LABELS } from '../features/editor';
 import { t, tf } from '../platform/i18n';
@@ -20,15 +20,6 @@ function ago(at: number): string {
 	if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
 	if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
 	return `${Math.round(seconds / 86400)}d ago`;
-}
-
-export interface HeadInfo {
-	repo: string;
-	branch: string | null;
-	shortHash: string;
-	ahead: number;
-	behind: number;
-	upstream: string | null;
 }
 
 /** One extension status bar item as the extension host pushes it. */
@@ -309,7 +300,7 @@ export class StatusBar {
 		const generation = this.generation;
 		let head: HeadInfo;
 		try {
-			head = await invoke<HeadInfo>('repo_head');
+			head = await repoHead();
 		} catch {
 			if (generation !== this.generation) return;
 			this.repoItem.hidden = true;

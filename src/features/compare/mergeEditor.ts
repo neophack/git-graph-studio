@@ -3,7 +3,7 @@
 // Resolved" saves the file and stages it - the workflow of a three-way merge view without a
 // language server or a separate merge tool.
 
-import { invoke } from '../../platform/ipc/core';
+import { gitStage } from '../../platform/ipc/scm';
 import { type FileContents, readFile, writeFile } from '../../platform/ipc/fs';
 import type { EditorView } from '@codemirror/view';
 
@@ -213,7 +213,7 @@ export class MergeToolbar {
 			// (flipping every line ending of a CRLF file, corrupting a GB18030/UTF-16 one).
 			const format: FileContents | null = await readFile(this.path).catch(() => null);
 			await writeFile(this.path, view.state.doc.toString(), format?.encoding ?? 'utf8', format?.eol ?? 'lf');
-			await invoke('git_stage', { paths: [this.path] });
+			await gitStage([this.path]);
 		} catch (error) {
 			notify('error', String(error));
 			return;
