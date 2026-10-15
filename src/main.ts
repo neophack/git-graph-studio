@@ -32,7 +32,7 @@ requestAnimationFrame(() => {
 });
 
 
-void import('./workbench/workbench')
+void import('./workbench')
 	.then(({ bootWorkbench }) => bootWorkbench())
 	.catch((error) => {
 		const splash = document.getElementById('boot-splash');

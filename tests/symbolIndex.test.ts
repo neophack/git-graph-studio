@@ -10,7 +10,7 @@ import { ContextView } from '../src/features/search';
 import { EditorGroup } from '../src/features/editor';
 import { StatusBar } from '../src/workbench/statusbar';
 import { buildTree, subtreeCounts, SymbolDatabaseView } from '../src/features/search';
-import { fileSymbolItems, workspaceSymbolItems } from '../src/workbench/workbench';
+import { fileSymbolItems, workspaceSymbolItems } from '../src/workbench';
 import { backend } from './tauriMock';
 import { click, flush, key, texts } from './helpers';
 

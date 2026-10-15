@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 
 import { commands } from '../src/platform/commands';
 import { settings, updateSetting } from '../src/platform/settings';
-import { Workbench } from '../src/workbench/workbench';
+import { Workbench } from '../src/workbench';
 import { commonHandlers, type Handler } from './scenarioFixtures';
 import { backend } from './tauriMock';
 import { installRemoteRound, uninstallRemoteRound } from './remoteRound';

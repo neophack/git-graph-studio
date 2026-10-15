@@ -10,7 +10,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { Workbench } from '../src/workbench/workbench';
+import { Workbench } from '../src/workbench';
 import { commands } from '../src/platform/commands';
 import { SCENARIOS, handlersFor, type Scenario } from './scenarioFixtures';
 import { backend } from './tauriMock';

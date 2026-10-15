@@ -19,7 +19,7 @@ import {
 	type SelfTestStatus
 } from './selftest';
 import { registerSelfTestSuites } from './selfTestSuites';
-import type { Workbench } from '../../workbench/workbench';
+import type { Workbench } from '../../workbench';
 
 const STATUS_ICON: Record<SelfTestStatus, string> = { pass: 'check', fail: 'error', skip: 'circle-slash' };
 

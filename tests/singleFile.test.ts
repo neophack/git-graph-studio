@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import * as state from '../src/platform/state';
-import { Workbench } from '../src/workbench/workbench';
+import { Workbench } from '../src/workbench';
 import { backend } from './tauriMock';
 import { click, flush, texts } from './helpers';
 

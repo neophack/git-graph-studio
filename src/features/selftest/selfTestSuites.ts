@@ -21,7 +21,7 @@ import { scoreFile, makeQuery, type FileEntry } from '../quickOpen';
 import { ANALYSIS_TOOLS } from '../analysis';
 import { SETTING_DEFS } from '../../platform/settings';
 import { registerSelfTests, type SelfTestGroup } from './selftest';
-import type { Workbench } from '../../workbench/workbench';
+import type { Workbench } from '../../workbench';
 
 /** Titles in the registry are i18n keys (or already-literal strings): `t` answers both — an
  *  unknown key falls back to the text itself. */

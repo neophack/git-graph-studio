@@ -35,7 +35,7 @@ describe('lazy chunks', () => {
 		// into first paint; editor.ts loads them through loadEditorExtensions).
 		const forbidden = /^import .* from '(@codemirror\/(?!merge)|@lezer\/|@xterm\/)/m;
 		const forbiddenExtensionViews = /^import .* from '\.\/(editorDiagnosticsView|editorDecorationsView|editorProviderViews)'/m;
-		for (const file of ['workbench/workbench.ts', 'features/editor/group.ts', 'features/editor/open.ts', 'features/editor/tabs.ts', 'features/editor/dirty.ts', 'features/editor/navigate.ts', 'features/editor/breadcrumbs.ts', 'features/terminal/terminal.ts', 'features/compare/folderCompare.ts', 'workbench/panel.ts', 'features/explorer/explorer.ts', 'features/scm/scm.ts', 'features/search/searchView.ts', 'workbench/statusbar.ts', 'workbench/titlebar.ts', 'platform/ui/index.ts', 'main.ts']) {
+		for (const file of ['workbench/workbench.ts', 'workbench/layout.ts', 'workbench/menus.ts', 'workbench/boot.ts', 'workbench/lifecycle.ts', 'features/editor/group.ts', 'features/editor/open.ts', 'features/editor/tabs.ts', 'features/editor/dirty.ts', 'features/editor/navigate.ts', 'features/editor/breadcrumbs.ts', 'features/terminal/terminal.ts', 'features/compare/folderCompare.ts', 'workbench/panel.ts', 'features/explorer/explorer.ts', 'features/scm/scm.ts', 'features/search/searchView.ts', 'workbench/statusbar.ts', 'workbench/titlebar.ts', 'platform/ui/index.ts', 'main.ts']) {
 			const source = readFileSync(join(__dirname, '..', 'src', file), 'utf8');
 			const offending = source.split('\n').filter((line) => (forbidden.test(line) || forbiddenExtensionViews.test(line)) && !line.startsWith('import type'));
 			expect(offending, file).toEqual([]);
@@ -56,7 +56,7 @@ describe('the hex and CAN chunks', () => {
 		expect(typeof can.CanLogView).toBe('function');
 		// Only `import type` may name them from the modules the workbench paints with.
 		const forbidden = /^import .* from '\.\/(hexView|hexCompare|canLogView|canRawView|canChart)'/m;
-		for (const file of ['workbench/workbench.ts', 'features/editor/group.ts', 'features/editor/open.ts', 'features/editor/editorArea.ts', 'features/compare/folderCompare.ts', 'features/explorer/explorer.ts', 'features/scm/scm.ts']) {
+		for (const file of ['workbench/workbench.ts', 'workbench/layout.ts', 'workbench/menus.ts', 'workbench/boot.ts', 'workbench/lifecycle.ts', 'features/editor/group.ts', 'features/editor/open.ts', 'features/editor/editorArea.ts', 'features/compare/folderCompare.ts', 'features/explorer/explorer.ts', 'features/scm/scm.ts']) {
 			const source = readFileSync(join(__dirname, '..', 'src', file), 'utf8');
 			const offending = source.split('\n').filter((line) => forbidden.test(line) && !line.startsWith('import type'));
 			expect(offending, file).toEqual([]);
@@ -81,7 +81,7 @@ describe('the on-demand view chunks', () => {
 		expect(typeof (await lazy.loadSnippetRegistry()).loadWorkspaceSnippets).toBe('function');
 		// Only `import type` may name any of them from the modules the workbench paints with.
 		const forbidden = /^import .* from '\.\/(fastView|folderCompare|mergeEditor|fileHistory|callTree|snippetRegistry)'/m;
-		for (const file of ['workbench/workbench.ts', 'features/editor/group.ts', 'features/editor/open.ts', 'features/editor/editorArea.ts', 'workbench/panel.ts', 'features/explorer/explorer.ts', 'features/scm/scm.ts', 'features/search/searchView.ts', 'workbench/statusbar.ts', 'workbench/titlebar.ts', 'platform/ui/index.ts', 'main.ts']) {
+		for (const file of ['workbench/workbench.ts', 'workbench/layout.ts', 'workbench/menus.ts', 'workbench/boot.ts', 'workbench/lifecycle.ts', 'features/editor/group.ts', 'features/editor/open.ts', 'features/editor/editorArea.ts', 'workbench/panel.ts', 'features/explorer/explorer.ts', 'features/scm/scm.ts', 'features/search/searchView.ts', 'workbench/statusbar.ts', 'workbench/titlebar.ts', 'platform/ui/index.ts', 'main.ts']) {
 			const source = readFileSync(join(__dirname, '..', 'src', file), 'utf8');
 			const offending = source.split('\n').filter((line) => forbidden.test(line) && !line.startsWith('import type'));
 			expect(offending, file).toEqual([]);

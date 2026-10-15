@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { CommandRegistry, matchesKeybinding } from '../src/platform/commands';
-import { FS_CHANGED_EVENT, Workbench } from '../src/workbench/workbench';
+import { FS_CHANGED_EVENT, Workbench } from '../src/workbench';
 import * as state from '../src/platform/state';
 import { StatusBar } from '../src/workbench/statusbar';
 import { TitleBar } from '../src/workbench/titlebar';

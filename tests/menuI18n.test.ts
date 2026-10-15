@@ -7,7 +7,7 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { Workbench } from '../src/workbench/workbench';
+import { Workbench } from '../src/workbench';
 import { commands } from '../src/platform/commands';
 import { trText } from '../src/platform/i18n';
 import { settings, updateSetting } from '../src/platform/settings';

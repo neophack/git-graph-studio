@@ -11,7 +11,7 @@
 import { commands } from '../platform/commands';
 import { notify } from '../platform/ui';
 import { t, tf } from '../platform/i18n';
-import { currentWorkbench } from '../workbench/workbench';
+import { currentWorkbench } from '../workbench';
 import { installActionSheet } from './actionSheet';
 import { createAppBar } from './appBar';
 import { createBottomTabs } from './bottomTabs';

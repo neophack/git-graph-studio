@@ -147,7 +147,15 @@ The application frame: custom title bar (menus, command center, window controls)
 bar, side bar, editor area host, bottom panel and status bar, plus the boot splash that
 guarantees the window is never a blank dark rectangle.
 
-- Frontend: `src/main.ts` (boot entry), `src/workbench/workbench.ts` (composition root),
+- Frontend: `src/main.ts` (boot entry), `src/workbench/workbench.ts` (the Workbench class
+  shell — fields, constructor, quick open, the editor/extension command surfaces, the
+  context-symbol cluster and the keyboard handlers; every layout/menu/boot/lifecycle method
+  is declared here and lives in its concern file), `src/workbench/layout.ts` (activity bar,
+  sidebar/sash, extension views), `src/workbench/menus.ts`, `src/workbench/boot.ts` (first
+  paint, command registration, the wiring pass incl. the window-level drag-drop routing),
+  `src/workbench/lifecycle.ts` (folder open/close, snapshots, fs-change refreshes),
+  `src/workbench/index.ts` (the facade that Object.assigns the concerns onto the prototype —
+  import the directory, not the file),
   `src/workbench/titlebar.ts`, `src/workbench/statusbar.ts`, `src/workbench/panel.ts` (panel chrome; its Output view is
   the Git channel), `src/platform/ui/` (shared DOM kit: dom, codicon, notify, progress,
   contextMenu, quickInput under one facade — codicons, notifications, context menus, quick

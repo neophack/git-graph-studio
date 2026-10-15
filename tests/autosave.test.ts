@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { EditorGroup } from '../src/features/editor';
 import { settings, updateSetting } from '../src/platform/settings';
-import { Workbench } from '../src/workbench/workbench';
+import { Workbench } from '../src/workbench';
 import { backend } from './tauriMock';
 import { flush, notifications } from './helpers';
 

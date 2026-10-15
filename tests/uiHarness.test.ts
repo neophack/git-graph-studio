@@ -5,7 +5,7 @@
 
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { Workbench } from '../src/workbench/workbench';
+import { Workbench } from '../src/workbench';
 import { commands } from '../src/platform/commands';
 import { effectiveKeybinding } from '../src/platform/keybindings';
 import { settings } from '../src/platform/settings';

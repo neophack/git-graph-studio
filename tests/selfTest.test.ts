@@ -5,7 +5,7 @@
 
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { Workbench } from '../src/workbench/workbench';
+import { Workbench } from '../src/workbench';
 import * as selftest from '../src/features/selftest';
 import { registerSelfTestSuites } from '../src/features/selftest';
 import { backend } from './tauriMock';

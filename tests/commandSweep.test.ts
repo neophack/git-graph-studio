@@ -8,7 +8,7 @@ vi.mock('mermaid', () => import('./mermaidStub'));
 vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { Workbench } from '../src/workbench/workbench';
+import { Workbench } from '../src/workbench';
 import { commands } from '../src/platform/commands';
 import { bookmarksFor } from '../src/features/editor';
 import * as state from '../src/platform/state';

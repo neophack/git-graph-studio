@@ -51,7 +51,9 @@ import { ExtensionTreeView } from '../features/extensions';
 import { evaluateWhen, extensionViewContributions } from '../features/extensions';
 import { extFileDataUrl } from '../platform/extAssets';
 
-type ViewId = 'explorer' | 'search' | 'scm' | 'extensions' | 'analysis';
+import type { MenuDefinition } from './titlebar';
+
+export type ViewId = 'explorer' | 'search' | 'scm' | 'extensions' | 'analysis';
 
 /** One debounced burst of external file changes, as the backend watcher reports it. */
 export interface FsChange {
@@ -82,70 +84,81 @@ export interface OpenedPaths { folders: string[]; files: string[] }
 export type { SymbolIndexEvent, SymbolIndexStatus } from '../platform/ipc/symbols';
 
 /** How long after a refresh a git-only change batch is taken for that refresh's own echo. */
-const REFRESH_ECHO_MS = 1500;
+export const REFRESH_ECHO_MS = 1500;
 
 
 export class Workbench {
-	/** The folders this window has open — the sync's remote-open boundary (workbenchSync). */
 	public openFolders(): string[] {
 		return this.explorer.roots();
 	}
 
-	/** Serial for extension page tabs: every open of an extension page is its own instance. */
-	private static extPageSerial = 0;
-	/** Singleton pages' tab ids, by `${extId}/${pageId}` (a second open reveals the tab). */
-	private readonly extPageTabs = new Map<string, string>();
-	private readonly activityBar = document.getElementById('activitybar')!;
-	private readonly sidebar = document.getElementById('sidebar')!;
-	private readonly sidebarSash = document.getElementById('sidebarSash')!;
-	private readonly editorPart = document.getElementById('editorPart')!;
-	private readonly panelElement = document.getElementById('panel')!;
-	private readonly panelSash = document.getElementById('panelSash')!;
+	static extPageSerial = 0;
 
-	private readonly views: Record<ViewId, HTMLElement> = { explorer: el('div', 'view'), search: el('div', 'view'), scm: el('div', 'view'), extensions: el('div', 'view'), analysis: el('div', 'view') };
-	private readonly activityItems: Record<string, HTMLElement> = {};
-	/** The spacer between the main activity items and the bottom ones — extension containers
-	 *  insert their icons before it, as VS Code appends them after Extensions. */
-	private activitySpacer: HTMLElement | null = null;
-	/** The extension-contributed containers (`contributes.viewsContainers`): sidebar view
-	 *  element + the view ids it stacks, keyed `ext-container:{extId}.{containerId}`. */
-	private readonly extContainers = new Map<string, { element: HTMLElement; viewIds: string[] }>();
-	/** Which declared views the last `applyExtensionViews` pass showed — a `setContext`
-	 *  rebuilds the sidebar only when its `when` clauses now pick a different set. */
-	private extViewsShown = '';
-	/** The extension tree views by view id (their sections live in a container's element or
-	 *  a built-in sidebar view's tail). */
-	private readonly extTreeViews = new Map<string, ExtensionTreeView>();
-	/** Extension sections appended to a built-in sidebar view (explorer / scm targets). */
-	private readonly extBuiltinSections: HTMLElement[] = [];
-	/** The webview views' iframe disposers, run when the sidebar surface rebuilds. */
-	private readonly extWebviewViewDisposers: (() => void)[] = [];
+	readonly extPageTabs = new Map<string, string>();
+
+	readonly activityBar = document.getElementById('activitybar')!;
+
+	readonly sidebar = document.getElementById('sidebar')!;
+
+	readonly sidebarSash = document.getElementById('sidebarSash')!;
+
+	readonly editorPart = document.getElementById('editorPart')!;
+
+	readonly panelElement = document.getElementById('panel')!;
+
+	readonly panelSash = document.getElementById('panelSash')!;
+
+	readonly views: Record<ViewId, HTMLElement> = { explorer: el('div', 'view'), search: el('div', 'view'), scm: el('div', 'view'), extensions: el('div', 'view'), analysis: el('div', 'view') };
+
+	readonly activityItems: Record<string, HTMLElement> = {};
+
+	activitySpacer: HTMLElement | null = null;
+
+	readonly extContainers = new Map<string, { element: HTMLElement; viewIds: string[] }>();
+
+	extViewsShown = '';
+
+	readonly extTreeViews = new Map<string, ExtensionTreeView>();
+
+	readonly extBuiltinSections: HTMLElement[] = [];
+
+	readonly extWebviewViewDisposers: (() => void)[] = [];
+
 	readonly titleBar: TitleBar;
+
 	readonly explorer: Explorer;
+
 	readonly search: SearchView;
+
 	readonly scm: SourceControlView;
+
 	readonly extensions: ExtensionsPanel;
+
 	readonly analysis: AnalysisView;
+
 	readonly extensionHost: ExtensionHost;
+
 	readonly editors: EditorArea;
+
 	readonly panel: Panel;
+
 	readonly statusBar: StatusBar;
-	private repoPath: string | null = null;
-	/** Whether the open folder is (or sits inside) a Git repository. */
-	private isRepo = false;
-	/** Single-file mode (`git-graph-studio <file>` / File > Open File...): the window shows
-	 *  one file and nothing else - no side bar, no terminal, no repository views. */
-	private singleFile: string | null = null;
-	/** Boot timing: the first folder open stamps "folder shown" once. */
-	private folderShownStamped = false;
-	/** Every open root: one entry for a plain folder, one per folder of a `.ggs-workspace`
-	 *  (M3 3.8). `repoPath` stays the first root - the single-root seam everything uses. */
-	private repoPaths: string[] = [];
-	/** The `.ggs-workspace` file the roots came from (null for a plain folder): the session
-	 *  snapshot is keyed by it, so a workspace keeps its own tabs. */
-	private workspaceFile: string | null = null;
-	private activeView: string = state.layout.activeView;
-	private refreshTimer: number | null = null;
+
+	repoPath: string | null = null;
+
+	isRepo = false;
+
+	singleFile: string | null = null;
+
+	folderShownStamped = false;
+
+	repoPaths: string[] = [];
+
+	workspaceFile: string | null = null;
+
+	activeView: string = state.layout.activeView;
+
+	refreshTimer: number | null = null;
 
 	constructor() {
 		for (const view of Object.values(this.views)) {
@@ -283,233 +296,10 @@ export class Workbench {
 		return this.repoPath;
 	}
 
-	/* ---------- Commands & menus ---------- */
+	declare registerCommands: () => void ;
 
-	private registerCommands(): void {
-		const hasRepo = () => this.repoPath !== null;
-		const editorView = () => this.editors.activeView;
-		const hasEditor = () => editorView() !== null;
-		const register = commands.register.bind(commands);
+	declare menus: () => MenuDefinition[];
 
-		register({ id: 'workbench.openFolder', title: 'Open Folder...', category: 'File', keybinding: 'Ctrl+O', run: () => this.pickFolder() });
-		// A second workbench is a second instance (no single-instance plugin — every launch
-		// its own process, backends and watcher), so "New Window" asks the backend to spawn
-		// one; the new window boots like a fresh launch. On Windows and Linux a second launch
-		// of the app already is a new instance; on macOS this is the discoverable way to
-		// multi-open, where clicking the app's icon again only focuses the running window.
-		register({ id: 'workbench.newWindow', title: 'New Window', category: 'File', keybinding: 'Ctrl+Shift+N', run: () => void appNewInstance().catch((error) => notify('error', tf('workbench.newWindowFailed', String(error)))) });
-		register({ id: 'workbench.openWorkspace', title: 'Open Workspace...', category: 'File', run: () => this.pickWorkspace() });
-		register({ id: 'workbench.openFileStandalone', title: 'Open File...', category: 'File', run: () => this.pickSingleFile() });
-		register({ id: 'workbench.closeFolder', title: 'Close Folder', category: 'File', enabled: hasRepo, run: () => this.closeFolder() });
-		register({ id: 'workbench.newFile', title: 'New File...', category: 'File', keybinding: 'Ctrl+N', enabled: hasRepo, run: () => this.explorer.newFile() });
-		register({ id: 'workbench.save', title: 'Save', category: 'File', keybinding: 'Ctrl+S', enabled: () => this.editors.hasDirtyEditors(), run: () => this.editors.save() });
-		register({ id: 'workbench.saveAll', title: 'Save All', category: 'File', keybinding: 'Ctrl+K S', enabled: () => this.editors.hasDirtyEditors(), run: () => this.editors.saveAll() });
-		register({ id: 'workbench.closeEditor', title: 'Close Editor', category: 'View', keybinding: 'Ctrl+W', enabled: () => this.editors.activeInput !== null, run: () => this.editors.close() });
-		register({ id: 'workbench.closeAllEditors', title: 'Close All Editors', category: 'View', keybinding: 'Ctrl+K Ctrl+W', enabled: () => this.editors.activeInput !== null, run: () => void this.editors.closeAll() });
-		register({ id: 'workbench.focusFirstEditorGroup', title: 'Focus First Editor Group', category: 'View', keybinding: 'Ctrl+1', run: () => this.editors.focusIndex(0) });
-		register({ id: 'workbench.focusSecondEditorGroup', title: 'Focus Second Editor Group', category: 'View', keybinding: 'Ctrl+2', run: () => this.editors.focusIndex(1) });
-		register({ id: 'workbench.focusThirdEditorGroup', title: 'Focus Third Editor Group', category: 'View', keybinding: 'Ctrl+3', run: () => this.editors.focusIndex(2) });
-		// VS Code's canonical spellings of the same focus commands — extensions call these
-		// (claude-code hands the focus back to the code with them after opening its chat).
-		// Palette-hidden: the rows above already carry the keybindings.
-		register({ id: 'workbench.action.focusFirstEditorGroup', title: 'Focus First Editor Group', category: 'View', paletteHidden: () => true, run: () => this.editors.focusIndex(0) });
-		register({ id: 'workbench.action.focusSecondEditorGroup', title: 'Focus Second Editor Group', category: 'View', paletteHidden: () => true, run: () => this.editors.focusIndex(1) });
-		register({ id: 'workbench.action.focusThirdEditorGroup', title: 'Focus Third Editor Group', category: 'View', paletteHidden: () => true, run: () => this.editors.focusIndex(2) });
-		// The rest of VS Code's editor-group management (the palette's Editor Group family):
-		// focus by number up to eight, focus by adjacency, focus spatially, move the active
-		// editor between groups, and the layout commands.
-		for (const [nth, word] of [[4, 'Fourth'], [5, 'Fifth'], [6, 'Sixth'], [7, 'Seventh'], [8, 'Eighth']] as const) {
-			register({ id: `workbench.action.focus${word}EditorGroup`, title: `Focus ${word} Editor Group`, category: 'View', keybinding: `Ctrl+${nth}`, run: () => this.editors.focusIndex(nth - 1) });
-		}
-		register({ id: 'workbench.action.focusLastEditorGroup', title: 'Focus Last Editor Group', category: 'View', run: () => this.editors.focusLast() });
-		register({ id: 'workbench.action.focusNextGroup', title: 'Focus Next Editor Group', category: 'View', keybinding: 'Ctrl+K Ctrl+Right', run: () => this.editors.focusSequence(1) });
-		register({ id: 'workbench.action.focusPreviousGroup', title: 'Focus Previous Editor Group', category: 'View', keybinding: 'Ctrl+K Ctrl+Left', run: () => this.editors.focusSequence(-1) });
-		register({ id: 'workbench.action.focusAboveGroup', title: 'Focus Editor Group Above', category: 'View', keybinding: 'Ctrl+K Ctrl+Up', run: () => this.editors.focusDirection('up') });
-		register({ id: 'workbench.action.focusBelowGroup', title: 'Focus Editor Group Below', category: 'View', keybinding: 'Ctrl+K Ctrl+Down', run: () => this.editors.focusDirection('down') });
-		register({ id: 'workbench.action.focusLeftGroup', title: 'Focus Editor Group on the Left', category: 'View', run: () => this.editors.focusDirection('left') });
-		register({ id: 'workbench.action.focusRightGroup', title: 'Focus Editor Group on the Right', category: 'View', run: () => this.editors.focusDirection('right') });
-		register({ id: 'workbench.splitEditor', title: 'Split Editor', category: 'View', keybinding: 'Ctrl+\\', run: () => this.editors.splitEditor('right') });
-		register({ id: 'workbench.action.splitEditorOrthogonal', title: 'Split Editor Orthogonal', category: 'View', keybinding: 'Ctrl+K Ctrl+\\', run: () => this.editors.splitEditorOrthogonal() });
-		register({ id: 'workbench.action.splitEditorLeft', title: 'Split Editor Left', category: 'View', run: () => this.editors.splitEditor('left') });
-		register({ id: 'workbench.action.splitEditorRight', title: 'Split Editor Right', category: 'View', run: () => this.editors.splitEditor('right') });
-		register({ id: 'workbench.action.splitEditorUp', title: 'Split Editor Up', category: 'View', run: () => this.editors.splitEditor('up') });
-		register({ id: 'workbench.action.splitEditorDown', title: 'Split Editor Down', category: 'View', run: () => this.editors.splitEditor('down') });
-		register({ id: 'workbench.action.moveEditorToNextGroup', title: 'Move Editor into Next Group', category: 'View', keybinding: 'Ctrl+Alt+Right', run: () => this.editors.moveEditorToSequence(1) });
-		register({ id: 'workbench.action.moveEditorToPreviousGroup', title: 'Move Editor into Previous Group', category: 'View', keybinding: 'Ctrl+Alt+Left', run: () => this.editors.moveEditorToSequence(-1) });
-		register({ id: 'workbench.action.moveEditorToLeftGroup', title: 'Move Editor into Left Group', category: 'View', run: () => this.editors.moveEditorToDirection('left') });
-		register({ id: 'workbench.action.moveEditorToRightGroup', title: 'Move Editor into Right Group', category: 'View', run: () => this.editors.moveEditorToDirection('right') });
-		register({ id: 'workbench.action.moveEditorToAboveGroup', title: 'Move Editor into Above Group', category: 'View', run: () => this.editors.moveEditorToDirection('up') });
-		register({ id: 'workbench.action.moveEditorToBelowGroup', title: 'Move Editor into Below Group', category: 'View', run: () => this.editors.moveEditorToDirection('down') });
-		register({ id: 'workbench.action.evenEditorWidths', title: 'Even Editor Group Widths', category: 'View', run: () => this.editors.evenEditorWidths() });
-		register({ id: 'workbench.action.toggleMaximizeEditorGroup', title: 'Toggle Maximized Editor Group', category: 'View', run: () => this.editors.toggleMaximizedGroup() });
-		register({ id: 'workbench.action.minimizeOtherEditorGroups', title: 'Minimize Other Editor Groups', category: 'View', run: () => this.editors.minimizeOtherGroups() });
-		register({ id: 'workbench.action.joinAllGroups', title: 'Join All Editor Groups', category: 'View', run: () => this.editors.joinAllGroups() });
-		register({ id: 'workbench.action.resetEditorGroups', title: 'Reset Editor Groups', category: 'View', run: () => void this.editors.resetEditorGroups() });
-		register({ id: 'workbench.action.closeEditorsInGroup', title: 'Close All Editors in Group', category: 'View', keybinding: 'Ctrl+K W', run: () => void this.editors.activeGroup.closeAll() });
-		register({ id: 'workbench.action.closeEditorsInOtherGroups', title: 'Close Editors in Other Groups', category: 'View', run: () => void this.editors.closeOtherGroups() });
-		// The group lock (claude-code locks its chat's group right after opening it, as it
-		// does in VS Code — a locked group keeps its editors, placed opens land elsewhere).
-		register({ id: 'workbench.action.lockEditorGroup', title: 'Lock Editor Group', category: 'View', enabled: () => !this.editors.activeGroup.locked, run: () => this.editors.setGroupLock(this.editors.activeGroup, true) });
-		register({ id: 'workbench.action.unlockEditorGroup', title: 'Unlock Editor Group', category: 'View', enabled: () => this.editors.activeGroup.locked, run: () => this.editors.setGroupLock(this.editors.activeGroup, false) });
-		register({ id: 'workbench.action.reopenClosedEditor', title: 'Reopen Closed Editor', category: 'View', keybinding: 'Ctrl+Shift+T', run: () => this.editors.reopenClosed() });
-		register({ id: 'workbench.openSettings', title: 'Settings', category: 'Preferences', keybinding: 'Ctrl+,', run: () => openSettingsPanel() });
-		register({ id: 'workbench.exit', title: 'Exit', category: 'File', keybinding: 'Alt+F4', run: () => getCurrentWindow().close() });
-
-		register({ id: 'editor.undo', title: 'Undo', category: 'Edit', keybinding: 'Ctrl+Z', enabled: hasEditor, run: () => this.editors.runEditorCommand('undo') });
-		register({ id: 'editor.redo', title: 'Redo', category: 'Edit', keybinding: 'Ctrl+Y', enabled: hasEditor, run: () => this.editors.runEditorCommand('redo') });
-		register({ id: 'editor.cut', title: 'Cut', category: 'Edit', keybinding: 'Ctrl+X', enabled: hasEditor, run: () => void document.execCommand('cut') });
-		register({ id: 'editor.copy', title: 'Copy', category: 'Edit', keybinding: 'Ctrl+C', enabled: hasEditor, run: () => void document.execCommand('copy') });
-		// A browser forbids execCommand('paste'): the remote workbench reads the clipboard
-		// through the plugin (its shim falls back to a paste box) and inserts directly.
-		register({ id: 'editor.paste', title: 'Paste', category: 'Edit', keybinding: 'Ctrl+V', enabled: hasEditor, run: () => (hook('session').remote() ? void this.editors.pasteFromClipboard() : void document.execCommand('paste')) });
-		register({ id: 'editor.find', title: 'Find', category: 'Edit', keybinding: 'Ctrl+F', enabled: hasEditor, run: () => this.editors.runEditorCommand('find') });
-		register({ id: 'editor.replace', title: 'Replace', category: 'Edit', keybinding: 'Ctrl+H', enabled: hasEditor, run: () => this.editors.runEditorCommand('replace') });
-		const hasCommentSurface = () => this.editors.activeView !== null || this.editors.activeInput !== null;
-		register({ id: 'editor.toggleLineComment', title: 'Toggle Line Comment', category: 'Edit', keybinding: 'Ctrl+/', enabled: hasCommentSurface, run: () => this.editors.runEditorCommand('toggleLineComment') });
-		register({ id: 'editor.toggleBlockComment', title: 'Toggle Block Comment', category: 'Edit', keybinding: 'Shift+Alt+A', enabled: hasCommentSurface, run: () => this.editors.runEditorCommand('toggleBlockComment') });
-		register({ id: 'editor.toggleWordWrap', title: 'Toggle Word Wrap', category: 'View', keybinding: 'Alt+Z', run: () => updateSetting('wordWrap', !settings.wordWrap) });
-		register({ id: 'editor.selectAll', title: 'Select All', category: 'Selection', keybinding: 'Ctrl+A', enabled: hasEditor, run: () => this.editors.runEditorCommand('selectAll') });
-
-		register({ id: 'workbench.quickOpen', title: 'Go to File...', category: 'Go', keybinding: 'Ctrl+P', enabled: hasRepo, run: () => this.quickOpen('') });
-		register({ id: 'workbench.commandPalette', title: 'Command Palette...', category: 'View', keybinding: 'Ctrl+Shift+P', run: () => this.quickOpen('>') });
-		register({ id: 'workbench.goBack', title: 'Go Back', category: 'Go', keybinding: 'Alt+Left', enabled: () => this.editors.canGoBack(), run: () => this.editors.goBack() });
-		register({ id: 'workbench.goForward', title: 'Go Forward', category: 'Go', keybinding: 'Alt+Right', enabled: () => this.editors.canGoForward(), run: () => this.editors.goForward() });
-		register({ id: 'editor.gotoDefinition', title: 'Go to Definition', category: 'Go', keybinding: 'F12', enabled: () => this.editors.activeView !== null, run: () => void this.editors.goToDefinition() });
-		register({ id: 'workbench.nextEditor', title: 'Next Editor', category: 'Go', keybinding: 'Ctrl+PageDown', run: () => this.editors.activateNext(1) });
-		register({ id: 'workbench.previousEditor', title: 'Previous Editor', category: 'Go', keybinding: 'Ctrl+PageUp', run: () => this.editors.activateNext(-1) });
-
-		register({ id: 'workbench.showExplorer', title: 'Explorer', category: 'View', keybinding: 'Ctrl+Shift+E', run: () => this.showView('explorer') });
-		register({ id: 'workbench.showSearch', title: 'Search', category: 'View', keybinding: 'Ctrl+Shift+F', run: () => { this.showView('search'); this.seedSearchQuery(); this.search.focus(); } });
-		register({ id: 'workbench.replaceInFiles', title: 'Replace in Files', category: 'Search', keybinding: 'Ctrl+Shift+H', run: () => { this.showView('search'); this.search.focusReplace(); } });
-		register({ id: 'workbench.showScm', title: 'Source Control', category: 'View', keybinding: 'Ctrl+Shift+G', run: () => this.showView('scm') });
-		register({ id: 'workbench.showExtensions', title: 'Extensions', category: 'View', keybinding: 'Ctrl+Shift+X', run: () => this.showView('extensions') });
-		register({ id: 'workbench.showAnalysis', title: 'Analysis', category: 'View', keybinding: 'Ctrl+Shift+A', run: () => this.showView('analysis') });
-		register({ id: 'analysis.showModules', title: 'Module Analysis', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('modules') });
-		register({ id: 'analysis.showMetrics', title: 'Complexity & Hotspots', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('metrics') });
-		register({ id: 'analysis.showDeadCode', title: 'Dead Code', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('deadcode') });
-		register({ id: 'analysis.showSecurity', title: 'Security Scan', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('security') });
-		register({ id: 'analysis.showImports', title: 'Import Graph', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('imports') });
-		register({ id: 'analysis.showMcp', title: 'MCP Server', category: 'Analysis', run: () => void this.editors.openAnalysisPage('mcp') });
-		register({ id: 'git.openFileHistory', title: 'Git: Open File History', category: 'Git', enabled: () => hasRepo() && this.editors.activeInput?.kind === 'file', run: () => this.editors.openFileHistory() });
-		register({ id: 'git.toggleBlame', title: 'Git: Toggle Blame', category: 'Git', keybinding: 'Ctrl+K Ctrl+B', enabled: () => hasRepo() && this.editors.activeView !== null && this.editors.activeInput?.kind === 'file', run: () => this.editors.toggleBlame() });
-		register({ id: 'markdown.showPreview', title: 'Markdown: Open Preview', category: 'View', keybinding: 'Ctrl+Shift+V', enabled: () => this.editors.activeInput?.kind === 'file' && /\.(md|markdown)$/i.test(this.editors.activeInput.path), run: () => this.editors.openMarkdownPreview() });
-		register({ id: 'markdown.showPreviewToSide', title: 'Markdown: Open Preview to the Side', category: 'View', keybinding: 'Ctrl+K V', enabled: () => this.editors.activeInput?.kind === 'file' && /\.(md|markdown)$/i.test(this.editors.activeInput.path), run: () => this.editors.openMarkdownPreviewToSide() });
-		// The `.py` tab-strip run button's palette twin (VS Code's Run Python File): the
-		// terminal opens with the file's interpreter line.
-		register({ id: 'python.runFile', title: 'Python: Run File in Terminal', category: 'Python', enabled: () => this.editors.activeInput?.kind === 'file' && /\.py$/i.test(this.editors.activeInput.path), run: () => { const input = this.editors.activeInput; if (input?.kind === 'file') void this.runPythonFile(input.path); } });
-		register({ id: 'workbench.openHexViewer', title: 'File: Open in Hex Viewer', category: 'File', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.editors.openHex(this.editors.activeInput!.kind === 'file' ? this.editors.activeInput.path : '') });
-		register({ id: 'workbench.compareFolders', title: 'Compare Two Folders...', category: 'File', enabled: hasRepo, run: () => void this.compareFolders() });
-		register({ id: 'workbench.gotoSymbolInFile', title: 'Go to Symbol in File...', category: 'Go', keybinding: 'Ctrl+Shift+O', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.editors.gotoSymbolInFile() });
-		register({ id: 'workbench.gotoSymbolInWorkspace', title: 'Go to Symbol in Workspace...', category: 'Go', keybinding: 'Ctrl+T', enabled: hasRepo, run: () => void this.gotoWorkspaceSymbol() });
-		register({ id: 'workbench.gotoLine', title: 'Go to Line/Column...', category: 'Go', keybinding: 'Ctrl+G', enabled: () => this.editors.activeView !== null, run: () => this.quickOpen(':') });
-		register({ id: 'editor.findReferences', title: 'Find References', category: 'Go', keybinding: 'Shift+F12', enabled: () => this.editors.activeView !== null, run: () => void this.editors.findReferences() });
-		register({ id: 'symbols.rebuild', title: 'Rebuild Symbol Index', category: 'Go', enabled: hasRepo, run: () => void this.rebuildSymbolIndex() });
-		register({ id: 'editor.callTree', title: 'Show Call Tree', category: 'Go', enabled: () => this.editors.activeView !== null, run: () => void this.editors.openCallTreeAtCursor() });
-		register({ id: 'editor.formatDocument', title: 'Format Document', category: 'Editor', keybinding: 'Ctrl+Shift+I', enabled: () => this.editors.activeView !== null, run: () => void this.formatActiveDocument() });
-		register({ id: 'editor.toggleBookmark', title: 'Toggle Bookmark', category: 'Edit', keybinding: 'Ctrl+Alt+B', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.toggleBookmark() });
-		register({ id: 'editor.listBookmarks', title: 'List Bookmarks', category: 'Edit', keybinding: 'Ctrl+Alt+K', run: () => void this.listBookmarks() });
-		register({ id: 'extensions.installFromVsix', title: 'Install Extension from VSIX...', category: 'Extensions', run: () => { this.showView('extensions'); void this.extensions.installFromVsixCommand(); } });
-		register({ id: 'extensions.checkForUpdates', title: 'Check for Extension Updates', category: 'Extensions', run: () => { this.showView('extensions'); void this.extensions.checkForUpdates(); } });
-		register({ id: 'git.initRepository', title: 'Initialize Repository', category: 'Git', enabled: () => this.repoPath !== null && !this.isRepo, run: () => void this.initializeRepository() });
-		register({ id: 'workbench.toggleSidebar', title: 'Toggle Primary Side Bar', category: 'View', keybinding: 'Ctrl+B', run: () => this.toggleSidebar() });
-		register({ id: 'workbench.togglePanel', title: 'Toggle Panel', category: 'View', keybinding: 'Ctrl+J', run: () => this.panel.toggle() });
-		register({ id: 'workbench.showOutput', title: 'Output', category: 'View', run: () => this.panel.show('output') });
-		register({ id: 'workbench.showContext', title: 'Context', category: 'View', run: () => this.panel.show('context') });
-		register({ id: 'workbench.showSymbolDatabase', title: 'Symbol Database', category: 'View', enabled: hasRepo, run: () => void this.editors.openSymbolDatabase() });
-		register({ id: 'workbench.focusNextPart', title: 'Focus Next Part', category: 'View', keybinding: 'F6', run: () => this.focusNextPart() });
-		register({ id: 'terminal.toggle', title: 'Toggle Terminal', category: 'Terminal', keybinding: 'Ctrl+`', run: () => this.panel.toggle('terminal') });
-		register({ id: 'terminal.new', title: 'New Terminal', category: 'Terminal', keybinding: 'Ctrl+Shift+`', run: async () => { this.panel.show('terminal'); await this.panel.terminal.newTerminal(); } });
-		register({ id: 'terminal.kill', title: 'Kill the Active Terminal Instance', category: 'Terminal', enabled: () => this.panel.terminal.sessionCount() > 0, run: () => this.panel.terminal.killActive() });
-		register({ id: 'help.welcome', title: 'Welcome', category: 'Help', run: () => this.editors.openHelp('welcome') });
-		register({ id: 'help.shortcuts', title: 'Keyboard Shortcuts', category: 'Help', keybinding: 'Ctrl+K Ctrl+S', run: () => this.editors.openHelp('shortcuts') });
-		register({ id: 'help.selfTest', title: 'Run Module Self-Tests', category: 'Help', run: () => this.editors.openSelfTest() });
-		register({ id: 'ai.providers', title: 'Manage Model Providers', category: 'AI', run: () => this.editors.openProviders() });
-		register({ id: 'help.repository', title: 'Report Issue / Project Page', category: 'Help', run: () => void openUrl('https://github.com/neophack/git-graph-studio') });
-		register({ id: 'help.about', title: 'About', category: 'Help', run: () => notify('info', `Git Graph Studio ${__APP_VERSION__} - a standalone workbench whose views arrive as plugins.`) });
-		register({ id: 'help.openDevTools', title: 'Open Developer Tools', category: 'Help', run: () => void openDevtools().catch((e) => console.error('open_devtools failed:', e)) });
-		// Dev builds only (vite strips the branch from the bundle; vitest is excluded so the
-		// command sweep never navigates): the dev harness page — the full functional pass
-		// (?full=1) runs every module's self-tests plus the two marketplace extensions end
-		// to end against THIS window's real backend, the only mode that catches
-		// packaged-only regressions on any platform.
-		if (import.meta.env.DEV && !import.meta.env.VITEST) {
-			register({ id: 'help.devHarness', title: 'Open Dev Harness (Full Test)', category: 'Help', run: () => { window.location.href = '/dev/dev-harness.html?full=1&run=' + Date.now(); } });
-		}
-
-		registerGitCommands(commands, {
-			repoPath: () => this.repoPath,
-			repoChanged: () => this.scheduleRefresh(0),
-			openFolder: (path) => this.openFolder(path),
-			showOutput: () => this.panel.show('output'),
-			commit: (options) => this.scm.commit(options)
-		});
-	}
-
-	/** The title bar menus, laid out as VS Code's (File, Edit, Selection, View, Go, Terminal, Help). */
-	menus() {
-		const item = (id: string) => commands.menuItem(id);
-		return [
-			{ label: t('menu.file'), entries: (): MenuEntry[] => [
-				// A browser session spawns a PC-side window it cannot see — the remote's own
-				// New Window lives in its window switcher, so the desktop entry hides here.
-				...(hook('session').remote() ? [] : [item('workbench.newWindow')]), item('workbench.newFile'), 'separator',
-				item('workbench.openFolder'), item('workbench.openFileStandalone'), item('workbench.openWorkspace'),
-				{ label: 'Open Recent', submenu: [
-					...state.recentFolders().map((folder) => ({ label: basename(folder), keybinding: folder, run: () => void this.openRecent(folder) })),
-					...(state.recentFolders().length > 0 ? ['separator' as const] : []),
-					{ label: 'Clear Recently Opened', disabled: state.recentFolders().length === 0, run: () => { state.save('recentFolders', []); } }
-				] },
-				'separator', item('workbench.save'), item('workbench.saveAll'), 'separator',
-				item('workbench.closeEditor'), item('workbench.closeFolder'), 'separator',
-				item('workbench.openSettings'), 'separator', item('workbench.exit')
-			] },
-			{ label: t('menu.edit'), entries: (): MenuEntry[] => [item('editor.undo'), item('editor.redo'), 'separator', item('editor.cut'), item('editor.copy'), item('editor.paste'), 'separator', item('editor.find'), item('editor.replace'), item('workbench.showSearch'), item('workbench.replaceInFiles'), 'separator', item('editor.toggleLineComment'), item('editor.toggleBlockComment'), 'separator', item('editor.toggleBookmark'), item('editor.listBookmarks')] },
-			{ label: t('menu.selection'), entries: (): MenuEntry[] => [item('editor.selectAll')] },
-				{ label: t('menu.view'), entries: (): MenuEntry[] => [
-			item('workbench.commandPalette'), 'separator',
-			item('workbench.showExplorer'), item('workbench.showSearch'), item('workbench.showScm'), item('workbench.showOutput'), item('workbench.showContext'), item('workbench.showSymbolDatabase'), 'separator',
-			{ label: t('menu.analysis'), submenu: [
-				item('analysis.showModules'), item('analysis.showMetrics'), item('analysis.showDeadCode'), item('analysis.showSecurity'), item('analysis.showImports'), item('analysis.showMcp')
-			] },
-			'separator', item('editor.toggleWordWrap'), 'separator', item('markdown.showPreview'), item('markdown.showPreviewToSide'), item('git.openFileHistory'), item('git.toggleBlame'), 'separator',
-				// The phone shell's CSS keeps one editor group on screen — the split/move
-				// layout commands are noise there (they stay on the desktop and tablet).
-				...(hook('navigation').phoneShell() ? [] : [{ label: 'Editor Layout', submenu: [
-					item('workbench.splitEditor'), item('workbench.action.splitEditorOrthogonal'), 'separator',
-					item('workbench.action.splitEditorLeft'), item('workbench.action.splitEditorRight'), item('workbench.action.splitEditorUp'), item('workbench.action.splitEditorDown'), 'separator',
-					item('workbench.action.moveEditorToNextGroup'), item('workbench.action.moveEditorToPreviousGroup'),
-					{ label: 'Move Editor into Group', submenu: [
-						item('workbench.action.moveEditorToLeftGroup'), item('workbench.action.moveEditorToRightGroup'), item('workbench.action.moveEditorToAboveGroup'), item('workbench.action.moveEditorToBelowGroup')
-					] }, 'separator',
-					item('workbench.focusFirstEditorGroup'), item('workbench.focusSecondEditorGroup'), item('workbench.focusThirdEditorGroup'), item('workbench.action.focusLastEditorGroup'), 'separator',
-					item('workbench.action.evenEditorWidths'), item('workbench.action.toggleMaximizeEditorGroup'), item('workbench.action.minimizeOtherEditorGroups'), item('workbench.action.joinAllGroups'), item('workbench.action.resetEditorGroups'), 'separator',
-					item('workbench.action.closeEditorsInGroup'), item('workbench.action.closeEditorsInOtherGroups'), 'separator',
-					item('workbench.action.lockEditorGroup'), item('workbench.action.unlockEditorGroup'), item('workbench.action.reopenClosedEditor')
-				] } as MenuEntry]),
-				{ label: 'Appearance', submenu: [
-					{ label: 'Primary Side Bar', checked: state.layout.sidebarVisible, keybinding: 'Ctrl+B', run: () => this.toggleSidebar() },
-					{ label: 'Panel', checked: this.panel.isVisible(), keybinding: 'Ctrl+J', run: () => this.panel.toggle() }
-				] },
-				'separator', item('workbench.closeEditor'), item('workbench.closeAllEditors')
-			] },
-			{ label: t('menu.go'), entries: (): MenuEntry[] => [item('workbench.quickOpen'), 'separator', item('workbench.gotoSymbolInFile'), item('workbench.gotoSymbolInWorkspace'), item('editor.gotoDefinition'), item('editor.findReferences'), item('editor.callTree'), item('workbench.gotoLine'), item('symbols.rebuild'), 'separator', item('workbench.goBack'), item('workbench.goForward'), 'separator', item('workbench.nextEditor'), item('workbench.previousEditor')] },
-			{ label: t('menu.terminal'), entries: (): MenuEntry[] => [item('terminal.new'), item('terminal.toggle'), 'separator', item('terminal.kill')] },
-			{ label: t('menu.help'), entries: (): MenuEntry[] => [
-				item('help.welcome'),
-				// A phone has no keyboard to bind — the shortcuts page is a desktop read.
-				...(hook('navigation').phoneShell() ? [] : [item('help.shortcuts')]),
-				item('help.selfTest'), ...((import.meta.env.DEV && !import.meta.env.VITEST) ? [item('help.devHarness')] : []), 'separator', item('help.repository'), 'separator',
-				// Opens the PC's own (hidden relay) devtools — invisible to a browser user.
-				...(hook('session').remote() ? [] : [item('help.openDevTools')]),
-				'separator', item('help.about')
-			] }
-		];
-	}
-
-	/** VS Code's quick open: files by default, commands with a leading ">". */
-	/** VS Code's quick open: files by default, commands with a leading ">". The picker opens at
-	 *  once — the file list is fetched from the backend in the background and the results fill
-	 *  in as it lands, so a cold cache never delays the input. */
 	async quickOpen(initial: string): Promise<void> {
 		const chosen = await quickInput({
 			value: initial,
@@ -533,12 +323,9 @@ export class Workbench {
 		}
 	}
 
-	/** The Quick Open file index: kept across picker opens (the pre-lowered entries are built
-	 *  once per file list, not once per open), and re-listed in the background on every open so
-	 *  changes made outside the app show up. */
-	private filePicks: FilePickSource | null = null;
+	filePicks: FilePickSource | null = null;
 
-	private fileSource(): FilePickSource {
+	fileSource(): FilePickSource {
 		if (!this.filePicks) {
 			// A multi-root workspace concatenates its roots' lists as absolute paths, so the
 			// picker's rows open directly; a plain folder keeps the repo-relative spelling and
@@ -557,16 +344,11 @@ export class Workbench {
 		return this.filePicks;
 	}
 
-	/* ---------- Symbol sources (Quick Open's @ and # modes, M4 4.9) ---------- */
+	fileSymbolsCache: { path: string; at: number; symbols: { name: string; kind: string; line: number }[] } | null = null;
 
-	/** The active file's outline, cached briefly so the picker's per-keystroke queries do not
-	 *  re-open a backend document each time. */
-	private fileSymbolsCache: { path: string; at: number; symbols: { name: string; kind: string; line: number }[] } | null = null;
+	workspaceSymbolsCache: { at: number; symbols: { name: string; kind: string; path: string; line: number }[] } | null = null;
 
-	/** The whole-workspace list, cached like Go to Symbol in Workspace keeps its copy. */
-	private workspaceSymbolsCache: { at: number; symbols: { name: string; kind: string; path: string; line: number }[] } | null = null;
-
-	private symbolSources() {
+	symbolSources() {
 		return {
 			fileSymbols: async () => {
 				const input = this.editors.activeInput;
@@ -603,9 +385,7 @@ export class Workbench {
 		};
 	}
 
-	/** Rebuild the symbol index on demand (the status item's click): a channel-fed progress
-	 *  into the status bar, a busy cursor while it runs (M7 7.8). */
-	private async rebuildSymbolIndex(): Promise<void> {
+	async rebuildSymbolIndex(): Promise<void> {
 		busy(true);
 		try {
 			const onEvent = new Channel<SymbolIndexEvent>();
@@ -626,13 +406,9 @@ export class Workbench {
 		}
 	}
 
-	/* ---------- Layout ---------- */
+	scmChangeCount = 0;
 
-	/** VS Code-style pending-changes badge on the Source Control activity bar item. */
-	/** The pending SCM changes the badge shows (also the remote content summary's count). */
-	private scmChangeCount = 0;
-
-	private setScmBadge(count: number): void {
+	setScmBadge(count: number): void {
 		this.scmChangeCount = count;
 		const item = this.activityItems['scm'];
 		if (!item) return;
@@ -640,138 +416,19 @@ export class Workbench {
 		if (count > 0) item.appendChild(el('span', 'badge', [count > 999 ? '999+' : String(count)]));
 	}
 
-	private buildActivityBar(): void {
-		const add = (id: string, content: HTMLElement, title: string, onClick: () => void) => {
-			const item = el('div', 'activity-item', [content]);
-			// The view id, for shells that mirror the bar (the remote phone's bottom tabs).
-			item.dataset.view = id;
-			item.title = title;
-			item.setAttribute('role', 'button');
-			// Focusable for F6's cycle, with the workbench's delayed tooltip (M7).
-			item.tabIndex = 0;
-			tooltip(item, () => title);
-			item.addEventListener('click', onClick);
-			this.activityItems[id] = item;
-			this.activityBar.appendChild(item);
-			return item;
-		};
-		add('explorer', icon('files'), 'Explorer (Ctrl+Shift+E)', () => this.toggleView('explorer'));
-		add('search', icon('search'), 'Search (Ctrl+Shift+F)', () => this.toggleView('search'));
-		add('scm', icon('source-control'), 'Source Control (Ctrl+Shift+G)', () => this.toggleView('scm'));
-		add('analysis', icon('graph'), 'Analysis (Ctrl+Shift+A)', () => this.toggleView('analysis'));
-		add('extensions', icon('extensions'), 'Extensions (Ctrl+Shift+X)', () => this.toggleView('extensions'));
-		this.activitySpacer = el('div', 'activity-spacer');
-		this.activityBar.appendChild(this.activitySpacer);
-		add('terminal', icon('terminal'), 'Terminal (Ctrl+`)', () => this.panel.toggle('terminal'));
-		add('open', icon('folder-opened'), 'Open Folder... (Ctrl+O)', () => void this.pickFolder());
-	}
+	declare buildActivityBar: () => void ;
 
-	private applyLayout(): void {
-		this.sidebar.style.width = `${state.layout.sidebarWidth}px`;
-		this.panelElement.style.height = `${state.layout.panelHeight}px`;
-		// showView reveals the side bar - right for a user gesture, but the boot applies the
-		// saved layout: a bar hidden with Ctrl+B stays hidden across the restart.
-		const sidebarVisible = state.layout.sidebarVisible;
-		this.showView(this.activeView, false);
-		if (!sidebarVisible) {
-			state.layout.sidebarVisible = false;
-			this.sidebar.hidden = true;
-			this.sidebarSash.hidden = true;
-			state.saveLayout();
-		}
-		if (!state.layout.sidebarVisible) this.activityItems[this.activeView]?.classList.remove('active');
-		for (const [id, item] of Object.entries(this.activityItems)) {
-			if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis' || id === 'extensions' || this.isExtensionView(id)) item.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
-		}
-		this.installSash(this.sidebarSash, 'horizontal', (delta, start) => {
-			state.layout.sidebarWidth = Math.max(170, Math.min(window.innerWidth - 400, start + delta));
-			this.sidebar.style.width = `${state.layout.sidebarWidth}px`;
-		}, () => state.layout.sidebarWidth);
-		this.installSash(this.panelSash, 'vertical', (delta, start) => {
-			state.layout.panelHeight = Math.max(100, Math.min(window.innerHeight - 200, start - delta));
-			this.panelElement.style.height = `${state.layout.panelHeight}px`;
-		}, () => state.layout.panelHeight);
-	}
+	declare applyLayout: () => void ;
 
-	private installSash(sash: HTMLElement, axis: 'horizontal' | 'vertical', onMove: (delta: number, start: number) => void, startValue: () => number): void {
-		sash.addEventListener('mousedown', (event) => {
-			event.preventDefault();
-			const origin = axis === 'horizontal' ? event.clientX : event.clientY;
-			const start = startValue();
-			sash.classList.add('active');
-			document.body.classList.add('resizing');
-			document.body.style.cursor = axis === 'horizontal' ? 'ew-resize' : 'ns-resize';
-			// Each applied delta forces a layout of the whole workbench (the graph iframe and
-			// the editors re-measure), so the moves are coalesced to one per animation frame -
-			// a high-resolution mouse otherwise fires far more `mousemove`s than frames.
-			let latest = origin;
-			let pending = 0;
-			const raf = window.requestAnimationFrame?.bind(window) ?? ((callback: () => void) => window.setTimeout(callback, 16));
-			const move = (e: MouseEvent) => {
-				latest = axis === 'horizontal' ? e.clientX : e.clientY;
-				if (pending) return;
-				pending = raf(() => {
-					pending = 0;
-					onMove(latest - origin, start);
-				});
-			};
-			const up = () => {
-				if (pending) { window.cancelAnimationFrame?.(pending); pending = 0; }
-				onMove(latest - origin, start);
-				document.removeEventListener('mousemove', move);
-				document.removeEventListener('mouseup', up);
-				sash.classList.remove('active');
-				document.body.classList.remove('resizing');
-				document.body.style.cursor = '';
-				state.saveLayout();
-			};
-			document.addEventListener('mousemove', move);
-			document.addEventListener('mouseup', up);
-		});
-	}
+	declare installSash: (sash: HTMLElement, axis: 'horizontal' | 'vertical', onMove: (delta: number, start: number) => void, startValue: () => number) => void ;
 
-	/** A built-in view id, or an extension container's key (`ext-container:{extId}.{id}`). */
-	private isExtensionView(view: string): boolean {
-		return view.startsWith('ext-container:');
-	}
+	declare isExtensionView: (view: string) => boolean ;
 
-	showView(view: ViewId | string, focus = true): void {
-		// An extension container that no longer exists (uninstalled) falls back to Explorer.
-		if (this.isExtensionView(view) && !this.extContainers.has(view)) view = 'explorer';
-		this.activeView = view;
-		state.layout.activeView = view;
-		state.layout.sidebarVisible = true;
-		this.sidebar.hidden = false;
-		this.sidebarSash.hidden = false;
-		for (const [id, element] of Object.entries(this.views)) element.style.display = id === view ? 'flex' : 'none';
-		let visibleExtViews: string[] = [];
-		for (const [id, container] of this.extContainers) {
-			container.element.style.display = id === view ? 'flex' : 'none';
-			if (id === view) visibleExtViews = container.viewIds;
-		}
-		for (const [id, item] of Object.entries(this.activityItems)) if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis' || id === 'extensions' || this.isExtensionView(id)) item.classList.toggle('active', id === view);
-		// The views of the container just left stop being visible; the selected one's start.
-		for (const viewId of this.lastVisibleExtViews) this.extensionHost.noteViewVisible(viewId, false);
-		for (const viewId of visibleExtViews) this.extensionHost.noteViewVisible(viewId, true);
-		this.lastVisibleExtViews = visibleExtViews;
-		state.saveLayout();
-		if (view === 'scm') void this.scm.refresh();
-		if (view === 'extensions') void this.extensions.refresh();
-		if (view === 'analysis') void this.analysis.refresh();
-		if (focus) {
-			const element = this.isExtensionView(view) ? this.extContainers.get(view)?.element : this.views[view as ViewId];
-			element?.querySelector<HTMLElement>('[tabindex]')?.focus();
-		}
-	}
+	declare showView: (view: ViewId | string, focus?: boolean) => void;
 
-	/** The extension view ids the sidebar currently shows (visibility tracking across switches). */
-	private lastVisibleExtViews: string[] = [];
+	lastVisibleExtViews: string[] = [];
 
-	/** Zed's `query_suggestion` (SeedQuery::Always): the Search view opens with the active
-	 *  editor's single-line selection — else the word at its caret — as its query, so
-	 *  Ctrl+Shift+F is find-usages without the retyping. The view escapes the seed when the
-	 *  search is a regex; no editor (or no word under the caret) keeps the previous query. */
-	private seedSearchQuery(): void {
+	seedSearchQuery(): void {
 		const view = this.editors.seedableView;
 		if (!view) return;
 		const selection = view.state.selection.main;
@@ -783,7 +440,6 @@ export class Workbench {
 		if (word) this.search.seedQuery(view.state.sliceDoc(word.from, word.to));
 	}
 
-	/** Whether the primary side bar is showing (Remote Access's sync reads it after a toggle). */
 	get sidebarShown(): boolean {
 		return state.layout.sidebarVisible;
 	}
@@ -792,167 +448,15 @@ export class Workbench {
 		return this.activeView;
 	}
 
-	private toggleView(view: ViewId | string): void {
-		if (this.activeView === view && state.layout.sidebarVisible) this.toggleSidebar();
-		else this.showView(view);
-	}
+	declare toggleView: (view: ViewId | string) => void ;
 
-	toggleSidebar(): void {
-		state.layout.sidebarVisible = !state.layout.sidebarVisible;
-		this.sidebar.hidden = !state.layout.sidebarVisible;
-		this.sidebarSash.hidden = !state.layout.sidebarVisible;
-		for (const [id, item] of Object.entries(this.activityItems)) {
-			if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis' || id === 'extensions' || this.isExtensionView(id)) item.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
-		}
-		state.saveLayout();
-	}
+	declare toggleSidebar: () => void ;
 
-	/* ---------- Extension-contributed sidebar views (module 12) ---------- */
+	declare visibleExtensionViews: () => string ;
 
-	/** Rebuild the extension-contributed sidebar surface (`contributes.viewsContainers` +
-	 *  `views`): one activity-bar entry and stacked view sections per container, and views
-	 *  declared for a built-in container (explorer / scm) as sections at that view's tail.
-	 *  Idempotent — install and uninstall both end here. */
-	/** The declared views whose `when` holds right now, as one comparable string. */
-	private visibleExtensionViews(): string {
-		return extensionViewContributions()
-			.flatMap((contribution) => contribution.views.filter((view) => evaluateWhen(contribution.extId, view.when)).map((view) => `${contribution.extId}/${view.viewId}`))
-			.join('\n');
-	}
+	declare applyExtensionViews: () => void ;
 
-	private applyExtensionViews(): void {
-		this.extViewsShown = this.visibleExtensionViews();
-		for (const id of Object.keys(this.activityItems)) {
-			if (!this.isExtensionView(id) && !id.startsWith('ext-launcher:')) continue;
-			this.activityItems[id]!.remove();
-			delete this.activityItems[id];
-		}
-		for (const container of this.extContainers.values()) container.element.remove();
-		for (const section of this.extBuiltinSections) section.remove();
-		for (const dispose of this.extWebviewViewDisposers) dispose();
-		this.extContainers.clear();
-		this.extTreeViews.clear();
-		this.extBuiltinSections.length = 0;
-		this.extWebviewViewDisposers.length = 0;
-		// The stale-active-view guard runs AFTER the rebuild, and only when the key is
-		// really gone: resetting first — then rebuilding the same container key — left
-		// every sidebar section hidden with nothing re-shown (any install/uninstall/
-		// activation while the user was viewing an extension's sidebar blanked the bar).
-		if (this.isExtensionView(this.activeView) && !this.extContainers.has(this.activeView)) {
-			this.activeView = 'explorer';
-			this.showView('explorer');
-		} else if (this.isExtensionView(this.activeView)) {
-			// The container survived the rebuild: its section element is brand new, so
-			// re-apply the visibility the old one had.
-			this.showView(this.activeView);
-		}
-
-		// One sidebar section per declared view: a tree view renders through the generic
-		// tree host (its provider feeds it); a `type: "webview"` view mounts the extension
-		// host's iframe (its provider's resolveWebviewView fills it at first visibility).
-		const makeSection = (viewId: string, name: string, extId: string, type: 'tree' | 'webview', into: HTMLElement): void => {
-			const section = el('div', type === 'webview' ? 'ext-view-section ext-webview-view-section' : 'ext-view-section');
-			if (type === 'webview') {
-				// The AI provider switcher rides a bridged extension's section header
-				// (`cmd_providers` says whose — `bridgedExtIds` — so the app names no
-				// extension id here); every other extension's slot stays empty.
-				const chipSlot = el('span', 'provider-chip-slot');
-				section.appendChild(el('div', 'sidebar-title', [el('span', 'label', [name]), chipSlot]));
-				const pane = el('div', 'view-pane ext-webview-view-pane');
-				section.appendChild(pane);
-				this.extWebviewViewDisposers.push(this.extensionHost.mountWebviewView(viewId, extId, pane));
-				this.extWebviewViewDisposers.push(mountProviderSwitcher(extId, chipSlot));
-				// The AI provider bridge's pane gate: the set-key page over a keyless
-				// third-party provider's chat, the usage strip above a keyed one —
-				// mounted for every webview section, rendered only for the bridged
-				// extension's (the backend's `bridgedExtIds` decides).
-				this.extWebviewViewDisposers.push(mountProviderPaneGate(extId, pane));
-			} else {
-				const tree = new ExtensionTreeView(section, name, {
-					viewId,
-					fetchChildren: (handle) => this.extensionHost.treeChildren(viewId, handle),
-					onCommand: (command, args) => void this.extensionHost.executeCommand(command, args),
-					onSelect: (handles) => this.extensionHost.treeInteraction(viewId, 'treeView.select', [handles]),
-					onExpand: (handle, expanded) => this.extensionHost.treeInteraction(viewId, 'treeView.expand', [handle, expanded]),
-					onCheckbox: (handle, state) => this.extensionHost.treeInteraction(viewId, 'treeView.checkbox', [handle, state])
-				});
-				this.extTreeViews.set(viewId, tree);
-			}
-			into.appendChild(section);
-			if (into !== this.sidebar) this.extBuiltinSections.push(section);
-		};
-
-		for (const contribution of extensionViewContributions()) {
-			// A view's `when` hides it exactly as a menu entry's hides the item (VS Code's own
-			// rule — Code Spell Checker's "Regular Expressions" view is off unless its
-			// experimental setting is), and a container left with no visible view goes away
-			// entirely. Evaluated here, at build time: a clause keyed to settings or context
-			// keys re-evaluates on the next install/uninstall pass, not on every keystroke.
-			const visibleViews = contribution.views.filter((view) => evaluateWhen(contribution.extId, view.when));
-			for (const container of contribution.containers) {
-				const key = `ext-container:${contribution.extId}.${container.id}`;
-				const element = el('div', 'view ext-container-view');
-				element.style.display = 'none';
-				const viewIds: string[] = [];
-				const viewNames = new Map<string, string>();
-				for (const declared of visibleViews.filter((view) => view.container === container.id)) {
-					makeSection(declared.viewId, declared.name, contribution.extId, declared.type ?? 'tree', element);
-					viewIds.push(declared.viewId);
-					viewNames.set(declared.viewId, declared.name);
-				}
-				if (viewIds.length === 0) continue;
-				this.sidebar.appendChild(element);
-				this.extContainers.set(key, { element, viewIds });
-				// VS Code generates a focus command per views container (`<container-id>.focus`)
-				// — claude-code's chat calls its own to reveal its sidebar container from inside
-				// a panel. Re-registering on every rebuild keeps it pointing at the live one.
-				commands.register({ id: `${container.id}.focus`, title: tf('workbench.focusViewContainer', container.title), category: 'View', enabled: () => this.extContainers.has(key), run: () => this.showView(key) });
-				// VS Code also generates one per view (`<view-id>.focus`) — kimi-code's own
-				// menu commands call `kimi.webview.focus`, the view's, not the container's.
-				// Each is titled by its own view — one palette row per view, not N copies of the
-				// container's name; a view sharing the container's id keeps the container's.
-				for (const viewId of viewIds) {
-					if (viewId === container.id) continue;
-					commands.register({ id: `${viewId}.focus`, title: tf('workbench.focusViewContainer', viewNames.get(viewId) || container.title), category: 'View', enabled: () => this.extContainers.has(key), run: () => this.showView(key) });
-				}
-				const item = el('div', 'activity-item', [icon('list-tree')]);
-				// The view key, for shells that mirror the bar (the remote phone's bottom tabs).
-				item.dataset.view = key;
-				item.title = container.title;
-				item.setAttribute('role', 'button');
-				item.tabIndex = 0;
-				tooltip(item, () => container.title);
-				item.addEventListener('click', () => this.toggleView(key));
-				this.activityItems[key] = item;
-				this.activityBar.insertBefore(item, this.activitySpacer);
-				if (container.icon) {
-					void extFileDataUrl(contribution.extId, container.icon).then((url) => {
-						if (!url) return;
-						const image = el('img');
-						image.src = url;
-						image.alt = '';
-						item.replaceChildren(image);
-					});
-				}
-			}
-			// Views a manifest placed in a built-in container ride that sidebar view's tail —
-			// the Explorer / Source Control trees manage their own DOM, never the tail.
-			for (const declared of visibleViews) {
-				const host = declared.container === 'scm' ? this.views.scm : declared.container === 'explorer' ? this.views.explorer : null;
-				if (host) makeSection(declared.viewId, declared.name, contribution.extId, declared.type ?? 'tree', host);
-			}
-		}
-	}
-
-
-	/** A webview panel (module 12): what `vscode.window.createWebviewPanel` opens — a VSIX
-	 *  extension's own HTML in an editor tab, over the same mounting path the extension pages
-	 *  take. The extension host owns the panel record and the iframe; the workbench owns
-	 *  the tab, and closing it tells the extension (`onDidDispose`). */
-
-	/** Format Document: run the registered extension formatters over the active document
-	 *  (`vscode.languages.registerDocumentFormattingEditProvider`) and apply their edits. */
-	private async formatActiveDocument(): Promise<void> {
+	async formatActiveDocument(): Promise<void> {
 		const input = this.editors.activeInput;
 		if (input?.kind !== 'file') return;
 		const path = input.path;
@@ -963,18 +467,13 @@ export class Workbench {
 		if (!formatted) notify('info', t('editor.noFormatter'));
 	}
 
-	/** Run a Python file in the integrated terminal (the `.py` tab-strip run button and the
-	 *  `python.runFile` command): the terminal shows and the interpreter line runs in its
-	 *  active shell — `python3` where that is the spelling the platform ships (macOS, Linux),
-	 *  `python` on Windows. The path rides double-quoted; a `"` in a POSIX path is escaped,
-	 *  on Windows one cannot occur in a file name. */
-	private async runPythonFile(path: string): Promise<void> {
+	async runPythonFile(path: string): Promise<void> {
 		this.panel.show('terminal');
 		const python = /^win/i.test(navigator.platform ?? '') ? 'python' : 'python3';
 		await this.panel.terminal.run(`${python} "${path.replace(/"/g, '\\"')}"`);
 	}
 
-	private openWebviewPanel(panelId: number, title: string, extId: string, placement?: EditorPlacement, focus?: boolean): void {
+	openWebviewPanel(panelId: number, title: string, extId: string, placement?: EditorPlacement, focus?: boolean): void {
 		// The tab opens at once — the open must not wait on the package icon's read: the
 		// extension may act on the group the panel lands in the moment the create returns
 		// (claude-code locks the column its chat just opened in), and a delayed open would
@@ -997,21 +496,14 @@ export class Workbench {
 		}
 	}
 
-	/** The Extensions view's detail page (module 12): a package's facts and README in an
-	 *  editor tab — one per extension id, so a second open focuses the tab already showing
-	 *  it (VS Code's extension editor behavior). */
-	private openExtensionDetail(ext: ExtInfo): void {
+	openExtensionDetail(ext: ExtInfo): void {
 		this.editors.openExtDetail(
 			{ kind: 'extdetail', id: `extdetail:${ext.id}`, title: extTitle(ext), extId: ext.id },
 			(pane) => this.extensions.mountDetail(ext, pane)
 		);
 	}
 
-
-	/* ---------- Wiring ---------- */
-
-	/** Beyond Compare's headline flow: pick two folders, compare them in an editor tab. */
-	private async compareFolders(): Promise<void> {
+	async compareFolders(): Promise<void> {
 		const left = await openDialog({ directory: true, multiple: false, title: 'Choose the left folder' });
 		if (!left) return;
 		const right = await openDialog({ directory: true, multiple: false, title: 'Choose the right folder' });
@@ -1026,8 +518,7 @@ export class Workbench {
 		});
 	}
 
-	/** Go to Symbol in Workspace (Ctrl+T): the whole symbol index as a pick list. */
-	private async gotoWorkspaceSymbol(): Promise<void> {
+	async gotoWorkspaceSymbol(): Promise<void> {
 		if (!this.repoPath) return;
 		let symbols: { kind: string; name: string; path: string; line: number }[];
 		try {
@@ -1059,8 +550,7 @@ export class Workbench {
 		void this.editors.openFile(/^([a-zA-Z]:[\\/]|\\|\/)/.test(picked) || !this.repoPath ? picked : joinRepo(this.repoPath, picked), { line: Number(line) + 1 });
 	}
 
-	/** Toggle the bookmark on the active editor's cursor line. */
-	private toggleBookmark(): void {
+	toggleBookmark(): void {
 		const input = this.editors.activeInput;
 		if (input?.kind !== 'file') return;
 		const view = this.editors.activeView;
@@ -1071,7 +561,7 @@ export class Workbench {
 		view.dispatch({ selection: { anchor: view.state.selection.main.head } });
 	}
 
-	private async listBookmarks(): Promise<void> {
+	async listBookmarks(): Promise<void> {
 		const bookmarks = listBookmarks();
 		if (bookmarks.length === 0) {
 			notify('info', 'No bookmarks yet. Right-click a line (or Ctrl+Alt+B) to add one.');
@@ -1095,205 +585,17 @@ export class Workbench {
 		void this.editors.openFile(path!, { line: Number(line) });
 	}
 
-	private wire(): void {
-		this.titleBar.onCommandCenter = () => void this.quickOpen('');
-		this.titleBar.onBack = () => this.editors.goBack();
-		this.titleBar.onForward = () => this.editors.goForward();
+	declare wire: () => void ;
 
-		// The Search view needs the open repo; its matches open in the editor group.
-		this.search.setEnabled(this.repoPath !== null);
-		this.search.onOpenMatch = (relative, line, column) => {
-			if (this.repoPath) void this.editors.openFile(joinRepo(this.repoPath, relative), { line, column });
-		};
-		this.editors.onMergeResolved = () => this.scheduleRefresh(0);
-		this.editors.onExternalFileChange = () => this.scheduleRefresh(0);
-		// A `.py` file's tab-strip run button: the terminal opens with the file's run line
-		// (the editor area reaches no panel).
-		this.editors.onRunInTerminal = (path) => void this.runPythonFile(path);
+	declare keepRunningHidden: () => Promise<boolean> ;
 
-		this.explorer.onFileOpened = (path) => void this.editors.openFile(path);
-		this.explorer.onOpenInDirection = (path, direction) => this.editors.openInDirection(path, direction);
-		this.explorer.onOpenHex = (path) => void this.editors.openHex(path);
-		this.explorer.onOpenFolder = () => void this.pickFolder();
-		this.explorer.onPathRenamed = (from, to) => this.editors.pathRenamed(from, to);
-		this.explorer.onPathDeleted = (path) => this.editors.pathDeleted(path);
-		this.explorer.onOpenInTerminal = (folder) => void this.panel.runInTerminal(`cd ${quoteShellPath(folder)}`);
-		// "Module Analysis" over the picked folder(s): a scoped Module Analysis tab,
-		// one per folder set (the blank-area pick on the root is the workspace page).
-		this.explorer.onModuleAnalysis = (folders) => void this.editors.openAnalysisPage('modules', folders);
-		// Two selected files (or folders) compare in an editor tab: files as a text diff of
-		// their on-disk contents, folders in the Folder Compare view.
-		this.explorer.onCompare = (left, right, isDir) => {
-			if (isDir) {
-				this.editors.openFolderCompare({ kind: 'folders', id: `${left}::${right}`, left, right });
-				return;
-			}
-			void this.editors.openDiff({
-				kind: 'diff',
-				id: `paths:${left}::${right}`,
-				title: `${basename(left)} ↔ ${basename(right)}`,
-				left: { revision: '*', path: left, label: left, exists: true, local: true },
-				right: { revision: '*', path: right, label: right, exists: true, local: true }
-			});
-		};
+	contextTimer: number | null = null;
 
-		this.scm.onStatus = (status) => this.explorer.setStatus(status);
-		this.extensions.onChanged = () => this.scheduleRefresh(0);
-		this.scm.onOpenFile = (path) => void this.editors.openFile(path);
-		this.scm.onOpenDiff = (diff) => void this.editors.openDiff({ kind: 'diff', ...diff });
-		this.scm.onCount = (count) => this.setScmBadge(count);
-		this.scm.onConflicts = (count) => this.statusBar.setConflicts(count);
-		this.scm.onChanged = () => {
-			void this.explorer.refresh();
-		};
-		// The Analysis sidebar's tool rows open their result pages in the editor area.
-		this.analysis.onOpenTool = (tool: AnalysisToolId) => void this.editors.openAnalysisPage(tool);
+	readonly onThemeChangedBound = () => this.extensionHost.noteThemeChanged();
 
-		// The refresh's own repo_head feeds the bar (one subprocess serves both views); a failed
-		// fetch falls back to the bar fetching the head itself.
-		this.scm.onHead = (head) => {
-			if (head) this.statusBar.applyHead(head);
-			else void this.statusBar.refreshHead();
-		};
+	contextGeneration = 0;
 
-		this.editors.onActiveChange = (editor) => {
-			this.scheduleSnapshot();
-			this.statusBar.setEditor(editor);
-			this.followContextSymbol(editor);
-			if (editor?.kind === 'file' && editor.path && state.layout.sidebarVisible && this.activeView === 'explorer') {
-				void this.explorer.reveal(editor.path);
-			}
-			// The extension frames learn the active editor, and an editor of a declared
-			// language wakes the extensions listening for it.
-			if (editor?.kind === 'file' && editor.path) this.extensionHost.noteLanguageOpened(editor.path);
-			this.extensionHost.noteActiveEditor(editor);
-		};
-		this.editors.onNavigationChange = () => this.titleBar.setNavigation(this.editors.canGoBack(), this.editors.canGoForward());
-		// The session snapshot (tabs, active tab, expanded folders) follows every change, coalesced.
-		this.editors.onTabsChange = () => this.scheduleSnapshot();
-		this.explorer.onExpandedChange = () => this.scheduleSnapshot();
-		this.editors.onFileSaved = (path) => {
-			this.scheduleRefresh(0);
-			this.extensionHost.noteDocumentSaved(path);
-		};
-		this.editors.onSaveProgress = (progress) => this.statusBar.setSaveProgress(progress);
-		this.editors.renderWelcome = (container) => this.renderWelcome(container);
-		this.editors.renderHelp = (help, container) => (help === 'welcome' ? this.renderWelcome(container) : this.renderShortcuts(container));
-		// The self-test page is a lazy chunk (it carries every module's suites): the pane
-		// mounts it on open, and the first open starts the run by itself.
-		this.editors.renderSelfTest = (container) => {
-			void import('../features/selftest').then((page) => page.mountSelfTestPage(container, this));
-		};
-		// The Model Providers page is a lazy chunk of the same shape.
-		this.editors.renderProviders = (container) => {
-			void import('../features/providers').then((page) => page.mountProvidersPage(container));
-		};
-
-		this.panel.terminal.onCommandEntered = () => this.scheduleRefresh(300);
-		this.panel.onVisibilityChange = (visible) => {
-			this.panelSash.hidden = !visible;
-			state.layout.panelVisible = visible;
-			state.saveLayout();
-			this.activityItems['terminal']?.classList.toggle('active', visible);
-		};
-		this.panel.onMaximizeChange = (maximized) => this.editorPart.classList.toggle('panel-maximized', maximized);
-
-		// Clicking the repo name opens Source Control; the branch offers a switch (branches
-		// and tags); the sync item pulls then pushes (git.sync).
-		this.statusBar.onRepoClick = () => this.showView('scm');
-		this.statusBar.onBranchClick = () => void commands.execute('git.checkout');
-		this.statusBar.onSyncClick = () => void commands.execute('git.sync');
-		this.statusBar.onEncodingClick = () => void this.pickEncoding();
-		this.statusBar.onEolClick = () => void this.pickEol();
-		this.statusBar.onIndentClick = () => void this.pickIndent();
-		this.statusBar.onSymbolsClick = () => void commands.execute('symbols.rebuild');
-		this.panel.context.onOpenDefinition = (definition) => {
-			void this.editors.openFile(definition.path, { line: definition.line + 1 });
-		};
-
-		document.addEventListener('keydown', this.onKeyDownBound);
-		// External changes arrive from the backend's file watcher; the focus refresh stays as
-		// the fallback for the filesystems the watcher cannot cover.
-		void listen<FsChange>(FS_CHANGED_EVENT, (event) => this.onFsChanged(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
-		// The symbol index's builds report from the backend (an open's resume, a watcher's
-		// incremental update, this command's own rebuild): the status item follows them all.
-		void listen<SymbolIndexStatus>('studio://symbol-index', (event) => this.statusBar.setSymbols(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
-		void listen<AnalysisStatus>('studio://analysis-index', (event) => this.analysis.noteStatus(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
-		window.addEventListener('focus', this.onWindowFocusBound);
-		window.addEventListener('blur', this.onWindowBlurBound);
-		void getCurrentWindow().onCloseRequested(async (event) => {
-			// Remote Access's replica (docs/ggs-remote-plan.md §22): while a remote browser
-			// watches this window, or the instance is a remote host, closing only hides it —
-			// the workbench, its terminals and the extension pages (a Claude Code turn in
-			// flight) keep running for the browser.
-			if (!hook('session').remote() && (await this.keepRunningHidden())) {
-				event.preventDefault();
-				void remoteHostHideMain().catch(() => undefined);
-				return;
-			}
-			// The window is destroyed right after this handler resolves - long before the
-			// debounced snapshot would fire - so the session is saved first, and before the
-			// dirty editors settle (closeFolder's order).
-			this.saveSnapshot();
-			if (this.editors.hasDirtyEditors()) {
-				const closed = await this.editors.closeAll();
-				if (!closed) event.preventDefault();
-			}
-		}).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
-		// Tauri captures webview drag-and-drop itself (the DOM never sees the drop), so files
-		// dragged onto the window arrive here. Over the Explorer they copy into the folder
-		// under the cursor (VS Code's own explorer drop); anywhere else each one opens like
-		// "Open File..." would. The remote shim synthesizes these events from a browser
-		// DragEvent after uploading into the open folder (already CSS pixels, no Explorer
-		// routing of its own), so there a drop only opens, as it always has.
-		void getCurrentWebview().onDragDropEvent((event) => {
-			const payload = event.payload;
-			if (hook('session').remote()) {
-				if (payload.type === 'drop') for (const path of payload.paths) void this.editors.openFile(path);
-				return;
-			}
-			if (payload.type === 'leave') {
-				this.explorer.endExternalDrag();
-				return;
-			}
-			// Tauri reports the position in physical pixels; the tree hit-tests CSS pixels.
-			const x = payload.position.x / window.devicePixelRatio;
-			const y = payload.position.y / window.devicePixelRatio;
-			if (payload.type === 'drop') {
-				void this.explorer.dropExternalFiles(x, y, payload.paths).then((consumed) => {
-					if (!consumed) for (const path of payload.paths) void this.editors.openFile(path);
-				});
-			} else {
-				// 'enter' and 'over': the drop ring follows the cursor.
-				this.explorer.noteExternalDrag(x, y);
-			}
-		}).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
-		// macOS Finder's "Open With" handoff, once the backend knows this window has booted.
-		void listen<OpenedPaths>(OPEN_PATHS_EVENT, (event) => void this.onOpenPaths(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
-		// Remote Access (module 19): what this window shows, for the window picker's cards.
-		const stopSummary = hook('summaryReporter')({ tabs: () => this.editors.contentSummary(), scmChanges: () => this.scmChangeCount });
-		this.trackUnlisten(stopSummary);
-		// The replica host: remote browsers show this window's live copy (§22).
-		const mirror = hook('mirror');
-		if (!hook('session').remote() && mirror) this.trackUnlisten(mirror.install());
-	}
-
-	/** Whether closing the window should hide it instead: a remote browser is watching, or
-	 *  this instance runs as a remote host (`--remote-host`, no desktop of its own). */
-	private async keepRunningHidden(): Promise<boolean> {
-		const mirror = hook('mirror');
-		if (mirror && await mirror.viewersActive()) return true;
-		const status = await remoteHostStatus().catch(() => null);
-		return status?.remoteHostOnly === true;
-	}
-
-	/** The Context Window's debounce (M4 4.7): the symbol under the cursor settles for this
-	 *  long before its definition is resolved - a pass over the code must not spam the panel. */
-	private contextTimer: number | null = null;
-	private readonly onThemeChangedBound = () => this.extensionHost.noteThemeChanged();
-	private contextGeneration = 0;
-
-	private followContextSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): void {
+	followContextSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): void {
 		// The view only follows while it is the one being looked at (or pinned to a symbol);
 		// anything else leaves it as it is - never a background query per keystroke.
 		if (!this.panel.context.isPinned() && this.panel.activeView() !== 'context') return;
@@ -1306,7 +608,7 @@ export class Workbench {
 		}, 150);
 	}
 
-	private async resolveContextSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): Promise<void> {
+	async resolveContextSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): Promise<void> {
 		const view = this.editors.activeView;
 		if (!editor || editor.kind !== 'file' || !view || !this.repoPath) {
 			this.panel.context.show(null);
@@ -1346,33 +648,40 @@ export class Workbench {
 		} catch {
 			fragment = '';
 		}
+
 		this.panel.context.show({ kind: def.kind, name: def.name, path: absolute, line: def.line, fragment });
+
 	}
 
 	/** F6 (M7 7.4): cycle the keyboard through the workbench's parts - activity bar, side
 	 *  bar, editor, panel - starting from the one that holds the focus. */
-	private focusNextPart(): void {
+	focusNextPart(): void {
+
 		const parts: (() => boolean)[] = [
 			() => {
 				const first = this.activityBar.querySelector<HTMLElement>('.activity-item');
 				first?.focus();
 				return document.activeElement === first;
 			},
+
 			() => {
 				this.showView(this.activeView);
 				const body = this.sidebar.querySelector<HTMLElement>('.view-pane:not([hidden]) [tabindex]');
 				body?.focus();
 				return !!body && document.activeElement === body;
 			},
+
 			() => {
 				this.editors.focusActiveEditor();
 				return this.editors.activeView !== null;
 			},
+
 			() => {
 				if (!this.panel.isVisible()) this.panel.show('terminal');
 				this.panel.terminal.focus();
 				return true;
 			}
+
 		];
 		const holds = (element: HTMLElement | null): boolean => !!element && (this.activityBar.contains(element) || this.sidebar.contains(element) || this.editorPart.contains(element) || this.panelElement.contains(element));
 		const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -1383,62 +692,38 @@ export class Workbench {
 			else if (this.sidebar.contains(active)) start = 1;
 			else start = 0;
 		}
+
 		for (let step = 1; step <= parts.length; step++) {
 			if (parts[(start + step) % parts.length]!()) return;
 		}
+
 	}
 
 	/** Keybindings: the registry's, except the editing ones CodeMirror handles themselves. */
-	private chordPending: string | null = null;
+	chordPending: string | null = null;
 
-	/** The window/document-level handlers, bound once so `dispose` can take them off again. */
-	private readonly onKeyDownBound = (event: KeyboardEvent): void => this.onKeyDown(event);
-	private readonly onWindowFocusBound = (): void => this.scheduleRefresh(0);
-	private readonly onWindowBlurBound = (): void => this.editors.onWindowBlur();
-	private readonly onSettingsChangedBound = (event: Event): void => {
+	readonly onKeyDownBound = (event: KeyboardEvent): void => this.onKeyDown(event);
+
+	readonly onWindowFocusBound = (): void => this.scheduleRefresh(0);
+
+	readonly onWindowBlurBound = (): void => this.editors.onWindowBlur();
+
+	readonly onSettingsChangedBound = (event: Event): void => {
 		this.titleBar.setMenus(this.menus());
 	};
-	/** The Tauri listeners' unlisten functions (they land asynchronously, maybe after dispose). */
-	private unlisteners: (() => void)[] = [];
-	private disposed = false;
-	/** The cross-frontend operation sync (module 19, §22.7): silent until boot() starts it,
-	 *  local-only while a session restore rebuilds this frontend's tabs, detached on dispose
-	 *  so a rebuilt harness workbench stops answering the others. */
-	private workbenchSync: { start(): void; localOnly(local: boolean): void; detach(): void } | null = null;
 
-	/** Keep a listener's unlisten for dispose(); one that lands after dispose() fires at once. */
-	private trackUnlisten(unlisten: () => void): void {
+	unlisteners: (() => void)[] = [];
+
+	disposed = false;
+
+	workbenchSync: { start(): void; localOnly(local: boolean): void; detach(): void } | null = null;
+
+	trackUnlisten(unlisten: () => void): void {
 		if (this.disposed) unlisten();
 		else this.unlisteners.push(unlisten);
 	}
 
-	/** Tear the workbench's window-level listeners down (the UI harness builds a fresh
-	 *  workbench per flow; without this, every instance kept answering every keystroke, every
-	 *  backend event and every window focus). */
-	dispose(): void {
-		this.disposed = true;
-		this.workbenchSync?.detach();
-		this.workbenchSync = null;
-		document.removeEventListener('keydown', this.onKeyDownBound);
-		document.removeEventListener(SETTINGS_EVENT, this.onSettingsChangedBound);
-		window.removeEventListener('focus', this.onWindowFocusBound);
-		window.removeEventListener('blur', this.onWindowBlurBound);
-		for (const unlisten of this.unlisteners.splice(0)) unlisten();
-		// A pending debounce must not fire into the next workbench's session.
-		if (this.snapshotTimer !== null) {
-			window.clearTimeout(this.snapshotTimer);
-			this.snapshotTimer = null;
-		}
-		if (this.refreshTimer !== null) {
-			window.clearTimeout(this.refreshTimer);
-			this.refreshTimer = null;
-		}
-		if (this.contextTimer !== null) {
-			window.clearTimeout(this.contextTimer);
-			this.contextTimer = null;
-		}
-		document.removeEventListener(THEME_EVENT, this.onThemeChangedBound);
-	}
+	declare dispose: () => void ;
 
 	onKeyDown(event: KeyboardEvent): void {
 		if (this.chordPending) {
@@ -1480,11 +765,7 @@ export class Workbench {
 		void commands.execute(command.id);
 	}
 
-	/* ---------- Encoding and line endings (the status bar's pickers) ---------- */
-
-	/** VS Code's encoding flow: first "Reopen with Encoding" or "Save with Encoding", then the
-	 *  encoding itself (the backend's list, the current one marked). */
-	private async pickEncoding(): Promise<void> {
+	async pickEncoding(): Promise<void> {
 		const input = this.editors.activeInput;
 		if (input?.kind !== 'file') return;
 		const action = await quickPick([
@@ -1499,8 +780,7 @@ export class Workbench {
 		else await this.editors.saveWithEncoding(encoding);
 	}
 
-	/** The status bar's indent item: VS Code's "Select Indentation" (the tab-size setting). */
-	private async pickIndent(): Promise<void> {
+	async pickIndent(): Promise<void> {
 		const chosen = await quickPick([
 			{ label: 'Indent Using Spaces', description: 'The tab size applies to every editor', value: 'header' },
 			...[2, 4, 8].map((size) => ({ label: String(size), description: settings.tabSize === size ? 'current' : undefined, value: String(size) }))
@@ -1508,465 +788,63 @@ export class Workbench {
 		if (chosen === '2' || chosen === '4' || chosen === '8') updateSetting('tabSize', Number(chosen));
 	}
 
-	private async pickEol(): Promise<void> {
+	async pickEol(): Promise<void> {
 		if (this.editors.activeInput?.kind !== 'file') return;
 		const eol = await quickPick([{ label: 'LF', description: 'Unix', value: 'lf' }, { label: 'CRLF', description: 'Windows', value: 'crlf' }], 'Select End of Line Sequence');
 		if (eol === 'lf' || eol === 'crlf') this.editors.setEol(eol);
 	}
 
-	/* ---------- The session snapshot ---------- */
+	snapshotTimer: number | null = null;
 
-	private snapshotTimer: number | null = null;
-	/** Set while a snapshot is being restored, so the restore's own tab churn is not saved
-	 *  back over the snapshot half-way through. */
-	private restoring = false;
+	restoring = false;
 
-	private scheduleSnapshot(): void {
-		if (!this.repoPath || this.restoring) return;
-		if (this.snapshotTimer !== null) window.clearTimeout(this.snapshotTimer);
-		this.snapshotTimer = window.setTimeout(() => {
-			this.snapshotTimer = null;
-			this.saveSnapshot();
-		}, 250);
-	}
+	declare scheduleSnapshot: () => void ;
 
-	/** Write the folder's session to storage now (a close or a switch must not lose the last change). */
-	private saveSnapshot(): void {
-		if (!this.repoPath || this.restoring) return;
-		if (this.snapshotTimer !== null) {
-			window.clearTimeout(this.snapshotTimer);
-			this.snapshotTimer = null;
-		}
-		const active = this.editors.activeInput;
-		// A workspace keeps its own session, keyed by its file (a plain folder by its path).
-		state.saveWorkspaceSnapshot(this.workspaceFile ?? this.repoPath, {
-			openFiles: this.editors.openFilePaths(),
-			activeFile: active?.kind === 'file' ? active.path : null,
-			expanded: this.explorer.expandedFolders(),
-			groups: this.editors.groupSessions(),
-			editorGrid: this.editors.gridLayout()
-		});
-	}
+	declare saveSnapshot: () => void ;
 
-	/** Reopen the folder's last session: the file tabs in order, the active one last so it
-	 *  ends up on top; a file that vanished meanwhile is skipped (openFile reports it). The
-	 *  files of a group open in parallel (their reads overlap) but as inactive tabs, so the
-	 *  tab order is still the snapshot's and only the remembered active one is shown. The
-	 *  saved grid comes back as it was - a 2x2 layout reopens as 2x2; sessions saved before
-	 *  the grid existed (or single-group ones) fall back to a row of splits (M3 3.1). */
-	private async restoreSnapshot(root: string, snapshot: state.WorkspaceSnapshot): Promise<void> {
-		// A fast folder switch (A then B within the idle delay) fires A's restore on B's
-		// workbench: rebuilding A's grid - or clearing the restore flags B's own restore may
-		// hold - would tear B's layout. The stale restore does not run at all.
-		if (this.repoPath !== root) return;
-		this.restoring = true;
-		// The restore rebuilds THIS frontend's own tabs: they are its session, not
-		// operations the other frontends should mirror (module 19's sync pauses for it).
-		this.workbenchSync?.localOnly(true);
-		try {
-			const groups = snapshot.groups && snapshot.groups.length > 0
-				? snapshot.groups
-				: [{ files: snapshot.openFiles, active: snapshot.activeFile }];
-			// The grid builder holds empty layers open until every session's files are in.
-			const restored = this.editors.applyGridLayout(snapshot.editorGrid ?? null);
-			for (const [index, session] of groups.entries()) {
-				// Without a saved grid (pre-grid sessions, or a single group) the sessions
-				// open as a row of splits, as they always did.
-				const group = restored.length > 0
-					? restored[Math.min(index, restored.length - 1)]!
-					: index === 0 ? this.editors.groupAt(0) : this.editors.split('right');
-				if (this.repoPath !== root) return; // the folder changed under the restore
-				await Promise.all(session.files.map((path) => group.openFile(path, { inactive: true })));
-				if (this.repoPath !== root) return;
-				if (session.active) await group.openFile(session.active);
-				else group.activateLast();
-			}
-		} finally {
-			this.editors.restoringLayout = false;
-			this.restoring = false;
-			this.workbenchSync?.localOnly(false);
-		}
-	}
+	declare restoreSnapshot: (root: string, snapshot: state.WorkspaceSnapshot) => Promise<void> ;
 
-	/** Something changed on disk outside the app (a build, a checkout in another terminal,
-	 *  another editor): clean tabs of the changed files reload in place, and the git-derived
-	 *  views refresh. A dirty tab keeps the user's edits - the save then prompts, as VS Code does. */
-	onFsChanged(change: FsChange): void {
-		if (!this.repoPath) return;
-		// A batch from a folder that is no longer open (the watcher's last debounced burst
-		// crossing a folder switch) belongs to the old project: its paths are relative to
-		// another root and would be joined onto the new one.
-		if (!this.repoPaths.includes(change.root)) return;
-		// A batch that names no working-tree file and lands right after a refresh of our own
-		// is ambiguous: it is that refresh's echo (the git commands it ran touching
-		// `.git/`) — acting on it would refresh again, and again — or a real external git
-		// operation (a terminal commit, a branch switch), whose burst never comes again, so
-		// dropping it lost the update until some file happened to change. The re-check
-		// reads the live status and refreshes only when it differs from the last one; the
-		// in-flight flag folds a commit's burst of `.git` batches into one re-check.
-		if (change.paths.length === 0 && !change.truncated && performance.now() - this.lastRefreshAt < REFRESH_ECHO_MS) {
-			this.recheckSwallowedBatch();
-			return;
-		}
-		if (!change.truncated) {
-			for (const relative of change.paths) void this.editors.reloadIfClean(joinRepo(change.root, relative));
-		} else {
-			// The batch names only some of what changed (a checkout, a build): every clean tab
-			// under that root re-reads its file, or a tab left behind shows the old contents
-			// the moment it is switched to. reloadIfClean skips the ones that did not change.
-			const root = change.root.replace(/[\\/]+$/, '').toLowerCase();
-			for (const path of this.editors.openFilePaths()) {
-				if (path.toLowerCase().startsWith(root)) void this.editors.reloadIfClean(path);
-			}
-		}
-		this.scheduleRefresh(0);
-	}
+	declare onFsChanged: (change: FsChange) => void ;
 
-	/** When the last git-derived refresh ran (`scheduleRefresh`'s timer fired). */
-	private lastRefreshAt = -Infinity;
+	lastRefreshAt = -Infinity;
 
-	/** One re-check at a time: a commit's burst of `.git`-only batches folds into one. */
-	private recheckInFlight = false;
+	recheckInFlight = false;
 
-	/** The swallowed-batch re-check: the live status against the last refresh's snapshot
-	 *  (scm.statusDiffers), a refresh only when they differ — the echo cannot loop this,
-	 *  because an echoed-against refresh that sees the same status never schedules one. */
-	private recheckSwallowedBatch(): void {
-		if (this.recheckInFlight) return;
-		this.recheckInFlight = true;
-		void this.scm
-			.statusDiffers()
-			.catch(() => true)
-			.then((differs) => {
-				this.recheckInFlight = false;
-				if (differs) this.scheduleRefresh(0);
-			});
-	}
+	declare recheckSwallowedBatch: () => void ;
 
-	/** A hidden window's refresh is queued: coalescing flag for the microtask that runs it. */
-	private hiddenRefreshQueued = false;
+	hiddenRefreshQueued = false;
 
-	/** Refresh everything git-derived: the SCM view (which colours the Explorer), the graph,
-	 *  the status bar, the tree, and clean editors whose files changed. Coalesced. */
-	scheduleRefresh(delay: number): void {
-		// A hidden window's timers are throttled by the webview (to seconds, eventually to
-		// a minute) — and the background window is exactly where external work happens: the
-		// terminal commits, another editor saves, a build finishes. Hidden runs the refresh
-		// on the microtask queue (never throttled), one burst coalesced into one refresh.
-		if (document.hidden) {
-			// A visible-path timer pending from before the window hid would fire a second
-			// refresh on top of the one this path runs now.
-			if (this.refreshTimer !== null) {
-				window.clearTimeout(this.refreshTimer);
-				this.refreshTimer = null;
-			}
-			if (this.hiddenRefreshQueued) return;
-			this.hiddenRefreshQueued = true;
-			queueMicrotask(() => {
-				this.hiddenRefreshQueued = false;
-				this.runScheduledRefresh();
-			});
-			return;
-		}
-		if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
-		this.refreshTimer = window.setTimeout(() => {
-			this.refreshTimer = null;
-			this.runScheduledRefresh();
-		}, delay);
-	}
+	declare scheduleRefresh: (delay: number) => void ;
 
-	/** The timer's body, shared by the visible (debounced) and hidden (immediate) paths. */
-	private runScheduledRefresh(): void {
-		if (!this.repoPath) return;
-		// While a sash drag is in progress, defer: refreshes mid-drag make the tree and
-		// the editors churn under the pointer for no benefit. It re-fires after mouseup.
-		// Hidden skips the deferral — the churn is invisible, and the deferral would
-		// re-enter the microtask scheduler (scheduleRefresh's hidden path) in a cycle
-		// that never yields to the event loop: a wedged queue, a dead window. A drag
-		// whose mouseup was lost to the hiding window is exactly when the class sticks.
-		if (!document.hidden && document.body.classList.contains('resizing')) {
-			this.scheduleRefresh(200);
-			return;
-		}
-		this.lastRefreshAt = performance.now();
-		void this.scm.refresh(); // its repo_head feeds the status bar (see scm.onHead)
-		void this.explorer.refresh();
-		const active = this.editors.activeInput;
-		if (active?.kind === 'file') void this.editors.reloadIfClean(active.path);
-	}
+	declare runScheduledRefresh: () => void ;
 
-	/* ---------- Folders ---------- */
+	declare openFolder: (path: string) => Promise<void> ;
 
-	async openFolder(path: string): Promise<void> {
-		if (!(await this.settleOutgoing())) return;
-		await this.openFolderSettled(path);
-	}
+	declare openFolderSettled: (path: string) => Promise<void> ;
 
-	/** The post-settling half of openFolder (openWorkspace's one-folder case lands here too:
-	 *  its settling - and the outgoing folder's snapshot - already happened). */
-	private async openFolderSettled(path: string): Promise<void> {
-		let opened: OpenedRoot;
-		try {
-			opened = await openFolder(path);
-		} catch (error) {
-			notify('error', String(error));
-			state.forgetFolder(path);
-			return;
-		}
-		await this.applyRoots([opened.root], opened.isRepo, null);
-	}
+	declare settleOutgoing: () => Promise<boolean> ;
 
-	/** Save the outgoing folder's session, then settle its dirty editors. The snapshot comes
-	 *  first: settling closes the tabs, and a snapshot taken afterwards would record an empty
-	 *  session over the folder's real one (closeFolder's order). False when the user cancelled. */
-	private async settleOutgoing(): Promise<boolean> {
-		this.saveSnapshot();
-		return !this.editors.hasDirtyEditors() || (await this.editors.closeAll());
-	}
+	declare openRecent: (path: string) => Promise<void> ;
 
-	/** Open a recent entry: a `.ggs-workspace` file as a workspace, a folder as a folder -
-	 *  both land in the recents list, and confusing them failed the open. */
-	async openRecent(path: string): Promise<void> {
-		if (path.toLowerCase().endsWith('.ggs-workspace')) await this.openWorkspace(path);
-		else await this.openFolder(path);
-	}
+	declare onOpenPaths: (payload: OpenedPaths) => Promise<void> ;
 
-	/** The Finder "Open With" handoff ([`OPEN_PATHS_EVENT`], macOS only - a folder picked
-	 * under "打开方式 / Open With", or a file the associations claim). A folder — or a
-	 * `.ggs-workspace` file, a container like a folder and never a document whose JSON a
-	 * viewer would show — takes over only an empty window; one that is showing anything (a
-	 * folder, a workspace, a single file) gets a new instance carrying it - the multi-open
-	 * answer to "open this folder", the same handoff the Dock and File menus spell "New
-	 * Window". Every other file opens the way a drop does: an editor tab over an open
-	 * folder, the whole window otherwise. */
-	private async onOpenPaths(payload: OpenedPaths): Promise<void> {
-		const workspaces: string[] = [];
-		const documents: string[] = [];
-		for (const file of payload.files) {
-			(file.toLowerCase().endsWith('.ggs-workspace') ? workspaces : documents).push(file);
-		}
-		for (const path of [...payload.folders, ...workspaces]) {
-			if (this.repoPath !== null || this.singleFile !== null) {
-				await appNewInstance(path).catch((error) => notify('error', tf('workbench.newWindowFailed', String(error))));
-			} else if (path.toLowerCase().endsWith('.ggs-workspace')) {
-				await this.openWorkspace(path);
-			} else {
-				await this.openFolder(path);
-			}
-		}
-		// Decided after the folders: one of them may have just become this window's content,
-		// and its files belong in it rather than in a standalone window.
-		let standalone = this.repoPath === null && this.singleFile === null;
-		for (const file of documents) {
-			if (standalone) {
-				await this.openFileStandalone(file);
-				standalone = false;
-			} else {
-				await this.editors.openFile(file);
-			}
-		}
-	}
+	declare pickFolder: () => Promise<void> ;
 
-	async pickFolder(): Promise<void> {
-		let selected: string | string[] | null;
-		try {
-			selected = await openDialog({ directory: true, multiple: false, title: 'Open Folder' });
-		} catch (error) {
-			notify('error', `Could not open the folder picker: ${String(error)}`);
-			return;
-		}
-		if (!selected) return;
-		await this.openFolder(Array.isArray(selected) ? selected[0]! : selected);
-	}
+	declare pickWorkspace: () => Promise<void> ;
 
-	/** File > Open Workspace...: pick a `.ggs-workspace`, open its folders as roots. */
-	async pickWorkspace(): Promise<void> {
-		let selected: string | string[] | null;
-		try {
-			selected = await openDialog({ multiple: false, title: 'Open Workspace', filters: [{ name: 'Git Graph Studio Workspace', extensions: ['ggs-workspace'] }] });
-		} catch (error) {
-			notify('error', `Could not open the workspace picker: ${String(error)}`);
-			return;
-		}
-		if (!selected) return;
-		await this.openWorkspace(Array.isArray(selected) ? selected[0]! : selected);
-	}
+	declare pickSingleFile: () => Promise<void> ;
 
-	/** Open a `.ggs-workspace` file: the backend resolves and registers its roots; the shell
-	 *  wires itself the same way a plain folder does, with the first root as the active one. */
-	/** File > Open File...: pick one file, show it alone. */
-	async pickSingleFile(): Promise<void> {
-		let selected: string | string[] | null;
-		try {
-			selected = await openDialog({ multiple: false, title: 'Open File' });
-		} catch (error) {
-			notify('error', `Could not open the file picker: ${String(error)}`);
-			return;
-		}
-		if (!selected) return;
-		const file = Array.isArray(selected) ? selected[0]! : selected;
-		try {
-			await openSingleFile(file);
-		} catch (error) {
-			notify('error', String(error));
-			return;
-		}
-		await this.openFileStandalone(file);
-	}
+	declare openFileStandalone: (path: string) => Promise<void> ;
 
-	/**
-	 * Single-file mode: the window becomes just this file - the side bar and the terminal are
-	 * hidden, no folder is open (no repository views, no watcher, no graph), and the file's
-	 * editor opens at once. `git-graph-studio <file>` boots straight here.
-	 */
-	async openFileStandalone(path: string): Promise<void> {
-		if (!(await this.settleOutgoing())) return;
-		await this.editors.closeAll();
-		this.singleFile = path;
-		this.repoPath = null;
-		this.repoPaths = [];
-		this.workspaceFile = null;
-		this.isRepo = false;
-		this.filePicks = null;
-		ExtensionHost.workspaceFolders = []; // no folder: extensions see no workspace either
-		// No folder: every repository view stands down (the editors too, or their breadcrumbs
-		// and relative paths would still be spelled against the folder just left).
-		this.explorer.setRoot(null);
-		this.editors.setRoot(null);
-		this.search.setEnabled(false);
-		this.search.setRoots([]);
-		this.scm.setRepo(null);
-		this.statusBar.setRepo(false);
-		this.extensionHost.noteWorkspaceChanged([]);
-		// The window is the file: hide the side bar and the terminal, like a single-file editor.
-		state.layout.sidebarVisible = false;
-		this.sidebar.hidden = true;
-		this.sidebarSash.hidden = true;
-		if (this.panel.isVisible()) this.panel.toggle();
-		for (const id of ['explorer', 'search', 'scm', 'analysis', 'extensions']) this.activityItems[id]?.classList.remove('active');
-		state.saveLayout();
-		document.title = `${basename(path)} - Git Graph Studio`;
-		this.titleBar.setFolderName(basename(path));
-		await this.editors.openFile(path);
-		// Boot timing: how long a single-file launch took to show its file.
-		void bootStage('single file shown', performance.now()).catch(() => undefined);
-	}
+	declare openWorkspace: (path: string) => Promise<void> ;
 
-	async openWorkspace(path: string): Promise<void> {
-		if (!(await this.settleOutgoing())) return;
-		let opened: { roots: OpenedRoot[] };
-		try {
-			opened = await openWorkspace(path);
-		} catch (error) {
-			notify('error', String(error));
-			return;
-		}
-		const roots = opened.roots;
-		if (roots.length === 0) return;
-		if (roots.length === 1) {
-			// A one-folder workspace is just that folder. Not openFolder(): the settling and the
-			// outgoing snapshot already happened above - its saveSnapshot would record the
-			// just-emptied editor area over the session that was saved.
-			await this.openFolderSettled(roots[0]!.root);
-			return;
-		}
-		await this.applyRoots(roots.map((entry) => entry.root), roots.some((entry) => entry.isRepo), path);
-	}
+	declare applyRoots: (roots: string[], anyRepo: boolean, workspaceFile: string | null) => Promise<void> ;
 
-	/** Wire the shell to a set of open roots (a plain folder passes one; the workspace file,
-	 *  when there is one, keys the session snapshot). The first root is the active repository
-	 *  seam; the graph and the SCM view can switch to the others through their own pickers.
-	 *  The caller has already saved the outgoing folder's snapshot and settled its dirty
-	 *  editors - before the backend switched folders. */
-	private async applyRoots(roots: string[], anyRepo: boolean, workspaceFile: string | null): Promise<void> {
-		await this.editors.closeAll();
-		this.repoPaths = roots;
-		this.workspaceFile = workspaceFile;
-		this.repoPath = roots[0]!;
-		this.isRepo = anyRepo;
-		this.filePicks = null;
-		const root = this.repoPath;
-		state.rememberFolder(workspaceFile ?? root);
-		const shownName = workspaceFile ? basename(workspaceFile).replace(/\.ggs-workspace$/i, '') : basename(root);
-		document.title = `${shownName} - Git Graph Studio`;
-		this.titleBar.setFolderName(shownName);
-		const snapshot = state.workspaceSnapshot(workspaceFile ?? root);
-		// The Explorer gets every root (a virtual top level when there are several), the
-		// Search view runs its query root by root, and the SCM view and the graph keep the
-		// first root as the active one (their own pickers can switch).
-		this.explorer.setRoots(this.repoPaths, snapshot?.expanded ?? []);
-		// Boot timing: the folder counts as shown once its tree is listed (the graph's first
-		// page has its own stamp; the SCM status settles after both).
-		if (!this.folderShownStamped) {
-			this.folderShownStamped = true;
-			void this.explorer.whenRendered().then(() => bootStage('folder shown', performance.now())).catch(() => undefined);
-		}
-		this.search.setEnabled(true);
-		this.search.setRoots(this.repoPaths.length > 1 ? this.repoPaths : []);
-		this.editors.setRoot(root);
-		this.scm.setRepo(root, anyRepo);
-		this.statusBar.setRepo(anyRepo); // a plain folder shows no repository items
-		// The graph view starts loading now, in parallel: its iframe boot and its first data
-		// request run on their own while the SCM view and the status bar settle below. A
-		// folder that is not a repository gets the placeholder with the Initialize button.
-		// The graph view (when its plugin is installed) learns the folder and reloads through
-		// the page event; nothing of the app opens it automatically — the command does.
-		this.extensionHost.noteWorkspaceChanged([root]);
-		// The last session's editors come back once the main thread next idles (within a
-		// second at most): their CodeMirror chunk and language modes would otherwise load
-		// and parse in the same burst as the graph view's boot, and the graph tab is the one
-		// on screen first.
-		if (snapshot && (snapshot.openFiles.length > 0 || snapshot.activeFile)) whenIdle(() => void this.restoreSnapshot(root, snapshot), 1000);
-		ExtensionHost.workspaceFolders = [...this.repoPaths];
-		// `git status` is the slowest part of opening a folder, and the tree above renders
-		// without it: the SCM refresh and the branch head it fetches wait for the first painted
-		// frame, so the full-tree scan and the head subprocess no longer compete with the graph
-		// view's boot for the CPU. The same signal starts the backend's own deferred services
-		// (the symbol/analysis indexes and the file watcher).
-		requestAnimationFrame(() => {
-			void postFirstPaint().catch(() => undefined);
-			if (anyRepo) void this.scm.refresh();
-		});
-		if (state.layout.sidebarVisible) this.showView(this.activeView);
-	}
+	declare initializeRepository: () => Promise<void> ;
 
-	/** `git init` in the open folder (the placeholder's and the SCM view's button, and the
-	 *  command palette). Re-opens the folder afterwards, which now resolves to a repository:
-	 *  the graph loads, the watcher starts, the status bar finds its branch. */
-	async initializeRepository(): Promise<void> {
-		if (this.repoPath === null || this.isRepo) return;
-		try {
-			await gitInit();
-		} catch (error) {
-			notify('error', `Could not initialize the repository: ${String(error)}`);
-			return;
-		}
-		notify('info', 'Initialized the Git repository.');
-		await this.openFolder(this.repoPath);
-	}
+	declare closeFolder: () => Promise<void> ;
 
-	async closeFolder(): Promise<void> {
-		this.saveSnapshot();
-		if (!(await this.editors.closeAll())) return;
-		await closeFolder().catch(() => undefined);
-		this.repoPath = null;
-		this.repoPaths = [];
-		this.workspaceFile = null;
-		this.singleFile = null;
-		this.isRepo = false;
-		state.rememberFolder(null);
-		document.title = 'Git Graph Studio';
-		this.titleBar.setFolderName(null);
-		this.explorer.setRoot(null);
-		this.search.setEnabled(false);
-		this.editors.setRoot(null);
-		this.scm.setRepo(null);
-		this.statusBar.setRepo(false);
-		this.extensionHost.noteWorkspaceChanged([]);
-		ExtensionHost.workspaceFolders = [];
-	}
-
-	private renderWelcome(container: HTMLElement): void {
+	renderWelcome(container: HTMLElement): void {
 		const inner = el('div', 'welcome-inner');
 		const logo = el('img');
 		logo.src = import.meta.env.BASE_URL + 'icons/icon.png';
@@ -2009,8 +887,7 @@ export class Workbench {
 		container.appendChild(inner);
 	}
 
-	/** The Keyboard Shortcuts page: the keybindings editor (search, record, conflicts). */
-	private renderShortcuts(container: HTMLElement): void {
+	renderShortcuts(container: HTMLElement): void {
 		// The pane takes the keyboard focus itself, so the recorder's keydown listener (on the
 		// container) hears the keystroke that becomes the new binding.
 		container.tabIndex = 0;
@@ -2018,137 +895,20 @@ export class Workbench {
 		container.focus();
 	}
 
-	/* ---------- Boot ---------- */
+	declare boot: () => Promise<void> ;
 
-	/** The launch form decides what this window shows; when it has decided, the
-	 *  cross-frontend operation sync goes live (module 19: a phone's own workbench and this
-	 *  one mirror each other's opens, closes and view switches from here on). */
-	async boot(): Promise<void> {
-		try {
-			await this.bootInner();
-		} finally {
-			this.workbenchSync?.start();
-		}
-	}
+	declare bootInner: () => Promise<void> ;
 
-	private async bootInner(): Promise<void> {
-		// One round trip instead of three: the launch form (a file, comparison actions, or the
-		// folder argument) decides everything the boot does next. A plain-folder launch is
-		// opened inside this very call (the backend opens it during the splash), so when the
-		// folder the boot picks matches, the answer is applied directly - no second round trip.
-		const context = await bootContext()
-			.catch((): BootContext => ({ file: null, actions: [], repo: null, workspace: null, reloaded: false, opened: null, openedFor: null }));
-		// A `ggs <file>` launch shows exactly that file, alone.
-		if (context.file) {
-			await this.openFileStandalone(context.file);
-			return;
-		}
-		// A `ggs <workspace>.ggs-workspace` launch opens that multi-root workspace. A page
-		// reload is past its launch: the window may have switched folders since, and what it
-		// holds now is the remembered folder below.
-		if (context.workspace && !context.reloaded) {
-			await this.openWorkspace(context.workspace);
-			return;
-		}
-		// A `ggs compare|hex|hex-compare|folder-compare ...` launch opens its comparison as the
-		// window's first tab, over no folder of its own - the same tabs the Explorer's
-		// "Compare Two Files/Folders" menu opens.
-		if (context.actions.length > 0) {
-			this.statusBar.setRepo(false);
-			for (const action of context.actions) {
-				if (action.type === 'compareFiles' && action.left && action.right) {
-					await this.editors.openDiff({
-						kind: 'diff',
-						id: `paths:${action.left}::${action.right}`,
-						title: `${basename(action.left)} ↔ ${basename(action.right)}`,
-						left: { revision: '*', path: action.left, label: action.left, exists: true, local: true },
-						right: { revision: '*', path: action.right, label: action.right, exists: true, local: true }
-					});
-				} else if (action.type === 'hexView' && action.path) {
-					await this.editors.openHex(action.path);
-				} else if (action.type === 'hexCompare' && action.left && action.right) {
-					await this.editors.openLocalHexCompare(action.left, action.right);
-				} else if (action.type === 'folderCompare' && action.left && action.right) {
-					await this.editors.openFolderCompare({ kind: 'folders', id: `${action.left}::${action.right}`, left: action.left, right: action.right });
-				}
-			}
-		} else {
-			// A `ggs <folder>` launch is explicit: it beats everything the last session
-			// remembered (VS Code's own precedence — `code <dir>` opens <dir>, whatever was
-			// open before). Only a no-argument launch falls back to the remembered folder —
-			// or to the remembered `.ggs-workspace` file, whose multi-root set must not
-			// reopen as its first root. A page reload is no launch: the backend still holds
-			// the window's open roots, `repo` being a workspace's FIRST root, so there the
-			// remembered workspace file wins - its other roots would drop otherwise.
-			const remembered = state.lastFolder();
-			const rememberedWorkspace = remembered !== null && remembered.toLowerCase().endsWith('.ggs-workspace');
-			const last = context.reloaded && rememberedWorkspace ? remembered : context.repo ?? remembered;
-			if (last) {
-				if (last.toLowerCase().endsWith('.ggs-workspace')) {
-					await this.openWorkspace(last);
-				} else {
-					if (context.opened !== null && context.openedFor === last) {
-						// The backend already opened this very folder inside `boot_context`:
-						// apply the answer directly instead of spending another round trip.
-						await this.applyRoots([context.opened.root], context.opened.isRepo, null);
-					} else {
-						await this.openFolder(last);
-					}
-				}
-			} else {
-				this.statusBar.setRepo(false);
-			}
-		}
-		// The rest of the boot is not what the user is waiting for, and it all shares the one
-		// main thread with the explorer's first listing and the graph view's boot: the
-		// terminal (its xterm chunk and a shell process), the extension host (its frame and
-		// every installed bundle) and the backup recovery run once that first burst is
-		// through - at the next idle moment, or within two seconds regardless.
-		whenIdle(() => {
-			if (state.layout.panelVisible) this.panel.show('terminal');
-			// Extensions activate after the workbench is up: their commands join the registry
-			// late, which the palette and menus pick up on their next render.
-			void this.extensionHost.activateInstalled();
-			void this.recoverBackups();
-		});
-	}
+	declare recoverBackups: () => Promise<void> ;
 
-	/** Hot exit: unsaved buffers a previous session left behind (a crash, a kill) come back
-	 *  into their editors, dirty, and the user is told. Backups of files outside the open
-	 *  folder wait for that folder to be opened. */
-	async recoverBackups(): Promise<void> {
-		if (!this.repoPath) return;
-		let backups: BackupEntry[];
-		try {
-			backups = await backupList();
-		} catch {
-			return;
-		}
-		if (!Array.isArray(backups)) return;
-		const separator = this.repoPath.includes('\\') ? '\\' : '/';
-		const root = this.repoPath.replace(/[\\/]+$/, '').toLowerCase() + separator;
-		const here = backups.filter((b) => b.path.toLowerCase().startsWith(root));
-		let restored = 0;
-		for (const backup of here) {
-			try {
-				const contents = await backupRead(backup.path);
-				if (await this.editors.restoreBackup(backup.path, contents)) restored++;
-			} catch {
-				// A backup that cannot be read is left in place for the next launch.
-			}
-		}
-		if (restored > 0) notify('info', `Recovered ${restored} unsaved file${restored === 1 ? '' : 's'} from the last session. Save to keep the changes.`);
-	}
 }
 
-/** Run `work` when the main thread next idles (at most `timeoutMs` later); synchronously
- *  where the browser has no idle callbacks (jsdom), so tests see the same end state. */
-function whenIdle(work: () => void, timeoutMs = 2000): void {
+export function whenIdle(work: () => void, timeoutMs = 2000): void {
 	if (typeof requestIdleCallback === 'function') requestIdleCallback(() => work(), { timeout: timeoutMs });
 	else work();
 }
 
-function joinRepo(root: string, relative: string): string {
+export function joinRepo(root: string, relative: string): string {
 	const separator = root.includes('\\') ? '\\' : '/';
 	return root.replace(/[\\/]+$/, '') + separator + relative.replaceAll('/', separator);
 }
