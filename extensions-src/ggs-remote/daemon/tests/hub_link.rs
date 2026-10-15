@@ -14,6 +14,7 @@
 
 use futures_util::{SinkExt, StreamExt};
 use ggs_remote::config::{Config, TlsConfig, TlsMode};
+use ggs_remote::control_io;
 use ggs_remote::control_msg::{self, FromInstance, LaunchSpec, ToInstance};
 use ggs_remote::hub::{Settings, Status};
 use ggs_remote::paths::Paths;
@@ -889,7 +890,7 @@ impl FakeInstance {
         loop {
             let body = tokio::time::timeout(
                 Duration::from_secs(5),
-                control_msg::read_message(&mut self.rx),
+                control_io::read_message(&mut self.rx),
             )
             .await
             .expect("a control message within 5 s")

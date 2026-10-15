@@ -13,6 +13,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 use ggs_remote::config::{Config, TlsMode};
+use ggs_remote::control_io;
 use ggs_remote::control_msg::{self, FromInstance, LaunchSpec, ToInstance};
 use ggs_remote::paths::Paths;
 use ggs_remote::state::Daemon;
@@ -350,7 +351,7 @@ impl FakeInstance {
 
     async fn recv_pings_only(&mut self) -> ToInstance {
         loop {
-            let body = control_msg::read_message(&mut self.rx).await.unwrap();
+            let body = control_io::read_message(&mut self.rx).await.unwrap();
             match control_msg::decode::<ToInstance>(&body).unwrap() {
                 ToInstance::Ping { nonce } => self.send(&FromInstance::Pong { nonce }).await,
                 other => return other,
@@ -363,7 +364,7 @@ impl FakeInstance {
         loop {
             let body = tokio::time::timeout(
                 Duration::from_secs(5),
-                control_msg::read_message(&mut self.rx),
+                control_io::read_message(&mut self.rx),
             )
             .await
             .expect("a control message within 5 s")
@@ -1740,7 +1741,7 @@ async fn restart_child_role() {
     // Hold the registration until the daemon no longer wants it (or a bounded while).
     let _ = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let body = match control_msg::read_message(&mut rx).await {
+            let body = match control_io::read_message(&mut rx).await {
                 Ok(body) => body,
                 Err(_) => break,
             };
@@ -1804,7 +1805,7 @@ async fn the_sandbox_endpoint_registers_only_with_a_one_shot_token() {
         }))
         .await
         .unwrap();
-        let first = control_msg::read_message(&mut rx).await;
+        let first = control_io::read_message(&mut rx).await;
         assert!(
             first.is_err(),
             "a tokenless Register is dropped, not welcomed: {first:?}"
@@ -1847,7 +1848,7 @@ async fn the_sandbox_endpoint_registers_only_with_a_one_shot_token() {
             .await
             .unwrap();
         match control_msg::decode::<ToInstance>(
-            &control_msg::read_message(&mut sbx_rx).await.unwrap(),
+            &control_io::read_message(&mut sbx_rx).await.unwrap(),
         )
         .unwrap()
         {
@@ -1874,7 +1875,7 @@ async fn the_sandbox_endpoint_registers_only_with_a_one_shot_token() {
         .await
         .unwrap();
         assert!(
-            control_msg::read_message(&mut rx).await.is_err(),
+            control_io::read_message(&mut rx).await.is_err(),
             "a consumed token buys no second registration"
         );
     }
@@ -1957,7 +1958,7 @@ async fn the_sandbox_hides_desktop_windows_from_close_and_restart_too() {
         .send("desktop", ToInstance::Ping { nonce: 7 });
     let delivered = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let body = control_msg::read_message(&mut desktop.rx).await.unwrap();
+            let body = control_io::read_message(&mut desktop.rx).await.unwrap();
             if let ToInstance::Ping { nonce: 7 } = control_msg::decode(&body).unwrap() {
                 break;
             }
