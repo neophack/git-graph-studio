@@ -30,6 +30,7 @@
 // whatever was packed, like VS Code's bundled extensions.
 import { checkSeams } from './check-seams.mjs';
 import { fetchMarketplacePackages } from './fetch-marketplace-extensions.mjs';
+import { buildNodeHost } from './node-host-bundle.mjs';
 import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 
 // The seam rules first: nothing under src/ or static/ may name the git-graph-rs extension's
@@ -149,33 +150,13 @@ const ggsBashBin = process.platform === 'win32' ? sidecarBinary('ggs-bash', 'rel
 
 /* 3½. The real-Node extension host bundle (`node-host.cjs`): the entry a system Node runs
  * as one extension's host process when a runtime is available — the same `vscode` shim the
- * sandboxed frames carry, over the ggs-ext/1 stdio channel, with `require('vscode')`
+ *  sandboxed frames carry, over the ggs-ext/1 stdio channel, with `require('vscode')`
  * intercepted and every other require resolving through Node's own machinery (a package's
- * `.node` NAPI addon, its ESM, its workers, its `node_modules`). Bundled by the app's own
- * Vite (lib mode, CommonJS, node builtins external); shipped beside the binaries through
- * tauri.conf.json's bundle.resources, and copied to target/studio/ for the dev lookup. */
+ * `.node` NAPI addon, its ESM, its workers, its `node_modules`). The one vite lib-mode
+ * config lives in node-host-bundle.mjs (the dev-loop helper scripts/build-node-host.mjs
+ * shares it). */
 {
-	const { build } = await import('vite');
-	await build({
-		configFile: false,
-		logLevel: 'warn',
-		build: {
-			outDir: join(out, 'bundled', 'app-resources'),
-			emptyOutDir: false,
-			minify: false,
-			sourcemap: false,
-			target: 'node20',
-			lib: {
-				entry: join(appDir, 'src', 'hosts', 'nodeHost.ts'),
-				formats: ['cjs'],
-				fileName: () => 'node-host.cjs'
-			},
-			rollupOptions: {
-				external: [/^node:/]
-			}
-		}
-	});
-	copyFileSync(join(out, 'bundled', 'app-resources', 'node-host.cjs'), join(out, 'node-host.cjs'));
+	await buildNodeHost(appDir, out);
 
 	// The `vscode` shim for ggs-node's own hosting of frame programs: an IIFE the Boa
 	// context evaluates, installing `__ggsVscodeShim` on its global.
