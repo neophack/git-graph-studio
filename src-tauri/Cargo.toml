@@ -209,39 +209,20 @@ ggs-ext = { workspace = true }
 ggs-providers = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-rpassword = { workspace = true }
 portable-pty = { workspace = true }
 ureq = { workspace = true }
 sha2 = { workspace = true }
-getrandom = { workspace = true }
-# The VSIX / .ggx readers and writers (cmd_ext): every archive this code writes picks
-# Deflated, and OPC packages (VSIX) are Deflate/stored by specification, so the pure-Rust
-# flate2 backend is the only codec linked — bzip2, zstd and xz (all C) stay out of the
-# tree (plan §3.1). Nothing sets entry timestamps, so the `time` feature is off too.
-# NOTE (docs/ci-speed-plan.md P3): dropping zopfli needs zip ≥ 3.0.0 — on the 2.x line
-# `deflate-flate2` does not activate zip's own optional flate2 dependency (only the
-# `deflate` umbrella's `flate2/rust_backend` does), so the leaner feature set does not
-# compile. The 2→3 (or 4) upgrade is its own change.
-zip = { workspace = true }
 # The extension-grammar loader (ggs-text's grammar module): reading a `.tmLanguage` plist
 # (the JSON grammars go through serde_json directly).
 plist = { workspace = true }
 # Extension icons and README images cross the IPC bridge as base64 data URLs (cmd_ext).
 base64 = { workspace = true }
-# The `.gitignore`-aware parallel tree walk (ripgrep's) behind Quick Open, the Search view
-# and the symbol index (ggs-fs's walk) - uncapped, all cores.
-ignore = { workspace = true }
-# BLF log containers are zlib-compressed (ggs-can).
-flate2 = { workspace = true }
 # The .asc walker's newline scan (can_log.rs): SIMD-accelerated where std's byte-by-byte
 # `position` is not; already in the tree via the `ignore` crate, so it costs nothing.
 memchr = { workspace = true }
 # Remote Access (module 19, remote_host.rs): the local control channel to the GGS Remote
-# daemon — a named pipe (Windows) or a Unix socket, over Tauri's own tokio runtime — and its
-# MessagePack messages (the daemon keeps its own copy; shared test vectors align the two).
+# daemon — a named pipe (Windows) or a Unix socket, over Tauri's own tokio runtime.
 interprocess = { workspace = true }
-rmp-serde = { workspace = true }
-serde_bytes = { workspace = true }
 tokio = { workspace = true }
 # The file-system watcher behind "external changes show up by themselves" (watcher.rs).
 notify = { workspace = true }
@@ -271,6 +252,13 @@ objc2-app-kit = { workspace = true }
 ggs-testkit = { workspace = true }
 # The performance test's raw parallel read baseline (rayon is optional for the app itself).
 rayon = { workspace = true }
+# The zip_tree tests (cmd_fs) and the remote download tests (remote_host) read archives
+# back; the runtime side writes them through ggs-fs / ggs-ext's own zip dependency.
+# NOTE (docs/ci-speed-plan.md P3): dropping zopfli needs zip ≥ 3.0.0 — on the 2.x line
+# `deflate-flate2` does not activate zip's own optional flate2 dependency (only the
+# `deflate` umbrella's `flate2/rust_backend` does), so the leaner feature set does not
+# compile. The 2→3 (or 4) upgrade is its own change.
+zip = { workspace = true }
 # The test suites' scratch directories (can_log, cmd_search, cmd_analysis, measure's own
 # tests). The runtime code builds its own tiny scratch dir instead (measure.rs's
 # ScratchDir) — tempfile is test-only, so no binary linking the lib carries it

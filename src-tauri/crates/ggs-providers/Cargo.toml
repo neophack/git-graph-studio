@@ -23,7 +23,6 @@ serde_json.workspace = true
 aes-gcm.workspace = true
 getrandom.workspace = true
 base64.workspace = true
-hex.workspace = true
 # The gateway probes (Test Connection, Fetch Models) and their bounded timeouts.
 ureq = { workspace = true }
 
