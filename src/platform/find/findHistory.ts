@@ -6,7 +6,7 @@
 // workspace search keeps its own query, include and exclude histories — each persisted
 // through the state store.
 
-import { load, save } from './platform/state';
+import { load, save } from '../state';
 
 /** How many queries one history keeps. */
 const CAP = 50;

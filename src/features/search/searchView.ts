@@ -8,8 +8,8 @@
 import { Channel, invoke } from '../../platform/ipc/core';
 
 import * as state from '../../platform/state';
-import { queryHasUppercase } from '../../findOptions';
-import { FindHistory, HistoryRecall, recallKey } from '../../findHistory';
+import { queryHasUppercase } from '../../platform/find/findOptions';
+import { FindHistory, HistoryRecall, recallKey } from '../../platform/find/findHistory';
 import { settings } from '../../platform/settings';
 import { actionButton, basename, confirmDialog, dirname, el, icon, liveSidebarTitle, notify } from '../../platform/ui/index';
 

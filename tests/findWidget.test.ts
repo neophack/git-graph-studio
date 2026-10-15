@@ -8,8 +8,8 @@ import { EditorView } from '@codemirror/view';
 import { SearchQuery, openSearchPanel, setSearchQuery } from '@codemirror/search';
 
 import { countMatches, createFindPanel } from '../src/features/editor';
-import { findOptions } from '../src/findOptions';
-import { FindHistory, HistoryRecall } from '../src/findHistory';
+import { findOptions } from '../src/platform/find/findOptions';
+import { FindHistory, HistoryRecall } from '../src/platform/find/findHistory';
 import { settings } from '../src/platform/settings';
 import { search } from '@codemirror/search';
 import { click, key, texts, type } from './helpers';

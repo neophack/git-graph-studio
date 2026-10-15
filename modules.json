@@ -1,0 +1,330 @@
+{
+	"$comment": "The machine-readable module map (plan §6): every source file under src/, src-tauri/src/ and src-tauri/crates/*/src/ is covered by exactly ONE module's ts/rust lists — file entries win over directory prefixes — and every listed test exists. scripts/check-modules.mjs enforces it through check-seams; the module self-tests read their names and order from here.",
+	"modules": [
+		{
+			"id": 1,
+			"name": "Workbench Shell",
+			"mission": "The application frame and first-paint boot",
+			"ts": [
+				"src/main.ts",
+				"src/vite-env.d.ts",
+				"src/workbench/",
+				"src/platform/ui/",
+				"src/platform/state.ts",
+				"src/platform/lazy.ts",
+				"src/platform/markdown.ts",
+				"src/platform/fileIcons.ts",
+				"src/platform/extAssets.ts",
+				"src/platform/hooks.ts",
+				"src/platform/diagnostics.ts",
+				"src/platform/ipc/"
+			],
+			"rust": [
+				"src-tauri/src/main.rs",
+				"src-tauri/src/lib.rs",
+				"src-tauri/src/boot.rs",
+				"src-tauri/src/cli.rs",
+				"src-tauri/src/window.rs",
+				"src-tauri/src/state.rs",
+				"src-tauri/src/events.rs",
+				"src-tauri/src/cmd_app.rs",
+				"src-tauri/src/test_git_helpers.rs",
+				"src-tauri/src/test_isolated_store.rs",
+				"src-tauri/crates/ggs-base/",
+				"src-tauri/crates/ggs-codec/",
+				"src-tauri/crates/ggs-shellenv/"
+			],
+			"tests": [
+				"tests/workbenchParts.test.ts",
+				"tests/workbenchLifecycle.test.ts",
+				"tests/uiSweep.test.ts",
+				"tests/ui.test.ts",
+				"tests/uiHarness.test.ts"
+			]
+		},
+		{
+			"id": 2,
+			"name": "Command System",
+			"mission": "Commands, keybindings, settings, language, theme quality",
+			"ts": [
+				"src/platform/commands.ts",
+				"src/platform/keybindings.ts",
+				"src/platform/settings.ts",
+				"src/platform/i18n.ts",
+				"src/workbench/settingsPanel.ts",
+				"src/themeMetrics.ts",
+				"src/uiMetrics.ts"
+			],
+			"rust": [
+				"src-tauri/src/cmd_assoc.rs"
+			],
+			"tests": [
+				"tests/commandSweep.test.ts",
+				"tests/commands.test.ts",
+				"tests/assoc.test.ts",
+				"tests/themeContrast.themes.test.ts",
+				"tests/menuI18n.test.ts",
+				"tests/autosave.test.ts"
+			]
+		},
+		{
+			"id": 3,
+			"name": "File Explorer",
+			"mission": "The workspace tree and its filesystem services",
+			"ts": [
+				"src/features/explorer/"
+			],
+			"rust": [
+				"src-tauri/crates/ggs-fs/",
+				"src-tauri/src/cmd_fs.rs",
+				"src-tauri/src/watcher.rs"
+			],
+			"tests": [
+				"tests/explorer.test.ts",
+				"tests/transfer.test.ts"
+			]
+		},
+		{
+			"id": 4,
+			"name": "Quick Open",
+			"mission": "Fuzzy file go-to",
+			"ts": [
+				"src/features/quickOpen/"
+			],
+			"rust": [
+				"src-tauri/src/cmd_fuzzy.rs"
+			],
+			"tests": [
+				"tests/filePicker.test.ts"
+			]
+		},
+		{
+			"id": 5,
+			"name": "Workspace Search",
+			"mission": "Text search & replace, symbol navigation",
+			"ts": [
+				"src/features/search/"
+			],
+			"rust": [
+				"src-tauri/crates/ggs-index/",
+				"src-tauri/src/cmd_search.rs",
+				"src-tauri/src/cmd_symbols.rs"
+			],
+			"tests": [
+				"tests/searchView.test.ts",
+				"tests/symbolIndex.test.ts"
+			]
+		},
+		{
+			"id": 6,
+			"name": "Editor Suite",
+			"mission": "Text editing, completion, find, decorations",
+			"ts": [
+				"src/features/editor/",
+				"src/platform/find/"
+			],
+			"rust": [
+				"src-tauri/crates/ggs-text/",
+				"src-tauri/src/viewer_commands.rs"
+			],
+			"tests": [
+				"tests/editor.test.ts",
+				"tests/editorArea.test.ts",
+				"tests/editorServices.test.ts"
+			]
+		},
+		{
+			"id": 7,
+			"name": "Large-File Viewers",
+			"mission": "Million-line and binary viewing",
+			"ts": [
+				"src/features/viewers/",
+				"src/scroll/"
+			],
+			"rust": [],
+			"tests": [
+				"tests/fastView.test.ts",
+				"tests/hexView.test.ts"
+			]
+		},
+		{
+			"id": 8,
+			"name": "Compare & Merge",
+			"mission": "Folder sync, three-way merge, diffs",
+			"ts": [
+				"src/features/compare/"
+			],
+			"rust": [],
+			"tests": [
+				"tests/folderCompare.test.ts",
+				"tests/mergeEditor.test.ts",
+				"tests/diffStyles.test.ts"
+			]
+		},
+		{
+			"id": 9,
+			"name": "Source Control",
+			"mission": "Stage / commit / history / git commands",
+			"ts": [
+				"src/features/scm/"
+			],
+			"rust": [
+				"src-tauri/crates/ggs-git/",
+				"src-tauri/src/cmd_scm.rs"
+			],
+			"tests": [
+				"tests/scm.test.ts",
+				"tests/fileHistory.test.ts"
+			]
+		},
+		{
+			"id": 10,
+			"name": "Git Graph Engine",
+			"mission": "The graph view and the engine seam (an extension package — nothing of it lives in this tree)",
+			"ts": [],
+			"rust": [],
+			"tests": []
+		},
+		{
+			"id": 11,
+			"name": "Integrated Terminal",
+			"mission": "Shells inside the panel",
+			"ts": [
+				"src/features/terminal/"
+			],
+			"rust": [
+				"src-tauri/src/pty.rs"
+			],
+			"tests": []
+		},
+		{
+			"id": 12,
+			"name": "Extension Platform",
+			"mission": "VSIX installs and the extension host",
+			"ts": [
+				"src/features/extensions/",
+				"src/features/providers/",
+				"src/hosts/"
+			],
+			"rust": [
+				"src-tauri/crates/ggs-ext/",
+				"src-tauri/crates/ggs-proto/",
+				"src-tauri/crates/ggs-providers/",
+				"src-tauri/crates/ggs-node/",
+				"src-tauri/src/cmd_ext.rs",
+				"src-tauri/src/ext_process.rs",
+				"src-tauri/src/ext_child.rs",
+				"src-tauri/src/ext_gallery.rs",
+				"src-tauri/src/cmd_providers.rs"
+			],
+			"tests": [
+				"tests/extensions.test.ts",
+				"tests/providers.test.ts",
+				"tests/nodeHostEsm.test.ts",
+				"tests/claudeChatInject.test.ts"
+			]
+		},
+		{
+			"id": 13,
+			"name": "CAN Trace Analyzer",
+			"mission": "CANoe-style .blf / .asc analysis",
+			"ts": [
+				"src/features/can/"
+			],
+			"rust": [
+				"src-tauri/crates/ggs-can/",
+				"src-tauri/src/can_commands.rs"
+			],
+			"tests": [
+				"tests/canLog.test.ts"
+			]
+		},
+		{
+			"id": 14,
+			"name": "Performance Lab",
+			"mission": "Measurement, metrics, the perf gate and the module self-tests",
+			"ts": [
+				"src/features/selftest/"
+			],
+			"rust": [
+				"src-tauri/src/measure.rs",
+				"src-tauri/src/stage_bench.rs",
+				"src-tauri/crates/ggs-testkit/"
+			],
+			"tests": [
+				"tests/selfTest.test.ts"
+			]
+		},
+		{
+			"id": 15,
+			"name": "Build & Release Pipeline",
+			"mission": "Asset preparation, packaging, installers, CI",
+			"ts": [],
+			"rust": [],
+			"tests": [
+				"tests/marketplace.test.ts"
+			]
+		},
+		{
+			"id": 16,
+			"name": "Symbol MCP Server",
+			"mission": "The ggs --mcp AI bridge over the symbol index",
+			"ts": [
+				"src/features/mcp/"
+			],
+			"rust": [
+				"src-tauri/crates/ggs-mcp/",
+				"src-tauri/src/mcp.rs"
+			],
+			"tests": [
+				"tests/analysis.test.ts"
+			]
+		},
+		{
+			"id": 17,
+			"name": "Code Analysis",
+			"mission": "tree-sitter parsing and the five analysis tools",
+			"ts": [
+				"src/features/analysis/"
+			],
+			"rust": [
+				"src-tauri/crates/ggs-analysis/",
+				"src-tauri/src/cmd_analysis.rs"
+			],
+			"tests": [
+				"tests/analysis.test.ts"
+			]
+		},
+		{
+			"id": 18,
+			"name": "GGS Bash",
+			"mission": "The Windows-only bundled bash-like shell and the Terminal Shell setting",
+			"ts": [],
+			"rust": [
+				"src-tauri/crates/ggs-bash/"
+			],
+			"tests": [
+				"tests/ggsBash.test.ts"
+			]
+		},
+		{
+			"id": 19,
+			"name": "Remote Access",
+			"mission": "The tray daemon, the Hub relay and the browser workbench",
+			"ts": [
+				"src/remote/"
+			],
+			"rust": [
+				"src-tauri/src/remote_host.rs",
+				"src-tauri/crates/ggs-remote-proto/",
+				"src-tauri/crates/ggs-config/"
+			],
+			"tests": [
+				"tests/remote.test.ts",
+				"tests/remoteResponsive.test.ts",
+				"tests/remoteMirror.test.ts",
+				"tests/remoteWorkbenchSync.test.ts"
+			]
+		}
+	]
+}

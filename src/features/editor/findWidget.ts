@@ -19,8 +19,8 @@ import {
 } from '@codemirror/search';
 import type { EditorView, Panel, ViewUpdate } from '@codemirror/view';
 
-import { findOptions, queryHasUppercase, updateFindOption } from '../../findOptions';
-import { FindHistory, HistoryRecall, recallKey } from '../../findHistory';
+import { findOptions, queryHasUppercase, updateFindOption } from '../../platform/find/findOptions';
+import { FindHistory, HistoryRecall, recallKey } from '../../platform/find/findHistory';
 import { settings } from '../../platform/settings';
 import { t, tf } from '../../platform/i18n';
 import { el, icon } from '../../platform/ui/index';

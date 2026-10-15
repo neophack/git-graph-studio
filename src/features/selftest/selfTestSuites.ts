@@ -92,7 +92,26 @@ async function live(id: string): Promise<void> {
 	if (ran === false) throw new Error(`${id} is disabled or unknown`);
 }
 
+import modulesJson from '../../../modules.json' with { type: 'json' };
+
+/** The module map's names in id order (modules.json is the single source the report page
+ *  groups by; a suite registered out of it fails the dev-time assert below). */
+const MODULE_NAMES: string[] = modulesJson.modules.map((m: { id: number; name: string }) => m.name);
+
 /** Register every module's group, in module-map order. Called by the report page on mount. */
+/** The modules this file registers a group for, in registration (= module-map) order. The
+ *  assert fails the moment modules.json and the suites drift apart — the module list has
+ *  exactly one machine-readable source (plan §6 item 4). */
+const SUITE_ORDER = [
+	'Workbench Shell', 'Command System', 'File Explorer', 'Quick Open', 'Workspace Search',
+	'Editor Suite', 'Large-File Viewers', 'Compare & Merge', 'Source Control', 'Git Graph Engine',
+	'Integrated Terminal', 'Extension Platform', 'CAN Trace Analyzer', 'Performance Lab',
+	'Build & Release Pipeline', 'Symbol MCP Server', 'Code Analysis', 'GGS Bash'
+];
+if (JSON.stringify(SUITE_ORDER) !== JSON.stringify(MODULE_NAMES.slice(0, SUITE_ORDER.length))) {
+	throw new Error('selfTestSuites: the registered module groups no longer match modules.json');
+}
+
 export function registerSelfTestSuites(workbench: Workbench): void {
 	const editors = workbench.editors;
 

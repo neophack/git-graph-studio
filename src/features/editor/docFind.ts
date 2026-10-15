@@ -9,8 +9,8 @@
 
 import { invoke } from '../../platform/ipc/core';
 
-import { findOptions, queryHasUppercase, updateFindOption, type FindOptions } from '../../findOptions';
-import { FindHistory, HistoryRecall, recallKey } from '../../findHistory';
+import { findOptions, queryHasUppercase, updateFindOption, type FindOptions } from '../../platform/find/findOptions';
+import { FindHistory, HistoryRecall, recallKey } from '../../platform/find/findHistory';
 import { settings } from '../../platform/settings';
 import { t, tf } from '../../platform/i18n';
 import { el, icon } from '../../platform/ui/index';
