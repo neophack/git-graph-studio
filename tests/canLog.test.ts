@@ -915,6 +915,81 @@ describe('CAN log views', () => {
 		expect(backend.callsTo('can_log_stats').length).toBe(walks);
 	});
 
+	it('hovering a dashboard chart reads the values at the cursor: crosshair, dots, tooltip', async () => {
+		await openStats('C:\\logs\\hover.blf');
+		// jsdom lays nothing out; the hover layer maps the pointer through the svg's own
+		// rect, which the test fixes at the viewBox size so a clientX lands where it says.
+		const viewBoxRect = (height: number) => ({ left: 0, top: 0, width: 800, height, right: 800, bottom: height }) as DOMRect;
+		const hover = (selector: string, clientX: number, height = 200): SVGElement => {
+			const svg = document.querySelector(`${STATS_VIEW} ${selector}`)! as SVGElement;
+			svg.getBoundingClientRect = () => viewBoxRect(height);
+			svg.dispatchEvent(new MouseEvent('mousemove', { clientX, clientY: 100, bubbles: true }));
+			return svg;
+		};
+		const rowTexts = (host: Element): string[] => Array.from(host.querySelectorAll('.can-chart-tip-row')).map((r) => r.textContent!);
+
+		// x=400 of [0, 9] s is 4.23 s: the indicator SNAPS to the nearest sample x=4 (it
+		// steps between samples, ECharts-style) — the axis labels it, and each channel's
+		// dot sits on it: channel 1's covering bucket is [4, 5) s (1.1648 % at 500 k / 2 M),
+		// channel 2's is [0, 5) s (0.3744 %, the dot clamped into its window).
+		hover('.can-section-load svg.can-chart', 400);
+		const tip = document.querySelector(`${STATS_VIEW} .can-section-load .can-chart-tip`)!;
+		expect(tip.querySelector('.can-chart-tip-head')!.textContent).toBe('4.0 s');
+		expect(rowTexts(tip)).toEqual(['Channel 11.16 %', 'Channel 20.37 %']);
+		// The crosshair, the axis label and both dots meet at the snapped sample.
+		const snapPx = 56 + (4 / 9) * (800 - 12 - 56);
+		expect(Number(document.querySelector(`${STATS_VIEW} .can-section-load .can-chart-cross`)!.getAttribute('x1'))).toBeCloseTo(snapPx, 3);
+		expect(document.querySelector(`${STATS_VIEW} .can-section-load .can-chart-axislabel-text`)!.textContent).toBe('4.0 s');
+		const dots = document.querySelectorAll(`${STATS_VIEW} .can-section-load .can-chart-dot`);
+		expect(dots.length).toBe(2);
+		for (const dot of dots) expect(Number(dot.getAttribute('cx'))).toBeCloseTo(snapPx, 3);
+		// Leaving the chart clears the whole readout.
+		document.querySelector(`${STATS_VIEW} .can-section-load svg.can-chart`)!.dispatchEvent(new MouseEvent('mouseleave'));
+		expect(document.querySelector(`${STATS_VIEW} .can-section-load .can-chart-tip`)).toBeNull();
+		expect(document.querySelector(`${STATS_VIEW} .can-section-load .can-chart-axislabel`)).toBeNull();
+
+		// The rate chart reads the same buckets' frame rates.
+		hover('.can-section-rate svg.can-chart', 400, 160);
+		expect(rowTexts(document.querySelector(`${STATS_VIEW} .can-section-rate .can-chart-tip`)!)).toEqual(['Channel 1289 fr/s', 'Channel 250 fr/s']);
+
+		// The payload chart lights the length bin under the cursor, labels it on the axis
+		// and totals it: bin 8 holds 1000 of channel 1's frames and 500 of channel 2's.
+		hover('.can-section-payload svg.can-chart', 56 + 8 * (732 / 15) + 10, 170);
+		const payTip = document.querySelector(`${STATS_VIEW} .can-section-payload .can-chart-tip`)!;
+		expect(payTip.querySelector('.can-chart-tip-head')!.textContent).toBe('8 B');
+		expect(rowTexts(payTip)).toEqual([`Channel 1${(1_000).toLocaleString()}`, `Channel 2${(500).toLocaleString()}`, `Total${(1_500).toLocaleString()}`]);
+		expect(document.querySelector(`${STATS_VIEW} .can-section-payload .can-chart-col`)).not.toBeNull();
+		expect(document.querySelector(`${STATS_VIEW} .can-section-payload .can-chart-axislabel-text`)!.textContent).toBe('8 B');
+	});
+
+	it('hovering the analysis charts reads the cycle sample and the histogram bin', async () => {
+		await openStats('C:\\logs\\analysis-hover.blf');
+		click(document.querySelector(`${STATS_VIEW} .can-messages .can-table-row`));
+		await waitForReady(() => document.querySelectorAll('.can-analysis svg.can-chart').length === 2);
+		const [series, histogram] = Array.from(document.querySelectorAll('.can-analysis svg.can-chart')) as SVGElement[];
+
+		// x=642 of [0, 0.05] s is 0.0401 s: the indicator snaps to the 0.04 s sample - the
+		// interval the frame-loss check blames - so the tooltip carries its cycle and note,
+		// and the axis labels the snapped time.
+		series.getBoundingClientRect = () => ({ left: 0, top: 0, width: 800, height: 240, right: 800, bottom: 240 }) as DOMRect;
+		series.dispatchEvent(new MouseEvent('mousemove', { clientX: 642, clientY: 100, bubbles: true }));
+		const tip = document.querySelector('.can-analysis .can-chart-tip')!;
+		expect(tip.querySelector('.can-chart-tip-head')!.textContent).toBe('0.04 s');
+		expect(Array.from(tip.querySelectorAll('.can-chart-tip-row')).map((r) => r.textContent!)).toEqual(['cycle30 ms']);
+		expect(tip.querySelector('.can-chart-tip-note')!.textContent).toBe('missed frame');
+		expect(series.querySelector('.can-chart-axislabel-text')!.textContent).toBe('0.04 s');
+		series.dispatchEvent(new MouseEvent('mouseleave'));
+
+		// The histogram lights the bin under the cursor and labels its range on the axis:
+		// bin 0 counts 800 frames of 9.5-10 ms.
+		histogram.getBoundingClientRect = () => ({ left: 0, top: 0, width: 800, height: 200, right: 800, bottom: 200 }) as DOMRect;
+		histogram.dispatchEvent(new MouseEvent('mousemove', { clientX: 100, clientY: 100, bubbles: true }));
+		const histTip = document.querySelector('.can-analysis .can-chart-tip')!;
+		expect(histTip.querySelector('.can-chart-tip-head')!.textContent).toBe('9.5 – 10 ms');
+		expect(Array.from(histTip.querySelectorAll('.can-chart-tip-row')).map((r) => r.textContent!)).toEqual([`frames${(800).toLocaleString()}`]);
+		expect(histogram.querySelector('.can-chart-axislabel-text')!.textContent).toBe('9.5 – 10 ms');
+	});
+
 	it('the sashes resize the panes, persist the shares, and a double-click resets', async () => {
 		await openStats('C:\\logs\\panes.blf');
 		const left = document.querySelector(`${STATS_VIEW} .can-pane-left`) as HTMLElement;
@@ -934,10 +1009,15 @@ describe('CAN log views', () => {
 		expect(left.style.flexGrow).toBe('82');
 		expect(right.style.flexGrow).toBe('18');
 		expect(JSON.parse(localStorage.getItem('ggstudio.canStats.layout')!)).toEqual({ left: 82, top: 62 });
-		// Drag the horizontal sash up: the dashboard takes more height, capped.
-		drag(document.querySelector(`${STATS_VIEW} .can-sash.horizontal`)!, 300, 200);
+		// Drag the horizontal sash down: the dashboard above takes more height, capped
+		// (jsdom's zero-height parents clamp the share to the cap).
+		drag(document.querySelector(`${STATS_VIEW} .can-sash.horizontal`)!, 200, 300);
 		expect(top.style.flexGrow).toBe('85');
 		expect(messages.style.flexGrow).toBe('15');
+		// Dragging it back up hands the height to the messages table, capped at the floor.
+		drag(document.querySelector(`${STATS_VIEW} .can-sash.horizontal`)!, 300, 200);
+		expect(top.style.flexGrow).toBe('20');
+		expect(messages.style.flexGrow).toBe('80');
 		// A double-click resets the whole layout to the defaults (both shares) and saves them.
 		document.querySelector(`${STATS_VIEW} .can-sash.vertical`)!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
 		expect(left.style.flexGrow).toBe('34');

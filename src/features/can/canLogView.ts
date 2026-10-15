@@ -314,7 +314,7 @@ export class CanLogView {
 	/** A horizontal drag hands height to the dashboard over the messages table. */
 	private dragTop(sash: HTMLElement, delta: number): void {
 		const span = Math.max(1, sash.parentElement?.getBoundingClientRect().height ?? 0);
-		this.layout.top = Math.max(20, Math.min(85, this.layout.top - (delta / span) * 100));
+		this.layout.top = Math.max(20, Math.min(85, this.layout.top + (delta / span) * 100));
 		this.applyLayout();
 	}
 
@@ -503,7 +503,9 @@ export class CanLogView {
 		const seriesOf = (y: (b: LoadBucket, rates: { arb: number; data: number }) => number): ChartSeries[] => view.channels.map((c, i) => ({
 			name: `${t('can.channel')} ${c.channel}`,
 			cls: seriesStyle(i),
-			points: (profiles.get(c.channel)?.buckets ?? []).map((b) => ({ x: b.tS, y: y(b, this.ratesOf(c.channel)) }))
+			// xEnd carries the bucket's window, so a hover inside it reads this bucket —
+			// not whichever sample edge happens to sit nearer the cursor.
+			points: (profiles.get(c.channel)?.buckets ?? []).map((b) => ({ x: b.tS, xEnd: b.tS + b.durS, y: y(b, this.ratesOf(c.channel)) }))
 		}));
 		this.loadBody.replaceChildren(
 			multiLineChart(seriesOf((b, r) => busLoad(b.arbBits, b.dataBits, b.durS, r.arb, r.data)), { xUnit: 's', yUnit: '%', height: 200, fmtX: formatAxisSeconds })

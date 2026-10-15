@@ -1276,12 +1276,12 @@ body.resizing iframe { pointer-events: none; }
 .can-chart-line.can-series-3 { stroke: var(--vscode-charts-orange, #d18616); }
 .can-chart-line.can-series-4 { stroke: var(--vscode-charts-red, #f14c4c); }
 .can-chart-line.can-series-5 { stroke: var(--vscode-charts-purple, #b180d7); }
-.can-chart-bar.can-series-0, .can-swatch.can-series-0 { fill: var(--vscode-charts-blue, #3794ff); background: var(--vscode-charts-blue, #3794ff); }
-.can-chart-bar.can-series-1, .can-swatch.can-series-1 { fill: var(--vscode-charts-green, #89d185); background: var(--vscode-charts-green, #89d185); }
-.can-chart-bar.can-series-2, .can-swatch.can-series-2 { fill: var(--vscode-charts-yellow, #cca700); background: var(--vscode-charts-yellow, #cca700); }
-.can-chart-bar.can-series-3, .can-swatch.can-series-3 { fill: var(--vscode-charts-orange, #d18616); background: var(--vscode-charts-orange, #d18616); }
-.can-chart-bar.can-series-4, .can-swatch.can-series-4 { fill: var(--vscode-charts-red, #f14c4c); background: var(--vscode-charts-red, #f14c4c); }
-.can-chart-bar.can-series-5, .can-swatch.can-series-5 { fill: var(--vscode-charts-purple, #b180d7); background: var(--vscode-charts-purple, #b180d7); }
+.can-chart-bar.can-series-0, .can-chart-dot.can-series-0, .can-swatch.can-series-0 { fill: var(--vscode-charts-blue, #3794ff); background: var(--vscode-charts-blue, #3794ff); }
+.can-chart-bar.can-series-1, .can-chart-dot.can-series-1, .can-swatch.can-series-1 { fill: var(--vscode-charts-green, #89d185); background: var(--vscode-charts-green, #89d185); }
+.can-chart-bar.can-series-2, .can-chart-dot.can-series-2, .can-swatch.can-series-2 { fill: var(--vscode-charts-yellow, #cca700); background: var(--vscode-charts-yellow, #cca700); }
+.can-chart-bar.can-series-3, .can-chart-dot.can-series-3, .can-swatch.can-series-3 { fill: var(--vscode-charts-orange, #d18616); background: var(--vscode-charts-orange, #d18616); }
+.can-chart-bar.can-series-4, .can-chart-dot.can-series-4, .can-swatch.can-series-4 { fill: var(--vscode-charts-red, #f14c4c); background: var(--vscode-charts-red, #f14c4c); }
+.can-chart-bar.can-series-5, .can-chart-dot.can-series-5, .can-swatch.can-series-5 { fill: var(--vscode-charts-purple, #b180d7); background: var(--vscode-charts-purple, #b180d7); }
 
 /* The raw frame view a .blf / .asc opens in: a toolbar with a live progress chip, a thin
  * progress strip while the walk runs, and a virtual table whose scroller grows as the
@@ -1354,8 +1354,8 @@ body.resizing iframe { pointer-events: none; }
 .can-analysis .can-summary { margin-bottom: 8px; }
 .can-chart-block { display: flex; flex-direction: column; gap: 4px; }
 .can-chart-title { font-size: 12px; color: var(--vscode-descriptionForeground, #999); }
-.can-chart-wrap { width: 100%; }
-.can-chart { width: 100%; height: auto; display: block; }
+.can-chart-wrap { width: 100%; position: relative; }
+.can-chart { width: 100%; height: auto; display: block; cursor: crosshair; }
 .can-chart-axis, .can-chart-grid { stroke: var(--vscode-panel-border, #2b2b2b); stroke-width: 1; }
 .can-chart-grid { stroke-opacity: 0.4; }
 .can-chart-tick { fill: var(--vscode-descriptionForeground, #999); font-size: 10px; font-family: var(--vscode-ui-font-family, sans-serif); }
@@ -1363,6 +1363,26 @@ body.resizing iframe { pointer-events: none; }
 .can-chart-ref { stroke: var(--vscode-editorLineNumber-foreground, #999); stroke-width: 1; stroke-dasharray: 4 3; }
 .can-chart-missed { fill: var(--vscode-errorForeground, #f48771); }
 .can-chart-bar { fill: var(--vscode-charts-blue, #3794ff); fill-opacity: 0.7; }
+/* The measure cursor: the crosshair/dots/column the hover layer draws sit under the
+ * pointer, so they never trap its moves; the tooltip is HTML the wrap positions. */
+.can-chart-cross { stroke: var(--vscode-descriptionForeground, #999); stroke-width: 1; stroke-dasharray: 3 3; pointer-events: none; }
+.can-chart-col { fill: var(--vscode-list-hoverBackground, rgba(102, 175, 224, 0.14)); pointer-events: none; }
+.can-chart-axislabel rect { fill: var(--vscode-charts-blue, #3794ff); }
+.can-chart-axislabel-text { fill: #ffffff; font-size: 10px; font-family: var(--vscode-ui-font-family, sans-serif); font-weight: 600; }
+.can-chart-dot { fill: var(--vscode-charts-blue, #3794ff); stroke: var(--vscode-editor-background, #1e1e1e); stroke-width: 1.5; pointer-events: none; }
+.can-chart-tip {
+	position: absolute; z-index: 30; pointer-events: none; display: flex; flex-direction: column; gap: 2px;
+	max-width: 280px; padding: 5px 9px; border-radius: 3px; white-space: nowrap;
+	background: var(--vscode-editorHoverWidget-background, #2c2c2d);
+	border: 1px solid var(--vscode-editorHoverWidget-border, #454545);
+	color: var(--vscode-editorHoverWidget-foreground, #cccccc);
+	font-size: 11px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+.can-chart-tip-head { font-weight: 600; }
+.can-chart-tip-row { display: flex; align-items: center; gap: 6px; }
+.can-chart-tip-row .can-swatch { flex: none; }
+.can-chart-tip-row b { margin-left: auto; padding-left: 14px; font-weight: 600; }
+.can-chart-tip-note { color: var(--vscode-errorForeground, #f48771); }
 
 /* ---------- Code Analysis (module 17) ---------- */
 
