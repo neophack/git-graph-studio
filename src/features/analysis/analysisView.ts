@@ -3,7 +3,7 @@
 // index's state and its rebuild action. Kept light on purpose: it is part of the
 // first-paint bundle, so the pages themselves live in the lazy analysisPages chunk.
 
-import { invoke, Channel } from '../../platform/ipc/core';
+import { Channel } from '../../platform/ipc/core';
 
 import { onLocaleChange, t, tf } from '../../platform/i18n';
 import { ANALYSIS_TOOLS, type AnalysisToolId } from './analysisTools';

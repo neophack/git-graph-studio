@@ -2,14 +2,14 @@
 // codicon file/folder icons), git status decorations, the title actions (new file / new
 // folder / refresh / collapse all), inline new/rename inputs, and the context menu.
 
-import { copyInto, createFile, createFolder, deletePath, type DirEntryInfo, type DirPage, listDir, listDirPage, renamePath } from '../../platform/ipc/fs';
+import { copyInto, createFile, createFolder, deletePath, type DirEntryInfo, listDir, listDirPage, renamePath } from '../../platform/ipc/fs';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { fileIcon, fileIconColor } from '../../platform/fileIcons';
 import type { StatusMap } from '../../platform/ipc/scm';
 import { contextUri, menuSection, resourceContext } from '../extensions';
-import { t, tf } from '../../platform/i18n';
+import { tf } from '../../platform/i18n';
 import { transferMenuEntries, transferMenuShown } from './transfer';
 import { actionButton, basename, confirmDialog, el, icon, joinPath, liveSidebarTitle, notify, relativeTo, showContextMenu, toPosix, type MenuEntry } from '../../platform/ui/index';
 

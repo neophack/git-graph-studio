@@ -16,11 +16,11 @@ import { mcpTools } from '../../platform/ipc/mcp';
 import { workspaceSymbols } from '../../platform/ipc/search';
 
 import { commands } from '../../platform/commands';
-import { locale, t } from '../../platform/i18n';
+import { t } from '../../platform/i18n';
 import { scoreFile, makeQuery, type FileEntry } from '../quickOpen';
 import { ANALYSIS_TOOLS } from '../analysis';
 import { SETTING_DEFS } from '../../platform/settings';
-import { registerSelfTests, type SelfTestGroup } from './selftest';
+import { registerSelfTests } from './selftest';
 import type { Workbench } from '../../workbench';
 
 /** Titles in the registry are i18n keys (or already-literal strings): `t` answers both — an

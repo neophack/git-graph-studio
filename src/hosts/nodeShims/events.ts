@@ -1,12 +1,6 @@
 // The Node `events` builtin: EventEmitter with the once/off/emit semantics the
 // shimmed packages rely on.
 
-import type { NodeEnv } from '../extModuleLoader';
-import { makeChildProcess } from './processSurfaces';
-import { makeHttpLike, makeReadline, makeReadlinePromises } from './processSurfaces';
-import { Buffer, encodeString, isWindows, encoder, type ShimHost } from './shared';
-import { callThrowsFn, unavailableModule } from './shared';
-import { makeStreamModule } from './stream';
 
 export class EventEmitter {
 	static defaultMaxListeners = 10;

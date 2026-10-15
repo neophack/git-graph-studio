@@ -3,7 +3,7 @@
 // serve (lm, chat, tasks, tests, debug, scm, notebooks, authentication, l10n,
 // comments) — each accepted, logged once, and never throwing.
 
-import { CancellationTokenNone, Disposable, Event, silentEvent } from './types/events';
+import { CancellationTokenNone, Disposable, silentEvent } from './types/events';
 import { LanguageModelError } from './types/values';
 import { Location, Range } from './types/position';
 import { Uri } from './types/uri';

@@ -12,7 +12,7 @@
 // here belongs to the first-paint bundle.
 
 import { Channel } from '../../platform/ipc/core';
-import { analysisDeadCode, analysisImportGraph, type DeadCodeEvent, type DeadRow, analysisMetrics, type CallSiteRow, type FileDep, type MetricRow, type MetricsEvent, type ModuleEdge, type ModuleInfo, type ModuleDiagram, type ModuleGraphData, analysisModuleDiagram, analysisModuleGraph, analysisSecurity, type Finding, type ImportGraphData, type SecurityEvent } from '../../platform/ipc/analysis';
+import { analysisDeadCode, analysisImportGraph, type DeadCodeEvent, type DeadRow, analysisMetrics, type FileDep, type MetricRow, type MetricsEvent, type ModuleEdge, type ModuleDiagram, type ModuleGraphData, analysisModuleDiagram, analysisModuleGraph, analysisSecurity, type Finding, type ImportGraphData, type SecurityEvent } from '../../platform/ipc/analysis';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { t, tf } from '../../platform/i18n';

@@ -20,7 +20,7 @@
 // narrows the tables and charts to chosen identifiers and channels.
 
 import { Channel } from '../../platform/ipc/core';
-import type { CanChannelStats, CanIdStats, CanIntervals, CanLogStats, CanProgress, CycleBin, IntervalPoint, LoadBucket } from '../../platform/ipc/can';
+import type { CanChannelStats, CanIdStats, CanIntervals, CanLogStats, CanProgress, LoadBucket } from '../../platform/ipc/can';
 export type { CanChannelStats, CanIdStats, CanFrameFilter, CanIntervals, CanLogCount, CanLogStats, CanProgress, ChannelLoadProfile, ChannelPayloadDist, CycleBin, IntervalPoint, LoadBucket } from '../../platform/ipc/can';
 import { canIntervals, canLogStats, convertCanLog as convertCanLogCmd } from '../../platform/ipc/can';
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';

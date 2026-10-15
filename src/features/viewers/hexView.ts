@@ -25,10 +25,9 @@
 // end. A data inspector line under the rows reads the caret byte as u8..u64, floats
 // and text.
 
-import { patchFile, type FileChunk, readFileChunk } from '../../platform/ipc/fs';
+import { patchFile, readFileChunk } from '../../platform/ipc/fs';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { t, tf } from '../../platform/i18n';
-import { settings } from '../../platform/settings';
 import { attachWheel, type Disposable } from '../../scroll/input';
 import { ScrollModel } from '../../scroll/model';
 import { Scrollbar } from '../../scroll/scrollbar';

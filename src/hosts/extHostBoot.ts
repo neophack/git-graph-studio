@@ -13,7 +13,7 @@
 //   Call (host -> frame): running a command handler the extension registered, deactivate,
 //                         tree view walks, webview view resolutions.
 
-import { activationContext, createVscodeApi, Disposable, readLocalDocProvider, rehydrateUris, serveHostCall, setUriPlatform, shimLog, UNSERVED_HOST_CALL, Uri, type HostContext, type VscodeApi } from './vscodeApi';
+import { activationContext, createVscodeApi, readLocalDocProvider, rehydrateUris, serveHostCall, setUriPlatform, shimLog, UNSERVED_HOST_CALL, Uri, type HostContext, type VscodeApi } from './vscodeApi';
 import { probeVscodeNamespace } from './vscodeNamespaceProbe';
 import { setShimFailureReporter } from './nodeShims/shared';
 import { createNodeRequire, defaultNodeEnv, type NodeEnv } from './extModuleLoader';

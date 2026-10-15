@@ -12,7 +12,7 @@ import type { ThemeColor } from './types/values';
 import type { HostBridge } from './bridge';
 import { plainDecorationOptions } from './util';
 import { documentKey } from './documents';
-import { WebviewPanel, WebviewView } from './webviews';
+import { WebviewPanel } from './webviews';
 import type { TreeDataProvider } from './treeViews';
 import { inert, unsupported } from './inert';
 import { guarded, shimLog, shimLogOnce } from './shimLog';

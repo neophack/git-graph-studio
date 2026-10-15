@@ -1,12 +1,7 @@
 // The Node `os` builtin over the host facts (ShimHost): the errno table and the
 // platform surfaces.
 
-import type { NodeEnv } from '../extModuleLoader';
-import { makeChildProcess } from './processSurfaces';
-import { makeHttpLike, makeReadline, makeReadlinePromises } from './processSurfaces';
-import { Buffer, encodeString, isWindows, encoder, type ShimHost } from './shared';
-import { callThrowsFn, unavailableModule } from './shared';
-import { makeStreamModule } from './stream';
+import { type ShimHost } from './shared';
 
 export const ERRNO_TABLE: Record<string, number> = {
 	E2BIG: 7, EACCES: 13, EADDRINUSE: 98, EADDRNOTAVAIL: 99, EAFNOSUPPORT: 97, EAGAIN: 11,

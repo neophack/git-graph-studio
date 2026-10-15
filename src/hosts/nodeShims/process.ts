@@ -1,12 +1,8 @@
 // The Node `process` surface and the stdio streams over the host bridge
 // (the richer process halves live in processSurfaces.ts / shared.ts).
 
-import type { NodeEnv } from '../extModuleLoader';
-import { makeChildProcess } from './processSurfaces';
-import { makeHttpLike, makeReadline, makeReadlinePromises } from './processSurfaces';
-import { Buffer, encodeString, isWindows, encoder, type ShimHost } from './shared';
-import { callThrowsFn, unavailableModule } from './shared';
-import { makeStreamModule } from './stream';
+import { type ShimHost } from './shared';
+import { callThrowsFn } from './shared';
 import { EventEmitter } from './events';
 
 export function makeProcess(host: ShimHost): Record<string, unknown> {

@@ -1,12 +1,8 @@
 // The Node `crypto` subset the frame serves: the digests (md5/sha1/sha256) the
 // gravatar-class callers need, random fill and Hash — pure TypeScript.
 
-import type { NodeEnv } from '../extModuleLoader';
-import { makeChildProcess } from './processSurfaces';
-import { makeHttpLike, makeReadline, makeReadlinePromises } from './processSurfaces';
-import { Buffer, encodeString, isWindows, encoder, type ShimHost } from './shared';
-import { callThrowsFn, unavailableModule } from './shared';
-import { makeStreamModule } from './stream';
+import { Buffer, encodeString, encoder } from './shared';
+import { callThrowsFn } from './shared';
 
 export function bufferToBase64(data: unknown): string {
 	if (typeof data === 'string') {

@@ -5,12 +5,11 @@
 
 import { Disposable } from './types/events';
 import type { CancellationToken } from './types/events';
-import { Position, Range } from './types/position';
+import { Range } from './types/position';
 import { Uri, rehydrateUris } from './types/uri';
 import { plainSelector, serializeDiagnostic, watcherGlobMatches } from './util';
 import { documentKey } from './documents';
 import { inert, unsupported } from './inert';
-import { shimLog } from './shimLog';
 import type { ShimState } from './state';
 
 /** A document selector's score for a document — VS Code's rules: a string matches the

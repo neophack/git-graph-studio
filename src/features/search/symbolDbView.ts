@@ -4,7 +4,7 @@
 // tool, so what the page shows is exactly what an AI assistant is told.
 
 import { Channel } from '../../platform/ipc/core';
-import { symbolTree, symbolsRebuild, type SymbolIndexEvent } from '../../platform/ipc/symbols';
+import { symbolTree, symbolsRebuild } from '../../platform/ipc/symbols';
 
 import { t } from '../../platform/i18n';
 import { KIND_ICONS } from './contextView';

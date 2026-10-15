@@ -3,19 +3,18 @@
 // process internals and stream shapes live in shared.ts / processSurfaces.ts /
 // stream.ts (P5-2). A directory import resolves here, so consumers are unchanged.
 
-import type { NodeEnv } from '../extModuleLoader';
 import { makeChildProcess } from './processSurfaces';
 import { makeHttpLike, makeReadline, makeReadlinePromises } from './processSurfaces';
-import { Buffer, encodeString, isWindows, encoder, type ShimHost } from './shared';
+import { Buffer, type ShimHost } from './shared';
 import { callThrowsFn, unavailableModule } from './shared';
 import { makeStreamModule } from './stream';
-import { posixPath, win32Path, defaultPath } from './path';
+import { defaultPath } from './path';
 import { EventEmitter } from './events';
 import { utilShim, assert, querystring, StringDecoder, timers, urlShim } from './util';
 import { ERRNO_TABLE, makeOs } from './os';
 import { makeFs } from './fs';
 import { cryptoShim } from './crypto';
-import { makeProcess, makeStdio } from './process';
+import { makeProcess } from './process';
 
 export function createNodeBuiltins(host: ShimHost): Record<string, unknown> {
 	const path = defaultPath(host.nodeEnv.platform);

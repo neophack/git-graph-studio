@@ -5,7 +5,6 @@
 import type { SerializableDiagnostic } from '../../platform/diagnostics';
 import { Range } from './types/position';
 import { Uri, pathOf } from './types/uri';
-import { documentKey } from './documents';
 
 /** One watcher pattern against one base-relative path (forward slashes, `**` crossing
  *  segment boundaries, `*` / `?` within one) — the subset VS Code's glob patterns use. */

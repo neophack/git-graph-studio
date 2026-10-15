@@ -1,12 +1,8 @@
 // The Node `fs` builtin over the workspace-confined host bridge: dirent shaping,
 // path resolution and the callback/promise forms.
 
-import type { NodeEnv } from '../extModuleLoader';
-import { makeChildProcess } from './processSurfaces';
-import { makeHttpLike, makeReadline, makeReadlinePromises } from './processSurfaces';
-import { Buffer, encodeString, isWindows, encoder, type ShimHost } from './shared';
-import { callThrowsFn, unavailableModule } from './shared';
-import { makeStreamModule } from './stream';
+import { Buffer, encoder, type ShimHost } from './shared';
+import { callThrowsFn } from './shared';
 import { bufferToBase64, decodeBase64ToBuffer } from './crypto';
 
 export function extensionRelative(path: string, host: ShimHost): string | null {

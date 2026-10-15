@@ -2,12 +2,7 @@
 // `querystring`, `string_decoder` and `timers` — one file, each a table the
 // module map serves.
 
-import type { NodeEnv } from '../extModuleLoader';
-import { makeChildProcess } from './processSurfaces';
-import { makeHttpLike, makeReadline, makeReadlinePromises } from './processSurfaces';
-import { Buffer, encodeString, isWindows, encoder, type ShimHost } from './shared';
-import { callThrowsFn, unavailableModule } from './shared';
-import { makeStreamModule } from './stream';
+import { Buffer, isWindows } from './shared';
 
 function inspectValue(value: unknown, depth = 2): string {
 	if (typeof value === 'string') return depth === 2 ? `'${value}'` : value;

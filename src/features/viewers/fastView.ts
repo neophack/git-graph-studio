@@ -7,7 +7,7 @@
 // its lines arrive and colored by `viewer_highlight` a beat later; the outline pane fills
 // from `viewer_symbols` once the rows are up, so neither ever blocks the first paint.
 
-import { indexedClose, indexedLines, indexedOpen, viewerClose, viewerHighlight, viewerLines, viewerOpen, viewerSymbols, type ViewerLinesResult, type ViewerOpenInfo, type ViewerOutlineSymbol } from '../../platform/ipc/viewer';
+import { indexedClose, indexedLines, indexedOpen, viewerClose, viewerHighlight, viewerLines, viewerOpen, viewerSymbols, type ViewerOpenInfo, type ViewerOutlineSymbol } from '../../platform/ipc/viewer';
 import { listen, type UnlistenFn } from '../../platform/ipc/core';
 
 import { DocFindController, type DocFindHost, type DocFindMatch } from '../editor';

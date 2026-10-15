@@ -8,16 +8,7 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { notify, el, icon } from '../../platform/ui/index';
 import { t } from '../../platform/i18n';
-import {
-	registerSelfTests,
-	reportMarkdown,
-	runSelfTests,
-	selfTestGroups,
-	summarize,
-	type SelfTestGroup,
-	type SelfTestOutcome,
-	type SelfTestStatus
-} from './selftest';
+import { reportMarkdown, runSelfTests, selfTestGroups, summarize, type SelfTestGroup, type SelfTestOutcome, type SelfTestStatus } from './selftest';
 import { registerSelfTestSuites } from './selfTestSuites';
 import type { Workbench } from '../../workbench';
 

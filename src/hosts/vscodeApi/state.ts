@@ -7,7 +7,7 @@
 import type { HostBridge, HostContext, HostEvent, SerializableTextEdit } from './bridge';
 import { Position, Range, Selection } from './types/position';
 import { pathOf, Uri } from './types/uri';
-import { CancellationToken, Disposable, Event, EventEmitter } from './types/events';
+import { CancellationToken, Event, EventEmitter } from './types/events';
 import { EndOfLine, TextEditorCursorStyle, TextEditorLineNumbersStyle, TextEditorSelectionChangeKind, ViewColumn } from './types/enums';
 import { snippetPlainText, SnippetString } from './types/values';
 import { plainDecorationRanges } from './util';
