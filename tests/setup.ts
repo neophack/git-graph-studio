@@ -9,6 +9,17 @@ import { beforeEach, vi } from 'vitest';
 
 import { backend, Channel, clipboard, dialog, emit, invoke, listen, opener, windowApi, webviewApi } from './tauriMock';
 
+// The desktop's remote halves install exactly as main.ts installs them: the tests that boot
+// the workbench or the extension host run as the desktop window (a test that wants the
+// remote session's own set calls installRemoteSessionHooks itself, as boot.ts does). The
+// import stays behind the DOM guard — the workbench-sync half reaches the editor suite,
+// whose module graph touches `document` at load, and node-environment suites (the build
+// scripts) load this setup too.
+if (typeof document !== 'undefined') {
+	const { installDesktopRemoteHooks } = await import('../src/remote/desktopHooks');
+	installDesktopRemoteHooks();
+}
+
 vi.mock('@tauri-apps/api/core', () => ({ invoke, Channel }));
 vi.mock('@tauri-apps/api/event', () => ({ listen, emit }));
 vi.mock('@tauri-apps/api/window', () => windowApi);

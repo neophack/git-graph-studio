@@ -7,6 +7,7 @@ import '@vscode/codicons/dist/codicon.css';
 import './shell.css';
 import { invoke } from '@tauri-apps/api/core';
 import { initSettings, loadSettingsFile } from './platform/settings';
+import { installDesktopRemoteHooks } from './remote/desktopHooks';
 
 // The webview's own right-click menu is the host browser's chrome (back/refresh/save
 // as/print/inspect) - never something this desktop app wants surfaced. Views that offer
@@ -18,6 +19,10 @@ document.addEventListener('contextmenu', (event) => event.preventDefault());
 // window never flashes the default theme at the user. A hand-edited ~/.ggs/settings.json
 // wins over the stored settings (M3 3.9) - one read before the theme applies.
 void loadSettingsFile().then(() => initSettings());
+
+// The desktop's own remote-shaped halves (the mirror host, the asset protocol, the
+// workbench sync) install before the workbench loads — the composition root's wiring.
+installDesktopRemoteHooks();
 
 // Boot timing: report when the splash first paints, so the log shows how long the window
 // spent dark between process start and the first frame (the Rust side prints both stamps).

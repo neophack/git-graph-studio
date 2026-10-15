@@ -15,6 +15,7 @@ import { installScopedStorage } from './storage';
 import { dataSaverPreferred } from './dataSaver';
 import { showBanner } from './banner';
 import { installRemoteShell } from './shell';
+import { installRemoteSessionHooks } from './desktopHooks';
 import { isPhoneWidth, requestedMode, wantsOwnUi } from './mirror/uiMode';
 import './remote.css';
 
@@ -70,6 +71,9 @@ async function boot(): Promise<void> {
 	initResponsive();
 	installInternals();
 	watchNotices(transport);
+	// The shared modules' remote hooks install before the workbench loads (the session
+	// first of all — everything else may read it).
+	installRemoteSessionHooks();
 	status('Loading Git Graph Studio…');
 	await import('../main');
 	installRemoteShell();

@@ -7,20 +7,21 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { setRemoteEnv } from '../src/remote/session';
+import { provideHook } from '../src/platform/hooks';
+import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
 import { backend, Channel } from './tauriMock';
 import { flush, notifications } from './helpers';
 
-// The cached mirror-viewer answer is module state nothing here drives — the mock hands the
-// test the switch.
+// The cached mirror-viewer answer is host state nothing here drives — the platform hook is
+// overridden with the switch in hand (the seam the transfer layer reads now).
 const { mirrorRig } = vi.hoisted(() => ({ mirrorRig: { watching: false } }));
-vi.mock('../src/remote/mirror/hostStub', async (importOriginal) => {
-	const original = await importOriginal<typeof import('../src/remote/mirror/hostStub')>();
-	return {
-		...original,
-		mirrorViewersNow: () => mirrorRig.watching,
-		mirrorViewersActive: async () => mirrorRig.watching
-	};
+provideHook('mirror', {
+	install: () => () => undefined,
+	viewersActive: async () => mirrorRig.watching,
+	viewersNow: () => mirrorRig.watching
 });
+// The remote-session hooks (the wire transport above all), as boot.ts installs them.
+installRemoteSessionHooks();
 
 interface ProgressEvent {
 	name: string;

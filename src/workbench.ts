@@ -4,11 +4,6 @@
 // the folder lifecycle (open / reopen last / close) that feeds them all.
 
 import { invoke, Channel } from '@tauri-apps/api/core';
-import { startSummaryReporter } from './remote/summary';
-import { installMirrorHost, mirrorViewersActive } from './remote/mirror/hostStub';
-import { installWorkbenchSync } from './remote/workbenchSync';
-import { remoteEnv } from './remote/session';
-import { phoneShell } from './remote/nav';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -37,6 +32,7 @@ import { Panel } from './panel';
 import { SearchView } from './searchView';
 import { SourceControlView } from './scm';
 import { t, tf } from './platform/i18n';
+import { hook } from './platform/hooks';
 import { openSettingsPanel } from './settingsPanel';
 import { SETTINGS_EVENT, settings, THEME_EVENT, updateSetting } from './platform/settings';
 import * as state from './platform/state';
@@ -277,7 +273,7 @@ export class Workbench {
 		// other frontends of this instance (a phone running its own phone workbench while the
 		// PC keeps the desktop UI) as one tiny message, and theirs land here. Silent until
 		// boot() is through: the boot's own wiring is housekeeping, not a user operation.
-		this.workbenchSync = installWorkbenchSync(this);
+		this.workbenchSync = hook('workbenchSync')(this);
 		// The shell is up: the boot splash (index.html) has done its job of filling the
 		// window while this module graph was still loading and parsing.
 		document.getElementById('boot-splash')?.remove();
@@ -367,7 +363,7 @@ export class Workbench {
 		register({ id: 'editor.copy', title: 'Copy', category: 'Edit', keybinding: 'Ctrl+C', enabled: hasEditor, run: () => void document.execCommand('copy') });
 		// A browser forbids execCommand('paste'): the remote workbench reads the clipboard
 		// through the plugin (its shim falls back to a paste box) and inserts directly.
-		register({ id: 'editor.paste', title: 'Paste', category: 'Edit', keybinding: 'Ctrl+V', enabled: hasEditor, run: () => (remoteEnv() ? void this.editors.pasteFromClipboard() : void document.execCommand('paste')) });
+		register({ id: 'editor.paste', title: 'Paste', category: 'Edit', keybinding: 'Ctrl+V', enabled: hasEditor, run: () => (hook('session').remote() ? void this.editors.pasteFromClipboard() : void document.execCommand('paste')) });
 		register({ id: 'editor.find', title: 'Find', category: 'Edit', keybinding: 'Ctrl+F', enabled: hasEditor, run: () => this.editors.runEditorCommand('find') });
 		register({ id: 'editor.replace', title: 'Replace', category: 'Edit', keybinding: 'Ctrl+H', enabled: hasEditor, run: () => this.editors.runEditorCommand('replace') });
 		const hasCommentSurface = () => this.editors.activeView !== null || this.editors.activeInput !== null;
@@ -458,7 +454,7 @@ export class Workbench {
 			{ label: t('menu.file'), entries: (): MenuEntry[] => [
 				// A browser session spawns a PC-side window it cannot see — the remote's own
 				// New Window lives in its window switcher, so the desktop entry hides here.
-				...(remoteEnv() ? [] : [item('workbench.newWindow')]), item('workbench.newFile'), 'separator',
+				...(hook('session').remote() ? [] : [item('workbench.newWindow')]), item('workbench.newFile'), 'separator',
 				item('workbench.openFolder'), item('workbench.openFileStandalone'), item('workbench.openWorkspace'),
 				{ label: 'Open Recent', submenu: [
 					...state.recentFolders().map((folder) => ({ label: basename(folder), keybinding: folder, run: () => void this.openRecent(folder) })),
@@ -480,7 +476,7 @@ export class Workbench {
 			'separator', item('editor.toggleWordWrap'), 'separator', item('markdown.showPreview'), item('markdown.showPreviewToSide'), item('git.openFileHistory'), item('git.toggleBlame'), 'separator',
 				// The phone shell's CSS keeps one editor group on screen — the split/move
 				// layout commands are noise there (they stay on the desktop and tablet).
-				...(phoneShell() ? [] : [{ label: 'Editor Layout', submenu: [
+				...(hook('navigation').phoneShell() ? [] : [{ label: 'Editor Layout', submenu: [
 					item('workbench.splitEditor'), item('workbench.action.splitEditorOrthogonal'), 'separator',
 					item('workbench.action.splitEditorLeft'), item('workbench.action.splitEditorRight'), item('workbench.action.splitEditorUp'), item('workbench.action.splitEditorDown'), 'separator',
 					item('workbench.action.moveEditorToNextGroup'), item('workbench.action.moveEditorToPreviousGroup'),
@@ -503,10 +499,10 @@ export class Workbench {
 			{ label: t('menu.help'), entries: (): MenuEntry[] => [
 				item('help.welcome'),
 				// A phone has no keyboard to bind — the shortcuts page is a desktop read.
-				...(phoneShell() ? [] : [item('help.shortcuts')]),
+				...(hook('navigation').phoneShell() ? [] : [item('help.shortcuts')]),
 				item('help.selfTest'), ...((import.meta.env.DEV && !import.meta.env.VITEST) ? [item('help.devHarness')] : []), 'separator', item('help.repository'), 'separator',
 				// Opens the PC's own (hidden relay) devtools — invisible to a browser user.
-				...(remoteEnv() ? [] : [item('help.openDevTools')]),
+				...(hook('session').remote() ? [] : [item('help.openDevTools')]),
 				'separator', item('help.about')
 			] }
 		];
@@ -1232,7 +1228,7 @@ export class Workbench {
 			// watches this window, or the instance is a remote host, closing only hides it —
 			// the workbench, its terminals and the extension pages (a Claude Code turn in
 			// flight) keep running for the browser.
-			if (!remoteEnv() && (await this.keepRunningHidden())) {
+			if (!hook('session').remote() && (await this.keepRunningHidden())) {
 				event.preventDefault();
 				void invoke('remote_host_hide_main').catch(() => undefined);
 				return;
@@ -1254,7 +1250,7 @@ export class Workbench {
 		// routing of its own), so there a drop only opens, as it always has.
 		void getCurrentWebview().onDragDropEvent((event) => {
 			const payload = event.payload;
-			if (remoteEnv()) {
+			if (hook('session').remote()) {
 				if (payload.type === 'drop') for (const path of payload.paths) void this.editors.openFile(path);
 				return;
 			}
@@ -1277,16 +1273,18 @@ export class Workbench {
 		// macOS Finder's "Open With" handoff, once the backend knows this window has booted.
 		void listen<OpenedPaths>(OPEN_PATHS_EVENT, (event) => void this.onOpenPaths(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
 		// Remote Access (module 19): what this window shows, for the window picker's cards.
-		const stopSummary = startSummaryReporter({ tabs: () => this.editors.contentSummary(), scmChanges: () => this.scmChangeCount });
+		const stopSummary = hook('summaryReporter')({ tabs: () => this.editors.contentSummary(), scmChanges: () => this.scmChangeCount });
 		this.trackUnlisten(stopSummary);
 		// The replica host: remote browsers show this window's live copy (§22).
-		if (!remoteEnv()) this.trackUnlisten(installMirrorHost());
+		const mirror = hook('mirror');
+		if (!hook('session').remote() && mirror) this.trackUnlisten(mirror.install());
 	}
 
 	/** Whether closing the window should hide it instead: a remote browser is watching, or
 	 *  this instance runs as a remote host (`--remote-host`, no desktop of its own). */
 	private async keepRunningHidden(): Promise<boolean> {
-		if (await mirrorViewersActive()) return true;
+		const mirror = hook('mirror');
+		if (mirror && await mirror.viewersActive()) return true;
 		const status = await invoke<{ remoteHostOnly?: boolean }>('remote_host_status').catch(() => null);
 		return status?.remoteHostOnly === true;
 	}

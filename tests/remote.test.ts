@@ -33,6 +33,11 @@ import { scopedStorage } from '../src/remote/storage';
 import { withModifier } from '../src/remote/terminalKeys';
 import { switcherItems } from '../src/remote/windowSwitcher';
 import { setRemoteEnv } from '../src/remote/session';
+import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
+
+// The remote session's hooks, as boot.ts installs them before the workbench loads: the
+// session-aware modules below read them through platform/hooks lookups.
+installRemoteSessionHooks();
 import { windowedEditThreshold } from '../src/remote/openThreshold';
 import { precacheList } from '../src/remote/precache';
 

@@ -9,10 +9,10 @@ import { listen } from '@tauri-apps/api/event';
 
 import { ContextView } from './contextView';
 import { TerminalView } from './terminal';
-import { dismissFullScreenSideView, fullScreenSideViewOpen } from './remote/nav';
 import { t } from './platform/i18n';
 import { SETTINGS_EVENT } from './platform/settings';
 import { actionButton, el, icon } from './platform/ui';
+import { hook } from './platform/hooks';
 
 export type PanelViewId = 'terminal' | 'output' | 'context';
 
@@ -195,7 +195,7 @@ export class Panel {
 		this.element.hidden = false;
 		// The phone's page stack (src/remote/nav.ts): the panel opens beneath the full-screen
 		// side view — closing it is what makes "toggle the terminal" show the terminal.
-		dismissFullScreenSideView();
+		hook('navigation').dismissFullScreenSideView();
 		this.active = view;
 		this.render();
 		if (wasHidden) this.onVisibilityChange?.(true);
@@ -219,7 +219,7 @@ export class Panel {
 	toggle(view: PanelViewId = this.active): void {
 		// A visible panel the phone's full-screen side view covers was never seen: the toggle
 		// then reveals it (show closes the side view) instead of hiding it unseen.
-		if (this.isVisible() && this.active === view && !fullScreenSideViewOpen()) this.hide();
+		if (this.isVisible() && this.active === view && !hook('navigation').fullScreenSideViewOpen()) this.hide();
 		else this.show(view);
 	}
 

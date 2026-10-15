@@ -11,6 +11,7 @@
 // the reveals all go through the model — no scroll event is ever an input, except the
 // scroller's own moves (CodeMirror keeping the caret in view), which are read back into it.
 
+import { hook } from './platform/hooks';
 import { EditorState, StateEffect, StateField, Compartment } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, drawSelection, highlightActiveLine, highlightSpecialChars, keymap, lineNumbers } from '@codemirror/view';
 import { attachWheel, type Disposable } from './scroll/input';
@@ -21,7 +22,6 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { DocFindController, type DocFindHost, type DocFindMatch, type DocFindSpec } from './docFind';
 import { toggleBlockComment, toggleLineComment } from './comments';
-import { editLockDefault, registerEditLock } from './remote/editLock';
 import { vscodeHighlighting } from './cmTheme';
 import { el, notify } from './platform/ui';
 import { Channel, invoke } from '@tauri-apps/api/core';
@@ -239,7 +239,7 @@ export class EditableDocView {
 	private buildEditor(): void {
 		// The phone's read-only open applies here too (src/remote/editLock.ts): a windowed
 		// large file browses locked until the app bar's lock button reconfigures the slice editable.
-		const editLocked = editLockDefault();
+		const editLocked = hook('editLock').defaultLocked();
 		this.cm = new EditorView({			state: EditorState.create({
 				// Absolute line numbers: the gutter's own 1-based number plus the window's offset.
 				extensions: [
@@ -297,7 +297,7 @@ export class EditableDocView {
 		});
 		if (editLocked) {
 			const cm = this.cm;
-			registerEditLock(this.root, (locked) => cm.dispatch({ effects: docEditLockSlot.reconfigure(locked ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []) }), () => cm.focus());
+			hook('editLock').register(this.root, (locked) => cm.dispatch({ effects: docEditLockSlot.reconfigure(locked ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []) }), () => cm.focus());
 		}
 		this.lineHeight = this.cm.defaultLineHeight || 19;
 		this.scroll.setRowHeight(this.lineHeight);

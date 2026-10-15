@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Explorer } from '../src/explorer';
 import { setRemoteEnv } from '../src/remote/session';
+import { provideHook } from '../src/platform/hooks';
 import { basename } from '../src/platform/ui';
 import { backend } from './tauriMock';
 import { click, flush, key, menuItem, menuLabels, notificationButton, notifications, rightClick, texts, type } from './helpers';
@@ -9,16 +10,13 @@ import { click, flush, key, menuItem, menuLabels, notificationButton, notificati
 const ROOT = 'C:\\repo';
 
 // The Explorer's transfer rows hide while a mirror viewer watches this window: the cached
-// answer the real hostStub serves is module state nothing in this file drives, so the mock
-// hands the test the switch.
+// answer the real mirror bridge serves is host state nothing in this file drives, so the
+// platform hook is overridden with the switch in hand (the seam the workbench reads now).
 const { mirrorRig } = vi.hoisted(() => ({ mirrorRig: { watching: false } }));
-vi.mock('../src/remote/mirror/hostStub', async (importOriginal) => {
-	const original = await importOriginal<typeof import('../src/remote/mirror/hostStub')>();
-	return {
-		...original,
-		mirrorViewersNow: () => mirrorRig.watching,
-		mirrorViewersActive: async () => mirrorRig.watching
-	};
+provideHook('mirror', {
+	install: () => () => undefined,
+	viewersActive: async () => mirrorRig.watching,
+	viewersNow: () => mirrorRig.watching
 });
 function setMirrorViewers(watching: boolean): void {
 	mirrorRig.watching = watching;

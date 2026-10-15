@@ -20,6 +20,11 @@ import { THEMES, syncExtensionThemes, updateSetting } from '../src/platform/sett
 import '../src/extHostBoot';
 import { backend } from './tauriMock';
 import { setRemoteEnv } from '../src/remote/session';
+import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
+
+// The remote session's hooks, as boot.ts installs them before the workbench loads: the
+// session-aware modules below read them through platform/hooks lookups.
+installRemoteSessionHooks();
 import { saveExtSetting } from '../src/platform/state';
 import { click, flush, key, menuItem, menuLabels, notificationButton, notifications, rightClick, type } from './helpers';
 import { Explorer } from '../src/explorer';

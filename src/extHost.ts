@@ -16,10 +16,6 @@ import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { commands } from './platform/commands';
-import { assetUrl } from './remote/assetUrl';
-import { addressedHere, frontendClass, frontendId, remoteEnv } from './remote/session';
-import { panelStream, viewStream } from './remote/mirror/protocol';
-import { parseStream, setWebviewFrameSource } from './remote/mirror/webviewFrames';
 import { applyContributions, applyExtensionSettings, declaredCommand, extensionSettingDefs, extensionThemeList, extensionViewContributions, languageIdFor, localize, registerContextProvider, registerExtensionSnippets, registerExtensionThemes, removeContributions, type ExtensionThemeDef, type ManifestContributes } from './contributions';
 import { describeDetail, extLog, extLogEnabled, extLogLevel, extLogOnce, flushExtLog, levelForConsole, setExtLogOutput, type ExtLogLevel } from './extLog';
 import { defaultNodeEnv, type NodeEnv } from './extModuleLoader';
@@ -30,6 +26,7 @@ import { locale, registerZhCnText, t, tf } from './platform/i18n';
 import * as state from './platform/state';
 import { notify, progressToast, quickInput, type ProgressToast } from './platform/ui';
 import { extFileDataUrl, forgetExtDataUrls, imageMime } from './platform/extAssets';
+import { hook } from './platform/hooks';
 import type { SerializedTreeItem } from './treeView';
 import { answerChatPermission, answerChatQuestion, chatBusy, chatControls, interruptChat, pickChatModel, pressSend, setChatInput, setChatPermissionMode, type ChatAnswer } from './claudeChatInject';
 
@@ -216,7 +213,7 @@ interface PageFrameHandle {
  *  separator is appended after the conversion, never inside it. */
 export function extAssetBase(ext: ExtInfo | undefined): string {
 	const dirName = ext?.path.split(/[\\/]/).pop() ?? '';
-	return assetUrl(dirName, 'ggs') + '/';
+	return hook('assetUrl')(dirName, 'ggs') + '/';
 }
 
 /** The `ggs://` URL of a file inside an installed package, the way the pages' iframes load
@@ -236,8 +233,8 @@ export function extAssetUrl(ext: ExtInfo | undefined, rel: string): string {
 function extHostFrameUrl(): string {
 	// A remote workbench always takes the package path: its frame document is the instance's
 	// own, served by the daemon under the session's resource token (§12.2).
-	if (!import.meta.env.PROD && !remoteEnv()) return '/ext-host.html';
-	return assetUrl('ext-host.html', 'ggs');
+	if (!import.meta.env.PROD && !hook('session').remote()) return '/ext-host.html';
+	return hook('assetUrl')('ext-host.html', 'ggs');
 }
 
 interface FrameHandle {
@@ -506,7 +503,7 @@ const FOREIGN_ASSET_ROOT = /ggs:\/\/localhost\/|https?:\/\/ggs\.localhost\/|http
  *  page cannot load `ggs://`, and one user's page must never load through another user's
  *  token (the token is that session's credential). */
 export function localizeAssetRoots(html: string): string {
-	const own = assetUrl('', 'ggs');
+	const own = hook('assetUrl')('', 'ggs');
 	return html.replace(FOREIGN_ASSET_ROOT, () => own);
 }
 
@@ -882,7 +879,7 @@ export class ExtensionHost {
 		// activation (its commands, its `setContext` keys, its view providers) landed there.
 		// The backend keeps them (`ext_process_registrations`); replayed here, the page shows
 		// the same entries — the Claude Code container, the Git Graph button.
-		if (frontendClass() === 'remote') await this.replayRegistrations(extId);
+		if (hook('session').frontendClass() === 'remote') await this.replayRegistrations(extId);
 	}
 
 	/** Apply a backend's registration journal (see `ensureNodeHost`), in order. */
@@ -933,7 +930,7 @@ export class ExtensionHost {
 	 *  live in the desktop window (ext_routing.rs), one live page per instance, so a
 	 *  conversation asked on either side streams on both. */
 	private sharesWebviews(extId: string): boolean {
-		return frontendClass() === 'remote' && this.backendHosted(extId);
+		return hook('session').frontendClass() === 'remote' && this.backendHosted(extId);
 	}
 
 	/** The panel copies mounted in this page, by panel key. */
@@ -941,22 +938,14 @@ export class ExtensionHost {
 
 	/** Mount the live copy of the desktop window's frame for a stream into a pane. */
 	private mountWebviewCopy(container: HTMLElement, stream: string): () => void {
-		let dispose: (() => void) | null = null;
-		let gone = false;
-		void import('./remote/mirror/webviewCopy')
-			.then(({ mountWebviewCopy }) => {
-				if (!gone) dispose = mountWebviewCopy(container, stream);
-			})
-			.catch((error) => extLog('warn', 'host', `webview copy ${stream}: ${String(error)}`));
-		return () => {
-			gone = true;
-			dispose?.();
-		};
+		const bridge = hook('webviewStreams');
+		if (!bridge) return () => undefined;
+		return bridge.mountCopy(container, stream);
 	}
 
 	/** The desktop window's frame for a stream (the replica host reads it). */
 	private webviewFrameFor(stream: string): HTMLIFrameElement | null {
-		const parsed = parseStream(stream);
+		const parsed = hook('webviewStreams')?.parseStream(stream) ?? null;
 		if (!parsed) return null;
 		if ('view' in parsed) return this.webviewViews.get(parsed.view)?.frame ?? null;
 		return this.webviews.get(this.webviewKey(parsed.extId, parsed.panelId))?.frame ?? null;
@@ -965,7 +954,7 @@ export class ExtensionHost {
 	/** A remote page watches a webview view the desktop has not shown yet: resolve it now,
 	 *  exactly as its first visibility would. */
 	private ensureWebviewShown(stream: string): void {
-		const parsed = parseStream(stream);
+		const parsed = hook('webviewStreams')?.parseStream(stream) ?? null;
 		if (parsed && 'view' in parsed && !this.resolvedWebviewViews.has(parsed.view)) this.noteViewVisible(parsed.view, true);
 	}
 
@@ -990,7 +979,7 @@ export class ExtensionHost {
 			// One instance, several frontends (the desktop window, remote sessions): each
 			// request is addressed to one of them, and only that one answers it
 			// (docs/ggs-remote-plan.md §8.6 #1).
-			if (frontend && !addressedHere(frontend)) return;
+			if (frontend && !hook('session').addressedHere(frontend)) return;
 			const handle = this.frames.get(extId) ?? this.remoteHandle(extId);
 			this.frames.set(extId, handle);
 			const respond = (ok: boolean, result: unknown) => {
@@ -1007,13 +996,13 @@ export class ExtensionHost {
 		// is gated on a `setContext` key, and a frontend that missed it never shows the entry.
 		void listen<{ extId: string; method: string; args: unknown[]; served?: string; caller?: string | null }>(HOST_STATE_EVENT, (event) => {
 			const { extId, method, args, served } = event.payload;
-			if (served === frontendId()) return;
+			if (served === hook('session').frontendId()) return;
 			this.applyMirroredState(extId, method, args ?? []);
 		}).catch((error) => extLog('warn', 'host', `the extension-host state channel is unavailable: ${String(error)}`));
 		// The desktop window is where every backend extension's webviews live (ext_routing.rs):
 		// it tells the replica host which frame a remote page's copy reads (§22.6).
-		if (frontendClass() === 'main') {
-			setWebviewFrameSource({
+		if (hook('session').frontendClass() === 'main') {
+			hook('webviewStreams')?.setWebviewFrameSource({
 				frameFor: (stream) => this.webviewFrameFor(stream),
 				ensure: (stream) => this.ensureWebviewShown(stream)
 			});
@@ -1279,7 +1268,7 @@ export class ExtensionHost {
 		await Promise.all(toActivate.map((ext) => (this.backendHosted(ext.id) ? this.ensureActive(ext.id) : this.activate(ext))));
 		// A remote page also mirrors the lazy backend packages the desktop window already
 		// woke (their activation ran there): an empty journal means nothing runs yet.
-		if (frontendClass() === 'remote') {
+		if (hook('session').frontendClass() === 'remote') {
 			const lazy = installed.filter((ext) => this.backendHosted(ext.id) && !toActivate.includes(ext));
 			await Promise.all(lazy.map((ext) => this.replayRegistrations(ext.id)));
 		}
@@ -1851,7 +1840,7 @@ export class ExtensionHost {
 			// extension's next reveal of the panel opens the copy again.
 			const key = this.webviewKey(extId, panelId);
 			this.webviewCopies.add(key);
-			const dispose = this.mountWebviewCopy(container, panelStream(extId, panelId));
+			const dispose = this.mountWebviewCopy(container, hook('webviewStreams')!.panelStream(extId, panelId));
 			return () => {
 				this.webviewCopies.delete(key);
 				dispose();
@@ -1914,7 +1903,7 @@ export class ExtensionHost {
 	 *  resolve, which the first visibility triggers) applies here. */
 	mountWebviewView(viewId: string, extId: string, container: HTMLElement): () => void {
 		// A remote page shows the desktop window's live page of the view (§22.6).
-		if (this.sharesWebviews(extId)) return this.mountWebviewCopy(container, viewStream(viewId));
+		if (this.sharesWebviews(extId)) return this.mountWebviewCopy(container, hook('webviewStreams')!.viewStream(viewId));
 		const record = this.webviewViews.get(viewId) ?? { extId, html: '', frame: null, pending: [], loaded: false, painted: null, loadGrace: null, firstPaintTimer: null };
 		this.webviewViews.set(viewId, record);
 		const frame = document.createElement('iframe');

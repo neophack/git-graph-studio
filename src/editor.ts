@@ -35,10 +35,8 @@ import { t, trText } from './platform/i18n';
 import { SETTINGS_EVENT, settings } from './platform/settings';
 import { basename, dirname, el, icon, joinPath, notify, quickPick, relativeTo, showContextMenu, showMenuBelow, toPosix, type MenuEntry } from './platform/ui';
 import { fileIcon, fileIconColor, isCanLog, isCodeExtension } from './platform/fileIcons';
+import { hook } from './platform/hooks';
 import type { DiffSide, EditorPlacement } from './features/editor/types';
-import { editLockDefault, registerEditLock } from './remote/editLock';
-import { revealEditorPage } from './remote/nav';
-import { windowedEditThreshold } from './remote/openThreshold';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 /** The text editor module once it has been loaded (`textEditor()`): CodeMirror lives in an
@@ -637,7 +635,7 @@ export class EditorGroup {
 		// rope backend refuses — both still offer the whole-file editor through the view's
 		// Edit button, and only when every editable surface refuses does the plain
 		// read-and-mount path below take over.
-		if (probe !== null && probe.size > windowedEditThreshold(WINDOWED_EDIT_BYTES)) {
+		if (probe !== null && probe.size > hook('openThreshold')(WINDOWED_EDIT_BYTES)) {
 			const offerWholeEditor = () => void this.swapFastToWholeEditor(editor);
 			if (!probe.longLines && (await this.tryMountDocEdit(editor))) {
 				const showNow = show();
@@ -837,7 +835,7 @@ export class EditorGroup {
 		// A minified one (few enormous lines) or a document the rope backend refuses opens
 		// in the indexed fast viewer instead, still offering the whole-file editor through
 		// its Edit button.
-		if (probe !== null && probe.size > windowedEditThreshold(WINDOWED_EDIT_BYTES)) {
+		if (probe !== null && probe.size > hook('openThreshold')(WINDOWED_EDIT_BYTES)) {
 			if (!probe.longLines && (await this.tryMountDocEdit(editor, wrap))) return;
 			if (await this.tryMountFastView(editor, wrap, true, () => void this.swapFastToWholeEditor(editor))) {
 				if (!probe.longLines) notify('info', t('viewer.readOnlyFallback') + basename(path));
@@ -1459,7 +1457,7 @@ export class EditorGroup {
 		// A phone's remote workbench opens files locked: the app bar's lock button toggles
 		// the edit grant (src/remote/editLock.ts). Everywhere else this is false and
 		// the editor is born editable as always.
-		const editLocked = editLockDefault();
+		const editLocked = hook('editLock').defaultLocked();
 		editor.languageName = 'Plain Text';
 		editor.view = new EditorView({
 			state: EditorState.create({
@@ -1504,7 +1502,7 @@ export class EditorGroup {
 		editor.savedDoc = editor.view.state.doc;
 		editor.savedEol = editor.eol;
 		editor.savedEncoding = editor.encoding;
-		if (editLocked) registerEditLock(parent, (locked) => editor.view?.dispatch({ effects: editLockSlot.reconfigure(locked ? editLockedExtensions() : []) }), () => editor.view?.focus());
+		if (editLocked) hook('editLock').register(parent, (locked) => editor.view?.dispatch({ effects: editLockSlot.reconfigure(locked ? editLockedExtensions() : []) }), () => editor.view?.focus());
 		// The language loads asynchronously: by the time it arrives the editor may have been
 		// remounted (a reopen with encoding rebuilds the view), so reconfigure the view that
 		// was built here, and only while it is still the editor's current one.
@@ -2235,7 +2233,7 @@ export class EditorGroup {
 		// side view (or the full-screen terminal page) navigates to it — tapping a file in the
 		// explorer is "open this file", and with one column the file only becomes visible once
 		// the page above it closes.
-		revealEditorPage();
+		hook('navigation').revealEditorPage();
 		const mruIndex = this.mru.indexOf(editor);
 		if (mruIndex !== -1) this.mru.splice(mruIndex, 1);
 		this.mru.unshift(editor);

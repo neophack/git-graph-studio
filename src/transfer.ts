@@ -11,8 +11,7 @@ import { invoke, Channel } from '@tauri-apps/api/core';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 
 import { t, tf } from './platform/i18n';
-import { remoteEnv } from './remote/session';
-import { mirrorViewersNow } from './remote/mirror/hostStub';
+import { hook } from './platform/hooks';
 import { basename, notify, progressToast, type MenuEntry } from './platform/ui';
 
 /** One progress report of a desktop transfer (`fs_export` / `fs_import`). */
@@ -100,10 +99,10 @@ function normalizeReport(report: TransferReport | null): TransferReport {
  *  notified — the one upload entry every environment runs. Resolves with the paths that
  *  landed. */
 export async function uploadInto(dir: string, folder = false): Promise<string[]> {
-	if (remoteEnv()) {
+	if (hook('session').remote()) {
 		const toast = new TransferToast((label) => tf('transfer.uploading', label));
-		const remote = await import('./remote/transfer');
-		const outcome = await remote.uploadFiles(dir, folder, (p, index, count) => {
+		const wire = await hook('transferWire')!();
+		const outcome = await wire.uploadFiles(dir, folder, (p, index, count) => {
 			const label = count > 1 ? `${index + 1}/${count} ${p.name}` : p.name;
 			toast.tick({ label, percent: p.total > 0 ? Math.round(((index + p.sent / p.total) / count) * 100) : null });
 		});
@@ -135,10 +134,10 @@ export async function uploadInto(dir: string, folder = false): Promise<string[]>
 /** Download a file or a folder (zipped by the backend) to the user's chosen destination —
  *  the one download entry every environment runs. Resolves whether the download ran. */
 export async function downloadTo(path: string, zip = false): Promise<boolean> {
-	if (remoteEnv()) {
-		const remote = await import('./remote/transfer');
+	if (hook('session').remote()) {
+		const wire = await hook('transferWire')!();
 		try {
-			await remote.download(path, zip);
+			await wire.download(path, zip);
 			return true;
 		} catch (error) {
 			sink.error(tf('transfer.failed', String(error)));
@@ -187,6 +186,6 @@ export function transferMenuEntries(path: string, isDir: boolean): MenuEntry[] {
  *  device-run rows are the transfer vocabulary then (a PC-run row would open a native
  *  dialog the phone cannot see), and they return the moment the viewer leaves. */
 export function transferMenuShown(): boolean {
-	if (remoteEnv()) return true;
-	return !mirrorViewersNow();
+	if (hook('session').remote()) return true;
+	return !(hook('mirror')?.viewersNow() ?? false);
 }

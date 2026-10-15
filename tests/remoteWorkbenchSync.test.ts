@@ -21,6 +21,11 @@ import { Workbench } from '../src/workbench';
 import { commands } from '../src/platform/commands';
 import { attachWorkbenchSync, WORKBENCH_SYNC_EVENT, type SyncedEditorArea, type SyncedWorkbench, type WorkbenchSyncMessage } from '../src/remote/workbenchSync';
 import { setRemoteEnv } from '../src/remote/session';
+import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
+
+// The remote session's hooks, as boot.ts installs them before the workbench loads: the
+// session-aware surfaces below read them through platform/hooks lookups.
+installRemoteSessionHooks();
 import { backend, emit as mockEmit, listen as mockListen } from './tauriMock';
 import { click, flush, until } from './helpers';
 

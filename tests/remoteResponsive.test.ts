@@ -3,7 +3,12 @@
 // its app bar, bottom navigation, drawer, open editors sheet and editing row, long-press as
 // contextmenu, the terminal key row, the page stack and the edit lock.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
 import { formFactorFor, initResponsive, formFactor } from '../src/remote/responsive';
+
+// The remote session's hooks, as boot.ts installs them: the editor suite's phone surfaces
+// (the edit lock, the page-stack navigation) read them through platform/hooks lookups.
+installRemoteSessionHooks();
 import { installActionSheet, closeActionSheet, showActionSheet } from '../src/remote/actionSheet';
 import { createBottomTabs } from '../src/remote/bottomTabs';
 import { createAppBar, pageHeading, relativeFolder } from '../src/remote/appBar';
