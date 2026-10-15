@@ -151,7 +151,11 @@ guarantees the window is never a blank dark rectangle.
   `src/workbench/titlebar.ts`, `src/workbench/statusbar.ts`, `src/workbench/panel.ts` (panel chrome; its Output view is
   the Git channel), `src/platform/ui/` (shared DOM kit: dom, codicon, notify, progress,
   contextMenu, quickInput under one facade — codicons, notifications, context menus, quick
-  input), `src/platform/fileIcons.ts` / `src/platform/extAssets.ts` (the file-icon mapping and
+  input), `src/platform/ipc/` (the typed IPC seam: one file per backend domain —
+  `core.ts` is the only door to `@tauri-apps/api`, the domain files' function signatures
+  are the contract `tests/ipcContract.test.ts` and `scripts/check-ipc.mjs` hold against
+  the backend's registration; the shared result shapes — StatusMap, FileContents,
+  WsSymbol, ExtInfo, CanLogStats... — live there once), `src/platform/fileIcons.ts` / `src/platform/extAssets.ts` (the file-icon mapping and
   extension-asset data URLs every view decorates with), `src/platform/lazy.ts` (async-chunk
   loaders), `src/platform/state.ts` (localStorage
   persistence), `src/workbench/shell.css`

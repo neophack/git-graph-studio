@@ -58,6 +58,7 @@
 | P5-2 解环（fileIcons/extAssets 入 platform；DiffSide/EditorPlacement/DiffRequest→features/editor/types、BlameLine→features/scm/types、StatusMap→platform/ipc/scm、AnalysisPageView→features/analysis/types；Buffer/ShimHost 入 nodeShims/shared）——Tarjan 0 个 SCC，14 条 R5 删 | ✅ | `5bf7316` |
 | P5-3 platform/hooks + remote/desktopHooks（main.ts 装桌面半边、boot.ts 装会话全套；extHost/editor/panel/transfer/workbench 的 16 处静态与 2 处动态 remote import 全部反转；16+2 条 R3/R4 删） | ✅ | `a391b1f` |
 | P5-4 地基（platform/ipc/core 单门；46 个文件的 @tauri-apps/api 直连全改道；R6 清零，**豁免清单归零**）。按领域的类型化封装为后续独立 PR | ✅ | `3c7c2ec` |
+| P5-4 后半（按领域的类型化封装：app/settings/assoc、fs、revision/scm、search/symbols/fuzzy、viewer/can、analysis/mcp、ext/extProcess/extChild/gallery、providers/pty/remote 共 19 个领域文件,8 个提交；函数签名即契约,结果形状沉到 seam 单一出处（DirEntryInfo/FileContents/WsSymbol/ExtInfo/CanLogStats/...）,门面再导出保持消费方路径;scm/extHost 的按名分发与 remote shim 自身的基础设施保留原生 invoke;`tests/ipcContract.test.ts` 以 Rust 注册表为对照逐 wrapper 调用） | ✅ | `f3ebdc1`–`5ff9016` |
 | P5-5/6/7 目录归位（14 个 features/ 模块 + index/types 门面、workbench/、hosts/ 含 nodeShims 整目录；诊断存储翻转到 extensions 模块、视图类型下沉 types.ts 后环保持为零；入口与构建脚本同步） | ✅ | `2b006e6` |
 | P5-8..12 拆大文件（vscodeApi/extHost/editor/workbench/scm/nodeShims/i18n） | ⬜ | 未开始 |
 | P5-13 豁免清单清零 | ✅ | `3c7c2ec` 达成（清单自 P5-4 起为空） |
@@ -83,8 +84,10 @@ P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现
   的运行时边会拖进 editor 的 DOM 代码）；explorer/transfer 的 hostStub `vi.mock` 改为
   `provideHook` 拨杆；`tests/hooks.test.ts` 钉注册表契约。
 - **P5-4 的两半**：单门（ipc/core 的 re-export + 46 文件改道）已落地，R6 清零；
-  按领域的类型化封装（函数签名即契约 + tests/ipcContract.test.ts）未开始——
-  check-ipc.mjs 已内置 platform/ipc 优先，封装落地时自动收敛。
+  按领域的类型化封装（函数签名即契约 + tests/ipcContract.test.ts）也已落地——
+  附录 C 的每个领域一个 `platform/ipc/<domain>.ts`，字面量 invoke 只剩 remote
+  shim 自身、两个经 shim 驱动的 remote 文件、以及 scm/extHost 的按名分发
+  （变量命令，本就非字面量）。check-ipc.mjs 保持全 src/ 扫描。
 - **目录归位的三处形状决定**：跨模块导入指向门面目录（R2）；视图类以
   `export type X = import('./impl').X` 别名沉入各 types.ts（类型边不进静态图）；
   诊断存储（editorDiagnostics.ts）从 editor 模块翻转到 extensions 模块——AGENTS.md
