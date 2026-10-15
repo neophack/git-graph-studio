@@ -17,6 +17,7 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { t, tf } from './platform/i18n';
 import { KIND_ICONS } from './contextView';
 import { analysisTool, type AnalysisToolId } from './analysisTools';
+import type { AnalysisPageView } from './features/analysis/types';
 import { McpPage } from './mcpPage';
 import { DiagramView, moduleLabel, moduleOf, type ModuleDiagram } from './moduleDiagram';
 import { actionButton, basename, el, icon, showContextMenu, type MenuEntry } from './platform/ui';
@@ -59,11 +60,6 @@ interface ModuleGraphData {
 type MetricsEvent = { kind: 'batch'; rows: MetricRow[] } | { kind: 'done'; files: number; functions: number; cancelled: boolean };
 type DeadCodeEvent = { kind: 'batch'; rows: DeadRow[] } | { kind: 'done'; found: number; cancelled: boolean };
 type SecurityEvent = { kind: 'batch'; findings: Finding[] } | { kind: 'done'; files: number; findings: number; cancelled: boolean };
-
-/** What a hosted page hands the editor: rows open files in the editor area. */
-export interface AnalysisPageView {
-	onOpen: ((path: string, line: number) => void) | null;
-}
 
 /** The editor's `openAnalysisPage` entry: build the page a tool's tab hosts. The
  *  Module Analysis tool takes a folder scope — the folders the Explorer's pick

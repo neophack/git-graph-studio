@@ -7,7 +7,8 @@
 // everything that concerns "the" editor, the whole area answers what spans groups (saving,
 // closing, path renames).
 
-import { EditorGroup, askToSaveMany, tabDrag, type Editor, type EditorInput, type EditorPlacement } from './editor';
+import { EditorGroup, askToSaveMany, tabDrag, type Editor, type EditorInput } from './editor';
+import type { EditorPlacement } from './features/editor/types';
 import { setDecorationRanges } from './editorDecorations';
 import type { EditorGridCell } from './platform/state';
 import { el, notify } from './platform/ui';

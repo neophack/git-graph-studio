@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { CommandRegistry } from '../src/platform/commands';
 import { applyContributions, contextUri, removeContributions } from '../src/contributions';
 import { registerGitCommands, type GitCommandHost } from '../src/gitCommands';
-import { buildChangeTree, DiffRequest, SourceControlView, sortChanges } from '../src/scm';
+import { buildChangeTree, SourceControlView, sortChanges } from '../src/scm';
+import type { DiffRequest } from '../src/features/editor/types';
 import { backend } from './tauriMock';
 import { click, flush, hover, key, menuItem, menuLabels, notificationButton, notifications, rightClick, texts, type } from './helpers';
 

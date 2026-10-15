@@ -24,7 +24,8 @@
 // local-only while a session restore rebuilds this frontend's own tabs.
 
 import { emit as tauriEmit, listen as tauriListen } from '@tauri-apps/api/event';
-import { inputId, type EditorInput, type EditorPlacement } from '../editor';
+import { inputId, type EditorInput } from '../editor';
+import type { EditorPlacement } from '../features/editor/types';
 import type { ActiveEditorInfo, EditorArea } from '../editorArea';
 import { phoneShell } from './nav';
 import { frontendId, remoteEnv } from './session';

@@ -12,7 +12,7 @@
 // view's `message` shows above the rows.
 
 import { commandIconContent, menuSection, resolvedMenuEntries, runMenuEntry, type ResolvedMenuEntry } from './contributions';
-import { extFileDataUrl } from './extHost';
+import { extFileDataUrl } from './platform/extAssets';
 import { el, icon, labelWithIcons, showContextMenu, showMenuBelow } from './platform/ui';
 
 /** One node as the extension's frame serialized it (`getTreeItem` already applied). The

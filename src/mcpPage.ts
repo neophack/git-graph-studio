@@ -10,7 +10,7 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { t, tf } from './platform/i18n';
 import { actionButton, el, icon } from './platform/ui';
-import type { AnalysisPageView } from './analysisPages';
+import type { AnalysisPageView } from './features/analysis/types';
 
 interface McpToolInfo { name: string; description: string }
 interface McpLogEntry { time: number; tool: string; ok: boolean; ms: number; args: string }

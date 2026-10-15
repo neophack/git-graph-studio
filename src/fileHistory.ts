@@ -5,7 +5,8 @@
 
 import { invoke } from '@tauri-apps/api/core';
 
-import type { DiffRequest } from './scm';
+import type { DiffRequest } from './features/editor/types';
+import type { BlameLine } from './features/scm/types';
 import { basename, el, icon, toPosix } from './platform/ui';
 
 export interface HistoryEntry {
@@ -95,15 +96,6 @@ export class FileHistoryView {
 }
 
 /* ---------- Blame ---------- */
-
-/** One line's last change, as `scm_blame` reports it. */
-export interface BlameLine {
-	hash: string;
-	author: string;
-	/** Seconds since the epoch. */
-	time: number;
-	summary: string;
-}
 
 /** The gutter text of a blame line: "author, 3 days ago" - the uncommitted marker for an
  *  all-zero hash. */

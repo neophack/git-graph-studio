@@ -149,8 +149,11 @@ guarantees the window is never a blank dark rectangle.
 
 - Frontend: `src/main.ts` (boot entry), `src/workbench.ts` (composition root),
   `src/titlebar.ts`, `src/statusbar.ts`, `src/panel.ts` (panel chrome; its Output view is
-  the Git channel), `src/platform/ui/` (shared DOM kit: codicons, notifications, context menus,
-  quick input), `src/platform/lazy.ts` (async-chunk loaders), `src/platform/state.ts` (localStorage
+  the Git channel), `src/platform/ui/` (shared DOM kit: dom, codicon, notify, progress,
+  contextMenu, quickInput under one facade — codicons, notifications, context menus, quick
+  input), `src/platform/fileIcons.ts` / `src/platform/extAssets.ts` (the file-icon mapping and
+  extension-asset data URLs every view decorates with), `src/platform/lazy.ts` (async-chunk
+  loaders), `src/platform/state.ts` (localStorage
   persistence), `src/shell.css`
 - Backend: `src-tauri/src/lib.rs` / `main.rs` (crate inventory and app entry),
   `src-tauri/src/cmd_app.rs` (the app-instance domain: File → New Window's

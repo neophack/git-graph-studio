@@ -90,76 +90,6 @@
 		"to": "src/remote/transfer.ts"
 	},
 	{
-		"rule": "R5",
-		"from": "src/analysisPages.ts",
-		"to": "src/mcpPage.ts"
-	},
-	{
-		"rule": "R5",
-		"from": "src/editor.ts",
-		"to": "src/extHost.ts"
-	},
-	{
-		"rule": "R5",
-		"from": "src/editor.ts",
-		"to": "src/fileHistory.ts"
-	},
-	{
-		"rule": "R5",
-		"from": "src/explorer.ts",
-		"to": "src/editor.ts"
-	},
-	{
-		"rule": "R5",
-		"from": "src/extHost.ts",
-		"to": "src/editor.ts"
-	},
-	{
-		"rule": "R5",
-		"from": "src/extHost.ts",
-		"to": "src/treeView.ts"
-	},
-	{
-		"rule": "R5",
-		"from": "src/fileHistory.ts",
-		"to": "src/scm.ts"
-	},
-	{
-		"rule": "R5",
-		"from": "src/mcpPage.ts",
-		"to": "src/analysisPages.ts"
-	},
-	{
-		"rule": "R5",
-		"from": "src/nodeShims.ts",
-		"to": "src/nodeShims/processSurfaces.ts"
-	},
-	{
-		"rule": "R5",
-		"from": "src/nodeShims/processSurfaces.ts",
-		"to": "src/nodeShims.ts"
-	},
-	{
-		"rule": "R5",
-		"from": "src/scm.ts",
-		"to": "src/editor.ts"
-	},
-	{
-		"rule": "R5",
-		"from": "src/scm.ts",
-		"to": "src/explorer.ts"
-	},
-	{
-		"rule": "R5",
-		"from": "src/scm.ts",
-		"to": "src/extHost.ts"
-	},
-	{
-		"rule": "R5",
-		"from": "src/treeView.ts",
-		"to": "src/extHost.ts"
-	},
-	{
 		"rule": "R6",
 		"from": "src/aiProviders.ts",
 		"to": "@tauri-apps/api/core"
@@ -286,11 +216,6 @@
 	},
 	{
 		"rule": "R6",
-		"from": "src/platform/keybindings.ts",
-		"to": "@tauri-apps/api/core"
-	},
-	{
-		"rule": "R6",
 		"from": "src/main.ts",
 		"to": "@tauri-apps/api/core"
 	},
@@ -313,6 +238,21 @@
 		"rule": "R6",
 		"from": "src/panel.ts",
 		"to": "@tauri-apps/api/event"
+	},
+	{
+		"rule": "R6",
+		"from": "src/platform/extAssets.ts",
+		"to": "@tauri-apps/api/core"
+	},
+	{
+		"rule": "R6",
+		"from": "src/platform/keybindings.ts",
+		"to": "@tauri-apps/api/core"
+	},
+	{
+		"rule": "R6",
+		"from": "src/platform/settings.ts",
+		"to": "@tauri-apps/api/core"
 	},
 	{
 		"rule": "R6",
@@ -382,11 +322,6 @@
 	{
 		"rule": "R6",
 		"from": "src/selfTestSuites.ts",
-		"to": "@tauri-apps/api/core"
-	},
-	{
-		"rule": "R6",
-		"from": "src/platform/settings.ts",
 		"to": "@tauri-apps/api/core"
 	},
 	{

@@ -11,10 +11,10 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 
 import type { CommandRegistry } from './platform/commands';
 import { commandIconContent, contextUri, resolvedMenuEntries } from './contributions';
-import { extFileDataUrl } from './extHost';
-import type { DiffSide } from './editor';
-import { fileIcon, fileIconColor } from './editor';
-import type { StatusMap } from './explorer';
+import { extFileDataUrl } from './platform/extAssets';
+import type { DiffRequest, DiffSide } from './features/editor/types';
+import { fileIcon, fileIconColor } from './platform/fileIcons';
+import type { StatusMap } from './platform/ipc/scm';
 import { t, tf, trText } from './platform/i18n';
 import * as state from './platform/state';
 import { actionButton, basename, confirmDialog, el, icon, liveSidebarTitle, notify, quickInput, quickPick, showContextMenu, showMenuBelow, toPosix, type MenuEntry, type QuickPickItem } from './platform/ui';
@@ -32,19 +32,6 @@ interface ScmChange {
 /** The three groups of the view, in display order; VS Code's names. */
 export type ScmGroup = 'merge' | 'staged' | 'changes';
 
-export interface DiffRequest {
-	id: string;
-	title: string;
-	/** The repository the revisions belong to (the open repository, or a submodule when the
-	 *  diff was opened from its graph). */
-	repo?: string;
-	/** The request came from the Git Graph view: the extension opens the native diff editor,
-	 *  whose binary sides show as placeholders - so a binary pair opens the shell's diff
-	 *  editor with the same notice instead of substituting the hex comparison. */
-	binaryNotice?: boolean;
-	left: DiffSide;
-	right: DiffSide;
-}
 
 /** One of the open folder's initialised submodules, rendered as its own repository section
  *  below the main one - VS Code's Source Control view when several repositories are open:

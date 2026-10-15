@@ -6,7 +6,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
-import { fileIcon, fileIconColor } from './editor';
+import { fileIcon, fileIconColor } from './platform/fileIcons';
+import type { StatusMap } from './platform/ipc/scm';
 import { contextUri, menuSection, resourceContext } from './contributions';
 import { t, tf } from './platform/i18n';
 import { transferMenuEntries, transferMenuShown } from './transfer';
@@ -37,9 +38,6 @@ const REMOTE_DIR_PAGE = 500;
 function remoteShell(): boolean {
 	return typeof document !== 'undefined' && document.documentElement.hasAttribute('data-remote-shell');
 }
-
-/** repo-relative path (forward slashes) -> status letter (M A D R U !), as the SCM view reports it. */
-export type StatusMap = Map<string, string>;
 
 const DECORATION_CLASS: Record<string, string> = { M: 'git-modified', A: 'git-added', D: 'git-deleted', R: 'git-renamed', U: 'git-untracked', '!': 'git-conflict' };
 

@@ -23,12 +23,13 @@ import { parseStream, setWebviewFrameSource } from './remote/mirror/webviewFrame
 import { applyContributions, applyExtensionSettings, declaredCommand, extensionSettingDefs, extensionThemeList, extensionViewContributions, languageIdFor, localize, registerContextProvider, registerExtensionSnippets, registerExtensionThemes, removeContributions, type ExtensionThemeDef, type ManifestContributes } from './contributions';
 import { describeDetail, extLog, extLogEnabled, extLogLevel, extLogOnce, flushExtLog, levelForConsole, setExtLogOutput, type ExtLogLevel } from './extLog';
 import { defaultNodeEnv, type NodeEnv } from './extModuleLoader';
-import type { EditorPlacement } from './editor';
+import type { EditorPlacement } from './features/editor/types';
 import { setFileDiagnostics, type SerializableDiagnostic } from './editorDiagnostics';
 import { settings as appSettings, syncExtensionThemes, themeById } from './platform/settings';
 import { locale, registerZhCnText, t, tf } from './platform/i18n';
 import * as state from './platform/state';
 import { notify, progressToast, quickInput, type ProgressToast } from './platform/ui';
+import { extFileDataUrl, forgetExtDataUrls, imageMime } from './platform/extAssets';
 import type { SerializedTreeItem } from './treeView';
 import { answerChatPermission, answerChatQuestion, chatBusy, chatControls, interruptChat, pickChatModel, pressSend, setChatInput, setChatPermissionMode, type ChatAnswer } from './claudeChatInject';
 
@@ -140,16 +141,6 @@ export function extTitle(ext: ExtInfo): string {
 	return ext.displayName ?? ext.name;
 }
 
-/** The data-URL MIME type of an image file inside an extension (icons, README images). */
-function imageMime(path: string): string {
-	const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
-	return ext === 'svg' ? 'image/svg+xml' : ext === 'png' ? 'image/png'
-		: ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp'
-		: ext === 'bmp' ? 'image/bmp' : 'image/jpeg';
-}
-
-/** Cached base64 reads of a file inside an installed extension, as a data URL. */
-const dataUrlCache = new Map<string, Promise<string | null>>();
 
 /** Cached marketplace icon reads, as data URLs (the same bridge `dataUrlCache` uses). */
 const galleryIconCache = new Map<string, Promise<string | null>>();
@@ -160,29 +151,7 @@ const galleryIconCache = new Map<string, Promise<string | null>>();
  *  healthy and it revealed instead of creating). */
 const WEBVIEW_OPEN_PENDING_MS = 15_000;
 
-/** An extension file as a data URL (icons and README images cross the bridge this way), or null
- *  when the file cannot be read. Cached per extension id + path. */
-export function extFileDataUrl(extId: string, relPath: string): Promise<string | null> {
-	const key = `${extId}:${relPath}`;
-	let pending = dataUrlCache.get(key);
-	if (!pending) {
-		pending = invoke<string>('ext_read_file_base64', { extId, relPath })
-			.then((base64) => `data:${imageMime(relPath)};base64,${base64}`)
-			.catch(() => null);
-		dataUrlCache.set(key, pending);
-	}
-	return pending;
-}
 
-/** Drop one extension's cached package-file data URLs: an upgrade replaced its bytes on disk
- *  (and a moved icon must fall to the label-text fallback, not keep serving the retired
- *  version's image forever). The next read follows the install's new version. */
-function forgetExtDataUrls(extId: string): void {
-	const prefix = `${extId}:`;
-	for (const key of dataUrlCache.keys()) {
-		if (key.startsWith(prefix)) dataUrlCache.delete(key);
-	}
-}
 
 /** A diff a page asks the workbench to open (the editor input's shape minus the kind):
  *  the two sides carry a revision/path/label and whether that side exists. */

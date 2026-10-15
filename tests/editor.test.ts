@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { EditorGroup, fileIcon, type Editor } from '../src/editor';
+import { EditorGroup, type Editor } from '../src/editor';
+import { fileIcon } from '../src/platform/fileIcons';
 import { el } from '../src/platform/ui';
 import { backend } from './tauriMock';
 import { click, flush, key, menuItem, menuLabels, notificationButton, notifications, rightClick, texts } from './helpers';

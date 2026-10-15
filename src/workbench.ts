@@ -25,7 +25,8 @@ import { setExtensionCompletionProvider } from './editorCompletions';
 import { setExtensionDefinitionOpener, setExtensionDefinitionProvider, setExtensionHoverProvider } from './editorHovers';
 import { languageIdFor, registerContextProvider } from './contributions';
 import { EditorArea } from './editorArea';
-import { ENCODING_LABELS, type EditorPlacement } from './editor';
+import { ENCODING_LABELS } from './editor';
+import type { EditorPlacement } from './features/editor/types';
 import { Explorer } from './explorer';
 import { ExtensionHost, extTitle, type ExtInfo, type PageDiffRequest } from './extHost';
 import { ExtensionsPanel } from './extensionsPanel';
@@ -45,7 +46,7 @@ import { basename, busy, el, icon, notify, quickInput, quickPick, relativeTo, to
 import { FilePickSource } from './filePicker';
 import { ExtensionTreeView } from './treeView';
 import { evaluateWhen, extensionViewContributions } from './contributions';
-import { extFileDataUrl } from './extHost';
+import { extFileDataUrl } from './platform/extAssets';
 
 type ViewId = 'explorer' | 'search' | 'scm' | 'extensions' | 'analysis';
 

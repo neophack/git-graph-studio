@@ -1,4 +1,4 @@
-import type { Buffer, BufferFactory, ShimHost } from '../nodeShims';
+import type { Buffer, BufferFactory, ShimHost } from './shared';
 import { EventEmitter, callThrowsFn, processNextTick, traceShim } from './shared';
 
 // The frame's child_process: real spawned tools through the host bridge. The shim keeps
