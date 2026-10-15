@@ -8,12 +8,17 @@
 //   target/studio/cargo/    the Cargo target dir (src-tauri/.cargo/config.toml)
 //   target/studio/dist/     the Vite build output (vite.config.ts)
 //
-//   node scripts/prepare.mjs --icons-only   the test-compile half alone: the seam check and
-//                                           the window icons `generate_context!()` embeds —
-//                                           nothing else (docs/ci-speed-plan.md P2: the CI
-//                                           test jobs need no sidecars, no daemon, no
-//                                           marketplace fetch; the icons are their only
-//                                           compile-time input)
+//   node scripts/prepare.mjs --icons-only   the compile-time half alone: everything
+//                                           tauri-build verifies on every compile of the
+//                                           app — the seam check, the icons
+//                                           `generate_context!()` embeds, the sidecar
+//                                           copies, node-host.cjs / vscode-shim.cjs and
+//                                           the (empty) bundled extensions directory —
+//                                           and nothing of the installer build (no
+//                                           marketplace fetch, no daemon, no packing;
+//                                           docs/ci-speed-plan.md P2, extended
+//                                           2026-10-15 when the test jobs hit the
+//                                           resources half of that verification too)
 //
 // The bundled VSIX packages the installer carries are the marketplace's per-architecture
 // builds (Open VSX — fetched by scripts/fetch-marketplace-extensions.mjs; no package has a
@@ -120,21 +125,6 @@ function sidecarBinary(bin, profile) {
 }
 
 
-// The test-compile half stops here: everything below serves the installer build (sidecars,
-// the real-Node host bundle, the marketplace fetch, the GGS Remote daemon), and a test
-// compile embeds none of it.
-if (iconsOnly) {
-	// Stage every sidecar copy the platform's externalBin names — tauri-build
-	// verifies the paths on every compile of the app, so even a test-compile pass
-	// needs them present (the restructure's P2-8/P2-9/P2-11).
-	stageSidecar(sidecarBinary('ggs-node', 'ggs-node'), 'ggs-node');
-	stageSidecar(sidecarBinary('ggs-config', 'release'), 'ggs-config');
-	if (process.platform === 'win32') {
-		stageSidecar(sidecarBinary('ggs-bash', 'release'), 'ggs-bash');
-	}
-	console.log(`Prepared ${appIcons} (icons only)`);
-	process.exit(0);
-}
 
 /* 3. The sidecar binaries — both are their own packages now (the restructure's
  *    P2-8/P2-9): ggs-node (the pretend Node runtime, the default `node`-backend host,
@@ -209,6 +199,20 @@ const ggsBashBin = process.platform === 'win32' ? sidecarBinary('ggs-bash', 'rel
 		}
 	});
 	copyFileSync(join(out, 'bundled', 'app-resources', 'vscode-shim.cjs'), join(out, 'vscode-shim.cjs'));
+}
+
+// The compile-time half stops here: everything below serves the installer build (the
+// marketplace fetch, the bundled packages, the GGS Remote daemon), and a test compile
+// embeds none of it. Everything ABOVE it is what tauri-build verifies on every compile
+// of the app — the icons `generate_context!()` embeds, the sidecar copies the platform's
+// externalBin names, and the bundle.resources map (node-host.cjs, vscode-shim.cjs, the
+// bundled extensions directory) — so CI's test jobs and the installer build's timings
+// pass stage exactly this (2026-10-15: a missing path fails the app's build script with
+// `resource path ... doesn't exist`, clippy and cargo test included).
+if (iconsOnly) {
+	mkdirSync(join(out, 'bundled', 'app-resources', 'extensions'), { recursive: true });
+	console.log(`Prepared ${out} (compile-time assets only)`);
+	process.exit(0);
 }
 
 /* The marketplace packages the installer carries (Open VSX, per architecture — see

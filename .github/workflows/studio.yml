@@ -204,7 +204,13 @@ jobs:
           }
 
       # The pinned toolchain (rust-toolchain.toml); keep ref and file in sync on a bump.
+      # The components are explicit: the action installs the minimal profile without
+      # them, and rust-toolchain.toml pins the channel, so a bare ref leaves `cargo
+      # clippy` failing with `'cargo-clippy' is not installed` (2026-10-15) — the daemon
+      # and hub jobs below always passed the pair explicitly.
       - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy, rustfmt
       # The dev/test half of the split cache: this job compiles only the dev profile, the
       # installer job below only release — one key each, so neither restores the other's
       # dead weight (the old shared key carried both halves and could not shed either).
@@ -287,7 +293,10 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
 
       # The pinned toolchain (rust-toolchain.toml); keep ref and file in sync on a bump.
+      # Components explicit — the Windows test job's note tells why.
       - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy, rustfmt
       # A fresh key of its own (the old studio-linux-native lineage mixed the dev and
       # release halves this split separates; one cold run retires it). cache-workspace-crates
       # as in the Windows test job: the vendored boa stays cached.
@@ -360,7 +369,10 @@ jobs:
       - uses: actions/checkout@v4
 
       # The pinned toolchain (rust-toolchain.toml); keep ref and file in sync on a bump.
+      # Components explicit — the Windows test job's note tells why.
       - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy, rustfmt
       # The dev/test half of the split cache, as on the other platforms (see the Windows
       # test job's comment); cache-workspace-crates keeps the vendored boa warm.
       - uses: Swatinem/rust-cache@v2
@@ -596,6 +608,16 @@ jobs:
           }
           New-Item -ItemType Directory -Force -Path target/studio | Out-Null
           [IO.File]::WriteAllText((Join-Path (Get-Location) 'target/studio/signing.json'), ($merge | ConvertTo-Json -Depth 5))
+
+      # The compile-time assets the app's build script verifies on EVERY cargo invocation
+      # — the icons, the sidecar externalBin copies, node-host.cjs / vscode-shim.cjs, the
+      # bundled extensions directory — staged before the timings build touches the app
+      # crate (a missing path fails it with `resource path ... doesn't exist`,
+      # 2026-10-15). `npm ci` stages nothing (the script is prepare:assets, not prepare,
+      # on purpose), and `tauri build` runs its full prepare only as this job's NEXT
+      # step — too late for the compile it pre-warms.
+      - name: Prepare the compile-time assets
+        run: node scripts/prepare.mjs --icons-only
 
       # The release dependency graph's per-crate timings (docs/ci-speed-plan.md P0): a
       # plain release build with the same profile and features `tauri build` uses, so the
