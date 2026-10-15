@@ -22,38 +22,10 @@ import { t } from '../../platform/i18n';
 import { THEME_EVENT } from '../../platform/settings';
 import { actionButton, el } from '../../platform/ui/index';
 
-/* ---------- The backend shapes (`analysis_module_diagram`) ---------- */
+/* ---------- The backend shapes (`analysis_module_diagram`) — the ipc seam owns them ---------- */
 
-export interface DiagramNode {
-	path: string;
-	label: string;
-	/** The area whose subgraph holds the block; "" is the root, null the unboxed
-	 *  overflow of a workspace with more areas than gitdiagram's group cap. */
-	module: string | null;
-	/** The area's pastel tone slot — the `t<n>` class in the mermaid source. */
-	tone: number;
-	callsIn: number;
-	callsOut: number;
-}
-
-export interface DiagramEdge {
-	id: string;
-	from: string;
-	to: string;
-	calls: number;
-	/** A cycle's back edge — mermaid's dashed `-.->`. */
-	dashed: boolean;
-}
-
-export interface ModuleDiagram {
-	nodes: DiagramNode[];
-	edges: DiagramEdge[];
-	droppedFiles: number;
-	droppedEdges: number;
-	/** The diagram as mermaid source — what this view renders and what the page's
-	 *  copy action exports. */
-	mermaid: string;
-}
+export type { DiagramEdge, DiagramNode, ModuleDiagram } from '../../platform/ipc/analysis';
+import type { ModuleDiagram } from '../../platform/ipc/analysis';
 
 /** A file's module: its directory; "" is the workspace root. */
 export function moduleOf(path: string): string {

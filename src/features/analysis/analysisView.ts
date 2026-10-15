@@ -10,15 +10,9 @@ import { ANALYSIS_TOOLS, type AnalysisToolId } from './analysisTools';
 import { actionButton, el, icon } from '../../platform/ui/index';
 
 /** The `analysis_status` answer (cmd_analysis). */
-export interface AnalysisStatus {
-	state: 'empty' | 'building' | 'ready';
-	done: number;
-	total: number;
-	files: number;
-	symbols: number;
-	calls: number;
-}
-
+export type { AnalysisStatus } from '../../platform/ipc/analysis';
+import type { AnalysisIndexEvent, AnalysisStatus } from '../../platform/ipc/analysis';
+import { analysisRebuild, analysisStatus } from '../../platform/ipc/analysis';
 export class AnalysisView {
 	private readonly titleLabel: HTMLElement;
 	private readonly toolsLabel: HTMLElement;
@@ -91,7 +85,7 @@ export class AnalysisView {
 	/** Refresh the index state (the view's reveal and every studio://analysis-index). */
 	async refresh(): Promise<void> {
 		try {
-			this.status = await invoke<AnalysisStatus>('analysis_status');
+			this.status = await analysisStatus();
 		} catch {
 			this.status = null;
 		}
@@ -122,10 +116,10 @@ export class AnalysisView {
 	}
 
 	private async rebuild(): Promise<void> {
-		const onEvent = new Channel<{ kind: string; done?: number; total?: number; state?: string }>();
+		const onEvent = new Channel<AnalysisIndexEvent>();
 		onEvent.onmessage = () => void this.refresh();
 		try {
-			await invoke('analysis_rebuild', { onEvent });
+			await analysisRebuild(onEvent);
 		} catch {
 			// A cancelled rebuild: the state line stands as it is.
 		}

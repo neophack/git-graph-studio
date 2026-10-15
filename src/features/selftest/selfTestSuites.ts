@@ -9,6 +9,8 @@
 // the scan names it so the report shows what a button does without doing it.
 
 import { invoke } from '../../platform/ipc/core';
+import { analysisStatus } from '../../platform/ipc/analysis';
+import { mcpTools } from '../../platform/ipc/mcp';
 import { workspaceSymbols } from '../../platform/ipc/search';
 
 import { commands } from '../../platform/commands';
@@ -580,7 +582,7 @@ export function registerSelfTestSuites(workbench: Workbench): void {
 				id: 'catalogue',
 				name: 'the MCP tool catalogue answers and names the navigation tools',
 				run: async () => {
-					const tools = await invoke<{ name: string }[]>('mcp_tools');
+					const tools = await mcpTools();
 					if (!Array.isArray(tools) || tools.length === 0) throw new Error('the MCP tool catalogue is empty');
 					const names = tools.map((tool) => tool.name);
 					if (!names.includes('symbol_lookup')) throw new Error('symbol_lookup is missing from the catalogue');
@@ -604,7 +606,7 @@ export function registerSelfTestSuites(workbench: Workbench): void {
 				id: 'status',
 				name: 'the analysis index answers its status for the open workspace',
 				run: async () => {
-					const status = await invoke<{ state: string }>('analysis_status');
+					const status = await analysisStatus();
 					if (!status || typeof status.state !== 'string') throw new Error('analysis_status did not answer');
 				}
 			},

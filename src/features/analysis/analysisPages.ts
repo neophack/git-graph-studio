@@ -11,7 +11,8 @@
 // workspace size can stall the page. Loaded lazily behind the Analysis sidebar; nothing
 // here belongs to the first-paint bundle.
 
-import { invoke, Channel } from '../../platform/ipc/core';
+import { Channel } from '../../platform/ipc/core';
+import { analysisDeadCode, analysisImportGraph, type DeadCodeEvent, type DeadRow, analysisMetrics, type CallSiteRow, type FileDep, type MetricRow, type MetricsEvent, type ModuleEdge, type ModuleInfo, type ModuleDiagram, type ModuleGraphData, analysisModuleDiagram, analysisModuleGraph, analysisSecurity, type Finding, type ImportGraphData, type SecurityEvent } from '../../platform/ipc/analysis';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { t, tf } from '../../platform/i18n';
@@ -19,47 +20,10 @@ import { KIND_ICONS } from '../search';
 import { analysisTool, type AnalysisToolId } from './analysisTools';
 import type { AnalysisPageView } from './types';
 import { McpPage } from '../mcp';
-import { DiagramView, moduleLabel, moduleOf, type ModuleDiagram } from './moduleDiagram';
+import { DiagramView, moduleLabel, moduleOf } from './moduleDiagram';
 import { actionButton, basename, el, icon, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 
 /* ---------- The backend shapes ---------- */
-
-interface MetricRow {
-	path: string; name: string; kind: string; container: string | null; line: number;
-	lines: number; params: number; complexity: number; nesting: number; refs: number; hotspot: number;
-	/** The big-code-analysis columns — present when that engine measured the function. */
-	cognitive?: number; halstead?: number; lloc?: number; mi?: number;
-}
-
-interface DeadRow {
-	path: string; name: string; kind: string; container: string | null; line: number; exported: boolean; lines: number;
-}
-
-interface Finding {
-	ruleId: string; severity: 'error' | 'warning' | 'info'; message: string;
-	path: string; line: number; column: number; cwe: string;
-}
-
-interface ImportGraphData { edges: [string, string][]; cycles: string[][] }
-
-/** `analysis_module_graph`: the workspace's cross-file calls lifted to modules (the
- *  directories that group the files) — module edges, the file pairs under them and the
- *  call sites under those. */
-interface ModuleInfo { name: string; files: number; symbols: number }
-interface ModuleEdge { from: string; to: string; calls: number; files: number }
-interface CallSiteRow { from: string; to: string; line: number; column: number }
-interface FileDep { from: string; to: string; calls: number; sites: CallSiteRow[] }
-interface ModuleGraphData {
-	modules: ModuleInfo[];
-	edges: ModuleEdge[];
-	fileEdges: FileDep[];
-	totalCalls: number;
-	totalFileEdges: number;
-}
-
-type MetricsEvent = { kind: 'batch'; rows: MetricRow[] } | { kind: 'done'; files: number; functions: number; cancelled: boolean };
-type DeadCodeEvent = { kind: 'batch'; rows: DeadRow[] } | { kind: 'done'; found: number; cancelled: boolean };
-type SecurityEvent = { kind: 'batch'; findings: Finding[] } | { kind: 'done'; files: number; findings: number; cancelled: boolean };
 
 /** The editor's `openAnalysisPage` entry: build the page a tool's tab hosts. The
  *  Module Analysis tool takes a folder scope — the folders the Explorer's pick
@@ -238,7 +202,7 @@ class MetricsPage extends ReportPage<MetricRow> {
 				this.summary = tf('analysis.metrics.summary', event.functions);
 			}
 		};
-		await invoke('analysis_metrics', { onEvent });
+		await analysisMetrics(onEvent);
 		// Sort before the stream's final render (`render: false` — `start` renders).
 		await this.resort(false);
 	}
@@ -323,7 +287,7 @@ class DeadCodePage extends ReportPage<DeadRow> {
 				this.summary = tf('analysis.deadcode.summary', event.found);
 			}
 		};
-		await invoke('analysis_dead_code', { includeExported: this.includeExported, onEvent });
+		await analysisDeadCode(this.includeExported, onEvent);
 	}
 
 	protected doneTitle(): string {
@@ -373,7 +337,7 @@ class SecurityPage extends ReportPage<Finding> {
 				this.summary = tf('analysis.security.summary', event.findings);
 			}
 		};
-		await invoke('analysis_security', { onEvent });
+		await analysisSecurity(onEvent);
 		this.rows.sort((a, b) => (SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]) || a.path.localeCompare(b.path));
 	}
 
@@ -529,7 +493,7 @@ class ModulePage implements AnalysisPageView {
 		this.loadId++;
 		this.render();
 		try {
-			this.data = await invoke<ModuleGraphData>('analysis_module_graph', { folders: this.folders });
+			this.data = await analysisModuleGraph(this.folders);
 		} catch (error) {
 			this.data = null;
 			this.error = String(error);
@@ -619,11 +583,7 @@ class ModulePage implements AnalysisPageView {
 		this.selectedId = null;
 		this.drawing.setDiagram(null);
 		try {
-			const diagram = await invoke<ModuleDiagram>('analysis_module_diagram', {
-				focus: this.focusNode,
-				filter: this.graphFilter,
-				folders: this.folders
-			});
+			const diagram = await analysisModuleDiagram(this.focusNode, this.graphFilter, this.folders);
 			if (key !== this.graphKey) return;
 			this.diagram = diagram;
 		} catch {
@@ -970,7 +930,7 @@ class ImportsPage implements AnalysisPageView {
 		this.error = null;
 		this.render();
 		try {
-			this.graph = await invoke<ImportGraphData>('analysis_import_graph');
+			this.graph = await analysisImportGraph();
 		} catch (error) {
 			this.graph = null;
 			this.error = String(error);

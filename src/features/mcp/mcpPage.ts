@@ -5,23 +5,12 @@
 // sidebar lists it beside the five analysis tools and opens it as one of the editor
 // pages, so it loads lazily with them.
 
-import { invoke } from '../../platform/ipc/core';
+import { claudeMcpStatus, type ClaudeMcpStatus, type McpLogEntry, mcpLog, type McpToolInfo, mcpTools } from '../../platform/ipc/mcp';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { t, tf } from '../../platform/i18n';
 import { actionButton, el, icon } from '../../platform/ui/index';
 import type { AnalysisPageView } from '../analysis/types';
-
-interface McpToolInfo { name: string; description: string }
-interface McpLogEntry { time: number; tool: string; ok: boolean; ms: number; args: string }
-
-/** The automatic Claude integration's state (`cmd_providers::claude_mcp_status`):
- *  whether the redirected Claude configuration carries the GGS analysis server. */
-interface ClaudeMcpStatus {
-	registered: boolean;
-	folder: string | null;
-	command: string | null;
-}
 
 /** The stdio snippet every MCP client understands (ZCode: the `mcp.servers` field of
  *  ~/.zcode/cli/config.json; Claude Desktop / Cursor: the same shape under
@@ -72,9 +61,9 @@ export class McpPage implements AnalysisPageView {
 		this.render();
 		try {
 			const [tools, log, claude] = await Promise.all([
-				invoke<McpToolInfo[]>('mcp_tools'),
-				invoke<McpLogEntry[]>('mcp_log'),
-				invoke<ClaudeMcpStatus | null>('claude_mcp_status')
+				mcpTools(),
+				mcpLog(),
+				claudeMcpStatus()
 			]);
 			// A defaulting test layer (or a degraded backend) answers null — an empty
 			// catalogue and log, not a render crash.
