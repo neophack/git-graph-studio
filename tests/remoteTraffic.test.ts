@@ -414,7 +414,7 @@ describe('the 1/10 line, on the modelled wire', () => {
 		// eslint-disable-next-line no-console
 		console.log(`virtualized scroll: legacy ${legacy.wire()} B, economy ${economy.wire()} B (${ratio.toFixed(1)}x)`);
 		expect(economy.wire()).toBeLessThan(legacy.wire() / 10);
-	});
+	}, 30_000); // two full recorder runs of 40 re-rendered windows: CPU-bound, slow under a parallel suite
 
 	it('a JS-driven animation', async () => {
 		vi.useFakeTimers();

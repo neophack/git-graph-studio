@@ -182,13 +182,17 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 120
     if: github.event_name != 'pull_request'
-    env:
-      # As in the installer job below (see its comment): the tests' tempdirs on the D:
-      # scratch, out of Defender's profile-temp scanning path.
-      TMP: ${{ runner.temp }}
-      TEMP: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
+
+      # The tests' tempdirs on the D: scratch, out of Defender's profile-temp scanning
+      # path. Set from a step, not a job-level env: the `runner` context is not available
+      # to `jobs.<id>.env` (the workflow fails to load with "Unrecognized named-value").
+      - name: Route TMP/TEMP to the runner scratch
+        shell: pwsh
+        run: |
+          "TMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TEMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       # As in the installer job below (see its comment).
       - name: Exclude the build paths from Defender scanning
@@ -489,12 +493,17 @@ jobs:
       # this package packed into the installers" for every prepare.mjs run below.
       GGS_BUNDLE_GIT_GRAPH: ${{ inputs.bundle-git-graph == false && '0' || '1' }}
       GGS_BUNDLE_CLAUDE_CODE: ${{ inputs.bundle-claude-code == true && '1' || '0' }}
-      # The build's scratch on the runner's D: drive, out of Defender's profile-temp
-      # scanning path (see the test job's note for the original diagnosis).
-      TMP: ${{ runner.temp }}
-      TEMP: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
+
+      # The build's scratch on the runner's D: drive, out of Defender's profile-temp
+      # scanning path (see the test job's note for the original diagnosis). A step, not a
+      # job-level env: `runner` is not in scope for `jobs.<id>.env`.
+      - name: Route TMP/TEMP to the runner scratch
+        shell: pwsh
+        run: |
+          "TMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TEMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       # Defender's real-time scanning taxes every rustc/link write (docs/ci-speed-plan.md
       # P1 #3): exclude the workspace, the runner scratch and the cargo/rustup homes.
