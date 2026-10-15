@@ -60,7 +60,8 @@
 | P5-4 地基（platform/ipc/core 单门；46 个文件的 @tauri-apps/api 直连全改道；R6 清零，**豁免清单归零**）。按领域的类型化封装为后续独立 PR | ✅ | `3c7c2ec` |
 | P5-4 后半（按领域的类型化封装：app/settings/assoc、fs、revision/scm、search/symbols/fuzzy、viewer/can、analysis/mcp、ext/extProcess/extChild/gallery、providers/pty/remote 共 19 个领域文件,8 个提交；函数签名即契约,结果形状沉到 seam 单一出处（DirEntryInfo/FileContents/WsSymbol/ExtInfo/CanLogStats/...）,门面再导出保持消费方路径;scm/extHost 的按名分发与 remote shim 自身的基础设施保留原生 invoke;`tests/ipcContract.test.ts` 以 Rust 注册表为对照逐 wrapper 调用） | ✅ | `f3ebdc1`–`5ff9016` |
 | P5-5/6/7 目录归位（14 个 features/ 模块 + index/types 门面、workbench/、hosts/ 含 nodeShims 整目录；诊断存储翻转到 extensions 模块、视图类型下沉 types.ts 后环保持为零；入口与构建脚本同步） | ✅ | `2b006e6` |
-| P5-8..12 拆大文件（vscodeApi/extHost/editor/workbench/scm/nodeShims/i18n） | ⬜ | 未开始 |
+| P5-8..12 拆大文件（vscodeApi/extHost/editor/workbench/scm/nodeShims） | ⬜ | 未开始 |
+| P5-12 的 i18n 半（字符串表外置：`platform/i18n/{en,zh-cn}.ts`,i18n.ts 1645 → 304 行,只留 `t()`/`tf()` 与注册/回退逻辑;en 表是键集的出处,zh 表按其形状类型化） | ✅ | 本次 |
 | P5-13 豁免清单清零 | ✅ | `3c7c2ec` 达成（清单自 P5-4 起为空） |
 | P6-1 modules.json + 覆盖性检查（19 模块盖住 327 个源文件,接缝检查内执行;自测分组对 modules.json 断言顺序与命名） | ✅ | `ebf2c9b` |
 | P6-2 直接依赖对齐（getrandom 0.2→0.3 与 tauri 合流、base64 0.22→0.23;残留 0.2/0.22 均为上游 aes-gcm/tauri-codegen 所引;measure-build.mjs 本就记录 -d 计数） | ✅ | `27c801e` |

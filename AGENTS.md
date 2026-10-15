@@ -184,7 +184,8 @@ language are user data under `~/.ggs/`; theme and UI quality are enforced, not h
 
 - Frontend: `src/platform/commands.ts` (registry), `src/platform/keybindings.ts`, `src/platform/settings.ts` (setting
   registry `SETTING_DEFS`), `src/workbench/settingsPanel.ts` (generated Settings dialog),
-  `src/platform/i18n.ts` (`t(key)`, en / zh-cn), `src/themeMetrics.ts` (WCAG contrast per theme),
+  `src/platform/i18n.ts` (`t(key)`, en / zh-cn; the string tables live in `src/platform/i18n/{en,zh-cn}.ts`, the
+  English table the key set is typed against), `src/themeMetrics.ts` (WCAG contrast per theme),
   `src/uiMetrics.ts` (layout invariants)
 - Backend: `src-tauri/src/cmd_assoc.rs` (the File Associations setting: OS-level
   "open with" registration per platform — HKCU ProgIds + RegisteredApplications on

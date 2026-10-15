@@ -51,6 +51,7 @@
 				"src/platform/keybindings.ts",
 				"src/platform/settings.ts",
 				"src/platform/i18n.ts",
+				"src/platform/i18n/",
 				"src/workbench/settingsPanel.ts",
 				"src/themeMetrics.ts",
 				"src/uiMetrics.ts"
