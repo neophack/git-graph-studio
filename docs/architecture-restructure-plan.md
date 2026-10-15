@@ -61,6 +61,12 @@
 | P5-5/6/7 目录归位（14 个 features/ 模块 + index/types 门面、workbench/、hosts/ 含 nodeShims 整目录；诊断存储翻转到 extensions 模块、视图类型下沉 types.ts 后环保持为零；入口与构建脚本同步） | ✅ | `2b006e6` |
 | P5-8..12 拆大文件（vscodeApi/extHost/editor/workbench/scm/nodeShims/i18n） | ⬜ | 未开始 |
 | P5-13 豁免清单清零 | ✅ | `3c7c2ec` 达成（清单自 P5-4 起为空） |
+| P6-1 modules.json + 覆盖性检查（19 模块盖住 327 个源文件,接缝检查内执行;自测分组对 modules.json 断言顺序与命名） | ✅ | `ebf2c9b` |
+| P6-2 直接依赖对齐（getrandom 0.2→0.3 与 tauri 合流、base64 0.22→0.23;残留 0.2/0.22 均为上游 aes-gcm/tauri-codegen 所引;measure-build.mjs 本就记录 -d 计数） | ✅ | `27c801e` |
+| P6-3 ggs-codec 补 SHA-512/HMAC/PBKDF2,ggs-node 去 md-5/sha1/hmac/pbkdf2 | ⬜ | 未开始（独立工作项,标准测试向量先行） |
+| P6-4 README 磁盘维护章节定稿;`debug="line-tables-only"` 本地 A/B 复测 | ✅（文档半）/⬜（A/B 复测） | 本次 |
+| P6-5 app/daemon/hub 共用 target 目录 | ⬜ | 计划本身要求 P0 指标证明收益才做 |
+| P6-6 AGENTS.md 模块图改为目录/crate 级引用 | ⬜ | 需 owner 拍板（计划 §6 第 3 条） |
 
 P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现（构建走
 `target/studio/cargo`），`incremental` 目录 17.5 GB 为多 feature 时代的历史累积，
