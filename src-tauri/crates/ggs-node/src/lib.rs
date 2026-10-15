@@ -23,12 +23,6 @@ pub mod alloc;
 mod builtins;
 mod esm;
 mod napi_host;
-
-/// Pull the N-API host's exported surface into a binary that would otherwise link none
-/// of it (see `napi_host::force_link`); the export directives name symbols this keeps.
-pub fn link_napi_host() {
-    napi_host::force_link();
-}
 mod native;
 mod require;
 

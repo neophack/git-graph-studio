@@ -1496,7 +1496,7 @@ mod tests {
     }
 
     #[test]
-    pub fn text_windows_read_plain_lines_and_cap() {
+    fn text_windows_read_plain_lines_and_cap() {
         let s = scratch();
         let path = s.file("plain.txt", "a\nbb\nccc\n");
         let state = ViewerState::default();

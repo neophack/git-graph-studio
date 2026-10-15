@@ -13,8 +13,6 @@ use serde::{Deserialize, Serialize};
 
 /// The largest control message either side accepts (an asset reply chunk plus headroom).
 pub const MAX_CONTROL_MESSAGE: usize = 4 << 20;
-/// Asset and file replies cross in chunks of at most this many body bytes.
-pub const REPLY_CHUNK: usize = 1 << 20;
 
 /// How the daemon starts another instance of the same GGS: the program plus the arguments
 /// before the folder (`cmd_app::instance_argv` on the app side; `open -n <bundle> --args` on

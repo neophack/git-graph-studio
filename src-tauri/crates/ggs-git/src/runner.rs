@@ -33,12 +33,6 @@ pub fn clear_log() {
     LOG.lock().unwrap().clear();
 }
 
-/// Record a line that came from elsewhere - the plugin backend's `log` events, its stderr -
-/// so the panel's "Git" channel shows one merged stream whichever process ran git.
-pub fn record_line(line: &str) {
-    record(line.to_owned());
-}
-
 fn record(line: String) {
     {
         let mut log = LOG.lock().unwrap();
@@ -181,31 +175,6 @@ impl Git {
         collect_bytes(output)
     }
 
-    /// Run a command with text on its stdin, returning its stdout.
-    pub fn output_with_input(&self, args: &[&str], input: &str) -> Result<String, String> {
-        use std::io::Write;
-        let started = Instant::now();
-        let mut child = self
-            .command()
-            .args(args)
-            .stdin(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Could not run git (is it on the PATH?): {e}"))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(input.as_bytes());
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|e| format!("Could not run git: {e}"))?;
-        self.log(args, &output, started);
-        collect(output)
-    }
-
-    /// Run a command whose failure is uninteresting (a best-effort cleanup).
-    pub fn run_quietly(&self, args: &[&str]) {
-        let _ = self.output(args);
-    }
-
     /// The absolute `.git` directory (a worktree's is elsewhere than `<repo>/.git`).
     ///
     /// Answered from the file system when the layout is the common one - `<repo>/.git` is
@@ -319,14 +288,6 @@ pub fn is_safe_ref_name(name: &str) -> bool {
     !["..", "@{", "\\", "^", ":", "?", "[", "*"]
         .iter()
         .any(|seq| name.contains(seq))
-}
-
-pub fn is_safe_stash_selector(selector: &str) -> bool {
-    selector
-        .strip_prefix("refs/stash@{")
-        .and_then(|rest| rest.strip_suffix('}'))
-        .map(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
-        .unwrap_or(false)
 }
 
 /// `git fetch` with the view's options: one named remote (validated) or `--all`, optional

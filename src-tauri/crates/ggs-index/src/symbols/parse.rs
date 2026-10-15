@@ -135,11 +135,6 @@ fn language(lang: Lang) -> Option<Language> {
     None
 }
 
-/// Whether `ext` parses with a compiled-in grammar (the outline fallback serves the rest).
-pub fn supports(ext: &str) -> bool {
-    lang_of(ext).is_some_and(|lang| language(lang).is_some())
-}
-
 /* ---------- The per-language queries ---------- */
 
 const RUST_QUERY: &str = r#"

@@ -122,10 +122,6 @@ impl Regex {
         })
     }
 
-    pub fn group_count(&self) -> usize {
-        self.groups
-    }
-
     /// The leftmost match in `text`, or `None`. `^` anchors at 0: the callers feed the
     /// engine one line at a time (grep, sed), the way those tools anchor lines.
     pub fn find(&self, text: &str) -> Option<Match> {

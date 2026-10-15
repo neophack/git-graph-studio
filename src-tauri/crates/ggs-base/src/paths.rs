@@ -47,13 +47,6 @@ pub fn extensions_home() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// `~/.ggs/index`, created if missing — the persistent symbol index home.
-pub fn index_home() -> Result<PathBuf, String> {
-    let dir = joined("index")?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    Ok(dir)
-}
-
 /// `~/.ggs/logs`, created on demand (None is never returned silently: the caller gets
 /// the error string and decides how to degrade).
 pub fn logs_home() -> Result<PathBuf, String> {
@@ -67,18 +60,6 @@ pub fn backups_home() -> Result<PathBuf, String> {
     let dir = joined("backups")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     Ok(dir)
-}
-
-/// `~/.ggs/cache`, created if missing — the bytecode cache and other regenerable data.
-pub fn cache_home() -> Result<PathBuf, String> {
-    let dir = joined("cache")?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    Ok(dir)
-}
-
-/// `~/.ggs/extension-data/<id>` — one extension's own persisted state.
-pub fn extension_data(ext_id: &str) -> Result<PathBuf, String> {
-    joined(&format!("extension-data/{ext_id}"))
 }
 
 #[cfg(test)]

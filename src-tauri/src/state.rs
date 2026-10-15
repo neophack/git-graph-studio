@@ -59,10 +59,6 @@ impl LaunchState {
         *self.single_file.lock().unwrap() = path;
     }
 
-    pub fn take_startup_actions(&self) -> Vec<StartupAction> {
-        std::mem::take(&mut *self.startup_actions.lock().unwrap())
-    }
-
     /// The launch's comparisons, cloned (boot_context answers them without consuming:
     /// a reload asks again and must see the same window).
     pub fn startup_actions(&self) -> Vec<StartupAction> {
