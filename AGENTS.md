@@ -52,6 +52,7 @@ Everyday commands, from the repository root:
 | `npm run typecheck` | `tsc --noEmit` — must pass before a change is considered done |
 | `npm test` | vitest (jsdom, scripted Tauri backend); runs `scripts/check-seams.mjs` as global setup |
 | `npx vitest run tests/<module>.test.ts` | One module's suite |
+| `scripts\test-studio.bat` (Windows) / `bash scripts/test-studio.sh` (Linux/macOS) | The CI mirror — every check studio.yml's test jobs run on this platform, `GGS_PERF_FILES=20000` included, so a green local run is a green CI run (the bat also cross-clippies the pure-Rust crates for `x86_64-unknown-linux-gnu` — the `#[cfg(windows)]` classes a Windows machine cannot see otherwise — and `--linux` adds the full Linux backend suite in the floor container; the residual is a `cfg(target_os = "macos")`-only path) |
 | `cargo test --workspace --all-features` (in `src-tauri/`) | Backend unit and integration tests across every crate — needs `node scripts/prepare.mjs --icons-only` run once first (`generate_context!()` embeds the icons it derives into `target/studio/icons/`, and the pass stages the sidecar copies tauri-build verifies; Linux/macOS add `--exclude ggs-bash`) |
 | `cargo clippy --all-targets --all-features -- -D warnings` (in `src-tauri/`) | Backend lint, warnings are errors in CI |
 | `npx tauri build` | Installers into `target/studio/cargo/release/bundle/` |
@@ -1199,6 +1200,17 @@ viewport (pan, zoom, states) around it.
 Everything that turns the source tree into installers: asset assembly into
 `target/studio/`, the seam checks, CI, and the Linux build containers.
 
+- Assets: `scripts/test-studio.bat` (Windows) and `scripts/test-studio.sh` (Linux/macOS)
+  — the CI mirror: every check studio.yml's test jobs run on that platform, in the same
+  shape (`clippy -D warnings`, the suite, `GGS_PERF_FILES=20000`, the daemon's and — on
+  Linux — the hub's fmt/clippy/test), so a green local run is a green CI run. The bat
+  adds the two halves a Windows machine otherwise cannot see: a cross-clippy of the
+  pure-Rust crates against `x86_64-unknown-linux-gnu` (the `#[cfg(windows)]` classes
+  that broke every Linux/macOS job on 2026-10-15 while the suite stayed green locally —
+  keep the crate list current when a pure crate joins), and `--linux`, the full Linux
+  backend suite inside the ubuntu:22.04 floor container (Docker; the image carries
+  clippy/rustfmt for it). The residual, stated honestly: a
+  `cfg(target_os = "macos")`-only path has no local answer from Windows or Linux.
 - Assets: `scripts/prepare.mjs` (assembles `target/studio/`; the bundled packages are the
   marketplace builds — `scripts/fetch-marketplace-extensions.mjs` downloads them from
   Open VSX per architecture and packs exactly what the build selected:

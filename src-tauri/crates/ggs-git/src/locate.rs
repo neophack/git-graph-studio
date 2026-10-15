@@ -208,7 +208,10 @@ pub fn find_git_exe() -> Option<PathBuf> {
 }
 
 
-#[cfg(test)]
+// Every test below exercises the `#[cfg(windows)]` lookups, so the whole module rides
+// the same gate — a bare `#[cfg(test)]` leaves the `use super::*` unused (and the build
+// red under `-D warnings`) on every non-Windows target.
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 

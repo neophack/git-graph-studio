@@ -63,8 +63,12 @@ RUN arch="$(uname -m)" \
     && curl -fsSL "https://nodejs.org/dist/v20.18.1/node-v20.18.1-linux-${node_arch}.tar.xz" \
         | tar -xJ -C /usr/local --strip-components=1
 
-# Rust stable, minimal profile. RUSTUP_HOME/CARGO_HOME are split so a build can redirect
-# CARGO_HOME to a cache volume (scripts/studio-linux-build.sh) while the toolchains stay here.
+# Rust stable, minimal profile plus clippy and rustfmt (scripts\test-studio.bat --linux
+# runs the full CI-parity test suite — clippy -D warnings, fmt --check — inside this
+# image; the installer builds alone would not need either). RUSTUP_HOME/CARGO_HOME are
+# split so a build can redirect CARGO_HOME to a cache volume
+# (scripts/studio-linux-build.sh) while the toolchains stay here.
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
+    && rustup component add clippy rustfmt \
     && chmod -R a+rwX /opt/rustup /opt/cargo
