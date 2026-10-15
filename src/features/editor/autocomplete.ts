@@ -6,6 +6,7 @@
 import { autocompletion, closeBrackets, snippetCompletion, type Completion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete';
 import { Facet, type Extension } from '@codemirror/state';
 import { invoke } from '../../platform/ipc/core';
+import { listFiles } from '../../platform/ipc/fs';
 
 import { languageOf, resolveVariables, snippetsFor } from './snippetRegistry';
 import { extensionCompletionsFor, hasExtensionCompletions, type ExtensionCompletion } from './editorCompletions';
@@ -95,7 +96,7 @@ const FILE_LIST_TTL = 5000;
 
 async function workspaceFiles(): Promise<string[]> {
 	if (fileList && performance.now() - fileList.at < FILE_LIST_TTL) return fileList.files;
-	const files = await invoke<string[]>('list_files').catch(() => [] as string[]);
+	const files = await listFiles().catch(() => [] as string[]);
 	fileList = { files, at: performance.now() };
 	return files;
 }

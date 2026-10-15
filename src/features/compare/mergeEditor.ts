@@ -4,6 +4,7 @@
 // language server or a separate merge tool.
 
 import { invoke } from '../../platform/ipc/core';
+import { type FileContents, readFile, writeFile } from '../../platform/ipc/fs';
 import type { EditorView } from '@codemirror/view';
 
 import { el, icon, notify } from '../../platform/ui/index';
@@ -210,13 +211,8 @@ export class MergeToolbar {
 			// CodeMirror holds the document normalized to \n; the file's own encoding and line
 			// endings come from a fresh read, or the write would re-encode it as UTF-8/LF
 			// (flipping every line ending of a CRLF file, corrupting a GB18030/UTF-16 one).
-			const format = await invoke<{ encoding?: string; eol?: 'lf' | 'crlf' }>('read_file', { path: this.path }).catch(() => null);
-			await invoke('write_file', {
-				path: this.path,
-				contents: view.state.doc.toString(),
-				encoding: format?.encoding ?? 'utf8',
-				eol: format?.eol ?? 'lf'
-			});
+			const format: FileContents | null = await readFile(this.path).catch(() => null);
+			await writeFile(this.path, view.state.doc.toString(), format?.encoding ?? 'utf8', format?.eol ?? 'lf');
 			await invoke('git_stage', { paths: [this.path] });
 		} catch (error) {
 			notify('error', String(error));

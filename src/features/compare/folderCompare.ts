@@ -4,6 +4,7 @@
 // filesystem commands the Explorer uses.
 
 import { invoke } from '../../platform/ipc/core';
+import { createFolder, type FileContents, deletePath, fileProbe, readFile, writeFile } from '../../platform/ipc/fs';
 import type { EditorView } from '@codemirror/view';
 import type { MergeView } from '@codemirror/merge';
 
@@ -17,17 +18,6 @@ export interface DirDiffEntry {
 	status: 'leftOnly' | 'rightOnly' | 'different' | 'same';
 	leftSize: number;
 	rightSize: number;
-}
-
-interface FileContents {
-	contents: string | null;
-	binary: boolean;
-	size: number;
-	/** The encoding id the text was decoded with (`encodings` lists them); a copy must be
-	 *  written back in it, or the copy transcodes. */
-	encoding: string;
-	/** `lf` or `crlf`. */
-	eol: string;
 }
 
 const STATUS_META: Record<DirDiffEntry['status'], { icon: string; title: string; cls: string }> = {
@@ -187,7 +177,7 @@ export class FolderCompareView {
 		const rightPath = joinPath(this.right, entry.path);
 		const copy = async (from: string, to: string) => {
 			try {
-				const file = await invoke<FileContents>('read_file', { path: from });
+				const file = await readFile(from);
 				if (file.contents === null || file.binary) {
 					notify('warning', `${basename(from)} is binary; only text files can be copied.`);
 					return;
@@ -195,11 +185,11 @@ export class FolderCompareView {
 				// A file in a folder the other side lacks (`src/new/x.txt` left-only) needs
 				// that folder first: `write_file` refuses to write into a missing parent.
 				const parent = dirname(to);
-				if (parent !== '') await invoke('create_folder', { path: parent }).catch(() => undefined);
+				if (parent !== '') await createFolder(parent).catch(() => undefined);
 				// Written back in the file's own encoding and line endings, as the editor
 				// saves: without them `write_file` defaults to UTF-8/LF and the "copy"
 				// transcodes - the pair still differs on the next refresh.
-				await invoke('write_file', { path: to, contents: file.contents, encoding: file.encoding, eol: file.eol });
+				await writeFile(to, file.contents, file.encoding, file.eol);
 				this.onFilesChanged?.();
 				await this.refresh();
 			} catch (error) {
@@ -210,7 +200,7 @@ export class FolderCompareView {
 			const confirmed = await confirmDialog(`Delete ${path}?`, 'Delete');
 			if (!confirmed) return;
 			try {
-				await invoke('delete_path', { path });
+				await deletePath(path, false);
 				this.onFilesChanged?.();
 				await this.refresh();
 			} catch (error) {
@@ -247,8 +237,8 @@ export class FolderCompareView {
 		// Both exist and differ: binaries open the hex comparison, text files the merge
 		// view. A probe decides which before anything is read whole; the read races a
 		// vanished file, which simply shows as empty.
-		const probe = (path: string) => invoke<FileContents>('file_probe', { path }).catch(() => null);
-		const read = (path: string) => invoke<FileContents>('read_file', { path }).catch(() => ({ contents: '', binary: false, size: 0, encoding: 'utf8', eol: 'lf' }) as FileContents);
+		const probe = (path: string) => fileProbe(path).catch(() => null);
+		const read = (path: string) => readFile(path).catch(() => ({ contents: '', binary: false, size: 0, encoding: 'utf8', eol: 'lf' }) as FileContents);
 		// The load's token: any re-render (a filter keystroke, the hide-same toggle, a
 		// refresh) wipes this detail element and bumps `detailLoad`, so a continuation that
 		// finds itself stale stops before attaching to the detached element or claiming

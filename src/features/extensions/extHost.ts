@@ -11,6 +11,7 @@
 // package), and its pages mount as sandboxed frames over the `ggs://` protocol.
 
 import { invoke, Channel } from '../../platform/ipc/core';
+import { writeFile } from '../../platform/ipc/fs';
 import { listen } from '../../platform/ipc/core';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
@@ -1667,7 +1668,7 @@ export class ExtensionHost {
 			}
 			case 'workbench.writeFile': {
 				const [path, contents] = args as [string, string];
-				return await invoke('write_file', { path, contents });
+				return await writeFile(path, contents);
 			}
 			case 'workbench.forwardKey': {
 				this.onForwardKey?.(args[0] as { key: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean });

@@ -7,27 +7,13 @@
 // those commands — the Relay refuses them, src/remote/pathGate.ts, because their paths
 // name anywhere on the machine). A desktop upload lands beside what already exists
 // (the ` (copy)` naming the Explorer's own drop copy uses — it never clobbers).
-import { invoke, Channel } from '../../platform/ipc/core';
+import { Channel } from '../../platform/ipc/core';
+import { fsExport, fsImport, type TransferProgress, type TransferReport, fsTransferCancel } from '../../platform/ipc/fs';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 
 import { t, tf } from '../../platform/i18n';
 import { hook } from '../../platform/hooks';
 import { basename, notify, progressToast, type MenuEntry } from '../../platform/ui/index';
-
-/** One progress report of a desktop transfer (`fs_export` / `fs_import`). */
-export interface TransferProgress {
-	name: string;
-	bytes: number;
-	total: number;
-}
-
-/** What a desktop transfer settled on: the paths that landed, per-entry failures, and
- *  whether the Cancel action stopped it early. */
-export interface TransferReport {
-	landed: string[];
-	failed: { name: string; error: string }[];
-	cancelled: boolean;
-}
 
 /** The surface a transfer reports through: a progress toast and the outcome notices. The
  *  workbench's own toasts are the default; the mirror page (no workbench DOM, no
@@ -115,14 +101,11 @@ export async function uploadInto(dir: string, folder = false): Promise<string[]>
 	const picked = await openDialog({ multiple: true, directory: folder, title: t(folder ? 'transfer.uploadFolder' : 'transfer.upload') });
 	const sources = Array.isArray(picked) ? picked : picked ? [picked] : [];
 	if (sources.length === 0) return [];
-	const toast = new TransferToast((label) => tf('transfer.uploading', label), () => void invoke('fs_transfer_cancel').catch(() => undefined));
+	const toast = new TransferToast((label) => tf('transfer.uploading', label), () => void fsTransferCancel().catch(() => undefined));
 	const channel = new Channel<TransferProgress>();
 	channel.onmessage = (p) => toast.tick({ label: p.name, percent: p.total > 0 ? Math.round((p.bytes / p.total) * 100) : null });
-	const report = normalizeReport(await invoke<TransferReport>('fs_import', {
-		sources,
-		targetDir: dir,
-		onProgress: channel
-	}).catch((error: unknown) => {
+	const report = normalizeReport(await fsImport(sources, dir, channel)
+		.catch((error: unknown) => {
 		sink.error(tf('transfer.failed', String(error)));
 		return null;
 	}));
@@ -152,15 +135,11 @@ export async function downloadTo(path: string, zip = false): Promise<boolean> {
 		...(zip ? { filters: [{ name: 'Zip', extensions: ['zip'] }] } : {})
 	});
 	if (!dest) return false;
-	const toast = new TransferToast((label) => tf('transfer.downloading', label), () => void invoke('fs_transfer_cancel').catch(() => undefined));
+	const toast = new TransferToast((label) => tf('transfer.downloading', label), () => void fsTransferCancel().catch(() => undefined));
 	const channel = new Channel<TransferProgress>();
 	channel.onmessage = (p) => toast.tick({ label: p.name, percent: p.total > 0 ? Math.round((p.bytes / p.total) * 100) : null });
-	const report = normalizeReport(await invoke<TransferReport>('fs_export', {
-		path,
-		dest,
-		zip,
-		onProgress: channel
-	}).catch((error: unknown) => {
+	const report = normalizeReport(await fsExport(path, dest, zip, channel)
+		.catch((error: unknown) => {
 		sink.error(tf('transfer.failed', String(error)));
 		return null;
 	}));

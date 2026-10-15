@@ -2,7 +2,7 @@
 // codicon file/folder icons), git status decorations, the title actions (new file / new
 // folder / refresh / collapse all), inline new/rename inputs, and the context menu.
 
-import { invoke } from '../../platform/ipc/core';
+import { copyInto, createFile, createFolder, deletePath, type DirEntryInfo, type DirPage, listDir, listDirPage, renamePath } from '../../platform/ipc/fs';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
@@ -12,22 +12,6 @@ import { contextUri, menuSection, resourceContext } from '../extensions';
 import { t, tf } from '../../platform/i18n';
 import { transferMenuEntries, transferMenuShown } from './transfer';
 import { actionButton, basename, confirmDialog, el, icon, joinPath, liveSidebarTitle, notify, relativeTo, showContextMenu, toPosix, type MenuEntry } from '../../platform/ui/index';
-
-interface DirEntryInfo {
-	name: string;
-	path: string;
-	isDir: boolean;
-	size: number;
-}
-
-/** One window of a paged directory listing (`list_dir_page`): the same order `list_dir`
- *  spells, sliced, with the unfiltered total behind it. */
-interface DirPage {
-	entries: DirEntryInfo[];
-	total: number;
-	offset: number;
-	limit: number;
-}
 
 /** Remote traffic (docs/ggs-remote-plan.md §10.3): over the WebSocket every byte is metered,
  *  so a huge directory pages — the first `REMOTE_DIR_PAGE` entries render and a "load more"
@@ -337,13 +321,13 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 					paging = record.entries.length < record.total ? { total: record.total } : null;
 				} else {
 					const limit = Math.max(REMOTE_DIR_PAGE, record?.entries.length ?? 0);
-					const page = await invoke<DirPage>('list_dir_page', { path: dirPath, offset: 0, limit });
+					const page = await listDirPage(dirPath, 0, limit);
 					this.dirPages.set(dirPath, { entries: page.entries, total: page.total, fresh: false });
 					entries = page.entries;
 					if (page.entries.length < page.total) paging = { total: page.total };
 				}
 			} else {
-				entries = await invoke<DirEntryInfo[]>('list_dir', { path: dirPath });
+				entries = await listDir(dirPath);
 			}
 		} catch (error) {
 			if (generation !== this.generation) return;
@@ -415,7 +399,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 			row.appendChild(el('span', 'label'));
 			row.addEventListener('click', () => {
 				const loaded = this.dirPages.get(dirPath)?.entries.length ?? 0;
-				void invoke<DirPage>('list_dir_page', { path: dirPath, offset: loaded, limit: REMOTE_DIR_PAGE })
+				void listDirPage(dirPath, loaded, REMOTE_DIR_PAGE)
 					.then((page) => {
 						const current = this.dirPages.get(dirPath);
 						// Another load-more (or a refresh) raced ahead: keep whichever saw more.
@@ -687,7 +671,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		if (paths.length === 0) return true;
 		let landed: string[] = [];
 		try {
-			landed = await invoke<string[]>('copy_into', { sources: paths, destDir: folder });
+			landed = await copyInto(paths, folder);
 		} catch (error) {
 			notify('error', String(error));
 			return true;
@@ -827,7 +811,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		if (value === null) return;
 		const target = joinPath(folder, value);
 		try {
-			await invoke(isDir ? 'create_folder' : 'create_file', { path: target });
+			await (isDir ? createFolder(target) : createFile(target));
 		} catch (error) {
 			notify('error', String(error));
 			return;
@@ -857,7 +841,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		if (value === null || value === basename(path)) return;
 		const target = joinPath(folder, value);
 		try {
-			await invoke('rename_path', { from: path, to: target });
+			await renamePath(path, target);
 		} catch (error) {
 			notify('error', String(error));
 			return;
@@ -893,7 +877,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 			: await confirmDialog(`Are you sure you want to delete ${what}? You can restore this ${isDir ? 'folder' : 'file'} from the Recycle Bin.`, 'Move to Recycle Bin');
 		if (!confirmed) return;
 		try {
-			await invoke('delete_path', { path, permanent });
+			await deletePath(path, permanent);
 		} catch (error) {
 			if (permanent) {
 				notify('error', String(error));
@@ -904,7 +888,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 			const retry = await confirmDialog(`Failed to delete ${what} using the Recycle Bin. Do you want to permanently delete instead?`, 'Delete Permanently', 'error');
 			if (!retry) return;
 			try {
-				await invoke('delete_path', { path, permanent: true });
+				await deletePath(path, true);
 			} catch (again) {
 				notify('error', String(again));
 				return;

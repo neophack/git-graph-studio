@@ -25,7 +25,7 @@
 // end. A data inspector line under the rows reads the caret byte as u8..u64, floats
 // and text.
 
-import { invoke } from '../../platform/ipc/core';
+import { patchFile, type FileChunk, readFileChunk } from '../../platform/ipc/fs';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { t, tf } from '../../platform/i18n';
 import { settings } from '../../platform/settings';
@@ -44,11 +44,6 @@ const SEARCH_CHUNK = 1024 * 1024;
 /** The largest selection Copy reads at once and Paste writes at once - a clipboard
  *  payload, not a file dump; 10 MiB, and anything larger is refused with a reminder. */
 export const COPY_LIMIT = 10 * 1024 * 1024;
-
-interface FileChunk {
-	size: number;
-	base64: string;
-}
 
 export function decodeBase64(data: string): Uint8Array {
 	const binary = atob(data);
@@ -619,7 +614,7 @@ export class HexView {
 		if (!promise) {
 			const offset = slabIndex * SLAB_BYTES;
 			if (offset >= this.size && this.size > 0) return Promise.resolve(null);
-			promise = invoke<FileChunk>('read_file_chunk', { path: this.path, offset, len: SLAB_BYTES })
+			promise = readFileChunk(this.path, offset, SLAB_BYTES)
 				.then((chunk) => {
 					this.size = chunk.size;
 					const bytes = decodeBase64(chunk.base64);
@@ -815,7 +810,7 @@ export class HexView {
 			while (offset < this.size && token === this.searchToken) {
 				let chunk: Uint8Array;
 				try {
-					chunk = decodeBase64((await invoke<FileChunk>('read_file_chunk', { path: this.path, offset, len: SEARCH_CHUNK })).base64);
+					chunk = decodeBase64((await readFileChunk(this.path, offset, SEARCH_CHUNK)).base64);
 				} catch {
 					if (token === this.searchToken) this.searchRunning = false;
 					return;
@@ -1093,7 +1088,7 @@ export class HexView {
 	private async readRange(start: number, count: number): Promise<Uint8Array | null> {
 		let bytes: Uint8Array;
 		try {
-			bytes = decodeBase64((await invoke<FileChunk>('read_file_chunk', { path: this.path, offset: start, len: count })).base64);
+			bytes = decodeBase64((await readFileChunk(this.path, start, count)).base64);
 		} catch {
 			return null;
 		}
@@ -1392,7 +1387,7 @@ export class HexView {
 		if (!this.edits.size) return true;
 		const edits = Array.from(this.edits, ([offset, byte]) => ({ offset, byte }));
 		try {
-			await invoke('patch_file', { path: this.path, edits });
+			await patchFile(this.path, edits);
 		} catch (error) {
 			this.status.textContent = `Save failed: ${String(error)}`;
 			return false;

@@ -2,7 +2,7 @@
 // workspace's `.vscode/` folder) plus a built-in base set per language. The registry is
 // queried live by the completion source, so a loaded file needs no reload round-trip.
 
-import { invoke } from '../../platform/ipc/core';
+import { listDir, readFile } from '../../platform/ipc/fs';
 
 import { contributionRegistryVersion, declaredLanguageId, extensionSnippetFiles } from '../extensions';
 
@@ -162,14 +162,14 @@ export async function loadWorkspaceSnippets(root: string | null): Promise<void> 
 	const folder = root.replace(/[\\/]+$/, '') + separator + '.vscode';
 	let entries: { name: string }[];
 	try {
-		entries = await invoke<{ name: string }[]>('list_dir', { path: folder });
+		entries = await listDir(folder);
 	} catch {
 		return; // no .vscode folder - the common case
 	}
 	for (const { name } of entries ?? []) {
 		if (!name.endsWith('.code-snippets')) continue;
 		try {
-			const file = await invoke<{ contents: string | null }>('read_file', { path: folder + separator + name });
+			const file = await readFile(folder + separator + name);
 			if (typeof file.contents === 'string') workspaceSnippets.push(...parseCodeSnippets(file.contents));
 		} catch {
 			// Unreadable or unparseable: skip the file, keep the rest.

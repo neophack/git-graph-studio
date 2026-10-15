@@ -13,7 +13,7 @@
 // viewer's own formats (hex, text, C array, Base64) from whichever pane the click landed
 // on - the two sides can differ, so Copy always names its source file.
 
-import { invoke } from '../../platform/ipc/core';
+import { type FileChunk, readFileChunk } from '../../platform/ipc/fs';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { t, tf } from '../../platform/i18n';
@@ -34,11 +34,6 @@ const SCAN_CHUNK = 1024 * 1024;
 const SLAB_CACHE_LIMIT = 48;
 /** Equal bytes that still merge two difference regions into one navigable "difference". */
 const DIFF_COALESCE = 16;
-
-interface FileChunk {
-	size: number;
-	base64: string;
-}
 
 /** One difference region of the shared address space: bytes [start, end) that differ (a
  *  run of differing bytes possibly bridged by short equal stretches; the tail beyond the
@@ -461,7 +456,7 @@ export class HexCompareView {
 		const offset = index * SLAB_BYTES;
 		const size = store === this.leftSlabs ? this.sizeLeft : this.sizeRight;
 		if (size && offset >= size) return Promise.resolve(null);
-		const promise = invoke<FileChunk>('read_file_chunk', { path, offset, len: SLAB_BYTES })
+		const promise = readFileChunk(path, offset, SLAB_BYTES)
 			.then((chunk) => {
 				if (store === this.leftSlabs) this.sizeLeft = chunk.size;
 				else this.sizeRight = chunk.size;
@@ -524,8 +519,8 @@ export class HexCompareView {
 		while (offset < common) {
 			if (token !== this.scanToken) return;
 			const [a, b] = await Promise.all([
-				invoke<FileChunk>('read_file_chunk', { path: this.leftPath, offset, len: SCAN_CHUNK }).catch(() => null),
-				invoke<FileChunk>('read_file_chunk', { path: this.rightPath, offset, len: SCAN_CHUNK }).catch(() => null)
+				readFileChunk(this.leftPath, offset, SCAN_CHUNK).catch(() => null),
+				readFileChunk(this.rightPath, offset, SCAN_CHUNK).catch(() => null)
 			]);
 			if (token !== this.scanToken) return;
 			if (!a || !b) {
@@ -742,7 +737,7 @@ export class HexCompareView {
 	 *  selection's span is a one-off read, not the repeated small reads scrolling makes. */
 	private async readRange(path: string, start: number, count: number): Promise<Uint8Array | null> {
 		try {
-			return decodeBase64((await invoke<FileChunk>('read_file_chunk', { path, offset: start, len: count })).base64);
+			return decodeBase64((await readFileChunk(path, start, count)).base64);
 		} catch {
 			return null;
 		}

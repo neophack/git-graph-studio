@@ -6,6 +6,7 @@
 import { invoke, Channel } from '../platform/ipc/core';
 import { listen } from '../platform/ipc/core';
 import { appNewInstance, bootContext, type BootContext, bootStage, closeFolder, openDevtools, openFolder, openSingleFile, openWorkspace, type OpenedRoot, postFirstPaint } from '../platform/ipc/app';
+import { backupList, backupRead, type BackupEntry, encodings, listFiles, readFile } from '../platform/ipc/fs';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -550,10 +551,10 @@ export class Workbench {
 			const multiRoot = this.repoPaths.length > 1;
 			this.filePicks = new FilePickSource(async () => {
 				if (multiRoot) {
-					const lists = await Promise.all(this.repoPaths.map((root) => invoke<string[]>('list_files', { repo: root }).catch(() => [] as string[])));
+					const lists = await Promise.all(this.repoPaths.map((root) => listFiles(root).catch(() => [] as string[])));
 					return lists.flatMap((files, index) => files.map((file) => joinRepo(this.repoPaths[index]!, file)));
 				}
-				return invoke<string[]>('list_files').catch(() => [] as string[]);
+				return listFiles().catch(() => [] as string[]);
 			}, { backend: !multiRoot });
 		}
 		void this.filePicks.refresh();
@@ -1337,7 +1338,7 @@ export class Workbench {
 		const absolute = /^([a-zA-Z]:[\\/]|\\|\/)/.test(def.path) ? def.path : joinRepo(this.repoPath, def.path);
 		let fragment = '';
 		try {
-			const file = await invoke<{ contents: string } | null>('read_file', { path: absolute });
+			const file = await readFile(absolute);
 			const lines = (file?.contents ?? '').split('\n');
 			const from = Math.max(0, def.line - 2);
 			// The declaration and what follows it, until the column-0 brace that closes it.
@@ -1495,7 +1496,7 @@ export class Workbench {
 			{ label: 'Save with Encoding', description: 'Write the file in another encoding from now on', value: 'save' }
 		], 'Select Action', basename(input.path));
 		if (!action) return;
-		const list = await invoke<[string, string][]>('encodings').catch(() => Object.entries(ENCODING_LABELS));
+		const list = await encodings().catch(() => Object.entries(ENCODING_LABELS));
 		const encoding = await quickPick(list.map(([id, label]) => ({ label, value: id })), 'Select File Encoding' + (action === 'reopen' ? ' to Reopen File' : ' to Save with'));
 		if (!encoding) return;
 		if (action === 'reopen') await this.editors.reopenWithEncoding(encoding);
@@ -2121,9 +2122,9 @@ export class Workbench {
 	 *  folder wait for that folder to be opened. */
 	async recoverBackups(): Promise<void> {
 		if (!this.repoPath) return;
-		let backups: { path: string; savedAt: number }[];
+		let backups: BackupEntry[];
 		try {
-			backups = await invoke('backup_list');
+			backups = await backupList();
 		} catch {
 			return;
 		}
@@ -2134,7 +2135,7 @@ export class Workbench {
 		let restored = 0;
 		for (const backup of here) {
 			try {
-				const contents = await invoke<string>('backup_read', { path: backup.path });
+				const contents = await backupRead(backup.path);
 				if (await this.editors.restoreBackup(backup.path, contents)) restored++;
 			} catch {
 				// A backup that cannot be read is left in place for the next launch.
