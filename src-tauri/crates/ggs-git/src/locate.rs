@@ -185,6 +185,15 @@ pub fn find_git_exe() -> Option<PathBuf> {
         .find_map(|root| git_exe_from_root(root))
 }
 
+/// POSIX: nothing to locate beyond the PATH — `None` is the documented answer, and every
+/// caller's fallback (`PathBuf::from("git")`) is the bare spawn that finds it. The
+/// runner's unconditional call needs the name to exist on every target (2026-10-15: its
+/// `#[cfg(windows)]`-only twin broke the Linux and macOS compiles).
+#[cfg(not(windows))]
+pub fn find_git_exe() -> Option<PathBuf> {
+    None
+}
+
 
 #[cfg(test)]
 mod tests {

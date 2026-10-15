@@ -75,6 +75,14 @@ export interface TransferWireTransport {
 	download(path: string, zip?: boolean): Promise<void>;
 }
 
+/** Open Folder for someone not sitting at the PC (docs/remote-ui-redesign-plan.md §P0):
+ *  resolves whether it took the request. A browser session browses the PC's disk and opens
+ *  the folder in a PC window (its own `open_folder` is refused); the desktop window, while
+ *  a mirror viewer watches, browses in-window — the copy shows it, where the native dialog
+ *  would open on the PC's screen alone — and opens through `open`. False leaves the
+ *  desktop's native dialog to run. */
+export type FolderOpenPolicy = (open: (path: string) => Promise<void>, roots: string[]) => Promise<boolean>;
+
 interface HookMap {
 	editLock: EditLockPolicy;
 	navigation: NavigationPolicy;
@@ -86,6 +94,7 @@ interface HookMap {
 	workbenchSync: (workbench: unknown) => WorkbenchSyncHandle | null;
 	summaryReporter: (source: { tabs(): { path: string; dirty: boolean; active: boolean }[]; scmChanges(): number }) => () => void;
 	transferWire: (() => Promise<TransferWireTransport>) | null;
+	folderOpen: FolderOpenPolicy | null;
 }
 
 const noop = (): void => undefined;
@@ -102,7 +111,8 @@ const defaults: HookMap = {
 	mirror: null,
 	workbenchSync: () => null,
 	summaryReporter: () => noop,
-	transferWire: null
+	transferWire: null,
+	folderOpen: null
 };
 
 const provided = new Map<keyof HookMap, HookMap[keyof HookMap]>();
