@@ -693,8 +693,17 @@ page shows the integration's state (`claude_mcp_status`).
   toasts, memento persistence, tree views, activationEvents; the activation policy also
   derives the implicit `onLanguage` events VS Code 1.74 reads off `contributes.languages` /
   `contributes.grammars`) + `ext-host.html` +
-  `src/hosts/extHostBoot.ts` (one sandboxed frame per extension), `src/hosts/vscodeApi.ts` (the `vscode`
-  shim the frames require; unsupported surfaces degrade to inert registrations instead of
+  `src/hosts/extHostBoot.ts` (one sandboxed frame per extension), `src/hosts/vscodeApi/` (the `vscode`
+  shim the frames require, split by concern — `index.ts` assembles the namespace and owns the
+  public surface every host imports; `types/` the value types (`Position`, `Range`, `Uri`,
+  `Selection`, the enums and item classes); `commands.ts` / `window.ts` / `workspace.ts` /
+  `languages.ts` / `env.ts` / `extensions.ts` the namespace builders over one shared `state.ts`
+  (the cross-namespace tables, emitters, document table, editor proxies, registration queues
+  and the host-event router); `inert.ts` the degraded namespaces (lm/chat/tasks/tests/debug/
+  scm/notebooks/authentication/l10n/comments) with the inert/unsupported vocabulary;
+  `mementos.ts` / `webviews.ts` / `treeViews.ts` / `documents.ts` the frame-side object halves;
+  `bridge.ts` / `shimLog.ts` / `util.ts` / `configuration.ts` the shared vocabulary; unsupported
+  surfaces degrade to inert registrations instead of
   throwing — an activation must survive whatever a foreign package registers — and every
   value type a load-time destructure touches (`Position`, `Range`, `SnippetString`,
   `CodeActionKind`, …) constructs), `src/hosts/extModuleLoader.ts` (the frame's CommonJS resolver
