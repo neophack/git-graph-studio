@@ -12,22 +12,13 @@
 // page's own transport. Entries ride the first surface only — a sheet's submenu step
 // rebuilds its rows from the PC's entries; the long press opens it again.
 import { t } from '../../platform/i18n';
+import { parentOf } from '../../platform/ui';
 import { downloadTo, uploadInto } from '../../features/explorer';
 
 /** What the PC's Explorer menus for one click: the row under it, or the tree's root. */
 export interface ExplorerSpot {
 	path: string;
 	isDir: boolean;
-}
-
-/** The parent of a path in either separator dialect (the picker's own `parentOf`). */
-function parentOf(path: string): string | null {
-	const trimmed = path.replace(/[\\/]+$/, '');
-	const at = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
-	if (at < 0) return null;
-	if (at === 0) return '/';
-	const parent = trimmed.slice(0, at);
-	return /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent;
 }
 
 /** What the PC's Explorer would menu for a click that landed on `target` of the copy: the

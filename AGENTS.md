@@ -322,7 +322,9 @@ paged, never loaded whole.
   lines per notch or trackpad pixels; `amount.ts` the page distance; `input.ts` the DOM
   listeners; `scrollbar.ts` the drawn scrollbar — the surfaces scroll nothing natively, so
   no document is too tall for the layout engine), `src/features/viewers/fastView.ts` (Fast Viewer —
-  backend-rope document, the visible rows only), `src/features/viewers/hexView.ts` (offset / hex / ASCII),
+  backend-rope document, the visible rows only), `src/features/viewers/hexShared.ts` (the leaf the two
+  hex surfaces share — the offset formatting, the row grid, the Copy Special vocabulary and its
+  10 MiB cap, the 64 KiB slab paging and the row-width probe), `src/features/viewers/hexView.ts` (offset / hex / ASCII),
   `src/features/viewers/hexCompare.ts` (byte-aligned two-pane compare)
 - Backend: `src-tauri/crates/ggs-text/` (the viewer engine), byte comparison in the
   `ggs-index` crate's `hexdiff`, chunked reads via `ggs-fs` (the `cmd_fs.rs` adapters)

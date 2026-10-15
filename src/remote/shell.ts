@@ -9,7 +9,7 @@
 // what only a browser session can do — the window switcher, transfers, the traffic readout,
 // Data Saver — stays with the browser.
 import { commands } from '../platform/commands';
-import { notify } from '../platform/ui';
+import { formatBytes, notify } from '../platform/ui';
 import { t, tf } from '../platform/i18n';
 import { currentWorkbench } from '../workbench';
 import { installActionSheet } from './actionSheet';
@@ -29,12 +29,6 @@ import { remoteEnv } from './session';
 import { installPhoneSettingsEntry } from './settingsPage';
 import { remoteHostStatus } from '../platform/ipc/remote';
 import { modeUrl } from './mirror/uiMode';
-
-function formatBytes(n: number): string {
-	if (n < 1024) return `${n} B`;
-	if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-	return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
 
 async function firstFolder(): Promise<string | null> {
 	try {

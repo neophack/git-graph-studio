@@ -28,7 +28,7 @@ import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { cycleSeriesChart, formatAxisSeconds, histogramChart, multiLineChart, seriesStyle, stackedBars, type ChartSeries } from './canChart';
 import { t, tf } from '../../platform/i18n';
 import { load as loadState, save as saveState } from '../../platform/state';
-import { basename, el, icon, quickPick } from '../../platform/ui/index';
+import { basename, el, formatBytes, icon, quickPick } from '../../platform/ui/index';
 
 /** The arbitration bitrates a CAN (FD) bus commonly runs at; the load is recomputed on any change. */
 export const CAN_BITRATES = [1_000_000, 800_000, 500_000, 250_000, 125_000, 100_000, 50_000, 33_333, 20_000, 10_000, 5_000] as const;
@@ -114,13 +114,6 @@ function formatDuration(seconds: number): string {
 	const s = seconds - m * 60;
 	if (m < 60) return `${m}m ${s.toFixed(1)}s`;
 	return `${Math.floor(m / 60)}h ${m % 60}m ${Math.floor(s)}s`;
-}
-
-function formatBytes(bytes: number): string {
-	if (bytes < 1024) return `${bytes} B`;
-	if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
-	if (bytes < 1024 ** 3) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-	return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
 function formatStart(seconds: number): string {
@@ -427,7 +420,7 @@ export class CanLogView {
 			cell(t('can.overview.duration'), formatDuration(view.durationS)),
 			cell(t('can.overview.frames'), view.totalFrames.toLocaleString()),
 			cell(t('can.overview.errors'), view.errorFrames.toLocaleString()),
-			cell(t('can.overview.payload'), formatBytes(view.payloadBytes)),
+			cell(t('can.overview.payload'), formatBytes(view.payloadBytes, { gb: true })),
 			cell(t('can.overview.ids'), view.messages.length.toLocaleString()),
 			cell(t('can.overview.rate'), view.durationS > 0 ? `${(view.totalFrames / view.durationS).toFixed(1)} fr/s` : '—')
 		]));
@@ -449,7 +442,7 @@ export class CanLogView {
 				el('span', 'can-left', [`${t('can.channel')} ${c.channel}`]),
 				el('span', 'can-num', [c.frames.toLocaleString()]),
 				el('span', `can-num${c.errorFrames ? ' can-warn' : ''}`, [c.errorFrames.toLocaleString()]),
-				el('span', 'can-num', [formatBytes(c.payloadBytes)]),
+				el('span', 'can-num', [formatBytes(c.payloadBytes, { gb: true })]),
 				el('span', 'can-num', [duration.toFixed(3) + ' s']),
 				el('span', 'can-num', [duration > 0 ? (c.frames / duration).toFixed(1) + ' fr/s' : '—']),
 				el('span', 'can-rates', [
@@ -567,7 +560,7 @@ export class CanLogView {
 				el('span', 'can-left', [m.fd ? 'CAN FD' : 'CAN']),
 				el('span', 'can-num', [m.count.toLocaleString()]),
 				el('span', 'can-num', [`${m.tx.toLocaleString()} / ${m.rx.toLocaleString()}`]),
-				el('span', 'can-num', [formatBytes(m.payloadBytes)]),
+				el('span', 'can-num', [formatBytes(m.payloadBytes, { gb: true })]),
 				el('span', 'can-num', [`${formatCycle(m.minCycleS)} / ${formatCycle(m.avgCycleS)} / ${formatCycle(m.maxCycleS)}`]),
 				el('span', 'can-num', [formatCycle(m.stdCycleS)]),
 				el('span', 'can-num', [share.toFixed(share < 1 ? 2 : 1) + ' %'])

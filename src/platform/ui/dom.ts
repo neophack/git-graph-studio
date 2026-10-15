@@ -98,6 +98,34 @@ export function joinPath(base: string, name: string): string {
 	return base.replace(/[\\/]+$/, '') + separator + name;
 }
 
+/** The parent of a path in either separator dialect, Windows-drive aware (`C:\` keeps its
+ *  separator, `/` is its own parent): `null` when the path has none above it — the shape
+ *  the remote folder pickers walk up with. */
+export function parentOf(path: string): string | null {
+	const trimmed = path.replace(/[\\/]+$/, '');
+	const at = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+	if (at < 0) return null;
+	if (at === 0) return '/';
+	const parent = trimmed.slice(0, at);
+	return /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent;
+}
+
+/** One byte-size formatter for every view (the CAN overview, the hex viewers' copy
+ *  notices, the remote traffic line): 1 decimal place, one unit per 1024 step. The
+ *  options keep each caller's prior spelling — `gb` adds the terabyte-free GB step
+ *  (CAN traces), `iec` spells KiB/MiB (the hex viewers), `trim` drops a trailing
+ *  `.0` (the hex viewers). */
+export function formatBytes(count: number, opts: { gb?: boolean; iec?: boolean; trim?: boolean } = {}): string {
+	const step = (value: number, places: number) => {
+		const fixed = value.toFixed(places);
+		return opts.trim ? String(Number(fixed)) : fixed;
+	};
+	if (count < 1024) return `${count} B`;
+	if (count < 1024 * 1024) return `${step(count / 1024, 1)} ${opts.iec ? 'KiB' : 'KB'}`;
+	if (opts.gb && count >= 1024 ** 3) return `${step(count / 1024 ** 3, 2)} GB`;
+	return `${step(count / (1024 * 1024), 1)} ${opts.iec ? 'MiB' : 'MB'}`;
+}
+
 /** Forward slashes, as git and the graph view spell paths. */
 export function toPosix(path: string): string {
 	return path.replaceAll('\\', '/');

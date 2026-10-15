@@ -22,12 +22,11 @@ import { ScrollModel } from '../../scroll/model';
 import { Scrollbar } from '../../scroll/scrollbar';
 import { el, icon, notify, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 import {
-	COPY_FORMAT_KEYS, COPY_LIMIT, OFFSET_DIGITS, ROW_LADDER, asciiChar, bytesPerRowFor, bytesToLatin1, decodeBase64, formatBytes,
-	groupSizeFor, hexAddress, hexByte, hexHeader, offsetDigitsFor, rowGridTemplate, type CopyFormat
-} from './hexView';
+	COPY_FORMAT_KEYS, COPY_LIMIT, OFFSET_DIGITS, ROW_LADDER, SLAB_BYTES, asciiChar, bytesPerRowFor, bytesToLatin1, decodeBase64,
+	formatBytes, groupSizeFor, hexAddress, hexByte, hexHeader, measureCharWidth, offsetDigitsFor, rowBytesAcross, rowGridTemplate,
+	type CopyFormat
+} from './hexShared';
 
-/** Visible rows are filled from 64 KiB slabs, so scrolling reads a slab at a time. */
-const SLAB_BYTES = 64 * 1024;
 /** The difference scan streams both sides in 1 MiB chunks; its reads bypass the slab cache. */
 const SCAN_CHUNK = 1024 * 1024;
 /** Decoded slabs kept per side (3 MiB); the least recently loaded is dropped beyond it. */
@@ -311,18 +310,10 @@ export class HexCompareView {
 	/* ---------- Layout & drawing ---------- */
 
 	/** The row width of one pane: half the scroller (both panes share the row), or the
-	 *  width the user pinned. The probe zeroes the row's own padding — 28 zeros in the
-	 *  row font, nothing else. */
+	 *  width the user pinned. */
 	private pickBytesPerRow(): number {
 		if (this.forcedBytesPerRow) return this.forcedBytesPerRow;
-		const probe = el('span', 'hex-row');
-		probe.style.visibility = 'hidden';
-		probe.style.position = 'absolute';
-		probe.style.padding = '0';
-		probe.textContent = '0'.repeat(28);
-		this.scroller.append(probe);
-		const charWidth = probe.getBoundingClientRect().width / 28;
-		probe.remove();
+		const charWidth = measureCharWidth(this.scroller);
 		if (!charWidth || !this.scroller.clientWidth) return 16;
 		return bytesPerRowFor(charWidth, this.scroller.clientWidth / 2 - 24, this.offsetDigits);
 	}
@@ -478,19 +469,12 @@ export class HexCompareView {
 
 	/** One side's bytes for a row: the slab's slice, or - when the row straddles the
 	 *  64 KiB boundary (a row width like 24 doesn't divide it) - the next slab's head
-	 *  joined on, so no byte of the row is lost. */
+	 *  joined on (hexShared's rowBytesAcross, both hex views' one copy of it). */
 	private async rowBytes(store: Slabs, path: string, offset: number): Promise<Uint8Array | null> {
 		const slabIndex = Math.floor(offset / SLAB_BYTES);
 		const first = await this.slab(store, path, slabIndex);
 		if (!first) return null;
-		const head = first.subarray(offset - slabIndex * SLAB_BYTES, offset - slabIndex * SLAB_BYTES + this.bytesPerRow);
-		if (head.length >= this.bytesPerRow) return head;
-		const tail = await this.slab(store, path, slabIndex + 1);
-		if (!tail) return head;
-		const joined = new Uint8Array(Math.min(this.bytesPerRow, head.length + tail.length));
-		joined.set(head);
-		joined.set(tail.subarray(0, joined.length - head.length), head.length);
-		return joined;
+		return rowBytesAcross(offset, this.bytesPerRow, first, () => this.slab(store, path, slabIndex + 1));
 	}
 
 	/* ---------- The difference scan ---------- */

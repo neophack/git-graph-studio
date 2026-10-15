@@ -3,7 +3,7 @@
 // workbench's own quick input — folders to step into, `..` to step out, a typed absolute
 // path accepted as is, and "Upload from this device…" to put files into the folder shown.
 import { invoke } from './tauriShim/core';
-import { quickInput, type QuickPickItem } from '../platform/ui';
+import { joinPath, parentOf, quickInput, type QuickPickItem } from '../platform/ui';
 import { t } from '../platform/i18n';
 import { uploadFiles } from './transfer';
 
@@ -27,20 +27,6 @@ export interface PickOptions {
 const SELECT = '\u0000select';
 const UP = '\u0000up';
 const UPLOAD = '\u0000upload';
-
-function parentOf(path: string): string | null {
-	const trimmed = path.replace(/[\\/]+$/, '');
-	const at = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
-	if (at < 0) return null;
-	if (at === 0) return '/';
-	const parent = trimmed.slice(0, at);
-	return /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent;
-}
-
-function joinPath(dir: string, name: string): string {
-	const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/';
-	return dir.endsWith('/') || dir.endsWith('\\') ? `${dir}${name}` : `${dir}${sep}${name}`;
-}
 
 function matchesFilters(name: string, filters?: PickOptions['filters']): boolean {
 	if (!filters || filters.length === 0) return true;

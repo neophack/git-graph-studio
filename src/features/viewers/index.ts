@@ -3,5 +3,6 @@
 // other directly.
 
 export * from './fastView';
+export * from './hexShared';
 export * from './hexView';
 export * from './hexCompare';

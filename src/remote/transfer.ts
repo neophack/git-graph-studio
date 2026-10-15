@@ -5,6 +5,7 @@
 // browser navigates to, so the bytes stream straight from the instance to the device's
 // disk. The UI (the progress toast, the outcome notices) lives in the shared layer.
 import { invoke } from './tauriShim/core';
+import { joinPath } from '../platform/ui';
 import { remoteEnv } from './session';
 
 export const UPLOAD_CHUNK = 256 * 1024;
@@ -20,11 +21,6 @@ export interface UploadProgress {
 export interface UploadOutcome {
 	uploaded: string[];
 	failed: { name: string; error: string }[];
-}
-
-function joinPath(dir: string, name: string): string {
-	const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/';
-	return dir.endsWith('/') || dir.endsWith('\\') ? `${dir}${name}` : `${dir}${sep}${name}`;
 }
 
 /** Upload one file into a folder of the PC; resolves with the path it landed at. */

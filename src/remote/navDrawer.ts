@@ -6,6 +6,7 @@
 // Data Saver switch, and the session's traffic. A tap on the backdrop, a swipe to the left,
 // Escape or the phone's back closes it.
 import { commands } from '../platform/commands';
+import { formatBytes } from '../platform/ui';
 import { t, tf } from '../platform/i18n';
 import type { MenuDefinition } from '../workbench/titlebar';
 import { showActionSheet } from './actionSheet';
@@ -31,12 +32,6 @@ export function closeDrawer(): void {
 
 export function drawerOpen(): boolean {
 	return open !== null;
-}
-
-function formatBytes(n: number): string {
-	if (n < 1024) return `${n} B`;
-	if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-	return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
 /** Every page the drawer lists, in order: the bar's own, then the rest. */
