@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { ExtensionHost, localizeAssetRoots, themeVars, type ExtInfo, type GalleryEntry } from '../src/features/extensions';
+import { ExtensionHost, localizeAssetRoots, SRCDOC_HISTORY_SHIM, themeVars, type ExtInfo, type GalleryEntry } from '../src/features/extensions';
 import { assetUrl } from '../src/remote/assetUrl';
 import { EditorGroup } from '../src/features/editor';
 import { applyContributions, applyExtensionSettings, evaluateWhen, extensionSettingDefs, registerContextProvider, removeContributions, resolvedMenuEntries } from '../src/features/extensions';
@@ -941,6 +941,59 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		// And it lands before any page script can run (the boot precedes the body).
 		expect(srcdoc.indexOf('_VSCODE_FILE_ROOT')).toBeLessThan(srcdoc.indexOf('<body>'));
 		dispose();
+	});
+
+	it('the composed boot shields history URL rewrites before the page\'s own scripts run', async () => {
+		// claude-code's chat tracks its open session in the URL (`?session=<id>`). In a real
+		// browser that is a plain replaceState; in the composed srcdoc document the same call
+		// throws SecurityError (about:srcdoc admits no history-entry URLs), and the throw
+		// surfaces inside claude-code's message-processing effect, whose catch then SKIPS the
+		// message — a dropped chat message. The boot patches History ahead of the page.
+		const { host } = hostWithFrame();
+		await host['serve']('webview.create', [1, 'demo.view', 'Demo Panel'], 'acme.demo', {} as never);
+		await host['serve']('webview.setHtml', [1, '<html><head></head><body>hi</body></html>'], 'acme.demo', {} as never);
+		const pane = document.body.appendChild(document.createElement('div'));
+		const dispose = host.mountWebview('acme.demo', 1, pane);
+		const srcdoc = pane.querySelector('iframe')!.getAttribute('srcdoc')!;
+		expect(srcdoc).toContain("patch('replaceState')");
+		expect(srcdoc).toContain("patch('pushState')");
+		// The shield precedes the page's own scripts, whose URL rewrites it must wrap.
+		expect(srcdoc.indexOf('patch(\'replaceState\')')).toBeLessThan(srcdoc.indexOf('<body>'));
+		dispose();
+	});
+
+	it('the history shield retries a refused URL rewrite as the URL-less call', () => {
+		// The engine's refusal, verbatim as WebView2 serves it for an about:srcdoc document —
+		// the SecurityError claude-code's session sync hit in the wild.
+		const refusing = (log: unknown[][]) => function (this: History, state: unknown, title: string, url?: string | URL) {
+			log.push([state, title, url]);
+			if (url !== undefined) throw new DOMException(
+				`A history state object with URL '${String(url)}' cannot be created in a document with origin 'http://tauri.localhost' and URL 'about:srcdoc'.`,
+				'SecurityError');
+		};
+		const origReplace = History.prototype.replaceState;
+		const origPush = History.prototype.pushState;
+		const replaceCalls: unknown[][] = [];
+		const pushCalls: unknown[][] = [];
+		History.prototype.replaceState = refusing(replaceCalls) as typeof origReplace;
+		History.prototype.pushState = refusing(pushCalls) as typeof origPush;
+		try {
+			new Function(SRCDOC_HISTORY_SHIM)();
+			// claude-code's call shape — replaceState({}, '', 'about:srcdoc?session=<uuid>'):
+			// the engine refuses the URL, the shield retries without it, the state still
+			// lands, and nothing throws up into the page's message pump.
+			expect(() => history.replaceState({ session: '407e4e1e' }, '', 'about:srcdoc?session=407e4e1e')).not.toThrow();
+			expect(replaceCalls).toEqual([
+				[{ session: '407e4e1e' }, '', 'about:srcdoc?session=407e4e1e'], // refused by the engine
+				[{ session: '407e4e1e' }, '', undefined] // the shield's URL-less retry
+			]);
+			// A call that never carried a URL passes through the shield untouched — once.
+			expect(() => history.pushState({ ggsOverlay: true }, '')).not.toThrow();
+			expect(pushCalls).toEqual([[{ ggsOverlay: true }, '', undefined]]);
+		} finally {
+			History.prototype.replaceState = origReplace;
+			History.prototype.pushState = origPush;
+		}
 	});
 
 	it('webview.create resolves the create\'s ViewColumn into the tab open\'s placement and focus', async () => {

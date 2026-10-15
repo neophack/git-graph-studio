@@ -42,6 +42,6 @@ export { type ActivationPolicy, type PageDiffRequest, type PageTheme, type ExtSt
 export { extIconRelPath, extTitle, MARKETPLACE_URL } from './store';
 export { ACTIVATION_TIMEOUT, parseActivationPolicy } from './activation';
 export { extAssetBase, extAssetUrl, themeVars } from './pages';
-export { localizeAssetRoots } from './webviews';
+export { localizeAssetRoots, SRCDOC_HISTORY_SHIM } from './webviews';
 export { claudePageMessage, claudeTapKind } from './claude';
 export { formatterScore } from './providers';

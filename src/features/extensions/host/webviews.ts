@@ -1,5 +1,6 @@
 import type { WebviewDelivery } from './sharedTypes';
-// The webview surfaces: panels and sidebar views, mirror copies, html composition, load watchdogs, session bookkeeping and asset roots.
+// The webview surfaces: panels and sidebar views, mirror copies, html composition (with the
+// srcdoc history shield), load watchdogs, session bookkeeping and asset roots.
 
 import { extAssetBase, jsonForScript } from './pages';
 import type { ExtensionHost } from './extensionHost';
@@ -21,9 +22,34 @@ export const WEBVIEW_OPEN_PENDING_MS = 15_000;
  *  tab's (the sidebar chat is the same claude-code page a tab hosts, and blanks the same
  *  way when its first pushes cross before the section mounts). */
 
+/** The srcdoc history shield — source text the composed boot embeds (and the test
+ *  evaluates). An `about:srcdoc` document cannot carry history-entry URLs: a
+ *  replaceState/pushState whose URL argument resolves against `about:srcdoc` throws
+ *  SecurityError. Real webview apps rewrite their URL — claude-code's chat tracks the
+ *  open session as `?session=<id>` — and the throw lands inside its message-processing
+ *  effect, whose catch then SKIPS the message ("Skipped a message (system) that failed
+ *  to process": a dropped chat message). The shield retries a refused call without the
+ *  URL — the state still lands, the document keeps its address — and shields only calls
+ *  that carried one: a failure of the state itself keeps throwing. */
+export const SRCDOC_HISTORY_SHIM = `(function () {
+	var patch = function (name) {
+		var orig = History.prototype[name];
+		var wrapped = function (state, title, url) {
+			if (url === undefined) return orig.call(this, state, title);
+			try { return orig.call(this, state, title, url); }
+			catch (e) { return orig.call(this, state, title); }
+		};
+		wrapped.__ggsSrcdocShield = true;
+		History.prototype[name] = wrapped;
+	};
+	patch('replaceState');
+	patch('pushState');
+})();`;
+
 function webviewBoot(nonce: string | null, fileRoot: string): string {
 	return `<script${nonce ? ` nonce="${nonce}"` : ''}>
 (function () {
+	${SRCDOC_HISTORY_SHIM}
 	if (globalThis._VSCODE_FILE_ROOT === undefined) globalThis._VSCODE_FILE_ROOT = ${jsonForScript(fileRoot)};
 	var api = null;
 	var state = null;
