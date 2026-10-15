@@ -54,10 +54,42 @@
 | P4-2 删 desktop 特性（24 处门控、required-features、20 个 optional deps、build.rs 分支全删；grammar-* 成仅剩特性） | ✅ | 本次 |
 | P4-3 check-ipc 的 Rust 侧仍读 lib.rs（脚本已内置 commands/mod.rs 优先，清单未迁移即无需迁移）；crate 白名单已逐 PR 对齐 | ✅ | 本次 |
 | P4-4 开发计划 §3 / AGENTS.md / README 的路径随各 PR 同步 | ✅ | 本次 |
+| P5-1 platform/（i18n/settings/state/commands/keybindings/lazy/markdown 移入；ui.ts 拆 platform/ui/{dom,codicon,notify,progress,contextMenu,quickInput}+门面；scroll 的两条 R1 随移动消解） | ✅ | `5bf7316` 前 |
+| P5-2 解环（fileIcons/extAssets 入 platform；DiffSide/EditorPlacement/DiffRequest→features/editor/types、BlameLine→features/scm/types、StatusMap→platform/ipc/scm、AnalysisPageView→features/analysis/types；Buffer/ShimHost 入 nodeShims/shared）——Tarjan 0 个 SCC，14 条 R5 删 | ✅ | `5bf7316` |
+| P5-3 platform/hooks + remote/desktopHooks（main.ts 装桌面半边、boot.ts 装会话全套；extHost/editor/panel/transfer/workbench 的 16 处静态与 2 处动态 remote import 全部反转；16+2 条 R3/R4 删） | ✅ | `a391b1f` |
+| P5-4 地基（platform/ipc/core 单门；46 个文件的 @tauri-apps/api 直连全改道；R6 清零，**豁免清单归零**）。按领域的类型化封装为后续独立 PR | ✅ | `3c7c2ec` |
+| P5-5/6/7 目录归位（14 个 features/ 模块 + index/types 门面、workbench/、hosts/ 含 nodeShims 整目录；诊断存储翻转到 extensions 模块、视图类型下沉 types.ts 后环保持为零；入口与构建脚本同步） | ✅ | `2b006e6` |
+| P5-8..12 拆大文件（vscodeApi/extHost/editor/workbench/scm/nodeShims/i18n） | ⬜ | 未开始 |
+| P5-13 豁免清单清零 | ✅ | `3c7c2ec` 达成（清单自 P5-4 起为空） |
 
 P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现（构建走
 `target/studio/cargo`），`incremental` 目录 17.5 GB 为多 feature 时代的历史累积，
 一次 `cargo clean` 或 `cargo sweep` 即回收——留待与 P6-4 一并处理。
+
+### P5 进行中的要点
+
+- **hooks 的形状**（P5-3）：`platform/hooks.ts` 的 HookMap 与 §5.5 一致，另含
+  `webviewStreams.mountCopy`（viewer 侧挂载副本——原 extHost 的动态 import 走了桥）。
+  `remote/desktopHooks.ts` 导出两个安装器：`installDesktopRemoteHooks`（镜像宿主、
+  资产协议、workbench 同步、摘要上报、webview 流——main.ts 组合根调用）与
+  `installRemoteSessionHooks`（会话全套——boot.ts 在 `import('../main')` 之前调用）。
+  测试侧：tests/setup.ts 在 DOM 环境下装桌面套（node 环境的套件不装——workbenchSync
+  的运行时边会拖进 editor 的 DOM 代码）；explorer/transfer 的 hostStub `vi.mock` 改为
+  `provideHook` 拨杆；`tests/hooks.test.ts` 钉注册表契约。
+- **P5-4 的两半**：单门（ipc/core 的 re-export + 46 文件改道）已落地，R6 清零；
+  按领域的类型化封装（函数签名即契约 + tests/ipcContract.test.ts）未开始——
+  check-ipc.mjs 已内置 platform/ipc 优先，封装落地时自动收敛。
+- **目录归位的三处形状决定**：跨模块导入指向门面目录（R2）；视图类以
+  `export type X = import('./impl').X` 别名沉入各 types.ts（类型边不进静态图）；
+  诊断存储（editorDiagnostics.ts）从 editor 模块翻转到 extensions 模块——AGENTS.md
+  本就注明它"由扩展平台写入"——editorDiagnosticsView 留作渲染半边，
+  `SerializableDiagnostic` 形状入 platform/diagnostics.ts（hosts 不得 import
+  features，R7）。两处门面命名冲突的化解：diagnostics 的 normalizePathKey 更名
+  normalizeDiagnosticPathKey（与 decorations 侧语义本就不同）；scm 门面对 types
+  显式只再导出 BlameLine。
+- **搬移方法**：一次性 mover（git mv 后按 HEAD 的文件清单做"虚拟旧布局"解析，
+  重算每个相对 specifier），副作用导入（css）与字符串 URL（dev harness、入口
+  html、build-node-host/prepare 的 entry）单独同步。
 
 ### P3 进行中的要点
 
