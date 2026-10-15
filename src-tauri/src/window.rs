@@ -23,6 +23,8 @@ pub fn stamp(stage: &str) {
 /// stall for wall-clock minutes (the sandbox probe froze exactly there, at 0% CPU).
 /// An NSProcessInfo activity assertion plus an always-on-top window keeps the run
 /// alive to completion. Debug builds only, and only when a probe asked for the harness.
+/// `pub` for lib.rs's run loop (same cfg there); every other target compiles neither
+/// half.
 #[cfg(all(debug_assertions, target_os = "macos"))]
 pub fn keep_awake_for_probe_runs(window: &tauri::WebviewWindow) {
     use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
@@ -123,6 +125,36 @@ fn should_disable_dmabuf(mode: &str, nvidia_driver: bool) -> bool {
     }
 }
 
+/// WebKitGTK's DMABUF renderer fails on machines whose X server runs on the
+/// NVIDIA proprietary driver: GBM falls back from the broken EGL-GBM image
+/// allocation to KMS dumb buffers, which a render node cannot create
+/// (EACCES), leaving the window black. Like RustDesk's
+/// `allow-always-software-render` option, the behaviour is driven by a user
+/// setting (`linuxDmabuf` in `~/.ggs/settings.json`, taking effect on the
+/// next launch): `auto` disables DMABUF only when the NVIDIA driver is
+/// detected, `disable` always disables it, `keep` never touches it. An
+/// environment variable set by the user always wins over everything.
+#[cfg(target_os = "linux")]
+pub fn apply_webkit_compat() {
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some()
+        || std::env::var_os("EGL_VENDOR_LIBRARY_FILENAMES").is_some()
+    {
+        return;
+    }
+    // The `~/.ggs` layout — `GGS_HOME` relocation included — is computed in exactly
+    // one place, ggs_base::paths; `mod desktop`'s same-named helper is its Windows-gated
+    // wrapper, unreachable (and unneeded) from this linux-only function.
+    let settings_text =
+        std::fs::read_to_string(ggs_base::paths::settings_file().unwrap_or_default()).ok();
+    let mode = linux_dmabuf_mode(settings_text.as_deref());
+    let nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists();
+    if should_disable_dmabuf(&mode, nvidia) {
+        // Must run before the webview picks its renderer; we are first in
+        // `run`, so no threads have spawned yet.
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod webkit_compat_tests {
     use super::{linux_dmabuf_mode, should_disable_dmabuf};
@@ -195,35 +227,5 @@ mod asset_cache_tests {
             .unwrap();
         revalidate_assets(revalidate(), &mut missing);
         assert!(missing.headers().get(header::ETAG).is_none());
-    }
-}
-
-/// WebKitGTK's DMABUF renderer fails on machines whose X server runs on the
-/// NVIDIA proprietary driver: GBM falls back from the broken EGL-GBM image
-/// allocation to KMS dumb buffers, which a render node cannot create
-/// (EACCES), leaving the window black. Like RustDesk's
-/// `allow-always-software-render` option, the behaviour is driven by a user
-/// setting (`linuxDmabuf` in `~/.ggs/settings.json`, taking effect on the
-/// next launch): `auto` disables DMABUF only when the NVIDIA driver is
-/// detected, `disable` always disables it, `keep` never touches it. An
-/// environment variable set by the user always wins over everything.
-#[cfg(target_os = "linux")]
-pub fn apply_webkit_compat() {
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some()
-        || std::env::var_os("EGL_VENDOR_LIBRARY_FILENAMES").is_some()
-    {
-        return;
-    }
-    // The `~/.ggs` layout — `GGS_HOME` relocation included — is computed in exactly
-    // one place, ggs_base::paths; `mod desktop`'s same-named helper is its Windows-gated
-    // wrapper, unreachable (and unneeded) from this linux-only function.
-    let settings_text =
-        std::fs::read_to_string(ggs_base::paths::settings_file().unwrap_or_default()).ok();
-    let mode = linux_dmabuf_mode(settings_text.as_deref());
-    let nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists();
-    if should_disable_dmabuf(&mode, nvidia) {
-        // Must run before the webview picks its renderer; we are first in
-        // `run`, so no threads have spawned yet.
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 }
