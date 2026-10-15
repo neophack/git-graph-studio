@@ -7,7 +7,10 @@
 // everything that concerns "the" editor, the whole area answers what spans groups (saving,
 // closing, path renames).
 
-import { EditorGroup, askToSaveMany, tabDrag, type Editor, type EditorInput } from './editor';
+import { EditorGroup } from './group';
+import { askToSaveMany } from './dirty';
+import { tabDrag } from './tabs';
+import type { Editor, EditorInput } from './inputs';
 import type { EditorPlacement } from './types';
 import { setDecorationRanges } from './editorDecorations';
 import type { EditorGridCell } from '../../platform/state';
@@ -1338,7 +1341,7 @@ export class EditorArea {
 	 *  custom editor kind — or, with a placement (a webview panel's `ViewColumn`), in the
 	 *  group that placement names (`groupForPlacement`), focused as VS Code focuses the
 	 *  column a panel opens in unless `preserveFocus` held (`focus`). */
-	openExtPage = (input: import('./editor').EditorInput & { kind: 'extpage' }, mount: (pane: HTMLElement) => (() => void) | void, iconSrc?: string | null, placement?: EditorPlacement, focus?: boolean) => {
+	openExtPage = (input: import('./inputs').EditorInput & { kind: 'extpage' }, mount: (pane: HTMLElement) => (() => void) | void, iconSrc?: string | null, placement?: EditorPlacement, focus?: boolean) => {
 		if (placement === undefined) {
 			this.activeGroup.openExtPage(input, mount, iconSrc);
 			return;
@@ -1351,7 +1354,7 @@ export class EditorArea {
 		}
 	};
 	/** The Extensions view's detail page tab (module 12): the same mounting path. */
-	openExtDetail = (input: import('./editor').EditorInput & { kind: 'extdetail' }, mount: (pane: HTMLElement) => (() => void) | void) => this.activeGroup.openExtDetail(input, mount);
+	openExtDetail = (input: import('./inputs').EditorInput & { kind: 'extdetail' }, mount: (pane: HTMLElement) => (() => void) | void) => this.activeGroup.openExtDetail(input, mount);
 	gotoSymbolInFile = () => this.activeGroup.gotoSymbolInFile();
 	lineInfo = () => this.activeGroup.lineInfo();
 	gotoLine = (line: number, column = 1) => this.activeGroup.gotoLine(line, column);

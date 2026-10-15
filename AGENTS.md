@@ -286,7 +286,7 @@ with on-demand language support, windowed editing of large files over the backen
 completion (document words, snippets, paths), the find/replace widget, bracket-pair
 colouring, sticky scroll, minimap, bookmarks, markdown preview.
 
-- Frontend: `src/features/editor/editor.ts` (groups, tabs, breadcrumbs), `src/features/editor/editorArea.ts` (split grid),
+- Frontend: `src/features/editor/group.ts` (the EditorGroup class shell — fields, constructor, the group-lifetime methods, the rest declared and assigned onto the prototype by the module facade), `src/features/editor/open.ts` (the open orchestration: files, diffs, revisions, previews, history, analysis/ext pages), `src/features/editor/mount.ts` (the viewer mounts and fast-view swaps), `src/features/editor/tabs.ts` (tabs + back/forward navigation), `src/features/editor/breadcrumbs.ts`, `src/features/editor/navigate.ts` (go-to-definition, references, goto symbol/line), `src/features/editor/dirty.ts` (save/close lifecycle, autosave, backups, encodings), `src/features/editor/inputs.ts` (the input vocabulary: EditorInput, Editor, inputId), `src/features/editor/{shared,editorState}.ts` (leaf helpers/state, R5), `src/features/editor/editorArea.ts` (split grid),
   `src/features/editor/textEditor.ts` (CodeMirror host), `src/comments.ts` (VS Code's comment toggles),
   `src/features/editor/docEditView.ts` (windowed large-file editor, scrolling on module 7's `src/scroll/`),
   `src/features/editor/docFind.ts` (the whole-file find/replace bar the windowed editor and the Fast Viewer
