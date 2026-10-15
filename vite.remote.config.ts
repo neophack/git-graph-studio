@@ -59,8 +59,14 @@ export default mergeConfig(
 					entryFileNames: (chunk) => (chunk.name === 'sw' ? 'sw.js' : 'assets/[name]-[hash].js'),
 					manualChunks(id) {
 						if (id.includes('vite/preload-helper')) return 'preload';
+						if (id.includes('commonjsHelpers')) return 'cjs-helpers';
 						if (id.includes('node_modules/@xterm/')) return 'xterm';
-						if (id.includes('node_modules/mermaid/') || id.includes('node_modules/@mermaid-js/') || id.includes('node_modules/elkjs/')) return 'mermaid';
+						// mermaid is deliberately NOT grouped into one chunk (either build):
+						// mermaid 12 lazily imports each diagram renderer, and a single
+						// `mermaid` chunk would drag every diagram (5+ MB) into the drawing's
+						// first load — the natural per-diagram chunks fetch only flowchart +
+						// core + elkjs when a drawing renders (docs/mermaid-chunking-plan.md §2).
+						if (id.includes('node_modules/elkjs/')) return 'elk';
 						if (id.includes('node_modules/@codemirror/merge/')) return 'cm-merge';
 						if (id.includes('node_modules/@codemirror/language-data/')) return 'cm-language-data';
 						if (/node_modules\/@codemirror\/(state|view|commands|language|search|autocomplete|lint)\//.test(id) || /node_modules\/@lezer\/(common|highlight|lr)\//.test(id)) return 'codemirror';

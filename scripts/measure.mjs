@@ -61,6 +61,18 @@ function firstPaintChunk(dist) {
 	return { path: closure.chunks.map((c) => c.file).join(' + '), size: closure.total, chunks: closure.chunks };
 }
 
+/** The Module Analysis drawing's first-render JavaScript: the closure the Vite build
+ *  recorded in dist/diagram-closure.json (vite.config.ts `diagramClosurePlugin`) - mermaid
+ *  core, the flowchart renderer, the ELK engine and their static imports (docs/
+ *  mermaid-chunking-plan.md §3). The other ~40 diagram renderers mermaid ships are lazily
+ *  imported chunks this closure never touches. `null` before a build. */
+function diagramClosure(dist) {
+	const path = join(dist, 'diagram-closure.json');
+	if (!existsSync(path)) return null;
+	const closure = JSON.parse(readFileSync(path, 'utf8'));
+	return { path: closure.chunks.map((c) => c.file).join(' + '), size: closure.total, chunks: closure.chunks };
+}
+
 export function collectSizes() {
 	// ggs: the release artifact is named by tauri.conf.json's mainBinaryName.
 	const exe = join(release, process.platform === 'win32' ? 'ggs.exe' : 'ggs');
@@ -76,7 +88,8 @@ export function collectSizes() {
 		installerPath: installer ? relative(root, installer).split('\\').join('/') : null,
 		dist: dist.total,
 		distLargest: dist.largest,
-		firstPaintJs: firstPaintChunk(join(studio, 'dist'))
+		firstPaintJs: firstPaintChunk(join(studio, 'dist')),
+		diagramJs: diagramClosure(join(studio, 'dist'))
 	};
 }
 
@@ -165,6 +178,8 @@ function main() {
 	console.log(`  frontend dist  ${mb(sizes.dist).padStart(10)}${sizes.distLargest?.path ? `   (largest: ${sizes.distLargest.path} ${kb(sizes.distLargest.size)})` : ''}`);
 	console.log(`  first-paint JS ${kb(sizes.firstPaintJs?.size ?? null).padStart(10)}   (static closure of the boot entry + workbench)`);
 	for (const chunk of sizes.firstPaintJs?.chunks ?? []) console.log(`${''.padStart(19)}${kb(chunk.bytes).padStart(8)}   ${chunk.file}`);
+	console.log(`  diagram JS     ${kb(sizes.diagramJs?.size ?? null).padStart(10)}   (Module Analysis first render: mermaid core + flowchart + ELK)`);
+	for (const chunk of sizes.diagramJs?.chunks ?? []) console.log(`${''.padStart(19)}${kb(chunk.bytes).padStart(8)}   ${chunk.file}`);
 	if (perf) {
 		console.log(`Backend probes on ${perf.folder} (${perf.files} files, ${perf.symbols} symbols)`);
 		for (const [phase, ms] of Object.entries(perf.ms)) console.log(`  ${phase.padEnd(15)} ${ms === null ? '-' : `${ms} ms`}`);

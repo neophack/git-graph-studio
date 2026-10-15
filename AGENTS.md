@@ -1039,7 +1039,10 @@ the identical checks.
   `src-tauri/src/stage_bench.rs` (launch-stage timing), `src-tauri/tests/it/perf.rs`
   (synthetic repository benchmark; `GGS_PERF_FILES` sets the size, CI runs 20 000)
 - Tooling: `scripts/measure.mjs` (sizes + probes + the boot-bench cold-start stages,
-  folded into `metrics.json`'s `perf.boot` key), `scripts/probes/boot-bench.mjs`
+  folded into `metrics.json`'s `perf.boot` key; the size keys include `firstPaintJs`
+  from `dist/first-paint.json` and `diagramJs` from `dist/diagram-closure.json` — the
+  Module Analysis drawing's first-render closure, docs/mermaid-chunking-plan.md),
+  `scripts/probes/boot-bench.mjs`
   (end-to-end startup latency of the release exe), `scripts/probes/cdp-console.mjs` /
   `cdp-probe.mjs` / `cdp-trace.mjs` (live inspection over WebView2's CDP port),
   `scripts/probes/verify-can-scroll.mjs` (drags a live CAN raw view to its scrollbar's
@@ -1206,7 +1209,16 @@ Everything that turns the source tree into installers: asset assembly into
   direct prepare runs pass — sets the fetch TTL to 0 (2026-09-30, the owner's direction: an
   installer must carry open-vsx.org's latest extension builds); the re-check is a lookup, a
   same-version answer reuses the cached file, and a `tauri dev` iteration keeps the TTL and
-  never phones home), `vite.config.ts`, and `src-tauri/Info.plist` (the macOS bundle's
+  never phones home), `vite.config.ts` (whose `manualChunks` leaves mermaid to its own
+  dynamic-import split — mermaid 12 ships one lazily imported chunk per diagram type, so a
+  Module Analysis flowchart fetches only core + flowchart + the ELK chunks (~2.6 MiB, down
+  from the 5.3 MiB monolith a blanket grouping forced, 2026-10-15, docs/mermaid-chunking-plan.md);
+  the named chunks there are `preload`, `cjs-helpers` (Rollup's CommonJS interop helpers, on
+  their own or every CJS consumer drags the xterm chunk in), `elk` (elkjs, stable for the
+  closure measurement) and the editor/terminal groups; `diagramClosurePlugin` walks the
+  drawing's first-render closure into `dist/diagram-closure.json` and fails the build if an
+  unrelated named chunk — xterm, codemirror, the tauri/msgpack shims — ever rides along
+  again; `vite.remote.config.ts` mirrors the same rules), and `src-tauri/Info.plist` (the macOS bundle's
   merged fragment — the `public.folder` declaration behind the Finder folder right-click's
   "Open With" entry plus the mirrored file associations; see module 2 and its drift test)
 - Seam checks: `scripts/check-seams.mjs` (TypeScript / CSS) and `src-tauri/build.rs` (Rust)

@@ -1,5 +1,21 @@
 # Module Analysis 图表分包计划（mermaid 5.5 MB → 约 2.6 MB）
 
+> **实施状态（2026-10-15）**：已实施并实测（第 4 节的 1–6 全过；7、8 的实机检查
+> 待跑——本轮环境无法启动 GUI）。主构建 `diagram-closure.json` total **2 744 771 B
+> （2.62 MiB，15 个 chunk）**，远程构建 2 719 018 B；基线 5 527 419 B 单块 +
+> xterm 293 KB。闭包构成：elk 1 405 KB + mermaid.core 572 KB + layout-elk 渲染
+> 521 KB + transform 91 KB + flowDiagram 63 KB + 其余小块；cytoscape / katex /
+> sequence 等其余图表 chunk 均不在闭包内。`from"./xterm-` 的静态导入者两个构建
+> 都为 **0 个**（终端路径走动态导入，连"只剩终端路径"都好于预期）；cjs-helpers
+> 单独成块（236 B，消费方 6 个）。first-paint 与 HEAD 基线逐字节一致（846 205 B、
+> 同 8 个 chunk）；主构建资产总量 9.17 MB（基线 8.81 MB——"总字节数不变，只是
+> 拆开"成立；metrics 里 17.30 MB 是主 + remote 两棵树）。第 6 节的结构性断言
+> **已加上**（`diagramClosurePlugin` 构建期失败：闭包出现 xterm / codemirror /
+> cm-merge / cm-language-data / tauri / msgpack 命名 chunk 即失败；触发路径已实测——
+> 临时把 elk 加进黑名单，构建按预期失败并点名闭包中的两个 chunk，随后还原）。`typecheck`、`npm test`（74 文件
+> 1151 用例）全过。待办：`npx tauri dev` 与 `npx tauri build` 实机验证第 7、8 条
+> （Network 面板确认只加载闭包内 chunk），以及 owner 对断言去留的最终确认。
+
 > 归属：模块 15（Build & Release Pipeline）的分包配置；受益方为模块 17（Code Analysis）
 > 的 Module Analysis 绘图。基线是 2026-10-14 `target/studio/dist` 的正式构建。
 > 本文的"预期"都要靠第 4 节的实测来验收（AGENTS.md：用数字说话，不用形容词）。

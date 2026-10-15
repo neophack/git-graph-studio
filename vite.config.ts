@@ -46,12 +46,58 @@ const firstPaintPlugin = (): Plugin => ({
 	}
 });
 
+// The Module Analysis drawing's first render: mermaid's core, the flowchart renderer, the
+// ELK layout engine and their static imports, transitively (docs/mermaid-chunking-plan.md
+// §3). mermaid 12 lazily imports each diagram type as its own chunk, so this closure is
+// what a flowchart render actually fetches - never the other ~40 diagram renderers.
+// Written to dist/diagram-closure.json so scripts/measure.mjs records the real number.
+const diagramRoots = [
+	// mermaid's package entry (its exports map "." -> dist/mermaid.core.mjs)
+	/\/node_modules\/mermaid\/dist\/mermaid\.core\.mjs$/,
+	// @mermaid-js/layout-elk's package entry, imported beside mermaid by moduleDiagram.ts
+	/\/node_modules\/@mermaid-js\/layout-elk\/dist\/mermaid-layout-elk\.core\.mjs$/,
+	// mermaid core dynamically imports the flowchart renderer when a flowchart renders
+	/\/node_modules\/mermaid\/dist\/chunks\/mermaid\.core\/flowDiagram-[^/]+\.mjs$/,
+	// layout-elk dynamically imports its ELK engine chunk at the first elk render (the
+	// hashed directory segment moves between versions - match by module path, not name)
+	/\/node_modules\/@mermaid-js\/layout-elk\/dist\/chunks\/[^/]+\/elk-[^/]+\.mjs$/
+];
+// Manual chunks that have nothing to do with the drawing. One appearing inside the closure
+// means a dependency edge dragged the terminal / editor bundles into the drawing's first
+// render again - the 293 KB xterm ride-along this chunking removed. A correctness check,
+// not a size budget (sizes are measured, never gated): the build fails on it.
+const unrelatedChunks = /^(xterm|codemirror|cm-merge|cm-language-data|tauri|msgpack)-/;
+const diagramClosurePlugin = (): Plugin => ({
+	name: 'diagram-closure',
+	generateBundle(_options, bundle) {
+		const chunks = Object.values(bundle).filter((item): item is Extract<typeof item, { type: 'chunk' }> => item.type === 'chunk');
+		const byFile = new Map(chunks.map((chunk) => [chunk.fileName, chunk]));
+		const roots = chunks.filter((chunk) => chunk.moduleIds.some((id) => diagramRoots.some((pattern) => pattern.test(id))));
+		if (roots.length === 0) this.error('diagram-closure: no root chunk found - mermaid or @mermaid-js/layout-elk changed its dist layout; update diagramRoots in vite.config.ts');
+		const seen = new Set<string>();
+		const walk = (file: string) => {
+			if (seen.has(file)) return;
+			seen.add(file);
+			for (const dep of byFile.get(file)?.imports ?? []) walk(dep);
+		};
+		for (const root of roots) walk(root.fileName);
+		const list = [...seen].map((file) => ({ file, bytes: Buffer.byteLength(byFile.get(file)!.code) })).sort((a, b) => b.bytes - a.bytes);
+		const unrelated = list.filter((chunk) => unrelatedChunks.test(chunk.file.split('/').pop() ?? ''));
+		if (unrelated.length > 0) this.error(`diagram-closure: unrelated chunks in the drawing's first render: ${unrelated.map((c) => c.file).join(', ')}`);
+		this.emitFile({
+			type: 'asset',
+			fileName: 'diagram-closure.json',
+			source: JSON.stringify({ total: list.reduce((sum, c) => sum + c.bytes, 0), chunks: list }, null, '\t') + '\n'
+		});
+	}
+});
+
 // The version the About box shows, from package.json - one source of truth for the number.
 const { version } = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf8')) as { version: string };
 
 export default defineConfig({
 	define: { __APP_VERSION__: JSON.stringify(version) },
-	plugins: [checkSeamsPlugin(), firstPaintPlugin()],
+	plugins: [checkSeamsPlugin(), firstPaintPlugin(), diagramClosurePlugin()],
 	clearScreen: false,
 	publicDir: resolve(studio, 'public'),
 	build: {
@@ -74,10 +120,19 @@ export default defineConfig({
 					// Vite's dynamic-import preload helper: on its own, or Rollup parks it in whichever
 					// library chunk it meets first and the boot entry then pulls that chunk in.
 					if (id.includes('vite/preload-helper')) return 'preload';
+					// Rollup's CommonJS interop helpers: on their own, or they land in whichever
+					// manual chunk first imports them (xterm, a CJS package) and every CJS consumer
+					// then pulls that chunk in too (docs/mermaid-chunking-plan.md §1.3).
+					if (id.includes('commonjsHelpers')) return 'cjs-helpers';
 					if (id.includes('node_modules/@xterm/')) return 'xterm';
-					// The module analysis drawing's mermaid + ELK engine — one named chunk
-					// the page loads on the drawing's first render (never first paint).
-					if (id.includes('node_modules/mermaid/') || id.includes('node_modules/@mermaid-js/') || id.includes('node_modules/elkjs/')) return 'mermaid';
+					// mermaid is deliberately NOT grouped by hand: mermaid 12 ships every diagram
+					// type as its own lazily imported piece, and a blanket `node_modules/mermaid/`
+					// rule forces all ~40 diagram renderers (5+ MB) into the chunk a flowchart
+					// render loads — left alone, Rollup keeps the per-diagram split and the
+					// drawing fetches only the core, flowchart and elk chunks. The ELK engine is
+					// the one deliberate naming (docs/mermaid-chunking-plan.md §2), a stable chunk
+					// for diagram-closure.json to measure.
+					if (id.includes('node_modules/elkjs/')) return 'elk';
 					if (id.includes('node_modules/@codemirror/merge/')) return 'cm-merge';
 					if (id.includes('node_modules/@codemirror/language-data/')) return 'cm-language-data';
 					if (/node_modules\/@codemirror\/(state|view|commands|language|search|autocomplete|lint)\//.test(id) || /node_modules\/@lezer\/(common|highlight|lr)\//.test(id) || /node_modules\/(style-mod|w3c-keyname|crelt)\//.test(id)) return 'codemirror';
