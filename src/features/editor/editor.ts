@@ -9,6 +9,7 @@ import type { MergeView } from '@codemirror/merge';
 import { invoke } from '../../platform/ipc/core';
 import { type FileContents, type FileProbe, fileProbe, readFileBase64 } from '../../platform/ipc/fs';
 import { materializeRevisionFile, readFileAt } from '../../platform/ipc/revision';
+import { viewerClose, viewerOpen, type ViewerOutlineSymbol } from '../../platform/ipc/viewer';
 import { findReferences, workspaceSymbols } from '../../platform/ipc/search';
 import { symbolLookup, symbolReferences } from '../../platform/ipc/symbols';
 import { scmBlame } from '../../platform/ipc/scm';
@@ -105,12 +106,6 @@ const WHOLE_FILE_EDITOR_BYTES = 480 * 1024 * 1024;
 const PREVIEW_DELAY_MS = 300;
 
 /** A symbol the backend's outline extraction found in a document. */
-interface OutlineSymbol {
-	kind: string;
-	name: string;
-	line: number;
-}
-
 /** The codicon VS Code's outline uses per symbol kind. */
 const SYMBOL_ICONS: Record<string, string> = {
 	function: 'symbol-method',
@@ -1237,11 +1232,11 @@ export class EditorGroup {
 		editor.pane.classList.add('has-outline');
 		editor.pane.prepend(pane);
 		void (async () => {
-			let symbols: OutlineSymbol[];
+			let symbols: ViewerOutlineSymbol[];
 			try {
-				const info = await invoke<{ docId: number; symbols: OutlineSymbol[] }>('viewer_open', { path });
+				const info = await viewerOpen(path);
 				symbols = info.symbols ?? [];
-				await invoke('viewer_close', { docId: info.docId }).catch(() => undefined);
+				await viewerClose(info.docId).catch(() => undefined);
 			} catch {
 				symbols = [];
 			}
@@ -3018,11 +3013,11 @@ export class EditorGroup {
 	async gotoSymbolInFile(): Promise<void> {
 		const editor = this.active;
 		if (!editor || editor.input.kind !== 'file') return;
-		let symbols: OutlineSymbol[];
+		let symbols: ViewerOutlineSymbol[];
 		try {
-			const info = await invoke<{ docId: number; symbols: OutlineSymbol[] }>('viewer_open', { path: editor.input.path });
+			const info = await invoke<{ docId: number; symbols: ViewerOutlineSymbol[] }>('viewer_open', { path: editor.input.path });
 			symbols = info.symbols ?? [];
-			await invoke('viewer_close', { docId: info.docId }).catch(() => undefined);
+			await viewerClose(info.docId).catch(() => undefined);
 		} catch {
 			symbols = [];
 		}

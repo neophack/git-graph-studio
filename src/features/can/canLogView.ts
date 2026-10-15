@@ -19,7 +19,10 @@
 // every load figure (table, peak, charts) recomputes live on a change. A filter bar
 // narrows the tables and charts to chosen identifiers and channels.
 
-import { invoke, Channel } from '../../platform/ipc/core';
+import { Channel } from '../../platform/ipc/core';
+import type { CanChannelStats, CanIdStats, CanIntervals, CanLogStats, CanProgress, CycleBin, IntervalPoint, LoadBucket } from '../../platform/ipc/can';
+export type { CanChannelStats, CanIdStats, CanFrameFilter, CanIntervals, CanLogCount, CanLogStats, CanProgress, ChannelLoadProfile, ChannelPayloadDist, CycleBin, IntervalPoint, LoadBucket } from '../../platform/ipc/can';
+import { canIntervals, canLogStats, convertCanLog as convertCanLogCmd } from '../../platform/ipc/can';
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 
 import { cycleSeriesChart, formatAxisSeconds, histogramChart, multiLineChart, seriesStyle, stackedBars, type ChartSeries } from './canChart';
@@ -34,90 +37,9 @@ export const DEFAULT_CAN_BITRATE = 500_000;
 export const CAN_DATA_BITRATES = [8_000_000, 5_000_000, 4_000_000, 2_000_000, 1_000_000] as const;
 export const DEFAULT_FD_DATA_BITRATE = 2_000_000;
 
-export interface CanIdStats {
-	channel: number;
-	id: number;
-	extended: boolean;
-	fd: boolean;
-	count: number;
-	tx: number;
-	rx: number;
-	payloadBytes: number;
-	firstS: number;
-	lastS: number;
-	minCycleS: number;
-	maxCycleS: number;
-	avgCycleS: number;
-	/** The standard deviation of the cycle times — the jitter figure. */
-	stdCycleS: number;
-}
-
-export interface CanChannelStats {
-	channel: number;
-	frames: number;
-	errorFrames: number;
-	payloadBytes: number;
-	/** The wire bits per phase, stuffing estimate included: the arbitration phase (all of
-	 *  a classic or NoBRS frame) and the data phase (a BRS frame after the switch). */
-	arbBits: number;
-	dataBits: number;
-	firstS: number;
-	lastS: number;
-}
-
-/** One time slice of a channel's load timeline — the raw material of the load and
- *  frame-rate charts (the bits cross raw per phase, so the load follows the rate pair live). */
-export interface LoadBucket {
-	tS: number;
-	durS: number;
-	frames: number;
-	errors: number;
-	arbBits: number;
-	dataBits: number;
-}
-
-export interface ChannelLoadProfile {
-	channel: number;
-	buckets: LoadBucket[];
-}
-
 /** The payload-length labels, in the backend's bin order: classic 0..8 then the FD
  *  lengths 12..64 — the x axis of the distribution chart. */
 export const PAYLOAD_LABELS = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '12', '16', '20', '24', '32', '48', '64'] as const;
-
-export interface ChannelPayloadDist {
-	channel: number;
-	/** One count per `PAYLOAD_LABELS` bin. */
-	counts: number[];
-}
-
-export interface CanLogStats {
-	format: 'BLF' | 'ASC';
-	startTimestampS: number | null;
-	durationS: number;
-	totalFrames: number;
-	errorFrames: number;
-	channels: CanChannelStats[];
-	messages: CanIdStats[];
-	/** Identifiers beyond the response cap — noted in the status line, not as rows. */
-	messagesTruncated: number;
-	skippedObjects: number;
-	loadProfiles: ChannelLoadProfile[];
-	payloadDist: ChannelPayloadDist[];
-}
-
-export interface IntervalPoint {
-	tS: number;
-	cycleS: number;
-	missed: boolean;
-}
-
-/** One progress report from a long backend walk (the channel Rust sends it over). */
-export interface CanProgress {
-	frames: number;
-	bytes: number;
-	totalBytes: number;
-}
 
 /** What a progress report reads as on the status line: percent through the file and how
  *  many frames have been handed over so far. */
@@ -133,31 +55,6 @@ function progressChannel(verb: string, report: (text: string, progress: CanProgr
 	const channel = new Channel<CanProgress>();
 	channel.onmessage = (progress) => report(progressText(progress, verb), progress);
 	return channel;
-}
-
-export interface CycleBin {
-	fromS: number;
-	toS: number;
-	count: number;
-}
-
-export interface CanIntervals {
-	channel: number;
-	id: number;
-	extended: boolean;
-	fd: boolean;
-	count: number;
-	firstS: number;
-	lastS: number;
-	medianCycleS: number;
-	avgCycleS: number;
-	minCycleS: number;
-	maxCycleS: number;
-	stdS: number;
-	missedGaps: number;
-	missedFrames: number;
-	points: IntervalPoint[];
-	histogram: CycleBin[];
 }
 
 /** The share of the measurement time the bus was busy, CANoe's arithmetic: each phase's
@@ -435,14 +332,11 @@ export class CanLogView {
 	 *  itself painted the moment the tab opened, and this only fills the numbers in. */
 	private async load(): Promise<void> {
 		try {
-			this.stats = await invoke<CanLogStats>('can_log_stats', {
-				path: this.path,
-				onProgress: progressChannel(t('can.status.parsing'), (text, progress) => {
+			this.stats = await canLogStats(this.path, progressChannel(t('can.status.parsing'), (text, progress) => {
 					this.liveText.textContent = text;
 					const percent = progress.totalBytes > 0 ? Math.min(100, (progress.bytes / progress.totalBytes) * 100) : 0;
 					this.progressFill.style.width = `${percent.toFixed(1)}%`;
-				})
-			});
+				}));
 			this.render();
 		} catch (error) {
 			this.live.classList.remove('can-live-parsing');
@@ -706,13 +600,7 @@ export class CanLogView {
 		this.analysisHost.scrollIntoView({ block: 'nearest' });
 		let intervals: CanIntervals;
 		try {
-			intervals = await invoke<CanIntervals>('can_intervals', {
-				path: this.path,
-				channel: m.channel,
-				id: m.id,
-				extended: m.extended,
-				onProgress: progressChannel(t('can.analysis.loading'), (text) => (loading.textContent = text))
-			});
+			intervals = await canIntervals(this.path, m.channel, m.id, m.extended, progressChannel(t('can.analysis.loading'), (text) => (loading.textContent = text)));
 		} catch (error) {
 			this.analysisHost.replaceChildren(el('div', 'can-error', [`${t('can.analysis.failed')}: ${String(error)}`]));
 			return;
@@ -809,12 +697,7 @@ export async function convertCanLog(path: string, format: 'BLF' | 'ASC' | null, 
 	const to = await saveDialog({ defaultPath: `${stem}.${picked}`, filters: [{ name: picked === 'blf' ? t('can.convert.blfFilter') : t('can.convert.ascFilter'), extensions: [picked] }] });
 	if (!to) return;
 	try {
-		const frames = await invoke<number>('convert_can_log', {
-			from: path,
-			to,
-			format: picked,
-			onProgress: progressChannel(t('can.status.converting'), (text) => report(text))
-		});
+		const frames = await convertCanLogCmd(path, to, picked as 'blf' | 'asc', progressChannel(t('can.status.converting'), (text) => report(text)));
 		report(tf('can.convert.done', frames.toLocaleString(), basename(to)));
 	} catch (error) {
 		report(`${t('can.convert.failed')}: ${String(error)}`);

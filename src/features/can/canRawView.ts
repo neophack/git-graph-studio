@@ -15,7 +15,9 @@
 // analysis as its own tab (the caller owns that flow), "Convert" exports the log to the
 // other format. Neither blocks browsing — both run on the backend's blocking pool.
 
-import { invoke } from '../../platform/ipc/core';
+import { type CanFindResult, type CanFrameFilter, type CanLogCount, canLogClose, canLogCount, canLogFind, canLogFrames, canLogOpen, type CanOpenResult } from '../../platform/ipc/can';
+import type { CanFrameLine } from '../../platform/ipc/can';
+export type { CanFrameLine };
 
 import { convertCanLog, idFilterRanges, idHex } from './canLogView';
 import { attachPageKeys, attachWheel, type Disposable } from '../../scroll/input';
@@ -23,63 +25,9 @@ import { ScrollModel } from '../../scroll/model';
 import { Scrollbar } from '../../scroll/scrollbar';
 import { basename, el, icon } from '../../platform/ui/index';
 
-interface CanOpenResult {
-	docId: number;
-	totalBytes: number;
-}
-
-export interface CanFrameLine {
-	/** The frame's position in the whole log — the "No." column, whatever filter narrowed
-	 *  the view (the lines arrive in filtered order but number in log order). */
-	index: number;
-	tS: number;
-	channel: number;
-	id: number;
-	extended: boolean;
-	fd: boolean;
-	brs: boolean;
-	esi: boolean;
-	remote: boolean;
-	error: boolean;
-	tx: boolean;
-	dlc: number;
-	dataHex: string;
-}
-
-interface CanLogCount {
-	parsed: number;
-	/** The frames that pass the current filter — the row model's length while one is on;
-	 *  absent when a scripted backend predates filtering (then `parsed` is the count). */
-	matched?: number;
-	done: boolean;
-	error: string | null;
-	bytes?: number;
-	totalBytes?: number;
-	/** The channels the walk has named so far, ascending — the channel select's options. */
-	channels?: number[];
-}
-
-/** One find's answer (`can_log_find`): the hit positions of the current row space (capped)
- *  and the true total behind them. */
-interface CanFindResult {
-	positions: number[];
-	total: number;
-	capped: boolean;
-}
-
 /** The raw view's filter, one field per toolbar control — CANoe's Trace-window set. Sent
  *  on every poll and fetch; `null` while every control sits on its "all" default, so the
  *  unfiltered browse skips the backend's match index entirely. */
-interface CanFrameFilter {
-	/** Channels to keep; empty = every channel. */
-	channels: number[];
-	direction: 'all' | 'rx' | 'tx';
-	/** The frame types the Type column badges: can, canfd, error, remote. */
-	kind: 'all' | 'can' | 'canfd' | 'error' | 'remote';
-	/** Inclusive `[from, to]` id ranges; empty = every id. */
-	idRanges: number[][];
-}
-
 /** Fixed row height keeps the scroll math allocation-free (shell.css `.can-raw-row`). */
 const ROW_HEIGHT = 20;
 /** Rows kept rendered above and below the viewport, so small scrolls don't flash empty. */
@@ -349,13 +297,13 @@ export class CanRawView {
 	private async load(): Promise<void> {
 		let doc: CanOpenResult;
 		try {
-			doc = await invoke<CanOpenResult>('can_log_open', { path: this.path });
+			doc = await canLogOpen(this.path);
 		} catch (error) {
 			this.fail(`Failed to open '${basename(this.path)}': ${String(error)}`);
 			return;
 		}
 		if (this.disposed) {
-			void invoke('can_log_close', { docId: doc.docId });
+			void canLogClose(doc.docId);
 			return;
 		}
 		this.doc = doc;
@@ -369,7 +317,7 @@ export class CanRawView {
 		const doc = this.doc;
 		if (!doc || this.disposed || this.done) return;
 		try {
-			const count = await invoke<CanLogCount>('can_log_count', { docId: doc.docId, filter: this.filter });
+			const count = await canLogCount(doc.docId, this.filter);
 			if (this.disposed || !this.doc || this.doc.docId !== doc.docId) return;
 			this.applyCount(count);
 			if (count.done) {
@@ -395,7 +343,7 @@ export class CanRawView {
 		const doc = this.doc;
 		if (!doc || this.disposed || this.failed) return;
 		try {
-			const count = await invoke<CanLogCount>('can_log_count', { docId: doc.docId, filter: this.filter });
+			const count = await canLogCount(doc.docId, this.filter);
 			if (!this.disposed && this.doc?.docId === doc.docId) this.applyCount(count);
 		} catch {
 			// Transient (the view closing mid-call); while the walk still runs, the poll
@@ -534,7 +482,7 @@ export class CanRawView {
 		}
 		let result: CanFindResult;
 		try {
-			result = await invoke<CanFindResult>('can_log_find', { docId: doc.docId, query, filter: this.filter });
+			result = await canLogFind(doc.docId, query, this.filter);
 		} catch (error) {
 			if (gen !== this.findGen || this.disposed) return;
 			this.hits = [];
@@ -674,7 +622,7 @@ export class CanRawView {
 		// The generation this fetch belongs to: a filter change while it is out ages it
 		// out on landing — its rows are positions in a row space that no longer exists.
 		const gen = this.fetchGen;
-		invoke<CanFrameLine[]>('can_log_frames', { docId, start, end, filter: this.filter })
+		canLogFrames(docId, start, end, this.filter)
 			.then((lines) => {
 				if (gen !== this.fetchGen) return;
 				this.fetchInFlight = false;
@@ -767,7 +715,7 @@ export class CanRawView {
 		this.sizer?.disconnect();
 		if (this.timer !== null) clearTimeout(this.timer);
 		if (this.findTimer !== null) clearTimeout(this.findTimer);
-		if (this.doc) void invoke('can_log_close', { docId: this.doc.docId });
+		if (this.doc) void canLogClose(this.doc.docId);
 		this.root.remove();
 	}
 }

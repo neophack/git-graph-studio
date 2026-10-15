@@ -10,6 +10,7 @@ import { backupList, backupRead, type BackupEntry, encodings, listFiles, readFil
 import { workspaceSymbols } from '../platform/ipc/search';
 import { symbolLookup, symbolsRebuild, type SymbolIndexEvent, type SymbolIndexStatus } from '../platform/ipc/symbols';
 import { gitInit } from '../platform/ipc/scm';
+import { viewerClose, viewerOpen } from '../platform/ipc/viewer';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -575,9 +576,9 @@ export class Workbench {
 				}
 				let symbols: { name: string; kind: string; line: number }[] = [];
 				try {
-					const info = await invoke<{ docId: number; symbols: { name: string; kind: string; line: number }[] | null }>('viewer_open', { path });
+					const info = await viewerOpen(path);
 					symbols = info.symbols ?? [];
-					await invoke('viewer_close', { docId: info.docId }).catch(() => undefined);
+					await viewerClose(info.docId).catch(() => undefined);
 				} catch {
 					symbols = [];
 				}

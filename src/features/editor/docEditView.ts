@@ -24,28 +24,9 @@ import { DocFindController, type DocFindHost, type DocFindMatch, type DocFindSpe
 import { toggleBlockComment, toggleLineComment } from './comments';
 import { vscodeHighlighting } from './cmTheme';
 import { el, notify } from '../../platform/ui/index';
-import { Channel, invoke } from '../../platform/ipc/core';
-
-interface OpenInfo {
-	docId: number;
-	lineCount: number;
-	syntaxName: string;
-	encoding: string;
-	eol: 'lf' | 'crlf';
-}
-
-interface TextWindow {
-	startLine: number;
-	lineCount: number;
-	lines: string[];
-}
-
-/** One save-progress report from `viewer_save` (`src-tauri/src/viewer/mod.rs`): bytes of
- *  the document streamed out so far, and the document's whole byte size. */
-interface SaveProgress {
-	written: number;
-	total: number;
-}
+import { Channel } from '../../platform/ipc/core';
+import { backupClear } from '../../platform/ipc/fs';
+import { viewerBackup, viewerClose, viewerEdit, viewerOpen, viewerReload, viewerReplace, viewerSave, viewerText, viewerUndo, viewerRedo, type ViewerOpenInfo, type ViewerSaveProgress, type ViewerTextWindow } from '../../platform/ipc/viewer';
 
 /** The window size, matching the backend's `MAX_WINDOW` so one `viewer_text` call fills it. */
 const WINDOW = 500;
@@ -207,14 +188,14 @@ export class EditableDocView {
 	/** Open a file into the windowed editor. False when the backend refused it (binary,
 	 *  unreadable) so the caller can fall back to its usual open path. */
 	async openFile(path: string): Promise<boolean> {
-		let info: OpenInfo;
+		let info: ViewerOpenInfo;
 		try {
-			info = await invoke<OpenInfo>('viewer_open', { path });
+			info = await viewerOpen(path);
 		} catch {
 			return false;
 		}
 		if (this.disposed) {
-			void invoke('viewer_close', { docId: info.docId });
+			void viewerClose(info.docId);
 			return true;
 		}
 		this.docId = info.docId;
@@ -334,9 +315,9 @@ export class EditableDocView {
 		if (!this.cm || this.docId === null) return;
 		const docId = this.docId;
 		const end = Math.min(start + WINDOW - 1, this.lineCount - 1);
-		let fetched: TextWindow;
+		let fetched: ViewerTextWindow;
 		try {
-			fetched = await invoke<TextWindow>('viewer_text', { docId, start, end });
+			fetched = await viewerText(docId, start, end);
 		} catch (error) {
 			notify('error', String(error));
 			return;
@@ -638,14 +619,7 @@ export class EditableDocView {
 		}
 		const docId = this.docId;
 		try {
-			const result = await invoke<{ lineCount: number; clean?: boolean }>('viewer_edit', {
-				docId,
-				startLine,
-				startCol: 0,
-				endLine,
-				endCol: 0,
-				text
-			});
+			const result = await viewerEdit(docId, startLine, endLine, text);
 			if (this.disposed || this.docId !== docId) return false;
 			this.synced = current;
 			this.lineCount = result.lineCount;
@@ -669,7 +643,7 @@ export class EditableDocView {
 		this.backupTimer = window.setTimeout(() => {
 			this.backupTimer = undefined;
 			const docId = this.docId;
-			if (docId !== null) void invoke('viewer_backup', { docId }).catch(() => undefined);
+			if (docId !== null) void viewerBackup(docId).catch(() => undefined);
 		}, BACKUP_DELAY_MS);
 	}
 
@@ -690,12 +664,12 @@ export class EditableDocView {
 				// The indeterminate pulse shows immediately; the backend's own reports
 				// (once the write starts) replace it with a real percentage.
 				this.onSaveProgress?.({ written: 0, total: 0 });
-				const onProgress = new Channel<SaveProgress>();
+				const onProgress = new Channel<ViewerSaveProgress>();
 				onProgress.onmessage = (progress) => this.onSaveProgress?.(progress);
-				await invoke('viewer_save', { docId: this.docId, onProgress });
+				await viewerSave(this.docId, onProgress);
 				this.touched = false;
 				const path = this.path;
-				if (path) void invoke('backup_clear', { path }).catch(() => undefined);
+				if (path) void backupClear(path).catch(() => undefined);
 				return true;
 			} catch (error) {
 				notify('error', String(error));
@@ -726,7 +700,7 @@ export class EditableDocView {
 			if (this.disposed || this.docId === null) return;
 			if (!(await this.sendDiff()) || this.disposed || this.docId === null) return;
 			try {
-				const result = await invoke<{ firstLine: number; lineCount: number; clean?: boolean }>(command, { docId: this.docId });
+				const result = await (command === 'viewer_undo' ? viewerUndo(this.docId) : viewerRedo(this.docId));
 				if (!result || this.disposed || this.docId === null) return;
 				this.lineCount = result.lineCount;
 				// Centre the window on the restored line, so the cursor lands well inside it
@@ -752,14 +726,7 @@ export class EditableDocView {
 			if (this.disposed || this.docId === null) return;
 			if (!(await this.sendDiff()) || this.disposed || this.docId === null) return;
 			try {
-				const result = await invoke<{ lineCount: number }>('viewer_edit', {
-					docId: this.docId,
-					startLine: 0,
-					startCol: 0,
-					endLine: this.lineCount,
-					endCol: 0,
-					text: contents
-				});
+				const result = await viewerEdit(this.docId, 0, this.lineCount, contents);
 				this.lineCount = result.lineCount;
 				// Restored, unsaved text: a watcher event must not reload the disk over it.
 				this.touched = true;
@@ -782,7 +749,7 @@ export class EditableDocView {
 			// Edits typed within the sync debounce, or not yet saved, keep the document as is.
 			if (this.touched) return;
 			try {
-				const result = await invoke<{ changed: boolean; lineCount: number }>('viewer_reload', { docId: this.docId });
+				const result = await viewerReload(this.docId);
 				if (this.disposed || this.docId === null || !result.changed) return;
 				this.lineCount = result.lineCount;
 				const cursor = this.cm ? this.cm.state.selection.main.head : 0;
@@ -895,19 +862,7 @@ export class EditableDocView {
 			if (this.disposed || this.docId === null || !this.cm) return;
 			if (!(await this.sendDiff()) || this.disposed || this.docId === null) return;
 			try {
-				const result = await invoke<{ replacements: number; firstLine: number; lineCount: number; clean?: boolean }>('viewer_replace', {
-					docId: this.docId,
-					query: spec.query,
-					replacement,
-					caseSensitive: spec.caseSensitive,
-					wholeWord: spec.wholeWord,
-					regexp: spec.useRegex,
-					// Replace All covers the whole document from the top; Replace covers the
-					// current match, addressed by its whole-document position.
-					fromLine: from ? from.line : 0,
-					fromCol: from ? from.startCol : 0,
-					max: all ? Number.MAX_SAFE_INTEGER : 1
-				});
+				const result = await viewerReplace(this.docId, { query: spec.query, caseSensitive: spec.caseSensitive, wholeWord: spec.wholeWord, regexp: spec.useRegex }, replacement, from, all);
 				if (this.disposed || this.docId === null || result.replacements === 0) return;
 				this.lineCount = result.lineCount;
 				// A replaced buffer is dirty however the watch reports it, and the tab must say so.
@@ -974,7 +929,7 @@ export class EditableDocView {
 		// flushes first) or intentionally discarded, and a sync still in flight checks
 		// `disposed` when it lands and drops its edit.
 		const docId = this.docId;
-		if (docId !== null) void invoke('viewer_close', { docId }).catch(() => undefined);
+		if (docId !== null) void viewerClose(docId).catch(() => undefined);
 		this.findBar?.destroy();
 		this.findBar = null;
 		this.cm?.destroy();

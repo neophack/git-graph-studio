@@ -7,7 +7,7 @@
 // its lines arrive and colored by `viewer_highlight` a beat later; the outline pane fills
 // from `viewer_symbols` once the rows are up, so neither ever blocks the first paint.
 
-import { invoke } from '../../platform/ipc/core';
+import { indexedClose, indexedLines, indexedOpen, viewerClose, viewerHighlight, viewerLines, viewerOpen, viewerSymbols, type ViewerLinesResult, type ViewerOpenInfo, type ViewerOutlineSymbol } from '../../platform/ipc/viewer';
 import { listen, type UnlistenFn } from '../../platform/ipc/core';
 
 import { DocFindController, type DocFindHost, type DocFindMatch } from '../editor';
@@ -16,29 +16,6 @@ import { attachPageKeys, attachWheel, type Disposable } from '../../scroll/input
 import { ScrollModel } from '../../scroll/model';
 import { Scrollbar } from '../../scroll/scrollbar';
 import { el, icon, notify } from '../../platform/ui/index';
-
-interface Symbol {
-	kind: 'function' | 'method' | 'class' | 'struct' | 'interface' | 'enum' | 'module' | 'type';
-	name: string;
-	line: number;
-}
-
-interface OpenResult {
-	docId: number;
-	lineCount: number;
-	language: string;
-	syntaxName: string;
-	/** Set locally: this document serves through the indexed command family. */
-	indexed?: boolean;
-}
-
-interface LinesResult {
-	startLine: number;
-	lineCount: number;
-	lines: [string, [number, number, string][]][];
-	/** True when the lines above are plain text — the tokens are owed by `viewer_highlight`. */
-	tokensPending: boolean;
-}
 
 /** Fixed line height keeps scroll math allocation-free; matches .cm-scroller's 19px so the
  *  viewer's text sits on exactly the same metrics as the editable editor. */
@@ -51,7 +28,7 @@ const MAX_WINDOW = 500;
 const OUTLINE_ITEM_HEIGHT = 22;
 
 /** The codicon VS Code's outline uses per symbol kind. */
-const SYMBOL_ICONS: Record<Symbol['kind'], string> = {
+const SYMBOL_ICONS: Record<string, string> = {
 	function: 'symbol-method',
 	method: 'symbol-method',
 	class: 'symbol-class',
@@ -109,13 +86,13 @@ export class FastView {
 	 *  rows, the scrollbar, the find bar and the status line all read. */
 	readonly scroll: ScrollModel;
 	private readonly scrollbar: Scrollbar;
-	private open: OpenResult | null = null;
+	private open: (ViewerOpenInfo & { indexed: boolean }) | null = null;
 	/** The window-fetch command of the open document's family (rope or indexed). */
-	private linesCommand: Parameters<typeof invoke>[0] = 'viewer_lines';
+	private linesCommand: typeof viewerLines = viewerLines;
 	/** True while the open document serves through the indexed, memory-bounded backend. */
 	private indexed = false;
 	/** The outline's symbols, fetched after the rows are up (`viewer_symbols`). */
-	private symbols: Symbol[] = [];
+	private symbols: ViewerOutlineSymbol[] = [];
 	/** Line cache, 0-based → rendered row element. Missing lines are fetched on demand. */
 	private cache = new Map<number, HTMLElement>();
 	private fetching = new Set<number>();
@@ -200,21 +177,21 @@ export class FastView {
 	 *  and minified single-line monsters open in. Returns false when the backend refused it
 	 *  (binary, missing…) so the caller can fall back to its normal open path. */
 	async openFile(path: string, options: { indexed?: boolean } = {}): Promise<boolean> {
-		const openCommand = options.indexed ? 'indexed_open' : 'viewer_open';
-		const closeCommand = options.indexed ? 'indexed_close' : 'viewer_close';
+		const openCommand = options.indexed ? indexedOpen : viewerOpen;
+		const closeCommand = options.indexed ? indexedClose : viewerClose;
 		this.indexed = options.indexed ?? false;
-		this.linesCommand = options.indexed ? 'indexed_lines' : 'viewer_lines';
-		let info: OpenResult;
+		this.linesCommand = options.indexed ? indexedLines : viewerLines;
+		let info: ViewerOpenInfo;
 		try {
-			info = await invoke<OpenResult>(openCommand, { path });
+			info = await openCommand(path);
 		} catch (error) {
 			return false;
 		}
 		if (this.disposed) {
-			void invoke(closeCommand, { docId: info.docId });
+			void closeCommand(info.docId);
 			return true;
 		}
-		if (this.open) void invoke(this.open.indexed ? 'indexed_close' : 'viewer_close', { docId: this.open.docId });
+		if (this.open) void (this.open.indexed ? indexedClose(this.open.docId) : viewerClose(this.open.docId));
 		this.open = { ...info, indexed: this.indexed };
 		this.symbols = [];
 		this.wantedTokens = null;
@@ -233,7 +210,7 @@ export class FastView {
 		// syntax walk), so the pane simply stays hidden there.
 		const docId = info.docId;
 		if (!this.indexed) {
-			void invoke<Symbol[]>('viewer_symbols', { docId })
+			void viewerSymbols(docId)
 				.then((symbols) => {
 					if (this.disposed || this.open?.docId !== docId) return;
 					this.symbols = symbols;
@@ -300,7 +277,7 @@ export class FastView {
 		for (let line = start; line <= end; line++) this.fetching.add(line);
 		this.fetchInFlight = true;
 		const docId = this.open.docId;
-		invoke<LinesResult>(this.linesCommand, { docId, start, end })
+		this.linesCommand(docId, start, end)
 			.then((result) => {
 				this.fetchInFlight = false;
 				// Release the WHOLE requested range before placing rows: a backend building
@@ -356,7 +333,7 @@ export class FastView {
 		this.wantedTokens = null;
 		this.tokensInFlight = true;
 		const docId = this.open.docId;
-		invoke<LinesResult>('viewer_highlight', { docId, start, end })
+		viewerHighlight(docId, start, end)
 			.then((result) => {
 				this.tokensInFlight = false;
 				if (this.disposed || this.open?.docId !== docId) return;
@@ -450,7 +427,7 @@ export class FastView {
 	/** The outline pane is virtual like the rows: a big source file carries thousands of
 	 *  symbols (the backend caps them at 20,000), and building a DOM node for each would
 	 *  cost more than the open itself. Only the items in view exist. */
-	private renderOutline(symbols: Symbol[]): void {
+	private renderOutline(symbols: ViewerOutlineSymbol[]): void {
 		this.outline.textContent = '';
 		this.outlineItems.clear();
 		if (symbols.length === 0) {
@@ -553,7 +530,7 @@ export class FastView {
 		this.unlisten = null;
 		this.findBar?.destroy();
 		this.findBar = null;
-		if (this.open) void invoke(this.open.indexed ? 'indexed_close' : 'viewer_close', { docId: this.open.docId });
+		if (this.open) void (this.open.indexed ? indexedClose(this.open.docId) : viewerClose(this.open.docId));
 		this.root.remove();
 	}
 }
