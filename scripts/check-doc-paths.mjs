@@ -23,9 +23,15 @@ const ROOT_DIRS = new Set(
 const ROOT_FILES = new Set(['package.json', 'tsconfig.json', 'tsconfig.e2e.json', 'tsconfig.tests.json', 'vite.config.ts', 'vite.remote.config.ts', 'playwright.remote.config.ts', 'AGENTS.md', 'README.md', 'Cargo.toml']);
 
 /** The repo paths a token may name even though the checker's root list would not see them
- *  (generated at build time under target/, user-home paths in prose). Nothing is here
- *  today; entries carry their why in the PR that adds them. */
-const PATH_ALLOWLIST = new Set([]);
+ *  (generated at build time under target/, user-home paths in prose). Entries carry their
+ *  why in the PR that adds them. */
+const PATH_ALLOWLIST = new Set([
+	// README's disk section names it as a SYMPTOM ("if `src-tauri/target/` ever appears,
+	// that is its writer" — a misconfigured IDE target dir), never as a tree member; on a
+	// fresh checkout it must not exist, and on a machine whose IDE once wrote it the
+	// check passed for the wrong reason (2026-10-15: CI red, local green).
+	'src-tauri/target/',
+]);
 
 function candidates(text) {
 	const out = [];
