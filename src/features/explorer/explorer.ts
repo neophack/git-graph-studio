@@ -259,15 +259,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		}));
 		// Reuse the row machinery by driving the same reconciliation as renderLevel, minus
 		// the directory listing: the "listing" here is the root list itself.
-		const existing = new Map<string, { row: HTMLElement; group: HTMLElement | null }>();
-		for (const child of Array.from(this.tree.children) as HTMLElement[]) {
-			if (child.classList.contains('row') && child.dataset['path']) {
-				existing.set(child.dataset['path']!, { row: child, group: null });
-			} else if (child.classList.contains('children') && child.dataset['parent']) {
-				const owner = existing.get(child.dataset['parent']);
-				if (owner) owner.group = child;
-			}
-		}
+		const existing = this.collectExisting(this.tree);
 		const next: HTMLElement[] = [];
 		const recurse: Promise<void>[] = [];
 		for (const entry of entries) {
@@ -305,6 +297,23 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 	 *  keep their DOM (and their expanded `.children` groups), so re-listing a folder that
 	 *  didn't change never flickers — clearing and rebuilding made expanded folders visibly
 	 *  collapse and re-expand on every refresh. */
+	/** The drawn rows of a level, by path, each with its expanded children group — what
+	 *  reconciliation (renderLevel, renderRoots) reuses instead of rebuilding. The
+	 *  "load more" row is not a file row: renderLoadMore owns its lifetime. */
+	private collectExisting(parent: HTMLElement): Map<string, { row: HTMLElement; group: HTMLElement | null }> {
+		const existing = new Map<string, { row: HTMLElement; group: HTMLElement | null }>();
+		for (const child of Array.from(parent.children) as HTMLElement[]) {
+			if (child.classList.contains('more-row')) continue;
+			if (child.classList.contains('row') && child.dataset['path']) {
+				existing.set(child.dataset['path']!, { row: child, group: null });
+			} else if (child.classList.contains('children') && child.dataset['parent']) {
+				const owner = existing.get(child.dataset['parent']);
+				if (owner) owner.group = child;
+			}
+		}
+		return existing;
+	}
+
 	private async renderLevel(parent: HTMLElement, dirPath: string, depth: number): Promise<void> {
 		const generation = this.generation;
 		let entries: DirEntryInfo[];
@@ -336,17 +345,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		}
 		// The folder switched while the listing was in flight: its rows belong to the old tree.
 		if (generation !== this.generation) return;
-		const existing = new Map<string, { row: HTMLElement; group: HTMLElement | null }>();
-		for (const child of Array.from(parent.children) as HTMLElement[]) {
-			// The "load more" row is not a file row: renderLoadMore owns its lifetime.
-			if (child.classList.contains('more-row')) continue;
-			if (child.classList.contains('row') && child.dataset['path']) {
-				existing.set(child.dataset['path']!, { row: child, group: null });
-			} else if (child.classList.contains('children') && child.dataset['parent']) {
-				const owner = existing.get(child.dataset['parent']);
-				if (owner) owner.group = child;
-			}
-		}
+		const existing = this.collectExisting(parent);
 		const next: HTMLElement[] = [];
 		const recurse: Promise<void>[] = [];
 		for (const entry of entries) {

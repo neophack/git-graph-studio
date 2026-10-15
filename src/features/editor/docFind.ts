@@ -9,7 +9,7 @@
 
 import { invoke } from '../../platform/ipc/core';
 
-import { findOptions, queryHasUppercase, updateFindOption, type FindOptions } from '../../platform/find/findOptions';
+import { findOptions, findToggleChord, queryHasUppercase, updateFindOption, type FindOptions } from '../../platform/find/findOptions';
 import { FindHistory, HistoryRecall, recallKey } from '../../platform/find/findHistory';
 import { settings } from '../../platform/settings';
 import { t, tf } from '../../platform/i18n';
@@ -375,15 +375,8 @@ export class DocFindController {
 				event.preventDefault();
 				this.setReplaceRow(true, true);
 			}
-		} else if (event.key.toLowerCase() === 'c' && event.altKey) {
-			event.preventDefault();
-			caseButton.click();
-		} else if (event.key.toLowerCase() === 'w' && event.altKey) {
-			event.preventDefault();
-			wordButton.click();
-		} else if (event.key.toLowerCase() === 'r' && event.altKey) {
-			event.preventDefault();
-			regexButton.click();
+		} else if (findToggleChord(event, [{ key: 'c', button: caseButton }, { key: 'w', button: wordButton }, { key: 'r', button: regexButton }])) {
+			// Alt+C / Alt+W / Alt+R toggle the options (the shared chord helper).
 		}
 	}
 }

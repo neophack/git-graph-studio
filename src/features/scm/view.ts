@@ -593,6 +593,10 @@ export class SourceControlView {
 
 	declare discard: (file: ScmChange) => Promise<void> ;
 
+	declare confirmDiscardOne: (file: ScmChange) => Promise<boolean> ;
+
+	declare discardChangesOf: (changes: ScmChange[], run: (command: string, args: Record<string, unknown>) => Promise<void>) => Promise<void> ;
+
 	declare discardFiles: (files: ScmChange[]) => Promise<void> ;
 
 	declare discardAll: () => Promise<void> ;

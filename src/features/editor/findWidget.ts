@@ -19,7 +19,7 @@ import {
 } from '@codemirror/search';
 import type { EditorView, Panel, ViewUpdate } from '@codemirror/view';
 
-import { findOptions, queryHasUppercase, updateFindOption } from '../../platform/find/findOptions';
+import { findOptions, findToggleChord, queryHasUppercase, updateFindOption } from '../../platform/find/findOptions';
 import { FindHistory, HistoryRecall, recallKey } from '../../platform/find/findHistory';
 import { settings } from '../../platform/settings';
 import { t, tf } from '../../platform/i18n';
@@ -234,18 +234,13 @@ export function createFindPanel(view: EditorView): Panel {
 		} else if ((event.code === 'Digit1' || event.key === '1') && event.shiftKey && (event.ctrlKey || event.metaKey)) {
 			event.preventDefault();
 			void replaceNext(view);
-		} else if (event.key.toLowerCase() === 'c' && event.altKey) {
-			event.preventDefault();
-			caseButton.click();
-		} else if (event.key.toLowerCase() === 'w' && event.altKey) {
-			event.preventDefault();
-			wordButton.click();
-		} else if (event.key.toLowerCase() === 'r' && event.altKey) {
-			event.preventDefault();
-			regexButton.click();
-		} else if (event.key.toLowerCase() === 'l' && event.altKey) {
-			event.preventDefault();
-			selectionButton.click();
+		} else if (findToggleChord(event, [
+			{ key: 'c', button: caseButton },
+			{ key: 'w', button: wordButton },
+			{ key: 'r', button: regexButton },
+			{ key: 'l', button: selectionButton }
+		])) {
+			// Alt+C / Alt+W / Alt+R / Alt+L toggle the options (the shared chord helper).
 		}
 	};
 	for (const field of [input, replaceInput]) {

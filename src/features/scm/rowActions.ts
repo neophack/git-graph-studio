@@ -275,15 +275,20 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 		this.onOpenDiff?.(diff);
 	},
 
-	async discard(file: ScmChange): Promise<void> {
+	/** The delete/discard confirmation a single file's row asks (verbatim for the row menu
+	 *  and the sub-repo's, which differ only in where the confirmed write runs). */
+	confirmDiscardOne(file: ScmChange): Promise<boolean> {
 		const label = basename(toPosix(file.path));
-		const confirmed = await confirmDialog(
+		return confirmDialog(
 			file.untracked
 				? `Are you sure you want to DELETE ${label}?\nThis is IRREVERSIBLE!\nThis file will be FOREVER LOST if you proceed.`
 				: `Are you sure you want to discard changes in ${label}?`,
 			file.untracked ? 'Delete file' : 'Discard Changes'
 		);
-		if (!confirmed) return;
+	},
+
+	async discard(file: ScmChange): Promise<void> {
+		if (!(await this.confirmDiscardOne(file))) return;
 		await this.run('git_discard', { path: file.path, untracked: file.untracked });
 	},
 
@@ -304,11 +309,13 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 		});
 	},
 
-	async discardAll(): Promise<void> {
-		// Only the "Changes" group: conflicted paths are the merge's own business - a
-		// pathspec-less `git restore -- .` aborts on the first unmerged path and discards
-		// nothing - so the operation names the non-conflicted paths explicitly.
-		const unstaged = this.changes.filter((c) => !c.conflicted && (c.unstaged !== null || c.untracked));
+	/** The discard-everything pass over one group's changes (the Changes group of the
+	 *  repository or of a sub-repo — the confirmed write goes through `run`). Only the
+	 *  "Changes" group: conflicted paths are the merge's own business - a pathspec-less
+	 *  `git restore -- .` aborts on the first unmerged path and discards nothing - so the
+	 *  operation names the non-conflicted paths explicitly. */
+	async discardChangesOf(changes: ScmChange[], run: (command: string, args: Record<string, unknown>) => Promise<void>): Promise<void> {
+		const unstaged = changes.filter((c) => !c.conflicted && (c.unstaged !== null || c.untracked));
 		if (unstaged.length === 0) return;
 		const untracked = unstaged.filter((c) => c.untracked);
 		const confirmed = await confirmDialog(
@@ -318,39 +325,23 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 			'Discard All Changes'
 		);
 		if (!confirmed) return;
-		await this.run('git_discard_all', {
+		await run('git_discard_all', {
 			restore: unstaged.filter((c) => !c.untracked).map((c) => c.path),
 			clean: untracked.map((c) => c.path)
 		});
 	},
 
+	async discardAll(): Promise<void> {
+		await this.discardChangesOf(this.changes, (command, args) => this.run(command, args));
+	},
+
 	async subDiscard(sub: SubRepoState, file: ScmChange): Promise<void> {
-		const label = basename(toPosix(file.path));
-		const confirmed = await confirmDialog(
-			file.untracked
-				? `Are you sure you want to DELETE ${label}?\nThis is IRREVERSIBLE!\nThis file will be FOREVER LOST if you proceed.`
-				: `Are you sure you want to discard changes in ${label}?`,
-			file.untracked ? 'Delete file' : 'Discard Changes'
-		);
-		if (!confirmed) return;
+		if (!(await this.confirmDiscardOne(file))) return;
 		await this.subRun(sub, 'git_discard', { path: file.path, untracked: file.untracked });
 	},
 
 	async subDiscardAll(sub: SubRepoState): Promise<void> {
-		const unstaged = sub.changes.filter((c) => !c.conflicted && (c.unstaged !== null || c.untracked));
-		if (unstaged.length === 0) return;
-		const untracked = unstaged.filter((c) => c.untracked);
-		const confirmed = await confirmDialog(
-			untracked.length > 0
-				? `Are you sure you want to discard ALL changes? ${untracked.length} untracked file(s) will be DELETED!\nThis is IRREVERSIBLE!\nYour current working set will be FOREVER LOST.`
-				: `Are you sure you want to discard ALL ${unstaged.length} changes?\nThis is IRREVERSIBLE!\nYour current working set will be FOREVER LOST if you proceed.`,
-			'Discard All Changes'
-		);
-		if (!confirmed) return;
-		await this.subRun(sub, 'git_discard_all', {
-			restore: unstaged.filter((c) => !c.untracked).map((c) => c.path),
-			clean: untracked.map((c) => c.path)
-		});
+		await this.discardChangesOf(sub.changes, (command, args) => this.subRun(sub, command, args));
 	},
 
 	absolute(relative: string): string {

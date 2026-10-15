@@ -409,16 +409,7 @@ export class CanRawView {
 		this.updateEmptyHint();
 		// The find's hit positions address the old row space; the open bar rescans the new
 		// one on its own, the count shows the scan pending.
-		this.findGen++;
-		if (this.findTimer !== null) {
-			clearTimeout(this.findTimer);
-			this.findTimer = null;
-		}
-		this.hits = [];
-		this.hitSet = new Set();
-		this.hitIndex = -1;
-		this.hitTotal = 0;
-		this.hitsCapped = false;
+		this.resetFindState();
 		if (!this.findBar.hidden) {
 			this.findCount.textContent = '…';
 			if (this.doc && this.findBox.value.trim() !== '') this.scheduleFind(0);
@@ -438,6 +429,14 @@ export class CanRawView {
 
 	private closeFind(): void {
 		this.findBar.hidden = true;
+		this.resetFindState();
+		this.paintHits();
+		this.scroller.focus();
+	}
+
+	/** Drops the current find's state wholesale — a document switch (the hits address the
+	 *  old row space) and a find-bar close both start from nothing. */
+	private resetFindState(): void {
 		this.findGen++;
 		if (this.findTimer !== null) {
 			clearTimeout(this.findTimer);
@@ -448,8 +447,6 @@ export class CanRawView {
 		this.hitIndex = -1;
 		this.hitTotal = 0;
 		this.hitsCapped = false;
-		this.paintHits();
-		this.scroller.focus();
 	}
 
 	/** Typing re-runs the backend scan this late: a giant log's pass takes a moment, and

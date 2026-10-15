@@ -7,6 +7,27 @@ import { Disposable, EventEmitter } from './types/events';
 import { ViewColumn } from './types/enums';
 import { Uri } from './types/uri';
 
+/** The `asWebviewUri` both webview kinds serve: a package-local path onto the host's
+ *  resource base, in package-relative form. The extension path crosses with the host
+ *  platform's separators (backslashes on Windows) while the incoming path is
+ *  forward-slash normalized — normalize both or the root-prefix test fails and the whole
+ *  absolute path is appended to the resource base, a URL nothing serves. */
+function webviewUriFor(ctx: HostContext, local: Uri | string): Uri {
+	const path = typeof local === 'string' ? local : local.fsPath;
+	const root = ctx.extensionPath.replace(/[\\/]+$/, '').replace(/\\/g, '/');
+	const rel = path.replace(/\\/g, '/').startsWith(root + '/')
+		? path.replace(/\\/g, '/').slice(root.length + 1)
+		: path.replace(/\\/g, '/').replace(/^\.\//, '');
+	return Uri.parse(ctx.webviewResourceBase + rel);
+}
+
+/** `${cspSource}` composes the page's own CSP directives, so `data:` rides along: a
+ *  page inlining its icon font as a data: URL (claude-code's codicons) dies under its
+ *  own `font-src ${cspSource}` without it. (Both webview kinds carry it.) */
+function webviewCspSource(ctx: HostContext): string {
+	return ctx.webviewResourceBase + ' data:';
+}
+
 /** A live webview panel the extension created; the host owns the tab and the iframe, the
  *  frame-side half only proxies. Disposal arrives as a `webviewDisposed` host event. */
 export class WebviewPanel {
@@ -41,22 +62,8 @@ export class WebviewPanel {
 			},
 			postMessage: (message: unknown) => bridge.request('webview.postMessage', [panelId, message]).then(() => true) as Promise<boolean>,
 			onDidReceiveMessage: this.messages.event,
-			asWebviewUri: (local: Uri | string): Uri => {
-				const path = typeof local === 'string' ? local : local.fsPath;
-				// The extension path crosses with the host platform's separators (backslashes
-				// on Windows) while the incoming path is forward-slash normalized — normalize
-				// both or the root-prefix test fails and the whole absolute path is appended
-				// to the resource base, a URL nothing serves.
-				const root = this.ctx.extensionPath.replace(/[\\/]+$/, '').replace(/\\/g, '/');
-				const rel = path.replace(/\\/g, '/').startsWith(root + '/')
-					? path.replace(/\\/g, '/').slice(root.length + 1)
-					: path.replace(/\\/g, '/').replace(/^\.\//, '');
-				return Uri.parse(this.ctx.webviewResourceBase + rel);
-			},
-			// `${cspSource}` composes the page's own CSP directives, so `data:` rides along: a
-			// page inlining its icon font as a data: URL (claude-code's codicons) dies under
-			// its own `font-src ${cspSource}` without it. (Both webview kinds carry it.)
-			cspSource: this.ctx.webviewResourceBase + ' data:'
+			asWebviewUri: (local: Uri | string): Uri => webviewUriFor(this.ctx, local),
+			cspSource: webviewCspSource(this.ctx)
 		};
 	}
 
@@ -155,22 +162,8 @@ export class WebviewView {
 			},
 			postMessage: (message: unknown) => bridge.request('webviewView.postMessage', [viewType, message]).then(() => true) as Promise<boolean>,
 			onDidReceiveMessage: this.messages.event,
-			asWebviewUri: (local: Uri | string): Uri => {
-				const path = typeof local === 'string' ? local : local.fsPath;
-				// The extension path crosses with the host platform's separators (backslashes
-				// on Windows) while the incoming path is forward-slash normalized — normalize
-				// both or the root-prefix test fails and the whole absolute path is appended
-				// to the resource base, a URL nothing serves.
-				const root = this.ctx.extensionPath.replace(/[\\/]+$/, '').replace(/\\/g, '/');
-				const rel = path.replace(/\\/g, '/').startsWith(root + '/')
-					? path.replace(/\\/g, '/').slice(root.length + 1)
-					: path.replace(/\\/g, '/').replace(/^\.\//, '');
-				return Uri.parse(this.ctx.webviewResourceBase + rel);
-			},
-			// `${cspSource}` composes the page's own CSP directives, so `data:` rides along: a
-			// page inlining its icon font as a data: URL (claude-code's codicons) dies under
-			// its own `font-src ${cspSource}` without it. (Both webview kinds carry it.)
-			cspSource: this.ctx.webviewResourceBase + ' data:'
+			asWebviewUri: (local: Uri | string): Uri => webviewUriFor(this.ctx, local),
+			cspSource: webviewCspSource(this.ctx)
 		};
 	}
 

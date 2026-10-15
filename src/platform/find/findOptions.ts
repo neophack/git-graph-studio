@@ -31,3 +31,20 @@ export function updateFindOption<K extends keyof FindOptions>(key: K, value: Fin
 export function queryHasUppercase(query: string): boolean {
 	return query !== query.toLowerCase();
 }
+
+/** One Alt+<letter> toggle chord a find bar serves: Alt+C the case toggle, Alt+W whole
+ *  word, Alt+R regex (the editor's find widget, the windowed editor's find bar, and any
+ *  bar-specific extra). Fires the toggle's button and consumes the event when it is one —
+ *  exactly the `else if (… && event.altKey)` chains both bars spelled before. */
+export function findToggleChord(event: KeyboardEvent, chords: { key: string; button: HTMLElement }[]): boolean {
+	if (!event.altKey) return false;
+	const letter = event.key.toLowerCase();
+	for (const chord of chords) {
+		if (chord.key === letter) {
+			event.preventDefault();
+			chord.button.click();
+			return true;
+		}
+	}
+	return false;
+}

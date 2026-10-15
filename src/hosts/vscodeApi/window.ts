@@ -198,6 +198,23 @@ export function buildWindow(s: ShimState) {
 		}
 	}
 
+	/** The hide / dispose halves both object-form modal prompts (createQuickPick,
+	 *  createInputBox) share: hide closes an open prompt, dispose tears its emitters down
+	 *  whatever state the prompt is in. `state.open` is the prompt's own flag. */
+	function promptTeardown(state: { open: boolean }, hide: EventEmitter<void>, emitters: { dispose(): void }[]): { hide(): void; dispose(): void } {
+		return {
+			hide: () => {
+				if (!state.open) return;
+				state.open = false;
+				hide.fire(undefined);
+			},
+			dispose: () => {
+				state.open = false;
+				for (const emitter of emitters) emitter.dispose();
+			}
+		};
+	}
+
 	/** `window.createQuickPick()`: the object form — items (often filled after `show()`,
 	 *  with `busy` set meanwhile), selection and the accept / hide events. The host's
 	 *  quick input is modal, so `show()` opens it once the items are in hand. */
@@ -209,7 +226,7 @@ export function buildWindow(s: ShimState) {
 		const valueChanged = new EventEmitter<string>();
 		let items: unknown[] = [];
 		let itemsArrived: (() => void) | null = null;
-		let open = false;
+		const state = { open: false };
 		const pick: Record<string, unknown> = {
 			title: undefined, step: undefined, totalSteps: undefined, enabled: true, busy: false,
 			ignoreFocusOut: false, placeholder: undefined, canSelectMany: false, matchOnDescription: false,
@@ -230,21 +247,21 @@ export function buildWindow(s: ShimState) {
 			onDidTriggerButton: silentEvent(),
 			onDidTriggerItemButton: silentEvent(),
 			show: () => {
-				if (open) return;
-				open = true;
+				if (state.open) return;
+				state.open = true;
 				setTimeout(async () => {
 					// Wait (bounded) for the items a busy pick is still loading.
 					if (items.length === 0) await new Promise<void>((resolve) => {
 						itemsArrived = resolve;
 						setTimeout(resolve, 15000);
 					});
-					if (!open) return;
+					if (!state.open) return;
 					const entries = pickEntries(items);
 					const placeholder = String(pick.placeholder ?? pick.title ?? '');
 					const picked = pick.canSelectMany ? await pickMany(entries, placeholder) : await pickOne(entries, placeholder).then((entry) => (entry ? [entry] : undefined));
-					if (!open) return;
+					if (!state.open) return;
 					if (picked === undefined) {
-						open = false;
+						state.open = false;
 						hide.fire(undefined);
 						return;
 					}
@@ -255,19 +272,7 @@ export function buildWindow(s: ShimState) {
 					accept.fire(undefined);
 				}, 0);
 			},
-			hide: () => {
-				if (!open) return;
-				open = false;
-				hide.fire(undefined);
-			},
-			dispose: () => {
-				open = false;
-				accept.dispose();
-				hide.dispose();
-				selection.dispose();
-				active.dispose();
-				valueChanged.dispose();
-			}
+			...promptTeardown(state, hide, [accept, hide, selection, active, valueChanged])
 		};
 		return pick;
 	}
@@ -277,7 +282,7 @@ export function buildWindow(s: ShimState) {
 		const accept = new EventEmitter<void>();
 		const hide = new EventEmitter<void>();
 		const valueChanged = new EventEmitter<string>();
-		let open = false;
+		const state = { open: false };
 		const box: Record<string, unknown> = {
 			title: undefined, step: undefined, totalSteps: undefined, enabled: true, busy: false, ignoreFocusOut: false,
 			value: '', valueSelection: undefined, placeholder: undefined, password: false, prompt: undefined,
@@ -287,13 +292,13 @@ export function buildWindow(s: ShimState) {
 			onDidChangeValue: valueChanged.event,
 			onDidTriggerButton: silentEvent(),
 			show: () => {
-				if (open) return;
-				open = true;
+				if (state.open) return;
+				state.open = true;
 				setTimeout(async () => {
 					const answer = await s.bridge.request('showInputBox', [String(box.prompt ?? box.title ?? ''), String(box.value ?? ''), { placeHolder: box.placeholder, password: box.password === true }]);
-					if (!open) return;
+					if (!state.open) return;
 					if (answer === undefined || answer === null) {
-						open = false;
+						state.open = false;
 						hide.fire(undefined);
 						return;
 					}
@@ -302,17 +307,7 @@ export function buildWindow(s: ShimState) {
 					accept.fire(undefined);
 				}, 0);
 			},
-			hide: () => {
-				if (!open) return;
-				open = false;
-				hide.fire(undefined);
-			},
-			dispose: () => {
-				open = false;
-				accept.dispose();
-				hide.dispose();
-				valueChanged.dispose();
-			}
+			...promptTeardown(state, hide, [accept, hide, valueChanged])
 		};
 		return box;
 	}
