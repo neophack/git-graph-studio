@@ -189,6 +189,15 @@ pub fn find_git_exe() -> Option<PathBuf> {
         .find_map(|root| git_exe_from_root(root))
 }
 
+/// POSIX: no Git Bash exists to find — `None` is the documented answer, and every
+/// caller's own `cfg!(windows)` branch needs the name to resolve on every target
+/// (2026-10-15: without this twin the ungated call sites in `ggs-providers` and the
+/// app's `pty.rs` were E0425s only the Linux and macOS builds could see).
+#[cfg(not(windows))]
+pub fn find_git_bash() -> Option<PathBuf> {
+    None
+}
+
 /// POSIX: nothing to locate beyond the PATH — `None` is the documented answer, and every
 /// caller's fallback (`PathBuf::from("git")`) is the bare spawn that finds it. The
 /// runner's unconditional call needs the name to exist on every target (2026-10-15: its
