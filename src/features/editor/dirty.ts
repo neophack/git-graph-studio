@@ -1,38 +1,13 @@
-import type { Extension, Text } from '@codemirror/state';
-import type { EditorView } from '@codemirror/view';
-import type { MergeView } from '@codemirror/merge';
-import { invoke } from '../../platform/ipc/core';
-import { backupClear, backupWrite, type FileContents, type FileProbe, fileProbe, listFiles, readFileBase64, readFileRaw as fetchFileRaw, writeFile } from '../../platform/ipc/fs';
-import { materializeRevisionFile, readFileAt } from '../../platform/ipc/revision';
-import { viewerClose, viewerOpen, type ViewerOutlineSymbol } from '../../platform/ipc/viewer';
-import { findReferences, workspaceSymbols } from '../../platform/ipc/search';
-import { symbolLookup, symbolReferences } from '../../platform/ipc/symbols';
-import { scmBlame } from '../../platform/ipc/scm';
-import { hasBookmark, toggleBookmark } from './bookmarks';
-import { samePath, commandIconContent, contextUri, declaredLanguageName, menuSection, resolvedMenuEntries, resourceContext, runMenuEntry } from '../extensions';
-import { loadAnalysisPages, loadCanViews, loadCallTree, loadEditorExtensions, loadFastView, loadFileHistory, loadFolderCompare, loadHexCompare, loadHexView, loadMerge, loadMergeEditor, loadSnippetRegistry, loadSymbolDbView, loadTextEditor } from '../../platform/lazy';
-import type { FastView, HexView, HexCompareView } from '../viewers/types';
-import type { CanLogView, CanRawView } from '../can/types';
-import type { EditableDocView } from './docEditView';
-import { imageMime, renderMarkdown } from '../../platform/markdown';
-import type { FileHistoryView, BlameLine } from '../scm/types';
-import type { CallTreeView, WsSymbol } from '../search/types';
-import { commands } from '../../platform/commands';
-import { extFileDataUrl } from '../../platform/extAssets';
-import type { FolderCompareView, MergeToolbar } from '../compare/types';
-import { t, trText } from '../../platform/i18n';
-import { SETTINGS_EVENT, settings } from '../../platform/settings';
-import { basename, dirname, el, icon, joinPath, notify, quickPick, relativeTo, showContextMenu, showMenuBelow, toPosix, type MenuEntry } from '../../platform/ui/index';
-import { fileIcon, fileIconColor, isCanLog, isCodeExtension } from '../../platform/fileIcons';
-import { hook } from '../../platform/hooks';
-import type { DiffSide, EditorPlacement } from './types';
-import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
+import { backupClear, backupWrite, type FileContents, writeFile } from '../../platform/ipc/fs';
+import { samePath } from '../extensions';
+import { settings } from '../../platform/settings';
+import { basename, notify, toPosix } from '../../platform/ui/index';
+import { fileIcon } from '../../platform/fileIcons';
 import type { EditorGroup } from './group';
 import { editorState } from './editorState';
 import type { Editor } from './inputs';
 import { inputId } from './inputs';
 import { readFileRaw } from './shared';
-import type * as TextEditor from './textEditor';
 
 
 /** How long after the last keystroke an unsaved buffer is backed up for hot exit. */

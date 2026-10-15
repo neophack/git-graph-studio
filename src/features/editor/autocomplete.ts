@@ -8,7 +8,7 @@ import { Facet, type Extension } from '@codemirror/state';
 import { listFiles } from '../../platform/ipc/fs';
 import { pathCompletions } from '../../platform/ipc/fuzzy';
 
-import { languageOf, resolveVariables, snippetsFor } from './snippetRegistry';
+import { resolveVariables, snippetsFor } from './snippetRegistry';
 import { extensionCompletionsFor, hasExtensionCompletions, type ExtensionCompletion } from './editorCompletions';
 import { settings } from '../../platform/settings';
 

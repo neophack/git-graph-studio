@@ -2,42 +2,17 @@
 // mounts, the fast-view swaps and the text services attach — called from the open
 // orchestration (open.ts), split out so neither file outgrows the other.
 
-import type { Extension, Text } from '@codemirror/state';
-import type { EditorView } from '@codemirror/view';
-import type { MergeView } from '@codemirror/merge';
-import { invoke } from '../../platform/ipc/core';
-import { backupClear, backupWrite, type FileContents, type FileProbe, fileProbe, listFiles, readFileBase64, readFileRaw as fetchFileRaw, writeFile } from '../../platform/ipc/fs';
-import { materializeRevisionFile, readFileAt } from '../../platform/ipc/revision';
-import { viewerClose, viewerOpen, type ViewerOutlineSymbol } from '../../platform/ipc/viewer';
-import { findReferences, workspaceSymbols } from '../../platform/ipc/search';
-import { symbolLookup, symbolReferences } from '../../platform/ipc/symbols';
-import { scmBlame } from '../../platform/ipc/scm';
-import { hasBookmark, toggleBookmark } from './bookmarks';
-import { samePath, commandIconContent, contextUri, declaredLanguageName, menuSection, resolvedMenuEntries, resourceContext, runMenuEntry } from '../extensions';
-import { loadAnalysisPages, loadCanViews, loadCallTree, loadEditorExtensions, loadFastView, loadFileHistory, loadFolderCompare, loadHexCompare, loadHexView, loadMerge, loadMergeEditor, loadSnippetRegistry, loadSymbolDbView, loadTextEditor } from '../../platform/lazy';
-import type { FastView, HexView, HexCompareView } from '../viewers/types';
-import type { CanLogView, CanRawView } from '../can/types';
-import type { EditableDocView } from './docEditView';
-import { imageMime, renderMarkdown } from '../../platform/markdown';
-import type { FileHistoryView, BlameLine } from '../scm/types';
-import type { CallTreeView, WsSymbol } from '../search/types';
-import { commands } from '../../platform/commands';
-import { extFileDataUrl } from '../../platform/extAssets';
-import type { FolderCompareView, MergeToolbar } from '../compare/types';
-import { t, trText } from '../../platform/i18n';
-import { SETTINGS_EVENT, settings } from '../../platform/settings';
-import { basename, dirname, el, icon, joinPath, notify, quickPick, relativeTo, showContextMenu, showMenuBelow, toPosix, type MenuEntry } from '../../platform/ui/index';
-import { fileIcon, fileIconColor, isCanLog, isCodeExtension } from '../../platform/fileIcons';
+import { type FileContents, type FileProbe, fileProbe, readFileBase64 } from '../../platform/ipc/fs';
+import { declaredLanguageName } from '../extensions';
+import { loadCanViews, loadEditorExtensions, loadFastView, loadHexView } from '../../platform/lazy';
+import { imageMime } from '../../platform/markdown';
+import { t } from '../../platform/i18n';
+import { settings } from '../../platform/settings';
+import { basename, el, icon, notify, showContextMenu } from '../../platform/ui/index';
 import { hook } from '../../platform/hooks';
-import type { DiffSide, EditorPlacement } from './types';
-import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
-import type { EditorGroup } from './group';
-import { editorState } from './editorState';
-import { notice, readFileRaw } from './shared';
+import { readFileRaw } from './shared';
 import { WHOLE_FILE_EDITOR_BYTES, WINDOWED_EDIT_BYTES, loadDocEdit, textEditor } from './open';
-import type { Editor, EditorInput } from './inputs';
-import { ANALYSIS_PAGE_ICONS, ANALYSIS_PAGE_LABELS } from './inputs';
-import type * as TextEditor from './textEditor';
+import type { Editor } from './inputs';
 
 /** The mounting concern of EditorGroup — assigned onto the prototype by the module facade. */
 export const mountMethods: ThisType<import('./group').EditorGroup> = {
