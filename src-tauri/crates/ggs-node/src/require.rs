@@ -428,10 +428,9 @@ pub(crate) fn evaluate_cached_script(
     source: &str,
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    use sha2::Digest as _;
     let cache_key = format!(
-        "{BYTECODE_CACHE_FORMAT}{tag}{:x}",
-        sha2::Sha256::digest(source.as_bytes())
+        "{BYTECODE_CACHE_FORMAT}{tag}{}",
+        ggs_codec::hash::sha256(source.as_bytes())
     );
     let cached_block = read_bytecode_cache(&cache_key).and_then(|blob| {
         let blob: boa_engine::vm::bytecode_cache::CacheBlob = bincode::deserialize(&blob).ok()?;
@@ -496,10 +495,9 @@ fn evaluate_module(path: &Path, source: &str, context: &mut Context) -> JsResult
     // back to the normal compile below, and a hit answers through the exact same
     // `Script::evaluate` path. The version prefix moves with the bytecode encoding: the
     // operands went fixed-width u32 (2026-09-30), which re-lays every instruction.
-    use sha2::Digest as _;
     let cache_key = format!(
-        "{BYTECODE_CACHE_FORMAT}{:x}",
-        sha2::Sha256::digest(source.as_bytes())
+        "{BYTECODE_CACHE_FORMAT}{}",
+        ggs_codec::hash::sha256(source.as_bytes())
     );
     let cached_block = read_bytecode_cache(&cache_key).and_then(|blob| {
         let blob: boa_engine::vm::bytecode_cache::CacheBlob = bincode::deserialize(&blob).ok()?;

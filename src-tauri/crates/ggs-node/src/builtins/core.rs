@@ -61,7 +61,6 @@ pub(super) fn pbkdf2(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    use pbkdf2::pbkdf2_hmac;
     let password = bytes_arg(args.get_or_undefined(0), context)
         .ok_or_else(|| error("pbkdf2: the password must be bytes"))?;
     let salt = bytes_arg(args.get_or_undefined(1), context)
@@ -77,9 +76,13 @@ pub(super) fn pbkdf2(
     let digest = string_arg(args, 4, context).to_ascii_lowercase();
     let mut out = vec![0u8; keylen as usize];
     match digest.as_str() {
-        "sha1" => pbkdf2_hmac::<sha1::Sha1>(&password, &salt, iterations as u32, &mut out),
-        "sha256" => pbkdf2_hmac::<sha2::Sha256>(&password, &salt, iterations as u32, &mut out),
-        "sha512" => pbkdf2_hmac::<sha2::Sha512>(&password, &salt, iterations as u32, &mut out),
+        "sha1" => ggs_codec::hmac::pbkdf2_hmac_sha1(&password, &salt, iterations as u32, &mut out),
+        "sha256" => {
+            ggs_codec::hmac::pbkdf2_hmac_sha256(&password, &salt, iterations as u32, &mut out)
+        }
+        "sha512" => {
+            ggs_codec::hmac::pbkdf2_hmac_sha512(&password, &salt, iterations as u32, &mut out)
+        }
         other => return Err(error(format!("Invalid digest: {other}"))),
     }
     array_buffer(out, context)
@@ -283,15 +286,13 @@ pub(super) fn hmac_sha256_hex(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    use hmac::Mac as _;
     let key = bytes_arg(args.get_or_undefined(0), context)
         .ok_or_else(|| error("hmac: the key must be bytes"))?;
     let data = bytes_arg(args.get_or_undefined(1), context)
         .ok_or_else(|| error("hmac: the data must be bytes"))?;
-    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&key)
-        .map_err(|e| error(format!("hmac: {e}")))?;
-    mac.update(&data);
-    Ok(text(hex::encode(mac.finalize().into_bytes())))
+    Ok(text(ggs_codec::hash::to_hex(&ggs_codec::hmac::hmac_sha256(
+        &key, &data,
+    ))))
 }
 
 /// GGS-patch: HKDF-SHA256 (RFC 5869) — `(ikm, salt, info, length) → key bytes`, the
@@ -302,7 +303,6 @@ pub(super) fn hkdf_sha256(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    use hmac::Mac as _;
     let type_error = || error("hkdf: the inputs must be bytes");
     let ikm = bytes_arg(args.get_or_undefined(0), context).ok_or_else(type_error)?;
     let salt = bytes_arg(args.get_or_undefined(1), context).ok_or_else(type_error)?;
@@ -313,10 +313,7 @@ pub(super) fn hkdf_sha256(
     }
     let length = length as usize;
     // Extract: PRK = HMAC-SHA256(salt, IKM); the empty salt is 32 zero bytes.
-    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&salt)
-        .map_err(|e| error(format!("hkdf: {e}")))?;
-    mac.update(&ikm);
-    let prk = mac.finalize().into_bytes();
+    let prk = ggs_codec::hmac::hmac_sha256(&salt, &ikm);
     // Expand: T(1) = HMAC(PRK, info || 0x01); T(n) = HMAC(PRK, T(n-1) || info || n).
     let mut okm = Vec::with_capacity(length);
     let mut previous: Vec<u8> = Vec::new();
@@ -324,12 +321,11 @@ pub(super) fn hkdf_sha256(
         if okm.len() >= length {
             break;
         }
-        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&prk)
-            .map_err(|e| error(format!("hkdf: {e}")))?;
-        mac.update(&previous);
-        mac.update(&info);
-        mac.update(&[counter]);
-        previous = mac.finalize().into_bytes().to_vec();
+        let mut mac_input = Vec::with_capacity(previous.len() + info.len() + 1);
+        mac_input.extend_from_slice(&previous);
+        mac_input.extend_from_slice(&info);
+        mac_input.push(counter);
+        previous = ggs_codec::hmac::hmac_sha256(&prk, &mac_input);
         okm.extend_from_slice(&previous);
     }
     okm.truncate(length);
@@ -348,24 +344,9 @@ pub(super) fn digest_hex(
     let data =
         bytes_arg(args.get_or_undefined(1), context).ok_or_else(|| error("digest needs bytes"))?;
     let hex = match algorithm.as_str() {
-        "md5" => {
-            use md5::Digest as _;
-            let mut hasher = md5::Md5::new();
-            hasher.update(&data);
-            hex::encode(hasher.finalize())
-        }
-        "sha1" => {
-            use sha1::Digest as _;
-            let mut hasher = sha1::Sha1::new();
-            hasher.update(&data);
-            hex::encode(hasher.finalize())
-        }
-        "sha256" => {
-            use sha2::Digest as _;
-            let mut hasher = sha2::Sha256::new();
-            hasher.update(&data);
-            hex::encode(hasher.finalize())
-        }
+        "md5" => ggs_codec::hash::md5(&data),
+        "sha1" => ggs_codec::hash::sha1(&data),
+        "sha256" => ggs_codec::hash::sha256(&data),
         other => {
             return Err(JsError::from_native(
                 JsNativeError::error().with_message(format!("unsupported digest: {other}")),

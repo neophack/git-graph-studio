@@ -70,14 +70,14 @@
 | P5-13 豁免清单清零 | ✅ | `3c7c2ec` 达成（清单自 P5-4 起为空） |
 | P6-1 modules.json + 覆盖性检查（19 模块盖住 327 个源文件,接缝检查内执行;自测分组对 modules.json 断言顺序与命名） | ✅ | `ebf2c9b` |
 | P6-2 直接依赖对齐（getrandom 0.2→0.3 与 tauri 合流、base64 0.22→0.23;残留 0.2/0.22 均为上游 aes-gcm/tauri-codegen 所引;measure-build.mjs 本就记录 -d 计数） | ✅ | `27c801e` |
-| P6-3 ggs-codec 补 SHA-512/HMAC/PBKDF2,ggs-node 去 md-5/sha1/hmac/pbkdf2 | ⬜ | 未开始（独立工作项,标准测试向量先行） |
+| P6-3 ggs-codec 补 SHA-512/HMAC/PBKDF2,ggs-node 去 md-5/sha1/hmac/pbkdf2 | ✅ | 本次（SHA-512/384 已在 P2-4 随 parity 批落地;本次补 `hmac.rs`——RFC 2104 的 HMAC-SHA1/256/512 与 RFC 8018 的 PBKDF2 三变体,hash 的三个家族抽出流式核心（密钥 pad 预计算）,RFC 2202/4231/6070 + Josefsson 向量先行把关;ggs-node 的 pbkdf2/hmac/hkdf/digest 四个 native 与 require.rs 的字节码缓存键（键值不变,旧缓存继续命中）、fs.rs 的 hex 编码全部换到 ggs-codec,`md-5`/`sha1`/`sha2`/`hmac`/`pbkdf2`/`hex` 六个 crate 连同 `digest`/`block-buffer` 离开侧车图（207→199,cargo tree -e normal --all-features 去重计数）——比计划多去 sha2 与 hex：sha2 在侧车里只剩这三处用法，hex 只剩 Buffer 的 toString('hex') 一处,均随换自然消失;ggs-node 的既有奇偶测试（crypto_pbkdf2_and_aes_gcm_behave_like_node、hmac_and_hkdf_answer_nodes_vectors）保持绿） |
 | P6-4 README 磁盘维护章节定稿;`debug="line-tables-only"` 本地 A/B 复测 | ✅（文档半）/⬜（A/B 复测） | 本次 |
 | P6-5 app/daemon/hub 共用 target 目录 | ⬜ | 计划本身要求 P0 指标证明收益才做 |
 | P6-6 AGENTS.md 模块图改为目录/crate 级引用 | ⬜ | 需 owner 拍板（计划 §6 第 3 条） |
 
 P0-2（target 目录写入者）未执行：本机 `src-tauri/target/` 未复现（构建走
-`target/studio/cargo`），`incremental` 目录 17.5 GB 为多 feature 时代的历史累积，
-一次 `cargo clean` 或 `cargo sweep` 即回收——留待与 P6-4 一并处理。
+`target/studio/cargo`）；注中提到的 17.5 GB 历史累积在 P6-3 复查时已不存在
+（`src-tauri/target` 只剩指向 studio 布局的空壳），无需回收。
 
 ### P5 进行中的要点
 
@@ -600,13 +600,18 @@ src-tauri/
 **`ggs-codec`** —— 纯 Rust 的摘要与归档
 
 - 来源：`ggs_bash/hashes.rs`（MD5/SHA-1/SHA-256）、`ggs_bash/compress.rs`（DEFLATE 解码、
-  gzip）、`ggs_bash/archive.rs`（USTAR、zip 读取 `zip_entry`）。
-- 对外 API：`hash::{md5, sha1, sha256, Digest}`、`deflate::inflate`、`gzip::{decode, encode_stored}`、
+  gzip）、`ggs_bash/archive.rs`（USTAR、zip 读取 `zip_entry`）；P6-3 又补 `hmac.rs`
+  （HMAC-SHA1/256/512 与 PBKDF2 三变体，hash 的 SHA 家族抽出共享的流式核心）。
+- 对外 API：`hash::{md5, sha1, sha224, sha256, sha384, sha512, blake2b512, to_hex}`、
+  `hmac::{hmac_sha1, hmac_sha256, hmac_sha512, pbkdf2_hmac_sha1/256/512}`、
+  `deflate::inflate`、`gzip::{decode, encode_stored}`、
   `tar::{read, write}`、`zip::{entry, list}`。
-- 使用者：`ggs-bash`（全部）、`ggs-config`（`zip::entry`）、后续 `ggs-node`（ci-speed-plan P3：
-  补 SHA-512 / HMAC / PBKDF2 后替换 `md-5`、`sha1`、`hmac`、`pbkdf2`）。
+- 使用者：`ggs-bash`（全部）、`ggs-config`（`zip::entry`）、`ggs-node`（P6-3 已接入：crypto
+  builtin 的 pbkdf2/hmac/hkdf/digest 四个 native、require.rs 的字节码缓存键、fs 的 hex
+  编码——`md-5`、`sha1`、`sha2`、`hmac`、`pbkdf2`、`hex` 六个 crate 随之离开侧车图）。
 - 外部依赖：无。
-- 测试：现 `hashes` / `compress` / `archive` 的测试与标准向量全部随迁。
+- 测试：现 `hashes` / `compress` / `archive` 的测试与标准向量全部随迁；HMAC/PBKDF2 以
+  RFC 2202 / 4231 / 6070 与 Josefsson PBKDF2 集（SHA-512 逐字节对 Node crypto 核过）把关。
 
 #### L1 领域层（可依赖 L0 与白名单内的 L1）
 
@@ -1968,15 +1973,10 @@ boa_engine = { version = "0.21", features = ["annex-b", "trace"] }   # 经根 [p
 libloading = "0.8"
 ureq.workspace = true
 if-addrs = "0.13"
+ggs-codec.workspace = true  # P6-3 落地：摘要/HMAC/PBKDF2/hex 全走它（md-5/sha1/sha2/hmac/pbkdf2/hex 六个 crate 已删）
 aes-gcm.workspace = true
-pbkdf2 = "0.12"             # P6-3 后由 ggs-codec 取代
-hmac = "0.12"               # 同上
-md-5 = "0.10"               # 同上
-sha1.workspace = true       # 同上
-sha2.workspace = true
 getrandom.workspace = true
 base64.workspace = true
-hex.workspace = true
 bincode = "1.3"
 serde.workspace = true
 serde_json.workspace = true

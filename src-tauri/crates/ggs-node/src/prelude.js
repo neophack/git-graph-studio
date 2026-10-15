@@ -582,9 +582,9 @@ for (const name of ['dispose', 'asyncDispose']) {
 	// one whose tail would throw).
 	globalThis.crypto.getHashes = () => ['md5', 'sha1', 'sha256'];
 
-	// GGS-patch: createHmac and hkdfSync over the Rust natives (hmac crate), in Node's
-	// shapes — the only digest both serves is sha256, which is what the pairing and
-	// frame-key derivations of Claude Remote ask for; other algorithms throw honestly.
+	// GGS-patch: createHmac and hkdfSync over the Rust natives (ggs-codec's HMAC-SHA256),
+	// in Node's shapes — the only digest both serves is sha256, which is what the pairing
+	// and frame-key derivations of Claude Remote ask for; other algorithms throw honestly.
 	globalThis.crypto.createHmac = (algorithm, key) => {
 		if (String(algorithm).toLowerCase().replace(/-/g, '') !== 'sha256') {
 			throw new Error(`Unknown HMAC digest ${algorithm}`);
@@ -615,7 +615,8 @@ for (const name of ['dispose', 'asyncDispose']) {
 	};
 
 	// GGS-patch: pbkdf2 + createCipheriv/createDecipheriv('aes-*-gcm') over the Rust
-	// natives (aes-gcm + pbkdf2 crates), in Node's own shapes: bytes cross as typed
+	// natives (aes-gcm for the cipher, ggs-codec's PBKDF2 for the KDF), in Node's own
+	// shapes: bytes cross as typed
 	// arrays (no base64 hop — a few hundred KB through the old string codec never
 	// finished), `update` answers its output as it goes (GCM is a counter-mode stream:
 	// code that keeps only `update`'s result works, Node's GCM `final` answers nothing),

@@ -149,7 +149,7 @@ fn encoding_arg(args: &[JsValue], at: usize, context: &mut Context) -> JsResult<
 fn decode(bytes: Vec<u8>, encoding: &str) -> String {
     match encoding {
         "base64" => base64_encode(&bytes),
-        "hex" => hex::encode(&bytes),
+        "hex" => ggs_codec::hash::to_hex(&bytes),
         _ => String::from_utf8_lossy(&bytes).into_owned(),
     }
 }

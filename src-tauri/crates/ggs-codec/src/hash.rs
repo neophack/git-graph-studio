@@ -59,71 +59,147 @@ pub fn md5(data: &[u8]) -> String {
 }
 
 pub fn sha1(data: &[u8]) -> String {
-    let mut state: [u32; 5] = [
-        0x6745_2301,
-        0xefcd_ab89,
-        0x98ba_dcfe,
-        0x1032_5476,
-        0xc3d2_e1f0,
-    ];
-    let mut message = data.to_vec();
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    message.push(0x80);
-    while message.len() % 64 != 56 {
-        message.push(0);
-    }
-    message.extend_from_slice(&bit_len.to_be_bytes());
-    for chunk in message.chunks(64) {
-        let mut words = [0u32; 80];
-        for i in 0..16 {
-            words[i] = u32::from_be_bytes([
-                chunk[4 * i],
-                chunk[4 * i + 1],
-                chunk[4 * i + 2],
-                chunk[4 * i + 3],
-            ]);
-        }
-        for i in 16..80 {
-            words[i] = (words[i - 3] ^ words[i - 8] ^ words[i - 14] ^ words[i - 16]).rotate_left(1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e] = state;
-        for (i, word) in words.iter().enumerate() {
-            let (f, k) = match i / 20 {
-                0 => ((b & c) | (!b & d), 0x5a82_7999),
-                1 => (b ^ c ^ d, 0x6ed9_eba1),
-                2 => ((b & c) | (b & d) | (c & d), 0x8f1b_bcdc),
-                _ => (b ^ c ^ d, 0xca62_c1d6),
-            };
-            let next = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(*word);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = next;
-        }
-        state[0] = state[0].wrapping_add(a);
-        state[1] = state[1].wrapping_add(b);
-        state[2] = state[2].wrapping_add(c);
-        state[3] = state[3].wrapping_add(d);
-        state[4] = state[4].wrapping_add(e);
-    }
-    hex_bytes(state.iter().flat_map(|word| word.to_be_bytes()))
+    let mut core = Sha1Core::new(SHA1_IV);
+    core.update(data);
+    hex_bytes(core.finish())
 }
 
+/// SHA-1's initial state — FIPS 180-4's five words.
+pub(crate) const SHA1_IV: [u32; 5] = [
+    0x6745_2301,
+    0xefcd_ab89,
+    0x98ba_dcfe,
+    0x1032_5476,
+    0xc3d2_e1f0,
+];
+
+/// SHA-1's round function over one 64-byte block — the sixteen input words, the
+/// message schedule's expansion to eighty, and the eighty rounds, FIPS 180-4 verbatim.
+fn sha1_compress(state: &mut [u32; 5], chunk: &[u8]) {
+    let mut words = [0u32; 80];
+    for i in 0..16 {
+        words[i] = u32::from_be_bytes([
+            chunk[4 * i],
+            chunk[4 * i + 1],
+            chunk[4 * i + 2],
+            chunk[4 * i + 3],
+        ]);
+    }
+    for i in 16..80 {
+        words[i] = (words[i - 3] ^ words[i - 8] ^ words[i - 14] ^ words[i - 16]).rotate_left(1);
+    }
+    let [mut a, mut b, mut c, mut d, mut e] = *state;
+    for (i, word) in words.iter().enumerate() {
+        let (f, k) = match i / 20 {
+            0 => ((b & c) | (!b & d), 0x5a82_7999),
+            1 => (b ^ c ^ d, 0x6ed9_eba1),
+            2 => ((b & c) | (b & d) | (c & d), 0x8f1b_bcdc),
+            _ => (b ^ c ^ d, 0xca62_c1d6),
+        };
+        let next = a
+            .rotate_left(5)
+            .wrapping_add(f)
+            .wrapping_add(e)
+            .wrapping_add(k)
+            .wrapping_add(*word);
+        e = d;
+        d = c;
+        c = b.rotate_left(30);
+        b = a;
+        a = next;
+    }
+    state[0] = state[0].wrapping_add(a);
+    state[1] = state[1].wrapping_add(b);
+    state[2] = state[2].wrapping_add(c);
+    state[3] = state[3].wrapping_add(d);
+    state[4] = state[4].wrapping_add(e);
+}
+
+/* ---------- The streaming cores the digests and HMAC share ---------- */
+
+/// One hash's incremental core: the running state, the partial block, and the message
+/// length. The one-shot digests are a single update; HMAC (hmac.rs) precomputes the
+/// key's inner and outer pads as two of these and clones them per message (RFC 2104's
+/// `K ⊕ ipad *` / `K ⊕ opad *` states — where PBKDF2's speed comes from, its iteration
+/// loop re-hashing two short messages per round).
+///
+/// `$length_bytes` is the width of the padding's bit-count field (8 for the 32-bit
+/// family and SHA-1, 16 for SHA-512) and `$boundary` the block offset it is padded to
+/// (56, respectively 112).
+macro_rules! streaming_core {
+    ($name:ident, $word:ty, $words:literal, $block_size:literal, $compress:ident,
+     $length_bytes:literal, $boundary:literal) => {
+        #[derive(Clone)]
+        pub(crate) struct $name {
+            state: [$word; $words],
+            block: [u8; $block_size],
+            filled: usize,
+            total: u64,
+        }
+
+        impl $name {
+            pub(crate) fn new(iv: [$word; $words]) -> Self {
+                Self {
+                    state: iv,
+                    block: [0; $block_size],
+                    filled: 0,
+                    total: 0,
+                }
+            }
+
+            /// Message bytes into the running state.
+            pub(crate) fn update(&mut self, data: &[u8]) {
+                self.total += data.len() as u64;
+                self.absorb(data);
+            }
+
+            fn absorb(&mut self, mut data: &[u8]) {
+                if self.filled > 0 {
+                    let take = ($block_size - self.filled).min(data.len());
+                    self.block[self.filled..self.filled + take].copy_from_slice(&data[..take]);
+                    self.filled += take;
+                    data = &data[take..];
+                    if self.filled == $block_size {
+                        let block = self.block;
+                        $compress(&mut self.state, &block);
+                        self.filled = 0;
+                    }
+                }
+                while data.len() >= $block_size {
+                    let (block, rest) = data.split_at($block_size);
+                    $compress(&mut self.state, block);
+                    data = rest;
+                }
+                self.block[..data.len()].copy_from_slice(data);
+                self.filled = data.len();
+            }
+
+            /// The padded final state as raw digest bytes (big-endian words).
+            pub(crate) fn finish(mut self) -> Vec<u8> {
+                let bits = (self.total as u128).wrapping_mul(8);
+                // 0x80, zeros up to the length field's boundary, then the bit count —
+                // at most one block plus the length field of appended bytes.
+                let mut tail = [0u8; $block_size + $length_bytes];
+                tail[0] = 0x80;
+                let boundary = if self.filled < $boundary {
+                    $boundary
+                } else {
+                    $boundary + $block_size
+                };
+                let pad = boundary - self.filled;
+                let length = bits.to_be_bytes();
+                tail[pad..pad + $length_bytes].copy_from_slice(&length[16 - $length_bytes..]);
+                self.absorb(&tail[..pad + $length_bytes]);
+                self.state.iter().flat_map(|word| word.to_be_bytes()).collect()
+            }
+        }
+    };
+}
+
+streaming_core!(Sha1Core, u32, 5, 64, sha1_compress, 8, 56);
+
 pub fn sha256(data: &[u8]) -> String {
-    sha256_family(
-        data,
-        [
-            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-            0x5be0cd19,
-        ],
-        8,
-    )
+    sha256_family(data, SHA256_IV, 8)
 }
 
 /// SHA-224 — SHA-256's round function over its own IV, the digest cut to 7 words.
@@ -138,9 +214,24 @@ pub fn sha224(data: &[u8]) -> String {
     )
 }
 
+/// SHA-256's initial state — the FIPS 180-4 words (SHA-224's own IV stays inline in
+/// [`sha224`]; only HMAC needs the standard one by name).
+pub(crate) const SHA256_IV: [u32; 8] = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+    0x5be0cd19,
+];
+
 /// The SHA-2 32-bit family shared by SHA-256 and SHA-224: the same rounds, different
 /// initial state and digest length.
 fn sha256_family(data: &[u8], iv: [u32; 8], digest_words: usize) -> String {
+    let mut core = Sha256Core::new(iv);
+    core.update(data);
+    hex_bytes(core.finish().into_iter().take(digest_words * 4))
+}
+
+/// The 32-bit family's round function over one 64-byte block — the message schedule
+/// and the sixty-four rounds, FIPS 180-4 verbatim.
+fn sha256_compress(state: &mut [u32; 8], chunk: &[u8]) {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
         0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
@@ -153,73 +244,59 @@ fn sha256_family(data: &[u8], iv: [u32; 8], digest_words: usize) -> String {
         0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
         0xc67178f2,
     ];
-    let mut state: [u32; 8] = iv;
-    let mut message = data.to_vec();
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    message.push(0x80);
-    while message.len() % 64 != 56 {
-        message.push(0);
+    let mut words = [0u32; 64];
+    for i in 0..16 {
+        words[i] = u32::from_be_bytes([
+            chunk[4 * i],
+            chunk[4 * i + 1],
+            chunk[4 * i + 2],
+            chunk[4 * i + 3],
+        ]);
     }
-    message.extend_from_slice(&bit_len.to_be_bytes());
-    for chunk in message.chunks(64) {
-        let mut words = [0u32; 64];
-        for i in 0..16 {
-            words[i] = u32::from_be_bytes([
-                chunk[4 * i],
-                chunk[4 * i + 1],
-                chunk[4 * i + 2],
-                chunk[4 * i + 3],
-            ]);
-        }
-        for i in 16..64 {
-            let s0 = words[i - 15].rotate_right(7)
-                ^ words[i - 15].rotate_right(18)
-                ^ (words[i - 15] >> 3);
-            let s1 = words[i - 2].rotate_right(17)
-                ^ words[i - 2].rotate_right(19)
-                ^ (words[i - 2] >> 10);
-            words[i] = words[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(words[i - 7])
-                .wrapping_add(s1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = state;
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let choose = (e & f) ^ (!e & g);
-            let temp1 = h
-                .wrapping_add(s1)
-                .wrapping_add(choose)
-                .wrapping_add(K[i])
-                .wrapping_add(words[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let majority = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(majority);
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-        state[0] = state[0].wrapping_add(a);
-        state[1] = state[1].wrapping_add(b);
-        state[2] = state[2].wrapping_add(c);
-        state[3] = state[3].wrapping_add(d);
-        state[4] = state[4].wrapping_add(e);
-        state[5] = state[5].wrapping_add(f);
-        state[6] = state[6].wrapping_add(g);
-        state[7] = state[7].wrapping_add(h);
+    for i in 16..64 {
+        let s0 = words[i - 15].rotate_right(7)
+            ^ words[i - 15].rotate_right(18)
+            ^ (words[i - 15] >> 3);
+        let s1 = words[i - 2].rotate_right(17)
+            ^ words[i - 2].rotate_right(19)
+            ^ (words[i - 2] >> 10);
+        words[i] = words[i - 16]
+            .wrapping_add(s0)
+            .wrapping_add(words[i - 7])
+            .wrapping_add(s1);
     }
-    hex_bytes(
-        state
-            .iter()
-            .take(digest_words)
-            .flat_map(|word| word.to_be_bytes()),
-    )
+    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
+    for i in 0..64 {
+        let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+        let choose = (e & f) ^ (!e & g);
+        let temp1 = h
+            .wrapping_add(s1)
+            .wrapping_add(choose)
+            .wrapping_add(K[i])
+            .wrapping_add(words[i]);
+        let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+        let majority = (a & b) ^ (a & c) ^ (b & c);
+        let temp2 = s0.wrapping_add(majority);
+        h = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(temp1);
+        d = c;
+        c = b;
+        b = a;
+        a = temp1.wrapping_add(temp2);
+    }
+    state[0] = state[0].wrapping_add(a);
+    state[1] = state[1].wrapping_add(b);
+    state[2] = state[2].wrapping_add(c);
+    state[3] = state[3].wrapping_add(d);
+    state[4] = state[4].wrapping_add(e);
+    state[5] = state[5].wrapping_add(f);
+    state[6] = state[6].wrapping_add(g);
+    state[7] = state[7].wrapping_add(h);
 }
+
+streaming_core!(Sha256Core, u32, 8, 64, sha256_compress, 8, 56);
 
 /* ---------- The SHA-2 64-bit family: SHA-512 and SHA-384 ---------- */
 
@@ -249,15 +326,15 @@ const K512: [u64; 80] = [
 ];
 
 pub fn sha512(data: &[u8]) -> String {
-    sha512_family(
-        data,
-        [
-            0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
-            0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179,
-        ],
-        8,
-    )
+    sha512_family(data, SHA512_IV, 8)
 }
+
+/// SHA-512's initial state — the FIPS 180-4 words (SHA-384's own IV stays inline in
+/// [`sha384`]).
+pub(crate) const SHA512_IV: [u64; 8] = [
+    0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
+    0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179,
+];
 
 pub fn sha384(data: &[u8]) -> String {
     sha512_family(
@@ -271,70 +348,64 @@ pub fn sha384(data: &[u8]) -> String {
 }
 
 fn sha512_family(data: &[u8], iv: [u64; 8], digest_words: usize) -> String {
-    let mut message = data.to_vec();
-    let bit_len = (data.len() as u128).wrapping_mul(8);
-    message.push(0x80);
-    while message.len() % 128 != 112 {
-        message.push(0);
-    }
-    message.extend_from_slice(&bit_len.to_be_bytes());
-    let mut state = iv;
-    for chunk in message.chunks(128) {
-        let mut words = [0u64; 80];
-        for i in 0..16 {
-            let mut bytes = [0u8; 8];
-            bytes.copy_from_slice(&chunk[8 * i..8 * i + 8]);
-            words[i] = u64::from_be_bytes(bytes);
-        }
-        for i in 16..80 {
-            let s0 = words[i - 15].rotate_right(1)
-                ^ words[i - 15].rotate_right(8)
-                ^ (words[i - 15] >> 7);
-            let s1 = words[i - 2].rotate_right(19)
-                ^ words[i - 2].rotate_right(61)
-                ^ (words[i - 2] >> 6);
-            words[i] = words[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(words[i - 7])
-                .wrapping_add(s1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = state;
-        for i in 0..80 {
-            let s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
-            let choose = (e & f) ^ (!e & g);
-            let temp1 = h
-                .wrapping_add(s1)
-                .wrapping_add(choose)
-                .wrapping_add(K512[i])
-                .wrapping_add(words[i]);
-            let s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
-            let majority = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(majority);
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-        state[0] = state[0].wrapping_add(a);
-        state[1] = state[1].wrapping_add(b);
-        state[2] = state[2].wrapping_add(c);
-        state[3] = state[3].wrapping_add(d);
-        state[4] = state[4].wrapping_add(e);
-        state[5] = state[5].wrapping_add(f);
-        state[6] = state[6].wrapping_add(g);
-        state[7] = state[7].wrapping_add(h);
-    }
-    hex_bytes(
-        state
-            .iter()
-            .take(digest_words)
-            .flat_map(|word| word.to_be_bytes()),
-    )
+    let mut core = Sha512Core::new(iv);
+    core.update(data);
+    hex_bytes(core.finish().into_iter().take(digest_words * 8))
 }
+
+/// The 64-bit family's round function over one 128-byte block — the message schedule
+/// and the eighty rounds, FIPS 180-4 verbatim.
+fn sha512_compress(state: &mut [u64; 8], chunk: &[u8]) {
+    let mut words = [0u64; 80];
+    for i in 0..16 {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&chunk[8 * i..8 * i + 8]);
+        words[i] = u64::from_be_bytes(bytes);
+    }
+    for i in 16..80 {
+        let s0 = words[i - 15].rotate_right(1)
+            ^ words[i - 15].rotate_right(8)
+            ^ (words[i - 15] >> 7);
+        let s1 = words[i - 2].rotate_right(19)
+            ^ words[i - 2].rotate_right(61)
+            ^ (words[i - 2] >> 6);
+        words[i] = words[i - 16]
+            .wrapping_add(s0)
+            .wrapping_add(words[i - 7])
+            .wrapping_add(s1);
+    }
+    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
+    for i in 0..80 {
+        let s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
+        let choose = (e & f) ^ (!e & g);
+        let temp1 = h
+            .wrapping_add(s1)
+            .wrapping_add(choose)
+            .wrapping_add(K512[i])
+            .wrapping_add(words[i]);
+        let s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
+        let majority = (a & b) ^ (a & c) ^ (b & c);
+        let temp2 = s0.wrapping_add(majority);
+        h = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(temp1);
+        d = c;
+        c = b;
+        b = a;
+        a = temp1.wrapping_add(temp2);
+    }
+    state[0] = state[0].wrapping_add(a);
+    state[1] = state[1].wrapping_add(b);
+    state[2] = state[2].wrapping_add(c);
+    state[3] = state[3].wrapping_add(d);
+    state[4] = state[4].wrapping_add(e);
+    state[5] = state[5].wrapping_add(f);
+    state[6] = state[6].wrapping_add(g);
+    state[7] = state[7].wrapping_add(h);
+}
+
+streaming_core!(Sha512Core, u64, 8, 128, sha512_compress, 16, 112);
 
 /* ---------- BLAKE2b (b2sum) ---------- */
 
@@ -489,6 +560,12 @@ fn hex_bytes(bytes: impl IntoIterator<Item = u8>) -> String {
         .into_iter()
         .flat_map(|byte| [hex(byte >> 4), hex(byte & 0x0f)])
         .collect()
+}
+
+/// Raw bytes as their lowercase hex string — the rendering Node's `Buffer.toString('hex')`
+/// and every digest here share, so the sidecars carry no `hex` crate for it.
+pub fn to_hex(bytes: &[u8]) -> String {
+    hex_bytes(bytes.iter().copied())
 }
 
 #[cfg(test)]
