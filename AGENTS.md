@@ -686,8 +686,13 @@ page shows the integration's state (`claude_mcp_status`).
   `vscode` shim over a stdio bridge, `require('vscode')` interception, ESM fallback —
   VS Code's own extension-host shape), `src/hosts/nodeHostEsm.ts` (the generated loader hooks
   mapping an ESM graph's static `import 'vscode'` onto that same shim — named exports
-  over the host instance, the well-known unserved names linking undefined), `src/features/extensions/extHost.ts` (the extension host for VSIX
-  extensions — frames without a Node runtime, remote handles over ggs-ext/1 with one;
+  over the host instance, the well-known unserved names linking undefined), `src/features/extensions/host/` (the extension host for VSIX
+  extensions, split by concern: `extensionHost.ts` the class shell — the fields, constructor
+  and statics, the methods declared and assigned onto the prototype by `index.ts` from the
+  concern modules (frames/store/activation/dispatch/pages/builtinCommands/webviews/claude/
+  statusItems/outputChannels/treeViews/providers/hostRequests/pushes, each a `ThisType<ExtensionHost>`
+  object literal over the same class), with `sharedTypes.ts` the leaf holding the cross-concern
+  handle/interface vocabulary — frames without a Node runtime, remote handles over ggs-ext/1 with one;
   the page host, the process-command dispatch, and the host services behind the
   `vscode` API — webview panels, webview views, status bar items, output channels, progress
   toasts, memento persistence, tree views, activationEvents; the activation policy also

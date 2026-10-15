@@ -18,9 +18,9 @@
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { listen } from '../../platform/ipc/core';
 
-import type { ExtInfo, ExtProcessInfo, ExtensionHost, GalleryEntry } from './extHost';
+import type { ExtInfo, ExtProcessInfo, ExtensionHost, GalleryEntry } from './host';
 import { extFileDataUrl } from '../../platform/extAssets';
-import { extIconRelPath as iconRelPath, extTitle } from './extHost';
+import { extIconRelPath as iconRelPath, extTitle } from './host';
 import { renderMarkdown } from '../../platform/markdown';
 import { t, tf } from '../../platform/i18n';
 import { actionButton, confirmDialog, el, icon, liveSidebarTitle, notify } from '../../platform/ui/index';

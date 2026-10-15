@@ -2,7 +2,7 @@
 // cross-feature imports resolve here (plan §5.3); the module's own files reach each
 // other directly.
 
-export * from './extHost';
+export * from './host';
 export * from './extensionsPanel';
 export * from './contributions';
 export * from './treeView';

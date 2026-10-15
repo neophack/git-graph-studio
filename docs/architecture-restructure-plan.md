@@ -60,8 +60,9 @@
 | P5-4 地基（platform/ipc/core 单门；46 个文件的 @tauri-apps/api 直连全改道；R6 清零，**豁免清单归零**）。按领域的类型化封装为后续独立 PR | ✅ | `3c7c2ec` |
 | P5-4 后半（按领域的类型化封装：app/settings/assoc、fs、revision/scm、search/symbols/fuzzy、viewer/can、analysis/mcp、ext/extProcess/extChild/gallery、providers/pty/remote 共 19 个领域文件,8 个提交；函数签名即契约,结果形状沉到 seam 单一出处（DirEntryInfo/FileContents/WsSymbol/ExtInfo/CanLogStats/...）,门面再导出保持消费方路径;scm/extHost 的按名分发与 remote shim 自身的基础设施保留原生 invoke;`tests/ipcContract.test.ts` 以 Rust 注册表为对照逐 wrapper 调用） | ✅ | `f3ebdc1`–`5ff9016` |
 | P5-5/6/7 目录归位（14 个 features/ 模块 + index/types 门面、workbench/、hosts/ 含 nodeShims 整目录；诊断存储翻转到 extensions 模块、视图类型下沉 types.ts 后环保持为零；入口与构建脚本同步） | ✅ | `2b006e6` |
-| P5-8..12 拆大文件（vscodeApi/extHost/editor/workbench/scm/nodeShims） | 🔶 | P5-8 完成（见下）;其余未开始 |
+| P5-8..12 拆大文件（vscodeApi/extHost/editor/workbench/scm/nodeShims） | 🔶 | P5-8/P5-9 完成（见下）;其余未开始 |
 | P5-8 的 vscodeApi 半（4585 → 22 个文件,hosts/vscodeApi/：types/{position,uri,events,enums,values}、bridge/shimLog/util/configuration/documents/mementos/webviews/treeViews、state.ts（跨命名空间共享态 + host 事件路由）、commands/window/workspace/languages/env/extensions 命名空间 builder、inert.ts（降级命名空间）、registrations.ts（__ggsFlushRegistrations）、index.ts（组装 + 原 4585 行模块的完整再导出面——5 个消费方 import 路径不变）;闭包共享态收敛为 createShimState 的 ShimState 对象,成员经 `s.` 访问,生命周期与原逐-API 闭包一致） | ✅ | 本次 |
+| P5-9 的 extHost 半（4102 → 17 个文件,features/extensions/host/：extensionHost.ts 持 ExtensionHost 类壳——字段/构造/statics 原样、方法 declare 化,15 个关注点文件（frames/store/activation/dispatch/pages/builtinCommands/webviews/claude/statusItems/outputChannels/treeViews/providers/hostRequests/pushes）以 ThisType<ExtensionHost> 对象字面量承载逐字搬移的方法体,index.ts Object.assign 到原型——方法体零改写、`this` 全保留;sharedTypes.ts 叶子模块收编跨关注点类型解 R5 环;私有成员放宽为公开（跨文件原型分派的代价,行为不变）;消费方只有 extensionsPanel 与模块门面,均改指 './host';计划的 fsProviders/mementos 内容实际住在 serveRequest 的 switch 内,随 hostRequests.ts 走） | ✅ | 本次 |
 | P5-12 的 i18n 半（字符串表外置：`platform/i18n/{en,zh-cn}.ts`,i18n.ts 1645 → 304 行,只留 `t()`/`tf()` 与注册/回退逻辑;en 表是键集的出处,zh 表按其形状类型化） | ✅ | 本次 |
 | P5-13 豁免清单清零 | ✅ | `3c7c2ec` 达成（清单自 P5-4 起为空） |
 | P6-1 modules.json + 覆盖性检查（19 模块盖住 327 个源文件,接缝检查内执行;自测分组对 modules.json 断言顺序与命名） | ✅ | `ebf2c9b` |
