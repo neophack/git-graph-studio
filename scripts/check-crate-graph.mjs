@@ -124,6 +124,47 @@ function checkGraph(metadata, errors) {
 	return members;
 }
 
+/** The unused-dependency sweep (docs/redundancy-cleanup-plan.md §6): every dependency a
+ *  member declares is searched for, by word, in the crate's own sources (src, tests,
+ *  examples, benches, build.rs — the dev-dependencies are covered by the tests under the
+ *  same root). A dependency nothing names is dead weight in the manifest — the exact
+ *  residue P1 §2.4 removed from the root crate. Heuristic by nature (a dep renamed in
+ *  code, a feature-only activation), so `crate-graph.json`'s `unusedDepsAllow` lists the
+ *  reviewed exceptions: `{ "crate": ["dep"] }`. */
+function checkUnusedDeps(members, errors) {
+	const allow = WHITELIST.unusedDepsAllow ?? {};
+	for (const [name, pkg] of members) {
+		const crateRoot = dirname(pkg.manifest_path);
+		const manifest = readFileSync(pkg.manifest_path, 'utf8');
+		const depNames = [];
+		let inDeps = false;
+		for (const raw of manifest.split('\n')) {
+			const line = raw.trim();
+			const header = line.match(/^\[(.+)\]$/);
+			if (header) {
+				// dependencies sections only (normal, target-specific, dev, build) — features,
+				// lints, package and workspace tables are not dependency declarations
+				inDeps = /^(dependencies|build-dependencies|dev-dependencies)$/.test(header[1])
+					|| /^target\('[^']+'\)\.(build-)?dependencies$/.test(header[1])
+					|| /^target\.'[^']+'\.(build-)?dependencies$/.test(header[1]);
+				continue;
+			}
+			if (!inDeps) continue;
+			const key = line.match(/^([A-Za-z0-9_-]+)\s*=/);
+			if (key) depNames.push(key[1]);
+		}
+		const sources = listFiles(crateRoot, '.rs').map((f) => readFileSync(f, 'utf8')).join('\n');
+		const allowed = allow[name] ?? [];
+		for (const dep of depNames) {
+			if (allowed.includes(dep)) continue;
+			const word = new RegExp(`\\b${dep.replace(/[-_]/g, '[-_]')}\\b`);
+			if (!word.test(sources)) {
+				errors.push(`${name}: dependency '${dep}' is named by no source under ${relative(appDir, crateRoot).split(sep).join('/')} — remove it or review it onto crate-graph.json's unusedDepsAllow`);
+			}
+		}
+	}
+}
+
 export function checkCrateGraph() {
 	const errors = [];
 	checkEngineSeam(errors);
@@ -141,6 +182,7 @@ export function checkCrateGraph() {
 		const metadata = JSON.parse(result.stdout);
 		members = checkGraph(metadata, errors);
 		checkDocHeaders([...members.values()], errors);
+		checkUnusedDeps(members, errors);
 	}
 
 	if (errors.length > 0) {

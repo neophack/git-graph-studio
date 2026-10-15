@@ -118,5 +118,6 @@
 		"interprocess",
 		"webview2-com",
 		"objc2-app-kit"
-	]
+	],
+	"unusedDepsAllow": {}
 }
