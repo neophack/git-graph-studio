@@ -4,7 +4,7 @@
 // detected (the same chord bound to more than one command), and the editor in the Keyboard
 // Shortcuts view (Ctrl+K Ctrl+S) records a new key straight from the keyboard.
 
-import { invoke } from '../platform/ipc/core';
+import { keybindingsRead, keybindingsWrite } from '../platform/ipc/settings';
 
 import { commands, UNSHIFTED_GLYPHS } from './commands';
 import { el, icon } from './ui';
@@ -26,7 +26,7 @@ export function userKeybindings(): UserKeybinding[] {
 /** Read ~/.ggs/keybindings.json (a missing or unparsable file leaves the bindings empty). */
 export async function loadUserKeybindings(): Promise<void> {
 	try {
-		const text = await invoke<string | null>('keybindings_read');
+		const text = await keybindingsRead();
 		if (!text) return;
 		const parsed = JSON.parse(text) as unknown;
 		if (!Array.isArray(parsed)) return;
@@ -52,7 +52,7 @@ export function effectiveKeybinding(commandId: string): string | undefined | nul
 export async function setUserKeybinding(commandId: string, key: string | undefined): Promise<void> {
 	userBindings = userBindings.filter((binding) => binding.command !== commandId);
 	if (key !== undefined) userBindings.push({ key, command: commandId });
-	await invoke('keybindings_write', { contents: JSON.stringify(userBindings, null, '\t') }).catch(() => undefined);
+	await keybindingsWrite(JSON.stringify(userBindings, null, '\t')).catch(() => undefined);
 }
 
 /** Every command whose effective binding is `binding` - more than one entry is a conflict. */

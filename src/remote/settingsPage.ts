@@ -17,7 +17,7 @@ import { SETTINGS_EVENT, SETTING_DEFS, THEMES, applyEnumSetting, isSettingModifi
 import { extSettings, saveExtSetting } from '../platform/state';
 import { notify } from '../platform/ui';
 import { extLog } from '../features/extensions';
-import { invoke } from '../platform/ipc/core';
+import { assocListDefaults } from '../platform/ipc/assoc';
 import { closeActionSheet, openSheet, showActionSheet, sheetOpen } from './actionSheet';
 import { pushBack } from './backStack';
 import { setDataSaver } from './dataSaver';
@@ -379,7 +379,7 @@ function fillCategory(level: HTMLElement, id: CategoryId): void {
 function fillFileTypes(level: HTMLElement): void {
 	const mount = document.createElement('div');
 	level.appendChild(mount);
-	void invoke<{ ext: string; recommended: boolean }[]>('assoc_list_defaults')
+	void assocListDefaults()
 		.then((catalog) => {
 			for (const entry of catalog) {
 				mount.appendChild(boolRow(`.${entry.ext}`, '', false,

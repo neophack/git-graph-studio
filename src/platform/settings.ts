@@ -4,6 +4,8 @@
 // parts that cache derived values (menus, terminals, the viewer's colors) can refresh.
 
 import { invoke } from '../platform/ipc/core';
+import { assocApply, contextMenuApply } from '../platform/ipc/assoc';
+import { settingsRead, settingsWrite } from '../platform/ipc/settings';
 
 import { load, save } from './state';
 import { setLocale, t } from './i18n';
@@ -400,7 +402,7 @@ export function updateSetting<K extends keyof AppSettings>(key: K, value: AppSet
  *  having applied its environment at its own start. New terminals pick the setting
  *  up on their own; they read it at creation. */
 function applyTerminalShell(): void {
-	void invoke('settings_write', { contents: JSON.stringify(settings, null, '\t') })
+	void settingsWrite(JSON.stringify(settings, null, '\t'))
 		.catch(() => undefined)
 		.then(() => invoke('providers_shell_refresh'))
 		.catch(() => undefined);
@@ -410,7 +412,7 @@ function applyTerminalShell(): void {
  *  backend reports per-platform; on Windows the result explains that Default Apps
  *  needs one confirmation (Win10/11 will not let an app set the default silently). */
 function applyFileAssociations(): void {
-	void invoke<{ messageKey: string; detail: string }>('assoc_apply', { extensions: settings.fileAssociations })
+	void assocApply(settings.fileAssociations)
 		.then((result) => notify('info', t(result.messageKey as 'assoc.applied.windows') + (result.detail ? ` (${result.detail})` : '')))
 		.catch((error: unknown) => notify('error', t('assoc.failed') + String(error)));
 }
@@ -421,7 +423,7 @@ function applyFileAssociations(): void {
  *  no toast), a Settings change notifies like the associations do. A `null` answer is the
  *  scripted backend's "write succeeded" - nothing to report, no toast. */
 function applyExplorerContextMenu(notifyUser: boolean): void {
-	void invoke<{ messageKey: string; detail: string } | null>('context_menu_apply', { on: settings.explorerContextMenu, label: t('contextmenu.title') })
+	void contextMenuApply(settings.explorerContextMenu, t('contextmenu.title'))
 		.then((result) => {
 			const key = result?.messageKey;
 			if (notifyUser && key) notify('info', t(key as 'contextmenu.applied.on'));
@@ -438,7 +440,7 @@ function applyExplorerContextMenu(notifyUser: boolean): void {
  *  like VS Code's own reload semantics). */
 export async function loadSettingsFile(): Promise<void> {
 	try {
-		const text = await invoke<string | null>('settings_read');
+		const text = await settingsRead();
 		if (!text) return;
 		// The file is a store from an older release as much as localStorage is: the same
 		// migration applies (a wheel sensitivity that was only ever a shipped default).
@@ -454,7 +456,7 @@ export async function loadSettingsFile(): Promise<void> {
 
 /** Write the current settings to the file (fire and forget - the form's direction). */
 export function persistSettingsFile(): void {
-	void invoke('settings_write', { contents: JSON.stringify(settings, null, '\t') }).catch(() => undefined);
+	void settingsWrite(JSON.stringify(settings, null, '\t')).catch(() => undefined);
 }
 
 /** The code editors' font size travels on a CSS variable, so a change is live everywhere. */

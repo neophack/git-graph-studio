@@ -5,7 +5,7 @@
 // Changes apply immediately, persist to localStorage and write ~/.ggs/settings.json (which a
 // hand edit of overrides on the next launch); the labels re-render on a language switch.
 
-import { invoke } from '../platform/ipc/core';
+import { assocListDefaults } from '../platform/ipc/assoc';
 
 import { LOCALES, t, tf } from '../platform/i18n';
 import { SETTINGS_EVENT, SETTING_DEFS, THEMES, applyEnumSetting, isSettingModified, settings, updateSetting, type SettingDef } from '../platform/settings';
@@ -84,7 +84,7 @@ function numberInput(value: number, onChange: (value: number) => void, min: numb
  *  so the platform list and the Settings dialog can never drift apart. */
 function extensionListControl(): HTMLElement {
 	const grid = el('div', 'settings-extlist');
-	void invoke<{ ext: string; recommended: boolean }[]>('assoc_list_defaults')
+	void assocListDefaults()
 		.then((catalog) => {
 			for (const entry of catalog) {
 				const box = el('input', 'settings-checkbox') as HTMLInputElement;

@@ -5,7 +5,7 @@
 
 import '@vscode/codicons/dist/codicon.css';
 import './workbench/shell.css';
-import { invoke } from './platform/ipc/core';
+import { bootStage } from './platform/ipc/app';
 import { initSettings, loadSettingsFile } from './platform/settings';
 import { installDesktopRemoteHooks } from './remote/desktopHooks';
 
@@ -26,9 +26,9 @@ installDesktopRemoteHooks();
 
 // Boot timing: report when the splash first paints, so the log shows how long the window
 // spent dark between process start and the first frame (the Rust side prints both stamps).
-void invoke('boot_stage', { stage: 'splash module ran', pageMs: performance.now() }).catch((e) => console.error('boot_stage failed:', e));
+void bootStage('splash module ran', performance.now()).catch((e) => console.error('boot_stage failed:', e));
 requestAnimationFrame(() => {
-	void invoke('boot_stage', { stage: 'splash painted', pageMs: performance.now() }).catch(() => undefined);
+	void bootStage('splash painted', performance.now()).catch(() => undefined);
 });
 
 

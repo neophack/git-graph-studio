@@ -5,6 +5,7 @@
 
 import { invoke, Channel } from '../platform/ipc/core';
 import { listen } from '../platform/ipc/core';
+import { appNewInstance, bootContext, type BootContext, bootStage, closeFolder, openDevtools, openFolder, openSingleFile, openWorkspace, type OpenedRoot, postFirstPaint } from '../platform/ipc/app';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -278,7 +279,7 @@ export class Workbench {
 		// window while this module graph was still loading and parsing.
 		document.getElementById('boot-splash')?.remove();
 		// The title bar and menus are on screen: boot timing's last stamp.
-		void invoke('boot_stage', { stage: 'title bar + menus', pageMs: performance.now() }).catch(() => undefined);
+		void bootStage('title bar + menus', performance.now()).catch(() => undefined);
 	}
 
 	get currentRepo(): string | null {
@@ -299,7 +300,7 @@ export class Workbench {
 		// one; the new window boots like a fresh launch. On Windows and Linux a second launch
 		// of the app already is a new instance; on macOS this is the discoverable way to
 		// multi-open, where clicking the app's icon again only focuses the running window.
-		register({ id: 'workbench.newWindow', title: 'New Window', category: 'File', keybinding: 'Ctrl+Shift+N', run: () => void invoke('app_new_instance').catch((error) => notify('error', tf('workbench.newWindowFailed', String(error)))) });
+		register({ id: 'workbench.newWindow', title: 'New Window', category: 'File', keybinding: 'Ctrl+Shift+N', run: () => void appNewInstance().catch((error) => notify('error', tf('workbench.newWindowFailed', String(error)))) });
 		register({ id: 'workbench.openWorkspace', title: 'Open Workspace...', category: 'File', run: () => this.pickWorkspace() });
 		register({ id: 'workbench.openFileStandalone', title: 'Open File...', category: 'File', run: () => this.pickSingleFile() });
 		register({ id: 'workbench.closeFolder', title: 'Close Folder', category: 'File', enabled: hasRepo, run: () => this.closeFolder() });
@@ -428,7 +429,7 @@ export class Workbench {
 		register({ id: 'ai.providers', title: 'Manage Model Providers', category: 'AI', run: () => this.editors.openProviders() });
 		register({ id: 'help.repository', title: 'Report Issue / Project Page', category: 'Help', run: () => void openUrl('https://github.com/neophack/git-graph-studio') });
 		register({ id: 'help.about', title: 'About', category: 'Help', run: () => notify('info', `Git Graph Studio ${__APP_VERSION__} - a standalone workbench whose views arrive as plugins.`) });
-		register({ id: 'help.openDevTools', title: 'Open Developer Tools', category: 'Help', run: () => void invoke('open_devtools').catch((e) => console.error('open_devtools failed:', e)) });
+		register({ id: 'help.openDevTools', title: 'Open Developer Tools', category: 'Help', run: () => void openDevtools().catch((e) => console.error('open_devtools failed:', e)) });
 		// Dev builds only (vite strips the branch from the bundle; vitest is excluded so the
 		// command sweep never navigates): the dev harness page — the full functional pass
 		// (?full=1) runs every module's self-tests plus the two marketplace extensions end
@@ -1707,9 +1708,9 @@ export class Workbench {
 	/** The post-settling half of openFolder (openWorkspace's one-folder case lands here too:
 	 *  its settling - and the outgoing folder's snapshot - already happened). */
 	private async openFolderSettled(path: string): Promise<void> {
-		let opened: { root: string; isRepo: boolean };
+		let opened: OpenedRoot;
 		try {
-			opened = await invoke<{ root: string; isRepo: boolean }>('open_folder', { path });
+			opened = await openFolder(path);
 		} catch (error) {
 			notify('error', String(error));
 			state.forgetFolder(path);
@@ -1749,7 +1750,7 @@ export class Workbench {
 		}
 		for (const path of [...payload.folders, ...workspaces]) {
 			if (this.repoPath !== null || this.singleFile !== null) {
-				await invoke('app_new_instance', { folder: path }).catch((error) => notify('error', tf('workbench.newWindowFailed', String(error))));
+				await appNewInstance(path).catch((error) => notify('error', tf('workbench.newWindowFailed', String(error))));
 			} else if (path.toLowerCase().endsWith('.ggs-workspace')) {
 				await this.openWorkspace(path);
 			} else {
@@ -1808,7 +1809,7 @@ export class Workbench {
 		if (!selected) return;
 		const file = Array.isArray(selected) ? selected[0]! : selected;
 		try {
-			await invoke('open_single_file', { path: file });
+			await openSingleFile(file);
 		} catch (error) {
 			notify('error', String(error));
 			return;
@@ -1851,14 +1852,14 @@ export class Workbench {
 		this.titleBar.setFolderName(basename(path));
 		await this.editors.openFile(path);
 		// Boot timing: how long a single-file launch took to show its file.
-		void invoke('boot_stage', { stage: 'single file shown', pageMs: performance.now() }).catch(() => undefined);
+		void bootStage('single file shown', performance.now()).catch(() => undefined);
 	}
 
 	async openWorkspace(path: string): Promise<void> {
 		if (!(await this.settleOutgoing())) return;
-		let opened: { roots: { root: string; isRepo: boolean }[] };
+		let opened: { roots: OpenedRoot[] };
 		try {
-			opened = await invoke<{ roots: { root: string; isRepo: boolean }[] }>('open_workspace', { path });
+			opened = await openWorkspace(path);
 		} catch (error) {
 			notify('error', String(error));
 			return;
@@ -1901,7 +1902,7 @@ export class Workbench {
 		// page has its own stamp; the SCM status settles after both).
 		if (!this.folderShownStamped) {
 			this.folderShownStamped = true;
-			void this.explorer.whenRendered().then(() => invoke('boot_stage', { stage: 'folder shown', pageMs: performance.now() })).catch(() => undefined);
+			void this.explorer.whenRendered().then(() => bootStage('folder shown', performance.now())).catch(() => undefined);
 		}
 		this.search.setEnabled(true);
 		this.search.setRoots(this.repoPaths.length > 1 ? this.repoPaths : []);
@@ -1926,7 +1927,7 @@ export class Workbench {
 		// view's boot for the CPU. The same signal starts the backend's own deferred services
 		// (the symbol/analysis indexes and the file watcher).
 		requestAnimationFrame(() => {
-			void invoke('post_first_paint').catch(() => undefined);
+			void postFirstPaint().catch(() => undefined);
 			if (anyRepo) void this.scm.refresh();
 		});
 		if (state.layout.sidebarVisible) this.showView(this.activeView);
@@ -1950,7 +1951,7 @@ export class Workbench {
 	async closeFolder(): Promise<void> {
 		this.saveSnapshot();
 		if (!(await this.editors.closeAll())) return;
-		await invoke('close_folder').catch(() => undefined);
+		await closeFolder().catch(() => undefined);
 		this.repoPath = null;
 		this.repoPaths = [];
 		this.workspaceFile = null;
@@ -2038,8 +2039,8 @@ export class Workbench {
 		// folder argument) decides everything the boot does next. A plain-folder launch is
 		// opened inside this very call (the backend opens it during the splash), so when the
 		// folder the boot picks matches, the answer is applied directly - no second round trip.
-		const context = await invoke<{ file: string | null; actions: { type: string; left?: string; right?: string; path?: string }[]; repo: string | null; workspace: string | null; reloaded: boolean; opened: { root: string; isRepo: boolean } | null; openedFor: string | null }>('boot_context')
-			.catch(() => ({ file: null as string | null, actions: [] as { type: string; left?: string; right?: string; path?: string }[], repo: null as string | null, workspace: null as string | null, reloaded: false, opened: null as { root: string; isRepo: boolean } | null, openedFor: null as string | null }));
+		const context = await bootContext()
+			.catch((): BootContext => ({ file: null, actions: [], repo: null, workspace: null, reloaded: false, opened: null, openedFor: null }));
 		// A `ggs <file>` launch shows exactly that file, alone.
 		if (context.file) {
 			await this.openFileStandalone(context.file);
