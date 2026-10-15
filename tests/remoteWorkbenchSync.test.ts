@@ -21,6 +21,7 @@ import { Workbench } from '../src/workbench';
 import { commands } from '../src/platform/commands';
 import { attachWorkbenchSync, WORKBENCH_SYNC_EVENT, type SyncedEditorArea, type SyncedWorkbench, type WorkbenchSyncMessage } from '../src/remote/workbenchSync';
 import { setRemoteEnv } from '../src/remote/session';
+import { provideHook } from '../src/platform/hooks';
 import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
 
 // The remote session's hooks, as boot.ts installs them before the workbench loads: the
@@ -300,6 +301,44 @@ describe('the sync core over a shared bus', () => {
 		channel.deps.send({ by: 'remote/1', k: 'open', path: NOTES_IN });
 		await new Promise((r) => setTimeout(r, 10));
 		expect(pc.tabs()).toEqual([NOTES_IN]);
+	});
+
+	it('re-checks a remote open whose path resolves outside through a symlink', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const REPO = 'C:' + '\\repo';
+		const LINK = REPO + '\\sneak.key';
+		const SECRET = 'C:' + '\\Users\\me\\.ggs\\keys\\ai-providers.key';
+		const NEWFILE = REPO + '\\new.txt';
+		pc.openFolders = () => [REPO];
+		const phone = fakeWorkbench();
+		// The canonical answers, the shape `remote_canonical_paths` gives: the link's
+		// target, and null for everything else (no answer — the lexical form stands).
+		attachWorkbenchSync(pc, channel.deps, 'main', {
+			canonicalPath: async (path) => (path === LINK ? SECRET : null)
+		});
+		attachWorkbenchSync(phone, channel.deps, 'remote/1');
+		// Lexically inside the repo, resolved outside: refused.
+		channel.deps.send({ by: 'remote/1', k: 'open', path: LINK });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(pc.opened).toEqual([]);
+		// No canonical form (not created yet) and a plain inside-root path both still open.
+		channel.deps.send({ by: 'remote/1', k: 'open', path: NEWFILE });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(pc.tabs()).toEqual([NEWFILE]);
+		// A canonicalizer that cannot answer refuses the open too — never degrades open.
+		const gatebroken = bus();
+		const guarded = fakeWorkbench();
+		guarded.openFolders = () => [REPO];
+		attachWorkbenchSync(guarded, gatebroken.deps, 'main', {
+			canonicalPath: async () => {
+				throw new Error('backend gone');
+			}
+		});
+		attachWorkbenchSync(fakeWorkbench(), gatebroken.deps, 'remote/1');
+		gatebroken.deps.send({ by: 'remote/1', k: 'open', path: NEWFILE });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(guarded.opened).toEqual([]);
 	});
 
 	it('closes on the other side whatever one side closed', async () => {
@@ -935,6 +974,9 @@ function workbenchHandlers(extra: [string, (args: Record<string, unknown>) => un
 		['list_dir', () => [{ name: 'notes.txt', path: NOTES, isDir: false, size: 12 }, { name: 'README.md', path: README, isDir: false, size: 4 }]],
 		['list_files', () => ['notes.txt', 'README.md']],
 		['read_file', ({ path }) => ({ contents: path === README ? '# Hi\n' : 'one two one\nthree\n', binary: false, size: 12, encoding: 'utf8', eol: 'lf' })],
+		// The remote-open gate's canonical forms: identity (the workbench sync's re-check
+		// asks for them; the boundary semantics live in the pathGate suite).
+		['remote_canonical_paths', ({ paths }) => paths],
 		['repo_head', () => ({ branch: 'main', shortHash: 'abc1234', ahead: 0, behind: 0, upstream: 'origin/main' })],
 		['scm_status', () => []],
 		['scm_branches', () => [{ name: 'main', remote: false, current: true, upstream: null }]],
@@ -1053,9 +1095,26 @@ describe('the wired workbench', () => {
 			expect(labelsOf('File')).not.toContain('New Window');
 			expect(labelsOf('Help')).not.toContain('Open Developer Tools');
 			expect(labelsOf('File')).toContain('Open Folder...');
+			// Its own opens are refused (pathGate): Open Folder browses the PC instead, and
+			// the entries with no remote path hide (remote-ui-redesign-plan §P0).
+			expect(labelsOf('File')).not.toContain('Open File...');
+			expect(labelsOf('File')).not.toContain('Open Workspace...');
+			expect(labelsOf('File')).not.toContain('Open Recent');
 		} finally {
 			setRemoteEnv(undefined);
 		}
+		// The PC window while a mirror viewer drives it: the native-dialog and new-window
+		// entries hide (only the PC's screen would show them); Open Recent opens in place.
+		provideHook('mirror', { install: () => () => undefined, viewersActive: async () => true, viewersNow: () => true });
+		try {
+			expect(labelsOf('File')).not.toContain('New Window');
+			expect(labelsOf('File')).not.toContain('Open File...');
+			expect(labelsOf('File')).toContain('Open Folder...');
+			expect(labelsOf('File')).toContain('Open Recent');
+		} finally {
+			provideHook('mirror', null);
+		}
+		expect(labelsOf('File')).toContain('Open File...');
 		// The phone form factor adds the keyboard page and the split-layout submenu.
 		const root = document.documentElement;
 		root.setAttribute('data-remote-shell', '');
@@ -1067,6 +1126,31 @@ describe('the wired workbench', () => {
 		} finally {
 			root.removeAttribute('data-remote-shell');
 			delete root.dataset['formFactor'];
+		}
+	});
+
+	it('a session Open Folder browses the PC and opens the folder in a PC window', async () => {
+		const spawn = vi.fn();
+		const urls: string[] = [];
+		vi.stubGlobal('fetch', async (url: URL) => {
+			urls.push(String(url));
+			return new Response(JSON.stringify({ path: 'C:\\Users\\me', parent: 'C:\\Users', dirs: [{ name: 'proj', path: 'C:\\Users\\me\\proj' }] }));
+		});
+		setRemoteEnv({ transport: { instances: [], recentFolders: [], spawn } as never, attached: { instance: 'i1', frontendId: 'remote/1' } as never, basePath: '/' });
+		const before = backend.calls.length;
+		try {
+			void commands.execute('workbench.openFolder');
+			await until(() => document.querySelector('.quick-input .row') !== null);
+			click(document.querySelector('.quick-input .row'));
+			await until(() => spawn.mock.calls.length > 0);
+			// The PC's own disk, through the daemon — never the device's picker, never this
+			// window's refused open_folder.
+			expect(urls[0]).toContain('api/browse?path=');
+			expect(spawn).toHaveBeenCalledWith('C:\\Users\\me', false);
+			expect(backend.calls.slice(before).map((call) => call.command)).not.toContain('open_folder');
+		} finally {
+			setRemoteEnv(undefined);
+			vi.unstubAllGlobals();
 		}
 	});
 

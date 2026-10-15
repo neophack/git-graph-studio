@@ -521,6 +521,7 @@ mod desktop {
                 cmd_fs::repo_submodules,
                 cmd_fs::remote_paths_policy,
                 cmd_fs::remote_ext_roots,
+                cmd_fs::remote_canonical_paths,
                 cmd_scm::scm_status,
                 cmd_scm::file_log,
                 cmd_scm::git_init,

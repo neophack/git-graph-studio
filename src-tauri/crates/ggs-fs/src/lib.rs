@@ -240,6 +240,22 @@ pub fn canonicalize_lenient(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// `canonicalize_lenient`'s answer as a display string: Windows' extended-length prefix
+/// (`\\?\C:\…`, `\\?\UNC\server\share\…`) stripped back to the `C:\…` / `\\server\share\…`
+/// form every caller spells paths in. The remote path gate's canonical re-check compares
+/// these — a symlink's canonical form is its target's.
+pub fn canonical_display(path: &Path) -> Option<String> {
+    let canonical = canonicalize_lenient(path)?;
+    let text = canonical.to_string_lossy();
+    Some(if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        text.strip_prefix(r"\\?\")
+            .unwrap_or(&text)
+            .to_owned()
+    })
+}
+
 /// Remote Access uploads land inside the open folders only (docs/ggs-remote-plan.md §7.8 —
 /// the download side confines the same way): an authenticated browser session must not
 /// write outside the workspace it serves. `path` may not exist yet; its tail canonicalizes
@@ -1494,5 +1510,53 @@ mod transfer_tests {
         assert!(report.cancelled, "{report:?}");
         assert!(!target.exists(), "no partial archive survived");
         assert!(report.landed.is_empty());
+    }
+}
+#[cfg(test)]
+mod canonical_tests {
+    use super::*;
+
+    #[test]
+    fn the_display_form_answers_existing_missing_and_link_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("a.txt"), b"x").unwrap();
+        let real_form = canonical_display(&real).unwrap();
+        assert!(!real_form.starts_with(r"\\?\"), "{real_form}: no extended-length prefix");
+        // An existing file answers its own canonical form.
+        assert_eq!(
+            canonical_display(&real.join("a.txt")).unwrap(),
+            Path::new(&real_form).join("a.txt").to_string_lossy()
+        );
+        // A missing tail canonicalizes through its nearest existing ancestor.
+        assert_eq!(
+            canonical_display(&real.join("new.txt")).unwrap(),
+            Path::new(&real_form).join("new.txt").to_string_lossy()
+        );
+        // A wholly missing subtree still answers through its existing ancestor (the
+        // lenient walk stops at the first existing directory) — only a degenerate path
+        // has no answer.
+        assert_eq!(
+            canonical_display(&dir.path().join("missing").join("deep").join("f.txt")).unwrap(),
+            Path::new(&canonical_display(dir.path()).unwrap())
+                .join("missing")
+                .join("deep")
+                .join("f.txt")
+                .to_string_lossy()
+        );
+        assert_eq!(canonical_display(Path::new("")), None);
+        // A symlink resolves to its target (the canonical re-check's whole point); a
+        // missing tail THROUGH the link lands in the target too. Windows needs developer
+        // mode or privileges for symlinks, so the link half is Unix-only.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
+            assert_eq!(canonical_display(&dir.path().join("link")).unwrap(), real_form);
+            assert_eq!(
+                canonical_display(&dir.path().join("link").join("new.txt")).unwrap(),
+                Path::new(&real_form).join("new.txt").to_string_lossy()
+            );
+        }
     }
 }

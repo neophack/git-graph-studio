@@ -484,7 +484,10 @@ and object items), `withProgress` toasts, output channels (the Output view's cha
 dropdown), status bar items (`window.createStatusBarItem` / `setStatusBarMessage`, rendered
 by the status bar), webview panels (`window.createWebviewPanel` — a sandboxed srcdoc iframe
 in an editor tab, with `acquireVsCodeApi()` composed in, `asWebviewUri` mapping onto
-`ggs://`), persisted `globalState`/`workspaceState` mementos, and `env.clipboard`; VS Code's
+`ggs://`; the composed boot also shields `history.replaceState`/`pushState` URL rewrites —
+an `about:srcdoc` document admits no history-entry URLs, and claude-code's `?session=` sync
+threw SecurityError inside its message pump, which then skipped the message — 2026-10-15),
+persisted `globalState`/`workspaceState` mementos, and `env.clipboard`; VS Code's
 own built-in commands (`vscode.diff` / `vscode.open` over a registered text-document content
 provider's scheme — the host asks the registering frame for the text and opens the diff
 editor or a read-only content tab, decoding nothing of any package's private schemes;
@@ -1599,7 +1602,16 @@ database) carries the link through NAT. The whole design lives in
   copy was the first seen),
   `open_folder` is refused, `relayEmit` is allowlisted and identity-stamped
   (`remote/<session>` over any client-claimed `by`/`from`), workbenchSync confines
-  remote-originated opens, and the mirror copy drops foreign-origin URLs. The daemon
+  remote-originated opens, and the mirror copy drops foreign-origin URLs. The gate's
+  comparisons are lexical, and `fs` follows symlinks and junctions — so (2026-10-15) every
+  gated invoke gets a second, canonical pass (`gateInvokeCanonical`): the arguments AND the
+  policy roots resolve through the backend's `remote_canonical_paths` (`canonical_display`,
+  the lenient walk — a symlinked ancestor of a not-yet-created file resolves to its target
+  too) and containment compares canonical against canonical, so a repository entry linking
+  to `~/.ggs` (the provider key store) passes lexically and is refused on resolution. The
+  command answers only inside the boundary's own areas — never an existence oracle over
+  the rest of the disk — a failed canonicalization refuses the invoke, and the PC's
+  workbenchSync receiver re-checks its remote opens through the same command. The daemon
   gained: the sandbox guard on INSTANCE_CLOSE/RESTART, an Argon2 concurrency semaphore,
   a session gate on `/sw.js`, instance-keyed asset cache, rightmost-XFF + a single tunnel
   bucket for login limiting, expiring sandbox tokens, Register/Update field caps, control

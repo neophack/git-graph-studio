@@ -88,6 +88,8 @@ export async function installRemoteRound(formFactor: 'desktop' | 'tablet' | 'pho
 			// The relay's own policy fetch is local (no session header): answer it with
 			// the scripted repository, the roots the gate confines remote invokes to.
 			if (cmd === 'remote_paths_policy') return [ROUND_REPO];
+			// The canonical forms: identity (the round trip's shape is what's under test).
+			if (cmd === 'remote_canonical_paths') return ((args as { paths: string[] }).paths);
 			return dispatchScripted(cmd, args as Record<string, unknown>);
 		}) as never,
 		listen: (async () => () => undefined) as never,
@@ -96,6 +98,7 @@ export async function installRemoteRound(formFactor: 'desktop' | 'tablet' | 'pho
 		// The channel the relay hands a handler: pushes must forward down the wire (the
 		// daemon-side shape of tauriMock's own Channel).
 		createChannel: (forward: (message: unknown) => void) => ({ onmessage: (message: unknown) => forward(message) }) as never,
+		canonicalize: (paths: string[]) => Promise.resolve([...paths]),
 		send: (bytes: Uint8Array) => down(decodeFrames(bytes)),
 		bufferedAmount: () => 0
 	});

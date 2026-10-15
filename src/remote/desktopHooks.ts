@@ -17,6 +17,7 @@ import { editLockDefault, registerEditLock } from './editLock';
 import { dismissFullScreenSideView, fullScreenSideViewOpen, phoneShell, revealEditorPage } from './nav';
 import { windowedEditThreshold } from './openThreshold';
 import { addressedHere, frontendClass, frontendId, remoteEnv } from './session';
+import { recentFolders } from '../platform/state';
 
 /** The webview stream vocabulary both mirror sides speak (the desktop registers its frames
  *  and shares them; a remote viewer mounts the copies). */
@@ -55,6 +56,16 @@ export function installDesktopRemoteHooks(): void {
 	provideHook('webviewStreams', webviewStreamBridge());
 	provideHook('workbenchSync', installWorkbenchSync as unknown as () => ReturnType<typeof installWorkbenchSync>);
 	provideHook('summaryReporter', startSummaryReporter);
+	// Open Folder while a viewer drives this window: the in-window browser the copy shows,
+	// never the native dialog only the PC's screen would (remote-ui-redesign-plan §P0).
+	provideHook('folderOpen', async (open, roots) => {
+		if (!mirrorViewersNow()) return false;
+		const { browseFolders, localFolderSource } = await import('./folderBrowser');
+		const fallback = roots[0] ?? (navigator.userAgent.includes('Windows') ? 'C:\\' : '/');
+		const folder = await browseFolders(localFolderSource(fallback), { recent: recentFolders() });
+		if (folder) await open(folder);
+		return true;
+	});
 }
 
 /** The remote session's set: everything the own-UI workbench runs with, installed by
@@ -70,4 +81,10 @@ export function installRemoteSessionHooks(): void {
 	provideHook('workbenchSync', installWorkbenchSync as unknown as () => ReturnType<typeof installWorkbenchSync>);
 	provideHook('summaryReporter', startSummaryReporter);
 	provideHook('transferWire', () => import('./transfer'));
+	// Open Folder browses the PC and opens in a PC window (openOnPc.ts) — never the
+	// browser device's own disk, never this window's refused `open_folder`.
+	provideHook('folderOpen', async () => {
+		await (await import('./openOnPc')).openFolderOnPc();
+		return true;
+	});
 }

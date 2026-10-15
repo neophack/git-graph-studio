@@ -103,6 +103,9 @@ export class Transport {
 	private closedForGood = false;
 	readonly stats = { up: 0, down: 0, byType: new Map<number, number>() };
 	instances: InstanceInfo[] = [];
+	/** The PC's recently opened folders, most recent first — every WINDOWS frame carries
+	 *  them (the daemon's recent.json), and the Open Folder browser offers them first. */
+	recentFolders: string[] = [];
 
 	constructor(private readonly options: TransportOptions) {}
 
@@ -447,7 +450,9 @@ export class Transport {
 				return;
 			}
 			case T.WINDOWS: {
-				this.instances = frameMsgpack<{ instances: InstanceInfo[] }>(frame).instances ?? [];
+				const windows = frameMsgpack<{ instances: InstanceInfo[]; recentFolders?: string[] }>(frame);
+				this.instances = windows.instances ?? [];
+				this.recentFolders = windows.recentFolders ?? [];
 				for (const handler of this.windowsHandlers) handler(this.instances);
 				return;
 			}

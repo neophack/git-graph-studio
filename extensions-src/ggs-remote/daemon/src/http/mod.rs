@@ -6,6 +6,7 @@
 pub mod admin;
 pub mod api;
 pub mod assets;
+pub mod browse;
 pub mod pages;
 
 use axum::body::Body;
@@ -50,6 +51,7 @@ pub fn public_router(daemon: Arc<Daemon>) -> Router {
         .route("/api/devices", get(api::devices))
         .route("/api/devices/{id}", delete(api::remove_device))
         .route("/api/download-ticket", post(api::download_ticket))
+        .route("/api/browse", get(browse::browse))
         .route("/w/{inst}/v/{ver}/{*path}", get(assets::app_asset))
         .route("/w/{inst}/ggs/{tok}/{*path}", get(assets::ext_asset))
         .route("/w/{inst}/download", get(assets::download))

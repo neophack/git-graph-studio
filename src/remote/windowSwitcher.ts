@@ -6,7 +6,7 @@ import { quickInput, confirmDialog, type QuickPickItem } from '../platform/ui';
 import { t, tf } from '../platform/i18n';
 import { remoteEnv } from './session';
 import type { InstanceInfo, Notice } from './transport';
-import { pickRemotePath } from './remoteFilePicker';
+import { browseFolders, daemonFolderSource } from './folderBrowser';
 
 const NEW = '\u0000new';
 
@@ -42,6 +42,14 @@ function workbenchUrl(info: InstanceInfo): string {
 	return new URL(`w/${encodeURIComponent(info.id)}/v/${encodeURIComponent(info.version)}/remote.html`, base).href;
 }
 
+/** Leave this window for another of the PC's: the page reloads onto that instance. */
+export function enterInstance(info: InstanceInfo): void {
+	const transport = remoteEnv()?.transport;
+	transport?.detach();
+	transport?.shutdown();
+	location.assign(workbenchUrl(info));
+}
+
 /** Open the switcher; the picked window loads in this tab. */
 export async function openWindowSwitcher(): Promise<void> {
 	const env = remoteEnv();
@@ -51,8 +59,10 @@ export async function openWindowSwitcher(): Promise<void> {
 	const picked = await quickInput({ title: t('remote.switcher.title'), items: switcherItems(transport.instances, current) });
 	if (!picked) return;
 	if (picked === NEW) {
-		const folder = await pickRemotePath({ directory: true, title: t('remote.switcher.newWindowFolder') });
-		transport.spawn(typeof folder === 'string' ? folder : null, false);
+		// The folder is the PC's (the daemon's browser), optional: dismissing opens an
+		// empty window, as before.
+		const folder = await browseFolders(daemonFolderSource(env.basePath), { recent: transport.recentFolders, title: t('remote.switcher.newWindowFolder') });
+		transport.spawn(folder, false);
 		return;
 	}
 	const id = picked.slice(2);
@@ -67,11 +77,8 @@ export async function openWindowSwitcher(): Promise<void> {
 			{ label: t('remote.switcher.restart'), icon: 'refresh', value: 'restart' }
 		]
 	});
-	if (action === 'open') {
-		transport.detach();
-		transport.shutdown();
-		location.assign(workbenchUrl(info));
-	} else if (action === 'close') transport.closeInstance(id, false);
+	if (action === 'open') enterInstance(info);
+	else if (action === 'close') transport.closeInstance(id, false);
 	else if (action === 'restart' && (await confirmDialog(t('remote.switcher.restartConfirm'), t('remote.switcher.restart')))) transport.restartInstance(id);
 }
 

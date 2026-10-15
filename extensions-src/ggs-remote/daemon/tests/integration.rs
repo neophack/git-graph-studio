@@ -963,6 +963,36 @@ async fn session_carries_the_folder_input_switch() {
     );
 }
 
+/// The session's folder browser (docs/remote-ui-redesign-plan.md §P0): a browser's Open
+/// Folder lists THIS PC's folders — never without a session, never with the typed-path
+/// switch off, folder names only.
+#[tokio::test]
+async fn the_folder_browser_needs_a_session_and_the_folder_input_switch() {
+    let h = start().await;
+    set_password(&h).await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("project")).unwrap();
+    std::fs::write(dir.path().join("notes.txt"), b"x").unwrap();
+    let query = format!(
+        "/api/browse?path={}",
+        dir.path()
+            .to_string_lossy()
+            .bytes()
+            .map(|b| format!("%{b:02X}"))
+            .collect::<String>()
+    );
+    let anonymous = http(h.public, "GET", &query, &[], None).await;
+    assert_eq!(anonymous.status, 401, "{}", anonymous.body);
+    let (cookie, _csrf) = login(&h).await;
+    let listed = http(h.public, "GET", &query, &[("Cookie", &cookie)], None).await;
+    assert_eq!(listed.status, 200, "{}", listed.body);
+    assert!(listed.body.contains("\"project\""), "{}", listed.body);
+    assert!(!listed.body.contains("notes.txt"), "{}", listed.body);
+    h.daemon.config.lock().unwrap().folder_input = false;
+    let off = http(h.public, "GET", &query, &[("Cookie", &cookie)], None).await;
+    assert_eq!(off.status, 403, "{}", off.body);
+}
+
 /// §7.8's one-time download, end to end: the ticket is minted for the session that asked
 /// and the instance it names, the navigation needs no cookie (the ticket is the
 /// credential), the file streams from the instance's chunks, and the ticket dies with its

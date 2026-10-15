@@ -5,7 +5,7 @@
 // window does, every command, channel and event works remotely with no per-command code.
 import { Channel, invoke } from '../platform/ipc/core';
 import { emit, emitTo, listen, type UnlistenFn } from '../platform/ipc/core';
-import { gateInvoke, isPathGated } from './pathGate';
+import { gateInvoke, gateInvokeCanonical, isPathGated, type Canonicalizer } from './pathGate';
 import {
 	CHANNEL_PREFIX,
 	decodeFrames,
@@ -49,6 +49,11 @@ export interface RelayDeps {
 	createChannel: (onmessage: (message: unknown) => void) => Channel<unknown>;
 	send: (bytes: Uint8Array) => void;
 	bufferedAmount: () => number;
+	/** The gate's canonicalizer: one `remote_canonical_paths` round trip for the whole
+	 *  argument set — the symlink-proof half of the boundary (pathGate.ts). Local, like
+	 *  the policy fetch: a session's own invokes never reach this command with usable
+	 *  answers (the backend confines them to the boundary's areas). */
+	canonicalize: Canonicalizer;
 }
 
 /** The Relay's frame engine, separated from the socket so it can be driven in tests. */
@@ -167,6 +172,7 @@ export class RelayEngine {
 				if (isPathGated(c)) {
 					const policy = await this.pathPolicy();
 					gateInvoke(c, body as unknown as Record<string, unknown> | undefined, policy.roots, policy.extRoots);
+					await gateInvokeCanonical(c, body as unknown as Record<string, unknown> | undefined, policy, this.deps.canonicalize);
 				}
 				result = await this.deps.invoke(c, body, { headers: { ...(h ?? {}), 'x-ggs-frontend': frontend } });
 			} else {
@@ -175,6 +181,7 @@ export class RelayEngine {
 				if (isPathGated(c)) {
 					const policy = await this.pathPolicy();
 					gateInvoke(c, args, policy.roots, policy.extRoots);
+					await gateInvokeCanonical(c, args, policy, this.deps.canonicalize);
 				}
 				result = await this.deps.invoke(c, args, { headers: { ...(h ?? {}), 'x-ggs-frontend': frontend } });
 			}
@@ -334,6 +341,9 @@ export function startRelay(): void {
 		emit,
 		emitTo,
 		createChannel: (onmessage) => new Channel<unknown>(onmessage),
+		// A failed canonicalization reaches the gate as a rejection, which refuses the
+		// invoke — the check never degrades to "all null, lexical stands".
+		canonicalize: (paths) => invoke('remote_canonical_paths', { paths }) as Promise<(string | null)[]>,
 		send: (bytes) => {
 			if (ws.readyState === WebSocket.OPEN) ws.send(bytes);
 		},

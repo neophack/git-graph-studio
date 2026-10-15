@@ -34,6 +34,9 @@ import { withModifier } from '../src/remote/terminalKeys';
 import { switcherItems } from '../src/remote/windowSwitcher';
 import { setRemoteEnv } from '../src/remote/session';
 import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
+import type { FolderListing } from '../src/remote/folderBrowser';
+import { backend } from './tauriMock';
+import { click, until } from './helpers';
 
 // The remote session's hooks, as boot.ts installs them before the workbench loads: the
 // session-aware modules below read them through platform/hooks lookups.
@@ -366,7 +369,7 @@ describe('tauri shims', () => {
 
 describe('relay engine', () => {
 	const isWindows = navigator.platform.toLowerCase().includes('win');
-	function engine() {
+	function engine(symlinks: Record<string, string> = {}) {
 		const sent: Frame[] = [];
 		const emitTo = vi.fn(async () => undefined);
 		const listeners = new Map<string, (e: { event: string; id: number; payload: unknown }) => void>();
@@ -378,6 +381,9 @@ describe('relay engine', () => {
 			if (cmd === 'raw') return new Uint8Array([1, 2]).buffer;
 			if (cmd === 'remote_paths_policy') return [isWindows ? 'C:\\work\\repo' : '/work/repo'];
 			if (cmd === 'remote_ext_roots') return [isWindows ? 'C:\\Users\\me\\.ggs\\extensions' : '/home/me/.ggs/extensions'];
+			// The canonical forms: identity, except the paths a test declares symlinks —
+			// the stand-in for the backend's `remote_canonical_paths`.
+			if (cmd === 'remote_canonical_paths') return ((args as { paths: string[] }).paths).map((p) => symlinks[p] ?? p);
 			return { cmd, args };
 		});
 		const relay = new RelayEngine({
@@ -394,6 +400,7 @@ describe('relay engine', () => {
 				channels.push(channel);
 				return channel as never;
 			},
+			canonicalize: (paths) => invoke('remote_canonical_paths', { paths }) as Promise<(string | null)[]>,
 			send: (bytes) => sent.push(...decodeFrames(bytes)),
 			bufferedAmount: () => 0
 		});
@@ -446,6 +453,48 @@ describe('relay engine', () => {
 		await new Promise((r) => setTimeout(r, 10));
 		expect(answer()).toBeTruthy();
 		expect(invoke).not.toHaveBeenCalledWith('open_folder', expect.anything(), expect.anything());
+	});
+
+	/** The symlink-proof half (§23.4's follow-up): a repository entry that is really a
+	 *  link to `~/.ggs` passes the lexical gate while its reads land outside — the
+	 *  canonical re-check refuses it before the invoke crosses. */
+	it('refuses an invoke whose path resolves outside through a symlink', async () => {
+		const root = isWindows ? 'C:\\work\\repo' : '/work/repo';
+		const link = isWindows ? 'C:\\work\\repo\\sneak.key' : '/work/repo/sneak.key';
+		const target = isWindows
+			? 'C:\\Users\\me\\.ggs\\keys\\ai-providers.key'
+			: '/home/me/.ggs/keys/ai-providers.key';
+		const { relay, invoke, sent } = engine({ [link]: target });
+		const answer = () => sent.find((f) => f.type === T.RESULT && f.flags & FLAG.ERROR);
+
+		relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'read_file', a: { path: link } }, 1, 0, 7)));
+		await new Promise((r) => setTimeout(r, 10));
+		expect(answer()).toBeTruthy();
+		expect(invoke).not.toHaveBeenCalledWith('read_file', expect.anything(), expect.anything());
+
+		// A plain inside-root read still passes — the roots canonicalize in the same
+		// batch, so a workspace opened through a junction keeps containing its members.
+		sent.length = 0;
+		relay.receive(
+			encodeFrame(jsonFrame(T.INVOKE, { c: 'read_file', a: { path: `${root}${isWindows ? '\\src\\a.ts' : '/src/a.ts'}` } }, 1, 0, 7))
+		);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(answer()).toBeUndefined();
+		expect(invoke).toHaveBeenCalledWith('read_file', expect.anything(), expect.anything());
+
+		// The check is fail-closed: a canonicalizer that cannot answer refuses the invoke.
+		const broken = engine();
+		(broken.invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+			if (cmd === 'remote_canonical_paths') throw 'backend gone';
+			if (cmd === 'remote_paths_policy') return [root];
+			if (cmd === 'remote_ext_roots') return [];
+			return {};
+		});
+		broken.sent.length = 0;
+		broken.relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'read_file', a: { path: `${root}${isWindows ? '\\src\\a.ts' : '/src/a.ts'}` } }, 1, 0, 7)));
+		await new Promise((r) => setTimeout(r, 10));
+		expect(broken.sent.find((f) => f.type === T.RESULT && f.flags & FLAG.ERROR)).toBeTruthy();
+		expect(broken.invoke).not.toHaveBeenCalledWith('read_file', expect.anything(), expect.anything());
 	});
 
 	it("forwards ext_fs into the extension platform's own areas, and refuses them everywhere else", async () => {
@@ -829,5 +878,98 @@ describe('file transfers', () => {
 		expect(notifications.textContent).toContain('bad.txt');
 		expect(notifications.textContent).toContain('Uploaded 1');
 		setRemoteEnv(undefined);
+	});
+});
+
+describe('Open Folder on the PC (remote-ui-redesign-plan §P0)', () => {
+	const ensure = (id: string) => {
+		if (!document.getElementById(id)) document.body.appendChild(Object.assign(document.createElement('div'), { id }));
+	};
+	beforeEach(() => {
+		ensure('overlays');
+		ensure('notifications');
+		document.getElementById('overlays')!.replaceChildren();
+		document.getElementById('notifications')!.replaceChildren();
+	});
+	const rowLabels = () => [...document.querySelectorAll('.quick-input .row .label')].map((label) => label.textContent ?? '');
+	const pickRow = async (label: string) => {
+		await until(() => rowLabels().includes(label));
+		const row = [...document.querySelectorAll<HTMLElement>('.quick-input .row')].find((element) => element.querySelector('.label')?.textContent === label);
+		click(row);
+		await flush();
+	};
+	const tree: Record<string, FolderListing> = {
+		'': { path: 'C:\\Users\\me', parent: 'C:\\Users', dirs: [{ name: 'proj', path: 'C:\\Users\\me\\proj' }], places: [{ kind: 'drive', path: 'D:\\' }] },
+		'C:\\Users\\me\\proj': { path: 'C:\\Users\\me\\proj', parent: 'C:\\Users\\me', dirs: [] }
+	};
+	const source = async (path: string) => {
+		const listing = tree[path];
+		if (!listing) throw new Error(`no such folder: ${path}`);
+		return listing;
+	};
+
+	it('steps into a PC folder and opens it — folders, the parent, the drives, the recent ones', async () => {
+		const { browseFolders } = await import('../src/remote/folderBrowser');
+		const picked = browseFolders(source, { recent: ['E:\\work\\repo'] });
+		await until(() => rowLabels().includes('proj'));
+		expect(rowLabels()).toEqual(['Open This Folder', '..', 'proj', 'repo', 'D:\\']);
+		await pickRow('proj');
+		await pickRow('Open This Folder');
+		await expect(picked).resolves.toBe('C:\\Users\\me\\proj');
+	});
+
+	it('a recent folder opens directly, and a refused start ends with a notice', async () => {
+		const { browseFolders } = await import('../src/remote/folderBrowser');
+		const recent = browseFolders(source, { recent: ['E:\\work\\repo'] });
+		await pickRow('repo');
+		await expect(recent).resolves.toBe('E:\\work\\repo');
+		await expect(browseFolders(source, { start: 'Z:\\gone' })).resolves.toBeNull();
+		expect(document.getElementById('notifications')!.textContent).toContain('no such folder');
+	});
+
+	it('the daemon source asks api/browse under the base path and words its refusals', async () => {
+		const { daemonFolderSource } = await import('../src/remote/folderBrowser');
+		const urls: string[] = [];
+		vi.stubGlobal('fetch', async (url: URL) => {
+			urls.push(String(url));
+			return new Response(JSON.stringify({ error: 'folder-input-off' }), { status: 403 });
+		});
+		try {
+			await expect(daemonFolderSource('/u/abc/')('C:\\x y')).rejects.toThrow('turned off');
+			expect(urls[0]).toContain('/u/abc/api/browse?path=C%3A%5Cx%20y');
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it('the local source lists folders only and climbs lexically', async () => {
+		backend.on('list_dir', () => [
+			{ name: 'src', path: 'C:\\repo\\src', isDir: true, size: 0 },
+			{ name: 'README.md', path: 'C:\\repo\\README.md', isDir: false, size: 3 }
+		]);
+		const { localFolderSource } = await import('../src/remote/folderBrowser');
+		const listing = await localFolderSource('C:\\repo')('');
+		expect(listing).toEqual({ path: 'C:\\repo', parent: 'C:\\', dirs: [{ name: 'src', path: 'C:\\repo\\src' }] });
+		expect((await localFolderSource('C:\\')('')).parent).toBeNull();
+	});
+
+	it('opens a new PC window for a folder no window shows, and never re-opens this one', async () => {
+		const spawn = vi.fn();
+		const transport = {
+			instances: [{ id: 'i1', title: 'repo', folders: ['C:/Work/Repo'], version: '1', visible: true, remoteSessions: 1, startedAt: 0, state: 'ok' }],
+			recentFolders: [],
+			spawn
+		};
+		setRemoteEnv({ transport: transport as never, attached: { instance: 'i1', frontendId: 'remote/1' } as never, basePath: '/' });
+		try {
+			const { openFolderPathOnPc } = await import('../src/remote/openOnPc');
+			await openFolderPathOnPc('c:\\work\\repo\\');
+			expect(spawn).not.toHaveBeenCalled();
+			expect(document.getElementById('notifications')!.textContent).toContain('already open');
+			await openFolderPathOnPc('D:\\other');
+			expect(spawn).toHaveBeenCalledWith('D:\\other', false);
+		} finally {
+			setRemoteEnv(undefined);
+		}
 	});
 });

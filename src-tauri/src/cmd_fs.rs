@@ -330,6 +330,54 @@ pub fn remote_ext_roots() -> Vec<String> {
     roots
 }
 
+/// The confined half of `remote_canonical_paths`: a path outside every confined root
+/// answers `None` (no existence oracle over the rest of the disk), a confined one answers
+/// its canonical form — resolved leniently, so a missing tail still resolves through its
+/// nearest existing ancestor and a symlinked ancestor of a not-yet-created file is
+/// caught exactly like an existing one.
+fn canonical_answers(confined: &[PathBuf], paths: &[String]) -> Vec<Option<String>> {
+    paths
+        .iter()
+        .map(|p| {
+            let path = Path::new(p);
+            if !confined.iter().any(|root| path.starts_with(root)) {
+                return None;
+            }
+            canonical_display(path)
+        })
+        .collect()
+}
+
+/// The canonical (symlink-resolved) forms of paths, for the Relay's re-check of the remote
+/// path gate (§23.4): the gate's own comparisons are lexical, so a repository entry that is
+/// really a symlink or junction to `~/.ggs` (the provider key store, the settings) passes
+/// them while its reads and writes land outside. `fs::canonicalize` resolves every link —
+/// the same resolution the reads and writes themselves follow — so the Relay sends the
+/// invoke's path arguments plus the policy roots and compares canonical against canonical.
+/// Answers are confined to the boundary's own areas (the open folders, a single-file launch,
+/// the extension platform's roots): a path the gate would not let a session name anyway
+/// answers `null` — the command is never an existence oracle over the rest of the disk. A
+/// confined path answers its lenient-canonical form (the nearest existing ancestor
+/// canonicalized, the missing tail re-appended), so a symlinked ancestor of a
+/// not-yet-created file resolves to its true destination too.
+#[tauri::command]
+pub async fn remote_canonical_paths(
+    roots: State<'_, WorkspaceRoots>,
+    launch: State<'_, crate::state::LaunchState>,
+    paths: Vec<String>,
+) -> Result<Vec<Option<String>>, String> {
+    let mut confined: Vec<PathBuf> = roots.inner().list().iter().map(PathBuf::from).collect();
+    if let Some(file) = launch.inner().single_file() {
+        confined.push(PathBuf::from(file));
+    }
+    for ext in remote_ext_roots() {
+        confined.push(PathBuf::from(ext));
+    }
+    tauri::async_runtime::spawn_blocking(move || canonical_answers(&confined, &paths))
+        .await
+        .map_err(|e| format!("the canonical path check failed: {e}"))
+}
+
 /// The resume point of an interrupted upload, confined like the write itself (a refused
 /// path errors, and the write refuses too).
 #[tauri::command]
@@ -902,5 +950,48 @@ mod remote_gate_tests {
             1,
             "the areas all sit under one home: {roots:?}"
         );
+    }
+
+    /// The canonical answers resolve symlinks to their targets and keep missing tails —
+    /// the gate's re-check material — and stay silent (None) outside the boundary's own
+    /// areas: the command is not an existence oracle over the rest of the disk.
+    #[test]
+    fn canonical_paths_resolve_links_inside_the_boundary_and_nothing_outside() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("a.txt"), b"x").unwrap();
+        let repo_form = canonical_display(&repo).unwrap();
+        let join = |name: &str| Path::new(&repo_form).join(name).to_string_lossy().into_owned();
+        let outside = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        let confined = vec![repo.clone()];
+
+        let answered = canonical_answers(
+            &confined,
+            &[
+                repo.join("a.txt").display().to_string(),
+                repo.join("new.txt").display().to_string(), // missing tail under a confined root
+                outside.display().to_string(),              // outside every confined root
+            ],
+        );
+        assert_eq!(answered[0].as_deref(), Some(join("a.txt").as_str()));
+        assert_eq!(answered[1].as_deref(), Some(join("new.txt").as_str()));
+        assert_eq!(answered[2], None, "no existence oracle outside the boundary");
+
+        // A symlink inside the open folder resolves to wherever it really points — the
+        // answer that lets the gate refuse a link aimed at ~/.ggs. Windows symlinks need
+        // privileges, so the link half is Unix-only; junctions ride the same canonicalize.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, repo.join("sneak")).unwrap();
+            let linked = canonical_answers(
+                &confined,
+                &[repo.join("sneak").join("f.txt").display().to_string()],
+            );
+            let mut target_form = canonical_display(&outside).unwrap();
+            target_form.push_str("/f.txt");
+            assert_eq!(linked[0].as_deref(), Some(target_form.as_str()));
+        }
     }
 }

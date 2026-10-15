@@ -214,7 +214,96 @@ export function isPathGated(command: string): boolean {
 	return REFUSED_COMMANDS.has(command) || PATH_GATED[command] !== undefined;
 }
 
-/** Check one invoke's arguments against the roots; throws the message the session sees.
+/** The canonical (symlink-resolved) form of a path, as the backend's
+ *  `remote_canonical_paths` spells it: forward slashes, the Windows drive letter
+ *  lower-cased, the extended-length prefixes (`\\?\C:\…`, `\\?\UNC\server\…`) stripped —
+ *  `null` when the backend answers nothing (a path outside the boundary's own areas — the
+ *  command's confinement — or one that cannot resolve at all). A symlink's canonical form
+ *  is its target's — the fact the lexical gate cannot see; a missing tail resolves
+ *  through its nearest existing ancestor, so a symlinked ancestor of a not-yet-created
+ *  file is caught exactly like an existing one. */
+export function canonicalForm(path: string, canonicalize: (candidate: string) => string | null): string | null {
+	const canonical = canonicalize(path);
+	if (canonical === null) return null;
+	let text = canonical.replace(/\\/g, '/');
+	const unc = text.match(/^\/\/\?\/UNC\/(.+)/);
+	if (unc) return `//${unc[1]}`;
+	const extended = text.match(/^\/\/\?\/([a-zA-Z]:\/.*)/);
+	if (extended) text = extended[1];
+	// A drive form keeps its (now prefix-free) spelling, drive letter lower-cased.
+	if (/^[a-zA-Z]:\//.test(text)) return text[0].toLowerCase() + text.slice(1);
+	return text.startsWith('/') ? text : null;
+}
+
+/** The gate's policy: the open folders (plus a single-file launch) and, for the rules
+ *  that mark `extensionRoots`, the extension platform's own areas. */
+export interface GatePolicy {
+	roots: string[];
+	extRoots?: string[];
+}
+
+/** One batch canonicalization for a whole argument set, riding the backend's
+ *  `remote_canonical_paths` — the same `fs` resolution the reads and writes themselves
+ *  follow. Answers positionally; a rejected promise fails the gate (closed). */
+export type Canonicalizer = (paths: string[]) => Promise<(string | null)[]>;
+
+/** The symlink-proof re-check (docs/ggs-remote-plan.md §23.6, the 2026-10-15 follow-up to
+ *  the audit's F1): every absolute path argument that passed the lexical gate must ALSO
+ *  resolve to a location that passes it — `fs` follows symlinks and junctions, so a
+ *  repository entry linking to `~/.ggs` (the provider key store, the settings) passes
+ *  lexically while its reads land outside. The batch canonicalizes the arguments AND the
+ *  policy roots, and containment compares canonical against canonical: a workspace the
+ *  desktop opened through a junction still contains its members' canonical forms. A
+ *  `null` form (no answer — the backend's confinement or an unresolvable path) keeps its
+ *  lexical answer; every resolved form must sit inside the resolved roots. Runs after
+ *  `gateInvoke`, never instead of it. */
+export async function gateInvokeCanonical(
+	command: string,
+	args: Record<string, unknown> | undefined,
+	policy: GatePolicy,
+	canonicalize: Canonicalizer
+): Promise<void> {
+	const rule = PATH_GATED[command];
+	if (!rule) return;
+	const record = args ?? {};
+	// The ext areas widen exactly the rules the lexical gate widens them for.
+	const lexicalRoots = rule.extensionRoots ? [...policy.roots, ...(policy.extRoots ?? [])] : policy.roots;
+	const names = rule.args.filter((name) => {
+		const value = record[name];
+		if (typeof value !== 'string' || absoluteForm(value) === null) return false;
+		if (rule.relativeAllowed && name !== 'repo') return false; // resolved against the (gated) repo
+		return true;
+	});
+	if (names.length === 0) return;
+	const spelled = [...new Set([...names.map((name) => record[name] as string), ...lexicalRoots])];
+	let forms: (string | null)[];
+	try {
+		forms = await canonicalize(spelled);
+	} catch {
+		throw new Error(`${command}: the path check could not resolve its paths — refused`);
+	}
+	const formOf = new Map<string, string | null>();
+	spelled.forEach((spell, at) => formOf.set(spell, forms[at] ?? null));
+	const canonicalRoots = lexicalRoots.map((root) => formOf.get(root) ?? root);
+	const resolvesOutside = (spell: string): string | null => {
+		const form = formOf.get(spell) ?? null;
+		if (form === null) return null; // does not exist yet: the lexical answer stands
+		if (withinRoots(form, canonicalRoots)) return null;
+		if (rule.prefixTowardRoot && towardRoot(form, canonicalRoots)) return null;
+		return form;
+	};
+	for (const name of names) {
+		const spell = record[name] as string;
+		const form = resolvesOutside(spell);
+		if (form === null) continue;
+		if (rule.sameRootOnly || rule.prefixTowardRoot) {
+			throw new Error(
+				'a remote session cannot open new folders on this PC — open one from the PC, or spawn a sandboxed window'
+			);
+		}
+		throw new Error(`${command}: ${spell} resolves to ${form}, outside the folders this window has open`);
+	}
+}/** Check one invoke's arguments against the roots; throws the message the session sees.
  *  `extRoots` are the extension platform's own areas (`remote_ext_roots`), applied only to
  *  the rules that mark `extensionRoots` — the extension host passes an installed package's
  *  own files, its storage and its log directory as `ext_fs` paths (an activation reading

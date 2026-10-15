@@ -23,7 +23,7 @@
 // housekeeping, and a reloaded phone page must not pull the PC's sidebar around), and goes
 // local-only while a session restore rebuilds this frontend's own tabs.
 
-import { emit as tauriEmit, listen as tauriListen } from '../platform/ipc/core';
+import { emit as tauriEmit, invoke, listen as tauriListen } from '../platform/ipc/core';
 import { inputId, type EditorInput } from '../features/editor';
 import type { EditorPlacement } from '../features/editor/types';
 import type { ActiveEditorInfo, EditorArea } from '../features/editor';
@@ -158,7 +158,7 @@ export function attachWorkbenchSync(
 	workbench: SyncedWorkbench,
 	deps: WorkbenchSyncDeps,
 	by: string,
-	options: { startImmediately?: boolean; sidebarHideCrosses?: () => boolean } = {}
+	options: { startImmediately?: boolean; sidebarHideCrosses?: () => boolean; canonicalPath?: (path: string) => Promise<string | null> } = {}
 ): AttachedWorkbenchSync {
 	const sidebarHideCrosses = options.sidebarHideCrosses ?? (() => true);
 	// The real EditorArea satisfies this surface structurally; the cast keeps every read and
@@ -455,6 +455,75 @@ export function attachWorkbenchSync(
 		};
 	}
 
+	/** One crossed message, applied: the receive handler's body, kept whole so the
+	 *  remote-open gate can call back into it after its async canonical re-check. */
+	const applyMessage = (message: WorkbenchSyncMessage): void => {
+		switch (message.k) {
+			case 'open': {
+				const key = keyOf(message.path);
+				// An open of it is already landing here (a local one, or the message's
+				// own earlier copy): it satisfies this message.
+				if (applyingOpens.has(key)) break;
+				void run(() => rawOpenFile(message.path, message.line !== undefined ? { line: message.line, column: message.column } : undefined), { add: key, spell: message.path });
+				break;
+			}
+			case 'close': {
+				const key = keyOf(message.path);
+				// Its open is still in flight: close it the moment it lands — closing now
+				// would find no tab, and the landing would re-announce the open, re-opening
+				// the sender's just-closed tab.
+				if (applyingOpens.has(key)) {
+					pendingCloses.add(key);
+					break;
+				}
+				void run(() => closeNow(key), { remove: key });
+				break;
+			}
+			case 'closeTab':
+				if (applyingTabs.has(message.id)) {
+					pendingTabCloses.add(message.id);
+					break;
+				}
+				void run(() => closeTabNow(message.id), { removeTab: message.id });
+				break;
+			case 'activeTab': {
+				// A tab not open here (its create mirror still in flight, or a copy this
+				// side never had) stays a no-op: the create opens it in the foreground. A
+				// tab that crosses whole carries its input, and opening it converges —
+				// unless its open is already landing here, in which case that open
+				// activates it (opening again would read the same revisions twice).
+				const input = message.input;
+				const inFlight = applyingTabs.has(message.id);
+				void run(() => {
+					if (editors.revealById(message.id)) return undefined;
+					return !inFlight && input ? openSyncedTab(input) : undefined;
+				}, inFlight || !input ? {} : { addTab: message.id });
+				break;
+			}
+			case 'openTab':
+				void run(() => openSyncedTab(message.input), { addTab: inputId(message.input) });
+				break;
+			case 'sidebar':
+				if (rawToggleSidebar && workbench.sidebarShown !== false) void run(() => rawToggleSidebar.call(workbench));
+				break;
+			case 'active': {
+				// Not open here (a missed open, or opened before this page arrived): opening
+				// it is the convergence — the active file is the same on both sides. An open
+				// already landing here activates it itself.
+				const key = keyOf(message.path);
+				const inFlight = applyingOpens.has(key);
+				void run(() => {
+					if (editors.revealFilePath(message.path)) return undefined;
+					return inFlight ? undefined : rawOpenFile(message.path);
+				}, inFlight ? {} : { add: key, spell: message.path });
+				break;
+			}
+			case 'view':
+				void run(() => rawShowView.call(workbench, message.id));
+				break;
+		}
+	};
+
 	const attached: AttachedWorkbenchSync = {
 		start(): void {
 			if (detachListener !== null) return;
@@ -463,77 +532,33 @@ export function attachWorkbenchSync(
 				if (!message || message.by === by) return;
 				// A remote-originated file open is the product (the phone opens, the PC
 				// follows) — but only inside the folders this window has open: a forged or
-				// curious session must not make the PC render ~/.ggs into the mirror.
+				// curious session must not make the PC render ~/.ggs into the mirror. The
+				// lexical answer stands only until the path resolves — a repository entry
+				// that is really a symlink to ~/.ggs passes `withinRoots` while its reads
+				// land outside — so a supplied `canonicalPath` re-checks the resolution
+				// against the same `remote_canonical_paths` the Relay's own gate rides:
+				// refused when it resolves outside the roots; a null answer (the backend's
+				// confinement, or nothing to resolve) keeps the lexical one. The check
+				// is async — one round trip is the cost of a refused open, and the
+				// announced/applying machinery already tolerates operations landing out
+				// of order.
 				const remoteOrigin = message.by !== 'main';
 				const remoteOpensFile =
 					remoteOrigin && (message.k === 'open' || message.k === 'active') && typeof message.path === 'string';
-				if (remoteOpensFile && !(workbench.openFolders ? withinRoots(message.path, workbench.openFolders()) : false)) {
-					return;
+				if (remoteOpensFile) {
+					const roots = workbench.openFolders?.() ?? [];
+					if (!withinRoots(message.path, roots)) return;
+					if (options.canonicalPath) {
+						void options
+							.canonicalPath(message.path)
+							.then((form) => {
+								if (form === null || withinRoots(form, roots)) applyMessage(message);
+							})
+							.catch(() => undefined); // an unanswerable check refuses the open
+						return;
+					}
 				}
-				switch (message.k) {
-					case 'open': {
-						const key = keyOf(message.path);
-						// An open of it is already landing here (a local one, or the message's
-						// own earlier copy): it satisfies this message.
-						if (applyingOpens.has(key)) break;
-						void run(() => rawOpenFile(message.path, message.line !== undefined ? { line: message.line, column: message.column } : undefined), { add: key, spell: message.path });
-						break;
-					}
-					case 'close': {
-						const key = keyOf(message.path);
-						// Its open is still in flight: close it the moment it lands — closing now
-						// would find no tab, and the landing would re-announce the open, re-opening
-						// the sender's just-closed tab.
-						if (applyingOpens.has(key)) {
-							pendingCloses.add(key);
-							break;
-						}
-						void run(() => closeNow(key), { remove: key });
-						break;
-					}
-					case 'closeTab':
-						if (applyingTabs.has(message.id)) {
-							pendingTabCloses.add(message.id);
-							break;
-						}
-						void run(() => closeTabNow(message.id), { removeTab: message.id });
-						break;
-					case 'activeTab': {
-						// A tab not open here (its create mirror still in flight, or a copy this
-						// side never had) stays a no-op: the create opens it in the foreground. A
-						// tab that crosses whole carries its input, and opening it converges —
-						// unless its open is already landing here, in which case that open
-						// activates it (opening again would read the same revisions twice).
-						const input = message.input;
-						const inFlight = applyingTabs.has(message.id);
-						void run(() => {
-							if (editors.revealById(message.id)) return undefined;
-							return !inFlight && input ? openSyncedTab(input) : undefined;
-						}, inFlight || !input ? {} : { addTab: message.id });
-						break;
-					}
-					case 'openTab':
-						void run(() => openSyncedTab(message.input), { addTab: inputId(message.input) });
-						break;
-					case 'sidebar':
-						if (rawToggleSidebar && workbench.sidebarShown !== false) void run(() => rawToggleSidebar.call(workbench));
-						break;
-					case 'active': {
-						// Not open here (a missed open, or opened before this page arrived): opening
-						// it is the convergence — the active file is the same on both sides. An open
-						// already landing here activates it itself.
-						const key = keyOf(message.path);
-						const inFlight = applyingOpens.has(key);
-						void run(() => {
-							if (editors.revealFilePath(message.path)) return undefined;
-							return inFlight ? undefined : rawOpenFile(message.path);
-						}, inFlight ? {} : { add: key, spell: message.path });
-						break;
-					}
-					case 'view':
-						void run(() => rawShowView.call(workbench, message.id));
-						break;
-				}
+				applyMessage(message);
 			});
 		},
 		localOnly(local: boolean): void {
@@ -590,6 +615,14 @@ export function installWorkbenchSync(workbench: SyncedWorkbench): AttachedWorkbe
 		// cross — but only a real browser session's: the PC's own window wearing the phone
 		// shell for a mirror viewer (phoneShell() reads the live DOM marker) keeps crossing,
 		// or every own-UI session attached beside the viewer would miss the hide.
-		sidebarHideCrosses: () => !(remoteEnv() && phoneShell())
+		sidebarHideCrosses: () => !(remoteEnv() && phoneShell()),
+		// The remote-open gate's canonical re-check (pathGate.ts's symlink note): one path
+		// per call. The backend confines the answers to the boundary's own areas, so a
+		// session's own copy of this command is no oracle — and on a phone the call simply
+		// crosses the wire like any other invoke.
+		canonicalPath: async (path) => {
+			const forms = (await invoke('remote_canonical_paths', { paths: [path] })) as (string | null)[];
+			return forms[0] ?? null;
+		}
 	});
 }
