@@ -95,8 +95,11 @@ function detachStaleVolumes() {
 	// detached, whether this run or an earlier one mounted them. Every rw.*
 	// under the staging dir is leaked scratch: a live build's scratch is
 	// mounted (never present while this script runs), a finished one deletes
-	// its own.
-	for (const name of readdirSync(`${bundleRoot}/macos`)) {
+	// its own. A missing staging dir — a fresh checkout, a wiped target, the
+	// very first build — is simply nothing to sweep (the clean pass runs
+	// before any bundle exists).
+	const staged = existsSync(`${bundleRoot}/macos`) ? readdirSync(`${bundleRoot}/macos`) : [];
+	for (const name of staged) {
 		if (/^rw\..*\.dmg$/.test(name)) {
 			try {
 				unlinkSync(`${bundleRoot}/macos/${name}`);
