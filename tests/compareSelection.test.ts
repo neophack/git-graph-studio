@@ -145,7 +145,12 @@ describe('explorer multi-selection compare', () => {
 		backend.on('compare_dirs', () => [{ path: 'shared.txt', status: 'different', leftSize: 3, rightSize: 4 }]);
 		const group = new EditorGroup(document.getElementById('editorGroup')!);
 		group.setRoot(ROOT);
-		group.openFolderCompare({ kind: 'folders', id: `${ROOT}\\left::${ROOT}\\right`, left: `${ROOT}\\left`, right: `${ROOT}\\right` });
+		// The view rides a lazy chunk (openFolderCompare's loadFolderCompare): awaiting
+		// the open — not flush rounds alone — is what guarantees the import (and the
+		// compare_dirs its mount fires) has landed; under a loaded parallel suite the
+		// import outlasts any fixed flush count, and the un-awaited call left this test
+		// flaky (2026-10-15: one full-suite run in several failed exactly here).
+		await group.openFolderCompare({ kind: 'folders', id: `${ROOT}\\left::${ROOT}\\right`, left: `${ROOT}\\left`, right: `${ROOT}\\right` });
 		await flush();
 		expect(backend.callsTo('compare_dirs')[0]).toMatchObject({ left: `${ROOT}\\left`, right: `${ROOT}\\right` });
 		expect(document.querySelector('.folder-compare')).not.toBeNull();

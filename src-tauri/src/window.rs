@@ -214,7 +214,11 @@ pub fn apply_webkit_compat() {
     {
         return;
     }
-    let settings_text = std::fs::read_to_string(settings_file().unwrap_or_default()).ok();
+    // The `~/.ggs` layout — `GGS_HOME` relocation included — is computed in exactly
+    // one place, ggs_base::paths; `mod desktop`'s same-named helper is its Windows-gated
+    // wrapper, unreachable (and unneeded) from this linux-only function.
+    let settings_text =
+        std::fs::read_to_string(ggs_base::paths::settings_file().unwrap_or_default()).ok();
     let mode = linux_dmabuf_mode(settings_text.as_deref());
     let nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists();
     if should_disable_dmabuf(&mode, nvidia) {

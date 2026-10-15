@@ -2389,9 +2389,15 @@ y z w
         assert_eq!(run_in(dir.path(), "numfmt --to=si 1536").0, "1.6K\n");
         assert_eq!(run_in(dir.path(), "numfmt --from=iec 1.5K").0, "1536\n");
         assert_eq!(run_in(dir.path(), "numfmt --to=iec 1024").0, "1.0K\n");
-        let (out, _, status) = run_in(dir.path(), "printenv PATH");
-        assert!(!out.is_empty());
-        assert_eq!(status, 0);
+        // printenv answers an exported var with the value a Git Bash session sees (the
+        // msys PATH form) and exits 1 for an unset one. PATH is set in the shell, not
+        // read off the inherited environment: its key's spelling is the runner's choice
+        // (`PATH` from a bash parent, `Path` from pwsh — 2026-10-15, the CI Windows
+        // runner's spelling emptied this and failed the suite while every local,
+        // bash-spawned run passed).
+        let (out, _, status) =
+            run_in(dir.path(), "PATH='C:\\a;C:\\b'; export PATH; printenv PATH");
+        assert_eq!((out.as_str(), status), ("/c/a:/c/b\n", 0));
         let (_, _, status) = run_in(dir.path(), "printenv GGS_DEFINITELY_UNSET_VAR");
         assert_eq!(status, 1);
         // column -t aligns to the widest cell.

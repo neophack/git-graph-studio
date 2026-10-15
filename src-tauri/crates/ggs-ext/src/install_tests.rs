@@ -1,5 +1,9 @@
     use super::*;
     use crate::store::*;
+    // Only the unix executable-bit test below reaches the extractor; a plain import
+    // would be an unused-imports error on the Windows test build (-D warnings).
+    #[cfg(unix)]
+    use crate::vsix::extract_vsix;
     use std::io::Write;
     use std::path::{Path, PathBuf};
 

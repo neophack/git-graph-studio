@@ -5110,7 +5110,18 @@ fn printenv(shell: &mut Shell, io: &Io, args: &[String]) -> ExecResult {
     }
     let mut status = 0;
     for name in &names {
-        match env.iter().find(|(key, _)| key == name) {
+        // The read follows insert_env's own semantics: on Windows an env write lands
+        // under the STORED key's spelling (`export PATH` into a pwsh-inherited `Path`
+        // updates `Path`), so an exact-case lookup would answer empty for a var the
+        // shell itself just exported — the write and the read must agree.
+        let hit = env.iter().find(|(key, _)| key == name).or_else(|| {
+            if cfg!(windows) {
+                env.iter().find(|(key, _)| key.eq_ignore_ascii_case(name))
+            } else {
+                None
+            }
+        });
+        match hit {
             Some((_, value)) => io.out_str(&format!("{}\n", present(name, value))),
             None => status = 1,
         }
