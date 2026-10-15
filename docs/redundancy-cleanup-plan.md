@@ -3,12 +3,17 @@
 > 状态:**执行中**(2026-10-15 启动)。已落地:P1 全部(§2.1–§2.5,`tsc --noUnusedLocals`
 > 1492 → 0)、P5-a 护栏全部(`noUnusedLocals` 进 tsconfig、未用依赖扫描进 check-crate-graph、
 > `scripts/check-doc-paths.mjs` 进 check-seams)、P4-a 文档修正(28 条路径、重复的 ggs-config
-> 节、两段退役机制史压缩)。§2.5 的两个 probe(claude-code-compat / ui-interaction-check)
-> 按 §9 待 owner 决定,未动。P2 / P3 / P4-b / §4.6 未开始。
-> 验收基线:`npm run typecheck`(含 e2e)、`npm test`(1162 用例)、
-> `cargo test --workspace --all-features`(45 套件)、
-> `cargo clippy --all-targets --all-features -- -D warnings`、`node scripts/check-seams.mjs`
-> 全部通过(2026-10-15,与一条并行的 remote 开发线共享同一棵工作树)。
+> 节、两段退役机制史压缩)、**P2-TS 全部(§3.2 T1–T12,2026-10-15)**。§2.5 的两个
+> probe(claude-code-compat / ui-interaction-check)按 §9 待 owner 决定,未动。
+> P2-Rust / P3 / P4-b / §4.6 未开始。
+> P2-TS 验收:`npm run typecheck`(含 e2e)、`npm test`(1164 用例)、
+> `node scripts/check-seams.mjs` 全部通过(2026-10-15)。T8(Relay/Transport 头部
+> 常量)经复核为测量假阳性——"重复"的行是两个文件各自的多行 import 清单(测量法只
+> 排除以 `import ` 开头的行),协议常量本就集中在 `frame.ts` 一处,无需合并;T7 的
+> viewerBoot `el` 裁决为有意隔离(镜像页不运行工作台,签名不同),已加注释说明。
+> 原始验收基线(2026-10-15,`c4d63aa`):`cargo test --workspace --all-features`
+> (45 套件)、`cargo clippy --all-targets --all-features -- -D warnings` 亦全绿
+> (与一条并行的 remote 开发线共享同一棵工作树);P2-TS 无 Rust 改动,未重跑。
 >
 > 与 [architecture-restructure-plan.md](architecture-restructure-plan.md) 的关系：重整计划
 > P0–P6 已基本落地（crate 拆分、目录归位、拆大文件）。本计划处理的是**落地后留下的冗余**：
@@ -209,6 +214,19 @@ wrapper。如果契约测试需要它们，就保留；否则删除，后端命�
 | R8 | 测试代码重复 | `ggs-node/tests/it/node_runtime.rs` 里同一个 10 行启动样板出现 7 次，27 行样板出现 3 次 | 抽成 `fn spawn_runtime(..)` / `fn rpc(..)` 测试辅助 | 低 |
 
 ### 3.2 TypeScript
+
+已全部落地(2026-10-15)。各条的落点:T1 `events.ts` 再导出 `shared.ts` 的一份;
+T2 `features/viewers/hexShared.ts`(已登记进模块 7 的文件清单);T3 `platform/ui/dom.ts`
+的 `formatBytes(count, { gb, iec, trim })` 按各调用方原拼写带参;T4 dom.ts 新增
+Windows 盘符感知的 `parentOf`,remote 三文件改用 dom.ts 的 `joinPath`/`parentOf`;
+T5 `remote/widgets.ts`(登记进模块 19);T6 保留 markdown.ts 的 `string | null` 版,
+extAssets 只留 `extImageMime` 的 jpeg 兜底;T7 裁决为有意隔离,已加注释;T8 复核为
+测量假阳性(见顶部状态),不合并;T9 `vscodeApi/index.ts` 的
+`serveExtensionHostCall(tables, …)` 两个宿主共用;T10 六组各自抽局部辅助
+(`webviewUriFor`/`webviewCspSource`、`promptTeardown`、`collectExisting`、
+`resetFindState`、`confirmDiscardOne`+`discardChangesOf`、`findToggleChord`);
+T11 `tests/helpers.ts` 的 `workbenchShell()` + `DefaultingHandlers`;T12
+`scripts/node-host-bundle.mjs` 的 `buildNodeHost()`,prepare 与 dev 助手共用。
 
 | # | 重复 | 位置 | 目标 |
 | - | ---- | ---- | ---- |
