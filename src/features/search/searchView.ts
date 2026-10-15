@@ -5,7 +5,8 @@
 // tree is a plain DOM tree, like VS Code's search tree: one group per file (its header row
 // followed by its match rows) in normal document flow - every row in the DOM, no windowing.
 
-import { Channel, invoke } from '../../platform/ipc/core';
+import { Channel } from '../../platform/ipc/core';
+import { replaceInFiles, searchCancel, searchWorkspace, type SearchEvent } from '../../platform/ipc/search';
 
 import * as state from '../../platform/state';
 import { queryHasUppercase } from '../../platform/find/findOptions';
@@ -13,25 +14,9 @@ import { FindHistory, HistoryRecall, recallKey } from '../../platform/find/findH
 import { settings } from '../../platform/settings';
 import { actionButton, basename, confirmDialog, dirname, el, icon, liveSidebarTitle, notify } from '../../platform/ui/index';
 
-export interface SearchMatch {
-	line: number;
-	column: number;
-	length: number;
-	text: string;
-}
 
-export interface FileMatches {
-	path: string;
-	matches: SearchMatch[];
-	/** The root (workspace folder) the path is relative to - multi-root searches set it, so
-	 *  the same relative path in two roots stays two results that open in their own root. */
-	root?: string;
-}
-
-/** What the backend streams: result batches, then exactly one `done`. */
-export type SearchEvent =
-	| { kind: 'batch'; files: FileMatches[] }
-	| { kind: 'done'; scanned: number; truncated: boolean; cancelled: boolean };
+import type { FileMatches, SearchMatch } from '../../platform/ipc/search';
+export type { FileMatches, SearchEvent, SearchMatch };
 
 export interface SearchOptions {
 	caseSensitive: boolean;
@@ -423,7 +408,7 @@ export class SearchView {
 		if (!this.searching) return;
 		this.searchId++;
 		this.searching = false;
-		void invoke('search_cancel').catch(() => undefined);
+		void searchCancel().catch(() => undefined);
 	}
 
 	async runSearch(): Promise<void> {
@@ -477,16 +462,14 @@ export class SearchView {
 		const searchRoot = async (): Promise<void> => {
 			if (id !== this.searchId) return;
 			try {
-				await invoke('search_workspace', {
+				await searchWorkspace({
 					query,
 					isRegex: this.options.useRegex,
 					caseSensitive: this.options.caseSensitive,
 					include: this.options.include,
 					exclude: this.options.exclude,
-					wordOnly: this.options.wholeWord,
-					repo: roots[rootIndex],
-					onEvent
-				});
+					wordOnly: this.options.wholeWord
+				}, roots[rootIndex], onEvent);
 			} catch (err) {
 				if (id !== this.searchId) return;
 				this.searching = false;
@@ -579,16 +562,14 @@ export class SearchView {
 			for (const root of this.roots.length > 1 ? this.roots : [undefined]) {
 				// The same matcher as the search (whole word included), so what was listed is
 				// exactly what gets replaced.
-				const outcome = await invoke<{ files: number; replacements: number }>('replace_in_files', {
+				const outcome = await replaceInFiles({
 					query: this.query,
-					replacement: this.replacement,
 					isRegex: this.options.useRegex,
 					caseSensitive: this.options.caseSensitive,
 					wordOnly: this.options.wholeWord,
 					include: this.options.include,
-					exclude: this.options.exclude,
-					repo: root
-				});
+					exclude: this.options.exclude
+				}, this.replacement, root);
 				files += outcome.files;
 				replacements += outcome.replacements;
 			}

@@ -4,7 +4,7 @@
 // scan runs, and a newer keystroke aborts the superseded scan at the next chunk boundary. The
 // top rows fill in progressively, ranked by the fuzzy scorer.
 
-import { invoke } from '../../platform/ipc/core';
+import { fuzzyFiles } from '../../platform/ipc/fuzzy';
 
 import { compareFileMatches, makeQuery, scoreFile, type FileEntry, type FileMatch } from './fuzzy';
 import type { QuickPickItem, QuickPickSource } from '../../platform/ui/index';
@@ -111,7 +111,7 @@ export class FilePickSource implements QuickPickSource {
 		// it) whether the backend or the TS scan ends up answering; later queries reuse it.
 		if (!this.loaded && !this.loading) void this.refresh();
 		try {
-			const hits = this.options.backend === false ? null : await invoke<{ path: string; label: string; ranges: [number, number][] }[]>('fuzzy_files', { query: trimmed, limit: PICK_LIMIT });
+			const hits = this.options.backend === false ? null : await fuzzyFiles(trimmed, PICK_LIMIT);
 			if (Array.isArray(hits)) {
 				if (isCancelled()) return [];
 				return hits.map((hit) => ({

@@ -3,8 +3,8 @@
 // versions, and the sync actions (copy to the other side, delete) that flow through the same
 // filesystem commands the Explorer uses.
 
-import { invoke } from '../../platform/ipc/core';
 import { createFolder, type FileContents, deletePath, fileProbe, readFile, writeFile } from '../../platform/ipc/fs';
+import { compareDirs } from '../../platform/ipc/search';
 import type { EditorView } from '@codemirror/view';
 import type { MergeView } from '@codemirror/merge';
 
@@ -13,12 +13,8 @@ import type { HexCompareView } from '../viewers/types';
 
 import { basename, confirmDialog, dirname, el, icon, joinPath, notify, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 
-export interface DirDiffEntry {
-	path: string;
-	status: 'leftOnly' | 'rightOnly' | 'different' | 'same';
-	leftSize: number;
-	rightSize: number;
-}
+import type { DirDiffEntry } from '../../platform/ipc/search';
+export type { DirDiffEntry };
 
 const STATUS_META: Record<DirDiffEntry['status'], { icon: string; title: string; cls: string }> = {
 	leftOnly: { icon: 'arrow-left', title: 'Only in the left folder', cls: 'fc-left-only' },
@@ -68,7 +64,7 @@ export class FolderCompareView {
 		this.loading = true;
 		this.render();
 		try {
-			const entries = await invoke<DirDiffEntry[] | null>('compare_dirs', { left: this.left, right: this.right, include: null, exclude: null });
+			const entries = await compareDirs(this.left, this.right, null, null);
 			// A backend that answers nothing (a stub, a refused call) is an empty comparison,
 			// not a crash in the render that follows.
 			this.entries = Array.isArray(entries) ? entries : [];

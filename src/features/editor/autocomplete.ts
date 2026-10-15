@@ -5,8 +5,8 @@
 
 import { autocompletion, closeBrackets, snippetCompletion, type Completion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete';
 import { Facet, type Extension } from '@codemirror/state';
-import { invoke } from '../../platform/ipc/core';
 import { listFiles } from '../../platform/ipc/fs';
+import { pathCompletions } from '../../platform/ipc/fuzzy';
 
 import { languageOf, resolveVariables, snippetsFor } from './snippetRegistry';
 import { extensionCompletionsFor, hasExtensionCompletions, type ExtensionCompletion } from './editorCompletions';
@@ -110,7 +110,7 @@ export async function pathCompletion(context: CompletionContext): Promise<Comple
 	const token = context.matchBefore(/[\w$./\\-]+/);
 	if (!token || !token.text.includes('/') || token.from === token.to) return null;
 	try {
-		const entries = await invoke<{ label: string; isDir: boolean }[]>('path_completions', { prefix: token.text });
+		const entries = await pathCompletions(token.text);
 		if (Array.isArray(entries)) {
 			if (entries.length === 0) return null;
 			return {

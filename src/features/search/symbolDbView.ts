@@ -3,26 +3,16 @@
 // action. The same backend shape (`symbol_tree`) serves the MCP server's `symbol_tree`
 // tool, so what the page shows is exactly what an AI assistant is told.
 
-import { invoke, Channel } from '../../platform/ipc/core';
+import { Channel } from '../../platform/ipc/core';
+import { symbolTree, symbolsRebuild, type SymbolIndexEvent } from '../../platform/ipc/symbols';
 
 import { t } from '../../platform/i18n';
 import { KIND_ICONS } from './contextView';
 import { actionButton, el, icon } from '../../platform/ui/index';
 
-export interface TreeSymbol {
-	kind: string;
-	name: string;
-	/** 0-based declaration line. */
-	line: number;
-	/** How many files the name occurs in (the index's occurrence list length). */
-	refs: number;
-}
 
-export interface TreeFile {
-	/** Repo-relative, forward slashes. */
-	path: string;
-	symbols: TreeSymbol[];
-}
+import type { TreeFile, TreeSymbol } from '../../platform/ipc/symbols';
+export type { TreeFile, TreeSymbol };
 
 /** A folder of the tree: nested folders and the files directly in it. */
 export interface FolderNode {
@@ -127,7 +117,7 @@ export class SymbolDatabaseView {
 		this.loading = true;
 		this.render();
 		try {
-			this.files = (await invoke<TreeFile[] | null>('symbol_tree')) ?? [];
+			this.files = (await symbolTree()) ?? [];
 		} catch {
 			this.files = [];
 		}
@@ -139,7 +129,7 @@ export class SymbolDatabaseView {
 		const onEvent = new Channel<{ kind: string }>();
 		onEvent.onmessage = () => undefined; // the status bar follows the progress; the page reloads at the end
 		try {
-			await invoke('symbols_rebuild', { onEvent });
+			await symbolsRebuild(onEvent);
 		} catch {
 			// An old backend or a cancelled build: the outline stands as it is.
 		}

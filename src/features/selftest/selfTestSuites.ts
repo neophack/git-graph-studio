@@ -9,6 +9,7 @@
 // the scan names it so the report shows what a button does without doing it.
 
 import { invoke } from '../../platform/ipc/core';
+import { workspaceSymbols } from '../../platform/ipc/search';
 
 import { commands } from '../../platform/commands';
 import { locale, t } from '../../platform/i18n';
@@ -317,7 +318,7 @@ export function registerSelfTestSuites(workbench: Workbench): void {
 				id: 'symbols',
 				name: 'the workspace symbol index answers a lookup without error',
 				run: async () => {
-					const rows = await invoke('workspace_symbols', { query: 'a' });
+					const rows = await workspaceSymbols('a', 100);
 					if (!Array.isArray(rows)) throw new Error('workspace_symbols did not answer a list');
 				}
 			}

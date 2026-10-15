@@ -9,6 +9,8 @@ import type { MergeView } from '@codemirror/merge';
 import { invoke } from '../../platform/ipc/core';
 import { type FileContents, type FileProbe, fileProbe, readFileBase64 } from '../../platform/ipc/fs';
 import { materializeRevisionFile, readFileAt } from '../../platform/ipc/revision';
+import { findReferences, workspaceSymbols } from '../../platform/ipc/search';
+import { symbolLookup, symbolReferences } from '../../platform/ipc/symbols';
 import { scmBlame } from '../../platform/ipc/scm';
 
 import { hasBookmark, toggleBookmark } from './bookmarks';
@@ -2892,7 +2894,7 @@ export class EditorGroup {
 	 *  the cursor already is does not count (that is the declaration itself). */
 	private async goToIndexedDefinition(name: string, currentPath: string | null, view: EditorView): Promise<boolean> {
 		try {
-			const exact = await invoke<WsSymbol[]>('symbol_lookup', { name });
+			const exact = await symbolLookup(name);
 			if (exact.length === 1) return this.jumpToDefinition(exact[0]!, currentPath, view);
 			if (exact.length > 1) return this.pickDefinition(exact, currentPath, view);
 		} catch {
@@ -2900,7 +2902,7 @@ export class EditorGroup {
 		}
 		let symbols: WsSymbol[];
 		try {
-			symbols = await invoke<WsSymbol[]>('workspace_symbols', { query: name, limit: 200 });
+			symbols = (await workspaceSymbols(name, 200)) ?? [];
 		} catch {
 			return false;
 		}
@@ -2959,10 +2961,10 @@ export class EditorGroup {
 		try {
 			// The index's occurrence list narrows this scan to the files that contain the
 			// word (M4); the older full-scan command stays as the fallback.
-			files = (await invoke('symbol_references', { name })) ?? [];
+			files = (await symbolReferences(name)) ?? [];
 		} catch {
 			try {
-				files = (await invoke('find_references', { name })) ?? [];
+				files = (await findReferences(name)) ?? [];
 			} catch (error) {
 				notify('error', String(error));
 				return;
@@ -2998,7 +3000,7 @@ export class EditorGroup {
 		const name = view.state.sliceDoc(word.from, word.to);
 		let symbols: WsSymbol[];
 		try {
-			symbols = await invoke<WsSymbol[]>('workspace_symbols', { query: name, limit: 200 });
+			symbols = (await workspaceSymbols(name, 200)) ?? [];
 		} catch (error) {
 			notify('error', String(error));
 			return;

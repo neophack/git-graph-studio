@@ -7,6 +7,9 @@ import { invoke, Channel } from '../platform/ipc/core';
 import { listen } from '../platform/ipc/core';
 import { appNewInstance, bootContext, type BootContext, bootStage, closeFolder, openDevtools, openFolder, openSingleFile, openWorkspace, type OpenedRoot, postFirstPaint } from '../platform/ipc/app';
 import { backupList, backupRead, type BackupEntry, encodings, listFiles, readFile } from '../platform/ipc/fs';
+import { workspaceSymbols } from '../platform/ipc/search';
+import { symbolLookup, symbolsRebuild, type SymbolIndexEvent, type SymbolIndexStatus } from '../platform/ipc/symbols';
+import { gitInit } from '../platform/ipc/scm';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -74,16 +77,7 @@ export interface OpenedPaths { folders: string[]; files: string[] }
 
 /** The symbol index's progress event (cmd_symbols `SYMBOL_INDEX_EVENT`): what the status
  *  bar's "Indexing symbols n/m" item follows. */
-export interface SymbolIndexStatus {
-	state: 'empty' | 'building' | 'ready';
-	done: number;
-	total: number;
-	files: number;
-	symbols: number;
-}
-
-/** What `symbols_rebuild` pushes over its channel before the final answer. */
-export type SymbolIndexEvent = { kind: 'progress'; done: number; total: number } | { kind: 'done'; files: number; symbols: number; cancelled: boolean };
+export type { SymbolIndexEvent, SymbolIndexStatus } from '../platform/ipc/symbols';
 
 /** How long after a refresh a git-only change batch is taken for that refresh's own echo. */
 const REFRESH_ECHO_MS = 1500;
@@ -596,7 +590,7 @@ export class Workbench {
 				try {
 					// A multi-root workspace indexes each root; a symbol's path is relative to its own.
 					const roots = this.repoPaths.length > 1 ? this.repoPaths : [null];
-					const perRoot = await Promise.all(roots.map((root) => invoke<{ name: string; kind: string; path: string; line: number }[] | null>('workspace_symbols', { query: '', limit: 10000, repo: root })));
+					const perRoot = await Promise.all(roots.map((root) => workspaceSymbols('', 10000, root)));
 					symbols = perRoot.flatMap((list, index) => (list ?? []).map((symbol) => ({ ...symbol, path: roots[index] ? joinRepo(roots[index]!, symbol.path) : symbol.path })));
 				} catch {
 					symbols = [];
@@ -620,7 +614,7 @@ export class Workbench {
 			// event: the channel's events carry done/total only, so leaving the item at
 			// its last "building N/N" stranded the counter until some later event happened
 			// to repaint it.
-			const status = await invoke<SymbolIndexStatus | null>('symbols_rebuild', { onEvent });
+			const status = await symbolsRebuild(onEvent);
 			if (status) this.statusBar.setSymbols(status);
 			notify('info', t('symbols.rebuildDone'));
 		} catch (error) {
@@ -1037,8 +1031,8 @@ export class Workbench {
 		try {
 			// A multi-root workspace indexes each root; a symbol's path is relative to its own.
 			const roots = this.repoPaths.length > 1 ? this.repoPaths : [null];
-			const perRoot = await Promise.all(roots.map((root) => invoke<{ kind: string; name: string; path: string; line: number }[]>('workspace_symbols', { query: '', limit: 10000, repo: root })));
-			symbols = perRoot.flatMap((list, index) => list.map((symbol) => ({ ...symbol, path: roots[index] ? joinRepo(roots[index]!, symbol.path) : symbol.path })));
+			const perRoot = await Promise.all(roots.map((root) => workspaceSymbols('', 10000, root)));
+			symbols = perRoot.flatMap((list, index) => (list ?? []).map((symbol) => ({ ...symbol, path: roots[index] ? joinRepo(roots[index]!, symbol.path) : symbol.path })));
 		} catch (error) {
 			notify('error', String(error));
 			return;
@@ -1326,7 +1320,7 @@ export class Workbench {
 		const name = view.state.sliceDoc(word.from, word.to);
 		let defs: { kind: string; name: string; path: string; line: number }[] = [];
 		try {
-			defs = (await invoke<{ kind: string; name: string; path: string; line: number }[]>('symbol_lookup', { name })) ?? [];
+			defs = (await symbolLookup(name)) ?? [];
 		} catch {
 			defs = [];
 		}
@@ -1940,7 +1934,7 @@ export class Workbench {
 	async initializeRepository(): Promise<void> {
 		if (this.repoPath === null || this.isRepo) return;
 		try {
-			await invoke('git_init');
+			await gitInit();
 		} catch (error) {
 			notify('error', `Could not initialize the repository: ${String(error)}`);
 			return;

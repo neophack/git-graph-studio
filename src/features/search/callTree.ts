@@ -4,25 +4,13 @@
 // body. That heuristic covers the direct-call reading the tree is for; the definitions come
 // from the same outline extraction the viewer uses.
 
-import { invoke } from '../../platform/ipc/core';
+import { readFile } from '../../platform/ipc/fs';
+import { findReferences, workspaceSymbols } from '../../platform/ipc/search';
 
 import { el, icon } from '../../platform/ui/index';
 
-export interface WsSymbol {
-	kind: string;
-	name: string;
-	path: string;
-	line: number;
-	/** The parser layer's additions (symbols/parse.rs); 0 / the start line when absent. */
-	column?: number;
-	endLine?: number;
-	container?: string | null;
-}
-
-export interface RefFile {
-	path: string;
-	matches: { line: number; column: number; length: number; text: string }[];
-}
+import type { RefFile, WsSymbol } from '../../platform/ipc/search';
+export type { RefFile, WsSymbol };
 
 export interface CallNode {
 	name: string;
@@ -145,7 +133,7 @@ export class CallTreeView {
 	private symbols(): Promise<WsSymbol[]> {
 		// The promise is what is cached, so two levels loading at once share one request;
 		// a failed request is not kept, and the next level asks again.
-		this.symbolCache ??= invoke<WsSymbol[]>('workspace_symbols', { query: '', limit: 20000 }).catch((error: unknown) => {
+		this.symbolCache ??= workspaceSymbols('', 20000).then((rows) => rows ?? []).catch((error: unknown) => {
 			this.symbolCache = null;
 			throw error;
 		});
@@ -163,12 +151,12 @@ export class CallTreeView {
 
 	private async loadLevel(symbol: WsSymbol, symbols: WsSymbol[]): Promise<void> {
 		if (this.direction === 'callers') {
-			const references = await invoke<RefFile[]>('find_references', { name: symbol.name }).catch(() => [] as RefFile[]);
+			const references = await findReferences(symbol.name).catch(() => [] as RefFile[]);
 			this.levels.set(`${symbol.path}:${symbol.line}`, computeCallers(symbol, symbols, references));
 			return;
 		}
 		// Callees need the body: read the file and take the lines to the next symbol.
-		const file = await invoke<{ contents: string | null }>('read_file', { path: absolute(symbol.path) }).catch(() => null);
+		const file = await readFile(absolute(symbol.path)).catch(() => null);
 		if (!file || file.contents === null) {
 			this.levels.set(`${symbol.path}:${symbol.line}`, []);
 			return;
