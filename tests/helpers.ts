@@ -1,5 +1,30 @@
 // DOM helpers for the UI tests.
 
+/** The workbench's shell skeleton — the element ids boot.ts wires itself onto, empty: the
+ *  suites that boot the real Workbench (commandSweep, selfTest, workbenchLifecycle,
+ *  scenarioHarness, singleFile, uiSweep) all reset the document to this shape per test. */
+export function workbenchShell(): void {
+	document.body.innerHTML = `
+		<div id="titlebar"></div>
+		<div id="workbench">
+			<div id="activitybar"></div>
+			<div id="sidebar"></div>
+			<div id="sidebarSash"></div>
+			<div id="editorPart"><div id="editorGroup"></div><div id="panelSash" hidden></div><div id="panel" hidden></div></div>
+		</div>
+		<div id="statusbar"></div>
+		<div id="notifications"></div>
+		<div id="overlays"></div>`;
+}
+
+/** Every command not scripted in the map answers `null` (a write that succeeded) — the
+ *  full-boot suites' handler table. */
+export class DefaultingHandlers extends Map<string, (args: Record<string, unknown>) => unknown> {
+	override get(command: string) {
+		return super.get(command) ?? (() => null);
+	}
+}
+
 export function click(element: Element | null | undefined, options: MouseEventInit = {}): void {
 	if (!element) throw new Error('no element to click');
 	element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, ...options }));

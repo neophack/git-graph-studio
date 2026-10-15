@@ -7,29 +7,9 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import * as state from '../src/platform/state';
 import { Workbench } from '../src/workbench';
 import { backend } from './tauriMock';
-import { click, flush, texts } from './helpers';
+import { click, DefaultingHandlers, flush, texts, workbenchShell as shell } from './helpers';
 
 const FILE = 'C:\\docs\\notes.md';
-
-class DefaultingHandlers extends Map<string, (args: Record<string, unknown>) => unknown> {
-	override get(command: string) {
-		return super.get(command) ?? (() => null);
-	}
-}
-
-function shell(): void {
-	document.body.innerHTML = `
-		<div id="titlebar"></div>
-		<div id="workbench">
-			<div id="activitybar"></div>
-			<div id="sidebar"></div>
-			<div id="sidebarSash"></div>
-			<div id="editorPart"><div id="editorGroup"></div><div id="panelSash" hidden></div><div id="panel" hidden></div></div>
-		</div>
-		<div id="statusbar"></div>
-		<div id="notifications"></div>
-		<div id="overlays"></div>`;
-}
 
 let workbench: Workbench | null = null;
 

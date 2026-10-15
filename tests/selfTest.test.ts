@@ -9,7 +9,7 @@ import { Workbench } from '../src/workbench';
 import * as selftest from '../src/features/selftest';
 import { registerSelfTestSuites } from '../src/features/selftest';
 import { backend } from './tauriMock';
-import { flush } from './helpers';
+import { DefaultingHandlers, flush, workbenchShell } from './helpers';
 
 // The version probe has no Tauri runtime; the suites script its answers.
 vi.mock('mermaid', () => import('./mermaidStub'));
@@ -20,12 +20,6 @@ const REPO = 'C:\\repo';
 const NOTES = `${REPO}\\notes.txt`;
 const README = `${REPO}\\README.md`;
 
-class DefaultingHandlers extends Map<string, (args: Record<string, unknown>) => unknown> {
-	override get(command: string) {
-		return super.get(command) ?? (() => null);
-	}
-}
-
 let workbench: Workbench;
 
 beforeAll(async () => {
@@ -34,17 +28,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
 	localStorage.clear();
-	document.body.innerHTML = `
-		<div id="titlebar"></div>
-		<div id="workbench">
-			<div id="activitybar"></div>
-			<div id="sidebar"></div>
-			<div id="sidebarSash"></div>
-			<div id="editorPart"><div id="editorGroup"></div><div id="panelSash" hidden></div><div id="panel" hidden></div></div>
-		</div>
-		<div id="statusbar"></div>
-		<div id="notifications"></div>
-		<div id="overlays"></div>`;
+	workbenchShell();
 	workbench?.dispose();
 	backend.reset();
 	backend.handlers = new DefaultingHandlers([

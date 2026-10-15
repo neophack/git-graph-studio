@@ -14,19 +14,12 @@ import { bookmarksFor } from '../src/features/editor';
 import * as state from '../src/platform/state';
 import { backend } from './tauriMock';
 import { installRemoteRound, uninstallRemoteRound } from './remoteRound';
-import { click, flush, key, menuItem, menuLabels, notifications, texts, until } from './helpers';
+import { click, DefaultingHandlers, flush, key, menuItem, menuLabels, notifications, texts, until, workbenchShell } from './helpers';
 
 
 const REPO = 'C:\\repo';
 const NOTES = `${REPO}\\notes.txt`;
 const README = `${REPO}\\README.md`;
-
-/** Every command not scripted here answers `null` (a write that succeeded). */
-class DefaultingHandlers extends Map<string, (args: Record<string, unknown>) => unknown> {
-	override get(command: string) {
-		return super.get(command) ?? (() => null);
-	}
-}
 
 let workbench: Workbench;
 /** §17.3's remote round: set by its describe, honoured by the boot below — every test there
@@ -39,17 +32,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
 	localStorage.clear();
-	document.body.innerHTML = `
-		<div id="titlebar"></div>
-		<div id="workbench">
-			<div id="activitybar"></div>
-			<div id="sidebar"></div>
-			<div id="sidebarSash"></div>
-			<div id="editorPart"><div id="editorGroup"></div><div id="panelSash" hidden></div><div id="panel" hidden></div></div>
-		</div>
-		<div id="statusbar"></div>
-		<div id="notifications"></div>
-		<div id="overlays"></div>`;
+	workbenchShell();
 	workbench?.dispose();
 	backend.reset();
 	backend.handlers = new DefaultingHandlers([

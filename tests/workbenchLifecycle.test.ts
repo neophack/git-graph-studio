@@ -11,18 +11,11 @@ import { ExtensionHost } from '../src/features/extensions';
 import * as state from '../src/platform/state';
 import { FS_CHANGED_EVENT, OPEN_PATHS_EVENT, Workbench } from '../src/workbench';
 import { backend, windowApi } from './tauriMock';
-import { click, flush, key, notificationButton, texts } from './helpers';
+import { click, DefaultingHandlers, flush, key, notificationButton, texts, workbenchShell } from './helpers';
 
 const REPO_A = 'C:\\repo-a';
 const REPO_B = 'C:\\repo-b';
 const STANDALONE = 'C:\\docs\\notes.md';
-
-/** Every command not scripted here answers `null` (a write that succeeded). */
-class DefaultingHandlers extends Map<string, (args: Record<string, unknown>) => unknown> {
-	override get(command: string) {
-		return super.get(command) ?? (() => null);
-	}
-}
 
 let workbench: Workbench;
 /** The onCloseRequested handler of the live workbench, kept by the patched window mock so the
@@ -38,17 +31,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
 	localStorage.clear();
-	document.body.innerHTML = `
-		<div id="titlebar"></div>
-		<div id="workbench">
-			<div id="activitybar"></div>
-			<div id="sidebar"></div>
-			<div id="sidebarSash"></div>
-			<div id="editorPart"><div id="editorGroup"></div><div id="panelSash" hidden></div><div id="panel" hidden></div></div>
-		</div>
-		<div id="statusbar"></div>
-		<div id="notifications"></div>
-		<div id="overlays"></div>`;
+	workbenchShell();
 	workbench?.dispose();
 	backend.reset();
 	backend.handlers = new DefaultingHandlers([
