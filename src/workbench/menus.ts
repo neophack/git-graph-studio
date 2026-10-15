@@ -2,68 +2,33 @@
 
 import type { Workbench } from './workbench';
 
-import { invoke, Channel } from '../platform/ipc/core';
-import { listen } from '../platform/ipc/core';
-import { appNewInstance, bootContext, type BootContext, bootStage, closeFolder, openDevtools, openFolder, openSingleFile, openWorkspace, type OpenedRoot, postFirstPaint } from '../platform/ipc/app';
-import { backupList, backupRead, type BackupEntry, encodings, listFiles, readFile } from '../platform/ipc/fs';
-import { workspaceSymbols } from '../platform/ipc/search';
-import { symbolLookup, symbolsRebuild, type SymbolIndexEvent, type SymbolIndexStatus } from '../platform/ipc/symbols';
-import { gitInit } from '../platform/ipc/scm';
-import { viewerClose, viewerOpen } from '../platform/ipc/viewer';
-import { remoteHostHideMain, remoteHostStatus } from '../platform/ipc/remote';
-import { getCurrentWindow } from '@tauri-apps/api/window';
-import { getCurrentWebview } from '@tauri-apps/api/webview';
-import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import { openUrl } from '@tauri-apps/plugin-opener';
-import { AnalysisView, type AnalysisStatus } from '../features/analysis';
-import type { AnalysisToolId } from '../features/analysis';
-import { mountProviderSwitcher } from '../features/providers';
-import { mountProviderPaneGate } from '../features/providers';
-import { commandForBinding, commands, effectiveBinding, setKeybindingResolver, UNSHIFTED_GLYPHS } from '../platform/commands';
-import { registerDecorationType } from '../features/editor';
-import { setExtensionCompletionProvider } from '../features/editor';
-import { setExtensionDefinitionOpener, setExtensionDefinitionProvider, setExtensionHoverProvider } from '../features/editor';
-import { languageIdFor, registerContextProvider } from '../features/extensions';
-import { EditorArea } from '../features/editor';
-import { ENCODING_LABELS } from '../features/editor';
-import type { EditorPlacement } from '../features/editor/types';
-import { Explorer } from '../features/explorer';
-import { ExtensionHost, extTitle, type ExtInfo, type PageDiffRequest } from '../features/extensions';
-import { ExtensionsPanel } from '../features/extensions';
-import { registerGitCommands } from '../features/scm';
-import { clearBookmarks, listBookmarks, toggleBookmark } from '../features/editor';
-import { effectiveKeybinding, loadUserKeybindings, renderKeybindingsEditor } from '../platform/keybindings';
-import { Panel } from './panel';
-import { SearchView } from '../features/search';
-import { SourceControlView } from '../features/scm';
-import { t, tf } from '../platform/i18n';
+import { commands } from '../platform/commands';
+import { t } from '../platform/i18n';
 import { hook } from '../platform/hooks';
-import { openSettingsPanel } from './settingsPanel';
-import { SETTINGS_EVENT, settings, THEME_EVENT, updateSetting } from '../platform/settings';
 import * as state from '../platform/state';
-import { StatusBar } from './statusbar';
-import { TitleBar } from './titlebar';
-import { basename, busy, el, icon, notify, quickInput, quickPick, relativeTo, toPosix, tooltip, type MenuEntry, type QuickPickItem, type QuickPickSource } from '../platform/ui/index';
-import { FilePickSource } from '../features/quickOpen';
-import { ExtensionTreeView } from '../features/extensions';
-import { evaluateWhen, extensionViewContributions } from '../features/extensions';
-import { extFileDataUrl } from '../platform/extAssets';
+import { basename, type MenuEntry } from '../platform/ui/index';
 
 /** The menus concern of Workbench — assigned onto the prototype by the module facade (index.ts). */
 export const menusMethods: ThisType<Workbench> = {
 	menus() {
 		const item = (id: string) => commands.menuItem(id);
+		// Who the File menu serves (docs/remote-ui-redesign-plan.md §P0): a browser session,
+		// or this PC window while a mirror viewer drives it. Either way New Window, Open File
+		// and Open Workspace would open a native dialog or a window only the PC's screen
+		// shows (a session's own opens are refused outright) — they hide; Open Folder stays,
+		// browsing the PC (`folderOpen`). A session's recent folders live in that browser
+		// (the daemon's list), so its Open Recent hides too.
+		const session = () => hook('session').remote();
+		const remoteFacing = () => session() || (hook('mirror')?.viewersNow() ?? false);
 		return [
 			{ label: t('menu.file'), entries: (): MenuEntry[] => [
-				// A browser session spawns a PC-side window it cannot see — the remote's own
-				// New Window lives in its window switcher, so the desktop entry hides here.
-				...(hook('session').remote() ? [] : [item('workbench.newWindow')]), item('workbench.newFile'), 'separator',
-				item('workbench.openFolder'), item('workbench.openFileStandalone'), item('workbench.openWorkspace'),
-				{ label: 'Open Recent', submenu: [
+				...(remoteFacing() ? [] : [item('workbench.newWindow')]), item('workbench.newFile'), 'separator',
+				item('workbench.openFolder'), ...(remoteFacing() ? [] : [item('workbench.openFileStandalone'), item('workbench.openWorkspace')]),
+				...(session() ? [] : [{ label: 'Open Recent', submenu: [
 					...state.recentFolders().map((folder) => ({ label: basename(folder), keybinding: folder, run: () => void this.openRecent(folder) })),
 					...(state.recentFolders().length > 0 ? ['separator' as const] : []),
 					{ label: 'Clear Recently Opened', disabled: state.recentFolders().length === 0, run: () => { state.save('recentFolders', []); } }
-				] },
+				] }]),
 				'separator', item('workbench.save'), item('workbench.saveAll'), 'separator',
 				item('workbench.closeEditor'), item('workbench.closeFolder'), 'separator',
 				item('workbench.openSettings'), 'separator', item('workbench.exit')

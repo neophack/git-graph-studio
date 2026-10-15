@@ -2,52 +2,15 @@
 
 import type { Workbench } from './workbench';
 
-import { invoke, Channel } from '../platform/ipc/core';
-import { listen } from '../platform/ipc/core';
-import { appNewInstance, bootContext, type BootContext, bootStage, closeFolder, openDevtools, openFolder, openSingleFile, openWorkspace, type OpenedRoot, postFirstPaint } from '../platform/ipc/app';
-import { backupList, backupRead, type BackupEntry, encodings, listFiles, readFile } from '../platform/ipc/fs';
-import { workspaceSymbols } from '../platform/ipc/search';
-import { symbolLookup, symbolsRebuild, type SymbolIndexEvent, type SymbolIndexStatus } from '../platform/ipc/symbols';
+import { appNewInstance, bootStage, closeFolder, openFolder, openSingleFile, openWorkspace, type OpenedRoot, postFirstPaint } from '../platform/ipc/app';
 import { gitInit } from '../platform/ipc/scm';
-import { viewerClose, viewerOpen } from '../platform/ipc/viewer';
-import { remoteHostHideMain, remoteHostStatus } from '../platform/ipc/remote';
-import { getCurrentWindow } from '@tauri-apps/api/window';
-import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import { openUrl } from '@tauri-apps/plugin-opener';
-import { AnalysisView, type AnalysisStatus } from '../features/analysis';
-import type { AnalysisToolId } from '../features/analysis';
-import { mountProviderSwitcher } from '../features/providers';
-import { mountProviderPaneGate } from '../features/providers';
-import { commandForBinding, commands, effectiveBinding, setKeybindingResolver, UNSHIFTED_GLYPHS } from '../platform/commands';
-import { registerDecorationType } from '../features/editor';
-import { setExtensionCompletionProvider } from '../features/editor';
-import { setExtensionDefinitionOpener, setExtensionDefinitionProvider, setExtensionHoverProvider } from '../features/editor';
-import { languageIdFor, registerContextProvider } from '../features/extensions';
-import { EditorArea } from '../features/editor';
-import { ENCODING_LABELS } from '../features/editor';
-import type { EditorPlacement } from '../features/editor/types';
-import { Explorer } from '../features/explorer';
-import { ExtensionHost, extTitle, type ExtInfo, type PageDiffRequest } from '../features/extensions';
-import { ExtensionsPanel } from '../features/extensions';
-import { registerGitCommands } from '../features/scm';
-import { clearBookmarks, listBookmarks, toggleBookmark } from '../features/editor';
-import { effectiveKeybinding, loadUserKeybindings, renderKeybindingsEditor } from '../platform/keybindings';
-import { Panel } from './panel';
-import { SearchView } from '../features/search';
-import { SourceControlView } from '../features/scm';
-import { t, tf } from '../platform/i18n';
+import { ExtensionHost } from '../features/extensions';
+import { tf } from '../platform/i18n';
 import { hook } from '../platform/hooks';
-import { openSettingsPanel } from './settingsPanel';
-import { SETTINGS_EVENT, settings, THEME_EVENT, updateSetting } from '../platform/settings';
+import { SETTINGS_EVENT, THEME_EVENT } from '../platform/settings';
 import * as state from '../platform/state';
-import { StatusBar } from './statusbar';
-import { TitleBar } from './titlebar';
-import { basename, busy, el, icon, notify, quickInput, quickPick, relativeTo, toPosix, tooltip, type MenuEntry, type QuickPickItem, type QuickPickSource } from '../platform/ui/index';
-import { FilePickSource } from '../features/quickOpen';
-import { ExtensionTreeView } from '../features/extensions';
-import { evaluateWhen, extensionViewContributions } from '../features/extensions';
-import { extFileDataUrl } from '../platform/extAssets';
+import { basename, notify } from '../platform/ui/index';
 import { FsChange, OpenedPaths, REFRESH_ECHO_MS, joinRepo, whenIdle } from './workbench';
 
 /** The lifecycle concern of Workbench — assigned onto the prototype by the module facade (index.ts). */
@@ -108,6 +71,8 @@ export const lifecycleMethods: ThisType<Workbench> = {
 	},
 
 	async pickFolder(): Promise<void> {
+		const elsewhere = hook('folderOpen');
+		if (elsewhere && (await elsewhere((path) => this.openFolder(path), this.openFolders()))) return;
 		let selected: string | string[] | null;
 		try {
 			selected = await openDialog({ directory: true, multiple: false, title: 'Open Folder' });
