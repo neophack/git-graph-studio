@@ -2016,7 +2016,7 @@ dependencies = [
 name = "ggs-ext"
 version = "0.0.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "ggs-base",
  "ggs-git",
  "ggs-proto",
@@ -2033,7 +2033,7 @@ dependencies = [
 name = "ggs-fs"
 version = "0.0.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "ggs-base",
  "ggs-text",
  "ignore",
@@ -2103,10 +2103,10 @@ name = "ggs-node"
 version = "0.0.0"
 dependencies = [
  "aes-gcm",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bincode",
  "boa_engine",
- "getrandom 0.2.17",
+ "getrandom 0.3.4",
  "ggs-proto",
  "hex",
  "hmac 0.12.1",
@@ -2135,8 +2135,8 @@ name = "ggs-providers"
 version = "0.0.0"
 dependencies = [
  "aes-gcm",
- "base64 0.22.1",
- "getrandom 0.2.17",
+ "base64 0.23.1",
+ "getrandom 0.3.4",
  "ggs-base",
  "ggs-git",
  "ggs-shellenv",
@@ -2239,9 +2239,9 @@ name = "git-graph-studio"
 version = "0.1.11"
 dependencies = [
  "aes-gcm",
- "base64 0.22.1",
+ "base64 0.23.1",
  "flate2",
- "getrandom 0.2.17",
+ "getrandom 0.3.4",
  "ggs-analysis",
  "ggs-base",
  "ggs-can",

@@ -343,7 +343,7 @@ fn master_key(home: &Path) -> Result<[u8; 32], String> {
     std::fs::create_dir_all(path.parent().expect("keys/ has a parent"))
         .map_err(|e| format!("create the keys directory: {e}"))?;
     let mut key = [0u8; 32];
-    getrandom::getrandom(&mut key).map_err(|e| format!("generate a master key: {e}"))?;
+    getrandom::fill(&mut key).map_err(|e| format!("generate a master key: {e}"))?;
     std::fs::write(&path, key).map_err(|e| format!("write {}: {e}", path.display()))?;
     #[cfg(unix)]
     {
@@ -361,7 +361,7 @@ fn seal(home: &Path, secret: &str) -> Result<String, String> {
     let key = master_key(home)?;
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
     let mut nonce = [0u8; 12];
-    getrandom::getrandom(&mut nonce).map_err(|e| format!("generate a nonce: {e}"))?;
+    getrandom::fill(&mut nonce).map_err(|e| format!("generate a nonce: {e}"))?;
     let sealed = cipher
         .encrypt(
             Nonce::from_slice(&nonce),

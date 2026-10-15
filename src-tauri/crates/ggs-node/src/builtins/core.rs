@@ -47,7 +47,7 @@ pub(super) fn random_bytes(
         ));
     }
     let mut bytes = vec![0u8; count as usize];
-    getrandom::getrandom(&mut bytes).map_err(|e| error(format!("random bytes: {e}")))?;
+    getrandom::fill(&mut bytes).map_err(|e| error(format!("random bytes: {e}")))?;
     JsArrayBuffer::from_byte_block(crate::byte_block(bytes), context)
         .map(JsValue::from)
 }
