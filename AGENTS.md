@@ -346,7 +346,7 @@ stage-unstage-discard), the Timeline of a file's commits, and the git command se
 Code's Git extension plus the gerrit contributions (amend, soft-reset to remote,
 commit-msg hook, `refs/for/` push).
 
-- Frontend: `src/features/scm/scm.ts`, `src/features/scm/gitCommands.ts`, `src/features/scm/fileHistory.ts`
+- Frontend: `src/features/scm/view.ts` (the SourceControlView class shell — fields, constructor, the refresh/selection/rendering lifetime and the sub-repo plumbing; the commit input, change groups, row actions and menus live in their concern files, assigned onto the prototype by the module facade), `src/features/scm/commitInput.ts`, `src/features/scm/groups.ts`, `src/features/scm/rowActions.ts`, `src/features/scm/menus.ts`, `src/features/scm/gitCommands.ts`, `src/features/scm/fileHistory.ts`
 - Backend: `src-tauri/src/cmd_scm.rs` (status over one parsed `git status --porcelain`, the
   Timeline's `file_log` over `git log --follow`, mutations through the git CLI),
   `src-tauri/src/scm_ops.rs` (the "..." menu operations plus the palette's branch/remote/
@@ -722,7 +722,7 @@ page shows the integration's state (`claude_mcp_status`).
   `CodeActionKind`, …) constructs), `src/hosts/extModuleLoader.ts` (the frame's CommonJS resolver
   over the activation preload `ext_load_code` — un-bundled multi-file packages and their
   `node_modules` load exactly as in Node: relative siblings, package.json `main`, cache,
-  circular partials, `MODULE_NOT_FOUND`), `src/hosts/ggsVscodeShim.ts` (the same `vscode` shim bundled as the IIFE ggs-node evaluates when a package's entry is a frame program — ggs-node's own frame-program host; a backend command's arguments cross JSON at both hops, which has no `undefined`, so its dispatch restores a top-level `null` arg to the `undefined` the caller passed — handlers branch on `arg !== void 0` (claude-code's `editor.open` computes its column that way), and the placeholder args the host's `claudeChatRun` sends landed as `null` and threw in Boa; frames need no restore, postMessage's structured clone keeps `undefined`), `src/hosts/nodeShims.ts` (the Node builtins — `path`,
+  circular partials, `MODULE_NOT_FOUND`), `src/hosts/ggsVscodeShim.ts` (the same `vscode` shim bundled as the IIFE ggs-node evaluates when a package's entry is a frame program — ggs-node's own frame-program host; a backend command's arguments cross JSON at both hops, which has no `undefined`, so its dispatch restores a top-level `null` arg to the `undefined` the caller passed — handlers branch on `arg !== void 0` (claude-code's `editor.open` computes its column that way), and the placeholder args the host's `claudeChatRun` sends landed as `null` and threw in Boa; frames need no restore, postMessage's structured clone keeps `undefined`), `src/hosts/nodeShims/` (the Node builtins, one file per builtin — path/events/util/os/fs/crypto/process with index.ts composing the module table; Buffer, the process internals and streams in shared/processSurfaces/stream — `path`,
   `os`, `events`, `util`, `fs` over the preload and the workspace-confined bridge, `Buffer`,
   `process`; real implementations for what a frame can serve — `child_process` through the
   host bridge, `nodeShims/processSurfaces.ts` + `shared.ts`, and `stream` —
