@@ -159,7 +159,10 @@ const ggsBashBin = process.platform === 'win32' ? sidecarBinary('ggs-bash', 'rel
 	await buildNodeHost(appDir, out);
 
 	// The `vscode` shim for ggs-node's own hosting of frame programs: an IIFE the Boa
-	// context evaluates, installing `__ggsVscodeShim` on its global.
+	// context evaluates, installing `__ggsVscodeShim` on its global. Only this second
+	// bundle of the block builds inline — its vite handle is imported here, after
+	// buildNodeHost() took the first bundle (and its own import) away.
+	const { build } = await import('vite');
 	await build({
 		configFile: false,
 		logLevel: 'warn',
