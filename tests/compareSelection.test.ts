@@ -4,8 +4,8 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { EditorGroup } from '../src/editor';
-import { Explorer } from '../src/explorer';
+import { EditorGroup } from '../src/features/editor';
+import { Explorer } from '../src/features/explorer';
 import { backend } from './tauriMock';
 import { click, flush, menuItem, menuLabels, rightClick, texts } from './helpers';
 

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { pathOptions, snippetCompletionSource, wordCompletion, fileNameFacet } from '../src/autocomplete';
-import { BUILTIN_LANGUAGE_COUNT, languageOf, loadWorkspaceSnippets, parseCodeSnippets, resolveVariables, snippetsFor } from '../src/snippetRegistry';
+import { pathOptions, snippetCompletionSource, wordCompletion, fileNameFacet } from '../src/features/editor';
+import { BUILTIN_LANGUAGE_COUNT, languageOf, loadWorkspaceSnippets, parseCodeSnippets, resolveVariables, snippetsFor } from '../src/features/editor';
 import { EditorState } from '@codemirror/state';
 import { CompletionContext } from '@codemirror/autocomplete';
 import { backend } from './tauriMock';

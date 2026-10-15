@@ -1,0 +1,6 @@
+// The Quick Open module's facade: the module's public surface under one import path —
+// cross-feature imports resolve here (plan §5.3); the module's own files reach each
+// other directly.
+
+export * from './filePicker';
+export * from './fuzzy';

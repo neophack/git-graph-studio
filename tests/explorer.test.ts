@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { Explorer } from '../src/explorer';
+import { Explorer } from '../src/features/explorer';
 import { setRemoteEnv } from '../src/remote/session';
 import { provideHook } from '../src/platform/hooks';
 import { basename } from '../src/platform/ui';

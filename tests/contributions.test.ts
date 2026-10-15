@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { commands } from '../src/platform/commands';
-import { applyContributions, commandIconContent, contextUri, evaluateWhen, extensionViewContributions, menuItems, menuSection, normalizeKeybinding, registerContextProvider, removeContributions, type ManifestContributes } from '../src/contributions';
+import { applyContributions, commandIconContent, contextUri, evaluateWhen, extensionViewContributions, menuItems, menuSection, normalizeKeybinding, registerContextProvider, removeContributions, type ManifestContributes } from '../src/features/extensions';
 import { saveExtSetting } from '../src/platform/state';
 
 const manifest: ManifestContributes = {

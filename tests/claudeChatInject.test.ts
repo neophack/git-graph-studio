@@ -5,7 +5,7 @@
 // with an empty input, a click on it interrupts, a submit with text sends.
 
 import { describe, expect, it } from 'vitest';
-import { answerChatPermission, answerChatQuestion, chatBusy, chatControls, chatModelPill, interruptChat, pickChatModel, pressSend, setChatInput, setChatPermissionMode } from '../src/claudeChatInject';
+import { answerChatPermission, answerChatQuestion, chatBusy, chatControls, chatModelPill, interruptChat, pickChatModel, pressSend, setChatInput, setChatPermissionMode } from '../src/features/extensions';
 
 function chatPage() {
 	const doc = document.implementation.createHTMLDocument('chat');

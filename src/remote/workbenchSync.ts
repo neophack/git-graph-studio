@@ -24,9 +24,9 @@
 // local-only while a session restore rebuilds this frontend's own tabs.
 
 import { emit as tauriEmit, listen as tauriListen } from '../platform/ipc/core';
-import { inputId, type EditorInput } from '../editor';
+import { inputId, type EditorInput } from '../features/editor';
 import type { EditorPlacement } from '../features/editor/types';
-import type { ActiveEditorInfo, EditorArea } from '../editorArea';
+import type { ActiveEditorInfo, EditorArea } from '../features/editor';
 import { phoneShell } from './nav';
 import { frontendId, remoteEnv } from './session';
 import { withinRoots } from './pathGate';

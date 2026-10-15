@@ -4,7 +4,7 @@
 // once the workbench's first frame is up. The window is never a blank dark rectangle.
 
 import '@vscode/codicons/dist/codicon.css';
-import './shell.css';
+import './workbench/shell.css';
 import { invoke } from './platform/ipc/core';
 import { initSettings, loadSettingsFile } from './platform/settings';
 import { installDesktopRemoteHooks } from './remote/desktopHooks';
@@ -32,7 +32,7 @@ requestAnimationFrame(() => {
 });
 
 
-void import('./workbench')
+void import('./workbench/workbench')
 	.then(({ bootWorkbench }) => bootWorkbench())
 	.catch((error) => {
 		const splash = document.getElementById('boot-splash');

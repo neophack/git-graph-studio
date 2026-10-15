@@ -4,8 +4,8 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { EditorGroup } from '../src/editor';
-import { HexCompareView } from '../src/hexCompare';
+import { EditorGroup } from '../src/features/editor';
+import { HexCompareView } from '../src/features/viewers';
 import { backend } from './tauriMock';
 import { click, flush, menuItem, texts } from './helpers';
 

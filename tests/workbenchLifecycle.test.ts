@@ -5,11 +5,11 @@
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { applyContributions, removeContributions } from '../src/contributions';
+import { applyContributions, removeContributions } from '../src/features/extensions';
 import { commands } from '../src/platform/commands';
-import { ExtensionHost } from '../src/extHost';
+import { ExtensionHost } from '../src/features/extensions';
 import * as state from '../src/platform/state';
-import { FS_CHANGED_EVENT, OPEN_PATHS_EVENT, Workbench } from '../src/workbench';
+import { FS_CHANGED_EVENT, OPEN_PATHS_EVENT, Workbench } from '../src/workbench/workbench';
 import { backend, windowApi } from './tauriMock';
 import { click, flush, key, notificationButton, texts } from './helpers';
 
@@ -33,7 +33,7 @@ const baseWindow = windowApi.getCurrentWindow;
 
 beforeAll(async () => {
 	// The editor widget lives in an async chunk; pay its one-time transform before the flows.
-	await import('../src/textEditor');
+	await import('../src/features/editor');
 });
 
 beforeEach(async () => {
@@ -403,7 +403,7 @@ describe('the About box', () => {
 
 describe('the integrated terminal\'s cd', () => {
 	it('quotes paths the way PowerShell and POSIX shells both read literally', async () => {
-		const { quoteShellPath } = await import('../src/workbench');
+		const { quoteShellPath } = await import('../src/workbench/workbench');
 		expect(quoteShellPath('C:\\repo\\src')).toBe('C:\\repo\\src');
 		expect(quoteShellPath('/home/me/repo')).toBe('/home/me/repo');
 		// A space needs quoting; single quotes stop PowerShell from expanding `$` and backticks.

@@ -16,14 +16,14 @@ import { backend, Channel } from './tauriMock';
 import { initializations, rendered } from './mermaidStub';
 
 
-let AnalysisView: typeof import('../src/analysisView').AnalysisView;
-let createAnalysisPage: typeof import('../src/analysisPages').createAnalysisPage;
-let ANALYSIS_TOOLS: typeof import('../src/analysisTools').ANALYSIS_TOOLS;
+let AnalysisView: typeof import('../src/features/analysis').AnalysisView;
+let createAnalysisPage: typeof import('../src/features/analysis').createAnalysisPage;
+let ANALYSIS_TOOLS: typeof import('../src/features/analysis').ANALYSIS_TOOLS;
 
 async function modules(): Promise<void> {
-	({ AnalysisView } = await import('../src/analysisView'));
-	({ createAnalysisPage } = await import('../src/analysisPages'));
-	({ ANALYSIS_TOOLS } = await import('../src/analysisTools'));
+	({ AnalysisView } = await import('../src/features/analysis'));
+	({ createAnalysisPage } = await import('../src/features/analysis'));
+	({ ANALYSIS_TOOLS } = await import('../src/features/analysis'));
 }
 
 function host(): HTMLElement {

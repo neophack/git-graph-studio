@@ -147,14 +147,14 @@ The application frame: custom title bar (menus, command center, window controls)
 bar, side bar, editor area host, bottom panel and status bar, plus the boot splash that
 guarantees the window is never a blank dark rectangle.
 
-- Frontend: `src/main.ts` (boot entry), `src/workbench.ts` (composition root),
-  `src/titlebar.ts`, `src/statusbar.ts`, `src/panel.ts` (panel chrome; its Output view is
+- Frontend: `src/main.ts` (boot entry), `src/workbench/workbench.ts` (composition root),
+  `src/workbench/titlebar.ts`, `src/workbench/statusbar.ts`, `src/workbench/panel.ts` (panel chrome; its Output view is
   the Git channel), `src/platform/ui/` (shared DOM kit: dom, codicon, notify, progress,
   contextMenu, quickInput under one facade — codicons, notifications, context menus, quick
   input), `src/platform/fileIcons.ts` / `src/platform/extAssets.ts` (the file-icon mapping and
   extension-asset data URLs every view decorates with), `src/platform/lazy.ts` (async-chunk
   loaders), `src/platform/state.ts` (localStorage
-  persistence), `src/shell.css`
+  persistence), `src/workbench/shell.css`
 - Backend: `src-tauri/src/lib.rs` / `main.rs` (crate inventory and app entry),
   `src-tauri/src/cmd_app.rs` (the app-instance domain: File → New Window's
   `app_new_instance` spawns a sibling process — the multi-open entry every platform
@@ -179,7 +179,7 @@ and the keyboard all resolve through one registry. Settings, keybindings and dis
 language are user data under `~/.ggs/`; theme and UI quality are enforced, not hoped for.
 
 - Frontend: `src/platform/commands.ts` (registry), `src/platform/keybindings.ts`, `src/platform/settings.ts` (setting
-  registry `SETTING_DEFS`), `src/settingsPanel.ts` (generated Settings dialog),
+  registry `SETTING_DEFS`), `src/workbench/settingsPanel.ts` (generated Settings dialog),
   `src/platform/i18n.ts` (`t(key)`, en / zh-cn), `src/themeMetrics.ts` (WCAG contrast per theme),
   `src/uiMetrics.ts` (layout invariants)
 - Backend: `src-tauri/src/cmd_assoc.rs` (the File Associations setting: OS-level
@@ -205,7 +205,7 @@ full context menu, and external file drops (a drag from the OS over the tree cop
 the folder under the cursor — the row itself, a file row's parent, or the root; elsewhere
 the drop keeps opening the files, `workbench.ts` routes Tauri's window-level drag events)
 — over filesystem services that also serve the editors — and the workbench's **file
-transfers** (rewritten 2026-10-13): one vocabulary, every environment. `src/transfer.ts`
+transfers** (rewritten 2026-10-13): one vocabulary, every environment. `src/features/explorer/transfer.ts`
 is the layer the Explorer's context menu, the remote shell's commands and the mirror's
 appended rows all ride — `uploadInto` / `downloadTo` dispatch on the environment: a
 browser session's own UI runs the remote wire transport (module 19's chunked uploads and
@@ -221,9 +221,9 @@ window the desktop rows hide (`transferMenuShown` over the hostStub's cached vie
 answer): the viewer's own device-run entries are the vocabulary then, and a PC-run row
 would open a dialog the phone cannot see.
 
-- Frontend: `src/explorer.ts` (the context menu adapts to the remote shell: the
+- Frontend: `src/features/explorer/explorer.ts` (the context menu adapts to the remote shell: the
   desktop-only Reveal hides; the transfer rows show in every environment, mirrored
-  windows excepted), `src/transfer.ts` (the transfer layer, the `TransferSink` progress
+  windows excepted), `src/features/explorer/transfer.ts` (the transfer layer, the `TransferSink` progress
   surface the mirror page re-installs)
 - Backend: `src-tauri/src/cmd_fs.rs` (tree, file contents of the working tree / index / any
   revision, new-rename-delete, the external-drop copy-in `copy_into` — a dragged entry
@@ -245,7 +245,7 @@ would open a dialog the phone cannot see.
 VS Code's anythingQuickAccess model: the walked file list pre-lowered once, queries scanned
 in event-loop-yielding chunks.
 
-- Frontend: `src/filePicker.ts`, `src/fuzzy.ts` (the fuzzyScorer port)
+- Frontend: `src/features/quickOpen/filePicker.ts`, `src/features/quickOpen/fuzzy.ts` (the fuzzyScorer port)
 - Backend: the `ggs-index` crate's `fuzzy` module (server-side scoring — a keystroke ships
   rows, not the tree) behind the `src-tauri/src/cmd_fuzzy.rs` command adapters
 
@@ -257,9 +257,9 @@ modes, the Context Window) over the persistent workspace symbol index: interned 
 per-file fingerprints and per-name occurrence lists under `~/.ggs/index/`, resumed on open,
 updated file-by-file by the watcher.
 
-- Frontend: `src/searchView.ts`, `src/callTree.ts`, `src/contextView.ts` (the Context
+- Frontend: `src/features/search/searchView.ts`, `src/features/search/callTree.ts`, `src/features/search/contextView.ts` (the Context
   Window panel page - the definition of the symbol under the cursor),
-  `src/symbolDbView.ts` (the Symbol Database page - the index as a collapsible
+  `src/features/search/symbolDbView.ts` (the Symbol Database page - the index as a collapsible
   folder / file / symbol tree with reference counts, filter and rebuild)
 - Backend: the `ggs-index` crate (`src-tauri/crates/ggs-index/`) — `scan` (the shared
   matcher / glob / searchable-read vocabulary), `search` (the rayon-parallelised streaming
@@ -281,14 +281,14 @@ with on-demand language support, windowed editing of large files over the backen
 completion (document words, snippets, paths), the find/replace widget, bracket-pair
 colouring, sticky scroll, minimap, bookmarks, markdown preview.
 
-- Frontend: `src/editor.ts` (groups, tabs, breadcrumbs), `src/editorArea.ts` (split grid),
-  `src/textEditor.ts` (CodeMirror host), `src/comments.ts` (VS Code's comment toggles),
-  `src/docEditView.ts` (windowed large-file editor, scrolling on module 7's `src/scroll/`),
-  `src/docFind.ts` (the whole-file find/replace bar the windowed editor and the Fast Viewer
-  serve, over `viewer_find` / `viewer_replace`), `src/editorExtras.ts`, `src/autocomplete.ts`,
-  `src/snippetRegistry.ts`, `src/findWidget.ts`, `src/findOptions.ts` (options shared with
+- Frontend: `src/features/editor/editor.ts` (groups, tabs, breadcrumbs), `src/features/editor/editorArea.ts` (split grid),
+  `src/features/editor/textEditor.ts` (CodeMirror host), `src/comments.ts` (VS Code's comment toggles),
+  `src/features/editor/docEditView.ts` (windowed large-file editor, scrolling on module 7's `src/scroll/`),
+  `src/features/editor/docFind.ts` (the whole-file find/replace bar the windowed editor and the Fast Viewer
+  serve, over `viewer_find` / `viewer_replace`), `src/features/editor/editorExtras.ts`, `src/features/editor/autocomplete.ts`,
+  `src/features/editor/snippetRegistry.ts`, `src/features/editor/findWidget.ts`, `src/findOptions.ts` (options shared with
   Workspace Search), `src/findHistory.ts` (the find and search fields' query history — the
-  Up/Down recall — shared with Workspace Search), `src/bookmarks.ts`, `src/cmTheme.ts`,
+  Up/Down recall — shared with Workspace Search), `src/features/editor/bookmarks.ts`, `src/features/editor/cmTheme.ts`,
   `src/platform/markdown.ts` (preview; also renders extension READMEs)
 - Backend: the `ggs-text` crate (`src-tauri/crates/ggs-text/`: `viewer/doc.rs` ropey rope
   + syntect highlight checkpoints; `viewer/find.rs` the whole-document find/replace
@@ -307,9 +307,9 @@ paged, never loaded whole.
   index, clamped, with the autoscroll strategies; `wheel.ts` reads a wheel event as system
   lines per notch or trackpad pixels; `amount.ts` the page distance; `input.ts` the DOM
   listeners; `scrollbar.ts` the drawn scrollbar — the surfaces scroll nothing natively, so
-  no document is too tall for the layout engine), `src/fastView.ts` (Fast Viewer —
-  backend-rope document, the visible rows only), `src/hexView.ts` (offset / hex / ASCII),
-  `src/hexCompare.ts` (byte-aligned two-pane compare)
+  no document is too tall for the layout engine), `src/features/viewers/fastView.ts` (Fast Viewer —
+  backend-rope document, the visible rows only), `src/features/viewers/hexView.ts` (offset / hex / ASCII),
+  `src/features/viewers/hexCompare.ts` (byte-aligned two-pane compare)
 - Backend: `src-tauri/crates/ggs-text/` (the viewer engine), byte comparison in the
   `ggs-index` crate's `hexdiff`, chunked reads via `ggs-fs` (the `cmd_fs.rs` adapters)
 - Bench: `src-tauri/examples/viewer_bench.rs` (the open path's phases — syntax set, rope,
@@ -321,8 +321,8 @@ paged, never loaded whole.
 The Beyond Compare workflow: folder comparison with sync actions, git-conflict resolution
 in place, and side-by-side diffs of any two revisions.
 
-- Frontend: `src/folderCompare.ts`, `src/mergeEditor.ts` (walk conflicts, keep
-  ours/theirs/both, Mark Resolved), diff editors in `src/editor.ts` / `src/textEditor.ts`
+- Frontend: `src/features/compare/folderCompare.ts`, `src/features/compare/mergeEditor.ts` (walk conflicts, keep
+  ours/theirs/both, Mark Resolved), diff editors in `src/features/editor/editor.ts` / `src/features/editor/textEditor.ts`
 - Backend: folder comparison in the `ggs-index` crate's `compare`, revision contents via
   the `ggs-git` crate's `revision` (the `cmd_fs.rs` / `cmd_scm.rs` adapters)
 
@@ -333,7 +333,7 @@ stage-unstage-discard), the Timeline of a file's commits, and the git command se
 Code's Git extension plus the gerrit contributions (amend, soft-reset to remote,
 commit-msg hook, `refs/for/` push).
 
-- Frontend: `src/scm.ts`, `src/gitCommands.ts`, `src/fileHistory.ts`
+- Frontend: `src/features/scm/scm.ts`, `src/features/scm/gitCommands.ts`, `src/features/scm/fileHistory.ts`
 - Backend: `src-tauri/src/cmd_scm.rs` (status over one parsed `git status --porcelain`, the
   Timeline's `file_log` over `git log --follow`, mutations through the git CLI),
   `src-tauri/src/scm_ops.rs` (the "..." menu operations plus the palette's branch/remote/
@@ -373,14 +373,14 @@ the extension's artifacts — `scripts/check-seams.mjs` fails the build on any r
   `node` beside the app, or the `PATH`) runs `node node-host.cjs <extension-dir> <entry>`
   — VS Code's own architecture,
   where an extension host is a node process and a package's `.node` loads as the NAPI addon
-  it is. The bundle (`src/nodeHost.ts`, built by `prepare.mjs` into `node-host.cjs`) carries
+  it is. The bundle (`src/hosts/nodeHost.ts`, built by `prepare.mjs` into `node-host.cjs`) carries
   the same `vscode` shim the frames use over the ggs-ext/1 stdio channel: extension→host
   services cross as `ggs.hostRequest` requests (forwarded to the workbench, which answers
   through the same `serve` path a frame's RPC takes), host pushes arrive as
   `ggs.hostEvent` notifications, and only `require('vscode')` is intercepted — a package's
   ESM, workers, `node_modules` and `.node` all behave natively. The ESM graph's static
   `import 'vscode'` rides the same shim through a `module.register()` loader hook
-  (`src/nodeHostEsm.ts`, the generated data-URL hooks; below Node 20.6 the old
+  (`src/hosts/nodeHostEsm.ts`, the generated data-URL hooks; below Node 20.6 the old
   ERR_MODULE_NOT_FOUND stands, logged), and a `"type": "module"` entry's `require` falls
   back to the dynamic import on both refusal codes (`ERR_REQUIRE_ESM`, and
   `ERR_REQUIRE_ASYNC_MODULE` — a top-level-await graph on the Node lines that grew
@@ -394,7 +394,7 @@ the extension's artifacts — `scripts/check-seams.mjs` fails the build on any r
   still naming the retired `ggx-rpc/1` fails its start with an upgrade hint),
   `src-tauri/src/ext_protocol.rs` (the one wire protocol, `ggs-ext/1`: JSON-RPC 2.0 over
   stdio, `serve_plugin` dispatching every request onto its own thread — the view's opening
-  burst of reads never serializes), `src/extHost.ts` (the page services:
+  burst of reads never serializes), `src/features/extensions/extHost.ts` (the page services:
   `theme.stylesheet`, `backend.run`, `workbench.*`, singleton pages, theme/workspace pushes;
   plus the change pushes that keep a page off polling — the watcher's every batch rides the
   page channel as `kind: 'fs'` (root/paths/`gitChanged`/`truncated`, so a stage or commit's
@@ -412,7 +412,7 @@ setting exists, the terminal opens the system's own `$SHELL`, and the Settings d
 hides the row); the choice rides every `pty_create`, so it reaches the next terminal
 without a restart.
 
-- Frontend: `src/terminal.ts`
+- Frontend: `src/features/terminal/terminal.ts`
 - Backend: `src-tauri/src/pty.rs`
 
 ### 12. Extension Platform
@@ -653,13 +653,13 @@ teaching the model the workflow (map a name's blast radius before editing, chase
 cycles while refactoring, self-check dead code and secrets after). The MCP Server
 page shows the integration's state (`claude_mcp_status`).
 
-- Frontend: `src/extensionsPanel.ts` (the Extensions view: the installed list with detail
+- Frontend: `src/features/extensions/extensionsPanel.ts` (the Extensions view: the installed list with detail
   pages and backend status: the featured packages' rows, each its Open VSX entry merged
   with its installed state — one-click Install / Update by the installed version, the
   bundled offer as the offline fallback — and anything else installed under "Other
-  installed"), `src/aiProviders.ts` (the AI provider bridge's store client and the
+  installed"), `src/features/providers/aiProviders.ts` (the AI provider bridge's store client and the
   sidebar switcher chip — the active provider's name on the Claude section header, the
-  quick pick that switches or opens the page), `src/providerUsageView.ts` (the bridge's
+  quick pick that switches or opens the page), `src/features/providers/providerUsageView.ts` (the bridge's
   usage surfaces: the token-usage curve — `provider_usage`'s per-UTC-hour answer
   re-bucketed into local today / 7-day / 30-day ranges, one smooth line with a hover
   breakdown of cache hits, cache writes, uncached input and output, tokens only, never
@@ -673,29 +673,29 @@ page shows the integration's state (`claude_mcp_status`).
   inaccurate"), so the gate watches the pane's chat iframe and clicks the section's own
   toggle once per loaded page when it first renders expanded; the page persists the
   collapsed state itself, the user's later expansion is never fought within a page, and
-  under the official provider the page is never touched), `src/providersPage.ts` (the Model
+  under the official provider the page is never touched), `src/features/providers/providersPage.ts` (the Model
   Providers page — flat and compact: the usage card, the profiles as one-line rows,
   the add/edit form whose key field travels once into the
-  backend's seal, activate and delete), `src/nodeHost.ts` (the real-Node
+  backend's seal, activate and delete), `src/hosts/nodeHost.ts` (the real-Node
   extension host's entry, compiled to `node-host.cjs`: stdio ggs-ext/1 server, the shared
   `vscode` shim over a stdio bridge, `require('vscode')` interception, ESM fallback —
-  VS Code's own extension-host shape), `src/nodeHostEsm.ts` (the generated loader hooks
+  VS Code's own extension-host shape), `src/hosts/nodeHostEsm.ts` (the generated loader hooks
   mapping an ESM graph's static `import 'vscode'` onto that same shim — named exports
-  over the host instance, the well-known unserved names linking undefined), `src/extHost.ts` (the extension host for VSIX
+  over the host instance, the well-known unserved names linking undefined), `src/features/extensions/extHost.ts` (the extension host for VSIX
   extensions — frames without a Node runtime, remote handles over ggs-ext/1 with one;
   the page host, the process-command dispatch, and the host services behind the
   `vscode` API — webview panels, webview views, status bar items, output channels, progress
   toasts, memento persistence, tree views, activationEvents; the activation policy also
   derives the implicit `onLanguage` events VS Code 1.74 reads off `contributes.languages` /
   `contributes.grammars`) + `ext-host.html` +
-  `src/extHostBoot.ts` (one sandboxed frame per extension), `src/vscodeApi.ts` (the `vscode`
+  `src/hosts/extHostBoot.ts` (one sandboxed frame per extension), `src/hosts/vscodeApi.ts` (the `vscode`
   shim the frames require; unsupported surfaces degrade to inert registrations instead of
   throwing — an activation must survive whatever a foreign package registers — and every
   value type a load-time destructure touches (`Position`, `Range`, `SnippetString`,
-  `CodeActionKind`, …) constructs), `src/extModuleLoader.ts` (the frame's CommonJS resolver
+  `CodeActionKind`, …) constructs), `src/hosts/extModuleLoader.ts` (the frame's CommonJS resolver
   over the activation preload `ext_load_code` — un-bundled multi-file packages and their
   `node_modules` load exactly as in Node: relative siblings, package.json `main`, cache,
-  circular partials, `MODULE_NOT_FOUND`), `src/ggsVscodeShim.ts` (the same `vscode` shim bundled as the IIFE ggs-node evaluates when a package's entry is a frame program — ggs-node's own frame-program host; a backend command's arguments cross JSON at both hops, which has no `undefined`, so its dispatch restores a top-level `null` arg to the `undefined` the caller passed — handlers branch on `arg !== void 0` (claude-code's `editor.open` computes its column that way), and the placeholder args the host's `claudeChatRun` sends landed as `null` and threw in Boa; frames need no restore, postMessage's structured clone keeps `undefined`), `src/nodeShims.ts` (the Node builtins — `path`,
+  circular partials, `MODULE_NOT_FOUND`), `src/hosts/ggsVscodeShim.ts` (the same `vscode` shim bundled as the IIFE ggs-node evaluates when a package's entry is a frame program — ggs-node's own frame-program host; a backend command's arguments cross JSON at both hops, which has no `undefined`, so its dispatch restores a top-level `null` arg to the `undefined` the caller passed — handlers branch on `arg !== void 0` (claude-code's `editor.open` computes its column that way), and the placeholder args the host's `claudeChatRun` sends landed as `null` and threw in Boa; frames need no restore, postMessage's structured clone keeps `undefined`), `src/hosts/nodeShims.ts` (the Node builtins — `path`,
   `os`, `events`, `util`, `fs` over the preload and the workspace-confined bridge, `Buffer`,
   `process`; real implementations for what a frame can serve — `child_process` through the
   host bridge, `nodeShims/processSurfaces.ts` + `shared.ts`, and `stream` —
@@ -703,26 +703,26 @@ page shows the integration's state (`claude_mcp_status`).
   `pipe`, `pipeline` and async iteration — call-time failures for what it cannot
   (`net`), each reported to the extension host log, so a `require` of them never kills
   an activation),
-  `src/extLog.ts` (the extension host log: one record of every extension-platform
+  `src/features/extensions/extLog.ts` (the extension host log: one record of every extension-platform
   anomaly — activation failures with their stacks, command / provider / listener
   exceptions, failed host requests, each unsupported VS Code API a package reaches for —
   into the Output view's "Extension Host" channel and `~/.ggs/logs/ext-host.log`, at the
   `extensionLogLevel` setting's threshold; the `extensions.showLog` /
   `extensions.openLogFile` commands),
-  `src/claudeChatInject.ts` (the host's Claude Code chat driver behind
+  `src/features/extensions/claudeChatInject.ts` (the host's Claude Code chat driver behind
   `ggs.claudeChat.*`: the composer typed into and sent, the turn interrupted, the model
   picker chosen, the AskUserQuestion card answered, the Account & usage bar collapsed
   through its own toggle — the page's own DOM, same-origin),
-  `src/editorDiagnostics.ts` (the diagnostics store: the host's
+  `src/features/editor/editorDiagnosticsView.ts (the rendering half) + the store in src/features/extensions/editorDiagnostics.ts` (the diagnostics store: the host's
   `languages.createDiagnosticCollection` entries land as CodeMirror squiggles in the open
   editors) + `src/editorDiagnosticsView.ts` (the CodeMirror half, loaded with the editor
   suite so the lint library stays off the first-paint bundle),
-  `src/treeView.ts` (the generic tree view host — the sidebar
+  `src/features/extensions/treeView.ts` (the generic tree view host — the sidebar
   surface `contributes.views` declares and `createTreeView` feeds),
-  `src/contributions.ts` (manifest contributions merged into the workbench; the manifest
+  `src/features/extensions/contributions.ts` (manifest contributions merged into the workbench; the manifest
   shapes VS Code accepts — `configuration` as object or array, `keybindings` as object or
   array, views with `type: "webview"` — normalize on read); the surfaces it
-  reaches into: `src/statusbar.ts` (extension items), `src/panel.ts` (the Output view's
+  reaches into: `src/workbench/statusbar.ts` (extension items), `src/workbench/panel.ts` (the Output view's
   channel dropdown), `src/platform/ui/` (`progressToast`)
 - Backend: the `ggs-ext` crate (`src-tauri/crates/ggs-ext/`: `store` — the install /
   upgrade / uninstall engine and the bundled-package scan over roots the app resolves;
@@ -983,7 +983,7 @@ CANoe's Statistics window and graphics window in one view: `.blf` / `.asc` trace
 the backend, rendered asynchronously — per-channel counts, bus load, per-identifier cycle
 times, frame-loss blame, raw frame browsing and SVG charts.
 
-- Frontend: `src/canLogView.ts`, `src/canRawView.ts`, `src/canChart.ts`
+- Frontend: `src/features/can/canLogView.ts`, `src/features/can/canRawView.ts`, `src/features/can/canChart.ts`
 - Backend: `src-tauri/src/can_log.rs` (parsing, statistics, blf↔asc conversion)
 
 ### 14. Performance Lab
@@ -998,15 +998,15 @@ module's declared checks — grouped in module-map order — and streams pass / 
 check. Structural checks (a button exists, its menu entry and palette row construct, its
 enablement answers) always run; live execution is limited to an explicit safe set (view
 switches, toggles, pure helpers) so a click in a real session never writes, spawns or
-dialogs. The runner (`src/selftest.ts`) times and streams each check with a per-check
-timeout; the suites (`src/selfTestSuites.ts`, a lazy chunk) declare the 17 module groups;
-the page (`src/selfTestPage.ts`) renders and copies the report. The same suites run in CI
+dialogs. The runner (`src/features/selftest/selftest.ts`) times and streams each check with a per-check
+timeout; the suites (`src/features/selftest/selfTestSuites.ts`, a lazy chunk) declare the 17 module groups;
+the page (`src/features/selftest/selfTestPage.ts`) renders and copies the report. The same suites run in CI
 against the scripted backend (`tests/selfTest.test.ts`), so the in-app click and CI assert
 the identical checks.
 
-- Frontend: `src/selftest.ts` (the self-test runner: classification, timing, per-check
-  timeout, the Markdown report), `src/selfTestSuites.ts` (the 17 module groups' checks, a
-  lazy chunk), `src/selfTestPage.ts` (the report page: streaming rows, per-module re-run,
+- Frontend: `src/features/selftest/selftest.ts` (the self-test runner: classification, timing, per-check
+  timeout, the Markdown report), `src/features/selftest/selfTestSuites.ts` (the 17 module groups' checks, a
+  lazy chunk), `src/features/selftest/selfTestPage.ts` (the report page: streaming rows, per-module re-run,
   copy report)
 - Backend: `src-tauri/src/measure.rs` (headless `--measure` probes),
   `src-tauri/src/stage_bench.rs` (launch-stage timing), `src-tauri/tests/it/perf.rs`
@@ -1064,7 +1064,7 @@ workspace text search), `index_status` — plus module 17's analysis tools
 is logged as one JSON line to `~/.ggs/logs/mcp.log` (rotated past 1 MB), which the
 in-app MCP Server page shows. stderr is logs; stdout is protocol only.
 
-- Frontend: `src/mcpPage.ts` (the MCP Server page — the connection snippets with copy
+- Frontend: `src/features/mcp/mcpPage.ts` (the MCP Server page — the connection snippets with copy
   buttons, the tool catalogue, the recent-call log; listed by module 17's tool registry
   as the Analysis sidebar's sixth entry and hosted in its editor pages, loading lazily
   with them)
@@ -1139,10 +1139,10 @@ Module Analysis drawing is mermaid's own output (ELK layout) over a backend-buil
 model: the page never lays anything out, it renders the source and ports gitdiagram's
 viewport (pan, zoom, states) around it.
 
-- Frontend: `src/analysisView.ts` (the sidebar), `src/analysisTools.ts` (the shared tool
-  registry), `src/analysisPages.ts` (the lazy result pages: the streaming reports, the
+- Frontend: `src/features/analysis/analysisView.ts` (the sidebar), `src/features/analysis/analysisTools.ts` (the shared tool
+  registry), `src/features/analysis/analysisPages.ts` (the lazy result pages: the streaming reports, the
   Import Graph list, and the Module Analysis page — the backend-built mermaid source
-  on the mermaid viewport beside its tree), `src/moduleDiagram.ts` (the Module
+  on the mermaid viewport beside its tree), `src/features/analysis/moduleDiagram.ts` (the Module
   Analysis drawing: mermaid + ELK rendering of `analysis_module_diagram`'s source,
   gitdiagram's viewport around it — pan/zoom, the zoom toolbar, the delegated
   selection states)
@@ -1491,7 +1491,7 @@ test-macos pass `-- --skip ggs_bash`).
   `~/.ggs/settings.json` write and only then invokes `providers_shell_refresh` —
   the restart thread re-reads that file for the spawn environment, and a refresh
   racing the write respawned the backend under the old shell, 2026-10-13), the
-  shell choice on every `pty_create` in `src/terminal.ts`, the shell spawn in
+  shell choice on every `pty_create` in `src/features/terminal/terminal.ts`, the shell spawn in
   `src-tauri/src/pty.rs` (`shell_command`)
 - Tests: the `#[cfg(test)]` suites through `src-tauri/src/ggs_bash/` (the language, the
   dialect round-trip, the invocation-dialect parser, and the e2e batches in
@@ -1765,7 +1765,7 @@ database) carries the link through NAT. The whole design lives in
   appended rows carry `data-ggs-local` (input never forwards them; the entries shift nothing
   above, so the PC items' replay rects stay exact), their click closes the mirrored surface
   (an Escape for menus, a press on the sheet's backdrop — its Escape listener sits where a
-  replayed key never lands) and rides `src/transfer.ts` (the shared layer) over this page's
+  replayed key never lands) and rides `src/features/explorer/transfer.ts` (the shared layer) over this page's
   own transport, whose
   progress / notices report through `setTransferSink` — the replica installs
   `mirror/transferSink.ts` (a small toast; the workbench's `#notifications` never exists
@@ -1944,7 +1944,7 @@ database) carries the link through NAT. The whole design lives in
   before this a page reload left every extension panel unopenable and the sidebar's
   webview views blank), and the explorer's context menu hides the desktop-only
   "Reveal in File Explorer" on the remote shell — its transfer entries (2026-10-12; since
-  2026-10-13's rewrite one vocabulary in every environment, module 3's `src/transfer.ts`:
+  2026-10-13's rewrite one vocabulary in every environment, module 3's `src/features/explorer/transfer.ts`:
   a file's Download, a folder's Download as Zip and Upload Files / Folder Here, riding
   `downloadTo` / `uploadInto` — progress toast, per-file failures collected and notified,
   never a silent hang; the wire transport loads on first use, so the desktop bundle never
@@ -2106,7 +2106,7 @@ under the opt-in).
 Every `node` backend hosts on the bundled pretend Node runtime (`ggs-node`, the
 `node-runtime` feature) — the app never depends on, or spawns, a system Node, and ggs-node
 is itself the N-API host a package's `.node` addon (the engine `git-graph.node`) loads
-through. The real-Node extension host (`node node-host.cjs`, `src/nodeHost.ts` — `.node`,
+through. The real-Node extension host (`node node-host.cjs`, `src/hosts/nodeHost.ts` — `.node`,
 ESM, workers and `node_modules` behave natively, the `vscode` API crossing ggs-ext/1 as
 `ggs.hostRequest`s the workbench serves) is the explicit `GGS_REAL_NODE=1` opt-in; the
 sandboxed frames host main-only packages with no backend, and the deleted C-ABI hosts

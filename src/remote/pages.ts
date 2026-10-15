@@ -11,7 +11,7 @@
 // and the launchers are whatever an installed manifest places in `scm/title`'s navigation
 // group — the same entries Source Control renders as its header buttons.
 import { commands } from '../platform/commands';
-import { codiconOf, resolvedMenuEntries, runMenuEntry, type ResolvedMenuEntry } from '../contributions';
+import { codiconOf, resolvedMenuEntries, runMenuEntry, type ResolvedMenuEntry } from '../features/extensions';
 import { extFileDataUrl } from '../platform/extAssets';
 import { t } from '../platform/i18n';
 import { revealEditorPage, dismissFullScreenSideView } from './nav';

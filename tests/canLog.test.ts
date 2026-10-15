@@ -9,10 +9,10 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { EditorGroup } from '../src/editor';
+import { EditorGroup } from '../src/features/editor';
 import { isCanLog } from '../src/platform/fileIcons';
-import { busLoad, formatCycle, idHex, parseIdFilter, progressText, type CanIntervals, type CanLogStats, type CanProgress } from '../src/canLogView';
-import { CanRawView, type CanFrameLine } from '../src/canRawView';
+import { busLoad, formatCycle, idHex, parseIdFilter, progressText, type CanIntervals, type CanLogStats, type CanProgress } from '../src/features/can';
+import { CanRawView, type CanFrameLine } from '../src/features/can';
 import { backend, Channel, dialog } from './tauriMock';
 import { click, texts } from './helpers';
 

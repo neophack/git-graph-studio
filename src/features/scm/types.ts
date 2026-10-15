@@ -9,3 +9,6 @@ export interface BlameLine {
 	time: number;
 	summary: string;
 }
+
+// The history view's public type (the class loads lazily; the editor imports it type-only).
+export type FileHistoryView = import('./fileHistory').FileHistoryView;

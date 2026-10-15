@@ -156,7 +156,7 @@
 		installRemoteShell();
 		// Stand-ins for two installed extensions, so the navigation shows their pages: a
 		// `scm/title` launcher (the Git Graph class) and a views container (the Claude class).
-		const { applyContributions } = await import('/src/contributions.ts');
+		const { applyContributions } = await import('/src/features/extensions/contributions.ts');
 		const { commands } = await import('/src/platform/commands.ts');
 		commands.register({ id: 'preview.graph.view', title: 'View Graph', run: () => undefined });
 		applyContributions('preview.graph', {

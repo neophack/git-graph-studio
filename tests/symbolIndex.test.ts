@@ -6,11 +6,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { applyTheme, updateSetting } from '../src/platform/settings';
-import { ContextView } from '../src/contextView';
-import { EditorGroup } from '../src/editor';
-import { StatusBar } from '../src/statusbar';
-import { buildTree, subtreeCounts, SymbolDatabaseView } from '../src/symbolDbView';
-import { fileSymbolItems, workspaceSymbolItems } from '../src/workbench';
+import { ContextView } from '../src/features/search';
+import { EditorGroup } from '../src/features/editor';
+import { StatusBar } from '../src/workbench/statusbar';
+import { buildTree, subtreeCounts, SymbolDatabaseView } from '../src/features/search';
+import { fileSymbolItems, workspaceSymbolItems } from '../src/workbench/workbench';
 import { backend } from './tauriMock';
 import { click, flush, key, texts } from './helpers';
 
@@ -28,7 +28,7 @@ beforeEach(async () => {
 	link.id = 'theme-css';
 	document.head.appendChild(link);
 	backend.reset();
-	await import('../src/textEditor');
+	await import('../src/features/editor');
 });
 
 function scriptFiles(contents: Record<string, string>): void {

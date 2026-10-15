@@ -5,7 +5,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { probeVscodeNamespace } from '../src/vscodeNamespaceProbe';
+import { probeVscodeNamespace } from '../src/hosts/vscodeNamespaceProbe';
 
 describe('probeVscodeNamespace', () => {
 	const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);

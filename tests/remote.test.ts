@@ -755,7 +755,7 @@ describe('file transfers', () => {
 	it('reports through the installed sink — the mirror page has no workbench toasts', async () => {
 		env((cmd) => (cmd === 'fs_upload_offset' ? 0 : 0));
 		const events: string[] = [];
-		const { setTransferSink, uploadInto } = await import('../src/transfer');
+		const { setTransferSink, uploadInto } = await import('../src/features/explorer');
 		setTransferSink({
 			progress: (title) => {
 				events.push(`begin ${title}`);
@@ -803,7 +803,7 @@ describe('file transfers', () => {
 		env(() => 0);
 		document.body.appendChild(Object.assign(document.createElement('div'), { id: 'notifications' }));
 		vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 403 }) as Response));
-		const { downloadTo } = await import('../src/transfer');
+		const { downloadTo } = await import('../src/features/explorer');
 		await expect(downloadTo('C:\\x\\a.txt')).resolves.toBe(false);
 		expect(document.getElementById('notifications')!.textContent).toContain('403');
 		vi.unstubAllGlobals();
@@ -817,7 +817,7 @@ describe('file transfers', () => {
 			return 0;
 		});
 		document.body.appendChild(Object.assign(document.createElement('div'), { id: 'notifications' }));
-		const { uploadInto } = await import('../src/transfer');
+		const { uploadInto } = await import('../src/features/explorer');
 		const promise = uploadInto('C:\\dest');
 		// The wrapper awaits the transport module before it opens the picker.
 		await flush();

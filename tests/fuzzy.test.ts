@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { compareFileMatches, makeQuery, scoreFile, scoreSequence, type FileEntry } from '../src/fuzzy';
+import { compareFileMatches, makeQuery, scoreFile, scoreSequence, type FileEntry } from '../src/features/quickOpen';
 
 function entry(path: string): FileEntry {
 	const label = path.slice(path.lastIndexOf('/') + 1);

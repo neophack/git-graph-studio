@@ -8,7 +8,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { DEFAULT_SETTINGS, SETTING_DEFS, initSettings, isSettingModified, settings, updateSetting } from '../src/platform/settings';
-import { openSettingsPanel } from '../src/settingsPanel';
+import { openSettingsPanel } from '../src/workbench/settingsPanel';
 import { backend } from './tauriMock';
 import { click, flush, notifications, texts } from './helpers';
 

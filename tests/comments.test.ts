@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { EditorSelection, EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 
-import { commentTokensFor, toggleBlockComment, toggleLineComment } from '../src/comments';
+import { commentTokensFor, toggleBlockComment, toggleLineComment } from '../src/features/editor';
 
 function viewOf(text: string, selection?: { anchor: number; head?: number }): EditorView {
 	const parent = document.createElement('div');

@@ -3,8 +3,8 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { Explorer } from '../src/explorer';
-import { SearchView } from '../src/searchView';
+import { Explorer } from '../src/features/explorer';
+import { SearchView } from '../src/features/search';
 import { backend } from './tauriMock';
 import { click, flush, texts } from './helpers';
 

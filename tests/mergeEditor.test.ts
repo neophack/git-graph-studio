@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { EditorState } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
 
-import { applyChoice, conflictAt, MergeToolbar, parseConflicts } from '../src/mergeEditor';
+import { applyChoice, conflictAt, MergeToolbar, parseConflicts } from '../src/features/compare';
 import { backend } from './tauriMock';
 import { click, flush } from './helpers';
 

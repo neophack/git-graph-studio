@@ -5,8 +5,8 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { EditorGroup } from '../src/editor';
-import { blameLabel, loadFileHistory, relativeDate } from '../src/fileHistory';
+import { EditorGroup } from '../src/features/editor';
+import { blameLabel, loadFileHistory, relativeDate } from '../src/features/scm';
 import { backend } from './tauriMock';
 import { click, flush } from './helpers';
 

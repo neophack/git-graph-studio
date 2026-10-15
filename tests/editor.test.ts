@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { EditorGroup, type Editor } from '../src/editor';
+import { EditorGroup, type Editor } from '../src/features/editor';
 import { fileIcon } from '../src/platform/fileIcons';
 import { el } from '../src/platform/ui';
 import { backend } from './tauriMock';

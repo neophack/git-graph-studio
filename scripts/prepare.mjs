@@ -176,7 +176,7 @@ const ggsBashBin = process.platform === 'win32' ? sidecarBinary('ggs-bash', 'rel
 			sourcemap: false,
 			target: 'node20',
 			lib: {
-				entry: join(appDir, 'src', 'nodeHost.ts'),
+				entry: join(appDir, 'src', 'hosts', 'nodeHost.ts'),
 				formats: ['cjs'],
 				fileName: () => 'node-host.cjs'
 			},
@@ -199,7 +199,7 @@ const ggsBashBin = process.platform === 'win32' ? sidecarBinary('ggs-bash', 'rel
 			sourcemap: false,
 			target: 'node20',
 			lib: {
-				entry: join(appDir, 'src', 'ggsVscodeShim.ts'),
+				entry: join(appDir, 'src', 'hosts', 'ggsVscodeShim.ts'),
 				formats: ['iife'],
 				name: '__ggsVscodeShim'
 			},

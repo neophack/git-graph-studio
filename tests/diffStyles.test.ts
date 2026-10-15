@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'shell.css'), 'utf8');
+const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'workbench', 'shell.css'), 'utf8');
 
 const DIFF_CLASSES = ['cm-changedText', 'cm-changedLine', 'cm-deletedText', 'cm-deletedChunk', 'cm-changedLineGutter', 'cm-deletedLineGutter', 'cm-inlineChangedLine', 'cm-collapsedLines'];
 

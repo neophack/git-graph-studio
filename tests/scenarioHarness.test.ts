@@ -10,7 +10,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { Workbench } from '../src/workbench';
+import { Workbench } from '../src/workbench/workbench';
 import { commands } from '../src/platform/commands';
 import { SCENARIOS, handlersFor, type Scenario } from './scenarioFixtures';
 import { backend } from './tauriMock';
@@ -44,7 +44,7 @@ interface Observation {
 const observations: Observation[] = [];
 
 beforeAll(async () => {
-	await import('../src/textEditor'); // pay the editor chunk's transform once
+	await import('../src/features/editor'); // pay the editor chunk's transform once
 });
 
 /** Boot the workbench against a scenario and gather the shared observations. */

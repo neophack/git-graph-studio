@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { EditorView } from '@codemirror/view';
 
-import { EditorGroup } from '../src/editor';
+import { EditorGroup } from '../src/features/editor';
 import { t } from '../src/platform/i18n';
 import { settings, updateSetting, DEFAULT_SETTINGS } from '../src/platform/settings';
 import { backend } from './tauriMock';

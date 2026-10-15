@@ -6,8 +6,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { EditorState } from '@codemirror/state';
 import { CompletionContext } from '@codemirror/autocomplete';
 
-import { FilePickSource } from '../src/filePicker';
-import { fileNameFacet, pathCompletion } from '../src/autocomplete';
+import { FilePickSource } from '../src/features/quickOpen';
+import { fileNameFacet, pathCompletion } from '../src/features/editor';
 import { backend } from './tauriMock';
 
 describe('the Rust-backed completion paths', () => {

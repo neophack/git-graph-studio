@@ -11,7 +11,7 @@
 import { commands } from '../platform/commands';
 import { notify } from '../platform/ui';
 import { t, tf } from '../platform/i18n';
-import { currentWorkbench } from '../workbench';
+import { currentWorkbench } from '../workbench/workbench';
 import { installActionSheet } from './actionSheet';
 import { createAppBar } from './appBar';
 import { createBottomTabs } from './bottomTabs';
@@ -22,7 +22,7 @@ import { closeDrawer, openDrawer } from './navDrawer';
 import { backToEditor, currentPage, onWorkbenchChange } from './pages';
 import { formFactor, onFormFactorChange } from './responsive';
 import { createTerminalKeys } from './terminalKeys';
-import { downloadTo, uploadInto } from '../transfer';
+import { downloadTo, uploadInto } from '../features/explorer';
 import { openWindowSwitcher, watchLifecycle } from './windowSwitcher';
 import { connectionLooksSlow, dataSaverPreferred, setDataSaver } from './dataSaver';
 import { remoteEnv } from './session';

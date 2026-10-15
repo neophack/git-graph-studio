@@ -4,7 +4,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { EditorGroup } from '../src/editor';
+import { EditorGroup } from '../src/features/editor';
 import { imageMime, sanitizeMarkdown } from '../src/platform/markdown';
 import { backend } from './tauriMock';
 import { click, flush } from './helpers';

@@ -44,7 +44,7 @@ describe('the transfer layer (desktop)', () => {
 			(args.onProgress as Channel<ProgressEvent>).send({ name: 'notes.txt', bytes: 4, total: 10 });
 			return new Promise((resolve) => (settle = resolve));
 		});
-		const { uploadInto } = await import('../src/transfer');
+		const { uploadInto } = await import('../src/features/explorer');
 		const picking = uploadInto('C:\\repo');
 		await flush();
 		// Mid-flight: the toast carries the streamed label and percent.
@@ -66,7 +66,7 @@ describe('the transfer layer (desktop)', () => {
 		backend.on('fs_import', () => {
 			throw new Error('the disk is full');
 		});
-		const { uploadInto } = await import('../src/transfer');
+		const { uploadInto } = await import('../src/features/explorer');
 		await expect(uploadInto('C:\\repo')).resolves.toEqual([]);
 		expect(notifications().join('\n')).toContain('the disk is full');
 	});
@@ -74,7 +74,7 @@ describe('the transfer layer (desktop)', () => {
 	it('a mixed report notifies the failed names beside the landed count', async () => {
 		backend.dialog.openResult = 'C:\\elsewhere\\notes.txt';
 		scriptImport({ landed: ['C:\\repo\\notes.txt'], failed: [{ name: 'ghost.txt', error: 'no such file' }] });
-		const { uploadInto } = await import('../src/transfer');
+		const { uploadInto } = await import('../src/features/explorer');
 		await expect(uploadInto('C:\\repo')).resolves.toEqual(['C:\\repo\\notes.txt']);
 		const text = notifications().join('\n');
 		expect(text).toContain('ghost.txt');
@@ -88,7 +88,7 @@ describe('the transfer layer (desktop)', () => {
 			(args.onProgress as Channel<ProgressEvent>).send({ name: 'notes.txt', bytes: 2, total: 10 });
 			return new Promise((resolve) => (settle = resolve));
 		});
-		const { uploadInto } = await import('../src/transfer');
+		const { uploadInto } = await import('../src/features/explorer');
 		const picking = uploadInto('C:\\repo');
 		await flush();
 		const cancel = document.querySelector<HTMLButtonElement>('.notification .buttons button');
@@ -103,7 +103,7 @@ describe('the transfer layer (desktop)', () => {
 	it('a cancelled report notifies the cancel, not a failure', async () => {
 		backend.dialog.openResult = 'C:\\elsewhere\\notes.txt';
 		scriptImport({ landed: [], cancelled: true });
-		const { uploadInto } = await import('../src/transfer');
+		const { uploadInto } = await import('../src/features/explorer');
 		await expect(uploadInto('C:\\repo')).resolves.toEqual([]);
 		expect(notifications().join('\n')).toContain('Transfer canceled');
 	});
@@ -115,7 +115,7 @@ describe('the transfer layer (desktop)', () => {
 			(args.onProgress as Channel<ProgressEvent>).send({ name: 'pack.zip', bytes: 5, total: 5 });
 			return new Promise((resolve) => (settle = resolve));
 		});
-		const { downloadTo } = await import('../src/transfer');
+		const { downloadTo } = await import('../src/features/explorer');
 		const exporting = downloadTo('C:\\repo\\pack', true);
 		await flush();
 		expect(document.querySelector('.notification .message')!.textContent).toContain('Downloading pack.zip');
@@ -130,7 +130,7 @@ describe('the transfer layer (desktop)', () => {
 	it('a cancelled picker is silent — no transfer, no toast', async () => {
 		backend.dialog.openResult = null;
 		backend.dialog.saveResult = null;
-		const { uploadInto, downloadTo } = await import('../src/transfer');
+		const { uploadInto, downloadTo } = await import('../src/features/explorer');
 		await expect(uploadInto('C:\\repo')).resolves.toEqual([]);
 		await expect(downloadTo('C:\\repo\\a.txt')).resolves.toBe(false);
 		expect(backend.callsTo('fs_import')).toEqual([]);
@@ -139,7 +139,7 @@ describe('the transfer layer (desktop)', () => {
 	});
 
 	it('the transfer rows hide while a mirror viewer watches, on the desktop alone', async () => {
-		const { transferMenuShown } = await import('../src/transfer');
+		const { transferMenuShown } = await import('../src/features/explorer');
 		expect(transferMenuShown()).toBe(true);
 		mirrorRig.watching = true;
 		expect(transferMenuShown()).toBe(false);
@@ -166,7 +166,7 @@ describe('the transfer layer (desktop)', () => {
 		// Warm the lazy transport first (the vm pool's in-src dynamic import needs the
 		// module in the runner's cache to settle promptly), then drive the wrapper.
 		await import('../src/remote/transfer');
-		const { uploadInto } = await import('../src/transfer');
+		const { uploadInto } = await import('../src/features/explorer');
 		const picking = uploadInto('C:\\repo');
 		for (let i = 0; i < 20 && !document.querySelector('input[type=file]'); i++) await flush();
 		const input = document.querySelector<HTMLInputElement>('input[type=file]')!;

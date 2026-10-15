@@ -16,8 +16,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { EditorArea } from '../src/editorArea';
-import { Workbench } from '../src/workbench';
+import { EditorArea } from '../src/features/editor';
+import { Workbench } from '../src/workbench/workbench';
 import { commands } from '../src/platform/commands';
 import { attachWorkbenchSync, WORKBENCH_SYNC_EVENT, type SyncedEditorArea, type SyncedWorkbench, type WorkbenchSyncMessage } from '../src/remote/workbenchSync';
 import { setRemoteEnv } from '../src/remote/session';

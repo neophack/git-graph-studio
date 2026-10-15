@@ -6,7 +6,7 @@
 // the core files once imported directly; the seam is now the hook lookup.
 
 import { provideHook, type WebviewStreamBridge } from '../platform/hooks';
-import { extLog } from '../extLog';
+import { extLog } from '../features/extensions';
 import { assetUrl } from './assetUrl';
 import { installMirrorHost, mirrorViewersActive, mirrorViewersNow } from './mirror/hostStub';
 import { installWorkbenchSync } from './workbenchSync';

@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { backend, Channel } from './tauriMock';
 import { click, flush, key, notifications, notificationButton, texts, type } from './helpers';
-import { SearchView, renderMatchLine, validateQuery, type FileMatches, type SearchEvent } from '../src/searchView';
+import { SearchView, renderMatchLine, validateQuery, type FileMatches, type SearchEvent } from '../src/features/search';
 import { settings } from '../src/platform/settings';
 
 /** Answer `search_workspace` the way the backend does: every batch, then `done`, pushed over

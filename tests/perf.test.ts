@@ -6,8 +6,8 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { FilePickSource } from '../src/filePicker';
-import { makeQuery, scoreFile, type FileEntry } from '../src/fuzzy';
+import { FilePickSource } from '../src/features/quickOpen';
+import { makeQuery, scoreFile, type FileEntry } from '../src/features/quickOpen';
 
 /** Deterministic index-seeded pseudo-randomness (a mulberry32-style hash): unlike an LCG,
  *  whose low bits cycle with a period of a few bits, the hash spreads every index evenly over
@@ -81,8 +81,8 @@ function pick<T>(array: T[], i: number, salt: number): T {
 	return array[Math.floor(rand(i * 8 + salt) * array.length)]!;
 }
 
-import { SearchView, type FileMatches, type SearchEvent } from '../src/searchView';
-import { SourceControlView } from '../src/scm';
+import { SearchView, type FileMatches, type SearchEvent } from '../src/features/search';
+import { SourceControlView } from '../src/features/scm';
 import { Channel, backend } from './tauriMock';
 import { flush } from './helpers';
 

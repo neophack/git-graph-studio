@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { bookmarksFor, clearBookmarks, hasBookmark, listBookmarks, loadBookmarks, toggleBookmark } from '../src/bookmarks';
+import { bookmarksFor, clearBookmarks, hasBookmark, listBookmarks, loadBookmarks, toggleBookmark } from '../src/features/editor';
 
 describe('bookmarks', () => {
 	beforeEach(() => {

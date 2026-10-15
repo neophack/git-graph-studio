@@ -4,8 +4,8 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { bytesPerRowFor, HexView } from '../src/hexView';
-import { EditorGroup } from '../src/editor';
+import { bytesPerRowFor, HexView } from '../src/features/viewers';
+import { EditorGroup } from '../src/features/editor';
 import { settings } from '../src/platform/settings';
 import { backend } from './tauriMock';
 import { flush } from './helpers';

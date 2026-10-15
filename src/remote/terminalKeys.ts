@@ -1,7 +1,7 @@
 // The phone's terminal key row (docs/ggs-remote-plan.md §11.3 Integrated Terminal): the keys
 // a phone keyboard lacks — Esc, Tab, sticky Ctrl / Alt, arrows, Home / End and the shell's
 // punctuation — sent to the active shell through the terminal's send event.
-import { TERMINAL_SEND_EVENT } from '../terminal';
+import { TERMINAL_SEND_EVENT } from '../features/terminal';
 
 const ESC = String.fromCharCode(27);
 

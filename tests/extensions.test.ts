@@ -3,21 +3,21 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { ExtensionHost, localizeAssetRoots, themeVars, type ExtInfo, type GalleryEntry } from '../src/extHost';
+import { ExtensionHost, localizeAssetRoots, themeVars, type ExtInfo, type GalleryEntry } from '../src/features/extensions';
 import { assetUrl } from '../src/remote/assetUrl';
-import { EditorGroup } from '../src/editor';
-import { applyContributions, applyExtensionSettings, evaluateWhen, extensionSettingDefs, registerContextProvider, removeContributions, resolvedMenuEntries } from '../src/contributions';
-import { extLog, extLogEntries, flushExtLog, resetExtLog } from '../src/extLog';
-import { ExtensionsPanel } from '../src/extensionsPanel';
+import { EditorGroup } from '../src/features/editor';
+import { applyContributions, applyExtensionSettings, evaluateWhen, extensionSettingDefs, registerContextProvider, removeContributions, resolvedMenuEntries } from '../src/features/extensions';
+import { extLog, extLogEntries, flushExtLog, resetExtLog } from '../src/features/extensions';
+import { ExtensionsPanel } from '../src/features/extensions';
 import { commandForBinding, commands } from '../src/platform/commands';
-import { activationContext, createVscodeApi, applyTextEditsToText, Position, rehydrateUris, Range, readLocalDocProvider, RelativePattern, setUriPlatform, Uri, ViewColumn, watcherGlobMatches } from '../src/vscodeApi';
-import { createNodeBuiltins } from '../src/nodeShims';
-import { registerDeclaredLanguages, declaredLanguageName, registerExtensionSnippets, registerExtensionThemes, extensionThemeList, languageIdFor } from '../src/contributions';
-import { snippetsFor } from '../src/snippetRegistry';
+import { activationContext, createVscodeApi, applyTextEditsToText, Position, rehydrateUris, Range, readLocalDocProvider, RelativePattern, setUriPlatform, Uri, ViewColumn, watcherGlobMatches } from '../src/hosts/vscodeApi';
+import { createNodeBuiltins } from '../src/hosts/nodeShims';
+import { registerDeclaredLanguages, declaredLanguageName, registerExtensionSnippets, registerExtensionThemes, extensionThemeList, languageIdFor } from '../src/features/extensions';
+import { snippetsFor } from '../src/features/editor';
 import { THEMES, syncExtensionThemes, updateSetting } from '../src/platform/settings';
 // The frame half of the extension host, loaded for its window message listener: under jsdom the
 // frame's `parent` is this same window, so tests drive it with MessageEvents and read its posts.
-import '../src/extHostBoot';
+import '../src/hosts/extHostBoot';
 import { backend } from './tauriMock';
 import { setRemoteEnv } from '../src/remote/session';
 import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
@@ -27,7 +27,7 @@ import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
 installRemoteSessionHooks();
 import { saveExtSetting } from '../src/platform/state';
 import { click, flush, key, menuItem, menuLabels, notificationButton, notifications, rightClick, type } from './helpers';
-import { Explorer } from '../src/explorer';
+import { Explorer } from '../src/features/explorer';
 
 const BUILTIN: ExtInfo = { id: 'neophack.git-graph-rs', name: 'git-graph-rs', displayName: 'Git Graph', publisher: 'neophack', version: '1.0.23', description: 'Git Graph', builtin: true, icon: null, path: '', categories: ['SCM Providers'], keywords: ['git'], repository: 'https://github.com/neophack/git-graph-rs', license: 'MIT', enginesVscode: '^1.80.0', extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'bundled', capabilities: null };
 const USER: ExtInfo = { id: 'acme.demo', name: 'demo', displayName: null, publisher: 'acme', version: '2.0.0', description: 'A demo', builtin: false, icon: null, path: '/ext/acme.demo-2.0.0', categories: [], keywords: [], repository: null, license: null, enginesVscode: null, extensionDependencies: ['acme.base'], extensionPack: [], readme: null, changelog: null, format: 'vsix', capabilities: null };
@@ -2050,7 +2050,7 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 		const previous = w.__TAURI_INTERNALS__;
 		w.__TAURI_INTERNALS__ = { convertFileSrc: (path, protocol) => `http://${protocol}.localhost/${encodeURIComponent(path)}` };
 		try {
-			const host = await import('../src/extHost');
+			const host = await import('../src/features/extensions');
 			const url = host.extAssetUrl(GGX2, 'web/view.html');
 			expect(url).toBe('http://ggs.localhost/acme.proc-1.0.0/web/view.html');
 			expect(url).not.toContain('%2F');
@@ -2058,7 +2058,7 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 			w.__TAURI_INTERNALS__ = previous;
 		}
 		// Without Tauri's internals (jsdom, probes): the plain scheme shape.
-		const host = await import('../src/extHost');
+		const host = await import('../src/features/extensions');
 		expect(host.extAssetUrl(GGX2, 'web/view.html')).toBe('ggs://localhost/acme.proc-1.0.0/web/view.html');
 	});
 
@@ -2611,7 +2611,7 @@ describe('tree views and activation events (round two)', () => {
 
 		// The UI host renders the levels and runs a row's command on click.
 		const commands: unknown[][] = [];
-		const { ExtensionTreeView } = await import('../src/treeView');
+		const { ExtensionTreeView } = await import('../src/features/extensions');
 		const container = document.body.appendChild(document.createElement('div'));
 		new ExtensionTreeView(container, 'Nodes', {
 			fetchChildren: (parent) => host.treeChildren('acme.demo.nodes', parent),
@@ -2878,7 +2878,7 @@ describe('extension page frames (shell.css)', () => {
 	it('opts every page frame out of the inherited colour scheme', () => {
 		// Comments out first: the rule's explanatory comment sits right above it, and the
 		// selector capture would otherwise swallow it into the first selector.
-		const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'shell.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+		const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'workbench', 'shell.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
 		const rule = /([^{}]+)\{\s*color-scheme:\s*normal;\s*\}/.exec(css);
 		expect(rule).not.toBeNull();
 		const selectors = rule![1].split(',').map((selector) => selector.trim());

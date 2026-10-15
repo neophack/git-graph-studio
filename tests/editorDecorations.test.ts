@@ -14,7 +14,7 @@ import {
 	registerDecorationType,
 	setDecorationRanges,
 	setDecorationsRenderer
-} from '../src/editorDecorations';
+} from '../src/features/editor';
 
 describe('extension decoration store', () => {
 	beforeEach(() => {

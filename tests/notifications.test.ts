@@ -3,7 +3,7 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { StatusBar } from '../src/statusbar';
+import { StatusBar } from '../src/workbench/statusbar';
 import { clearAllNotifications, notify, notificationEntries } from '../src/platform/ui';
 import { click, flush, texts } from './helpers';
 

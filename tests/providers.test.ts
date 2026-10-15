@@ -13,17 +13,17 @@ import { readFileSync } from 'node:fs';
 import { click, flush, notifications, notificationButton, texts, type, until } from './helpers';
 import { backend } from './tauriMock';
 
-let mountProvidersPage: typeof import('../src/providersPage').mountProvidersPage;
-let mountProviderSwitcher: typeof import('../src/aiProviders').mountProviderSwitcher;
-let resetProviderCacheForTests: typeof import('../src/aiProviders').resetProviderCacheForTests;
-let mountUsagePanel: typeof import('../src/providerUsageView').mountUsagePanel;
-let formatTokens: typeof import('../src/providerUsageView').formatTokens;
-let mountProviderPaneGate: typeof import('../src/providerUsageView').mountProviderPaneGate;
+let mountProvidersPage: typeof import('../src/features/providers').mountProvidersPage;
+let mountProviderSwitcher: typeof import('../src/features/providers').mountProviderSwitcher;
+let resetProviderCacheForTests: typeof import('../src/features/providers').resetProviderCacheForTests;
+let mountUsagePanel: typeof import('../src/features/providers').mountUsagePanel;
+let formatTokens: typeof import('../src/features/providers').formatTokens;
+let mountProviderPaneGate: typeof import('../src/features/providers').mountProviderPaneGate;
 
 async function modules(): Promise<void> {
-	({ mountProvidersPage } = await import('../src/providersPage'));
-	({ mountProviderSwitcher, resetProviderCacheForTests } = await import('../src/aiProviders'));
-	({ mountUsagePanel, formatTokens, mountProviderPaneGate } = await import('../src/providerUsageView'));
+	({ mountProvidersPage } = await import('../src/features/providers'));
+	({ mountProviderSwitcher, resetProviderCacheForTests } = await import('../src/features/providers'));
+	({ mountUsagePanel, formatTokens, mountProviderPaneGate } = await import('../src/features/providers'));
 }
 
 function host(): HTMLElement {
@@ -442,7 +442,7 @@ describe('the token-usage curve', () => {
 		// browser keeps targeting the chart under it (jsdom does no hit-testing — the
 		// stylesheet carries the rule, pinned here; the vm pool's import.meta.url is no
 		// file: URL, so the path rides the run's cwd).
-		const css = readFileSync('src/shell.css', 'utf8');
+		const css = readFileSync('src/workbench/shell.css', 'utf8');
 		expect(css).toMatch(/\.usage-tooltip\s*\{[^}]*pointer-events:\s*none/);
 		dispose();
 	});

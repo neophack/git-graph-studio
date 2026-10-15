@@ -656,7 +656,7 @@
 
 			/* ----- the hex compare (two panes over one model), constructed directly ----- */
 			await surface('hex compare', async () => {
-				const { HexCompareView } = await import('/src/hexCompare.ts');
+				const { HexCompareView } = await import('/src/features/viewers/hexCompare.ts');
 				const view = new HexCompareView('C:\\l.bin', 'C:\\r.bin');
 				document.getElementById('editorGroup').appendChild(view.root);
 				await view.load();
@@ -678,7 +678,7 @@
 
 			/* ----- the CAN raw view (.asc), constructed directly ----- */
 			await surface('CAN raw view', async () => {
-				const { CanRawView } = await import('/src/canRawView.ts');
+				const { CanRawView } = await import('/src/features/can/canRawView.ts');
 				const view = new CanRawView('/repo/trace.asc');
 				document.getElementById('editorGroup').appendChild(view.root);
 				await waitFor(() => view.scroll.rowCount === CAN_FRAMES && view.scroll.visibleLines > 0);
@@ -699,7 +699,7 @@
 
 			/* ----- the CAN statistics dashboard: a full pane scrolls, no chart is clipped ----- */
 			await surface('CAN statistics', async () => {
-				const { CanLogView } = await import('/src/canLogView.ts');
+				const { CanLogView } = await import('/src/features/can/canLogView.ts');
 				const view = new CanLogView('/repo/trace.asc');
 				document.getElementById('editorGroup').appendChild(view.root);
 				await waitFor(() => view.root.querySelectorAll('.can-chart').length >= 3);
@@ -933,7 +933,7 @@
 				// as five unrelated module failures downstream.
 				if (fullParams.get('workspace') && !window.__harness.mocked) {
 					await check('workbench', 'the sandbox workspace is open', async () => {
-						const wb = (await import('/src/workbench.ts')).currentWorkbench;
+						const wb = (await import('/src/workbench/workbench.ts')).currentWorkbench;
 						if (!wb || typeof wb.openFolder !== 'function') throw new Error('the workbench instance exposes no openFolder');
 						await wb.openFolder(fullParams.get('workspace'));
 						await waitFor(() => document.querySelectorAll('#explorer *').length > 0, 15000);
@@ -949,16 +949,16 @@
 				const quick = fullParams.has('quick');
 				let selfOutcomes = [];
 				let selfSummary = { pass: 0, fail: 0, skip: 0 };
-				const { reportMarkdown } = await import('/src/selftest.ts');
+				const { reportMarkdown } = await import('/src/features/selftest/selftest.ts');
 				if (quick) {
 					skip('self-tests', 'the all-buttons sweep', 'quick mode — the claude-code sandbox pass only');
 				} else {
-					const workbenchModule = await import('/src/workbench.ts');
+					const workbenchModule = await import('/src/workbench/workbench.ts');
 					const workbench = workbenchModule.currentWorkbench;
 					if (!workbench) throw new Error('the workbench instance is gone (bootWorkbench did not run?)');
-					const suites = await import('/src/selfTestSuites.ts');
+					const suites = await import('/src/features/selftest/selfTestSuites.ts');
 					suites.registerSelfTestSuites(workbench);
-					const { runSelfTests, summarize } = await import('/src/selftest.ts');
+					const { runSelfTests, summarize } = await import('/src/features/selftest/selftest.ts');
 					selfOutcomes = await runSelfTests((outcome) => {
 						report.push({ group: outcome.module, name: outcome.name, status: outcome.status, ms: outcome.ms, detail: outcome.message || '' });
 						renderPanel();
@@ -993,7 +993,7 @@
 					});
 					await check('kimi-code', 'the sidebar view mounts and loads', async () => {
 						const mountStarted = performance.now();
-						const wb = (await import('/src/workbench.ts')).currentWorkbench;
+						const wb = (await import('/src/workbench/workbench.ts')).currentWorkbench;
 						const containerKey = 'ext-container:' + KIMI + '.kimi-sidebar';
 						try {
 							await withTimeout(wb.showView(containerKey), 20000, 'showView(kimi-sidebar)');
@@ -1034,9 +1034,9 @@
 				/* ---------- Phase 2: git-graph-rs ---------- */
 				const GG = 'neophack.git-graph-rs';
 				const { commands } = await import('/src/platform/commands.ts');
-				const { resolvedMenuEntries } = await import('/src/contributions.ts');
+				const { resolvedMenuEntries } = await import('/src/features/extensions/contributions.ts');
 				const { saveExtSetting, extSettings } = await import('/src/platform/state.ts');
-				const { extLogEntries } = await import('/src/extLog.ts');
+				const { extLogEntries } = await import('/src/features/extensions/extLog.ts');
 				const logErrorsBefore = extLogEntries().filter((e) => e.level === 'error').length;
 				const extList = window.__harness.mocked ? [] : await invoke('ext_list').catch(() => []);
 				// The sandbox's per-button pass — run AFTER the claude phase (phase 3½), never
@@ -1719,7 +1719,7 @@
 					skip('explorer', 'an external drop over a folder row copies into it', 'the scripted backend has no filesystem');
 				} else {
 					await check('explorer', 'an external drop over a folder row copies into it', async () => {
-						const wb = (await import('/src/workbench.ts')).currentWorkbench;
+						const wb = (await import('/src/workbench/workbench.ts')).currentWorkbench;
 						const roots = wb.explorer.roots();
 						if (roots.length === 0) throw new Error('no folder is open');
 						await wb.showView('explorer');
@@ -1767,7 +1767,7 @@
 				} else {
 					await check('explorer', 'the transfer commands copy in and zip out through the real IPC', async () => {
 						const core = await import('@tauri-apps/api/core');
-						const wb = (await import('/src/workbench.ts')).currentWorkbench;
+						const wb = (await import('/src/workbench/workbench.ts')).currentWorkbench;
 						const roots = wb.explorer.roots();
 						if (roots.length === 0) throw new Error('no folder is open');
 						const root = roots[0].replace(/[\\/]+$/, '');

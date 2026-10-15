@@ -3,7 +3,7 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { CallTreeView, computeCallers, computeCallees, enclosingSymbol, symbolRanges, type RefFile, type WsSymbol } from '../src/callTree';
+import { CallTreeView, computeCallers, computeCallees, enclosingSymbol, symbolRanges, type RefFile, type WsSymbol } from '../src/features/search';
 import { backend } from './tauriMock';
 import { click, texts } from './helpers';
 

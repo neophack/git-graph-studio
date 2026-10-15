@@ -5,9 +5,9 @@
 
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { Workbench } from '../src/workbench';
-import * as selftest from '../src/selftest';
-import { registerSelfTestSuites } from '../src/selfTestSuites';
+import { Workbench } from '../src/workbench/workbench';
+import * as selftest from '../src/features/selftest';
+import { registerSelfTestSuites } from '../src/features/selftest';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
 
@@ -29,7 +29,7 @@ class DefaultingHandlers extends Map<string, (args: Record<string, unknown>) => 
 let workbench: Workbench;
 
 beforeAll(async () => {
-	await import('../src/textEditor');
+	await import('../src/features/editor');
 });
 
 beforeEach(async () => {

@@ -5,10 +5,10 @@
 // through the same __studioExtInit the host sends, then format requests cross the bridge.
 
 import { describe, expect, it } from 'vitest';
-import { ExtensionHost, type ExtInfo } from '../src/extHost';
-import { clearFileDiagnostics, diagnosticsFor, setFileDiagnostics } from '../src/editorDiagnostics';
+import { ExtensionHost, type ExtInfo } from '../src/features/extensions';
+import { clearFileDiagnostics, diagnosticsFor, setFileDiagnostics } from '../src/features/extensions';
 import { backend } from './tauriMock';
-import '../src/extHostBoot';
+import '../src/hosts/extHostBoot';
 import { flush } from './helpers';
 
 const INFO: ExtInfo = {

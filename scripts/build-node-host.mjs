@@ -17,7 +17,7 @@ await build({
 		sourcemap: false,
 		target: "node20",
 		lib: {
-			entry: join(appDir, "src", "nodeHost.ts"),
+			entry: join(appDir, "src", "hosts", "nodeHost.ts"),
 			formats: ["cjs"],
 			fileName: () => "node-host.cjs",
 		},

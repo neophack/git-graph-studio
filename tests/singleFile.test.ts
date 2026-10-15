@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import * as state from '../src/platform/state';
-import { Workbench } from '../src/workbench';
+import { Workbench } from '../src/workbench/workbench';
 import { backend } from './tauriMock';
 import { click, flush, texts } from './helpers';
 
@@ -58,7 +58,7 @@ describe('single-file mode', () => {
 	it('boots straight into the file, with the side bar and terminal hidden', async () => {
 		workbench = new Workbench();
 		// Pre-warm the editor chunk, then boot: the launch file is the whole window.
-		await import('../src/textEditor');
+		await import('../src/features/editor');
 		await workbench.boot();
 		await flush(12);
 		workbench.dispose();
@@ -80,7 +80,7 @@ describe('single-file mode', () => {
 		backend.handlers.set('scm_status', () => []);
 		backend.handlers.set('list_dir', () => []);
 		workbench = new Workbench();
-		await import('../src/textEditor');
+		await import('../src/features/editor');
 		await workbench.boot();
 		await flush(10);
 		expect((document.getElementById('sidebar') as HTMLElement).hidden).toBe(false);

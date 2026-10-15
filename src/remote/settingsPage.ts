@@ -11,12 +11,12 @@
 // catalogue is a level of its own over the backend list. The root's search spans every
 // category and the extension declarations, like the desktop's.
 import { commands, type Command } from '../platform/commands';
-import { extensionSettingDefs, type ExtensionSettingDef } from '../contributions';
+import { extensionSettingDefs, type ExtensionSettingDef } from '../features/extensions';
 import { LOCALES, t, tf, type LocaleKey } from '../platform/i18n';
 import { SETTINGS_EVENT, SETTING_DEFS, THEMES, applyEnumSetting, isSettingModified, settings, updateSetting, type SettingDef } from '../platform/settings';
 import { extSettings, saveExtSetting } from '../platform/state';
 import { notify } from '../platform/ui';
-import { extLog } from '../extLog';
+import { extLog } from '../features/extensions';
 import { invoke } from '../platform/ipc/core';
 import { closeActionSheet, openSheet, showActionSheet, sheetOpen } from './actionSheet';
 import { pushBack } from './backStack';

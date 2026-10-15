@@ -7,10 +7,10 @@ import { indentUnit } from '@codemirror/language';
 import { EditorState } from '@codemirror/state';
 import { CompletionContext } from '@codemirror/autocomplete';
 
-import { EditorGroup } from '../src/editor';
-import { pathCompletion, snippetCompletionSource, wordCompletion, fileNameFacet } from '../src/autocomplete';
+import { EditorGroup } from '../src/features/editor';
+import { pathCompletion, snippetCompletionSource, wordCompletion, fileNameFacet } from '../src/features/editor';
 import { applyFontSize, updateSetting } from '../src/platform/settings';
-import { openSettingsPanel } from '../src/settingsPanel';
+import { openSettingsPanel } from '../src/workbench/settingsPanel';
 import { backend } from './tauriMock';
 import { click, texts } from './helpers';
 

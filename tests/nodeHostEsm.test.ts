@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { Buffer } from 'node:buffer';
-import { VSCODE_ESM_GLOBAL, vscodeEsmHookUrl, vscodeEsmModuleSource } from '../src/nodeHostEsm';
+import { VSCODE_ESM_GLOBAL, vscodeEsmHookUrl, vscodeEsmModuleSource } from '../src/hosts/nodeHostEsm';
 
 const exec = promisify(execFile);
 

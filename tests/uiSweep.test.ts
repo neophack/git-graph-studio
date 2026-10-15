@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 
 import { commands } from '../src/platform/commands';
 import { settings, updateSetting } from '../src/platform/settings';
-import { Workbench } from '../src/workbench';
+import { Workbench } from '../src/workbench/workbench';
 import { commonHandlers, type Handler } from './scenarioFixtures';
 import { backend } from './tauriMock';
 import { installRemoteRound, uninstallRemoteRound } from './remoteRound';
@@ -352,7 +352,7 @@ function press(binding: string, target: Element | Document = document): void {
 }
 
 beforeAll(async () => {
-	await import('../src/textEditor');
+	await import('../src/features/editor');
 	window.addEventListener('error', (event) => windowErrors.push(String(event.error ?? event.message)));
 	const originalError = console.error;
 	console.error = (...args: unknown[]) => { consoleErrors.push(args.map(String).join(' ')); originalError(...args); };

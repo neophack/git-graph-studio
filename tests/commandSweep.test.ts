@@ -8,9 +8,9 @@ vi.mock('mermaid', () => import('./mermaidStub'));
 vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { Workbench } from '../src/workbench';
+import { Workbench } from '../src/workbench/workbench';
 import { commands } from '../src/platform/commands';
-import { bookmarksFor } from '../src/bookmarks';
+import { bookmarksFor } from '../src/features/editor';
 import * as state from '../src/platform/state';
 import { backend } from './tauriMock';
 import { installRemoteRound, uninstallRemoteRound } from './remoteRound';
@@ -34,7 +34,7 @@ let workbench: Workbench;
 let remoteRound: 'tablet' | null = null;
 
 beforeAll(async () => {
-	await import('../src/textEditor');
+	await import('../src/features/editor');
 });
 
 beforeEach(async () => {

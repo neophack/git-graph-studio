@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { MergeView } from '@codemirror/merge';
 
-import { FolderCompareView } from '../src/folderCompare';
+import { FolderCompareView } from '../src/features/compare';
 import { backend } from './tauriMock';
 import { click, flush, menuItem, rightClick, texts, type } from './helpers';
 

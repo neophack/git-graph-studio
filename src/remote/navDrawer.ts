@@ -7,7 +7,7 @@
 // Escape or the phone's back closes it.
 import { commands } from '../platform/commands';
 import { t, tf } from '../platform/i18n';
-import type { MenuDefinition } from '../titlebar';
+import type { MenuDefinition } from '../workbench/titlebar';
 import { showActionSheet } from './actionSheet';
 import { branchName, workspaceName } from './appBar';
 import { pushBack } from './backStack';

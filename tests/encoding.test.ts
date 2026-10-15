@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { EditorGroup } from '../src/editor';
+import { EditorGroup } from '../src/features/editor';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
 

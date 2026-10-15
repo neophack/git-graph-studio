@@ -2,7 +2,7 @@
 // is the workbench's own toasts — DOM this page never builds (`#notifications` belongs to
 // the workbench the PC runs). The mirror's sink is one small card over the copy: a progress
 // toast while an upload streams, the outcome notices after.
-import { setTransferSink, type TransferSink } from '../../transfer';
+import { setTransferSink, type TransferSink } from '../../features/explorer';
 
 function card(message: string, kind: 'info' | 'error' | 'progress' = 'info'): HTMLElement {
 	const card = document.createElement('div');

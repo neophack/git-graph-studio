@@ -5,7 +5,7 @@
 
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { Workbench } from '../src/workbench';
+import { Workbench } from '../src/workbench/workbench';
 import { commands } from '../src/platform/commands';
 import { effectiveKeybinding } from '../src/platform/keybindings';
 import { settings } from '../src/platform/settings';
@@ -27,7 +27,7 @@ let workbench: Workbench;
 // The editor widget lives in an async chunk; pay its one-time transform before the flows, so
 // a file open inside a test is ticks, not wall-clock.
 beforeAll(async () => {
-	await import('../src/textEditor');
+	await import('../src/features/editor');
 });
 
 beforeEach(async () => {

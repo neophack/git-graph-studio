@@ -4,7 +4,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { DocFindController, type DocFindHost, type DocFindMatch } from '../src/docFind';
+import { DocFindController, type DocFindHost, type DocFindMatch } from '../src/features/editor';
 import { backend } from './tauriMock';
 import { flush } from './helpers';
 

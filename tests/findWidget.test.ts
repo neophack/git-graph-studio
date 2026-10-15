@@ -7,7 +7,7 @@ import { EditorSelection, EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 import { SearchQuery, openSearchPanel, setSearchQuery } from '@codemirror/search';
 
-import { countMatches, createFindPanel } from '../src/findWidget';
+import { countMatches, createFindPanel } from '../src/features/editor';
 import { findOptions } from '../src/findOptions';
 import { FindHistory, HistoryRecall } from '../src/findHistory';
 import { settings } from '../src/platform/settings';

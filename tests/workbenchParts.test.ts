@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import { CommandRegistry, matchesKeybinding } from '../src/platform/commands';
-import { FS_CHANGED_EVENT, Workbench } from '../src/workbench';
+import { FS_CHANGED_EVENT, Workbench } from '../src/workbench/workbench';
 import * as state from '../src/platform/state';
-import { StatusBar } from '../src/statusbar';
-import { TitleBar } from '../src/titlebar';
-import { Panel } from '../src/panel';
+import { StatusBar } from '../src/workbench/statusbar';
+import { TitleBar } from '../src/workbench/titlebar';
+import { Panel } from '../src/workbench/panel';
 import { DEFAULT_SETTINGS, SETTING_DEFS, settings, updateSetting } from '../src/platform/settings';
 import { setLocale, t } from '../src/platform/i18n';
 import { backend } from './tauriMock';

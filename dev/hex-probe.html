@@ -61,7 +61,7 @@
 		document.body.appendChild(progress);
 		const widths = (new URLSearchParams(location.search).get('widths') || '480,800,1024,1280,1440,1680,1920,2400').split(',').map(Number);
 		const keep = new URLSearchParams(location.search).has('keep'); // keep the last view for eyeballing
-		const { HexView } = await import('/src/hexView.ts');
+		const { HexView } = await import('/src/features/viewers/hexView.ts');
 		progress.textContent = 'imported';
 		const stage = document.getElementById('stage');
 		const results = [];
