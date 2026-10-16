@@ -189,6 +189,12 @@ export class MirrorViewer {
 	private loadHooks = new WeakMap<Document, () => void>();
 	/** A fluid copy's scroll reports waiting for their throttle (node id → fraction, end). */
 	private scrollReport = new Map<number, [number, boolean]>();
+	/** The scroll positions THIS copy applied (the end-pin's write, a snapshot's restore):
+	 *  the scroll events they cause are not the viewer scrolling and are never reported —
+	 *  a programmatic pin that crossed as a report would claim the stream's scroll
+	 *  ownership on the PC for a machine act and hold it against every real viewer
+	 *  (§9.2). A WeakMap: the marked elements die with their document. */
+	private ownScrolls = new WeakMap<Element, number>();
 	private scrollTimer: ReturnType<typeof setTimeout> | null = null;
 	private readonly onResize = () => this.layout();
 
@@ -420,7 +426,11 @@ export class MirrorViewer {
 				if (!el) return;
 				if (atEnd(el)) this.stuck.add(el);
 				else this.stuck.delete(el);
-				this.reportScroll(el);
+				// A scroll this copy applied itself (the end-pin, a snapshot's restore) is
+				// not the viewer's: it reports nothing, so it can neither yank the PC's
+				// scroller nor take the §9.2 lease a real viewer's scrolls need.
+				if (this.ownScrolls.get(el) === el.scrollTop) this.ownScrolls.delete(el);
+				else this.reportScroll(el);
 				// The copy scrolled natively: the caret's bar rides the content, but the
 				// proxy rides this page's viewport — re-map it.
 				this.paintCaret();
@@ -543,6 +553,8 @@ export class MirrorViewer {
 		if (s.sc) {
 			const [top, left] = s.sc;
 			later.push(() => {
+				// The restore is this copy's own write too (the end-pin's marker above).
+				if (el.scrollTop !== top) this.ownScrolls.set(el, top);
 				el.scrollTop = top;
 				el.scrollLeft = left;
 			});
@@ -939,6 +951,8 @@ export class MirrorViewer {
 				this.stuck.delete(el);
 				continue;
 			}
+			// Marked as this copy's own write: the scroll event it causes reports nothing.
+			if (el.scrollTop !== el.scrollHeight) this.ownScrolls.set(el, el.scrollHeight);
 			el.scrollTop = el.scrollHeight;
 		}
 	}

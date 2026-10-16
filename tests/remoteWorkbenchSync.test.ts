@@ -342,6 +342,63 @@ describe('the sync core over a shared bus', () => {
 		expect(guarded.opened).toEqual([]);
 	});
 
+	it('a remote open inside a symlink-opened workspace resolves against the resolved roots', async () => {
+		// macOS /tmp → /private/tmp: the desktop opened the workspace through the link, so
+		// the roots are lexical — and every legitimate member's canonical form sits inside
+		// the root's canonical form, nowhere near the lexical one. The relay's invoke gate
+		// compares canonical against canonical (pathGate.ts's gateInvokeCanonical); the
+		// sync's receiver must too, or it refuses every file of such a workspace.
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const LINKROOT = '/tmp/repo';
+		const REALROOT = '/private/tmp/repo';
+		const MEMBER = '/tmp/repo/src/a.ts';
+		const REALMEMBER = '/private/tmp/repo/src/a.ts';
+		const SNEAK = '/tmp/repo/sneak';
+		pc.openFolders = () => [LINKROOT];
+		attachWorkbenchSync(pc, channel.deps, 'main', {
+			canonicalPath: async (path) =>
+				path === LINKROOT ? REALROOT : path === MEMBER ? REALMEMBER : path === SNEAK ? '/private/etc/secret' : null
+		});
+		attachWorkbenchSync(fakeWorkbench(), channel.deps, 'remote/1');
+		channel.deps.send({ by: 'remote/1', k: 'open', path: MEMBER });
+		await until(() => pc.tabs().includes(MEMBER));
+		// A member resolving OUTSIDE the resolved root is still refused.
+		channel.deps.send({ by: 'remote/1', k: 'open', path: SNEAK });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(pc.opened).toEqual([{ path: MEMBER, line: undefined, column: undefined }]);
+	});
+
+	it('a catch-up snapshot keeps the lexical answer when the canonical check has no form', async () => {
+		// The same semantics in mergeSnapshot's gate: a null canonical form (the file does
+		// not exist yet, or the backend confined its answer) is not a refusal — the lexical
+		// inside-the-roots answer stands, exactly like the receive half and the relay gate.
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const REPO = 'C:' + '\\repo';
+		const NEWFILE = REPO + '\\new.txt';
+		pc.openFolders = () => [REPO];
+		const presence = fakePresence(2);
+		const sync = attachWorkbenchSync(pc, channel.deps, 'main', {
+			presence,
+			startImmediately: false,
+			canonicalPath: async () => null
+		});
+		sync.start();
+		await until(() => channel.sent.some((m) => m.k === 'stateRequest'));
+		channel.deps.send({
+			by: 'remote/1',
+			k: 'stateSnapshot',
+			to: 'main',
+			files: [NEWFILE],
+			tabs: [],
+			extTabs: [],
+			active: null
+		});
+		await until(() => pc.tabs().includes(NEWFILE));
+		expect(pc.tabs()).toEqual([NEWFILE]);
+	});
+
 	it('closes on the other side whatever one side closed', async () => {
 		const channel = bus();
 		const pc = fakeWorkbench();
@@ -892,13 +949,16 @@ describe('closes under a shut gate survive it (K11 vs E7)', () => {
 		expect(channel.sent).toEqual([]);
 		expect(deferredRecord().files.length).toBe(2);
 		// The PC window returns: the phone's roster learns it, the gate opens, the recorded
-		// closes cross BEFORE any catch-up can answer with the stale tabs.
+		// closes cross BEFORE any catch-up can answer with the stale tabs. The catch-up
+		// itself is the returning PC's — becoming active is the re-join trigger (K14); the
+		// established phone's roster word alone no longer re-asks.
 		pcPresence.count = 2;
 		phonePresence.count = 2;
 		phonePresence.roster();
+		pcPresence.became();
 		await until(() => pc.tabs().length === 0);
-		// The catch-ups that follow (both sides became active) see consistent state: nothing
-		// reopens anywhere.
+		// The catch-ups that follow (the PC became active again) see consistent state:
+		// nothing reopens anywhere.
 		await until(() => channel.sent.some((m) => m.k === 'stateSnapshot'));
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(phone.tabs()).toEqual([]);
@@ -1117,6 +1177,39 @@ describe('the catch-up (§7.0.3, K14)', () => {
 		// K14: the joiner follows the PC's active tab — the phone's Editor page opens on
 		// what the PC was looking at.
 		expect(remote.activePath()).toBe(README);
+	});
+
+	it('an already-synced frontend does not re-ask on a roster event — only becoming active re-triggers', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const pcPresence = fakePresence(2);
+		attachWorkbenchSync(pc, channel.deps, 'main', { presence: pcPresence });
+		// The start's own catch-up asked once, and the answer completed it.
+		await until(() => channel.sent.some((m) => m.k === 'stateRequest'));
+		channel.deps.send({ by: 'remote/1', k: 'stateSnapshot', to: 'main', files: [], tabs: [], extTabs: [], active: null });
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		channel.sent.length = 0;
+		// A new roster entry (a phone connects), a heartbeat, an activity flip, a TTL
+		// sweep: none re-asks. The PC already caught up — every later answer's active tab
+		// would drag it off its user's own choice, and two established frontends answering
+		// each other diverge for good (2026-10-16: the PC followed the phone's restored
+		// session's active file while the phone followed the PC's).
+		pcPresence.roster();
+		pcPresence.roster();
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(channel.sent.filter((m) => m.k === 'stateRequest')).toEqual([]);
+		// The roster emptying re-arms the trigger: the next active other is a fresh join.
+		pcPresence.count = 1;
+		pcPresence.roster();
+		pcPresence.count = 2;
+		pcPresence.roster();
+		await until(() => channel.sent.some((m) => m.k === 'stateRequest'));
+		channel.sent.length = 0;
+		channel.deps.send({ by: 'remote/1', k: 'stateSnapshot', to: 'main', files: [], tabs: [], extTabs: [], active: null });
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		// And becoming active again still asks at once (K14) — that trigger owns re-joins.
+		pcPresence.became();
+		await until(() => channel.sent.some((m) => m.k === 'stateRequest'));
 	});
 });
 

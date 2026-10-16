@@ -645,6 +645,24 @@ export function attachWorkbenchSync(
 		})()
 	});
 
+	/** The canonical half of the remote-open boundary, the relay gate's semantics
+	 *  (pathGate.ts's gateInvokeCanonical) applied to one path: the resolved path must sit
+	 *  inside the RESOLVED roots — a workspace opened through a symlink (macOS
+	 *  /tmp → /private/tmp) contains its members' canonical forms, and comparing against
+	 *  the lexical roots would refuse every legitimate file of such a workspace. A null
+	 *  form (the path does not exist yet, or the backend's confinement answered nothing)
+	 *  keeps the lexical answer; a canonicalizer that fails refuses the open. */
+	const canonicalGate = async (path: string, roots: string[]): Promise<boolean> => {
+		try {
+			const spelled = [path, ...roots];
+			const forms = await Promise.all(spelled.map((entry) => options.canonicalPath!(entry)));
+			const canonicalRoots = roots.map((root, at) => forms[at + 1] ?? root);
+			return forms[0] === null || withinRoots(forms[0], canonicalRoots);
+		} catch {
+			return false; // an unanswerable check refuses the open
+		}
+	};
+
 	/** Merge a snapshot on the freshly active frontend (§7.0.3): tabs take the UNION — the
 	 *  other side's open here in the background, mine pushed back as background opens — no
 	 *  tab closes over it and an unsaved buffer always survives; the active tab follows the
@@ -659,12 +677,7 @@ export function attachWorkbenchSync(
 			if (!remoteOrigin) return true;
 			if (!withinRoots(path, roots)) return false;
 			if (!options.canonicalPath) return true;
-			try {
-				const form = await options.canonicalPath(path);
-				return form !== null && withinRoots(form, roots);
-			} catch {
-				return false;
-			}
+			return canonicalGate(path, roots);
 		};
 		void (async () => {
 			const haveFiles = new Set(editors.openFilePaths().map((path) => keyOf(path)));
@@ -738,12 +751,25 @@ export function attachWorkbenchSync(
 		})();
 	};
 
+	/** Whether this frontend still owes itself a catch-up: it became active (or started)
+	 *  while the roster named no other active frontend and none has run since, or the
+	 *  roster has since emptied. This is what scopes the roster trigger below to its
+	 *  comment's case — an already-synced frontend must NOT re-ask on every roster event
+	 *  (a heartbeat, an activity flip, a TTL sweep, a new entry): each answer's active
+	 *  tab would drag it off its user's own choice, and two established frontends
+	 *  answering each other's requests diverge for good (2026-10-16: the PC followed the
+	 *  phone's restored session while the phone followed the PC). */
+	let catchUpDue = false;
 	/** Ask the others for a snapshot and accept one within the window: the joiner merges,
 	 *  then starts announcing (§7.0.3). No other active frontend — the typical lone remote
-	 *  — skips the whole exchange. */
+	 *  — skips the whole exchange and stays due: the roster trigger runs it later. */
 	const catchUp = (): void => {
 		if (!live || quiet) return;
-		if (presence && !presence.othersActive()) return;
+		if (presence && !presence.othersActive()) {
+			catchUpDue = true;
+			return;
+		}
+		catchUpDue = false;
 		awaitingSnapshot = true;
 		if (catchUpTimer !== null) clearTimeout(catchUpTimer);
 		catchUpTimer = setTimeout(() => {
@@ -760,10 +786,15 @@ export function attachWorkbenchSync(
 	// catch-up skipped, the table naming no other active frontend yet (a fresh remote's
 	// roster is empty until the PC's heartbeat or a WINDOWS word lands) — asks the moment
 	// the roster first names one. The awaiting window keeps a heartbeat-seconds-later
-	// arrival from stacking a second request.
+	// arrival from stacking a second request. A roster that empties re-arms the trigger:
+	// the next active other is a fresh join, not an event in an established collective.
 	presence?.onRosterChange?.(() => {
 		tryFlushDeferred();
-		if (!awaitingSnapshot) catchUp();
+		if (presence.othersActive()) {
+			if (!awaitingSnapshot && catchUpDue) catchUp();
+		} else {
+			catchUpDue = true;
+		}
 	});
 
 	/** One crossed message, applied: the receive handler's body, kept whole so the
@@ -871,9 +902,10 @@ export function attachWorkbenchSync(
 				// lexical answer stands only until the path resolves — a repository entry
 				// that is really a symlink to ~/.ggs passes `withinRoots` while its reads
 				// land outside — so a supplied `canonicalPath` re-checks the resolution
-				// against the same `remote_canonical_paths` the Relay's own gate rides:
-				// refused when it resolves outside the roots; a null answer (the backend's
-				// confinement, or nothing to resolve) keeps the lexical one. The check
+				// against the same `remote_canonical_paths` the Relay's own gate rides,
+				// with the gate's own semantics (canonicalGate above): the roots resolve
+				// alongside the path, and a null answer (the backend's confinement, or
+				// nothing to resolve) keeps the lexical one. The check
 				// is async — one round trip is the cost of a refused open, and the
 				// announced/applying machinery already tolerates operations landing out
 				// of order.
@@ -884,12 +916,9 @@ export function attachWorkbenchSync(
 					const roots = workbench.openFolders?.() ?? [];
 					if (!withinRoots(message.path, roots)) return;
 					if (options.canonicalPath) {
-						void options
-							.canonicalPath(message.path)
-							.then((form) => {
-								if (form === null || withinRoots(form, roots)) applyMessage(message);
-							})
-							.catch(() => undefined); // an unanswerable check refuses the open
+						void canonicalGate(message.path, roots).then((allowed) => {
+							if (allowed) applyMessage(message);
+						});
 						return;
 					}
 				}

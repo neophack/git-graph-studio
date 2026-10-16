@@ -302,6 +302,49 @@ pub fn redirect(location: &str) -> Response {
         .expect("valid redirect")
 }
 
+/// Whether the request is a browser navigation for a document (the workbench shell's own
+/// load) rather than a subresource the loaded page pulls: `Sec-Fetch-Dest` says so on every
+/// current browser, and an `Accept` led by `text/html` is the pre-Sec-Fetch fallback.
+pub fn wants_document(headers: &HeaderMap) -> bool {
+    if headers
+        .get("sec-fetch-dest")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == "document")
+    {
+        return true;
+    }
+    headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim_start().starts_with("text/html"))
+}
+
+/// A navigation's error page (2026-10-16, the owner's direction: Safari 打开 remote 直接
+/// 下载了): a bare status with an empty body and no Content-Type is saved as a zero-byte
+/// file named after the URL — Safari downloaded `remote.html` where Chromium draws its own
+/// error page — so every answer a navigation can reach carries `text/html` and a line of
+/// prose. Where the person's real next step is another page (the login, the picker) the
+/// answer is a redirect instead; this is what the errors with no next page land on.
+pub fn error_page(status: StatusCode, message: &str) -> Response {
+    let title = format!(
+        "{} {}",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("error")
+    );
+    let body = format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>{title}</title>\
+         <style>body{{font:14px/1.6 system-ui;padding:2rem;background:#1f1f1f;color:#eee}}\
+         h1{{font-size:1.1rem;margin:0 0 .5rem}}p{{margin:0}}</style>\
+         <h1>GGS Remote</h1><p>{message}</p>"
+    );
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(body))
+        .expect("valid error page")
+}
+
 /// Normalize a request path for the asset routes (§16 path traversal): reject `..`, absolute
 /// paths, backslashes and NUL.
 pub fn safe_rel_path(path: &str) -> Option<String> {

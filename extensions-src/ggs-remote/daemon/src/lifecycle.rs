@@ -101,7 +101,10 @@ pub enum CloseOutcome {
 
 /// INSTANCE_CLOSE (R20): graceful `Quit` first; unsaved files block it unless `force`, which
 /// kills the pid — only while the pid still owns the instance's control connection (the
-/// registry entry exists), so a reused pid is never hit.
+/// registry entry exists). The residual race, stated honestly: the registry.exists +
+/// pid_alive check and the kill are not atomic, and on Unix kill_pid spawns /bin/kill,
+/// which widens the window — a pid reused inside it could be hit. No cheap cross-platform
+/// start-identity check exists to close it, so the window stays.
 pub async fn close(daemon: &Arc<Daemon>, instance: &str, force: bool) -> CloseOutcome {
     let Some(pid) = daemon.registry.with(instance, |i| i.pid) else {
         return CloseOutcome::Missing;

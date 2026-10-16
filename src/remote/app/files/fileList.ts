@@ -86,12 +86,12 @@ export function createFileList(hooks: FileListHooks) {
 		total = page.total;
 		if (offset === 0) entries = page.entries;
 		else entries = entries.concat(page.entries);
+		// A continuation keeps its place: the rows above must not jump. The LIVE scroll is
+		// the anchor — the user may have scrolled while the page loaded; the remembered
+		// entry-time position is stale exactly then and snapping back to it yanks the list.
+		const keepScroll = offset > 0 && path === dir ? scroller().scrollTop : null;
 		render();
-		if (path === dir && offset > 0) {
-			// A continuation keeps its place: the rows above must not jump.
-			const before = scrollMemory.get(dir) ?? 0;
-			if (before > 0) scroller().scrollTop = before;
-		}
+		if (keepScroll !== null) scroller().scrollTop = keepScroll;
 	}
 
 	async function loadMore(): Promise<void> {
@@ -153,6 +153,12 @@ export function createFileList(hooks: FileListHooks) {
 		const box = document.createElement('input');
 		box.type = 'checkbox';
 		box.tabIndex = -1;
+		// The box is display-only (pointer-events: none — the tap falls through to the row,
+		// which toggles the selection): a click that still reaches it must not flip the mark
+		// off the real selection state, so any native flip is re-synced at once.
+		box.addEventListener('change', () => {
+			box.checked = hooks.selection.isSelected(entry.path);
+		});
 		check.appendChild(box);
 		const glyph = icon(entry.isDir ? 'folder' : fileIcon(entry.name));
 		if (!entry.isDir) glyph.style.color = fileIconColor(entry.name) ?? '';

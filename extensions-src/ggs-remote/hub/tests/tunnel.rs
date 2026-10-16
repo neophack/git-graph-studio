@@ -802,3 +802,182 @@ async fn serve_one_http_head_only(ws: &mut Pc) -> HttpReq {
         }
     }
 }
+
+/// §20.6 login throttling through the Hub (state.rs `LOGIN_MAX`, 10/min per IP+uuid): the
+/// wildcard `rest` never carries a leading slash, so the guard must name the path exactly —
+/// `ends_with("/api/login")` never matched "api/login" and the limiter never ran at all.
+#[tokio::test]
+async fn a_hammered_login_is_throttled() {
+    let fixture = start_hub(Config::default()).await;
+    let signing = SigningKey::from_bytes(&[25u8; 32]);
+    let mut ws = pc(fixture.hub, &signing, None).await;
+    let host = format!("127.0.0.1:{}", fixture.hub.port());
+    let ready = answer_challenge(&mut ws, &signing, &host).await;
+    let uuid = &ready.uuid;
+
+    // The window's ten: each crosses to the PC and is answered (a wrong password).
+    for _ in 0..10 {
+        let request = tokio::spawn(http(
+            fixture.hub,
+            "POST",
+            format!("/u/{uuid}/api/login"),
+            &[],
+            Some("{}"),
+        ));
+        let _seen = serve_one_http(&mut ws, 401, "no").await;
+        assert_eq!(request.await.unwrap().0, 401);
+    }
+    // The eleventh inside the same minute: the Hub refuses without waking the tunnel. The
+    // timeout is the red-state detector — unthrottled, this request parks on the PC's
+    // answer instead of coming back.
+    let refused = tokio::time::timeout(
+        Duration::from_secs(5),
+        http(
+            fixture.hub,
+            "POST",
+            format!("/u/{uuid}/api/login"),
+            &[],
+            Some("{}"),
+        ),
+    )
+    .await
+    .expect("the Hub must refuse, not forward an eleventh login");
+    assert_eq!(refused.0, 429, "{}", refused.1);
+}
+
+/// §20.8 `bytes_per_day_per_tunnel`: a spent budget must take the tunnel down — the PC
+/// unregisters (the link answers the plain offline page) and its browsers close. Before,
+/// the refusal only broke out of the frame batch and the select loop kept the dead tunnel
+/// Online forever, dropping every further PC→browser frame one warn at a time.
+#[tokio::test]
+async fn a_spent_byte_budget_takes_the_tunnel_offline() {
+    let config = Config {
+        bytes_per_day_per_tunnel: 256,
+        ..Config::default()
+    };
+    let fixture = start_hub(config).await;
+    let signing = SigningKey::from_bytes(&[26u8; 32]);
+    let mut pc_ws = pc(fixture.hub, &signing, None).await;
+    let host = format!("127.0.0.1:{}", fixture.hub.port());
+    let ready = answer_challenge(&mut pc_ws, &signing, &host).await;
+    let uuid = ready.uuid.clone();
+
+    // A browser on the link, so a downlink frame has somewhere to go.
+    let (mut browser, _) =
+        tokio_tungstenite::connect_async(format!("ws://{}/u/{uuid}/ws", fixture.hub).as_str())
+            .await
+            .unwrap();
+    let frames = next_frames(&mut pc_ws).await;
+    let open = frames
+        .iter()
+        .find(|f| f.ty == ty::CONN_OPEN)
+        .and_then(|f| f.decode_msgpack::<ConnOpen>())
+        .expect("a CONN_OPEN");
+
+    // One downlink frame bigger than the rest of the budget.
+    let big = Frame::raw(0x52, open.session, vec![0u8; 1024]);
+    pc_ws
+        .send(Message::Binary(big.encode().into()))
+        .await
+        .unwrap();
+
+    // The tunnel leaves the table: the link answers offline from here, not 504-forever.
+    let gone = tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture.state.tunnel(&uuid).is_some() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(gone.is_ok(), "a spent budget must unregister the tunnel");
+
+    // The browser hears the tunnel's close, never the oversized frame.
+    let closed = tokio::time::timeout(Duration::from_secs(5), browser.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(closed, Ok(Message::Close(_)) | Err(_)),
+        "the browser session must close with the tunnel"
+    );
+}
+
+/// §20.6 `blocklist`, the handshake half: the file is re-read at the handshake itself
+/// (cheap while unchanged), so a key listed moments ago is refused right away — not
+/// whenever the next 30 s `enforce_blocklist` tick happens to land.
+#[tokio::test]
+async fn a_newly_listed_key_is_refused_at_its_handshake() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("block.txt");
+    std::fs::write(&file, "").unwrap();
+    let config = Config {
+        blocklist: file.to_str().unwrap().to_owned(),
+        ..Config::default()
+    };
+    let fixture = start_hub(config).await;
+    let signing = SigningKey::from_bytes(&[27u8; 32]);
+
+    // Listed moments before the handshake — no refresh tick in between.
+    let uuid = identity::uuid_for(&signing.verifying_key().to_bytes());
+    std::fs::write(&file, format!("{uuid}\n")).unwrap();
+
+    let mut ws = pc(fixture.hub, &signing, None).await;
+    let frames = next_frames(&mut ws).await;
+    let challenge = frames
+        .iter()
+        .find(|f| f.ty == ty::T_CHALLENGE)
+        .and_then(|f| f.decode_msgpack::<ggs_remote_hub::msg::TChallenge>())
+        .expect("a challenge");
+    let message = identity::auth_message(&challenge.nonce, &challenge.host);
+    ws.send(Message::Binary(
+        Frame::msgpack(
+            ty::T_AUTH,
+            &TAuth {
+                sig: signing.sign(&message).to_bytes().to_vec(),
+            },
+        )
+        .encode()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let frames = next_frames(&mut ws).await;
+    let rejected = frames
+        .iter()
+        .find(|f| f.ty == ty::T_REJECTED)
+        .and_then(|f| f.decode_msgpack::<ggs_remote_hub::msg::TRejected>());
+    assert_eq!(
+        rejected.map(|r| r.reason),
+        Some("banned".into()),
+        "a key listed since the last tick must still be refused at its handshake"
+    );
+}
+
+/// §20.4 `sessions_per_tunnel`, the browser side end to end: the second connection past a
+/// ceiling of one is refused. (The pre-fix race itself — concurrent upgrades each passing
+/// the check inside the upgrade gap — cannot be parked deterministically from a test; the
+/// atomic check-and-insert it needed is pinned by `reserve_conn`'s unit test in state.rs.)
+#[tokio::test]
+async fn a_browser_past_the_session_ceiling_is_refused() {
+    let config = Config {
+        sessions_per_tunnel: 1,
+        ..Config::default()
+    };
+    let fixture = start_hub(config).await;
+    let signing = SigningKey::from_bytes(&[28u8; 32]);
+    let mut pc_ws = pc(fixture.hub, &signing, None).await;
+    let host = format!("127.0.0.1:{}", fixture.hub.port());
+    let ready = answer_challenge(&mut pc_ws, &signing, &host).await;
+    let uuid = &ready.uuid;
+
+    let url = format!("ws://{}/u/{uuid}/ws", fixture.hub);
+    let (first, _) = tokio_tungstenite::connect_async(url.as_str())
+        .await
+        .unwrap();
+    let frames = next_frames(&mut pc_ws).await;
+    assert!(frames.iter().any(|f| f.ty == ty::CONN_OPEN));
+
+    // The slot is taken: the next upgrade is refused before it becomes a session.
+    let refused = tokio_tungstenite::connect_async(url.as_str()).await;
+    assert!(refused.is_err(), "the ceiling must refuse a second browser");
+    drop(first);
+}

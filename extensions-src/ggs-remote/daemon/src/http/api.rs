@@ -319,7 +319,10 @@ pub async fn download_ticket(
     };
     // The multi form needs its two paths; the single form needs its one. A multi body caps
     // its paths the way a body field ever gets capped here (a bounded request, not an
-    // unbounded walk handed to the instance).
+    // unbounded walk handed to the instance). A multi ticket IS a zip whatever the body
+    // said: the browser's downloadMany posts `paths` with no `zip` field (§6.7), and the
+    // instance packs `zip_trees` unconditionally for two or more paths — the ticket must
+    // say so, or the answer goes out as application/octet-stream.
     let multi = body.paths.len() >= 2 && body.paths.len() <= 1000;
     if !daemon.registry.exists(&body.instance) || (body.path.is_empty() && !multi) {
         return error(StatusCode::NOT_FOUND, "no-such-window");
@@ -332,7 +335,7 @@ pub async fn download_ticket(
             token_hash: session.token_hash,
             instance: body.instance.clone(),
             path: body.path,
-            zip: body.zip,
+            zip: body.zip || multi,
             paths: if multi { body.paths } else { Vec::new() },
         });
     let base = base_path(&headers);

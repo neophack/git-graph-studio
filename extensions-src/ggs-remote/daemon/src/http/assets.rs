@@ -6,7 +6,7 @@
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -93,16 +93,33 @@ pub async fn app_asset(
     headers: HeaderMap,
     Path((inst, ver, path)): Path<(String, String, String)>,
 ) -> Response {
+    let base = super::base_path(&headers);
     if session_of(&daemon, &headers).is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
+        // A lapsed session on the shell's own navigation goes to the login (2026-10-16, the
+        // owner's direction: Safari 打开 remote 直接下载了): the bare 401 this used to answer
+        // — no Content-Type, empty body — is what Safari saved as a zero-byte `remote.html`.
+        if super::wants_document(&headers) {
+            return super::redirect(&format!("{base}login"));
+        }
+        return super::error(StatusCode::UNAUTHORIZED, "session required");
     }
+    let document = super::wants_document(&headers);
     let Some(path) = safe_rel_path(&path) else {
-        return StatusCode::NOT_FOUND.into_response();
+        return super::error(StatusCode::NOT_FOUND, "not found");
+    };
+    // A navigation whose window is gone — or upgraded under it — lands on the picker, whose
+    // rows carry what is running now; a loaded page's fetches keep reading the status code.
+    let gone = |status: StatusCode| {
+        if document {
+            super::redirect(&format!("{base}windows"))
+        } else {
+            super::error(status, "no such window")
+        }
     };
     match daemon.registry.version_of(&inst) {
-        None => return StatusCode::NOT_FOUND.into_response(),
+        None => return gone(StatusCode::NOT_FOUND),
         // The window was upgraded under an open tab (§6.6): a 409 tells the page to reload.
-        Some(running) if running != ver => return StatusCode::CONFLICT.into_response(),
+        Some(running) if running != ver => return gone(StatusCode::CONFLICT),
         _ => {}
     }
     // Only content-hashed files are cached: their names change whenever their bytes do.
@@ -123,11 +140,20 @@ pub async fn app_asset(
             let fetched = match fetch_from_instance(&daemon, &inst, AssetKind::App, &path).await {
                 Ok(f) if f.status == 200 => f,
                 Ok(f) => {
-                    return StatusCode::from_u16(f.status)
-                        .unwrap_or(StatusCode::NOT_FOUND)
-                        .into_response()
+                    let status = StatusCode::from_u16(f.status).unwrap_or(StatusCode::NOT_FOUND);
+                    return if document {
+                        super::error_page(status, "the window did not serve this file")
+                    } else {
+                        super::error(status, "the window did not serve this file")
+                    };
                 }
-                Err(status) => return status.into_response(),
+                Err(status) => {
+                    return if document {
+                        super::error_page(status, "the window did not answer in time")
+                    } else {
+                        super::error(status, "the window did not answer in time")
+                    };
+                }
             };
             let etag = if fetched.etag.is_empty() {
                 format!(
@@ -211,10 +237,10 @@ fn respond(headers: &HeaderMap, entry: Entry, cache_control: &str) -> Response {
 /// things a service worker can serve, all carry a session cookie anyway.
 pub async fn service_worker(State(daemon): State<Arc<Daemon>>, headers: HeaderMap) -> Response {
     if super::session_of(&daemon, &headers).is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return super::error(StatusCode::UNAUTHORIZED, "session required");
     }
     let Some(first) = daemon.registry.snapshot().into_iter().next() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return super::error(StatusCode::NOT_FOUND, "no window is running");
     };
     match fetch_from_instance(&daemon, &first.id, AssetKind::App, "sw.js").await {
         Ok(f) if f.status == 200 => {
@@ -226,10 +252,11 @@ pub async fn service_worker(State(daemon): State<Arc<Daemon>>, headers: HeaderMa
                 .body(Body::from(f.body))
                 .expect("valid sw response")
         }
-        Ok(f) => StatusCode::from_u16(f.status)
-            .unwrap_or(StatusCode::NOT_FOUND)
-            .into_response(),
-        Err(status) => status.into_response(),
+        Ok(f) => super::error(
+            StatusCode::from_u16(f.status).unwrap_or(StatusCode::NOT_FOUND),
+            "the window did not serve this file",
+        ),
+        Err(status) => super::error(status, "the window did not answer in time"),
     }
 }
 
@@ -241,14 +268,14 @@ pub async fn ext_asset(
     Path((inst, tok, path)): Path<(String, String, String)>,
 ) -> Response {
     if !daemon.check_resource_token(&tok, &inst) {
-        return StatusCode::NOT_FOUND.into_response();
+        return super::error(StatusCode::NOT_FOUND, "not found");
     }
     let Some(path) = safe_rel_path(&path) else {
-        return StatusCode::NOT_FOUND.into_response();
+        return super::error(StatusCode::NOT_FOUND, "not found");
     };
     let fetched = match fetch_from_instance(&daemon, &inst, AssetKind::Ext, &path).await {
         Ok(f) => f,
-        Err(status) => return status.into_response(),
+        Err(status) => return super::error(status, "the window did not answer in time"),
     };
     let base = format!("/w/{inst}/ggs/{tok}/");
     let mut body = fetched.body;
@@ -285,17 +312,20 @@ pub async fn download(
     Path(inst): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
+    // A one-time ticket's failure answers a page a browser can show — a download URL is a
+    // navigation too, and a bare typeless status is what Safari saves as an empty file.
+    let fail = |status: StatusCode| super::error_page(status, "this download link expired");
     let Some(ticket) = query
         .get("t")
         .and_then(|t| daemon.tickets.lock().unwrap().take_download(t))
     else {
-        return StatusCode::NOT_FOUND.into_response();
+        return fail(StatusCode::NOT_FOUND);
     };
     if ticket.instance != inst || !daemon.session_valid(&ticket.token_hash) {
-        return StatusCode::NOT_FOUND.into_response();
+        return fail(StatusCode::NOT_FOUND);
     }
     let Some((req, mut rx)) = daemon.registry.open_request(&inst) else {
-        return StatusCode::NOT_FOUND.into_response();
+        return fail(StatusCode::NOT_FOUND);
     };
     daemon.registry.send(
         &inst,
@@ -310,13 +340,11 @@ pub async fn download(
         Ok(Some(chunk)) => chunk,
         _ => {
             daemon.registry.cancel_request(&inst, req);
-            return StatusCode::GATEWAY_TIMEOUT.into_response();
+            return fail(StatusCode::GATEWAY_TIMEOUT);
         }
     };
     if first.status != 200 {
-        return StatusCode::from_u16(first.status)
-            .unwrap_or(StatusCode::NOT_FOUND)
-            .into_response();
+        return fail(StatusCode::from_u16(first.status).unwrap_or(StatusCode::NOT_FOUND));
     }
     let name = first.name.clone();
     let total = first.total;

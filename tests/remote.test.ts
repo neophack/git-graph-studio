@@ -31,6 +31,7 @@ import {
 } from '../src/remote/frame';
 import { Transport, basePathOf, instanceOf } from '../src/remote/transport';
 import { RelayEngine } from '../src/remote/relay';
+import { gateInvoke, withinRoots } from '../src/remote/pathGate';
 import { scopedStorage } from '../src/remote/storage';
 import { withModifier } from '../src/remote/terminalKeys';
 import { openWindowSwitcher, pickerPageUrl, switcherItems } from '../src/remote/windowSwitcher';
@@ -364,6 +365,115 @@ describe('transport', () => {
 		expect(lists).toEqual([[{ id: 'ggs-1', title: 'repo' }]]);
 		expect(notices).toEqual([{ kind: 'close-blocked', instance: 'ggs-1', dirty: ['a.rs'] }]);
 	});
+
+	it('drops a frame whose listener throws instead of killing the downlink', async () => {
+		// A throwing event handler rejected the ordered inflate chain once, and every later
+		// frame — RESULTs included — was silently dropped: invokes hung forever.
+		const { transport, socket } = await connected();
+		const good: unknown[] = [];
+		const badStream = transport.listen('studio://bad', () => {
+			throw new Error('listener boom');
+		});
+		const goodStream = transport.listen('studio://good', (e) => good.push(e.payload));
+		const call = transport.call('list_dir', { path: '/repo' });
+		await new Promise((r) => setTimeout(r, 20));
+		const invokeFrame = socket.frames().filter((f) => f.type === T.INVOKE).pop()!;
+		socket.deliver(
+			down(jsonFrame(T.EVENT, { event: 'studio://bad', id: 1, payload: 1 }, badStream)),
+			down(jsonFrame(T.RESULT, ['ok'], invokeFrame.stream)),
+			down(jsonFrame(T.EVENT, { event: 'studio://good', id: 2, payload: 'yes' }, goodStream))
+		);
+		await expect(call).resolves.toEqual(['ok']);
+		expect(good).toEqual(['yes']);
+	});
+
+	it('coalesces a visibility-driven retry with the in-flight one, and stays dead once shut down', async () => {
+		const sockets: FakeSocket[] = [];
+		const make = () =>
+			new Transport({
+				basePath: '/',
+				instance: 'ggs-1',
+				createSocket: (url) => {
+					const socket = new FakeSocket(url);
+					sockets.push(socket);
+					setTimeout(() => socket.open(), 0); // the browser's stack would
+					return socket as unknown as WebSocket;
+				},
+				fetchSession: async () => ({ csrf: 'tok' })
+			});
+		const transport = make();
+		void transport.connect().catch(() => undefined);
+		await flush();
+		await flush();
+		// The link dies: the retry sleeps ~500 ms. A visibility comeback during the sleep
+		// must not start a SECOND reconnect — two sockets on one sid corrupt the resume
+		// accounting.
+		sockets[0]!.close();
+		sockets[0]!.onclose?.({ code: 1006, reason: '' });
+		transport.onVisibility(true);
+		await new Promise((r) => setTimeout(r, 700));
+		await flush();
+		expect(sockets).toHaveLength(2);
+		await new Promise((r) => setTimeout(r, 1500));
+		expect(sockets).toHaveLength(2);
+
+		// Shutdown mid-backoff: the sleeping retry must not open a socket anyway, and a
+		// later visibility event stays a no-op.
+		const shut = make();
+		void shut.connect().catch(() => undefined);
+		await flush();
+		await flush();
+		const opened = sockets.length;
+		sockets[opened - 1]!.close();
+		sockets[opened - 1]!.onclose?.({ code: 1006, reason: '' });
+		shut.shutdown();
+		shut.onVisibility(true);
+		await new Promise((r) => setTimeout(r, 1200));
+		expect(sockets).toHaveLength(opened);
+	});
+
+	it('rejects connect when the attach fails — the splash cannot hang on Connecting… forever', async () => {
+		// The daemon answers a failed ATTACH with NOTICE{kind:'attach-failed'} alone —
+		// never ATTACHED, never CLOSE.
+		let socket!: FakeSocket;
+		const transport = new Transport({
+			basePath: '/',
+			instance: 'ggs-9',
+			createSocket: (url) => {
+				socket = new FakeSocket(url);
+				setTimeout(() => socket.open(), 0);
+				return socket as unknown as WebSocket;
+			},
+			fetchSession: async () => ({ csrf: 'tok' })
+		});
+		const attached = transport.connect();
+		await flush();
+		await flush();
+		socket.deliver(down(msgpackFrame(T.HELLO_ACK, { sid: 's1', resumed: false, credit: 1 << 20 })));
+		await flush();
+		socket.deliver(down(msgpackFrame(T.NOTICE, { kind: 'attach-failed', instance: 'ggs-9', message: 'the window did not answer in time' })));
+		await expect(attached).rejects.toThrow('the window did not answer in time');
+	});
+
+	it('rejects connect when no ATTACHED ever arrives (bounded wait)', async () => {
+		let socket!: FakeSocket;
+		const transport = new Transport({
+			basePath: '/',
+			instance: 'ggs-9',
+			attachTimeoutMs: 60,
+			createSocket: (url) => {
+				socket = new FakeSocket(url);
+				setTimeout(() => socket.open(), 0);
+				return socket as unknown as WebSocket;
+			},
+			fetchSession: async () => ({ csrf: 'tok' })
+		});
+		const attached = transport.connect();
+		await flush();
+		await flush();
+		socket.deliver(down(msgpackFrame(T.HELLO_ACK, { sid: 's1', resumed: false, credit: 1 << 20 })));
+		await expect(attached).rejects.toThrow(/did not answer/);
+	});
 });
 
 describe('tauri shims', () => {
@@ -514,6 +624,86 @@ describe('relay engine', () => {
 		expect(broken.invoke).not.toHaveBeenCalledWith('read_file', expect.anything(), expect.anything());
 	});
 
+	/** The relative half of the repo-anchored rules: the backend joins a relative `path`
+	 *  against the repo and reads raw (read_file_at's `*`), so `..` climbs out of the gated
+	 *  repo unless the gate resolves the pair lexically and confines the result. */
+	it('refuses a repo-relative path whose `..` climbs out of the gated repo', async () => {
+		const { relay, invoke, sent } = engine();
+		const root = isWindows ? 'C:\\work\\repo' : '/work/repo';
+		const answer = () => sent.find((f) => f.type === T.RESULT && f.flags & FLAG.ERROR);
+
+		// The legitimate case the relative rule exists for: a plain repo-relative read.
+		relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'read_file_at', a: { repo: root, revision: '*', path: 'src/a.ts' } }, 1, 0, 7)));
+		await new Promise((r) => setTimeout(r, 10));
+		expect(answer()).toBeUndefined();
+		expect(invoke).toHaveBeenCalledWith('read_file_at', expect.objectContaining({ path: 'src/a.ts' }), expect.anything());
+
+		// The escape: joined against the repo, this lands in /etc.
+		sent.length = 0;
+		invoke.mockClear();
+		relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'read_file_at', a: { repo: root, revision: '*', path: '../../../../etc/passwd' } }, 1, 0, 7)));
+		await new Promise((r) => setTimeout(r, 10));
+		expect(answer()).toBeTruthy();
+		expect(invoke).not.toHaveBeenCalledWith('read_file_at', expect.anything(), expect.anything());
+
+		// No repo argument at all: the backend falls back to the first open root, and the
+		// same climb out of it is refused.
+		sent.length = 0;
+		relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'read_file_at', a: { revision: '*', path: '../../../etc/passwd' } }, 1, 0, 7)));
+		await new Promise((r) => setTimeout(r, 10));
+		expect(answer()).toBeTruthy();
+		expect(invoke).not.toHaveBeenCalledWith('read_file_at', expect.anything(), expect.anything());
+	});
+
+	/** The canonical pass used to skip EVERY non-repo argument of a relativeAllowed rule —
+	 *  including absolute ones, where the "resolved against the repo" comment does not
+	 *  apply. An in-roots symlink to outside sailed through. */
+	it('re-checks the paths of repo-relative rules against symlinks, absolute and relative', async () => {
+		const root = isWindows ? 'C:\\work\\repo' : '/work/repo';
+		const link = isWindows ? 'C:\\work\\repo\\sneak.key' : '/work/repo/sneak.key';
+		const target = isWindows
+			? 'C:\\Users\\me\\.ggs\\keys\\ai-providers.key'
+			: '/home/me/.ggs/keys/ai-providers.key';
+		const { relay, invoke, sent } = engine({ [link]: target });
+		const answer = () => sent.find((f) => f.type === T.RESULT && f.flags & FLAG.ERROR);
+
+		// Absolute value on a relativeAllowed rule: inside the roots lexically, outside
+		// through the symlink.
+		relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'read_file_at', a: { repo: root, revision: '*', path: link } }, 1, 0, 7)));
+		await new Promise((r) => setTimeout(r, 10));
+		expect(answer()).toBeTruthy();
+		expect(invoke).not.toHaveBeenCalledWith('read_file_at', expect.anything(), expect.anything());
+
+		// The same link spelled repo-relative: the joined form is what the backend reads,
+		// so the canonical pass covers it too.
+		sent.length = 0;
+		relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'read_file_at', a: { repo: root, revision: '*', path: 'sneak.key' } }, 1, 0, 7)));
+		await new Promise((r) => setTimeout(r, 10));
+		expect(answer()).toBeTruthy();
+		expect(invoke).not.toHaveBeenCalledWith('read_file_at', expect.anything(), expect.anything());
+	});
+
+	/** A malformed LISTEN/EMIT must be one dropped frame, never a wedged relay: the frame
+	 *  chain used to reject on the first bad payload and skip every later frame of every
+	 *  session until the socket died. */
+	it('survives malformed LISTEN/EMIT frames — one bad frame never wedges the relay', async () => {
+		const { relay, sent, emitTo, listeners } = engine();
+		// msgpack decoding to a non-map, a map whose event is not a string, and an EMIT
+		// whose payload is not JSON at all.
+		relay.receive(encodeFrame({ ...makeFrame(T.LISTEN, Enc.Msgpack, encodeMsgpack(42), 9), session: 7 }));
+		relay.receive(encodeFrame({ ...makeFrame(T.LISTEN, Enc.Msgpack, encodeMsgpack({ event: 123 }), 11), session: 7 }));
+		relay.receive(encodeFrame({ ...makeFrame(T.EMIT, Enc.Json, new TextEncoder().encode('not json'), 0), session: 7 }));
+		await new Promise((r) => setTimeout(r, 10));
+		expect(emitTo).not.toHaveBeenCalled();
+		expect(listeners.size).toBe(0);
+		// The relay still runs: a good LISTEN is served and the daemon heartbeat answered.
+		relay.receive(encodeFrame({ ...msgpackFrame(T.LISTEN, { event: 'studio://git-output' }, 13), session: 7 }));
+		relay.receive(encodeFrame({ ...makeFrame(T.PING, Enc.Raw, new Uint8Array(0), 77), session: 7 }));
+		await new Promise((r) => setTimeout(r, 10));
+		expect(listeners.has('studio://git-output')).toBe(true);
+		expect(sent.find((f) => f.type === T.PONG)?.stream).toBe(77);
+	});
+
 	it("forwards ext_fs into the extension platform's own areas, and refuses them everywhere else", async () => {
 		const { relay, invoke, sent } = engine();
 		const ownInstall = isWindows
@@ -647,6 +837,17 @@ describe('relay engine', () => {
 		const events = sent.filter((f) => f.type === T.EVENT);
 		expect(events.length).toBe(1);
 		expect(frameJson<{ payload: string }>(events[0]).payload).toBe('abc');
+	});
+});
+
+describe('path gate roots', () => {
+	it("the POSIX root '/' contains every absolute path", () => {
+		// The stem stayed '/', and the prefix check became `form === '/' || form.startsWith('//')`
+		// — every real path failed while '//…' forms passed.
+		expect(withinRoots('/', ['/'])).toBe(true);
+		expect(withinRoots('/etc/passwd', ['/'])).toBe(true);
+		expect(withinRoots('relative/x', ['/'])).toBe(false);
+		expect(() => gateInvoke('read_file', { path: '/etc/passwd' }, ['/'])).not.toThrow();
 	});
 });
 

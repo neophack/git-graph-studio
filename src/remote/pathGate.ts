@@ -47,6 +47,9 @@ export function withinRoots(path: string, roots: string[]): boolean {
 		// A root's own form may carry a trailing slash (`C:\` → `c:/`; the POSIX root stays
 		// `/`): normalise it away so the prefix check never looks for a doubled slash.
 		const stem = base.length > 1 && base.endsWith('/') ? base.slice(0, -1) : base;
+		// The POSIX root holds every absolute path — the generic check below would compare
+		// against a doubled slash and match nothing (or a '//…' form and match wrong).
+		if (stem === '/') return form.startsWith('/');
 		return form === stem || form.startsWith(`${stem}/`);
 	});
 }
@@ -65,6 +68,17 @@ function towardRoot(partial: string, roots: string[]): boolean {
 		const base = absoluteForm(root);
 		return base !== null && base.startsWith(form);
 	});
+}
+
+/** The absolute form a relativeAllowed value resolves to: the backend joins it against
+ *  the (gated) `repo` argument — or the first open root when none rides along — and reads
+ *  or writes the joined path raw, so a `..` segment climbs OUT of that base. `null` when
+ *  the pair does not resolve to an absolute form at all. */
+function resolveRelative(value: string, record: Record<string, unknown>, roots: string[]): string | null {
+	const repo = record.repo;
+	const base = typeof repo === 'string' && repo !== '' ? repo : roots[0];
+	if (!base) return null;
+	return absoluteForm(`${base.replace(/\\/g, '/')}/${value.replace(/\\/g, '/')}`);
 }
 
 /** The commands whose arguments name filesystem paths, by argument name (the JS/camelCase
@@ -283,14 +297,25 @@ export async function gateInvokeCanonical(
 	const record = args ?? {};
 	// The ext areas widen exactly the rules the lexical gate widens them for.
 	const lexicalRoots = rule.extensionRoots ? [...policy.roots, ...(policy.extRoots ?? [])] : policy.roots;
-	const names = rule.args.filter((name) => {
+	// What each argument's check reads: the absolute value itself, or — for a
+	// relativeAllowed rule's relative value — the form the backend will actually read,
+	// joined against the (gated) repo. Relative values of every other rule never reach
+	// here (the lexical gate refused them first).
+	const entries: { name: string; spell: string }[] = [];
+	for (const name of rule.args) {
 		const value = record[name];
-		if (typeof value !== 'string' || absoluteForm(value) === null) return false;
-		if (rule.relativeAllowed && name !== 'repo') return false; // resolved against the (gated) repo
-		return true;
-	});
-	if (names.length === 0) return;
-	const spelled = [...new Set([...names.map((name) => record[name] as string), ...lexicalRoots])];
+		if (typeof value !== 'string') continue;
+		if (absoluteForm(value) !== null) {
+			entries.push({ name, spell: value });
+			continue;
+		}
+		if (rule.relativeAllowed && name !== 'repo') {
+			const resolved = resolveRelative(value, record, policy.roots);
+			if (resolved !== null) entries.push({ name, spell: resolved });
+		}
+	}
+	if (entries.length === 0) return;
+	const spelled = [...new Set([...entries.map((entry) => entry.spell), ...lexicalRoots])];
 	let forms: (string | null)[];
 	try {
 		forms = await canonicalize(spelled);
@@ -307,8 +332,7 @@ export async function gateInvokeCanonical(
 		if (rule.prefixTowardRoot && towardRoot(form, canonicalRoots)) return null;
 		return form;
 	};
-	for (const name of names) {
-		const spell = record[name] as string;
+	for (const { name, spell } of entries) {
 		const form = resolvesOutside(spell);
 		if (form === null) continue;
 		if (rule.sameRootOnly || rule.prefixTowardRoot) {
@@ -316,7 +340,7 @@ export async function gateInvokeCanonical(
 				'a remote session cannot open new folders on this PC — open one from the PC, or spawn a sandboxed window'
 			);
 		}
-		throw new Error(`${command}: ${spell} resolves to ${form}, outside the folders this window has open`);
+		throw new Error(`${command}: ${record[name] as string} resolves to ${form}, outside the folders this window has open`);
 	}
 }/** Check one invoke's arguments against the roots; throws the message the session sees.
  *  `extRoots` are the extension platform's own areas (`remote_ext_roots`), applied only to
@@ -343,7 +367,15 @@ export function gateInvoke(
 		if (typeof value !== 'string') continue;
 		const absolute = absoluteForm(value) !== null;
 		if (!absolute) {
-			if (rule.relativeAllowed && name !== 'repo') continue;
+			if (rule.relativeAllowed && name !== 'repo') {
+				// A relative value is not a free pass: the backend joins it against the
+				// (gated) repo and reads raw, so confine the joined form like any path.
+				const resolved = resolveRelative(value, record, roots);
+				if (resolved === null || !withinRoots(resolved, allowed)) {
+					throw new Error(`${command}: ${value} is outside the folders this window has open`);
+				}
+				continue;
+			}
 			throw new Error(`${command}: ${name} must be an absolute path inside the open folders`);
 		}
 		if (!withinRoots(value, allowed)) {

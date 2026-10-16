@@ -26,6 +26,12 @@ struct PtySession {
 /// How much recent output each terminal keeps for late joiners.
 pub const TAIL_BYTES: usize = 64 * 1024;
 
+/// How long the output coalescer gathers further reads into one event before emitting.
+/// Under one frame — next to the Relay webview's own 16 ms per-session batching, invisible.
+const OUTPUT_COALESCE: std::time::Duration = std::time::Duration::from_millis(8);
+/// Gathered output past this emits at once instead of waiting out the coalesce window.
+const OUTPUT_FLUSH_BYTES: usize = 32 * 1024;
+
 /// Append output to a tail buffer, dropping the oldest text past the cap (at a char boundary).
 fn push_tail(tail: &Mutex<String>, text: &str) {
     let mut tail = tail.lock().unwrap();
@@ -117,30 +123,48 @@ pub fn pty_create(
         );
     }
 
-    // Drain the session on its own thread, forwarding chunks as events; exit ends the stream.
+    // Drain the session on its own thread, forwarding output as events; exit ends the
+    // stream. The path batches before it emits: a read loop emitting per 8 KiB read turns
+    // a chatty command (cargo build, npm install) into thousands of broadcast events a
+    // second, and on macOS every broadcast emit is an evaluateJavaScript in EVERY webview
+    // on the main thread — the whole UI, relay included, pays for the terminal's noise.
+    // The reader stays as tight as ever; a coalescer behind a channel gathers what the
+    // next few milliseconds bring (or [`OUTPUT_FLUSH_BYTES`], whichever comes first) into
+    // one event. Order is preserved end to end: one channel, one coalescer, and the exit
+    // follows the last gathered bytes because the reader's end drops the sender only
+    // after its final read.
     let event_app = app.clone();
+    let (out_tx, out_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
-        let mut carry: Vec<u8> = Vec::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    let payload = decode_pty_chunk(&mut carry, &buf[..n]);
-                    if !payload.is_empty() {
-                        push_tail(&reader_tail, &payload);
-                        let _ =
-                            event_app.emit(format!("studio://pty-output-{id}").as_str(), payload);
+                    if out_tx.send(buf[..n].to_vec()).is_err() {
+                        break;
                     }
                 }
             }
+        }
+    });
+    std::thread::spawn(move || {
+        let event_name = format!("studio://pty-output-{id}");
+        let mut pending: Vec<u8> = Vec::new();
+        let mut carry: Vec<u8> = Vec::new();
+        while gather_batch(&out_rx, &mut pending) {
+            let payload = decode_pty_chunk(&mut carry, &pending);
+            if !payload.is_empty() {
+                push_tail(&reader_tail, &payload);
+                let _ = event_app.emit(event_name.as_str(), payload);
+            }
+            pending.clear();
         }
         if !carry.is_empty() {
             // Stream end: whatever incomplete sequence remains is terminal damage —
             // flush it lossily (one U+FFFD) rather than dropping it.
             let tail = String::from_utf8_lossy(&carry).into_owned();
-            carry.clear();
-            let _ = event_app.emit(format!("studio://pty-output-{id}").as_str(), tail);
+            let _ = event_app.emit(event_name.as_str(), tail);
         }
         let _ = event_app.emit(format!("studio://pty-exit-{id}").as_str(), ());
         if let Some(state) = event_app.try_state::<Mutex<PtyState>>() {
@@ -216,6 +240,24 @@ pub fn session_count(app: &TauriAppHandle) -> u32 {
     app.try_state::<Mutex<PtyState>>()
         .map(|state| state.lock().unwrap().sessions.len() as u32)
         .unwrap_or(0)
+}
+
+/// Gather one output batch from the reader's channel into `pending`: the first chunk
+/// blocks (the stream is quiet), the rest ride the coalesce window until it goes quiet
+/// again or the batch is big enough to flush. Answers false once the stream ended and
+/// nothing more will come.
+fn gather_batch(rx: &std::sync::mpsc::Receiver<Vec<u8>>, pending: &mut Vec<u8>) -> bool {
+    match rx.recv() {
+        Ok(chunk) => pending.extend_from_slice(&chunk),
+        Err(_) => return false,
+    }
+    while pending.len() < OUTPUT_FLUSH_BYTES {
+        match rx.recv_timeout(OUTPUT_COALESCE) {
+            Ok(chunk) => pending.extend_from_slice(&chunk),
+            Err(_) => break,
+        }
+    }
+    true
 }
 
 /// Kill the shell (the "trash" action). The reader thread notices the exit and emits it.
@@ -311,7 +353,52 @@ fn decode_pty_chunk(carry: &mut Vec<u8>, chunk: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_pty_chunk, push_tail, shell_command, TAIL_BYTES};
+    use super::{decode_pty_chunk, gather_batch, push_tail, shell_command, TAIL_BYTES};
+
+    #[test]
+    fn a_burst_of_small_reads_crosses_as_far_fewer_batches() {
+        // The coalescer's whole point (see the reader thread): a shell that answers one
+        // read per token must not become one broadcast event per read. A burst that
+        // lands within the coalesce window gathers into fewer batches — and the stream
+        // end still delivers whatever remains. Asserting "far fewer", not an exact
+        // count, keeps the test honest under a loaded machine.
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        const CHUNKS: usize = 200;
+        for i in 0..CHUNKS {
+            tx.send(format!("line {i}\n").into_bytes()).unwrap();
+        }
+        drop(tx);
+        let mut batches = 0;
+        let mut bytes = Vec::new();
+        let mut pending = Vec::new();
+        while gather_batch(&rx, &mut pending) {
+            batches += 1;
+            bytes.append(&mut pending);
+            pending.clear();
+        }
+        assert!(batches < CHUNKS / 4, "{batches} batches for {CHUNKS} reads");
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(text.lines().count(), CHUNKS);
+        assert!(text.ends_with("line 199\n"));
+    }
+
+    #[test]
+    fn a_quiet_stream_still_delivers_each_chunk() {
+        // No burst, just two reads spaced past the coalesce window: each is its own
+        // batch, nothing coalesced away and nothing held back.
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        tx.send(b"first".to_vec()).unwrap();
+        let mut pending = Vec::new();
+        assert!(gather_batch(&rx, &mut pending));
+        assert_eq!(pending, b"first");
+        pending.clear();
+        std::thread::sleep(super::OUTPUT_COALESCE * 2);
+        tx.send(b"second".to_vec()).unwrap();
+        assert!(gather_batch(&rx, &mut pending));
+        assert_eq!(pending, b"second");
+        drop(tx);
+        assert!(!gather_batch(&rx, &mut pending));
+    }
 
     #[test]
     fn the_tail_keeps_the_newest_output_at_char_boundaries() {

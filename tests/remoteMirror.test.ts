@@ -478,6 +478,60 @@ describe('the recorder and the viewer', () => {
 		expect(r.sent.length).toBe(count);
 		expect(r.recorder.active).toBe(false);
 	});
+
+	it('hooks a frame’s load listener ONCE across stop/start cycles — the host stops the recorder with the last viewer and restarts it on the next hello, and N cycles stacked N listeners, each firing its own whole-document serialization per load', () => {
+		const outer = document.createElement('iframe');
+		document.body.appendChild(outer);
+		const pc = outer.contentDocument!;
+		pc.body.innerHTML = '<iframe id="wv"></iframe>';
+		const wv = pc.getElementById('wv') as HTMLIFrameElement;
+		wv.contentDocument!.body.innerHTML = '<p>frame</p>';
+		const sent: MirrorOp[][] = [];
+		const recorder = new DomRecorder(pc, (ops) => sent.push(ops));
+		// Three detach/attach cycles (host.ts's stop on the last bye, snapshot on the hello).
+		for (let cycle = 0; cycle < 3; cycle += 1) {
+			recorder.stop();
+			recorder.snapshot();
+		}
+		sent.length = 0;
+		wv.dispatchEvent(new Event('load'));
+		const docOps = sent.flat().filter((op) => op.o === 'doc');
+		expect(docOps).toHaveLength(1);
+		recorder.stop();
+		outer.remove();
+	});
+
+	it('crosses a same-count CSSOM rule edit — a count-only compare left the copy’s CSS silently diverged (and the next snapshot’s re-seeded base poisoned every later delta)', () => {
+		// jsdom creates a sheet only in a document with a browsing context: the PC side is
+		// a connected frame's document (the pattern the frame tests above use).
+		const outer = document.createElement('iframe');
+		document.body.appendChild(outer);
+		const pc = outer.contentDocument!;
+		pc.body.innerHTML = '<style id="gen"></style><p id="p">x</p>';
+		const host = document.createElement('div');
+		document.body.appendChild(host);
+		let resnaps = 0;
+		let viewer: MirrorViewer;
+		const recorder = new DomRecorder(pc, (ops, seq) => viewer.receive({ k: 'ops', to: '*', seq, ops }));
+		viewer = new MirrorViewer(host, 'remote/1', { appBase: 'https://p/main/', ggsBase: 'https://p/ggs/', resnap: () => resnaps++ });
+		viewer.receive({ k: 'snap', to: 'remote/1', ...recorder.snapshot() });
+		const style = pc.getElementById('gen') as HTMLStyleElement;
+		const sheet = style.sheet!;
+		sheet.insertRule('#p { color: red; }', 0);
+		recorder.flush();
+		const copyStyle = viewer.root!.getElementById('gen') as HTMLStyleElement;
+		expect(copyStyle.textContent).toContain('red');
+		// A net-zero delete+insert: the rule count never moves, the text does.
+		sheet.deleteRule(0);
+		sheet.insertRule('#p { color: blue; }', 0);
+		recorder.flush();
+		expect(copyStyle.textContent).toContain('blue');
+		expect(resnaps).toBe(0);
+		recorder.stop();
+		viewer.dispose();
+		host.remove();
+		outer.remove();
+	});
 });
 
 describe('the input replay', () => {
@@ -829,6 +883,30 @@ describe('webview streams (§22.6)', () => {
 		pc.receive({ k: 'bye', from: 'remote/4', w: stream });
 	});
 
+	it('a bye arriving while the stream’s share module loads leaves no phantom viewer behind', async () => {
+		const frame = document.createElement('iframe');
+		document.body.appendChild(frame);
+		frame.contentDocument!.body.innerHTML = '<p>chat</p>';
+		const stream = viewStream('chat');
+		setWebviewFrameSource({ frameFor: () => frame, ensure: () => undefined });
+		const sent: DownMessage[] = [];
+		const focus = vi.fn();
+		const pc = new MirrorHost(document, { send: (message) => sent.push(message), fit: () => undefined, focus, now: () => 0 });
+		// The hello parks inside the dynamic import; the bye lands before it resolves.
+		pc.receive({ k: 'hello', from: 'remote/8', w: stream, vw: 390, vh: 700, touch: true });
+		pc.receive({ k: 'bye', from: 'remote/8', w: stream });
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		// Without the guard the stale hello replayed here: a share with a viewer nobody
+		// watches — a snapshot sent, the focus emulation on until the TTL pruned it.
+		expect(sent.some((message) => message.k === 'snap')).toBe(false);
+		expect(focus).not.toHaveBeenCalled();
+		// A later hello joins normally (its bye was consumed, not latched).
+		pc.receive({ k: 'hello', from: 'remote/8', w: stream, vw: 390, vh: 700, touch: true });
+		await vi.waitFor(() => expect(sent.some((message) => message.k === 'snap')).toBe(true));
+		expect(focus).toHaveBeenCalledWith(true);
+		pc.receive({ k: 'bye', from: 'remote/8', w: stream });
+	});
+
 	// jsdom lays nothing out: a scroller's metrics are stubbed per element, the scrollTop
 	// setter recording what the code under test scrolled to (the yank under test, the sync).
 	function stubScroller(el: HTMLElement, metrics: { top?: number; height?: number; view?: number }): { top(): number; grow(to: number): void } {
@@ -931,6 +1009,41 @@ describe('webview streams (§22.6)', () => {
 		expect(rig.pcScroller.scrollTop).toBe(1750);
 		rig.pc.receive({ k: 'scroll', from: 'remote/5', w: viewStream('graph'), i: id, f: fraction, e: 1 });
 		expect(rig.pcScroller.scrollTop).toBe(7000);
+		rig.copy.dispose();
+		rig.pane.remove();
+		rig.pc.receive({ k: 'bye', from: 'remote/5', w: viewStream('graph') });
+	});
+
+	it('a programmatic end-pin never reports a scroll — the copy’s own pin must not seize the PC’s scroll ownership (§9.2), while the viewer’s real scroll still does', async () => {
+		const rig = await fluidRig('<div id="scroller" style="overflow-y: auto"><div id="log"><p>answer</p></div></div>', { top: 4800, height: 5000, view: 200 });
+		// The end-scan opens on the first batch past its window (the mount's own layout pass
+		// consumed the first scan): the scroller sitting at its end is pinned — a write the
+		// copy applies to itself, which a browser answers with a scroll event (jsdom fires
+		// none — dispatched by hand below).
+		const pcLog = rig.frame.contentDocument!.getElementById('log')!;
+		pcLog.insertAdjacentHTML('beforeend', '<p>x</p>');
+		await new Promise((resolve) => setTimeout(resolve, 1100));
+		await vi.waitFor(() => expect(rig.sent.some((message) => message.k === 'ops')).toBe(true));
+		rig.deliver();
+		expect(rig.scroller().scrollTop).toBe(5000);
+		rig.scroller().dispatchEvent(new Event('scroll'));
+		await new Promise((resolve) => setTimeout(resolve, 150)); // past SCROLL_REPORT_MS
+		expect(rig.reports).toHaveLength(0);
+		// The content grows and the pin follows: still the copy's own write, still no report.
+		rig.grow(6000);
+		pcLog.insertAdjacentHTML('beforeend', '<p>streaming…</p>');
+		await vi.waitFor(() => expect(rig.sent.some((message) => message.k === 'ops')).toBe(true));
+		rig.deliver();
+		expect(rig.scroller().scrollTop).toBe(6000);
+		rig.scroller().dispatchEvent(new Event('scroll'));
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect(rig.reports).toHaveLength(0);
+		// The viewer's own scroll reports exactly as before.
+		rig.scroller().scrollTop = 3000;
+		rig.scroller().dispatchEvent(new Event('scroll'));
+		await vi.waitFor(() => expect(rig.reports).toHaveLength(1));
+		expect(rig.reports[0][1]).toBeCloseTo(3000 / 5800);
+		expect(rig.reports[0][2]).toBe(false);
 		rig.copy.dispose();
 		rig.pane.remove();
 		rig.pc.receive({ k: 'bye', from: 'remote/5', w: viewStream('graph') });

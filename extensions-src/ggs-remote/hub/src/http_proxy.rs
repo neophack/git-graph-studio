@@ -100,7 +100,10 @@ pub async fn proxy(
 ) -> Response {
     hub.counters.http_requests.fetch_add(1, Ordering::Relaxed);
     let method = request.method().clone();
-    if method == Method::POST && rest.ends_with("/api/login") && !hub.login_entry(ip, &uuid) {
+    // `rest` is the axum wildcard capture and never carries a leading slash, so the login
+    // path matches it exactly — `ends_with("/api/login")` never matched "api/login" (the
+    // pattern is a character longer) and this limiter never ran at all.
+    if method == Method::POST && rest == "api/login" && !hub.login_entry(ip, &uuid) {
         return too_many_requests();
     }
     let query = request.uri().query().unwrap_or_default().to_owned();
@@ -501,7 +504,10 @@ fn gone_offline() -> Response {
     error_page(StatusCode::SERVICE_UNAVAILABLE, "this PC went offline")
 }
 
-fn error_page(status: StatusCode, message: &str) -> Response {
+/// An answer a browser can render (2026-10-16, the owner's direction: Safari 打开 remote
+/// 直接下载了): a bare status with an empty body and no Content-Type is saved by Safari as
+/// a zero-byte file, so every answer a navigation can reach carries a type and some prose.
+pub(crate) fn error_page(status: StatusCode, message: &str) -> Response {
     (
         status,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],

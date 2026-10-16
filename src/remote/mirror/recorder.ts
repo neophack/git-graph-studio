@@ -166,6 +166,11 @@ export class DomRecorder {
 	private attrHeat = new WeakMap<Element, Map<string, AttrHeat>>();
 	/** Elements with an attribute waiting out its animation window. */
 	private deferredAttrs = new Set<Element>();
+	/** Frames whose `load` hook is attached. Deliberately survives stop(): the hook guards
+	 *  on `running` and the id tables, the element keeps its listeners across a stop, and
+	 *  resetting this set here would stack one more listener per stop/start cycle — the
+	 *  host stops the recorder with the last viewer and restarts it on the next hello, so
+	 *  N cycles fired N whole-document `doc` serializations per frame load. */
 	private loadHooked = new WeakSet<HTMLIFrameElement>();
 	private frameDocs = new Map<HTMLIFrameElement, Document | null>();
 	private flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -243,7 +248,6 @@ export class DomRecorder {
 		this.sentAttrs = new WeakMap();
 		this.attrHeat = new WeakMap();
 		this.deferredAttrs.clear();
-		this.loadHooked = new WeakSet();
 		this.stormSince = 0;
 		this.lastEmpty = true;
 	}
@@ -437,8 +441,23 @@ export class DomRecorder {
 	}
 
 	private adoptedKey(doc: Document): string {
+		// Counts alone cannot see an in-place rule edit or a net-zero delete+insert (the
+		// cssomStyles loop above compares full text; the adopted set can be large, so a
+		// cheap length fingerprint stands in for the whole string here).
 		const sheets = this.adoptedSheets(doc);
-		return `${sheets.length}:${sheets.reduce((sum, sheet) => sum + ruleCount(sheet), 0)}`;
+		let rules = 0;
+		let length = 0;
+		for (const sheet of sheets) {
+			try {
+				for (const rule of Array.from(sheet.cssRules)) {
+					rules += 1;
+					length += rule.cssText.length;
+				}
+			} catch {
+				// A sheet this context cannot read counts nothing, as rulesText reads it empty.
+			}
+		}
+		return `${sheets.length}:${rules}:${length}`;
 	}
 
 	private adoptedText(doc: Document): string {
@@ -947,12 +966,17 @@ export class DomRecorder {
 				continue;
 			}
 			if ((style.textContent ?? '').trim() !== '') continue;
+			// The count alone cannot see an in-place rule edit or a net-zero
+			// deleteRule+insertRule: the copy's CSS would silently diverge, and with the
+			// base re-seeded by the next snapshot the following delta would apply against
+			// text no viewer holds. The set is small (CSSOM-only style elements), so the
+			// canonical text is compared beside the count.
+			const text = canonicalizeCss(rulesText(style.sheet), style.ownerDocument.baseURI, this.appRoot);
 			const rules = ruleCount(style.sheet);
-			if (rules === entry.rules) continue;
+			if (rules === entry.rules && text === entry.text) continue;
 			entry.rules = rules;
 			const id = this.ids.get(style);
 			if (id === undefined) continue;
-			const text = canonicalizeCss(rulesText(style.sheet), style.ownerDocument.baseURI, this.appRoot);
 			ops.push({ o: 'css', i: id, ...(this.legacy ? { v: text } : stringDelta(entry.text, text)) });
 			entry.text = text;
 		}

@@ -229,7 +229,7 @@
 .ggs-file-row:active { background: var(--ggs-row-active, var(--vscode-list-hoverBackground)); }
 .ggs-file-row .check { display: none; flex: none; width: 24px; align-items: center; justify-content: center; }
 .ggs-file-row.selectable .check { display: inline-flex; }
-.ggs-file-row.selectable .check input { width: 20px; height: 20px; accent-color: var(--ggs-accent, var(--vscode-focusBorder)); }
+.ggs-file-row.selectable .check input { width: 20px; height: 20px; accent-color: var(--ggs-accent, var(--vscode-focusBorder)); pointer-events: none; }
 .ggs-file-row .row-icon { flex: none; display: inline-flex; width: 32px; height: 32px; align-items: center; justify-content: center; }
 .ggs-file-row .row-icon .codicon { font-size: 24px; }
 [data-layout="phone-landscape"] .ggs-file-row .row-icon,

@@ -58,6 +58,11 @@ export class MirrorHost {
 	/** The webview streams remote workbenches watch (§22.6), by stream key. */
 	private readonly shares = new Map<string, WebviewShare>();
 	private shareModule: Promise<typeof import('./webviewShare')> | null = null;
+	/** Streams whose viewer said bye while their share module was still loading: the
+	 *  pending hello must not replay into a share then — it would register a phantom
+	 *  viewer (gone only when the TTL pruned it, the focus emulation and the follow
+	 *  polling running to nobody meanwhile). */
+	private readonly streamByes = new Set<string>();
 	private focused = false;
 	private pruneTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -119,9 +124,16 @@ export class MirrorHost {
 			this.settle();
 			return;
 		}
-		if (message.k !== 'hello') return;
+		if (message.k !== 'hello') {
+			if (message.k === 'bye') this.streamByes.add(stream);
+			return;
+		}
+		// A fresh hello supersedes a bye the same stream sent during an earlier load.
+		this.streamByes.delete(stream);
 		this.shareModule ??= import('./webviewShare');
 		void this.shareModule.then(({ WebviewShare }) => {
+			// The viewer left while the module loaded: nobody to serve.
+			if (this.streamByes.delete(stream)) return;
 			const next = this.shares.get(stream) ?? new WebviewShare(stream, { send: (down) => this.deps.send(down), now: () => this.deps.now(), trusted: this.deps.trusted });
 			this.shares.set(stream, next);
 			next.receive(message);

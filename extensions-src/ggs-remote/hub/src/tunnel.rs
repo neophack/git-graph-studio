@@ -138,7 +138,10 @@ async fn run(hub: Arc<Hub>, socket: WebSocket, peer: SocketAddr, host: Option<St
 
     // The operator's kill switch (§20.6): a blocklisted device key is refused here and its
     // online tunnel (if any) is taken off the air by the periodic refresh — both look like
-    // a plain offline PC from every other vantage.
+    // a plain offline PC from every other vantage. The refresh runs at the handshake itself
+    // (the contract's other half — cheap while the file is unchanged): without it a newly
+    // listed uuid could still handshake until the next 30 s tick.
+    hub.blocklist.refresh();
     if hub.blocklist.blocked(&uuid) {
         crate::warn!("tunnel for {uuid} refused: blocklisted");
         hub.audit.log(
@@ -220,7 +223,7 @@ async fn run(hub: Arc<Hub>, socket: WebSocket, peer: SocketAddr, host: Option<St
     beat.tick().await; // the first tick is immediate
     let mut missed = 0u32;
     let mut kicked = false;
-    loop {
+    'pump: loop {
         tokio::select! {
             message = stream.next() => {
                 let Some(Ok(message)) = message else { break };
@@ -228,8 +231,11 @@ async fn run(hub: Arc<Hub>, socket: WebSocket, peer: SocketAddr, host: Option<St
                 let Message::Binary(bytes) = message else { continue };
                 let Some(frames) = Frame::decode_all(&bytes) else { break };
                 for frame in frames {
+                    // A refused route (the daily byte budget spent) must stop the tunnel,
+                    // not just this batch — a bare `break` left the select loop running an
+                    // online-but-dead registration: Online forever, every frame dropped.
                     if !route(&hub, &tunnel, frame) {
-                        break;
+                        break 'pump;
                     }
                 }
             }

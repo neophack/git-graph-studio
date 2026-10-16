@@ -781,6 +781,13 @@ fn ensure_relay(app: &AppHandle, token: &str) -> tauri::Result<()> {
     }
     let config = serde_json::json!({ "url": url, "token": token });
     // The token travels in an initialization script, never in the URL: no history, no log.
+    // The Relay is hidden for its whole life, and on macOS a hidden WKWebView throttles
+    // its page's DOM timers to ~1 s — the Relay's own 16 ms terminal coalescing and 20 ms
+    // socket-drain timers would run at one-thirtieth their cadence, and the remote's
+    // terminal and event streams would arrive in second-long lurches. The main window
+    // already carries the same switch in tauri.conf.json (`backgroundThrottling:
+    // disabled`, added when the §22 mirror landed); the Relay needs it too (macOS 14+ —
+    // wry applies it through WKPreferences' inactiveSchedulingPolicy; elsewhere inert).
     let build = || {
         tauri::WebviewWindowBuilder::new(
             app,
@@ -792,6 +799,7 @@ fn ensure_relay(app: &AppHandle, token: &str) -> tauri::Result<()> {
         .skip_taskbar(true)
         .focused(false)
         .inner_size(1.0, 1.0)
+        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
         .initialization_script(format!("window.__GGS_RELAY__ = {config};"))
         .build()
     };
@@ -805,6 +813,9 @@ fn ensure_relay(app: &AppHandle, token: &str) -> tauri::Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(50));
         attempt = build();
     }
+    // While the Relay lives, remote sessions live: keep the process out of App Nap (the
+    // hidden-window configuration is exactly what macOS naps — window.rs's awake pair).
+    crate::window::remote_sessions_awake(true);
     Ok(())
 }
 
@@ -812,6 +823,7 @@ fn drop_relay(app: &AppHandle) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window(RELAY_LABEL) {
         window.destroy()?;
     }
+    crate::window::remote_sessions_awake(false);
     Ok(())
 }
 

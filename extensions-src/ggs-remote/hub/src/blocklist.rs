@@ -7,10 +7,15 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::SystemTime;
 
 pub struct Blocklist {
     path: Option<PathBuf>,
     set: Mutex<HashSet<String>>,
+    /// The (mtime, length) pair the cached set was read from: a refresh stats first and
+    /// skips the read while the file is unchanged, so the handshake path can refresh on
+    /// every attempt for the cost of one stat.
+    stamp: Mutex<Option<(SystemTime, u64)>>,
 }
 
 impl Blocklist {
@@ -21,10 +26,13 @@ impl Blocklist {
         let list = Blocklist {
             path: (!path.is_empty()).then(|| PathBuf::from(path)),
             set: Mutex::new(HashSet::new()),
+            stamp: Mutex::new(None),
         };
         if let Some(path) = &list.path {
             match std::fs::read_to_string(path) {
-                Ok(_) => list.refresh(),
+                Ok(_) => {
+                    list.refresh();
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     crate::info!(
                         "blocklist {}: not present yet — an empty list",
@@ -41,14 +49,24 @@ impl Blocklist {
         self.path.is_some()
     }
 
-    /// Re-read the file. Lines are trimmed; empty ones and `#` comments drop out —
-    /// everything else is a uuid to refuse.
-    pub fn refresh(&self) {
+    /// Re-read the file when it changed since the cached set was read; answers whether a
+    /// read happened. Lines are trimmed; empty ones and `#` comments drop out — everything
+    /// else is a uuid to refuse. An unchanged file costs one stat and no read, so the
+    /// handshake path can call this on every attempt.
+    pub fn refresh(&self) -> bool {
         let Some(path) = &self.path else {
-            return;
+            return false;
         };
+        let stamp = std::fs::metadata(path)
+            .and_then(|m| m.modified().map(|modified| (modified, m.len())))
+            .ok();
+        if let Some(stamp) = stamp {
+            if *self.stamp.lock().unwrap() == Some(stamp) {
+                return false; // unchanged since the last read
+            }
+        }
         let Ok(text) = std::fs::read_to_string(path) else {
-            return; // keep the last good set; the next refresh tries again
+            return false; // keep the last good set; the next refresh tries again
         };
         let set = text
             .lines()
@@ -57,6 +75,8 @@ impl Blocklist {
             .map(str::to_owned)
             .collect();
         *self.set.lock().unwrap() = set;
+        *self.stamp.lock().unwrap() = stamp;
+        true
     }
 
     pub fn blocked(&self, uuid: &str) -> bool {
@@ -95,6 +115,24 @@ mod tests {
         std::fs::write(&file, "some-uuid\n").unwrap();
         list.refresh();
         assert!(list.blocked("some-uuid"));
+    }
+
+    #[test]
+    fn an_unchanged_file_is_not_re_read_and_a_rewrite_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("block.txt");
+        std::fs::write(&file, "uuid-a\n").unwrap();
+        let list = Blocklist::open(file.to_str().unwrap());
+        assert!(list.blocked("uuid-a"));
+        // Nothing changed on disk: the refresh stats and skips the read — cheap enough to
+        // run at every handshake.
+        assert!(!list.refresh());
+        // A rewrite (different length, so no mtime-granularity doubt) is picked up.
+        std::fs::write(&file, "a-much-longer-uuid-b\n").unwrap();
+        assert!(list.refresh());
+        assert!(!list.blocked("uuid-a"));
+        assert!(list.blocked("a-much-longer-uuid-b"));
+        assert!(!list.refresh());
     }
 
     #[test]

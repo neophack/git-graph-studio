@@ -41,7 +41,13 @@ pub async fn attach(
         .ok_or(AttachError::NoInstance)?;
     conn.set_instance(Some(instance.to_owned()));
     refresh_session_counts(daemon);
-    let mut ready = ensure_relay(daemon, instance).ok_or(AttachError::NoInstance)?;
+    // Every error past this point undoes the binding: the conn must not stay attached to
+    // an instance it never got a Relay for.
+    let Some(mut ready) = ensure_relay(daemon, instance) else {
+        conn.set_instance(None);
+        refresh_session_counts(daemon);
+        return Err(AttachError::NoInstance);
+    };
     if !*ready.borrow() {
         let waited = tokio::time::timeout(RELAY_WAIT, ready.wait_for(|up| *up)).await;
         if !matches!(waited, Ok(Ok(_))) {

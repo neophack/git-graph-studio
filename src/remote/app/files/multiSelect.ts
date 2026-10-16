@@ -85,11 +85,12 @@ export function createMultiSelect(hooks: MultiSelectHooks) {
 			}
 		}
 		if (failed.length > 0) notify('error', tf('remote.files.deleteFailed', failed.length));
-		const keep = failed.length > 0;
+		// Whatever the outcome, the directory changed when anything succeeded: reload so
+		// the deleted rows leave the screen (the watcher's own refresh is suppressed while
+		// a selection is on). The selection ends either way — a failed path simply reappears
+		// in the reloaded list, unmarked, and the error toast named the count.
 		clear();
-		if (!keep) void hooks.refresh();
-		else for (const path of failed) selected.add(path);
-		syncBars();
+		void hooks.refresh();
 	}
 
 	async function rename(path: string): Promise<void> {

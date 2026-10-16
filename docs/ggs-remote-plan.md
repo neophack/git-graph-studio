@@ -433,7 +433,7 @@ Tauri 的 Channel 由后端推送，无法反压到后端。因此流控分两�
 2. **Relay 内：** 每个会话的待发队列上限 32 MB。超过时：
    - 终端输出：合并为“已截断 N 字节”标记，并把截断点之后的最近 64 KB 保留下来（保证屏幕最终正确）；
    - 其他 Channel：发 `NOTICE{kind:"overflow", stream}`，前端的对应视图走自己的“重新加载”路径（与桌面断流重试相同）。
-3. **合并：** Relay 对 `studio://pty-output-*` 事件按 16 ms 合帧；`FsChange` 类事件按 100 ms 合并去重。
+3. **合并：** 终端输出在两处合帧——`pty.rs` 的读线程先把 8 ms 窗口内（或 32 KB）的读取合成**一次**广播 emit（macOS 上每次广播 emit 都是在每个 webview 里跑一次 `evaluateJavaScript`，逐读 emit 会让一条 `cargo build` 把主线程淹没），Relay 再对同一 `studio://pty-output-*` 订阅按 16 ms 合帧；`FsChange` 类事件按 100 ms 合并去重。
 4. **上行合帧（终端输入）**：按键这类高频小 `INVOKE` 由 `transport.ts` 在 16 ms 窗口内合并为一个 WS message（§6.1 一消息多帧），Relay 侧解码后逐帧执行。合帧减少的是消息数；单次按键的回显延迟仍等于链路 RTT（Hub 模式两跳）——已知取舍（§19），需要更低延迟时再评估本地回显。
 5. **拉取型数据（FETCH、文件块读取）** 天然受请求驱动，不需要额外处理。
 
@@ -869,7 +869,15 @@ async function runInvoke(f: Frame) {
 
 - 发送队列：每会话一个队列，按 §6.4 的规则合并和截断；`ws.bufferedAmount > 8 MB` 时暂停发送。
 - 终端输出事件合帧：同一 `studio://pty-output-*` 订阅 16 ms 内的多条 payload 拼成一条。
-- Relay 自身 bundle 很小（`frame.ts` + `@msgpack/msgpack` + Tauri api），首屏无关。
+- Relay bundle 很小（`frame.ts` + `@msgpack/msgpack` + Tauri api），首屏无关。
+- **macOS 的两个保活（2026-10-16，"macOS 的 remote 很卡"）**：Relay webview 终身隐藏，而 macOS 的
+  WebKit 会把不可见页面的 DOM 定时器节流到约 1 s——Relay 自己的 16 ms 合帧与 20 ms 排空定时器会退化成
+  秒级顿挫。Relay 构建时带 `background_throttling(Disabled)`（与主窗口在 tauri.conf.json 里的
+  `backgroundThrottling: disabled` 同源——§22 镜像落地时主窗口已踩过同一坑；macOS 14+ 经
+  WKPreferences 的 `inactiveSchedulingPolicy` 生效）；同时，Relay 存在期间（即有远程会话在线）持有
+  `NSProcessInfo` 的 `UserInitiatedAllowingIdleSystemSleep` 活动断言（`window.rs` 的
+  `remote_sessions_awake`，release 同样生效），把整个进程挡在 App Nap 之外——隐藏窗口的实例正是
+  macOS 最想 nap 的形态。选 `AllowingIdleSystemSleep`：浏览器里挂着的会话不阻止机器休眠。
 
 ### 8.4 能力文件 `src-tauri/capabilities/remote-relay.json`
 

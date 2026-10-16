@@ -27,12 +27,68 @@ pub fn stamp(stage: &str) {
 /// half.
 #[cfg(all(debug_assertions, target_os = "macos"))]
 pub fn keep_awake_for_probe_runs(window: &tauri::WebviewWindow) {
-    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
-    let reason = NSString::from_str("ggs dev-harness probe run (GGS_DEV_HARNESS)");
-    let activity = NSProcessInfo::processInfo()
-        .beginActivityWithOptions_reason(NSActivityOptions::UserInitiated, &reason);
+    let activity = hold_activity("ggs dev-harness probe run (GGS_DEV_HARNESS)");
     std::mem::forget(activity); // held for the process lifetime — endActivity never comes
     let _ = window.set_always_on_top(true);
+}
+
+/// One App Nap exclusion assertion (macOS): the same failure mode the probe guard above
+/// documents, as the shipping Remote Access path — while remote sessions ride this
+/// instance the app is exactly what macOS naps (the Relay webview is hidden by design,
+/// the desktop window may be hidden too), and a napped process stalls the workbench
+/// timers behind the Relay's coalescing windows, so the remote runs in lurches. Held for
+/// the Relay webview's lifetime; `UserInitiatedAllowingIdleSystemSleep` so a session left
+/// open in a browser tab never keeps the machine itself from sleeping. Unlike the probe
+/// guard this is release too — the remote is the product here. No-op off macOS.
+#[cfg(target_os = "macos")]
+pub fn remote_sessions_awake(awake: bool) {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+
+    /// The begin/end activity token. `Send` by hand for its one job — crossing from the
+    /// control-channel thread that began it to whichever ends it.
+    ///
+    /// SAFETY: the token is an opaque NSObject with no thread affinity. Apple's activity
+    /// API takes begin and end on any thread (NSProcessInfo itself is thread-safe, and
+    /// the token is only ever fed back to `endActivity:`), so moving it between threads
+    /// is what the API is designed for; objc2's blanket non-`Send` is conservatism about
+    /// ObjC objects at large, not a real constraint here.
+    struct Token(objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>);
+    unsafe impl Send for Token {}
+
+    static HELD: std::sync::Mutex<Option<Token>> = std::sync::Mutex::new(None);
+    let mut held = HELD.lock().unwrap_or_else(|p| p.into_inner());
+    if awake {
+        if held.is_none() {
+            let reason = NSString::from_str("ggs remote sessions attached");
+            *held = Some(Token(
+                NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+                    NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+                    &reason,
+                ),
+            ));
+        }
+    } else if let Some(activity) = held.take() {
+        // SAFETY: the object is exactly what beginActivityWithOptions_reason returned.
+        unsafe {
+            NSProcessInfo::processInfo().endActivity(&activity.0);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn remote_sessions_awake(_awake: bool) {}
+
+#[cfg(all(debug_assertions, target_os = "macos"))]
+fn hold_activity(
+    reason: &str,
+) -> objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>> {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+    // UserInitiated — the probe's own bar: nothing stalls a harness run, idle sleep
+    // included. The remote path (remote_sessions_awake above) is the gentler variant.
+    NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+        NSActivityOptions::UserInitiated,
+        &NSString::from_str(reason),
+    )
 }
 
 /// The Help menu's "Open Developer Tools" entry: the webview's own context menu is

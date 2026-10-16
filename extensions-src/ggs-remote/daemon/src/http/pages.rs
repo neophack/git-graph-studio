@@ -85,7 +85,7 @@ pub async fn lang_js(State(daemon): State<Arc<Daemon>>) -> Response {
 
 pub async fn static_file(Path(file): Path<String>, headers: HeaderMap) -> Response {
     let Some(prepared) = crate::web::get(&file).filter(|_| !file.ends_with(".html")) else {
-        return StatusCode::NOT_FOUND.into_response();
+        return super::error(StatusCode::NOT_FOUND, "not found");
     };
     if headers
         .get(header::IF_NONE_MATCH)
@@ -146,7 +146,7 @@ pub async fn ca_crt(State(daemon): State<Arc<Daemon>>) -> Response {
             )
             .body(Body::from(pem))
             .expect("valid response"),
-        None => StatusCode::NOT_FOUND.into_response(),
+        None => super::error_page(StatusCode::NOT_FOUND, "no certificate has been issued"),
     }
 }
 
@@ -160,6 +160,6 @@ pub async fn ca_mobileconfig(State(daemon): State<Arc<Daemon>>) -> Response {
             )
             .body(Body::from(profile))
             .expect("valid response"),
-        None => StatusCode::NOT_FOUND.into_response(),
+        None => super::error_page(StatusCode::NOT_FOUND, "no certificate has been issued"),
     }
 }

@@ -42,8 +42,23 @@ async fn run(
     headers: HeaderMap,
 ) {
     let session = hub.alloc_session();
-    hub.counters.sessions_total.fetch_add(1, Ordering::Relaxed);
     let (mut sink, mut stream) = socket.split();
+
+    // Reserve the slot against the ceiling, atomically and BEFORE the session goes anywhere:
+    // bridge()'s check ran ahead of the upgrade's arbitrary gap, and a burst of concurrent
+    // upgrades each passed it — the ceiling (shared with the HTTP proxy's sessions) overshot
+    // without bound. The refusal is a clean close: the PC never hears of this session.
+    let (conn_tx, mut conn_rx) = mpsc::unbounded_channel::<ToConn>();
+    if !tunnel.reserve_conn(hub.config.sessions_per_tunnel, session, conn_tx) {
+        let _ = sink
+            .send(Message::Close(Some(CloseFrame {
+                code: 1013,
+                reason: "capacity".into(),
+            })))
+            .await;
+        return;
+    }
+    hub.counters.sessions_total.fetch_add(1, Ordering::Relaxed);
 
     let mut open = ConnOpen {
         session,
@@ -57,6 +72,8 @@ async fn run(
         open.headers.insert(name, value);
     }
     if !tunnel.send(&Frame::msgpack(ty::CONN_OPEN, &open)) {
+        // The PC is gone: roll the reservation back — the session never happened.
+        tunnel.conns.lock().unwrap().remove(&session);
         let _ = sink
             .send(Message::Close(Some(CloseFrame {
                 code: 1013,
@@ -66,8 +83,6 @@ async fn run(
         return;
     }
 
-    let (conn_tx, mut conn_rx) = mpsc::unbounded_channel::<ToConn>();
-    tunnel.conns.lock().unwrap().insert(session, conn_tx);
     crate::info!("session {session} on {} from {ip}", tunnel.uuid);
     hub.audit.log(
         "session_open",

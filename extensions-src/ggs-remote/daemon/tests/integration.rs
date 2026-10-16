@@ -452,6 +452,101 @@ async fn login_rate_limit_and_routes_need_a_session() {
     );
 }
 
+/// Safari saves a navigation whose answer is an empty body without a Content-Type as a
+/// zero-byte file named after the URL (2026-10-16, the owner's direction: Safari 打开
+/// remote 直接下载了 — a lapsed session on the shell's URL downloaded `remote.html`, where
+/// Chromium draws its own error page): the shell's routes answer pages a browser can
+/// render — a lapsed session goes to the login, a gone or upgraded window to the picker —
+/// and the subresource answers carry a Content-Type.
+#[tokio::test]
+async fn workbench_answers_renderable_pages_not_typeless_statuses() {
+    let h = start().await;
+    set_password(&h).await;
+
+    // A navigation without a session: to the login, not the bare 401.
+    let nav = http(
+        h.public,
+        "GET",
+        "/w/ggs-x/v/1/remote.html",
+        &[("Accept", "text/html,application/xhtml+xml")],
+        None,
+    )
+    .await;
+    assert_eq!(nav.status, 302, "{}", nav.headers);
+    assert!(nav.headers.contains("location: /login"), "{}", nav.headers);
+
+    // The same route as a subresource: JSON with a Content-Type, for the loaded page.
+    let sub = http(
+        h.public,
+        "GET",
+        "/w/ggs-x/v/1/assets/a-B1o2x3.js",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(sub.status, 401);
+    assert!(
+        sub.headers
+            .to_ascii_lowercase()
+            .contains("content-type: application/json"),
+        "{}",
+        sub.headers
+    );
+
+    // Signed in, the window gone: the navigation lands on the picker.
+    let (cookie, _csrf) = login(&h).await;
+    let gone = http(
+        h.public,
+        "GET",
+        "/w/ggs-x/v/1/remote.html",
+        &[("Cookie", &cookie), ("Sec-Fetch-Dest", "document")],
+        None,
+    )
+    .await;
+    assert_eq!(gone.status, 302, "{}", gone.headers);
+    assert!(
+        gone.headers.contains("location: /windows"),
+        "{}",
+        gone.headers
+    );
+
+    // The window upgraded under the tab (its version differs): the navigation follows the
+    // picker, the subresource keeps the 409 the loaded page reads.
+    let instance = FakeInstance::connect(&h, "ggs-live").await;
+    let upgraded = http(
+        h.public,
+        "GET",
+        "/w/ggs-live/v/9.9.9/remote.html",
+        &[("Cookie", &cookie), ("Sec-Fetch-Dest", "document")],
+        None,
+    )
+    .await;
+    assert_eq!(upgraded.status, 302, "{}", upgraded.headers);
+    assert!(
+        upgraded.headers.contains("location: /windows"),
+        "{}",
+        upgraded.headers
+    );
+    let upgraded_sub = http(
+        h.public,
+        "GET",
+        "/w/ggs-live/v/9.9.9/assets/a-B1o2x3.js",
+        &[("Cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert_eq!(upgraded_sub.status, 409);
+    assert!(
+        upgraded_sub
+            .headers
+            .to_ascii_lowercase()
+            .contains("content-type: application/json"),
+        "{}",
+        upgraded_sub.headers
+    );
+    drop(instance);
+}
+
 #[tokio::test]
 async fn websocket_checks_origin_and_csrf() {
     let h = start().await;
@@ -1406,6 +1501,52 @@ async fn a_multi_path_ticket_packs_one_zip() {
     let zip = get.await.unwrap();
     assert_eq!(zip.status, 200, "{}", zip.body);
     assert_eq!(zip.body, "PK\x03\x04multi");
+    assert!(zip.headers.contains("content-type: application/zip"));
+
+    // The browser's actual shape (src/remote/transfer.ts's downloadMany): `paths` with NO
+    // `zip` field at all. The instance packs zip_trees unconditionally for two or more
+    // paths, so the ticket forces zip semantics — the FetchFile says zip and the answer
+    // is application/zip, never octet-stream over a zip body (2026-10-16).
+    let minted = http(
+        h.public,
+        "POST",
+        "/api/download-ticket",
+        &[("Cookie", &cookie), ("Content-Type", "application/json")],
+        Some(r#"{"instance":"ggs-38741","paths":["C:/repo/a.rs","C:/repo/src"]}"#),
+    )
+    .await;
+    assert_eq!(minted.status, 200, "{}", minted.body);
+    let url = serde_json::from_str::<serde_json::Value>(&minted.body).unwrap()["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let get = tokio::spawn({
+        let port = h.public;
+        let url = url.clone();
+        async move { http(port, "GET", &url, &[], None).await }
+    });
+    match instance.recv().await {
+        ToInstance::FetchFile {
+            req, zip, paths, ..
+        } => {
+            assert!(zip, "a multi ticket is a zip whatever the body said");
+            assert_eq!(paths, vec!["C:/repo/a.rs", "C:/repo/src"]);
+            instance
+                .send(&FromInstance::FileReply {
+                    req,
+                    status: 200,
+                    name: "repo.zip".into(),
+                    total: 0,
+                    chunk: b"PK\x03\x04browser".to_vec(),
+                    done: true,
+                })
+                .await;
+        }
+        other => panic!("expected FetchFile, got {other:?}"),
+    }
+    let zip = get.await.unwrap();
+    assert_eq!(zip.status, 200, "{}", zip.body);
+    assert_eq!(zip.body, "PK\x03\x04browser");
     assert!(zip.headers.contains("content-type: application/zip"));
 
     // One path in `paths` is not the multi form: with no `path` either, the ticket is

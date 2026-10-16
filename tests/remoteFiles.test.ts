@@ -200,6 +200,49 @@ describe('the file list (§6.1)', () => {
 		vi.unstubAllGlobals();
 	});
 
+	it('a paged continuation keeps the live scroll — the remembered position is not snapped back', async () => {
+		// The scroll memory holds the position the directory was LEFT at; a continuation
+		// arriving after the user scrolled on must keep the live position, not restore the
+		// stale remembered one (the rows above must not jump).
+		const many = Array.from({ length: 250 }, (_, i) => ({ name: `f${String(i).padStart(3, '0')}.ts`, isDir: false }));
+		serve({ 'C:/repo': many, 'C:/other': [{ name: 'x.ts', isDir: false }] });
+		// An IntersectionObserver the test drives by hand: the continuation loads exactly
+		// when the test says the sentinel came into view.
+		const observers: { fire(): void }[] = [];
+		vi.stubGlobal('IntersectionObserver', class {
+			private readonly callback: (seen: { isIntersecting: boolean }[]) => void;
+			constructor(callback: (seen: { isIntersecting: boolean }[]) => void) {
+				this.callback = callback;
+				observers.push(this);
+			}
+			observe(): void { /* the test fires */ }
+			unobserve(): void { /* the sentinel swaps */ }
+			disconnect(): void { /* the list lives once */ }
+			fire(): void {
+				this.callback([{ isIntersecting: true }]);
+			}
+		});
+		const scroll = document.createElement('div');
+		scroll.className = 'ggs-files-scroll';
+		const list = createFileList({ enter: () => undefined, open: () => undefined, letter: () => null, selection: selectionHook, filter: () => '' });
+		scroll.appendChild(list.root);
+		document.body.appendChild(scroll);
+		await list.show('C:/repo');
+		expect(list.root.querySelectorAll('.ggs-file-row')).toHaveLength(200);
+		// Leave at 66 and come back: the remembered position is 66, the live one restored.
+		scroll.scrollTop = 66;
+		await list.show('C:/other');
+		await list.show('C:/repo');
+		expect(scroll.scrollTop).toBe(66);
+		// The user scrolled on to 400 when the sentinel's page lands: 400 must hold.
+		scroll.scrollTop = 400;
+		observers.at(-1)!.fire();
+		await flush();
+		expect(list.root.querySelectorAll('.ggs-file-row')).toHaveLength(250);
+		expect(scroll.scrollTop).toBe(400);
+		vi.unstubAllGlobals();
+	});
+
 	it('sorts: folders always first, every key both ways, the hidden switch', async () => {
 		const now = Math.floor(Date.now() / 1000);
 		const mounted = mountList({
@@ -299,6 +342,21 @@ describe('the multi-select (§6.1)', () => {
 		expect(row(mounted.root, 'a.ts').classList.contains('selectable')).toBe(false);
 	});
 
+	it('a click reaching the checkbox itself cannot diverge the mark from the selection', async () => {
+		// The box is display-only (the stylesheet keeps real taps off it — the tap falls
+		// through to the row, which toggles): a synthetic click still landing on the input
+		// natively flips it, and the mark re-syncs to the selection at once instead of
+		// showing the opposite until the next render.
+		const mounted = mountList({ 'C:/repo': [{ name: 'a.ts', isDir: false }, { name: 'b.ts', isDir: false }] });
+		await mounted.list.show('C:/repo');
+		const select = selectOver(mounted);
+		await longPressSelect(row(mounted.root, 'a.ts'));
+		const box = row(mounted.root, 'b.ts').querySelector('input')!;
+		box.click();
+		expect(select.isSelected('C:/repo/b.ts')).toBe(false);
+		expect(box.checked).toBe(false);
+	});
+
 	it('a multi-selection downloads as ONE zip; a single file downloads itself', async () => {
 		const packed: string[][] = [];
 		const single: string[] = [];
@@ -360,6 +418,39 @@ describe('the multi-select (§6.1)', () => {
 			{ path: 'C:/repo/a.ts', permanent: true },
 			{ path: 'C:/repo/b.ts', permanent: true }
 		]);
+	});
+
+	it('a delete with partial failures still refreshes — the gone rows leave the screen', async () => {
+		// b.ts's delete fails, a.ts's succeeds: the directory changed, so the list reloads
+		// either way — the succeeded row must not linger (the watcher's own refresh is
+		// suppressed while a selection is on), and the selection ends with the failed file
+		// back in view, unmarked.
+		const fixture = [{ name: 'a.ts', isDir: false }, { name: 'b.ts', isDir: false }];
+		backend.on('delete_path', ({ path }: { path: string; permanent: boolean }) => {
+			if (path.endsWith('/b.ts')) throw new Error('denied');
+			fixture.splice(fixture.findIndex((entry) => path.endsWith(`/${entry.name}`)), 1);
+			return null;
+		});
+		const mounted = mountList({ 'C:/repo': fixture });
+		await mounted.list.show('C:/repo');
+		let refreshed = 0;
+		select = createMultiSelect({
+			paths: () => [...mounted.root.querySelectorAll<HTMLElement>('.ggs-file-row')].map((node) => node.dataset.path!),
+			rerender: () => mounted.list.render(),
+			refresh: () => {
+				refreshed++;
+				void mounted.list.refresh();
+			},
+			entryOf: (path) => ({ name: path.slice(path.lastIndexOf('/') + 1), isDir: false })
+		});
+		await longPressSelect(row(mounted.root, 'a.ts'));
+		click(row(mounted.root, 'b.ts'));
+		await click([...select.actionBar.querySelectorAll('button')].find((button) => button.textContent === 'Delete')!);
+		await click([...document.querySelectorAll('#notifications button')].find((button) => button.textContent === 'Delete')!);
+		await flush();
+		expect(refreshed).toBe(1);
+		expect(select.active()).toBe(false);
+		expect(rows(mounted.root)).toEqual(['b.ts']);
 	});
 });
 

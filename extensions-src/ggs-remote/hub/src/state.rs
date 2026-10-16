@@ -77,6 +77,23 @@ impl Tunnel {
         }
     }
 
+    /// Reserve a session slot against the ceiling, the check and the insert under one
+    /// lock — a critical section no concurrent claimant can interleave, so a burst of
+    /// upgrades cannot each pass a check made before their inserts. Answers false when full.
+    pub fn reserve_conn(
+        &self,
+        ceiling: usize,
+        session: u32,
+        tx: mpsc::UnboundedSender<ToConn>,
+    ) -> bool {
+        let mut conns = self.conns.lock().unwrap();
+        if conns.len() >= ceiling {
+            return false;
+        }
+        conns.insert(session, tx);
+        true
+    }
+
     /// Every browser connection on this tunnel ends — the tunnel is going away.
     pub fn close_all(&self, code: u16, reason: &str) {
         let senders: Vec<_> = self.conns.lock().unwrap().drain().collect();
@@ -482,6 +499,23 @@ mod tests {
         assert!(hub.is_banned(ip));
         let other: IpAddr = "203.0.113.10".parse().unwrap();
         assert!(hub.offline_probe(other));
+    }
+
+    #[test]
+    fn a_session_slot_reserve_is_atomic_against_the_ceiling() {
+        let hub = hub();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let t = Arc::new(hub.new_tunnel("u".into(), tx));
+        let (tx1, _rx1) = mpsc::unbounded_channel();
+        let (tx2, _rx2) = mpsc::unbounded_channel();
+        // Ceiling one: the first reserve takes the slot, the second is refused — the check
+        // and the insert are one critical section, so a concurrent burst cannot overshoot.
+        assert!(t.reserve_conn(1, 1, tx1));
+        assert!(!t.reserve_conn(1, 2, tx2));
+        assert_eq!(t.sessions(), 1);
+        t.conns.lock().unwrap().remove(&1);
+        let (tx3, _rx3) = mpsc::unbounded_channel();
+        assert!(t.reserve_conn(1, 3, tx3));
     }
 
     #[test]

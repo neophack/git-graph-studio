@@ -78,7 +78,7 @@ async fn serve(
             Ok(upgrade) => {
                 ws_bridge::bridge(hub, tunnel, upgrade, peer_ip, base_path, headers).await
             }
-            Err(_) => StatusCode::BAD_REQUEST.into_response(),
+            Err(_) => http_proxy::error_page(StatusCode::BAD_REQUEST, "not a websocket"),
         };
     }
     http_proxy::proxy(hub, tunnel, uuid, rest, base_path, peer_ip, request).await

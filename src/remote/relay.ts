@@ -79,6 +79,9 @@ export class RelayEngine {
 			this.chain = this.chain.then(async () => {
 				const whole = this.joiner.push(frame.flags & FLAG.COMPRESSED ? await inflate(frame) : frame);
 				if (whole) await this.handle(whole);
+			}).catch(() => {
+				// One malformed frame is dropped, never wedged: a rejected chain would skip
+				// every later frame of every session until the socket died.
 			});
 		}
 	}
@@ -225,7 +228,16 @@ export class RelayEngine {
 
 	private async addListener(frame: Frame): Promise<void> {
 		const { session, stream } = frame;
-		const { event, target } = frameMsgpack<{ event: string; target?: unknown }>(frame);
+		// The payload is the session's own bytes: decode defensively (runInvoke's shape) —
+		// a non-map or a non-string event is one dropped frame, never a thrown chain step.
+		let decoded: { event?: unknown; target?: unknown };
+		try {
+			decoded = frameMsgpack<{ event?: unknown; target?: unknown }>(frame) ?? {};
+		} catch {
+			return;
+		}
+		if (typeof decoded.event !== 'string') return;
+		const { event, target } = decoded as { event: string; target?: unknown };
 		const state = this.session(session);
 		state.events.set(stream, event);
 		const pty = event.startsWith('studio://pty-output-');
@@ -276,7 +288,14 @@ export class RelayEngine {
 	}
 
 	private async relayEmit(frame: Frame): Promise<void> {
-		const { event, payload } = frameJson<{ event: string; payload?: unknown; target?: unknown }>(frame);
+		let decoded: { event?: unknown; payload?: unknown; target?: unknown };
+		try {
+			decoded = frameJson<{ event?: unknown; payload?: unknown; target?: unknown }>(frame) ?? {};
+		} catch {
+			return;
+		}
+		if (typeof decoded.event !== 'string') return;
+		const { event, payload } = decoded as { event: string; payload?: unknown };
 		// The event bridge is a privilege: the desktop trusts what arrives on these
 		// channels, so only the two the remote workbench actually speaks cross, the
 		// sender's identity is stamped over (a session cannot pose as `main` or as

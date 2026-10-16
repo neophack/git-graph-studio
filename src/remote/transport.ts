@@ -74,6 +74,8 @@ export interface TransportOptions {
 	onOnline?: () => void;
 	formFactor?: string;
 	dataSaver?: boolean;
+	/** Injected for tests: how long connect() waits for ATTACHED before giving up. */
+	attachTimeoutMs?: number;
 }
 
 /** Frames up to this size ride the uplink batch window (§6.4: keystrokes). */
@@ -82,6 +84,9 @@ const BATCH_WINDOW_MS = 16;
 const CREDIT_EVERY = 256 * 1024;
 const HEARTBEAT_MS = 20_000;
 const HIDDEN_HEARTBEAT_MS = 60_000;
+/** The daemon answers a failed ATTACH with NOTICE{kind:'attach-failed'} alone — never
+ *  ATTACHED, never CLOSE — so a connect with no answer at all must still give up. */
+const ATTACH_TIMEOUT_MS = 30_000;
 
 export class Transport {
 	private ws?: WebSocket;
@@ -99,7 +104,7 @@ export class Transport {
 	private sid?: string;
 	private csrf = '';
 	private attachedInfo?: Attached;
-	private attachWaiters: ((info: Attached) => void)[] = [];
+	private attachWaiters: { resolve(info: Attached): void; reject(error: unknown): void }[] = [];
 	private batch: Frame[] = [];
 	private batchOpen = false;
 	private heartbeat?: ReturnType<typeof setInterval>;
@@ -117,12 +122,25 @@ export class Transport {
 		return this.attachedInfo;
 	}
 
-	/** Connect, say HELLO and attach to the instance; resolves with ATTACHED. */
+	/** Connect, say HELLO and attach to the instance; resolves with ATTACHED, rejects on
+	 *  the daemon's attach-failed notice or a bounded wait with no answer at all. */
 	async connect(): Promise<Attached> {
 		await this.open(false);
-		return new Promise<Attached>((resolve) => {
-			if (this.attachedInfo) resolve(this.attachedInfo);
-			else this.attachWaiters.push(resolve);
+		if (this.attachedInfo) return this.attachedInfo;
+		return new Promise<Attached>((resolve, reject) => {
+			const fail = (error: unknown) => {
+				clearTimeout(timer);
+				this.attachWaiters = this.attachWaiters.filter((waiter) => waiter.reject !== fail);
+				reject(error);
+			};
+			const timer = setTimeout(() => fail(new Error('the window did not answer in time')), this.options.attachTimeoutMs ?? ATTACH_TIMEOUT_MS);
+			this.attachWaiters.push({
+				resolve: (info) => {
+					clearTimeout(timer);
+					resolve(info);
+				},
+				reject: fail
+			});
 		});
 	}
 
@@ -239,7 +257,9 @@ export class Transport {
 	}
 
 	private async open(resume: boolean): Promise<void> {
+		if (this.closedForGood) return;
 		const session = await this.fetchSession();
+		if (this.closedForGood) return;
 		if (!session) {
 			this.navigate('login', 'expired');
 			return;
@@ -294,6 +314,7 @@ export class Transport {
 
 	/** A page that comes back to the foreground checks the link at once (§9.4). */
 	onVisibility(visible: boolean): void {
+		if (this.closedForGood) return;
 		this.startHeartbeat();
 		if (!visible) return;
 		if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -312,18 +333,34 @@ export class Transport {
 		void this.reconnect();
 	}
 
+	private reconnecting = false;
+
 	private async reconnect(): Promise<void> {
-		if (this.closedForGood) return;
+		// One retry loop at a time: a visibility comeback while the drop's own retry sleeps
+		// must not open a second socket on the same sid (two sequence spaces corrupt the
+		// resume accounting).
+		if (this.closedForGood || this.reconnecting) return;
+		this.reconnecting = true;
 		this.options.onOffline?.();
 		const wait = this.retryMs;
 		this.retryMs = Math.min(this.retryMs * 2, 8000);
 		await new Promise((r) => setTimeout(r, wait));
-		try {
-			await this.open(true);
-			this.options.onOnline?.();
-		} catch {
-			void this.reconnect();
+		let retry = false;
+		if (!this.closedForGood) {
+			try {
+				await this.open(true);
+				if (this.closedForGood) {
+					// Shutdown raced the retry: the fresh socket must not live.
+					this.ws?.close(1000);
+				} else {
+					this.options.onOnline?.();
+				}
+			} catch {
+				retry = true;
+			}
 		}
+		this.reconnecting = false;
+		if (retry && !this.closedForGood) void this.reconnect();
 	}
 
 	// ---- uplink ----
@@ -390,16 +427,24 @@ export class Transport {
 					this.consumed = 0;
 				}
 			}
-			if (frame.flags & FLAG.COMPRESSED) {
-				// Inflation is asynchronous: chain it so frames stay in sequence order.
-				this.inflateChain = this.inflateChain.then(async () => this.dispatch(await inflate(frame)));
-			} else {
-				this.inflateChain = this.inflateChain.then(() => this.dispatch(frame));
-			}
+			// Inflation is asynchronous: chain it so frames stay in sequence order — and
+			// catch, so one bad frame (a corrupt compressed payload, a throwing listener)
+			// is dropped instead of rejecting the chain and silently eating every later
+			// frame: RESULTs, events, CLOSE.
+			this.inflateChain = this.inflateChain.then(async () => {
+				try {
+					this.dispatch(frame.flags & FLAG.COMPRESSED ? await inflate(frame) : frame);
+				} catch {
+					/* one bad frame, dropped — never the session */
+				}
+			});
 		}
 	}
 
 	private dispatch(raw: Frame): void {
+		// Nothing lands after a terminal close — least of all the reattach branch's reload,
+		// which would race the navigation the shutdown is part of.
+		if (this.closedForGood) return;
 		const frame = this.joiner.push(raw);
 		if (!frame) return;
 		switch (frame.type) {
@@ -425,7 +470,7 @@ export class Transport {
 			}
 			case T.ATTACHED: {
 				this.attachedInfo = frameMsgpack<Attached>(frame);
-				for (const waiter of this.attachWaiters.splice(0)) waiter(this.attachedInfo);
+				for (const waiter of this.attachWaiters.splice(0)) waiter.resolve(this.attachedInfo);
 				return;
 			}
 			case T.RESULT: {
@@ -451,7 +496,13 @@ export class Transport {
 			case T.CHAN_DATA: {
 				const handler = this.channels.get(frame.stream);
 				if (!handler) return;
-				handler(encOf(frame) === Enc.Raw ? frame.payload.buffer.slice(frame.payload.byteOffset, frame.payload.byteOffset + frame.payload.byteLength) : frameJson(frame));
+				// A listener's failure is its own: it must never reject the frame chain and
+				// take the session's later frames with it.
+				try {
+					handler(encOf(frame) === Enc.Raw ? frame.payload.buffer.slice(frame.payload.byteOffset, frame.payload.byteOffset + frame.payload.byteLength) : frameJson(frame));
+				} catch {
+					/* dropped */
+				}
 				return;
 			}
 			case T.CHAN_CLOSE:
@@ -459,24 +510,52 @@ export class Transport {
 				return;
 			case T.EVENT: {
 				const handler = this.listeners.get(frame.stream);
-				if (handler) handler(frameJson(frame));
+				if (!handler) return;
+				try {
+					handler(frameJson(frame));
+				} catch {
+					/* a listener's failure is its own */
+				}
 				return;
 			}
 			case T.WINDOWS: {
 				const windows = frameMsgpack<{ instances: InstanceInfo[]; recentFolders?: string[] }>(frame);
 				this.instances = windows.instances ?? [];
 				this.recentFolders = windows.recentFolders ?? [];
-				for (const handler of this.windowsHandlers) handler(this.instances);
+				for (const handler of this.windowsHandlers) {
+					try {
+						handler(this.instances);
+					} catch {
+						/* a listener's failure is its own */
+					}
+				}
 				return;
 			}
 			case T.NOTICE: {
 				const notice = frameMsgpack<Notice>(frame);
-				for (const handler of this.noticeHandlers) handler(notice);
+				// The daemon's only answer to a failed ATTACH: settle the connect promise,
+				// or boot() waits on the splash forever.
+				if (notice.kind === 'attach-failed') {
+					for (const waiter of this.attachWaiters.splice(0)) waiter.reject(new Error(notice.message ?? 'the window did not answer in time'));
+				}
+				for (const handler of this.noticeHandlers) {
+					try {
+						handler(notice);
+					} catch {
+						/* a listener's failure is its own */
+					}
+				}
 				return;
 			}
 			case T.SPAWNED: {
 				const spawned = frameMsgpack<{ instance: string }>(frame);
-				for (const handler of this.noticeHandlers) handler({ kind: 'spawned', instance: spawned.instance });
+				for (const handler of this.noticeHandlers) {
+					try {
+						handler({ kind: 'spawned', instance: spawned.instance });
+					} catch {
+						/* a listener's failure is its own */
+					}
+				}
 				return;
 			}
 			case T.PONG:

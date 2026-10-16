@@ -32,6 +32,11 @@ pub struct Conn {
 struct Inner {
     instance: Option<String>,
     live: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    /// Which socket task `live` belongs to, bumped by every `go_live` / `resume`: a
+    /// superseded socket (a half-open TCP the browser abandoned on a network switch, still
+    /// running its loop until the idle check) must never tear down its successor's
+    /// binding — its `go_offline` / end-of-life is a no-op against a newer generation.
+    live_gen: u64,
     seq: u32,
     resume: ResumeBuffer,
     credit: i64,
@@ -53,6 +58,7 @@ impl Conn {
             inner: Mutex::new(Inner {
                 instance: None,
                 live: None,
+                live_gen: 0,
                 seq: 0,
                 resume: ResumeBuffer::default(),
                 credit: INITIAL_CREDIT as i64,
@@ -65,44 +71,60 @@ impl Conn {
         }
     }
 
-    /// Bind a fresh socket's writer (a new connection: nothing to replay).
-    pub fn go_live(&self, live: mpsc::UnboundedSender<Vec<u8>>, deflate: bool) {
+    /// Bind a fresh socket's writer (a new connection: nothing to replay); answers the
+    /// generation the calling task owns.
+    pub fn go_live(&self, live: mpsc::UnboundedSender<Vec<u8>>, deflate: bool) -> u64 {
         let mut inner = self.inner.lock().unwrap();
+        inner.live_gen += 1;
         inner.live = Some(live);
         inner.deflate = deflate;
         inner.detached_at = None;
         inner.credit = INITIAL_CREDIT as i64;
+        inner.live_gen
     }
 
-    /// Resume onto a new socket: replay what the browser missed. `false` when the ring no
-    /// longer covers `last_seq` (the browser then soft-reloads).
+    /// Resume onto a new socket: replay what the browser missed. `None` when the ring no
+    /// longer covers `last_seq` (the browser then soft-reloads); on success the generation
+    /// the calling task owns.
     pub fn resume(
         &self,
         live: mpsc::UnboundedSender<Vec<u8>>,
         deflate: bool,
         last_seq: u32,
-    ) -> bool {
+    ) -> Option<u64> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(replay) = inner.resume.replay_after(last_seq) else {
-            return false;
-        };
+        let replay = inner.resume.replay_after(last_seq)?;
         inner.resume.ack(last_seq);
         for bytes in replay {
             let _ = live.send(bytes);
         }
+        inner.live_gen += 1;
+        let gen = inner.live_gen;
         inner.live = Some(live);
         inner.deflate = deflate;
         inner.detached_at = None;
         inner.credit = INITIAL_CREDIT as i64;
         drop(inner);
         self.flush_held();
-        true
+        Some(gen)
     }
 
-    pub fn go_offline(&self) {
+    /// The owning socket is gone: park the state for the resume window. A stale socket's
+    /// exit (its generation superseded by a resume) must not take the live binding down.
+    pub fn go_offline(&self, gen: u64) {
         let mut inner = self.inner.lock().unwrap();
-        inner.live = None;
-        inner.detached_at = Some(Instant::now());
+        if inner.live.is_some() && inner.live_gen == gen {
+            inner.live = None;
+            inner.detached_at = Some(Instant::now());
+        }
+    }
+
+    /// Whether the given generation still owns the live binding — a stale socket task's
+    /// end-of-life (kick, expired session, protocol error) must not end the connection its
+    /// successor is serving.
+    pub fn owns_live(&self, gen: u64) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.live.is_some() && inner.live_gen == gen
     }
 
     pub fn is_live(&self) -> bool {
@@ -328,7 +350,7 @@ mod tests {
         let (conn, mut rx) = conn();
         conn.push(Frame::empty(ty::PONG));
         drain(&mut rx);
-        conn.go_offline();
+        conn.go_offline(1);
         conn.push(Frame::new(
             ty::EVENT,
             super::super::frame::Enc::Json,
@@ -340,10 +362,38 @@ mod tests {
             b"[]".to_vec(),
         ));
         let (tx, mut rx2) = mpsc::unbounded_channel();
-        assert!(conn.resume(tx, false, 1));
+        assert!(conn.resume(tx, false, 1).is_some());
         let frames = drain(&mut rx2);
         assert_eq!(frames.iter().map(|f| f.seq).collect::<Vec<_>>(), vec![2, 3]);
         assert!(conn.is_live());
+    }
+
+    /// A stale socket's exit must not tear down the binding its successor took over
+    /// (2026-10-16): the browser resumed onto a new socket while the old half-open one's
+    /// loop was still alive; when that loop's idle check finally fired, its `go_offline`
+    /// used to kill the conn the new socket was serving.
+    #[test]
+    fn a_stale_sockets_exit_leaves_the_resumed_binding_alone() {
+        let (conn, mut rx) = conn(); // generation 1
+        conn.push(Frame::empty(ty::PONG));
+        drain(&mut rx);
+        conn.go_offline(1);
+        let (tx, mut rx2) = mpsc::unbounded_channel();
+        let gen2 = conn.resume(tx, false, 1).unwrap();
+        assert_ne!(gen2, 1);
+        drain(&mut rx2);
+        // The old socket's loop exits now: neither its offline nor its end-of-life gate
+        // may touch the new binding.
+        conn.go_offline(1);
+        assert!(conn.is_live());
+        assert!(conn.owns_live(gen2));
+        assert!(!conn.owns_live(1));
+        // A push still reaches the new socket, not the resume ring alone.
+        conn.push(Frame::empty(ty::PONG));
+        assert_eq!(drain(&mut rx2).len(), 1);
+        // The owning socket's own exit still parks the conn.
+        conn.go_offline(gen2);
+        assert!(!conn.is_live());
     }
 
     #[test]

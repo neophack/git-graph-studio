@@ -79,7 +79,7 @@ pub async fn ws(
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let deflate = hello.caps.deflate;
-    let (conn, resumed) = establish(
+    let (conn, resumed, gen) = establish(
         &daemon,
         &Establishment {
             user: &user,
@@ -89,7 +89,7 @@ pub async fn ws(
             deflate,
         },
         &tx,
-        &mut pump_rx,
+        &mut rx,
     );
     if !resumed {
         conn.push(crate::ws::windows_frame(&daemon));
@@ -152,12 +152,17 @@ pub async fn ws(
     };
 
     if ended {
-        crate::router::end_conn(&daemon, &conn);
+        // Only the session task that owns the live binding may end the connection: a
+        // stale tunnel session (superseded by a resume, exiting on its idle check)
+        // leaves its successor's connection alone.
+        if conn.owns_live(gen) {
+            crate::router::end_conn(&daemon, &conn);
+        }
         tunnel.close_session(session, 1000, "closed");
     } else {
         // The tunnel went away under us: keep the resume window open (§6.5) — the browser
         // reconnects through whatever tunnel answers next and presents its sid.
-        conn.go_offline();
+        conn.go_offline(gen);
     }
     daemon.update_tray();
     crate::info!("tunnel session {session} disconnected");
@@ -181,13 +186,14 @@ struct Establishment<'a> {
 }
 
 /// The fresh-or-resume establishment: resume onto the connection the browser's
-/// `HELLO.resume.sid` names, or start a new one.
+/// `HELLO.resume.sid` names, or start a new one. Answers the connection, whether it
+/// resumed, and the live-binding generation the calling task owns.
 fn establish(
     daemon: &Arc<Daemon>,
     ask: &Establishment<'_>,
     tx: &mpsc::UnboundedSender<Vec<u8>>,
-    pump_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
-) -> (Arc<Conn>, bool) {
+    rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
+) -> (Arc<Conn>, bool, u64) {
     let (user, hello, ip, base, deflate) = (ask.user, ask.hello, ask.ip, ask.base, ask.deflate);
     let resumable = hello.resume.as_ref().and_then(|r| {
         daemon
@@ -197,11 +203,13 @@ fn establish(
     match resumable {
         Some((conn, last_seq)) => {
             let _ = tx.send(ack(&conn, true));
-            if conn.resume(tx.clone(), deflate, last_seq) {
-                (conn, true)
+            if let Some(gen) = conn.resume(tx.clone(), deflate, last_seq) {
+                (conn, true, gen)
             } else {
                 // The ring no longer covers the gap: a fresh connection (the browser soft-
-                // reloads on `resumed: false`).
+                // reloads on `resumed: false`). The premature {resumed: true} ack waiting
+                // in the DOWNLINK goes with it (the LAN path's rule, §7.7) — never the
+                // uplink, whose pipelined frames are the browser's own.
                 crate::router::end_conn(daemon, &conn);
                 let fresh = daemon.new_conn(
                     crate::util::token(16),
@@ -209,10 +217,10 @@ fn establish(
                     base.to_owned(),
                     ip,
                 );
-                while pump_rx.try_recv().is_ok() {}
+                while rx.try_recv().is_ok() {}
                 let _ = tx.send(ack(&fresh, false));
-                fresh.go_live(tx.clone(), deflate);
-                (fresh, false)
+                let gen = fresh.go_live(tx.clone(), deflate);
+                (fresh, false, gen)
             }
         }
         None => {
@@ -223,8 +231,8 @@ fn establish(
                 ip,
             );
             let _ = tx.send(ack(&fresh, false));
-            fresh.go_live(tx.clone(), deflate);
-            (fresh, false)
+            let gen = fresh.go_live(tx.clone(), deflate);
+            (fresh, false, gen)
         }
     }
 }
@@ -408,4 +416,100 @@ fn header_map(source: &std::collections::BTreeMap<String, String>) -> axum::http
         headers.insert(name, value);
     }
     headers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::Paths;
+    use crate::ws::msg::Resume;
+
+    fn daemon() -> (tempfile::TempDir, Arc<Daemon>) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::at(dir.path().join("remote"), dir.path().to_path_buf());
+        paths.ensure().unwrap();
+        (
+            dir,
+            Daemon::new(paths, crate::config::Config::default()).unwrap(),
+        )
+    }
+
+    fn user() -> Session {
+        Session {
+            token_hash: "hash".into(),
+            epoch: 0,
+            device: "test".into(),
+            ua: String::new(),
+            ip: String::new(),
+            created: 0,
+            last_seen: 0,
+            remember: false,
+            csrf: "csrf".into(),
+        }
+    }
+
+    /// A failed resume drains the DOWNLINK — the premature {resumed: true} ack waiting in
+    /// it — never the uplink, whose pipelined frames (a PING, a CREDIT, keystrokes) are
+    /// the browser's own (2026-10-16): before, `establish` emptied `pump_rx` and left the
+    /// stale ack queued ahead of the fresh one.
+    #[test]
+    fn a_failed_resume_drains_the_downlink_not_the_uplink() {
+        let (_dir, daemon) = daemon();
+        let user = user();
+        // A conn whose ring no longer covers the browser's last_seq: an oversized push
+        // evicts unacknowledged frames, so a resume from 0 cannot replay.
+        let old = daemon.new_conn(
+            "sid-old".into(),
+            user.token_hash.clone(),
+            "/".into(),
+            "127.0.0.1".parse().unwrap(),
+        );
+        let (old_tx, _old_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let old_gen = old.go_live(old_tx, false);
+        old.push(Frame::new(
+            ty::NOTICE,
+            crate::ws::frame::Enc::Raw,
+            vec![0; 2 << 20],
+        ));
+        old.go_offline(old_gen);
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (pump_tx, mut pump_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        pump_tx.send(b"pipelined".to_vec()).unwrap();
+        let hello = Hello {
+            resume: Some(Resume {
+                sid: "sid-old".into(),
+                last_seq: 0,
+            }),
+            ..Default::default()
+        };
+        let (conn, resumed, _gen) = establish(
+            &daemon,
+            &Establishment {
+                user: &user,
+                ip: "127.0.0.1".parse().unwrap(),
+                base: "/",
+                hello: &hello,
+                deflate: false,
+            },
+            &tx,
+            &mut rx,
+        );
+        assert!(!resumed);
+        assert_ne!(conn.sid, "sid-old");
+        // Exactly the fresh {resumed: false} ack waits in the downlink — the premature
+        // {resumed: true} one went with the old connection.
+        let mut frames = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            frames.extend(Frame::decode_all(&bytes).unwrap());
+        }
+        assert_eq!(frames.len(), 1);
+        let acked: HelloAck = frames[0].decode_msgpack().unwrap();
+        assert!(!acked.resumed);
+        assert_eq!(acked.sid, conn.sid);
+        // The uplink's pipelined bytes survived.
+        assert_eq!(pump_rx.try_recv().unwrap(), b"pipelined".to_vec());
+        // The old connection is ended.
+        assert!(daemon.conn_by_sid("sid-old", "hash").is_none());
+    }
 }

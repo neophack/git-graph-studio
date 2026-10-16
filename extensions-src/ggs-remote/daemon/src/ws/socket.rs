@@ -6,7 +6,7 @@
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -37,11 +37,11 @@ pub async fn ws_handler(
     upgrade: WebSocketUpgrade,
 ) -> Response {
     let Some(session) = session_of(&daemon, &headers) else {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return crate::http::error_page(StatusCode::UNAUTHORIZED, "session required");
     };
     if !origin_ok(&daemon, peer, &headers) {
         crate::warn!("websocket with a foreign Origin refused");
-        return StatusCode::FORBIDDEN.into_response();
+        return crate::http::error_page(StatusCode::FORBIDDEN, "refused");
     }
     let ip = client_ip(&daemon, peer, &headers);
     daemon.note_foreign(ip);
@@ -121,12 +121,12 @@ async fn run(
             .conn_by_sid(&r.sid, &session.token_hash)
             .map(|c| (c, r.last_seq))
     });
-    let (conn, resumed) = match resumable {
+    let (conn, resumed, gen) = match resumable {
         Some((conn, last_seq)) => {
             let ack = hello_ack(&conn, true);
             let _ = tx.send(ack.clone());
-            if conn.resume(tx.clone(), deflate, last_seq) {
-                (conn, true)
+            if let Some(gen) = conn.resume(tx.clone(), deflate, last_seq) {
+                (conn, true, gen)
             } else {
                 // The ring no longer covers the gap: a fresh connection (the browser soft-
                 // reloads on `resumed: false`).
@@ -139,8 +139,8 @@ async fn run(
                 );
                 while rx.try_recv().is_ok() {}
                 let _ = tx.send(hello_ack(&fresh, false));
-                fresh.go_live(tx.clone(), deflate);
-                (fresh, false)
+                let gen = fresh.go_live(tx.clone(), deflate);
+                (fresh, false, gen)
             }
         }
         None => {
@@ -151,8 +151,8 @@ async fn run(
                 ip,
             );
             let _ = tx.send(hello_ack(&fresh, false));
-            fresh.go_live(tx.clone(), deflate);
-            (fresh, false)
+            let gen = fresh.go_live(tx.clone(), deflate);
+            (fresh, false, gen)
         }
     };
     if !resumed {
@@ -217,8 +217,15 @@ async fn run(
         }
     };
     match exit {
-        Exit::Dropped => conn.go_offline(),
-        Exit::Ended => crate::router::end_conn(&daemon, &conn),
+        // Only the socket that owns the live binding may take it down: a stale task
+        // (the half-open socket a network switch stranded, exiting on its idle check)
+        // leaves the resumed connection alone.
+        Exit::Dropped => conn.go_offline(gen),
+        Exit::Ended => {
+            if conn.owns_live(gen) {
+                crate::router::end_conn(&daemon, &conn);
+            }
+        }
     }
     daemon.update_tray();
     crate::info!("remote session {} disconnected", conn.id);

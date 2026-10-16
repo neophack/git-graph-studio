@@ -1746,6 +1746,15 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   the lenient walk — a symlinked ancestor of a not-yet-created file resolves to its target
   too) and containment compares canonical against canonical, so a repository entry linking
   to `~/.ggs` (the provider key store) passes lexically and is refused on resolution. The
+  relative arguments of the repo-relative rules (`read_file_at`, `file_log`, `scm_blame`,
+  `git_discard`, `materialize_revision_file`, the ext-page byte services) are joined
+  against the gated `repo` argument and confined the same way, lexically AND canonically
+  (2026-10-16, the remote audit pass: before, a relative value passed uninspected while
+  `read_file_at`'s `revision: '*'` working-tree read is a bare `fs::read` in the backend,
+  so `../../../../etc/passwd` escaped the workspace; and the old `relativeAllowed`
+  exemption in the canonical pass only ever fired on ABSOLUTE values, where its
+  "resolved against the repo" premise is false — an in-roots symlink spelled absolutely
+  skipped the re-check). The
   command answers only inside the boundary's own areas — never an existence oracle over
   the rest of the disk — a failed canonicalization refuses the invoke, and the PC's
   workbenchSync receiver re-checks its remote opens through the same command. The daemon
@@ -2120,7 +2129,16 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   its `@tauri-apps/api` seam aliased onto the WebSocket shims (`tauriShim/`), the responsive
   shell (the five layouts above rotate the frame; `shell.ts` installs the host after the
   workbench's first frame), and the hidden Relay webview that executes a remote browser's
-  invoke/Channel/listen calls with the real Tauri API. The phone form factor is an app,
+  invoke/Channel/listen calls with the real Tauri API. The Relay webview is built
+  `background_throttling(Disabled)` and holds an `NSProcessInfo` activity assertion for
+  its lifetime (`window.rs`'s `remote_sessions_awake`, macOS, release too): a permanently
+  hidden WKWebView gets its DOM timers throttled to ~1 s and a fully hidden instance is
+  App Nap's favourite target — either one alone turns the remote's terminal and mirror
+  streams into second-long lurches (2026-10-16, "macOS 的 remote 很卡"; the main window
+  carries the same switch in tauri.conf.json since the §22 mirror). Terminal output also
+  batches before its broadcast emit (`pty.rs`'s coalescer, 8 ms / 32 KiB): on macOS every
+  emit evaluates JavaScript in every webview on the main thread, and a per-read emit let
+  one chatty command drown the UI. The phone form factor is an app,
   not a shrunken desktop (redesigned 2026-10-12): one column of full-screen pages over
   one page model (`pages.ts` — the page showing is read off the workbench's own DOM, and
   going to a page always shows it, never toggles it away; the extensions' pages are found
