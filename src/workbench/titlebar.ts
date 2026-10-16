@@ -47,6 +47,8 @@ export class TitleBar {
 	private menus: MenuDefinition[] = [];
 	/** The open folder's name, kept so a language switch can re-render the command center. */
 	private folderName: string | null = null;
+	/** The window's maximized state, kept so a language switch re-derives the tooltip. */
+	private maximized = false;
 
 	onCommandCenter: (() => void) | null = null;
 	onBack: (() => void) | null = null;
@@ -105,7 +107,7 @@ export class TitleBar {
 		onLocaleChange(() => {
 			this.commandCenter.title = t('titlebar.commandCenter');
 			this.minimizeButton.title = t('titlebar.minimize');
-			this.maximizeButton.title = t('titlebar.maximize');
+			this.maximizeButton.title = t(this.maximized ? 'titlebar.restoreDown' : 'titlebar.maximize');
 			this.closeButton.title = t('titlebar.close');
 			this.setNavigation(!this.backButton.classList.contains('disabled'), !this.forwardButton.classList.contains('disabled'));
 			this.setFolderName(this.folderName);
@@ -173,8 +175,9 @@ export class TitleBar {
 			// Not running under Tauri (tests): stay in the restored look.
 		}
 		this.container.classList.toggle('maximized', maximized);
+		this.maximized = maximized;
 		this.maximizeButton.innerHTML = '';
 		this.maximizeButton.appendChild(icon(maximized ? 'chrome-restore' : 'chrome-maximize'));
-		this.maximizeButton.title = maximized ? 'Restore Down' : 'Maximize';
+		this.maximizeButton.title = t(maximized ? 'titlebar.restoreDown' : 'titlebar.maximize');
 	}
 }

@@ -17,7 +17,7 @@
 // collapsed groups, sort), so a device-class switch is seamless by construction: the wide
 // form's classic view and this page are two renderings of the same repository state, and
 // the switch re-renders both once.
-import { basename, el, icon, toPosix, swipeReveal, type MenuEntry, type RevealAction } from '../../../platform/ui';
+import { basename, closeRevealedRow, el, icon, toPosix, swipeReveal, type MenuEntry, type RevealAction } from '../../../platform/ui';
 import { t, tf } from '../../../platform/i18n';
 import { fileIcon, fileIconColor } from '../../../platform/fileIcons';
 import { currentWorkbench } from '../../../workbench';
@@ -66,8 +66,9 @@ export function installScmPage(): void {
 	const scm = workbench.scm;
 	view.classList.add('ggs-scm-host');
 
-	/** How many rows each group shows past the first page (a refresh keeps what grew). */
-	const shownExtra = new Map<ScmGroup, number>();
+	/** How many rows each group shows past the first page (a refresh keeps what grew). The
+	 *  key carries the repo: the main repo and every sub-repo reuse the same group names. */
+	const shownExtra = new Map<string, number>();
 
 	// Every state crossing of the one SourceControlView re-renders the page: onChanged after
 	// an operation, onStatus / onHead after a refresh, chained onto whatever was there.
@@ -322,13 +323,14 @@ export function installScmPage(): void {
 			return section;
 		}
 		const sorted = sortChanges(files, scm.sort, key);
-		const limit = PAGE_ROWS + (shownExtra.get(key) ?? 0);
+		const pageKey = `${sub?.repoPath ?? ''}:${key}`;
+		const limit = PAGE_ROWS + (shownExtra.get(pageKey) ?? 0);
 		for (const file of sorted.slice(0, limit)) section.appendChild(changeRow(file, key, sub));
 		if (sorted.length > limit) {
 			const more = el('button', 'ggs-scm-showmore', [tf('remote.scm.showMore', sorted.length - limit)]);
 			more.type = 'button';
 			more.addEventListener('click', () => {
-				shownExtra.set(key, (shownExtra.get(key) ?? 0) + PAGE_ROWS);
+				shownExtra.set(pageKey, (shownExtra.get(pageKey) ?? 0) + PAGE_ROWS);
 				render();
 			});
 			section.appendChild(more);
@@ -405,6 +407,9 @@ export function installScmPage(): void {
 	function render(): void {
 		renderBranchRow();
 		renderCommitCard();
+		// The rebuild discards every row: an open swipe strip would leave its document-level
+		// listener pinned to the dead row — close it first (a no-op with none open).
+		closeRevealedRow();
 		// A re-render under the user's hands keeps the message box's focus and caret.
 		const hadFocus = document.activeElement === message;
 		const caret = { start: message.selectionStart, end: message.selectionEnd };

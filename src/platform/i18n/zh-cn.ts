@@ -17,6 +17,7 @@ export const zhCn: typeof en = {
 	'titlebar.goForwardPlain': '前进',
 	'titlebar.minimize': '最小化',
 	'titlebar.maximize': '最大化',
+	'titlebar.restoreDown': '向下还原',
 	'titlebar.close': '关闭',
 	'titlebar.searchFolder': '搜索 {0}',
 	'keybindings.title': '键盘快捷键',

@@ -10,7 +10,7 @@
 // traffic readout, Data Saver — stays with the browser.
 import { commands } from '../platform/commands';
 import { formatBytes, notify, quickPick } from '../platform/ui';
-import { t, tf } from '../platform/i18n';
+import { t, tf, onLocaleChange } from '../platform/i18n';
 import { installActionSheet } from './actionSheet';
 import { leavingPage } from './backStack';
 import { installLongPress, swipeBack } from './gestures';
@@ -164,6 +164,11 @@ function addSwitcherButton(): void {
 	icon.className = 'codicon codicon-multiple-windows';
 	button.appendChild(icon);
 	button.addEventListener('click', () => void openWindowSwitcher());
+	// The button is built once: a language switch relabels its tooltip in place, like the
+	// title bar's own controls.
+	onLocaleChange(() => {
+		button.title = t('remote.windows');
+	});
 	const center = titlebar.querySelector('.titlebar-center');
 	(center ?? titlebar).appendChild(button);
 }

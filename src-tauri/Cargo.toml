@@ -1,6 +1,6 @@
 [package]
 name = "git-graph-studio"
-version = "0.1.11"
+version = "0.1.12"
 description = "Git Graph Studio - a standalone Git repository viewer with an explorer, source control panel, terminal and the git-graph-rs engine"
 edition.workspace = true
 # The floor is big-code-analysis (module 17's richer-metrics engine): it is Rust

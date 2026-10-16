@@ -128,6 +128,20 @@ describe('title bar', () => {
 		expect(backend.window).toMatchObject({ minimized: 1, closed: 1, toggled: 1, maximized: true });
 		expect(document.querySelector('.window-control.maximize .codicon-chrome-restore')).not.toBeNull();
 		expect(document.getElementById('titlebar')!.classList.contains('maximized')).toBe(true);
+		// The maximize button's tooltip follows the state, localized (it once overwrote the
+		// constructor's t() with hardcoded English, and a locale switch forced 'Maximize'
+		// even while maximized).
+		expect((document.querySelector('.window-control.maximize') as HTMLElement).title).toBe('Restore Down');
+		setLocale('zh-cn');
+		expect((document.querySelector('.window-control.maximize') as HTMLElement).title).toBe('向下还原');
+		click(document.querySelector('.window-control.maximize'));
+		await flush();
+		expect(backend.window.maximized).toBe(false);
+		expect((document.querySelector('.window-control.maximize') as HTMLElement).title).toBe('最大化');
+		setLocale('en');
+		expect((document.querySelector('.window-control.maximize') as HTMLElement).title).toBe('Maximize');
+		click(document.querySelector('.window-control.maximize'));
+		await flush();
 
 		let center = 0;
 		bar.onCommandCenter = () => center++;

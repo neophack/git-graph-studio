@@ -223,6 +223,33 @@ describe('the phone Source Control page (§6.4)', () => {
 		const classic = currentWorkbench!.views.scm.querySelector<HTMLTextAreaElement>('.view-pane textarea');
 		expect(classic!.value).toBe('kept across the switch');
 	});
+
+	it('a sub-repo\'s show-more grows only its own group — the paging budget keys per repository', { timeout: 30_000 }, async () => {
+		changes = Array.from({ length: 120 }, (_, i) => change(`src/m${i}.ts`));
+		const subChanges = Array.from({ length: 120 }, (_, i) => change(`lib/s${i}.ts`));
+		await bootPhoneRepo();
+		const mainHead = head;
+		backend.handlers.set('repo_submodules', () => ['C:/repo/sub']);
+		backend.handlers.set('scm_status', (args) => (args.repo === 'C:/repo/sub' ? subChanges : changes));
+		backend.handlers.set('repo_head', (args) =>
+			args.repo === 'C:/repo/sub' ? { branch: 'main', shortHash: 'sub1234', ahead: 0, behind: 0, upstream: null } : mainHead);
+		await currentWorkbench!.scm.refresh();
+		await flush(4);
+		// Both repositories' Changes groups page at 100 rows with a show-more row.
+		const mainGroup = groupSection(t('remote.scm.group.changes'))!;
+		const subSectionEl = document.querySelector<HTMLElement>('.ggs-scm-grouphead.sub')!.closest('.ggs-scm-group')!;
+		expect(mainGroup.querySelectorAll('.ggs-scm-row')).toHaveLength(100);
+		expect(subSectionEl.querySelectorAll('.ggs-scm-row')).toHaveLength(100);
+		click(subSectionEl.querySelector<HTMLButtonElement>('.ggs-scm-showmore'));
+		await flush(2);
+		// The click re-renders the page (replaceChildren): re-query, the old nodes are dead.
+		const subAfter = document.querySelector<HTMLElement>('.ggs-scm-grouphead.sub')!.closest('.ggs-scm-group')!;
+		expect(subAfter.querySelectorAll('.ggs-scm-row')).toHaveLength(120);
+		// The main repository's group is untouched: still paged, its show-more still offered.
+		const mainAfter = groupSection(t('remote.scm.group.changes'))!;
+		expect(mainAfter.querySelectorAll('.ggs-scm-row')).toHaveLength(100);
+		expect(mainAfter.querySelector('.ggs-scm-showmore')).not.toBeNull();
+	});
 });
 
 describe('the branch sheet (the Files page chip and the SCM branch row)', () => {

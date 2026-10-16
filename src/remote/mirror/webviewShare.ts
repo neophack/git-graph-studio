@@ -191,8 +191,11 @@ export class WebviewShare {
 		}
 		if (doc === this.doc) return false;
 		this.recorder?.stop();
-		this.doc = doc;
+		// Unwire before the field moves: wireLocalInput removes from this.doc, which must
+		// still be the OLD document — a swap to another live frame's document would
+		// otherwise leave the wheel/pointer/key listeners armed on it.
 		this.wireLocalInput(doc);
+		this.doc = doc;
 		this.makeRecorder();
 		for (const viewer of this.viewers.keys()) this.snapshotTo(viewer);
 		return true;

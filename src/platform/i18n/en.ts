@@ -16,6 +16,7 @@ export const en = {
 	'titlebar.goForwardPlain': 'Go Forward',
 	'titlebar.minimize': 'Minimize',
 	'titlebar.maximize': 'Maximize',
+	'titlebar.restoreDown': 'Restore Down',
 	'titlebar.close': 'Close',
 	'titlebar.searchFolder': 'Search {0}',
 	'keybindings.title': 'Keyboard Shortcuts',

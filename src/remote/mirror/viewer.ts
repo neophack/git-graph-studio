@@ -155,6 +155,10 @@ export class MirrorViewer {
 	 *  browsing context DISCARDED and reborn — the element then answers a different, empty
 	 *  document, and the content written into the old one is gone. */
 	private liveDoc: Document | null = null;
+	/** A snapshot arrived while the fresh frame had no browsing context (its host was
+	 *  detached): the drop is remembered here, and checkContext re-asks once the frame is
+	 *  back in the document with a live context — seq-null alone would mute every probe. */
+	private snapPending = false;
 	private readonly onFrameLoad = () => this.checkContext();
 	private viewport: Viewport = { w: 1, h: 1 };
 	private ready = false;
@@ -310,7 +314,11 @@ export class MirrorViewer {
 		this.viewport = { w: Math.max(1, vp.w), h: Math.max(1, vp.h) };
 		this.layout();
 		const target = frame.contentDocument;
-		if (!target) return;
+		if (!target) {
+			this.snapPending = true;
+			return;
+		}
+		this.snapPending = false;
 		this.fillDoc(target, doc);
 		this.liveDoc = target;
 		this.seq = seq;
@@ -335,7 +343,21 @@ export class MirrorViewer {
 	 *  lands in a context the next move does not take with it. */
 	private checkContext(): void {
 		const frame = this.frame;
-		if (!frame || this.seq === null || this.liveDoc === null) return;
+		if (!frame) return;
+		if (this.snapPending) {
+			if (!frame.isConnected) return;
+			let ready: Document | null = null;
+			try {
+				ready = frame.contentDocument ?? null;
+			} catch {
+				ready = null;
+			}
+			if (!ready) return;
+			this.snapPending = false;
+			this.deps.resnap();
+			return;
+		}
+		if (this.seq === null || this.liveDoc === null) return;
 		if (!frame.isConnected) return;
 		let doc: Document | null = null;
 		try {
