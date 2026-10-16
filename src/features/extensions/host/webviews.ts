@@ -309,7 +309,7 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 			// extension's next reveal of the panel opens the copy again.
 			const key = this.webviewKey(extId, panelId);
 			this.webviewCopies.add(key);
-			const dispose = this.mountWebviewCopy(container, hook('webviewStreams')!.panelStream(extId, panelId));
+			const dispose = this.mountWebviewCopy(container, hook('webviewStreams')!.panelStream(extId, panelId), extId);
 			return () => {
 				this.webviewCopies.delete(key);
 				dispose();
@@ -352,7 +352,7 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 
 	mountWebviewView(viewId: string, extId: string, container: HTMLElement): () => void {
 		// A remote page shows the desktop window's live page of the view (§22.6).
-		if (this.sharesWebviews(extId)) return this.mountWebviewCopy(container, hook('webviewStreams')!.viewStream(viewId));
+		if (this.sharesWebviews(extId)) return this.mountWebviewCopy(container, hook('webviewStreams')!.viewStream(viewId), extId);
 		const record = this.webviewViews.get(viewId) ?? { extId, html: '', frame: null, pending: [], loaded: false, painted: null, loadGrace: null, firstPaintTimer: null };
 		this.webviewViews.set(viewId, record);
 		const frame = document.createElement('iframe');
@@ -549,10 +549,10 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 		return hook('session').frontendClass() === 'remote' && this.backendHosted(extId);
 	},
 
-	mountWebviewCopy(container: HTMLElement, stream: string): () => void {
+	mountWebviewCopy(container: HTMLElement, stream: string, extId?: string): () => void {
 		const bridge = hook('webviewStreams');
 		if (!bridge) return () => undefined;
-		return bridge.mountCopy(container, stream);
+		return bridge.mountCopy(container, stream, extId);
 	},
 
 	webviewFrameFor(stream: string): HTMLIFrameElement | null {

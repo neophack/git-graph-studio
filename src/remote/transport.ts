@@ -21,6 +21,7 @@ import {
 	Reassembler,
 	T
 } from './frame';
+import { leavingPage } from './backStack';
 
 export interface Attached {
 	instance: string;
@@ -274,6 +275,9 @@ export class Transport {
 	private navigate(to: 'login' | 'picker', reason: string): void {
 		this.closedForGood = true;
 		if (this.options.navigate) return this.options.navigate(to, reason);
+		// An overlay's closing release may have a history.back() queued one tick out — the
+		// traversal would cancel this replace in flight, stranding the page it must leave.
+		leavingPage();
 		const base = new URL(this.options.basePath, location.href);
 		location.replace(new URL(to === 'login' ? `login?reason=${encodeURIComponent(reason)}` : `windows?reason=${encodeURIComponent(reason)}`, base).href);
 	}

@@ -12,9 +12,11 @@ import { commands } from '../platform/commands';
 import { formatBytes, notify, quickPick } from '../platform/ui';
 import { t, tf } from '../platform/i18n';
 import { installActionSheet } from './actionSheet';
+import { leavingPage } from './backStack';
 import { installLongPress, swipeBack } from './gestures';
 import { installHasFallbacks } from './hasFallbacks';
 import { backToEditor, currentPage, onWorkbenchChange } from './pages';
+import { installPageBack } from './pageBack';
 import { deviceOverride, onDeviceClassChange, setDeviceOverride, type DeviceOverride } from './responsive';
 import { downloadTo, uploadInto } from '../features/explorer';
 import { goWindowsPicker, openWindowSwitcher, watchLifecycle } from './windowSwitcher';
@@ -72,8 +74,10 @@ function registerCommands(): void {
 		}
 	});
 	// Back from this page's own workbench to the PC window's live copy (§22.5), pinned so the
-	// auto rule does not hand a phone straight back here while the PC shows the window.
-	commands.register({ ...remoteOnly, id: 'remote.liveView', title: t('remote.liveView'), category: 'Remote', run: () => location.replace(modeUrl(location.href, 'mirror')) });
+	// auto rule does not hand a phone straight back here while the PC shows the window. A
+	// drawer row serves it on a phone: the drawer's queued close-back() must not cancel the
+	// replace (backStack's leavingPage).
+	commands.register({ ...remoteOnly, id: 'remote.liveView', title: t('remote.liveView'), category: 'Remote', run: () => { leavingPage(); location.replace(modeUrl(location.href, 'mirror')); } });
 	commands.register({
 		...remoteOnly,
 		id: 'remote.uploadFiles',
@@ -162,12 +166,14 @@ function addSwitcherButton(): void {
 
 /** The one-time installs that outlive every layout: the files page and the phone Source
  *  Control page (the page-stack shells' Files and Changes destinations), the page-stack
- *  back gesture (the side bar element persists across arrangements), the settings entry's
+ *  back gesture (the side bar element persists across arrangements), the page-back entry
+ *  (the app bar's ‹, the rail's ‹ and the system back key ride it), the settings entry's
  *  routing, and the page marks the CSS reads. */
 function installOnce(): void {
 	installFilesPage();
 	installScmPage();
 	installTerminalFollow();
+	installPageBack();
 	if (!swipeBackInstalled) {
 		const sidebar = document.getElementById('sidebar');
 		if (sidebar) {

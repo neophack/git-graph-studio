@@ -13,12 +13,16 @@ installRemoteSessionHooks();
 import { installActionSheet, closeActionSheet, showActionSheet } from '../src/remote/actionSheet';
 import { createBottomTabs } from '../src/remote/bottomTabs';
 import { createNavRail } from '../src/remote/navRail';
+import { collectLayoutParts } from '../src/remote/app/layouts/parts';
 import { createAppBar, pageHeading, relativeFolder } from '../src/remote/appBar';
 import { createEditorEmptyState, editorActionEntries, openEditorsSheet } from '../src/remote/editorSwitcher';
 import { ACCESSORY_KEYS, createEditorAccessory } from '../src/remote/editorAccessory';
 import { closeDrawer, drawerOpen, openDrawer } from '../src/remote/navDrawer';
+import { leavingPage, pushBack } from '../src/remote/backStack';
+import { goWindowsPicker } from '../src/remote/windowSwitcher';
 import { setRemoteEnv } from '../src/remote/session';
 import { currentPage, editorPlaceholderShown, resetWorkbenchWatch } from '../src/remote/pages';
+import { installPageBack, pageBackAvailable, resetPageBack } from '../src/remote/pageBack';
 import { editableFocused, keyboardOpen } from '../src/remote/responsive';
 import { applyContributions, applyExtensionSettings, removeContributions } from '../src/features/extensions';
 import { installLongPress, LONG_PRESS_MS } from '../src/remote/gestures';
@@ -34,7 +38,8 @@ import { DEFAULT_SETTINGS, settings } from '../src/platform/settings';
 import { extSettings } from '../src/platform/state';
 import { setLocale, t } from '../src/platform/i18n';
 import { backend } from './tauriMock';
-import { click, flush, type } from './helpers';
+import { click, flush, type, workbenchShell, DefaultingHandlers } from './helpers';
+import { bootWorkbench, currentWorkbench } from '../src/workbench';
 
 function setWidth(width: number, height = 800): void {
 	Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
@@ -321,6 +326,25 @@ describe('bottom navigation', () => {
 		expect(taps).toEqual(['editor', 'editor']);
 	});
 
+	it('the layout wiring opens the open editors list on the Editor tap alone — no other destination does', async () => {
+		const { group } = phoneWorkbench();
+		document.body.appendChild(Object.assign(document.createElement('div'), { id: 'workbench' }));
+		addTab(group, 'a.ts', { path: '/home/u/ws/src/a.ts', active: true });
+		// The real bar, as the layout host adopts it (parts.ts): before the fix the chooser rode
+		// EVERY tap, so with an editor open any bottom-bar button opened the editors sheet.
+		const parts = collectLayoutParts();
+		document.body.appendChild(parts.bottomTabs);
+		const tab = (id: string) => parts.bottomTabs.querySelector<HTMLButtonElement>(`[data-tab="${id}"]`)!;
+		for (const other of ['scm', 'panel', 'search']) {
+			tab(other).click();
+			await flushMutations();
+			expect(document.querySelector('.ggs-editors-sheet')).toBeNull();
+		}
+		tab('editor').click();
+		await flushMutations();
+		expect(document.querySelector('.ggs-editors-sheet')).not.toBeNull();
+	});
+
 	it('carries the extensions\' pages — a scm/title launcher and a views container — in place of Terminal and Search', async () => {
 		const { group } = phoneWorkbench();
 		let launched = 0;
@@ -447,6 +471,109 @@ describe('app bar', () => {
 		heading.click();
 		[...bar.querySelectorAll<HTMLElement>('.ggs-appbar-actions .ggs-appbar-btn')].pop()!.click();
 		expect(opened).toEqual(['drawer', 'editors', 'actions']);
+	});
+});
+
+// The page back (pageBack.ts, §5.1's 层级 rule — 返回手势、系统返回键和 App 栏的返回按钮都
+// 弹出栈顶): a full-screen page over the editor — a side view, the panel, a launcher page —
+// carries a back affordance on every page-stack shell (the app bar's ‹ on the phone forms,
+// the rail's ‹ on the portrait tablet, which draws no app bar), and the system back key
+// closes the page before it could ever leave the workbench.
+describe('page back', () => {
+	afterEach(() => {
+		closeDrawer();
+		closeActionSheet();
+		resetPageBack();
+		// Drain any ignorePop a consumed entry left behind, then leave the phone shell.
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		leavePhone();
+	});
+
+	it('the app bar\'s ‹ shows while a page covers the editor and returns to it', async () => {
+		const { sidebar } = phoneWorkbench();
+		const bar = createAppBar({ openDrawer: () => undefined, openEditors: () => undefined, editorActions: () => undefined });
+		document.body.prepend(bar);
+		const back = () => bar.querySelector<HTMLButtonElement>('.ggs-appbar-btn.back')!;
+		// The Files page is showing over the editor: back is there; the editor page has none.
+		expect(back().hidden).toBe(false);
+		sidebar.hidden = true;
+		await flushMutations();
+		expect(back().hidden).toBe(true);
+		expect(pageBackAvailable()).toBe(false);
+		// Off a page-stack shell there is never a back (tablet landscape, desktop web).
+		document.documentElement.removeAttribute('data-page-stack');
+		expect(pageBackAvailable()).toBe(false);
+		document.documentElement.setAttribute('data-page-stack', '');
+		// …and back from a page returns to the editor page.
+		sidebar.hidden = false;
+		await flushMutations();
+		expect(back().hidden).toBe(false);
+		back().click();
+		await flush();
+		expect(sidebar.hidden).toBe(true);
+		expect(back().hidden).toBe(true);
+		expect(currentPage()).toBe('editor');
+	});
+
+	it('a launcher page (Git Graph) shows back too — it answers with the regular tab', async () => {
+		const { group } = phoneWorkbench();
+		applyContributions('preview.graph', {
+			commands: [{ command: 'preview.graph.view', title: 'View Git Graph (git log)', icon: '$(git-merge)' }],
+			menus: { 'scm/title': [{ command: 'preview.graph.view', group: 'navigation' }] }
+		}, {}, () => undefined, () => true);
+		commands.register({ id: 'preview.graph.view', title: 'View Graph', run: () => undefined });
+		const bar = createAppBar({ openDrawer: () => undefined, openEditors: () => undefined, editorActions: () => undefined });
+		document.body.prepend(bar);
+		const back = () => bar.querySelector<HTMLButtonElement>('.ggs-appbar-btn.back')!;
+		const a = addTab(group, 'a.ts', { path: '/home/u/ws/src/a.ts', active: true });
+		const graph = addTab(group, 'Git Graph', { ext: 'preview.graph' });
+		graph.click();
+		await flushMutations();
+		expect(currentPage()).toBe('launch:preview.graph.view');
+		expect(back().hidden).toBe(false);
+		// Back is the Editor destination's own semantics: the most recent regular tab.
+		back().click();
+		await flush();
+		expect(a.classList.contains('active')).toBe(true);
+		expect(graph.classList.contains('active')).toBe(false);
+		expect(currentPage()).toBe('editor');
+		expect(back().hidden).toBe(true);
+	});
+
+	it('the rail\'s ‹ is the portrait tablet\'s back — the form draws no app bar', async () => {
+		const { sidebar } = phoneWorkbench();
+		const rail = createNavRail(() => undefined, () => undefined);
+		document.body.appendChild(rail);
+		const back = () => rail.querySelector<HTMLButtonElement>('.ggs-rail-back')!;
+		expect(back().hidden).toBe(false);
+		sidebar.hidden = true;
+		await flushMutations();
+		expect(back().hidden).toBe(true);
+		sidebar.hidden = false;
+		await flushMutations();
+		expect(back().hidden).toBe(false);
+		back().click();
+		await flush();
+		expect(sidebar.hidden).toBe(true);
+		expect(currentPage()).toBe('editor');
+	});
+
+	it('the system back closes the page over the editor — a sheet over it peels first', async () => {
+		const { sidebar } = phoneWorkbench();
+		installPageBack();
+		await flushMutations();
+		// A drawer over the Files page: one back closes the drawer, the next the page — the
+		// back stack keeps one entry armed while layers remain beneath the back's target.
+		openDrawer(() => []);
+		expect(drawerOpen()).toBe(true);
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		await flush();
+		expect(drawerOpen()).toBe(false);
+		expect(sidebar.hidden).toBe(false);
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		await flush();
+		expect(sidebar.hidden).toBe(true);
+		expect(currentPage()).toBe('editor');
 	});
 });
 
@@ -649,6 +776,66 @@ describe('navigation drawer', () => {
 		expect(drawerOpen()).toBe(false);
 		expect(ran).toEqual(['picker']);
 		setRemoteEnv(undefined);
+	});
+
+	// The regression this pins (2026-10-16, 点击窗口选择页 不能进入页面): a drawer row that
+	// leaves the page closes the drawer first, whose release queues a history.back() one tick
+	// out — and that traversal cancels the location.assign the same click started (verified
+	// live in a browser: assign + a deferred back() stays on the origin page). The leave must
+	// outride the entry: goWindowsPicker abandons it, so no traversal ever runs.
+	it('leaves for the picker page from its drawer row without the close-back cancelling it', async () => {
+		phoneWorkbench();
+		const left: string[] = [];
+		const backs: number[] = [];
+		vi.spyOn(history, 'back').mockImplementation(() => backs.push(1));
+		setRemoteEnv({
+			transport: {
+				instances: [{ id: 'ggs-1', title: 'repo', folders: [], version: '1', visible: true, state: 'ok' }],
+				detach: () => void left.push('detach'),
+				shutdown: () => void left.push('shutdown')
+			} as never,
+			attached: { instance: 'ggs-1' } as never,
+			basePath: '/'
+		});
+		// shell.ts's own registration, verbatim: the row is the command, the command leaves.
+		commands.register({ profiles: ['remote'], id: 'remote.windowsPage', title: t('remote.windowsPage'), category: 'Remote', run: () => goWindowsPicker() });
+		openDrawer(() => []);
+		const row = [...document.querySelectorAll<HTMLButtonElement>('.ggs-drawer-row')].find((candidate) => candidate.querySelector('.label')!.textContent === t('remote.windowsPage'))!;
+		row.click();
+		expect(drawerOpen()).toBe(false);
+		// The leave started (jsdom does not navigate; the URL is pickerPageUrl's own case).
+		expect(left).toEqual(['detach', 'shutdown']);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		expect(backs.length).toBe(0);
+		// Drain any ignorePop residue so later popstate tests see a clean back stack.
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		setRemoteEnv(undefined);
+	});
+});
+
+// The overlay back stack (backStack.ts): the phone's back closes an overlay instead of
+// leaving, and a full-page leave ABANDONS the entry — consuming it (a history.back() one
+// tick after the closing click) is exactly what cancels the leave's own navigation.
+describe('overlay back stack', () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it('consumes the entry on an overlay close — and a page leave abandons it instead', async () => {
+		const backs: number[] = [];
+		vi.spyOn(history, 'back').mockImplementation(() => backs.push(1));
+		const release = pushBack(() => closeDrawer());
+		release();
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		expect(backs.length).toBe(1);
+
+		const releaseAgain = pushBack(() => closeDrawer());
+		releaseAgain();
+		leavingPage();
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		expect(backs.length).toBe(1);
+		// Drain the one ignorePop the consumed entry left behind.
+		window.dispatchEvent(new PopStateEvent('popstate'));
 	});
 });
 
@@ -855,6 +1042,81 @@ describe('edit lock', () => {
 			delete document.documentElement.dataset['formFactor'];
 			document.documentElement.removeAttribute('data-remote-shell');
 		}
+	});
+});
+
+// The app bar's Markdown source⇄preview toggle (the owner's 2026-10-16 direction: 顶栏加
+// 按钮，切换源码还是预览查看): the button rides the Editor page's trailing actions, flips a
+// Markdown file to its preview and back, and hides for every other editor. The state reads
+// the workbench's active input, so the test boots the real workbench.
+describe('markdown source⇄preview toggle', () => {
+	async function bootPhoneEditor(): Promise<HTMLElement> {
+		localStorage.clear();
+		workbenchShell();
+		document.documentElement.setAttribute('data-remote-shell', '');
+		document.documentElement.dataset['formFactor'] = 'phone';
+		document.documentElement.setAttribute('data-page-stack', '');
+		backend.reset();
+		backend.handlers = new DefaultingHandlers([
+			['boot_context', () => ({ file: null, actions: [], repo: 'C:/repo', roots: ['C:/repo'], workspaceFile: null })],
+			['open_folder', () => ({ root: 'C:/repo', isRepo: true })],
+			['repo_head', () => ({ branch: 'main', shortHash: 'abc', ahead: 0, behind: 0, upstream: null })],
+			['scm_status', () => []],
+			['repo_submodules', () => []],
+			['list_dir_page', () => ({ entries: [], total: 0, offset: 0, limit: 100 })],
+			['ext_list', () => []],
+			['backup_list', () => []],
+			['pty_create', () => 1]
+		] as [string, (args: Record<string, unknown>) => unknown][]);
+		backend.on('read_file', ({ path }) => ({ contents: String(path).endsWith('a.txt') ? 'plain\n' : '# Guide\n', binary: false, size: 1, encoding: 'utf8', eol: 'lf' }));
+		(window as unknown as { markdownIt: unknown }).markdownIt = { render: (text: string) => `<h1>${text.trim().replace(/^#\s*/, '')}</h1>` };
+		await import('../src/features/editor'); // pre-warm the editor chunk, as the boot suites do
+		await bootWorkbench();
+		await flush(8);
+		const bar = createAppBar({ openDrawer: () => undefined, openEditors: () => undefined, editorActions: () => undefined });
+		document.body.prepend(bar);
+		document.getElementById('sidebar')!.hidden = true; // the Editor page
+		await flushMutations();
+		return bar;
+	}
+
+	afterEach(() => {
+		currentWorkbench?.dispose();
+		leavePhone();
+	});
+
+	it('flips a Markdown file to its preview and back, hiding for other editors', { timeout: 30_000 }, async () => {
+		const bar = await bootPhoneEditor();
+		const toggle = () => bar.querySelector<HTMLButtonElement>('.ggs-appbar-btn.markdown-toggle')!;
+		// The Editor page's actions are built with the bar: the toggle leads them.
+		expect(bar.querySelector('.ggs-appbar-actions .ggs-appbar-btn')).toBe(toggle());
+		// Nothing open: out of sight.
+		expect(toggle().hidden).toBe(true);
+		await currentWorkbench!.editors.openFile('C:/repo/README.md');
+		await flushMutations();
+		// A Markdown source tab: the button offers the preview.
+		expect(toggle().hidden).toBe(false);
+		expect(toggle().dataset.state).toBe('source');
+		expect(toggle().getAttribute('aria-label')).toBe('Open Preview');
+		expect(toggle().querySelector('.codicon-open-preview')).not.toBeNull();
+		click(toggle());
+		await flush(2); // the click's open settles through its own awaits before the tab mutates
+		await flushMutations();
+		expect(currentWorkbench!.editors.activeInput).toEqual({ kind: 'markdown', path: 'C:/repo/README.md' });
+		expect(document.querySelector('.markdown-preview-body h1')!.textContent).toBe('Guide');
+		// The preview up: the button offers the source back.
+		expect(toggle().dataset.state).toBe('preview');
+		expect(toggle().getAttribute('aria-label')).toBe('View Source');
+		expect(toggle().querySelector('.codicon-code')).not.toBeNull();
+		click(toggle());
+		await flush(2);
+		await flushMutations();
+		expect(currentWorkbench!.editors.activeInput).toEqual({ kind: 'file', path: 'C:/repo/README.md' });
+		expect(toggle().dataset.state).toBe('source');
+		// A plain text file: nothing to flip.
+		await currentWorkbench!.editors.openFile('C:/repo/a.txt');
+		await flushMutations();
+		expect(toggle().hidden).toBe(true);
 	});
 });
 

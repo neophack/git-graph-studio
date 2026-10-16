@@ -174,6 +174,12 @@
 :root.remote-shell[data-page-stack] .minimap,
 :root.remote-shell[data-page-stack] .cm-minimap,
 :root.remote-shell[data-page-stack] .cm-sticky-scroll { display: none !important; }
+/* The editor keeps its has-minimap class while the minimap is hidden — shell.css's content
+   shrink (the 86 px padding-right) and the find widget's minimap offset must go with it,
+   or the code lines end 86 px short of the edge over nothing (2026-10-16, the owner's
+   direction). */
+:root.remote-shell[data-page-stack] .cm-editor.has-minimap .cm-scroller { padding-right: 0; }
+:root.remote-shell[data-page-stack] .cm-editor.has-minimap .cm-find-widget { right: 14px; }
 
 .ggs-editor-empty[hidden] { display: none !important; }
 /* The empty Editor page as a small dashboard of the workspace (the owner's 2026-10-16
@@ -252,7 +258,7 @@
 
 /* The editor's lock toggle in the app bar (editLock.ts): a phone opens files read-only; the
    open lock is tinted so an editable file reads at a glance. */
-.ggs-appbar-btn.edit-lock[hidden] { display: none; }
+.ggs-appbar-btn[hidden] { display: none; }
 .ggs-appbar-btn.edit-lock[data-state="unlocked"] .codicon { color: var(--vscode-editorWarning-foreground, inherit); }
 
 /* The editing row above the keyboard (editorAccessory.ts). */
@@ -594,6 +600,9 @@
 :root[data-data-saver] .minimap,
 :root[data-data-saver] .cm-minimap,
 :root[data-data-saver] .cm-sticky-scroll { display: none !important; }
+/* Same dead-zone rule as the page-stack block above: the minimap's offsets leave with it. */
+:root[data-data-saver] .cm-editor.has-minimap .cm-scroller { padding-right: 0; }
+:root[data-data-saver] .cm-editor.has-minimap .cm-find-widget { right: 14px; }
 
 @media (prefers-reduced-motion: reduce) {
 	.ggs-action-sheet, .ggs-drawer, .ggs-action-sheet-backdrop, .ggs-drawer-backdrop, .ggs-bottom-tabs .pill,

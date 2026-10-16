@@ -12,6 +12,7 @@ import { commands } from '../src/platform/commands';
 import { initResponsive } from '../src/remote/responsive';
 import { installLayoutHost } from '../src/remote/app/layouts/host';
 import { installActionSheet, showActionSheet } from '../src/remote/actionSheet';
+import { drawerOpen } from '../src/remote/navDrawer';
 import { currentPage } from '../src/remote/pages';
 import type { MenuEntry } from '../src/platform/ui';
 
@@ -139,21 +140,22 @@ describe('the five layouts', () => {
 		expect(main.contains(document.getElementById('workbench')!)).toBe(true);
 		expect(main.contains(tabs())).toBe(false);
 
-		// Tablet portrait: the wider rail with labels, the page column beside it.
+		// Tablet portrait: the icon-only rail, the page column beside it.
 		await become(744, 1133, true);
 		expect(frame().dataset.layout).toBe('tablet-portrait');
 		expect(arrange().firstElementChild).toBe(rail());
 		expect(arrange().children[1]).toBe(document.getElementById('workbench'));
 		expect(document.documentElement.hasAttribute('data-page-stack')).toBe(true);
 
-		// Tablet landscape: the workbench's own three-column frame — the activity bar
-		// rail with a label under every icon, the side bar, the editor — plus the status
-		// bar; the phone chrome is parked behind (no ids).
+		// Tablet landscape: the workbench's own three-column frame — the activity bar in
+		// VS Code's icon-only shape (the owner's 2026-10-16 direction, 左轨图标不配标题:
+		// no label under any icon; the ☰ menu entry still leads the bar), the side bar,
+		// the editor — plus the status bar; the phone chrome is parked behind (no ids).
 		await become(1133, 744, true);
 		expect(frame().dataset.layout).toBe('tablet-landscape');
 		expect([...arrange().children].filter((child) => child.id).map((child) => child.id)).toEqual(['titlebar', 'workbench', 'statusbar']);
-		const labels = [...document.querySelectorAll('#activitybar .rail-label')].map((label) => label.textContent);
-		expect(labels).toEqual(['Files', 'Search', 'Changes']);
+		expect(document.querySelector('#activitybar .ggs-activity-menu')).not.toBeNull();
+		expect(document.querySelectorAll('#activitybar .rail-label')).toHaveLength(0);
 		expect(document.documentElement.hasAttribute('data-page-stack')).toBe(false);
 
 		// Desktop browser: the VS Code frame with the remote indicator leading the status
@@ -261,6 +263,44 @@ describe('the five layouts', () => {
 		await flush();
 		expect(document.querySelector('.ggs-editors-sheet')).not.toBeNull();
 		expect(document.querySelector('.ggs-editors-sheet .ggs-editor-row .name')!.textContent).toBe('a.ts');
+	});
+
+	it('carries a menu entry on the tablet forms — the rail head and the activity rail both open the drawer (the owner\'s 2026-10-16 direction, 平板界面没有菜单入口)', async () => {
+		setWidth(744, 1133);
+		document.documentElement.setAttribute('data-remote-shell', '');
+		stopResponsive = initResponsive();
+		stopHost = installLayoutHost();
+		expect(frame().dataset.layout).toBe('tablet-portrait');
+
+		// The portrait tablet has no app bar: the ☰ at the rail's head is its menu entry —
+		// the drawer with every page, the workspace actions and the application menus.
+		const railMenu = () => document.querySelector<HTMLButtonElement>('.ggs-nav-rail .ggs-rail-menu')!;
+		expect(railMenu()).not.toBeNull();
+		railMenu().click();
+		expect(drawerOpen()).toBe(true);
+		expect(document.querySelector('.ggs-drawer')).not.toBeNull();
+		// The switch process closes the drawer (§4.2's overlays) before the next form; the
+		// layout stamp is the settle signal (a loaded suite outpaces the 170 ms settle).
+		const lands = async (layout: string, w: number, h: number, coarse: boolean) => {
+			await become(w, h, coarse);
+			for (let i = 0; i < 20 && frame().dataset.layout !== layout; i++) await new Promise((resolve) => setTimeout(resolve, 50));
+			expect(frame().dataset.layout).toBe(layout);
+		};
+		await lands('tablet-landscape', 1133, 744, true);
+		expect(drawerOpen()).toBe(false);
+
+		// The landscape tablet draws no title bar: the ☰ rides the activity rail's head
+		// instead — icon-only like every other item (the owner's 2026-10-16 direction) —
+		// and leaves with the layout.
+		const activityMenu = () => document.querySelector<HTMLButtonElement>('#activitybar .ggs-activity-menu')!;
+		expect(activityMenu()).toBe(document.querySelector('#activitybar')!.firstElementChild);
+		expect(activityMenu().title).toBe('Menu');
+		activityMenu().click();
+		expect(drawerOpen()).toBe(true);
+		await lands('desktop', 1440, 900, false);
+		expect(drawerOpen()).toBe(false);
+		expect(document.querySelector('#activitybar .ggs-activity-menu')).toBeNull();
+		expect(document.querySelector('#activitybar .rail-label')).toBeNull();
 	});
 
 	it('gates the workbench global chords off the phone forms, keeps the editor own keys (§5.7)', async () => {

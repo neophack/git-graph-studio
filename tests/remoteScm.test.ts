@@ -1,6 +1,7 @@
 // The phone's Source Control page (module 19, docs/remote-client-plan.md §6.4, the owner's
-// 2026-10-16 direction: 手机端源代码管理界面不适合触控，要重新设计): the branch row with the
-// shared branch sheet (切换分支), the commit card whose primary action follows the
+// 2026-10-16 direction: 手机端源代码管理界面不适合触控，要重新设计): the branch chip riding
+// the commit card's action row (the owner's 2026-10-16 direction: ggs-scm-branch 要放到第一
+// 行增加一个按钮就可以，不要单独一行) with the shared branch sheet (切换分支), the commit card whose primary action follows the
 // repository's state, the change groups as touch sections — a tap opens the change, the ⋮
 // opens the row's sheet, the group's own verbs stage / unstage / discard — and the page's
 // seamlessness: it renders the ONE SourceControlView's state, so a device-class switch
@@ -87,12 +88,18 @@ afterEach(() => {
 });
 
 describe('the phone Source Control page (§6.4)', () => {
-	it('renders the branch row with ahead/behind, the groups, and the letters', { timeout: 30_000 }, async () => {
+	it('renders the branch chip in the commit row, the groups, and the letters', { timeout: 30_000 }, async () => {
 		await bootPhoneRepo();
 		const branch = document.querySelector<HTMLElement>('.ggs-scm-branch')!;
 		expect(branch.querySelector('.name')!.textContent).toBe('main');
 		expect(branch.querySelector('.meta')!.textContent).toContain('1');
 		expect(branch.querySelector('.meta')!.textContent).toContain('2');
+		// The chip is a button in the commit card's action row — never a row of its own
+		// (the owner's 2026-10-16 direction: ggs-scm-branch 要放到第一行增加一个按钮就可以，
+		// 不要单独一行): the page's own children are the commit card and the scroll.
+		expect(branch.closest('.ggs-scm-commitrow')).not.toBeNull();
+		const pageChildren = [...document.querySelector('.ggs-scm-page')!.children];
+		expect(pageChildren.map((child) => child.className)).toEqual(['ggs-scm-commit', 'ggs-scm-scroll']);
 		// The groups: the staged change under 已暂存的更改, the unstaged under 更改.
 		expect(groupSection(t('remote.scm.group.staged'))).not.toBeNull();
 		expect(groupSection(t('remote.scm.group.changes'))).not.toBeNull();
@@ -239,7 +246,7 @@ describe('the branch sheet (the Files page chip and the SCM branch row)', () => 
 		expect(backend.callsTo('scm_status').length).toBeGreaterThan(0);
 	});
 
-	it('the SCM page\'s branch row opens the same sheet', { timeout: 30_000 }, async () => {
+	it('the SCM page\'s branch chip opens the same sheet', { timeout: 30_000 }, async () => {
 		await bootPhoneRepo();
 		click(document.querySelector<HTMLElement>('.ggs-scm-branch'));
 		await until(() => document.querySelector('.ggs-action-sheet') !== null);

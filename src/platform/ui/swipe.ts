@@ -76,9 +76,11 @@ export function swipeReveal(row: HTMLElement, actions: RevealAction[]): () => vo
 
 	// Eager build once the row lands in its list (the caller may wire while detached): the
 	// strip is in place before the first touch, and the lazy path covers a row never laid
-	// out by a frame.
+	// out by a frame. A 0 ms timer, not rAF: the strip is only appended (hidden — a drag
+	// positions it), so nothing needs a laid-out frame, and jsdom's test clocks run
+	// setTimeout flushes without ever ticking a 16 ms animation frame.
 	if (row.isConnected) build();
-	else requestAnimationFrame(() => { if (!strip) build(); });
+	else setTimeout(() => { if (!strip) build(); }, 0);
 
 	let open = false;
 	const setOffset = (px: number): void => {

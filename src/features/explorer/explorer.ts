@@ -74,6 +74,9 @@ export class Explorer {
 	/** "Open in Hex Viewer": the file opens as the hex editor's tab (any file, however
 	 *  large - it is paged, never read whole). */
 	onOpenHex: ((path: string) => void) | null = null;
+	/** "Open Preview" / "Open Preview to the Side": a Markdown file opens as its rendered
+	 *  preview tab (the same one the editor's own toolbar button and Ctrl+Shift+V open). */
+	onOpenMarkdownPreview: ((path: string, toSide: boolean) => void) | null = null;
 	onOpenFolder: (() => void) | null = null;
 	onPathRenamed: ((from: string, to: string) => void) | null = null;
 	onPathDeleted: ((path: string) => void) | null = null;
@@ -742,6 +745,12 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 				'separator'
 			] : []) as MenuEntry[],
 				...(isDir ? [] : [
+				// A Markdown file opens as its rendered preview, like VS Code's own
+				// explorer entries (the editor's toolbar button and Ctrl+Shift+V do the same).
+				...(/\.(md|markdown)$/i.test(path) ? [
+					{ label: 'Open Preview', run: () => this.onOpenMarkdownPreview?.(path, false) },
+					{ label: 'Open Preview to the Side', run: () => this.onOpenMarkdownPreview?.(path, true) }
+				] as MenuEntry[] : []),
 				{ label: 'Open to the Right', run: () => this.onOpenInDirection?.(path, 'right') },
 				{ label: 'Open to the Left', run: () => this.onOpenInDirection?.(path, 'left') },
 				{ label: 'Open Below', run: () => this.onOpenInDirection?.(path, 'down') },

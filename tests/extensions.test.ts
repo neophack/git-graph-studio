@@ -21,6 +21,8 @@ import '../src/hosts/extHostBoot';
 import { backend } from './tauriMock';
 import { setRemoteEnv } from '../src/remote/session';
 import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
+import { hook, provideHook } from '../src/platform/hooks';
+import { noteCopyInteraction, resetCopyInteractions } from '../src/remote/mirror/copyInteraction';
 
 // The remote session's hooks, as boot.ts installs them before the workbench loads: the
 // session-aware modules below read them through platform/hooks lookups.
@@ -2418,6 +2420,74 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 			expect(invoked).not.toContain('webviewView.resolve');
 			expect(invoked).not.toContain('webviewView.setVisible');
 		} finally {
+			setRemoteEnv(undefined);
+		}
+	});
+
+	it('a mirrored create or reveal this page\'s own copy interaction caused takes the foreground; another frontend\'s stays held (2026-10-16: 手机端 claude 打开新的 session 页面没有到前台显示)', async () => {
+		// The tap that opens the panel crossed from HERE — the copy's input replay into the
+		// PC's real page — so the mirrored create that comes back is this user's own act: it
+		// skips K7's page hold and the new session page comes forward. The backend cannot
+		// say it (a replayed tap reads as the PC user's own input, and the mirror's `caller`
+		// names no one); the copy's input trail is the only witness
+		// (src/remote/mirror/copyInteraction.ts).
+		const ENGINE: ExtInfo = {
+			...GGX2, id: 'acme.engine',
+			capabilities: { format: 'ggs/2', id: 'acme.engine', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }
+		};
+		withExtensions(ENGINE);
+		backend.on('ext_read_file', () => { throw new Error('no such file'); });
+		backend.on('ext_process_start', () => ({ extensionId: 'acme.engine', pid: 4242, commands: [], protocolVersion: 'ggs-ext/1', startCount: 1, lastError: null }));
+		setRemoteEnv({ transport: {} as never, attached: { frontendId: 'remote/4' } as never, basePath: '/' });
+		const navigation = hook('navigation');
+		let holds = 0;
+		provideHook('navigation', { ...navigation, holdPage: () => { holds += 1; return () => undefined; } });
+		resetCopyInteractions();
+		try {
+			const host = new ExtensionHost();
+			const opened: [number, boolean | undefined][] = [];
+			const revealed: string[] = [];
+			host.onOpenWebview = (panelId, _title, _extId, _placement, focus) => void opened.push([panelId, focus]);
+			host.onRevealWebviewTab = (tabId) => void revealed.push(tabId);
+			await host.activateInstalled();
+			await flush();
+			// The PC's own act: held in the background (K7) — the tab joins, the page stays.
+			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.create', args: [7, 'chat', 'Claude Code', 1, false], served: 'main', caller: null });
+			await flush();
+			expect(holds).toBe(1);
+			expect(opened).toEqual([[7, true]]);
+			// This page's user just tapped in the extension's copy (the "new session" tap):
+			// the create it caused comes forward — no hold taken.
+			noteCopyInteraction('acme.engine');
+			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.create', args: [8, 'chat', 'Claude Code', 1, false], served: 'main', caller: null });
+			await flush();
+			expect(holds).toBe(1);
+			expect(opened.slice(1)).toEqual([[8, true]]);
+			// A reveal follows the same rule: the own-act reveal comes forward ungated…
+			host['webviewCopies'].add(host['webviewKey']('acme.engine', 8));
+			noteCopyInteraction('acme.engine');
+			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.reveal', args: [8], served: 'main', caller: null });
+			await flush();
+			expect(holds).toBe(1);
+			expect(revealed).toEqual([host.webviewTabId('acme.engine', 8)]);
+			// …and another frontend's reveal is held again once the trail is cold.
+			resetCopyInteractions();
+			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.reveal', args: [8], served: 'main', caller: null });
+			await flush();
+			expect(holds).toBe(2);
+			// A create the extension made WITHOUT taking the PC's focus (a background event's
+			// panel — preserveFocus true) joins here in the same posture: the copy keeps the
+			// extension's choice instead of forcing the foreground, or the two sides' active
+			// tabs diverge silently — each side's fresh-tab suppression eats its activation,
+			// the PC never learns this page opened, and its next activation drags this
+			// phone's view away (2026-10-16: 远程打开的界面没有同步到 pc 端，随后被 pc 端激活的页面覆盖).
+			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.create', args: [9, 'chat', 'Claude Code', 1, true], served: 'main', caller: null });
+			await flush();
+			expect(opened.slice(2)).toEqual([[9, false]]);
+			expect(holds).toBe(3);
+		} finally {
+			provideHook('navigation', navigation);
+			resetCopyInteractions();
 			setRemoteEnv(undefined);
 		}
 	});

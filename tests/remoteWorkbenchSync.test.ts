@@ -1083,6 +1083,152 @@ describe('a real editor area under the sync', () => {
 		}
 	});
 
+	it('a catch-up snapshot follows the answerer\'s active tab without pulling this side\'s page (2026-10-16: 远程点击页面后又被替换)', async () => {
+		// The joiner is often a phone coming back from the background: its catch-up asks, the
+		// PC answers with its active tab — the joiner follows the TAB, but the reveal is the
+		// other side's act, not this user's: the page holds wrap it exactly as every other
+		// remote-applied reveal (K7), and its activation crosses back as nothing.
+		const original = hook('navigation');
+		let held = 0;
+		let reveals = 0;
+		provideHook('navigation', {
+			...original,
+			revealEditorPage: (): void => {
+				if (held === 0) reveals++;
+			},
+			holdPage: (): (() => void) => {
+				held++;
+				let done = false;
+				return () => {
+					if (!done) {
+						done = true;
+						held--;
+					}
+				};
+			}
+		});
+		try {
+			const container = document.createElement('div');
+			document.body.appendChild(container);
+			const area = new EditorArea(container);
+			const workbench: SyncedWorkbench = { editors: area, openFolders: () => ['C:\\repo'] };
+			const channel = bus();
+			const presence = fakePresence(2);
+			const attached = attachWorkbenchSync(workbench, channel.deps, 'main', { presence, startImmediately: false });
+			attached.start();
+			const activeOf = (): string | null => {
+				const input = area.activeInput;
+				return input?.kind === 'file' ? input.path ?? null : null;
+			};
+			// Two tabs of this frontend's own (the restore path, no announces), the newer one
+			// active — the snapshot's active names the OLDER one, so the follow is a real
+			// reveal, not an open.
+			attached.localOnly(true);
+			await area.groupAt(0).openFile(NOTES);
+			await area.groupAt(0).openFile(README);
+			attached.localOnly(false);
+			// The phone returned: the catch-up request crosses.
+			presence.became();
+			await until(() => channel.by('main').some((m) => m.k === 'stateRequest'));
+			// The PC answers: its active tab is NOTES.
+			channel.deps.send({ by: 'remote/1', k: 'stateSnapshot', to: 'main', files: [NOTES], tabs: [], extTabs: [], active: { kind: 'file', path: NOTES } });
+			await until(() => activeOf() === NOTES);
+			// The tab followed… without pulling the page, and without announcing the reveal's
+			// own activation back (the answerer is already on that tab).
+			expect(reveals).toBe(0);
+			await flush(5);
+			expect(channel.by('main').filter((m) => m.k === 'active' || m.k === 'activeTab')).toEqual([]);
+			container.remove();
+		} finally {
+			provideHook('navigation', original);
+		}
+	});
+
+	it('a catch-up snapshot follows the answerer\'s active extension page the same held way', async () => {
+		const original = hook('navigation');
+		let held = 0;
+		let reveals = 0;
+		provideHook('navigation', {
+			...original,
+			revealEditorPage: (): void => {
+				if (held === 0) reveals++;
+			},
+			holdPage: (): (() => void) => {
+				held++;
+				let done = false;
+				return () => {
+					if (!done) {
+						done = true;
+						held--;
+					}
+				};
+			}
+		});
+		try {
+			const container = document.createElement('div');
+			document.body.appendChild(container);
+			const area = new EditorArea(container);
+			const workbench: SyncedWorkbench = { editors: area };
+			const channel = bus();
+			const presence = fakePresence(2);
+			const input = { kind: 'extpage', id: 'webview:acme.engine:7', title: 'Claude Code', extId: 'acme.engine', pageId: 'webview' } as const;
+			const attached = attachWorkbenchSync(workbench, channel.deps, 'main', { presence, startImmediately: false });
+			attached.start();
+			await area.openExtPage({ ...input }, () => undefined);
+			// The file takes the focus back, so the snapshot's follow is a real switch.
+			attached.localOnly(true);
+			await area.groupAt(0).openFile(NOTES);
+			attached.localOnly(false);
+			await until(() => channel.by('main').some((m) => m.k === 'stateRequest'));
+			// Only the snapshot's own reveal counts from here (the setup opens above were
+			// this frontend's own acts, free to pull).
+			reveals = 0;
+			channel.sent.length = 0;
+			channel.deps.send({ by: 'remote/1', k: 'stateSnapshot', to: 'main', files: [], tabs: [], extTabs: ['webview:acme.engine:7'], active: { kind: 'tab', id: 'webview:acme.engine:7' } });
+			await until(() => area.activeInput?.kind === 'extpage');
+			expect(reveals).toBe(0);
+			await flush(5);
+			expect(channel.by('main').filter((m) => m.k === 'active' || m.k === 'activeTab')).toEqual([]);
+			container.remove();
+		} finally {
+			provideHook('navigation', original);
+		}
+	});
+
+	it('a markdown preview tab crosses as a re-openable tab — open, active and close (2026-10-16: 远程打开的界面没有同步到 pc 端，随后被 pc 端激活的页面覆盖)', async () => {
+		// The preview is a phone-prominent surface (the app bar's source⇄preview toggle, the
+		// files row's preview entry): its tab crosses WHOLE like a diff — the path, never the
+		// rendered text — so the PC's active tab follows the phone's preview, and the phone's
+		// preview is never silently divergent from what the PC believes is active.
+		(window as unknown as { markdownIt: unknown }).markdownIt = { render: (text: string) => `<p>${text}</p>` };
+		const containerA = document.createElement('div');
+		const containerB = document.createElement('div');
+		document.body.append(containerA, containerB);
+		const areaA = new EditorArea(containerA);
+		const areaB = new EditorArea(containerB);
+		const channel = bus();
+		attachWorkbenchSync({ editors: areaA }, channel.deps, 'main');
+		attachWorkbenchSync({ editors: areaB }, channel.deps, 'remote/1');
+		const ID = `markdown:${README}`;
+		// The phone opens the preview: the tabs diff announces it whole.
+		await areaB.openMarkdownPreview(README);
+		await until(() => channel.by('remote/1').some((m) => m.k === 'openTab' && m.input.kind === 'markdown' && m.input.path === README));
+		// The PC opens its own preview of the same file — the same tab id on both sides.
+		await until(() => areaA.openTabInputs().some(({ id }) => id === ID));
+		// A later switch back to the preview crosses as one activeTab, and the PC follows.
+		await areaB.groupAt(0).openFile(NOTES);
+		await until(() => channel.by('remote/1').some((m) => m.k === 'active' && m.path === NOTES));
+		await areaB.revealById(ID);
+		await until(() => channel.by('remote/1').some((m) => m.k === 'activeTab' && m.id === ID));
+		await until(() => areaA.activeInput?.kind === 'markdown');
+		// A close crosses too, keyed by the same id.
+		areaB.closeById(ID);
+		await until(() => channel.by('remote/1').some((m) => m.k === 'closeTab' && m.id === ID));
+		await until(() => !areaA.openTabInputs().some(({ id }) => id === ID));
+		containerA.remove();
+		containerB.remove();
+	});
+
 	it('closes an extension page tab on the other side, its id the key', async () => {
 		const containerA = document.createElement('div');
 		const containerB = document.createElement('div');

@@ -1,9 +1,11 @@
 // The phone's Source Control page (docs/remote-client-plan.md §6.4, the owner's
 // 2026-10-16 direction: 手机端源代码管理界面不适合触控，要重新设计): the desktop view's
-// 22 px rows, hover buttons and context menus rebuilt as a touch page — the branch row
-// (tap to switch, the shared branch sheet), the commit card (a 16 px message box over a
-// 48 px primary action whose label follows the repository's state: Commit, Push n, Sync,
-// Publish), the change groups as sections with thumb-sized stage-all / unstage-all /
+// 22 px rows, hover buttons and context menus rebuilt as a touch page — the branch chip
+// riding the commit card's action row (tap to switch, the shared branch sheet — the owner's
+// 2026-10-16 direction: ggs-scm-branch 要放到第一行增加一个按钮就可以，不要单独一行), the
+// commit card (a 16 px message box over a 44 px primary action whose label follows the
+// repository's state: Commit, Push n, Sync, Publish), the change groups as sections with
+// thumb-sized stage-all / unstage-all /
 // discard-all, and 56 px rows whose tap opens the change, whose swipe-left uncovers the
 // row's own verb (the platform's swipe-reveal, the same gesture §6.3 gave the classic
 // rows) and whose ⋮ opens the row's sheet. Mounted INTO the SCM sidebar view exactly the
@@ -98,11 +100,14 @@ export function installScmPage(): void {
 	const scroll = el('div', 'ggs-scm-scroll');
 	const shell = workbench;
 
-	/* ---------- The branch row ---------- */
+	/* ---------- The branch chip (the commit row's leading button) ---------- */
 
 	const branchName = el('span', 'name');
 	const branchMeta = el('span', 'meta');
-	const branchRow = el('button', 'ggs-scm-branch', [icon('git-branch'), branchName, branchMeta, icon('chevron-right', 'chev')]);
+	// A button in the first row, never a row of its own (the owner's 2026-10-16 direction):
+	// the chip rides the commit card's action row, the same shape the Files page's toolbar
+	// chip takes — name and ahead/behind, one tap from the shared branch sheet.
+	const branchRow = el('button', 'ggs-scm-branch', [icon('git-branch'), branchName, branchMeta]);
 	branchRow.type = 'button';
 	branchRow.title = t('remote.branch.switch');
 	branchRow.addEventListener('click', () => void openBranchSheet());
@@ -141,7 +146,7 @@ export function installScmPage(): void {
 	commitMore.title = t('remote.scm.commitMore');
 	commitMore.setAttribute('aria-label', t('remote.scm.commitMore'));
 	commitMore.addEventListener('click', () => showActionSheet(commitMenu(), t('remote.scm.commitMore')));
-	const commitCard = el('div', 'ggs-scm-commit', [message, el('div', 'ggs-scm-commitrow', [commitButton, commitMore])]);
+	const commitCard = el('div', 'ggs-scm-commit', [message, el('div', 'ggs-scm-commitrow', [branchRow, commitButton, commitMore])]);
 
 	function commitMenu(): MenuEntry[] {
 		return [
@@ -433,7 +438,7 @@ export function installScmPage(): void {
 		}
 	}
 
-	page.append(branchRow, commitCard, scroll);
+	page.append(commitCard, scroll);
 	view.appendChild(page);
 	render();
 }

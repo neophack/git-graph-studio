@@ -13,6 +13,7 @@ import { createFileList, relativeTime, shortDateTime, defaultSort, type FileList
 import { createPathBar } from '../src/remote/app/files/pathBar';
 import { createMultiSelect } from '../src/remote/app/files/multiSelect';
 import { installFilesPage } from '../src/remote/app/files/filesPage';
+import { createAppBar } from '../src/remote/appBar';
 import { createEditorEmptyState } from '../src/remote/editorSwitcher';
 import { bootWorkbench, currentWorkbench } from '../src/workbench';
 
@@ -446,6 +447,67 @@ describe('the installed page follows the workspace root', () => {
 		await currentWorkbench!.applyRoots(['C:/other'], false, null);
 		await flush(8);
 		expect(pageRows()).toEqual(['b.md']);
+	});
+
+	// The owner's 2026-10-16 direction (右下角的加号遮挡文件的 ... 按钮，放到顶上，风格要和
+	// 其他按钮一致) and its continuation (codicon-add 放在 ggs-appbar-btn 前面): the ＋ is an
+	// app bar button — the FIRST of the Files page's trailing actions, ahead of the bar's own
+	// go-to-file and kebab — never a floating corner over the rows. The toolbar keeps a copy
+	// for the form that draws no app bar (the tablet portrait), hidden by the layout's CSS.
+	it('the actions ＋ leads the app bar\'s buttons, not the list\'s corner', { timeout: 30_000 }, async () => {
+		await bootWithoutRoots();
+		await currentWorkbench!.applyRoots(['C:/repo'], true, null);
+		await flush(8);
+		// The floating corner button that covered the rows' ⋮ is gone.
+		expect(document.querySelector('.ggs-files-fab')).toBeNull();
+		// The ＋ is the app bar's own button — placed before the other ggs-appbar-btns.
+		const bar = createAppBar({ openDrawer: () => undefined, openEditors: () => undefined, editorActions: () => undefined });
+		document.body.prepend(bar);
+		expect(bar.dataset.page).toBe('explorer');
+		const buttons = [...bar.querySelectorAll<HTMLElement>('.ggs-appbar-actions .ggs-appbar-btn')];
+		expect(buttons[0].querySelector('.codicon')!.className).toBe('codicon codicon-add');
+		expect(buttons[0].getAttribute('aria-label')).toBe('New');
+		expect(buttons[0].hidden).toBe(false);
+		// The toolbar keeps the no-app-bar form's copy (the tablet portrait's), CSS-hidden
+		// wherever the bar carries the ＋.
+		const toolbarAdd = document.querySelector('.ggs-files-toolbar .ggs-files-addbtn');
+		expect(toolbarAdd).not.toBeNull();
+		click(buttons[0]);
+		await flush(2);
+		const sheet = document.querySelector('.ggs-action-sheet');
+		expect(sheet).not.toBeNull();
+		const labels = [...sheet!.querySelectorAll('button')].map((button) => button.textContent);
+		expect(labels).toContain('Upload Files Here…');
+		expect(labels).toContain('Upload Folder Here…');
+		expect(labels).toContain('New File…');
+		expect(labels).toContain('New Folder…');
+		bar.remove();
+	});
+
+	// The owner's direction (2026-10-16: md文件要支持使用预览打开): a Markdown row opens
+	// rendered — the row menu carries the preview entry, the tap opens the preview tab.
+	it('a Markdown row\'s menu opens the file\'s preview', { timeout: 30_000 }, async () => {
+		await bootWithoutRoots();
+		(window as unknown as { markdownIt: unknown }).markdownIt = { render: (text: string) => `<h1>${text.trim().replace(/^#\s*/, '')}</h1>` };
+		backend.on('read_file', () => ({ contents: '# Notes', binary: false, size: 1, encoding: 'utf8', eol: 'lf' }));
+		await currentWorkbench!.applyRoots(['C:/other'], true, null);
+		await flush(8);
+		const more = row(document.querySelector('.ggs-files-page') as HTMLElement, 'b.md').querySelector('.ggs-file-more')!;
+		click(more);
+		const sheet = document.querySelector('.ggs-action-sheet');
+		expect(sheet).not.toBeNull();
+		const preview = [...sheet!.querySelectorAll('button')].find((button) => button.textContent === 'Open Preview')!;
+		click(preview);
+		await flush(6);
+		expect(document.querySelector('.markdown-preview-body h1')!.textContent).toBe('Notes');
+		expect(currentWorkbench!.editors.activeInput).toEqual({ kind: 'markdown', path: 'C:/other/b.md' });
+
+		// A plain text file's menu carries no preview row — it opens in the editor.
+		await currentWorkbench!.applyRoots(['C:/repo'], false, null);
+		await flush(8);
+		click(row(document.querySelector('.ggs-files-page') as HTMLElement, 'a.txt').querySelector('.ggs-file-more')!);
+		const next = document.querySelector('.ggs-action-sheet');
+		expect([...next!.querySelectorAll('button')].map((button) => button.textContent)).not.toContain('Open Preview');
 	});
 });
 

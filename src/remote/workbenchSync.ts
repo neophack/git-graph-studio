@@ -86,9 +86,9 @@ export type WorkbenchSyncMessage =
  *  extension page, a diff, a history) by the tab id every frontend keys it by. */
 export type SnapshotActive = { kind: 'file'; path: string } | { kind: 'tab'; id: string };
 
-/** The tab inputs that cross whole: diffs between revisions or files on disk, and file
- *  histories. */
-export type SyncedTabInput = Extract<EditorInput, { kind: 'diff' } | { kind: 'history' }>;
+/** The tab inputs that cross whole: diffs between revisions or files on disk, file
+ *  histories, and Markdown previews (the path — the receiving side renders its own). */
+export type SyncedTabInput = Extract<EditorInput, { kind: 'diff' } | { kind: 'history' } | { kind: 'markdown' }>;
 
 /** The presence surface the sync rides on — the real Presence satisfies it, and a test
  *  fakes it. */
@@ -111,9 +111,9 @@ export interface SyncPresence {
 
 /** Whether an open tab's input crosses as `openTab`: a diff only when both sides are read
  *  from the repository or the disk (an extension's provider text is that frontend's own,
- *  and can be any size). */
+ *  and can be any size); a file history and a Markdown preview cross by path alone. */
 function syncedTabInput(input: EditorInput): SyncedTabInput | null {
-	if (input.kind === 'history') return input;
+	if (input.kind === 'history' || input.kind === 'markdown') return input;
 	if (input.kind === 'diff' && input.left.content === undefined && input.right.content === undefined) return input;
 	return null;
 }
@@ -142,10 +142,13 @@ export interface SyncedEditorArea {
 	closeById(id: string): boolean;
 	revealById(id: string): boolean;
 	/** The open tabs' ids and inputs, and the opens of the tabs that cross whole — optional:
-	 *  an area without them syncs no diff or history tabs. */
+	 *  an area without them syncs no diff, history or preview tabs. */
 	openTabInputs?(): { id: string; input: EditorInput }[];
 	openDiff?(input: Extract<EditorInput, { kind: 'diff' }>): Promise<void>;
 	openFileHistory?(path: string): Promise<void>;
+	/** Opens this frontend's own rendered preview of a Markdown file — the receiving half of
+	 *  a preview tab that crosses whole. Optional: an area without it drops preview tabs. */
+	openMarkdownPreview?(path: string): Promise<void>;
 }
 
 /** The workbench surface the sync rides on. */
@@ -398,7 +401,7 @@ export function attachWorkbenchSync(
 	};
 	/** Open a tab that crosses whole through this frontend's own editor area. */
 	const openSyncedTab = (input: SyncedTabInput): Promise<void> | undefined =>
-		input.kind === 'diff' ? editors.openDiff?.(input) : editors.openFileHistory?.(input.path);
+		input.kind === 'diff' ? editors.openDiff?.(input) : input.kind === 'history' ? editors.openFileHistory?.(input.path) : editors.openMarkdownPreview?.(input.path);
 
 	// A local file open crosses with its anchor, the moment the user asked for it, and marks
 	// the path announced — the tabs diff must not repeat it. Everything user-facing opens
@@ -552,15 +555,28 @@ export function attachWorkbenchSync(
 			const theirs = new Set(message.tabs.map((input) => inputId(input)));
 			for (const [id, input] of syncedTabs()) if (!theirs.has(id)) announce({ by, k: 'openTab', input });
 			// The active tab LAST, after the union's background opens: the editor's
-			// openIntent lets only the newest open take the focus, so this one wins it.
+			// openIntent lets only the newest open take the focus, so this one wins it. The
+			// follow runs as one remote apply (beginApply): the page hold keeps this
+			// frontend's own page in place — the joiner is often a phone back from the
+			// background, and the reveal it is about to receive is the OTHER side's act, not
+			// this user's (K7; 2026-10-16, the owner's direction: 远程点击页面后又被替换) —
+			// and the applying guard keeps the reveal's own activation from announcing back
+			// (the answerer is already on that tab).
 			const active = message.active;
-			if (active?.kind === 'file') {
-				if (!editors.revealFilePath(active.path) && await gateFile(active.path)) {
-					await run(() => rawOpenFile(active.path), { add: keyOf(active.path), spell: active.path });
+			if (active !== null) {
+				beginApply();
+				try {
+					if (active.kind === 'file') {
+						if (!editors.revealFilePath(active.path) && await gateFile(active.path)) {
+							await run(() => rawOpenFile(active.path), { add: keyOf(active.path), spell: active.path });
+						}
+					} else if (active.kind === 'tab' && !editors.revealById(active.id)) {
+						const input = message.tabs.find((entry) => inputId(entry) === active.id);
+						if (input) await run(() => openSyncedTab(input), { addTab: active.id });
+					}
+				} finally {
+					endApply();
 				}
-			} else if (active?.kind === 'tab' && !editors.revealById(active.id)) {
-				const input = message.tabs.find((entry) => inputId(entry) === active.id);
-				if (input) await run(() => openSyncedTab(input), { addTab: active.id });
 			}
 		})();
 	};

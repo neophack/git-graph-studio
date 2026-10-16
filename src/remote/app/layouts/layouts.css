@@ -22,10 +22,12 @@
 .ggs-layout[data-layout="desktop"] .ggs-editor-accessory,
 .ggs-layout[data-layout="desktop"] .ggs-terminal-keys { display: none !important; }
 
-/* ---------- The navigation rail (§5.2 at 56 px icon-only, §5.3 at 72 px with labels) ----------
+/* ---------- The navigation rail (§5.2 and §5.3, icon-only at 56 px) ----------
    The bottom navigation's vocabulary stood upright: the same buttons, the same badges, the
-   pills on their side. A landscape phone's rail hugs the leading edge with the safe area;
-   the portrait tablet's is wider and shows the label under the icon. */
+   pills on their side. Every form that shows it — the landscape phone's, the portrait
+   tablet's — is icon-only (the owner's 2026-10-16 direction, 左轨图标不配文字 — VS Code's
+   activity bar shape; the portrait tablet's icon-over-label form went with it); the rail
+   hugs the leading edge with the safe area. */
 .ggs-nav-rail {
 	flex: none; display: flex; flex-direction: column; align-items: stretch; gap: 2px;
 	width: calc(56px + env(safe-area-inset-left));
@@ -35,7 +37,6 @@
 	border-right: 1px solid var(--vscode-activityBar-border, var(--ggs-sep, rgba(128, 128, 128, 0.25)));
 	user-select: none;
 }
-.ggs-layout[data-layout="tablet-portrait"] .ggs-nav-rail { width: calc(72px + env(safe-area-inset-left)); }
 .ggs-nav-rail button {
 	flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
 	min-height: 52px; padding: 4px 2px; border: 0; border-radius: 12px;
@@ -50,11 +51,6 @@
 .ggs-nav-rail button:active .pill { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
 .ggs-nav-rail button.active { color: var(--vscode-activityBar-foreground, var(--vscode-foreground)); }
 .ggs-nav-rail button.active .pill { background: var(--vscode-list-inactiveSelectionBackground, rgba(128, 128, 128, 0.15)); }
-.ggs-nav-rail .label {
-	display: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-	font-size: 11px; line-height: 14px;
-}
-.ggs-layout[data-layout="tablet-portrait"] .ggs-nav-rail .label { display: block; }
 .ggs-nav-rail .badge {
 	position: absolute; top: -2px; right: -6px; min-width: 16px; height: 16px; padding: 0 4px;
 	box-sizing: border-box; border-radius: 999px;
@@ -63,6 +59,22 @@
 }
 .ggs-nav-rail .badge[hidden] { display: none; }
 .ggs-nav-rail .badge.dirty { background: var(--ggs-dirty, #e2c08d); color: #1f1f1f; }
+/* The rail's head ☰ (the owner's 2026-10-16 direction, 平板界面没有菜单入口): the portrait
+   tablet has no app bar, so the drawer — every page, the workspace actions, the transfers,
+   the full application menus, Settings — opens from the rail's head, set off from the
+   destinations by a hairline. The landscape phone's app bar carries its own ☰; its rail
+   shows none. */
+.ggs-layout[data-layout="tablet-portrait"] .ggs-nav-rail .ggs-rail-menu {
+	margin-bottom: 8px; padding-bottom: 10px;
+	border-bottom: 1px solid var(--vscode-activityBar-border, var(--ggs-sep, rgba(128, 128, 128, 0.25)));
+}
+.ggs-layout[data-layout="phone-landscape"] .ggs-nav-rail .ggs-rail-menu { display: none; }
+/* The rail's ‹ (§5.1's 层级 rule: a full-screen page over the editor pops back to it): the
+   portrait tablet's own back entry — the form draws no app bar, so the ‹ the phone's app
+   bar carries rides the rail's head, above ☰, only while a page covers the editor. The
+   landscape phone's app bar carries its own ‹; its rail shows none. */
+.ggs-nav-rail .ggs-rail-back[hidden] { display: none; }
+.ggs-layout[data-layout="phone-landscape"] .ggs-nav-rail .ggs-rail-back { display: none; }
 
 /* ---------- Phone landscape (§5.2) ----------
    Height is the scarce side (360–430 px): the app bar compresses to a 40 px top bar and the
@@ -78,18 +90,19 @@
 .ggs-layout[data-layout="tablet-portrait"] #sidebar:not([hidden]) { box-shadow: none; }
 
 /* ---------- Tablet landscape (§5.4) ----------
-   The workbench's own frame in three columns: the activity bar widened to a 72 px rail with
-   the label under each icon (the labels are tabletLandscape.ts's own chrome), the side bar
-   as a 320 px collapsible main column (the sash still drags it), the editor area as the
-   detail. No title bar — the frame's own drawing has none; the menus ride the views. */
+   The workbench's own frame in three columns: the activity bar in its own icon-only shape
+   (the owner's 2026-10-16 direction, 左轨图标不配文字 — VS Code's activity bar: the 72 px
+   widening and the label under each icon went together, the bar keeps the desktop form's
+   drawing), the side bar as a 320 px collapsible main column (the sash still drags it),
+   the editor area as the detail. No title bar — the frame's own drawing has none; the
+   rail's head ☰ opens the drawer that carries the menus (the owner's 2026-10-16
+   direction, 平板界面没有菜单入口). */
 .ggs-layout[data-layout="tablet-landscape"] #titlebar { display: none !important; }
-.ggs-layout[data-layout="tablet-landscape"] #activitybar { width: 72px; }
-.ggs-layout[data-layout="tablet-landscape"] #activitybar .activity-item {
-	flex-direction: column; gap: 2px; justify-content: center; height: 60px;
-}
-.ggs-layout[data-layout="tablet-landscape"] #activitybar .rail-label {
-	max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-	font-size: 11px; line-height: 14px; color: inherit; opacity: 0.85;
+/* The rail's head ☰: a native button for the touch form, reset onto the activity item's
+   own chrome (the bar's items are divs; this one is the form's menu entry, opening the
+   drawer from the activity rail's first slot). */
+.ggs-layout[data-layout="tablet-landscape"] #activitybar .ggs-activity-menu {
+	border: 0; padding: 0; background: transparent; font: inherit; cursor: pointer;
 }
 /* The side bar is a static column again, not the portrait tablet's drawer. */
 .ggs-layout[data-layout="tablet-landscape"] #sidebar:not([hidden]) {
@@ -118,33 +131,41 @@
 }
 .ggs-files-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 
-/* The path bar (§6.1): root chip + one chip per level, horizontally scrollable. */
+/* The path bar (§6.1): root chip + one capsule per level, horizontally scrollable. The
+   2026-10-16 redesign (the owner's direction: 可以看出每个文件夹胶囊) — every level is a
+   visible pill, the same raised background vocabulary as the toolbar's branch chip. */
 .ggs-path-bar {
-	flex: none; display: flex; align-items: center; gap: 2px;
+	flex: none; display: flex; align-items: center; gap: 4px;
 	height: 40px; padding: 0 max(4px, env(safe-area-inset-right)) 0 max(4px, env(safe-area-inset-left));
 	border-bottom: 1px solid var(--ggs-sep, rgba(128, 128, 128, 0.25));
 	background: var(--vscode-sideBar-background, transparent);
 }
 .ggs-path-track {
-	flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 2px;
+	flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px;
 	overflow-x: auto; scrollbar-width: none;
 }
 .ggs-path-track::-webkit-scrollbar { display: none; }
 .ggs-path-chip {
 	flex: none; display: inline-flex; align-items: center; gap: 4px;
-	height: 32px; padding: 0 10px; border: 0; border-radius: 8px;
-	background: transparent; color: var(--vscode-foreground);
-	font-size: 13px; white-space: nowrap;
+	height: 32px; padding: 0 12px; box-sizing: border-box;
+	border: 1px solid var(--vscode-input-border, transparent); border-radius: 999px;
+	background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font-size: 13px; white-space: nowrap;
 }
 .ggs-path-chip:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
+.ggs-path-chip.home { width: 32px; padding: 0; justify-content: center; }
 .ggs-path-chip.home .codicon { font-size: 16px; color: var(--ggs-accent, var(--vscode-focusBorder)); }
 .ggs-path-siblings {
 	flex: none; width: 36px; height: 32px; display: inline-flex; align-items: center; justify-content: center;
-	border: 0; border-radius: 8px; background: transparent; color: var(--vscode-descriptionForeground);
+	border: 0; border-radius: 999px; background: transparent; color: var(--vscode-descriptionForeground);
 }
 .ggs-path-siblings:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
 
-/* The toolbar: the filter box and the sort button. */
+/* The toolbar: the filter box, the sort button and the actions ＋ (the owner's
+   2026-10-16 direction: the ＋ moved off the list's corner, where it covered the rows'
+   ⋮). Its continued direction puts the ＋ ON the app bar, ahead of its own buttons
+   (codicon-add 放在 ggs-appbar-btn 前面) — this toolbar copy shows only on the form that
+   draws no app bar (the tablet portrait, §5.3); the phone forms' bar owns the ＋. */
 .ggs-files-toolbar {
 	flex: none; display: flex; align-items: center; gap: 6px; padding: 6px max(8px, env(safe-area-inset-right)) 6px max(8px, env(safe-area-inset-left));
 	border-bottom: 1px solid var(--ggs-sep, rgba(128, 128, 128, 0.25));
@@ -160,6 +181,10 @@
 	border: 0; border-radius: 8px; background: transparent; color: var(--vscode-foreground);
 }
 .ggs-files-toolbtn:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
+/* The ＋'s two homes: the app bar carries it on the phone forms (the owner's continued
+   2026-10-16 direction), and the toolbar copy stands in only where no app bar exists. */
+.ggs-files-addbtn { display: none; }
+.ggs-layout[data-layout="tablet-portrait"] .ggs-files-addbtn { display: inline-flex; }
 /* The branch chip (the owner's 2026-10-16 direction: 手机端文件管理页面没有切换分支的按
    钮): the current branch at the toolbar's leading edge, one tap from the switch sheet. It
    yields its width to the filter — the name truncates, never the field. */
@@ -231,7 +256,7 @@
    the bottom. */
 .ggs-select-bar {
 	flex: none; display: flex; align-items: center; gap: 8px;
-	padding: 6px max(8px, env(safe-area-inset-right)) 6px max(12px, env(safe-area-inset-left));
+	padding: 1px max(8px, env(safe-area-inset-right)) 1px max(12px, env(safe-area-inset-left));
 	border-bottom: 1px solid var(--ggs-sep, rgba(128, 128, 128, 0.25));
 	background: var(--vscode-list-activeSelectionBackground, rgba(128, 128, 128, 0.18));
 }
@@ -253,24 +278,11 @@
 .ggs-select-btn:disabled { opacity: 0.45; }
 .ggs-select-btn.primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: transparent; }
 
-/* The floating action button (§6.1): the + over the list's bottom corner, shown while
-   the page-stack shell's Files page is the page on screen. */
-.ggs-files-fab {
-	display: none; position: absolute; right: max(16px, env(safe-area-inset-right)); bottom: calc(16px + env(safe-area-inset-bottom));
-	width: 56px; height: 56px; border-radius: 18px; border: 0; z-index: 30;
-	background: var(--vscode-button-background); color: var(--vscode-button-foreground);
-	box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
-	align-items: center; justify-content: center;
-}
-.ggs-files-fab .codicon { font-size: 22px; }
-:root[data-page-stack] #sidebar:not([hidden]) .ggs-files-fab { display: inline-flex; }
-.ggs-files-host { position: relative; }
-
 /* ---------- The phone Source Control page (§6.4, the owner's 2026-10-16 direction) ----------
    Mounted into the SCM sidebar view beside the classic one: the page-stack shells show
    this page and hide the classic view; the wide forms keep the classic view. The page is
-   a rendering of the same SourceControlView state — the branch row, the commit card, the
-   change groups as thumb-sized sections. */
+   a rendering of the same SourceControlView state — the commit card (the branch chip
+   riding its action row), the change groups as thumb-sized sections. */
 :root[data-page-stack] .ggs-scm-host > .sidebar-title,
 :root[data-page-stack] .ggs-scm-host > .view-pane { display: none !important; }
 .ggs-scm-page { display: none; }
@@ -279,25 +291,29 @@
 }
 .ggs-scm-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 
-/* The branch row: the repository's own state — name, ahead/behind — one tap from the
-   switch sheet (the same sheet the Files page's chip opens). */
+/* The branch chip (the owner's 2026-10-16 direction: ggs-scm-branch 要放到第一行增加一
+   个按钮就可以，不要单独一行): the current branch as a button at the COMMIT ROW's leading
+   edge — name and ahead/behind, one tap from the switch sheet (the same sheet the Files
+   page's chip opens). The name truncates, never the commit button's label. */
 .ggs-scm-branch {
-	flex: none; display: flex; align-items: center; gap: 8px; min-height: 52px;
-	padding: 0 max(12px, env(safe-area-inset-right)) 0 max(12px, env(safe-area-inset-left));
-	border: 0; border-bottom: 1px solid var(--ggs-sep, rgba(128, 128, 128, 0.25));
-	background: transparent; color: var(--vscode-foreground); text-align: left;
+	flex: 0 1 auto; min-width: 0; max-width: 45%; min-height: 44px;
+	display: inline-flex; align-items: center; gap: 6px; padding: 0 12px;
+	border: 1px solid var(--vscode-input-border, transparent); border-radius: 12px;
+	background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
 }
 .ggs-scm-branch[hidden] { display: none; }
-.ggs-scm-branch > .codicon-git-branch { flex: none; font-size: 18px; color: var(--vscode-gitDecoration-untrackedResourceForeground, var(--ggs-accent, inherit)); }
-.ggs-scm-branch .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 600; }
-.ggs-scm-branch .meta { flex: none; display: inline-flex; align-items: center; gap: 2px; font-size: 13px; color: var(--vscode-descriptionForeground); }
+.ggs-scm-branch > .codicon-git-branch { flex: none; font-size: 16px; color: var(--vscode-gitDecoration-untrackedResourceForeground, var(--ggs-accent, inherit)); }
+.ggs-scm-branch .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
+.ggs-scm-branch .meta { flex: none; display: inline-flex; align-items: center; gap: 2px; font-size: 12px; color: var(--vscode-descriptionForeground); }
 .ggs-scm-branch .meta:empty { display: none; }
-.ggs-scm-branch .chev { flex: none; margin-left: auto; color: var(--vscode-descriptionForeground); }
 .ggs-scm-branch:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
 
 /* The commit card: the message box over the primary action. The action's label follows
    the repository (Commit / Push n / Sync / Publish — commitInput's own rule); the ⋮
-   carries the variants (amend, commit & push, staged only). */
+   carries the variants (amend, commit & push, staged only). The action row is 44 px —
+   the thumb floor the page's every other button takes (the owner's 2026-10-16 direction:
+   提交按钮太高了,48 px read chunky beside the message box). */
 .ggs-scm-commit {
 	flex: none; display: flex; flex-direction: column; gap: 8px;
 	padding: 10px max(12px, env(safe-area-inset-right)) 10px max(12px, env(safe-area-inset-left));
@@ -311,7 +327,7 @@
 }
 .ggs-scm-commitrow { display: flex; gap: 8px; }
 .ggs-scm-commitbtn {
-	flex: 1 1 auto; min-height: 48px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+	flex: 1 1 auto; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
 	border: 0; border-radius: 12px; background: var(--vscode-button-background); color: var(--vscode-button-foreground);
 	font-size: 15px; font-weight: 600;
 }
@@ -319,7 +335,7 @@
 .ggs-scm-commitbtn:disabled { opacity: 0.45; }
 .ggs-scm-commitbtn .codicon { font-size: 18px; }
 .ggs-scm-commitmore {
-	flex: none; width: 48px; min-height: 48px; display: inline-flex; align-items: center; justify-content: center;
+	flex: none; width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center;
 	border: 1px solid var(--vscode-input-border, transparent); border-radius: 12px;
 	background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
 	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));

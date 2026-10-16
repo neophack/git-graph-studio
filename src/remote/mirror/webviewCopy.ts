@@ -11,6 +11,7 @@
 import { showBanner } from '../banner';
 import { remoteEnv } from '../session';
 import { t, tf } from '../../platform/i18n';
+import { noteCopyInteraction } from './copyInteraction';
 import { HELLO_EVERY_MS, MIRROR_DOWN, MIRROR_UP, type DownMessage, type UpPayload } from './protocol';
 import { MirrorViewer } from './viewer';
 import { ViewerInput } from './viewerInput';
@@ -55,8 +56,10 @@ export function mountScrollHint(host: HTMLElement, me: string): { receive(messag
 }
 
 /** Mount the live copy of `stream` (`view:<id>` / `panel:<ext>#<id>`) into a pane; the
- *  answer unmounts it. */
-export function mountWebviewCopy(container: HTMLElement, stream: string): () => void {
+ *  answer unmounts it. `extId` names the stream's extension (a view's stream id carries
+ *  none) — the copy's input trail is noted under it, so a mirrored create or reveal the
+ *  input causes (a "new session" tap) is known for this frontend's own act. */
+export function mountWebviewCopy(container: HTMLElement, stream: string, extId?: string): () => void {
 	const env = remoteEnv();
 	if (!env) return () => undefined;
 	const { transport, attached } = env;
@@ -67,6 +70,11 @@ export function mountWebviewCopy(container: HTMLElement, stream: string): () => 
 	const touch = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
 	const send = (message: UpPayload) => {
 		transport.emit(MIRROR_UP, { ...message, from, w: stream }, { kind: 'AnyLabel', label: 'main' });
+		// Real input — everything but the hello/bye/resnap housekeeping and a bare hover,
+		// the same rule the PC's scroll ownership reads (§9.2): it may be the tap whose
+		// replayed click on the PC opens a panel, so the mirrored create it causes can be
+		// told apart from another frontend's act (copyInteraction.ts).
+		if (extId && message.k !== 'hello' && message.k !== 'bye' && message.k !== 'resnap' && !(message.k === 'ptr' && message.ev === 'hover')) noteCopyInteraction(extId);
 	};
 	let input: ViewerInput | null = null;
 	const viewer = new MirrorViewer(host, from, {

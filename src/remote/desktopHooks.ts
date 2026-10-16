@@ -14,6 +14,7 @@ import { installMirrorHost, mirrorViewersActive, mirrorViewersNow } from './mirr
 import { installWorkbenchSync } from './workbenchSync';
 import { startSummaryReporter } from './summary';
 import { panelStream, viewStream } from './mirror/protocol';
+import { noteCopyInteraction, recentCopyInteraction } from './mirror/copyInteraction';
 import { parseStream, setWebviewFrameSource } from './mirror/webviewFrames';
 import { editLockDefault, registerEditLock } from './editLock';
 import { dismissFullScreenSideView, fullScreenSideViewOpen, holdPhonePage, phoneShell, revealEditorPage } from './nav';
@@ -29,19 +30,23 @@ function webviewStreamBridge(): WebviewStreamBridge {
 		viewStream,
 		parseStream,
 		setWebviewFrameSource,
-		mountCopy(container, stream) {
+		mountCopy(container, stream, extId) {
 			let dispose: (() => void) | null = null;
 			let gone = false;
 			void import('./mirror/webviewCopy')
 				.then(({ mountWebviewCopy }) => {
-					if (!gone) dispose = mountWebviewCopy(container, stream);
+					if (!gone) dispose = mountWebviewCopy(container, stream, extId);
 				})
 				.catch((error) => extLog('warn', 'host', `webview copy ${stream}: ${String(error)}`));
 			return () => {
 				gone = true;
 				dispose?.();
 			};
-		}
+		},
+		// The desktop answers false forever — it hosts the real pages, nothing is a copy
+		// here; only a remote session's own inputs ever note an interaction.
+		noteCopyInteraction,
+		recentCopyInteraction
 	};
 }
 

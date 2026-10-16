@@ -8,6 +8,7 @@
 // spawn from here. Fed by the transport's live WINDOWS pushes.
 import { quickInput, confirmDialog, type QuickPickItem } from '../platform/ui';
 import { t, tf } from '../platform/i18n';
+import { leavingPage } from './backStack';
 import { remoteEnv } from './session';
 import type { InstanceInfo, Notice } from './transport';
 
@@ -54,9 +55,13 @@ export function pickerPageUrl(basePath: string): string {
 
 /** The one clean exit every voluntary leave takes: tell the PC this frontend is going,
  *  stop the socket for good, then load the destination (always a full page — the picker
- *  and another instance's workbench are pages of their own). */
+ *  and another instance's workbench are pages of their own). The overlay back-entry dies
+ *  first: a leave started from an overlay's row (the drawer's picker-page entry) closed
+ *  that overlay on the same click, and its deferred history.back() would cancel this very
+ *  navigation in flight. */
 function leaveSession(url: string): void {
 	const transport = remoteEnv()?.transport;
+	leavingPage();
 	transport?.detach();
 	transport?.shutdown();
 	location.assign(url);
@@ -132,9 +137,7 @@ export function watchLifecycle(): () => void {
 		const info = pendingOpen ? list.find((i) => i.id === pendingOpen) : undefined;
 		if (!info) return;
 		pendingOpen = null;
-		transport.detach();
-		transport.shutdown();
-		location.assign(workbenchUrl(info));
+		leaveSession(workbenchUrl(info));
 	};
 	const offWindows = transport.onWindows(openWhenListed);
 	const offNotice = transport.onNotice((notice: Notice) => {

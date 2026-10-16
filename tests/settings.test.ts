@@ -147,7 +147,7 @@ describe('settings store', () => {
 describe('settings dialog', () => {
 	it('groups its controls into categories', () => {
 		openSettingsPanel();
-		expect(texts('.settings-nav-item')).toEqual(['General', 'Appearance', 'Editor', 'Search', 'Extensions']);
+		expect(texts('.settings-nav-label')).toEqual(['General', 'Appearance', 'Editor', 'Search', 'Extensions', 'Modified']);
 		// General holds the language picker, Appearance the theme picker.
 		expect(document.querySelector('.settings-content .settings-select')).not.toBeNull();
 		click(document.querySelectorAll('.settings-nav-item')[1]!);
@@ -172,11 +172,56 @@ describe('settings dialog', () => {
 		const language = document.querySelector('.settings-select') as HTMLSelectElement;
 		language.value = 'zh-cn';
 		language.dispatchEvent(new Event('change', { bubbles: true }));
-		expect(texts('.settings-nav-item')).toEqual(['常规', '外观', '编辑器', '搜索', '扩展']);
+		expect(texts('.settings-nav-label')).toEqual(['常规', '外观', '编辑器', '搜索', '扩展', '已修改']);
 		expect(document.querySelector('.settings-title')!.textContent).toBe('设置');
 		// Escape closes the dialog.
 		document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
 		expect(document.querySelector('.settings-overlay')).toBeNull();
+	});
+
+	it('collects modified settings under a badge-counted Modified category and resets them', () => {
+		settings.showOutline = true; // a value off its default
+		updateSetting('wordWrap', true);
+		openSettingsPanel();
+		// The nav badge counts every modified setting (two of them here).
+		const badge = document.querySelector('.settings-nav-badge');
+		expect(badge?.textContent).toBe('2');
+		// The Modified category lists both rows, each carrying a reset button.
+		click(Array.from(document.querySelectorAll('.settings-nav-item')).find((item) => item.textContent?.startsWith('Modified'))!);
+		const rows = Array.from(document.querySelectorAll('.settings-row'));
+		expect(rows).toHaveLength(2);
+		const resetButtons = document.querySelectorAll('.settings-row .settings-reset');
+		expect(resetButtons).toHaveLength(2);
+		// Resetting one row restores its default and the row leaves the list (the dialog
+		// re-renders, so the remaining reset button is re-found, not held from before).
+		const reset = () => document.querySelector<HTMLElement>('.settings-row .settings-reset');
+		click(reset()!);
+		expect(document.querySelectorAll('.settings-row')).toHaveLength(1);
+		expect(document.querySelector('.settings-nav-badge')?.textContent).toBe('1');
+		// A dialog opened with nothing modified shows the empty state instead.
+		click(reset()!);
+		expect(document.querySelectorAll('.settings-row')).toHaveLength(0);
+		expect(document.querySelector('.settings-nav-badge')).toBeNull();
+		expect(texts('.settings-content .empty')).toEqual(['No modified settings — every value is at its default']);
+		expect(settings.showOutline).toBe(false);
+		expect(settings.wordWrap).toBe(false);
+		document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+	});
+
+	it('counts the search results beside the search box', () => {
+		openSettingsPanel();
+		const search = document.querySelector<HTMLInputElement>('.settings-search')!;
+		// Browsing shows no count; a query names how many settings survived it.
+		expect(document.querySelector('.settings-search-count')!.textContent).toBe('');
+		search.value = 'word wrap';
+		search.dispatchEvent(new Event('input', { bubbles: true }));
+		expect(document.querySelectorAll('.settings-row')).toHaveLength(1);
+		expect(document.querySelector('.settings-search-count')!.textContent).toBe('1 settings');
+		search.value = 'nothing-matches-this';
+		search.dispatchEvent(new Event('input', { bubbles: true }));
+		expect(document.querySelector('.settings-search-count')!.textContent).toBe('0 settings');
+		expect(texts('.settings-content .empty')).toEqual(['No matching settings']);
+		document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
 	});
 });
 

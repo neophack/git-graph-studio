@@ -4,7 +4,7 @@
 > **2026-10-15 落地记录**(同日实施):R0(§3.3 门禁收紧、远程设置只留本端、`boot_context` 增加 `roots`/`workspaceFile` 供远程恢复)、C0(fflate 压缩回退、构建目标对齐 A 级下限、`:has()` 由 hasFallbacks.ts 的类名替代、dvh/16px 输入、`pageshow` 恢复、C 级拦截页 unsupported.html、capabilities.ts)、A1(`Command.profiles` 两套命令配置、撤回远程打开文件夹/新窗口——openOnPc.ts 删除、守护进程 `api/browse` 删除、会话 SPAWN 一律拒绝、picker 输入行删除、K16 前后端删除 `fs_import`/`fs_export`/`fs_transfer_cancel`、Workbench 挂载点参数化、`src/remote/app/main.ts` 远程组合根——remote.html 不再加载桌面 main.ts)、A2 的分类器与稳定性规则(deviceClass.ts,`data-device` 五类 + 派生 `data-form-factor`)。
 > **2026-10-16 落地记录**:A2 的布局框架补齐——`src/remote/app/layouts/` 五个布局模块(phonePortrait / phoneLandscape / tabletPortrait / tabletLandscape / desktop)+ 布局宿主 host.ts(§4.2 切换过程:浮层关闭、导航状态经 pages.ts 的同一词汇记录并重放、部件移动不重建)+ parts.ts 部件注册表 + navRail.ts 竖向导航轨(56 图标 / 72 带文字)+ layouts.css;页面栈外壳(手机两种方向 + 平板竖屏)经 `<html data-page-stack>` 共享原手机 CSS 块(remote.css 改键);平板横屏是工作台自身的三栏框架(活动栏加 `.rail-label` 标签、侧栏 320 主栏);桌面形态状态栏最左侧远程指示器(§5.5);§5.7 手机形态键盘门控(页面级修饰键和弦交还浏览器,编辑器内的键保留)。responsive.ts 新增 `onDeviceClassChange`(含方向翻转)并维护 data-page-stack。同日删掉 §11 清单里的副本手机外壳路径:`mirror/phoneShell.ts`、`hostStub.ts` 的 `watchPhoneMode`、镜像协议的 `own` 消息、`remote_mirror_fit` 的手机尺寸分支(PC 窗口任何尺寸都保持桌面外壳,`fitFor` 一律桌面下限)。验收:`tests/remoteLayouts.test.ts` 五种形态互切,标签、脏缓冲、终端会话是同一 DOM。
 >
-> **2026-10-16 P1 落地记录**(同日第二批):§6.1 文件页与 §6.7 多路径打包。文件页 `src/remote/app/files/`(filesPage 挂进 explorer 侧栏视图——页面栈外壳显示它、隐藏树,宽形态相反;git 字母链接 SCM 的 onStatus,打开走 workbench.openFile)+ pathBar(根图标 + 每级一个标签、横向滚动、长按复制路径、尾部 ▸ 列同级目录)+ fileList(双行行布局:文件夹"12 项 · 3 天前"/文件"24.3 KB · 10-14 18:20"、git 字母着色、中省略文件名;`list_dir_page` 每页 200 + IntersectionObserver 哨兵无限滚动;逐目录滚动位置记忆;排序名称/修改时间/大小/类型 × 升降序、文件夹恒前、隐藏文件开关,按设备记忆)+ multiSelect(450ms 长按进入、计数条 + 底部操作栏:下载/删除(整选一次确认)/重命名(单选,行内)/复制路径)+ 悬浮按钮动作面板(上传文件/上传文件夹(iOS 按 data-cap-ios 隐藏)/新建文件/新建文件夹)。后端 `DirEntryInfo` 新增可选 `modified`/`children`(read_dir_sorted 同一次 metadata,文件夹多一次 read_dir,PC 侧计算)。多路径打包:`ggs-fs` 的 `zip_trees`(单根等价 zip_tree;多根各归其名,重名数字后缀)、协议 `ToInstance::FetchFile` 增 `paths`(serde 缺省,单路径形态线上字节不变;共享控制向量两种形状都有)、守护进程票据与 `api/download-ticket` 携带 `paths`、浏览器线路 `downloadMany` / 共享层 `downloadManyTo`(无多路径能力的线路逐项回退);`serve_file` 多路径分支与文件夹 zip 同一"先空头后字节"流,以选择所在父目录命名。验收:`tests/remoteFiles.test.ts` 九例(行布局、进入返回与滚动恢复、哨兵分页、排序、长按多选、计数条、多选一 zip、单选直下、整选确认删除、路径栏与同级表);守护进程集成测试 `a_multi_path_ticket_packs_one_zip`;ggs-fs zip_trees 两例。**余量**(随 P2/Q 补):传输中心页面(§6.7 的列表/暂停/续传 UI——线路本身已支持断点续传)、下拉刷新、工具条视图按钮、二进制文件的"打开方式"面板、左滑行操作、Playwright 的 iPhone/Pixel 上传下载规格(§14 的矩阵阶段)。
+> **2026-10-16 P1 落地记录**(同日第二批):§6.1 文件页与 §6.7 多路径打包。文件页 `src/remote/app/files/`(filesPage 挂进 explorer 侧栏视图——页面栈外壳显示它、隐藏树,宽形态相反;git 字母链接 SCM 的 onStatus,打开走 workbench.openFile)+ pathBar(根图标 + 每级一个标签、横向滚动、长按复制路径、尾部 ▸ 列同级目录)+ fileList(双行行布局:文件夹"12 项 · 3 天前"/文件"24.3 KB · 10-14 18:20"、git 字母着色、中省略文件名;`list_dir_page` 每页 200 + IntersectionObserver 哨兵无限滚动;逐目录滚动位置记忆;排序名称/修改时间/大小/类型 × 升降序、文件夹恒前、隐藏文件开关,按设备记忆)+ multiSelect(450ms 长按进入、计数条 + 底部操作栏:下载/删除(整选一次确认)/重命名(单选,行内)/复制路径)+ 工具栏 ＋ 按钮动作面板(上传文件/上传文件夹(iOS 按 data-cap-ios 隐藏)/新建文件/新建文件夹；原为右下角悬浮按钮，同日按所有者指示移入工具栏——遮挡行尾 ⋮)。后端 `DirEntryInfo` 新增可选 `modified`/`children`(read_dir_sorted 同一次 metadata,文件夹多一次 read_dir,PC 侧计算)。多路径打包:`ggs-fs` 的 `zip_trees`(单根等价 zip_tree;多根各归其名,重名数字后缀)、协议 `ToInstance::FetchFile` 增 `paths`(serde 缺省,单路径形态线上字节不变;共享控制向量两种形状都有)、守护进程票据与 `api/download-ticket` 携带 `paths`、浏览器线路 `downloadMany` / 共享层 `downloadManyTo`(无多路径能力的线路逐项回退);`serve_file` 多路径分支与文件夹 zip 同一"先空头后字节"流,以选择所在父目录命名。验收:`tests/remoteFiles.test.ts` 九例(行布局、进入返回与滚动恢复、哨兵分页、排序、长按多选、计数条、多选一 zip、单选直下、整选确认删除、路径栏与同级表);守护进程集成测试 `a_multi_path_ticket_packs_one_zip`;ggs-fs zip_trees 两例。**余量**(随 P2/Q 补):传输中心页面(§6.7 的列表/暂停/续传 UI——线路本身已支持断点续传)、下拉刷新、工具条视图按钮、二进制文件的"打开方式"面板、左滑行操作、Playwright 的 iPhone/Pixel 上传下载规格(§14 的矩阵阶段)。
 >
 > **2026-10-16 P2 落地记录**(第三批):§6.3 更改页交互与 §6.6 终端订阅。左滑手势 `platform/ui/swipe.ts`(`swipeReveal`,进共享 UI 工具箱:动作条挂在行的列表宿主、行自身随指平移,首次决定性移动锁定轴向使纵向滚动不受影响,同时只一行打开,拖拽结束的 click 被吞掉)——`scm/rowActions.ts` 在 `data-page-stack` 标记下挂接:未暂存组露出 放弃+暂存、已暂存组露出 取消暂存、合并组露出 标记已解决,各按钮即悬停按钮与上下文菜单的同一处理器(放弃保留自己的二次确认);两行行布局与提交框吸顶走同一标记的 CSS。差异视图按形态取向(`open.ts` 的 `diffInlineShell`:页面栈外壳一律行内差异——横屏手机 850px 视格若按宽度规则会劈成两半不可读;宽形态保持宽度规则;用户手动固定优先)。终端输出跟随 `features/terminal/outputFollow.ts`(独立状态机、定时器可注入:离开页面 30 秒宽限内保持流,宽限耗尽仅退订各会话的输出监听——生存期监听不动,回来时重取并从 `pty_tail` 的 64KB 回放补拉,宽限内往返零补拉;宽限外新建的会话出生即无订阅),`TerminalView.setOutputFollow` 委托之,`remote/terminalFollow.ts` 由 pages.ts 的观察器驱动(页面栈外壳 = 面板是当前页;宽形态 = 面板可见),`pty_tail` 进 IPC 缝。验收:`tests/remotePages.test.ts` 九例。**P2 余量**(随后续阶段):更改页行数据按需拉取(组折叠不拉行,属 §7.1 的 D 档)、编辑器双指缩放字号、终端双指缩放。
 >
@@ -29,6 +29,16 @@
 > **2026-10-16 落地记录(远程两处修正——所有者指示:"远程时候,左下角的文件打开按钮不要"、"手机端文件管理上长按没有弹出菜单,或者没有打开的菜单的入口")**:**K4 的最后一处**——活动栏最底部的 Open Folder 按钮(`layout.ts` 的 `buildActivityBar`,spacer 之下,远程桌面形态与平板横屏的左下角)按命令配置构建时就不挂载:远程组合根在 workbench 构造前已切到 remote profile,`activeProfile() !== 'remote'` 才挂;欢迎页(workbench.ts 的 `renderWelcome`)同步收紧——Start 不再列 Open Folder / Clone / Close Folder,Recent 整节不列(远程窗口跟随 PC 的文件夹,`open_folder` 本就在 §3.3 的拒绝表里),Keyboard Shortcuts 列按 `commands.visible` 过滤(desktop-only 命令不再占行)。**§6.1 行菜单**——长按不再直接进入多选,而是弹出该行的动作面板(以文件名标题):打开/进入、传输行(文件:下载;文件夹:打包下载 + 上传到此)、重命名、删除(单行二次确认)、复制路径、多选(进入多选并选中该行);多选进行中的长按仍是切换选中,不在复选框上叠菜单。入口三份:长按(450 ms,gestures.ts 同配方)、每行尾部的 ⋮ 按钮(44 px 目标,始终可见——不依赖手势可发现性)、`contextmenu`(Android 长按的 ~500 ms 追随事件与鼠标右键;已开面板不重开,避免重放滑入动画)。长按后的释放 click 被吞掉——此前菜单/多选刚出现就被这次 click 立即反转,读起来正是"长按没反应"。`fileList.ts` 持手势与 ⋮,`filesPage.ts` 经 `menu(entry)` 钩子组装动作(与多选栏同一套动词),`multiSelect.rename` 对外暴露给菜单复用。验收:`tests/remoteFiles.test.ts` 行菜单四例(长按弹菜单且吞点击、⋮ 打开并执行、contextmenu 打开且不重开、多选中长按仍是切换)+ 多选三例改走菜单的 多选 行;`tests/remoteWorkbenchSync.test.ts` 新例(remote profile 构造的 workbench 活动栏无 open 项、欢迎页无桌面专属链接,桌面基线仍在)。
 >
 > **2026-10-16 落地记录(编辑器空状态页重设计——所有者指示:"远程这个页面要重新设计,要更好用,更专业")**:§6.2 的编辑器空状态页(`editorSwitcher.ts` 的 `createEditorEmptyState`)从"图标 + 一句话 + 三个竖排按钮"重做为工作区的小仪表盘,设计语言对齐 §6.1/§6.4 的触控页(圆角卡、磁贴、大写节标、双行行):顶部主题色圆角图标砖 + "没有打开的文件" + 工作区名;**仓库卡**(有仓库时)——分支名、↓n/↑n(各自成对、对间留隙)、待变更徽章(干净树为 accent 色的"没有变更"),一点直达源代码管理页,状态读 `workbench.scm`(isRepo/branch/ahead/behind/changes),随状态栏/活动栏的 DOM 变化经既有观察器刷新;**三个入口磁贴**(浏览文件为主题色、转到文件、查看变更)替换原竖排按钮;**"已打开的编辑器"列表**(原有,别处分组的标签一触可达)与**"本机最近打开"列表**(新)——本设备 MRU 存 localStorage `remote.editor.recent`(Hub 下按 PC 前缀隔离,与文件页排序键同法),`sync` 在任何页面上记录当前活动文件标签(去重、上限 15),展示时按 `withinRoots` 过滤到仍在打开文件夹内的路径(最多 5 行,双行行 + 文件图标着色),点行经 `workbench.editors.openFile` 打开;原 `remote.editor.emptyHint` 文案随一句话提示一并删除。验收:`tests/remoteResponsive.test.ts` 新 describe 两例(仪表盘形态与磁贴动作;MRU 记录/去重/关尽后页面应答)、`tests/remoteFiles.test.ts` 新 describe 两例(真 workbench 下仓库卡分支与变更数并一点到 SCM 页;最近列表只列仍在打开文件夹内的文件)。
+>
+> **2026-10-16 落地记录(镜像 create/reveal 到前台——所有者反馈:"手机端remote时候claude打开新的session页面时候,没有到前台显示")**:§22.6(ggs-remote-plan.md)的镜像 create/reveal 此前一律包着页面保持(K7,2026-10-16"文件页面会被其他页面顶到最前"),于是手机用户在 Claude 副本里点"新会话"——点击经输入回放进 PC 的真实页面,扩展随后 `webview.create` 新面板——回到本端的镜像事件被保持压在后台,页面纹丝不动。修正:本端副本的输入轨迹是唯一可信的"这是本端用户自己点的"证据(后端把回放的点击读作 PC 用户自己的输入,镜像的 `caller` 也无人可名)。`mirror/copyInteraction.ts`(新):按扩展记录本端副本最近一次上行输入(排除 hello/resnap/bye 与裸 hover,与 §9.2 滚动所有权的交互判定同一规则),8 秒窗口内有效、读时自清;`webviewCopy.ts` 的 `send` 落记录——`extId` 由 host 的两个 mount 经 `WebviewStreamBridge.mountCopy` 新增的第三形参传入(视图流 `view:<id>` 本身不带扩展名),`desktopHooks.ts` 把 `noteCopyInteraction`/`recentCopyInteraction` 接进桥(桌面端永远答 false——它持有真页面,没有副本);`frames.ts` 的 `applyMirroredState`:create/reveal 镜像落在窗口内时**不加**页面保持——副本 tab 激活时 `revealEditorPage` 真正把编辑器页带到前台(全屏侧栏页随之收起,新会话页立刻可见);窗口外的 create/reveal 仍按 K7 保持(K7 的唯一例外,记录在此)。验收:`tests/remoteMirror.test.ts` 两例(注册表:窗口新鲜/过期、按扩展键控;挂载副本:上行 hello 不算输入、键盘代理的 text 才落记录),`tests/extensions.test.ts` 新例(无交互的 create/reveal 各持一次页面保持;窗口内的 create 与 reveal 零保持且前台打开;轨迹冷后 reveal 重新保持)。
+>
+> **2026-10-16 落地记录(平板两种形态的菜单入口——所有者反馈:"平板界面没有菜单入口")**:此前平板竖屏只有导航轨(页面按钮,无 ☰)、平板横屏不画标题栏(layouts.css 把 `#titlebar` 藏了,"菜单挂在视图上"落了空——视图并不携带 File/Edit/View 全局菜单),两种形态都无处打开菜单、设置与命令面板。修正:触摸形态的 ☰ 统一开**导航抽屉**(navDrawer——全部页面、工作区动作、传输、完整应用菜单、设置与省流,与手机 App 栏同一面板);平板竖屏的 ☰ 在导航轨头部(`navRail.ts` 的 `railMenuButton`,随轨重建、细线与目的地分隔;横屏手机的轨上由 CSS 隐藏——它的 App 栏有自己的 ☰),平板横屏的 ☰ 挂在活动轨头部(`tabletLandscape.ts` 注入 `activity-item` 按钮,`.rail-label` 机制自动配标签,随布局销毁移除)。抽屉开法收敛为一处 `openWorkbenchDrawer()`(navDrawer.ts,读 `titleBar.menuDefinitions()`),App 栏与两处 ☰ 共用(parts.ts 不再自行组装)。§5.3/§5.4 各补一条 ☰ 规格。验收:`tests/remoteLayouts.test.ts` 新例(竖屏轨头 ☰ 开抽屉、形态切换关闭;横屏活动轨头 ☰ 开抽屉、离开该形态即移除),平板横屏的标签断言含 Menu。
+
+> **2026-10-16 落地记录(平板左轨去标题——所有者反馈:"平板模式下,左边栏的图标不需要写标题,会导致很难看,参考vscode")**:两种平板形态的左轨一律纯图标,与 VS Code 活动栏同形。平板竖屏的导航轨从 72 px 带文字回到 56 px 纯图标(`navRail.ts` 的 label span 与 layouts.css 的显示规则一并删除——轨在两种形态下同为 56 图标);平板横屏的活动栏撤销 72 px 加宽与 `.rail-label` 注入(`tabletLandscape.ts` 的注入/观察器/销毁清理、layouts.css 的宽度/纵向/标签覆盖全部删除),回到桌面形态自身的 48 px 纯图标绘制。可访问性不降:轨按钮与活动项的 `aria-label`/`title` 原样保留。§5.3/§5.4/§12.1 同步改。验收:`tests/remoteLayouts.test.ts` 平板横屏断言反转(活动栏存在 ☰ 头项、零 `.rail-label`;菜单用例的"标签含 Menu"断言删除),平板竖屏互切用例照过。
+
+> **2026-10-16 落地记录(远程打开的界面被 PC 激活页面覆盖——所有者反馈:"远程某个界面打开,没有同步到pc端,导致又被pc端激活页面覆盖,导致远程点击页面后又被替换")**:三处互相配合的修正。**§7.0.3 追平的活动标签跟随此前不持页**——`workbenchSync.ts` 的 `mergeSnapshot` 直接调 `revealFilePath`/`revealById`,追平快照(手机从后台回前台、名册变化、新连接)一到,PC 答复的活动标签就把手机的全屏侧栏页收起、编辑器页内容换掉——它明明是**另一端的行为**(K7);现在跟随包在 `beginApply` 里:页面保持护住本端页面,reveal 自己的激活也不再回播 `active`/`activeTab`(应答方本就在那个标签上)。**镜像 create 此前一律强制前台**——`frames.ts` 的 `applyMirroredState` 对非本端操作的 create 也改写 `preserveFocus=false`:扩展以后台姿态(preserveFocus true)建的面板,PC 的真标签在后台、手机的副本却抢了前台,两侧活动标签**静默分叉**(两端的新标签抑制各自吞掉激活,PC 永远不知道手机开了这页),PC 的下一次激活过线就把手机刚打开的页面顶掉;现在只有本端副本交互窗口内的 create(ownAct)才强制前台,其余保留扩展自己的 preserveFocus——副本以 PC 真标签落地时的同一姿态加入。**Markdown 预览入同步面**——预览标签(顶栏源码⇄预览切换、文件页的预览行,手机的高频面)此前不在 `SyncedTabInput` 里:开与切从不过线,PC 的活动标签停在旧处,下一次激活同样顶掉手机预览;现在 `markdown` 输入随 diff/history 一起作为整体过线的标签(路径过线、渲染各端自理,`openTab`/`activeTab`/`closeTab` 按 `markdown:<path>` 同一 id 键控)。验收:`tests/remoteWorkbenchSync.test.ts` 三例(追平快照跟随文件/扩展页标签零页面拉动且零回播;预览标签开-切-关三向过线)、`tests/extensions.test.ts` 一例(preserveFocus 的镜像 create 后台加入)。
+
+> **2026-10-16 落地记录(页面栈外壳的返回——所有者反馈:"手机界面平板页面有些页面打开没有返回按钮")**:页面栈外壳(手机两种方向 + 平板竖屏)上盖住编辑器的全屏页(侧栏视图——文件/搜索/更改/扩展容器,终端面板,launch 页)此前只有左缘滑动与底部导航/导航轨两处可达,App 栏与轨都没有返回按钮,系统返回键还会直接离开工作台——§5.1 的层级规则(返回手势、系统返回键和 App 栏的返回按钮都弹出栈顶)落空了一半。修正分三层,同一词汇 `remote/pageBack.ts`(新):**可用性与动作**——`pageBackAvailable`(仅页面栈外壳且当前页非编辑器)与 `pageBack`(goTo('editor') 的完整语义:launch 页回到最近的常规标签,与编辑器目的地一致);**可见的 ‹**——`appBar.ts` 在 ☰ 前加 `‹` 返回钮(页面盖住编辑器时显示,编辑器页隐藏;`ggs-appbar-btn[hidden]` 显示规则补齐),平板竖屏没有 App 栏,`navRail.ts` 的轨头 ☰ 之上加 `‹`(`.ggs-rail-back`,横屏手机由 CSS 隐藏——它的 App 栏有自己的 ‹);**系统返回键**——页面盖住编辑器时 pageBack 作为**底层 closer** 压入 backStack(页面打开布防、编辑器回归解除)。为此 `backStack.ts` 从"单层清空"改为**分层弹出**:popstate 只弹栈顶 closer,仍有层剩余就重新压回一个条目(下一Back 剥下一层),空栈才放行离开;原有的替换语义(动作面板换子级、`armBack` 逐级)不受影响——它们替换栈顶,层数不变。`shell.ts` 的 installOnce 挂 `installPageBack`(与页面标记同一观察器驱动)。验收:`tests/remoteResponsive.test.ts` 新 describe 四例(App 栏 ‹ 的显隐与返回;launch 页的 ‹ 回常规标签;平板竖屏轨头 ‹;系统返回先剥抽屉再回编辑器)。
 
 > **未开始**:L2 的场景矩阵与随机序列(§18.3–§18.6)——§18.1 与 §18.7 的地基已落(见上)。
 >
@@ -242,14 +252,13 @@ export function classify(w: number, h: number, touch: boolean): DeviceClass {
 ```text
 ┌──────────────────────────────┐
 │ ☰  git-graph-studio      ⋮  │ ← App 栏 48：标题为当前页，副标题为窗口 / 分支
-│ 📁 / src / features / ...  ▸ │ ← 路径栏 40（文件页）
+│ 📁 / src / features / ...  ▸ │ ← 路径栏 40（文件页）；工具栏随其下：分支、筛选、排序
 ├──────────────────────────────┤
 │ 📁 editor                  › │
 │    12 项 · 3 天前              │ ← 行高 60，整行都是点按区
 │ 📄 main.ts               M   │
 │    4.2 KB · 今天 18:20          │
 │ ...                          │
-│                         (＋) │ ← 悬浮按钮：上传 / 新建
 ├──────────────────────────────┤
 │ 文件   编辑器  更改   Claude  更多 │ ← 底部导航 56 + 安全区，带徽标
 └──────────────────────────────┘
@@ -279,7 +288,8 @@ export function classify(w: number, h: number, touch: boolean): DeviceClass {
 
 ### 5.3 平板竖屏
 
-- 左侧导航轨 72 px，带图标和文字。
+- 左侧导航轨 56 px，只有图标（2026-10-16 所有者方向："平板模式下，左边栏的图标不需要写标题，会导致很难看，参考 vscode"——原 72 px 带文字的形式随之取消；图标与文字的可达性由 `aria-label`/长按提示承担）。
+- 导航轨头部是 ☰ 菜单入口，打开导航抽屉（全部页面、工作区动作、传输、完整应用菜单、设置）——竖屏平板没有 App 栏，这是它唯一的菜单面。
 - 页面单栏显示。文件页点开文件时，编辑器从右侧滑入，盖住 85% 宽度，左边缘露出列表，点露出的部分即可返回。这是平板竖屏常见的列表与详情交互。
 - 支持硬件键盘快捷键（§5.7）和指针悬停。
 
@@ -295,7 +305,8 @@ export function classify(w: number, h: number, touch: boolean): DeviceClass {
 └──┴───────────────┴──────────────────────────────────┴─────────────┘
 ```
 
-- 导航轨、主栏（320 px，可折叠）、详情区三栏。主栏显示当前导航项的列表：文件、更改或搜索结果；详情区显示编辑器、差异或 Git Graph。
+- 导航轨、主栏（320 px，可折叠）、详情区三栏。主栏显示当前导航项的列表：文件、更改或搜索结果；详情区显示编辑器、差异或 Git Graph。导航轨即 VS Code 的活动栏原形——48 px 纯图标，无文字标题（2026-10-16 所有者方向，见 §5.3）。
+- 不画标题栏；活动轨头部是 ☰ 菜单入口，打开与手机相同的导航抽屉（完整应用菜单、设置、命令面板入口都在其中）。
 - 宽度达到 1180 px 时，Claude 可以固定为右侧栏（相当于 VS Code 的辅助侧栏），一边看代码一边发指令。
 - 编辑器标签条恢复显示，可以拆分成两组。
 
@@ -327,7 +338,7 @@ export function classify(w: number, h: number, touch: boolean): DeviceClass {
 
 **结构（从上到下）**
 
-1. **路径栏**：根目录图标加各级目录的标签，可以横向滚动，进入新目录时自动滚到末尾。点按某一级直接跳转；长按复制该路径；末尾的 `▸` 列出同级目录，用于快速换到兄弟目录。
+1. **路径栏**：根目录图标加各级目录的标签，可以横向滚动，进入新目录时自动滚到末尾。点按某一级直接跳转；长按复制该路径；末尾的 `▸` 列出同级目录，用于快速换到兄弟目录。**每一级是一个可见的胶囊**（2026-10-16 修订——所有者指示"ggs-path-track 要修改设计，可以看出每个文件夹胶囊"）：药丸圆角（999 px）、工具栏分支 chip 同一底色词汇（`button-secondaryBackground`，缺省回退输入框底色），根图标为 32 px 的圆形胶囊，胶囊间距 6 px。
 2. **工具条**（列表向下滚动时隐藏，向上滚动时出现）：搜索框（过滤当前目录，输入后 300 ms 生效）、排序按钮、视图按钮。
 3. **列表**：平铺显示**当前目录**的内容，不再是树。
 
@@ -352,7 +363,7 @@ export function classify(w: number, h: number, touch: boolean): DeviceClass {
 | 行尾的 ⋮ | 同一动作面板的另一入口（44 px 目标，始终可见）；`contextmenu`（Android 长按的追随事件、鼠标右键）也打开它 |
 | 多选模式 | 每行左侧出现复选框；App 栏显示"已选 3 项"、全选和取消；底部操作栏提供下载、删除、重命名（单选时可用）、复制路径、更多（移动到、复制到）。下载多项时自动打包成 zip |
 | 下拉 | 刷新当前目录 |
-| 悬浮按钮 ＋ | 打开动作面板：上传文件、上传文件夹（按能力显示）、新建文件、新建文件夹 |
+| App 栏 ＋ | 打开动作面板：上传文件（上传到当前目录）、上传文件夹（按能力显示）、新建文件、新建文件夹（2026-10-16 两度修订——先按所有者指示移入顶部工具栏，再按其续示"codicon-add 放在 ggs-appbar-btn 前面"移上 App 栏，作 `ggs-appbar-btn` 领先于该页其余尾随按钮；无 App 栏的平板竖屏保留工具栏副本，CSS 控制）。动作面板内容仍由文件页注册——只有它知道当前目录 |
 | 排序 | 动作面板：名称、修改时间、大小、类型 × 升序 / 降序，文件夹始终在前；"显示隐藏文件"开关。按设备记住 |
 
 **数据**
@@ -373,6 +384,8 @@ export function classify(w: number, h: number, touch: boolean): DeviceClass {
 - **保存冲突**：见 §7.3。
 
 ### 6.3 更改页
+
+> **2026-10-16 修订**（所有者指示："手机端 源代码管理 ggs-scm-branch要放到第一行增加一个按钮就可以，不要单独一行"）：页面栈外壳上的更改页是 `src/remote/app/scm/scmPage.ts` 的触控页（提交卡 + 触控行）；分支入口不占单独一行——`ggs-scm-branch` 是提交卡按钮行最前的一个按钮（分支名 + ↑n/↓n，点按开共享分支面板）。同日修订（所有者指示"提交按钮太高了"）：提交卡按钮行 48→44 px（提交按钮、分支 chip、⋮ 同步），44 px 是本页触控目标的统一下限。
 
 - 顶部是提交输入框和"提交"按钮，滚动时吸顶；溢出菜单里有拉取、推送、同步、暂存全部。
 - 分组为合并冲突、已暂存、更改，组标题可以折叠。行布局：文件名在上、目录在下、状态字母在右。
@@ -407,7 +420,7 @@ export function classify(w: number, h: number, touch: boolean): DeviceClass {
 
 ### 6.7 传输中心
 
-- **入口**：文件页的悬浮按钮和多选操作栏、编辑器页的"下载此文件"、桌面形态的右键菜单与拖放。进度显示在状态栏（桌面）或底部导航上方的进度条（手机）。
+- **入口**：文件页工具栏的 ＋ 和多选操作栏、编辑器页的"下载此文件"、桌面形态的右键菜单与拖放。进度显示在状态栏（桌面）或底部导航上方的进度条（手机）。
 - **上传**：分块续传（今天的 `fs_write_chunk` / `fs_upload_offset`），可以暂停、继续、取消、重试失败项。页面被切到后台或断网后，回来时从 `fs_upload_offset` 返回的位置继续。同名冲突时询问：保留两者（加 ` (copy)` 后缀）、覆盖、跳过，并提供"对其余项执行相同操作"的选项。
 - **下载**：单个文件走票据 URL，响应带 `Content-Disposition: attachment; filename*=`，由浏览器自己的下载管理器接管。文件夹或多个文件打包成 zip。多个文件打包需要守护进程新增"多路径打包"能力，与现有的文件夹打包共用 `zip_tree`。
 - **列表**：进行中、已完成、失败三组，每项显示文件名、大小、速度、剩余时间，失败项附原因。完成的记录在本端保留 24 小时。
@@ -467,7 +480,7 @@ export function classify(w: number, h: number, touch: boolean): DeviceClass {
 | 打开文件（路径加行锚点） | **S** | 双向 | K7。消息 `open` |
 | 关闭文件标签 | **S** | 双向 | `close`。关闭有未保存修改的标签时，只在发起关闭的一端询问 |
 | 切换活动标签 | **S** | 双向 | `active` / `activeTab`。所有者已确认（K9） |
-| 打开或关闭扩展页（Claude、Git Graph）、差异、文件历史 | **S** | 双向 | `activeTab` / `closeTab` / `openTab`，与今天相同 |
+| 打开或关闭扩展页（Claude、Git Graph）、差异、文件历史、Markdown 预览 | **S** | 双向 | `activeTab` / `closeTab` / `openTab`，与今天相同；预览只过线路径，渲染各端自理（2026-10-16 补） |
 | 文件内容的编辑、未保存状态 | **L** | — | K7。每端有自己的缓冲。保存写入磁盘后，另一端由监视器触发 `reloadIfClean`，有冲突时按 §7.3 处理 |
 | 光标、选区、滚动、折叠、查找条 | **L** | — | |
 | 侧栏视图切换、侧栏隐藏、手机的当前页 | **L** | — | **变更**：删除今天的 `view` / `sidebar` 两类消息（G8） |
@@ -687,7 +700,7 @@ type ChatDown =
 | 列表行高 | 60 | 52 | 52 | 22（VS Code 的树） |
 | 最小点按区 | 48 | 44 | 44 | 22 |
 | App 栏或顶栏 | 48 | 40 | 48 | 30（标题栏） |
-| 导航 | 底部导航 56 | 导航轨 56 | 导航轨 72 | 活动栏 48 |
+| 导航 | 底部导航 56 | 导航轨 56 | 导航轨 56 / 活动栏 48（均纯图标） | 活动栏 48 |
 | 页面左右边距 | 16 | 12 + 安全区 | 20 | — |
 | 圆角（卡片、面板） | 12 | 12 | 10 | 4 |
 

@@ -2,7 +2,9 @@
 // and one chip per directory below it, horizontally scrollable and auto-scrolled to the
 // end when a directory is entered. A chip's tap jumps straight to that level; a long-press
 // copies the path; the trailing ▸ lists the sibling directories of the current one (the
-// quick hop to the folder beside, MT-manager's own move).
+// quick hop to the folder beside, MT-manager's own move). Every level renders as a
+// visible capsule (the owner's 2026-10-16 direction, 可以看出每个文件夹胶囊) — the pill
+// styling lives with the .ggs-path-chip rules in layouts.css.
 import { el, icon, notify } from '../../../platform/ui';
 import { listDirPage } from '../../../platform/ipc/fs';
 import { t } from '../../../platform/i18n';

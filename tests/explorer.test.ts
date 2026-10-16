@@ -198,6 +198,32 @@ describe('explorer', () => {
 		}
 	});
 
+	it("a Markdown file opens with its preview — the menu leads with VS Code's own pair of rows", async () => {
+		fileSystem({ [ROOT]: ['README.md', 'notes.markdown', 'a.txt'] });
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		const previewed: Array<[string, boolean]> = [];
+		explorer.onOpenMarkdownPreview = (path, toSide) => previewed.push([path, toSide]);
+		explorer.setRoot(ROOT);
+		await flush();
+		const rowFor = (name: string) =>
+			[...document.querySelectorAll<HTMLElement>('.tree .row')].find((row) => row.querySelector('.label')?.textContent === name)!;
+
+		// The preview rows lead a .md file's menu, handing the clicked path over.
+		rightClick(rowFor('README.md'));
+		expect(menuLabels().slice(0, 2)).toEqual(['Open Preview', 'Open Preview to the Side']);
+		click(menuItem('Open Preview'));
+		expect(previewed).toEqual([[`${ROOT}\\README.md`, false]]);
+		rightClick(rowFor('README.md'));
+		click(menuItem('Open Preview to the Side'));
+		expect(previewed[1]).toEqual([`${ROOT}\\README.md`, true]);
+
+		// The long .markdown spelling answers too; a plain text file never shows the rows.
+		rightClick(rowFor('notes.markdown'));
+		expect(menuLabels()).toContain('Open Preview');
+		rightClick(rowFor('a.txt'));
+		expect(menuLabels()).not.toContain('Open Preview');
+	});
+
 	it("the transfer rows are the remote session's alone — the desktop never shows them (K16)", async () => {
 		fileSystem({ [ROOT]: ['src/', 'README.md'], [`${ROOT}\\src`]: [] });
 		const explorer = new Explorer(document.getElementById('sidebar')!);

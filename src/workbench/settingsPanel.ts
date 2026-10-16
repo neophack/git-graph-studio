@@ -4,17 +4,25 @@
 // `contributes.configuration` declarations join as their own section, stored per extension.
 // Changes apply immediately, persist to localStorage and write ~/.ggs/settings.json (which a
 // hand edit of overrides on the next launch); the labels re-render on a language switch.
+//
+// The 2026-10-16 redesign: a near-fullscreen, flat, compact editor — every modified row
+// carries its own reset-to-default button, and a "Modified" pseudo-category (badge-counted
+// in the nav) collects them as one audit-and-restore list.
 
 import { assocListDefaults } from '../platform/ipc/assoc';
 
 import { LOCALES, t, tf } from '../platform/i18n';
-import { SETTINGS_EVENT, SETTING_DEFS, THEMES, applyEnumSetting, isSettingModified, settings, updateSetting, type SettingDef } from '../platform/settings';
-import { extensionSettingDefs } from '../features/extensions';
+import { DEFAULT_SETTINGS, SETTINGS_EVENT, SETTING_DEFS, THEMES, applyEnumSetting, isSettingModified, settings, updateSetting, type SettingDef } from '../platform/settings';
+import { extensionSettingDefs, type ExtensionSettingDef } from '../features/extensions';
 import { saveExtSetting, extSettings } from '../platform/state';
 import { el, icon, notify } from '../platform/ui/index';
 import { extLog } from '../features/extensions';
 
-type CategoryId = 'general' | 'appearance' | 'editor' | 'search' | 'extensions';
+type CategoryId = 'general' | 'appearance' | 'editor' | 'search' | 'extensions' | 'modified';
+
+/** The browseable categories, in nav order. `modified` rides last — an appended
+ *  pseudo-category, not a SettingDef's home — so category indexes stay stable. */
+const CATEGORIES: CategoryId[] = ['general', 'appearance', 'editor', 'search', 'extensions', 'modified'];
 
 /** The same platform read `Uri`'s win32 default takes: the Terminal Shell row names
  *  shells that exist only on Windows, and hides elsewhere — off Windows the terminal
@@ -26,16 +34,29 @@ const IS_WINDOWS = typeof navigator !== 'undefined' && /^win/i.test(navigator.pl
 let openDialog: HTMLElement | null = null;
 
 /** A labelled control row, laid out as VS Code's Settings editor: label + description left,
- *  the control right; `modified` marks a value that differs from its default. */
-function settingRow(label: string, description: string, control: HTMLElement, modified: boolean): HTMLElement {
-	const row = el('div', 'settings-row' + (modified ? ' modified' : ''));
+ *  the control right; `modified` marks a value that differs from its default, and a
+ *  modified row carries a reset button restoring the default in one click. `wide` rows
+ *  (the File Associations grid) let the control span the full row under the text. */
+function settingRow(label: string, description: string, control: HTMLElement, modified: boolean, opts?: { wide?: boolean; onReset?: () => void }): HTMLElement {
+	const row = el('div', 'settings-row' + (modified ? ' modified' : '') + (opts?.wide ? ' wide' : ''));
 	if (modified) {
 		const mark = el('span', 'settings-modified');
 		mark.title = 'Modified - the default is shown in the description';
 		row.appendChild(mark);
 	}
-	row.appendChild(el('div', 'settings-row-text', [el('div', 'settings-row-label', [label]), el('div', 'settings-row-description', [description])]));
-	row.appendChild(el('div', 'settings-row-control', [control]));
+	const text = el('div', 'settings-row-text', [el('div', 'settings-row-label', [label]), el('div', 'settings-row-description', [description])]);
+	// The description clamps to two lines for compactness; the tooltip keeps the full text.
+	text.title = description;
+	row.appendChild(text);
+	const controlCell = el('div', 'settings-row-control', [control]);
+	if (modified && opts?.onReset) {
+		const reset = el('button', 'settings-reset', [icon('discard')]);
+		reset.title = t('settings.resetToDefault');
+		reset.setAttribute('aria-label', t('settings.resetToDefault'));
+		reset.addEventListener('click', opts.onReset);
+		controlCell.appendChild(reset);
+	}
+	row.appendChild(controlCell);
 	return row;
 }
 
@@ -122,6 +143,63 @@ function controlFor(def: SettingDef): HTMLElement {
 	}
 }
 
+/** One extension-declared setting as a row, its control chosen by the declared type. */
+function extensionSettingRow(def: ExtensionSettingDef, query: string): HTMLElement | null {
+	if (query !== '' && !`${def.extId} ${def.id} ${def.description}`.toLowerCase().includes(query)) return null;
+	const stored = extSettings(def.extId);
+	const value = def.id in stored ? stored[def.id] : def.default;
+	const described = `${def.extId} — ${def.description || t('settings.noDescription')}`;
+	const modified = JSON.stringify(value) !== JSON.stringify(def.default);
+	const onReset = () => saveExtSetting(def.extId, def.id, def.default);
+	if (def.type === 'boolean') {
+		return settingRow(def.id, described, checkbox(value === true, (next) => saveExtSetting(def.extId, def.id, next)), modified, { onReset });
+	}
+	if (def.type === 'enum') {
+		// The declared value list as a select; the stored value keeps its type
+		// (an enum of numbers stays numbers).
+		const values = def.enumValues ?? [];
+		const control = select(String(value), values.map((entry) => ({ value: String(entry), label: String(entry) })), (next) => {
+			saveExtSetting(def.extId, def.id, values.find((entry) => String(entry) === next) ?? next);
+		});
+		return settingRow(def.id, described, control, modified, { onReset });
+	}
+	if (def.type === 'json') {
+		// Arrays, objects and multi-type values edit as JSON text; an invalid
+		// value is refused (and logged) rather than stored as a string.
+		const input = el('input', 'settings-input settings-input-wide') as HTMLInputElement;
+		input.type = 'text';
+		input.value = JSON.stringify(value ?? null);
+		input.addEventListener('change', () => {
+			try {
+				saveExtSetting(def.extId, def.id, JSON.parse(input.value));
+			} catch (error) {
+				notify('warning', tf('extensions.invalidJsonSetting', def.id, String(error)));
+				extLog('warn', def.extId, `setting ${def.id} rejected: not valid JSON`, String(error));
+			}
+		});
+		return settingRow(def.id, described, input, modified, { onReset });
+	}
+	const input = el('input', 'settings-input settings-input-wide') as HTMLInputElement;
+	input.type = def.type === 'number' ? 'number' : 'text';
+	input.value = String(value);
+	input.addEventListener('change', () => {
+		const raw = def.type === 'number' ? Number(input.value) : input.value;
+		saveExtSetting(def.extId, def.id, raw);
+	});
+	return settingRow(def.id, described, input, modified, { onReset });
+}
+
+/** How many settings differ from their default right now — built-ins plus the
+ *  extensions' declarations; the nav badge and the Modified category both count it. */
+function countModified(): number {
+	const builtins = SETTING_DEFS.filter((def) => (!def.windowsOnly || IS_WINDOWS) && isSettingModified(def.key)).length;
+	const extensions = extensionSettingDefs().filter((def) => {
+		const stored = extSettings(def.extId);
+		return JSON.stringify(def.id in stored ? stored[def.id] : def.default) !== JSON.stringify(def.default);
+	}).length;
+	return builtins + extensions;
+}
+
 export function openSettingsPanel(): void {
 	// A dialog left over from a torn-down DOM (a test, a reload) must not block a fresh one.
 	if (openDialog && !openDialog.isConnected) openDialog = null;
@@ -138,10 +216,12 @@ export function openSettingsPanel(): void {
 	search.type = 'text';
 	search.placeholder = t('settings.searchPlaceholder');
 	search.spellcheck = false;
+	// The live result count beside the search box: what a query narrowed the list to.
+	const searchCount = el('span', 'settings-search-count');
 	const close = el('button', 'settings-close', [icon('chrome-close')]);
 	close.title = t('menu.openSettings');
 	const dialog = el('div', 'settings-dialog', [
-		el('div', 'settings-header', [title, search, close]),
+		el('div', 'settings-header', [title, search, searchCount, close]),
 		el('div', 'settings-body', [nav, content])
 	]);
 	overlay.appendChild(dialog);
@@ -156,9 +236,18 @@ export function openSettingsPanel(): void {
 		search.placeholder = t('settings.searchPlaceholder');
 		nav.textContent = '';
 		const query = search.value.trim().toLowerCase();
-		const categories: CategoryId[] = ['general', 'appearance', 'editor', 'search', 'extensions'];
-		for (const id of categories) {
-			const item = el('div', 'settings-nav-item' + (id === category ? ' active' : ''), [t(`settings.category.${id}` as 'settings.category.general')]);
+		const modifiedCount = countModified();
+		for (const id of CATEGORIES) {
+			// The label wraps in its own span so the Modified badge's count never joins the
+			// item's text (tests and a11y read the label alone).
+			const item = el('div', 'settings-nav-item' + (id === category ? ' active' : ''), [el('span', 'settings-nav-label', [t(`settings.category.${id}` as 'settings.category.general')])]);
+			if (id === 'modified') {
+				item.title = t('settings.category.modified');
+				if (modifiedCount > 0) {
+					const badge = el('span', 'settings-nav-badge', [String(modifiedCount)]);
+					item.appendChild(badge);
+				}
+			}
 			item.addEventListener('click', () => {
 				category = id;
 				render();
@@ -167,74 +256,77 @@ export function openSettingsPanel(): void {
 		}
 
 		content.textContent = '';
-		// A search reaches the extension declarations too, whatever the category.
-		if (category === 'extensions' || query !== '') {
+		const categoryTitle = (text: string) => content.appendChild(el('div', 'settings-category-title', [text]));
+
+		if (query !== '') {
+			// A search spans every category (VS Code's Settings search does too), whatever
+			// the selected category — the extension declarations included.
 			const defs = extensionSettingDefs();
 			if (defs.length > 0) {
-				content.appendChild(el('div', 'settings-category-title', [t('settings.category.extensions')]));
+				categoryTitle(t('settings.category.extensions'));
 				for (const def of defs) {
-					if (query !== '' && !`${def.extId} ${def.id} ${def.description}`.toLowerCase().includes(query)) continue;
-					const stored = extSettings(def.extId);
-					const value = def.id in stored ? stored[def.id] : def.default;
-					const described = `${def.extId} — ${def.description || t('settings.noDescription')}`;
-					const modified = JSON.stringify(value) !== JSON.stringify(def.default);
-					if (def.type === 'boolean') {
-						const box = checkbox(value === true, (next) => saveExtSetting(def.extId, def.id, next));
-						content.appendChild(settingRow(def.id, described, box, modified));
-					} else if (def.type === 'enum') {
-						// The declared value list as a select; the stored value keeps its type
-						// (an enum of numbers stays numbers).
-						const values = def.enumValues ?? [];
-						const control = select(String(value), values.map((entry) => ({ value: String(entry), label: String(entry) })), (next) => {
-							saveExtSetting(def.extId, def.id, values.find((entry) => String(entry) === next) ?? next);
-						});
-						content.appendChild(settingRow(def.id, described, control, modified));
-					} else if (def.type === 'json') {
-						// Arrays, objects and multi-type values edit as JSON text; an invalid
-						// value is refused (and logged) rather than stored as a string.
-						const input = el('input', 'settings-input') as HTMLInputElement;
-						input.type = 'text';
-						input.value = JSON.stringify(value ?? null);
-						input.addEventListener('change', () => {
-							try {
-								saveExtSetting(def.extId, def.id, JSON.parse(input.value));
-							} catch (error) {
-								notify('warning', tf('extensions.invalidJsonSetting', def.id, String(error)));
-								extLog('warn', def.extId, `setting ${def.id} rejected: not valid JSON`, String(error));
-							}
-						});
-						content.appendChild(settingRow(def.id, described, input, modified));
-					} else {
-						const input = el('input', 'settings-input') as HTMLInputElement;
-						input.type = def.type === 'number' ? 'number' : 'text';
-						input.value = String(value);
-						input.addEventListener('change', () => {
-							const raw = def.type === 'number' ? Number(input.value) : input.value;
-							saveExtSetting(def.extId, def.id, raw);
-						});
-						content.appendChild(settingRow(def.id, described, input, modified));
-					}
+					const row = extensionSettingRow(def, query);
+					if (row) content.appendChild(row);
 				}
-			} else if (category === 'extensions' && query === '') {
-				content.appendChild(el('p', 'empty', [t('settings.noExtensionSettings')]));
 			}
-			// Browsing the Extensions category shows only those; a search goes on to the
-			// built-in settings whichever category is selected.
-			if (category === 'extensions' && query === '') return;
+			categoryTitle(t('settings.allSettings'));
+			for (const def of SETTING_DEFS) {
+				if (def.windowsOnly && !IS_WINDOWS) continue;
+				const label = t(`settings.${def.key}` as 'settings.theme');
+				const description = t(`settings.${def.key}.description` as 'settings.theme.description');
+				if (!`${label} ${description} ${def.key}`.toLowerCase().includes(query)) continue;
+				content.appendChild(settingRow(label, description, controlFor(def), isSettingModified(def.key), {
+					wide: def.kind === 'extensionList',
+					onReset: () => updateSetting(def.key, DEFAULT_SETTINGS[def.key])
+				}));
+			}
+		} else if (category === 'modified') {
+			// The audit list: every row that differs from its default, ready to reset.
+			categoryTitle(t('settings.category.modified'));
+			for (const def of SETTING_DEFS) {
+				if (def.windowsOnly && !IS_WINDOWS) continue;
+				if (!isSettingModified(def.key)) continue;
+				content.appendChild(settingRow(t(`settings.${def.key}` as 'settings.theme'), t(`settings.${def.key}.description` as 'settings.theme.description'), controlFor(def), true, {
+					wide: def.kind === 'extensionList',
+					onReset: () => updateSetting(def.key, DEFAULT_SETTINGS[def.key])
+				}));
+			}
+			for (const def of extensionSettingDefs()) {
+				const row = extensionSettingRow(def, '');
+				if (row && row.classList.contains('modified')) content.appendChild(row);
+			}
+		} else {
+			if (category === 'extensions') {
+				// Browsing the Extensions category shows only those.
+				const defs = extensionSettingDefs();
+				if (defs.length > 0) {
+					for (const def of defs) {
+						const row = extensionSettingRow(def, '');
+						if (row) content.appendChild(row);
+					}
+				} else {
+					content.appendChild(el('p', 'empty', [t('settings.noExtensionSettings')]));
+				}
+				searchCount.textContent = '';
+				return;
+			}
+			categoryTitle(t(`settings.category.${category}` as 'settings.category.general'));
+			for (const def of SETTING_DEFS) {
+				if (def.windowsOnly && !IS_WINDOWS) continue;
+				if (def.category !== category) continue;
+				content.appendChild(settingRow(t(`settings.${def.key}` as 'settings.theme'), t(`settings.${def.key}.description` as 'settings.theme.description'), controlFor(def), isSettingModified(def.key), {
+					wide: def.kind === 'extensionList',
+					onReset: () => updateSetting(def.key, DEFAULT_SETTINGS[def.key])
+				}));
+			}
 		}
-
-		// A search spans every category (VS Code's Settings search does too); browsing keeps
-		// the category's rows.
-		content.appendChild(el('div', 'settings-category-title', [query === '' ? t(`settings.category.${category}` as 'settings.category.general') : t('settings.allSettings')]));
-		for (const def of SETTING_DEFS) {
-			if (def.windowsOnly && !IS_WINDOWS) continue;
-			if (query === '' && def.category !== category) continue;
-			const label = t(`settings.${def.key}` as 'settings.theme');
-			const description = t(`settings.${def.key}.description` as 'settings.theme.description');
-			if (query !== '' && !`${label} ${description} ${def.key}`.toLowerCase().includes(query)) continue;
-			content.appendChild(settingRow(label, description, controlFor(def), isSettingModified(def.key)));
+		if (category === 'modified' && query === '' && !content.querySelector('.settings-row')) {
+			content.appendChild(el('p', 'empty', [t('settings.noModified')]));
 		}
-		if (!content.querySelector('.settings-row')) content.appendChild(el('p', 'empty', [t('settings.noMatching')]));
+		if (query !== '' && !content.querySelector('.settings-row')) {
+			content.appendChild(el('p', 'empty', [t('settings.noMatching')]));
+		}
+		searchCount.textContent = query !== '' ? tf('settings.resultCount', content.querySelectorAll('.settings-row').length) : '';
 	};
 	search.addEventListener('input', render);
 	render();

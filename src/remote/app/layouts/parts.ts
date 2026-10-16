@@ -14,11 +14,10 @@ import { createAppBar } from '../../appBar';
 import { createBottomTabs } from '../../bottomTabs';
 import { createEditorAccessory } from '../../editorAccessory';
 import { createEditorEmptyState, openEditorActions, openEditorsSheet } from '../../editorSwitcher';
-import { editorTabs } from '../../pages';
+import { editorTabs, type PageId } from '../../pages';
 import { createNavRail } from '../../navRail';
 import { createTerminalKeys } from '../../terminalKeys';
-import { openDrawer } from '../../navDrawer';
-import { currentWorkbench } from '../../../workbench';
+import { openWorkbenchDrawer } from '../../navDrawer';
 import { workspaceName } from '../../appBar';
 import { openWindowSwitcher } from '../../windowSwitcher';
 import type { LayoutParts } from './shared';
@@ -50,7 +49,8 @@ export function collectLayoutParts(): LayoutParts {
 	// list, the chooser between the pages the PC and this device have open. With nothing
 	// open the page's own empty state is the better surface, so the chooser only answers
 	// when there is something to choose.
-	const editorChooser = (): void => {
+	const editorChooser = (page: PageId): void => {
+		if (page !== 'editor') return;
 		if (editorTabs().length > 0) openEditorsSheet();
 	};
 	return {
@@ -58,14 +58,15 @@ export function collectLayoutParts(): LayoutParts {
 		workbench,
 		statusbar: document.getElementById('statusbar')!,
 		appBar: createAppBar({
-			openDrawer: () => openDrawer(() => currentWorkbench?.titleBar.menuDefinitions() ?? []),
+			openDrawer: openWorkbenchDrawer,
 			openEditors: openEditorsSheet,
 			editorActions: openEditorActions
 		}),
+		// `onTap` reports every tap of every destination — the chooser answers the Editor's alone.
 		bottomTabs: createBottomTabs(() => undefined, editorChooser),
-		navRail: createNavRail((page) => {
-			if (page === 'editor') editorChooser();
-		}),
+		// The rail's ☰ (the portrait tablet's menu entry — the form has no app bar) opens the
+		// same drawer the phone's app bar does.
+		navRail: createNavRail(editorChooser, openWorkbenchDrawer),
 		editorAccessory: createEditorAccessory(),
 		remoteIndicator: createRemoteIndicator()
 	};

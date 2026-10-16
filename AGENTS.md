@@ -1623,9 +1623,11 @@ indicator; parts MOVE, never rebuild, so tabs, dirty buffers and terminal sessio
 by construction — `tests/remoteLayouts.test.ts`), and the recorded page re-applies (§5.6).
 The phone chrome is the layout's: portrait is the app bar + page column + editing row +
 bottom navigation, landscape swaps in the 56 px icon rail and a 40 px top bar (the height
-is 360–430 px), the portrait tablet shows the 72 px labelled rail beside the same page
-column, the landscape tablet is the workbench's own three-column frame with the activity
-bar widened to a labelled rail and the side bar a 320 px main column, and the desktop form
+is 360–430 px), the portrait tablet shows the same 56 px icon-only rail beside the same
+page column and the landscape tablet is the workbench's own three-column frame with the
+activity bar in its own icon-only shape (the tablet rails carry no titles under their
+icons — the owner's 2026-10-16 direction, VS Code's activity bar shape; the labelled
+72 px forms went) and the side bar a 320 px main column, and the desktop form
 is VS Code's frame with the remote indicator (`>< GGS: <workspace>`, in
 `statusBarItem.remoteBackground`) leading the status bar's left cluster. The page-stack
 shells (both phone orientations AND the portrait tablet — §5.1–§5.3) share remote.css's
@@ -2143,7 +2145,12 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   and the tab strip's overflow dropped desktop floating panels whose submenus cascaded
   left and right of them on a phone; on the phone every menu is the sheet, its submenus
   drilling in with a back step) — and the phone's back
-  button closing the overlay on screen (`backStack.ts`); `responsive.ts` marks a raised
+  button closing the overlay on screen (`backStack.ts`: the closers STACK — a sheet over a
+  full-screen page peels one layer per back, one entry re-armed while layers remain); the
+  page-stack shells' page-back entry is `pageBack.ts` — while a page covers the editor the
+  app bar leads with ‹ (`appBar.ts`), the portrait tablet's rail carries ‹ at its head
+  (`navRail.ts` — the form draws no app bar), and the system back key rides backStack as
+  the page's bottom closer; `responsive.ts` marks a raised
   keyboard (`data-keyboard`) and the body follows the visual viewport, so the bars step
   aside or lift with the content. A swipe from the left edge closes a side-view page
   (`gestures.ts`'s `swipeBack`, wired in `shell.ts`), the quick input (palette, quick

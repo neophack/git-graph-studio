@@ -3,6 +3,7 @@
 // flow), maximize is the Fullscreen API and the rest are harmless defaults. Unknown methods
 // resolve to no-ops instead of throwing — a foreign call must never break the shell.
 import { transport, remoteEnv } from '../session';
+import { leavingPage } from '../backStack';
 
 type CloseHandler = (event: { preventDefault(): void; isPreventDefault(): boolean }) => void | Promise<void>;
 const closeHandlers = new Set<CloseHandler>();
@@ -31,6 +32,9 @@ async function requestClose(): Promise<void> {
 	} catch {
 		/* not connected */
 	}
+	// The menus this runs from are the phone's drawer sheets: their close queued a
+	// history.back() one tick out, and that traversal would cancel the assign below.
+	leavingPage();
 	const base = new URL(env?.basePath ?? '/', location.href);
 	location.assign(new URL('windows', base).href);
 }

@@ -1,12 +1,16 @@
 // The vertical navigation rail (docs/remote-client-plan.md §5.2, §5.3): the bottom
-// navigation's destinations stood on their side — icon-only at 56 px on a landscape phone
-// (no bottom bar: the height is 360–430 px and the content needs all of it), icon over
-// label at 72 px on a portrait tablet. The same page model (pages.ts) drives it: a tap
-// always shows its page, the active page is marked, and the badges (open editors, pending
-// changes) carry what the hidden status and activity bars would.
+// navigation's destinations stood on their side — icon-only at 56 px on every form that
+// shows it (a landscape phone has no bottom bar: the height is 360–430 px and the content
+// needs all of it; the portrait tablet's icon-over-label form went with the owner's
+// 2026-10-16 direction, 左轨图标不配文字 — VS Code's activity bar shape). The same page
+// model (pages.ts) drives it: a tap always shows its page, the active page is marked, and
+// the badges (open editors, pending changes) carry what the hidden status and activity
+// bars would.
 import { t } from '../platform/i18n';
 import { currentPage, extensionContainers, goTo, onWorkbenchChange, pageIcon, type PageId } from './pages';
+import { pageBack, pageBackAvailable } from './pageBack';
 import { bottomTabs, tabBadge } from './bottomTabs';
+import { codicon } from './widgets';
 
 function railButton(id: PageId, label: string, onTap: () => void): HTMLButtonElement {
 	const button = document.createElement('button');
@@ -21,12 +25,7 @@ function railButton(id: PageId, label: string, onTap: () => void): HTMLButtonEle
 	badge.className = 'badge';
 	badge.hidden = true;
 	pill.appendChild(badge);
-	// The label span exists in every form; the rail's width decides whether CSS shows it
-	// (§5.2 hides, §5.3 shows) — one element, no rebuild between the two rails.
-	const text = document.createElement('span');
-	text.className = 'label';
-	text.textContent = label;
-	button.append(pill, text);
+	button.appendChild(pill);
 	button.addEventListener('click', onTap);
 	return button;
 }
@@ -35,6 +34,8 @@ function railButton(id: PageId, label: string, onTap: () => void): HTMLButtonEle
  *  buttons themselves — the rail's buttons carry the same classes and badge structure). */
 function syncRail(bar: HTMLElement): void {
 	const page = currentPage();
+	const back = bar.querySelector<HTMLButtonElement>('.ggs-rail-back');
+	if (back) back.hidden = !pageBackAvailable();
 	for (const button of bar.querySelectorAll<HTMLButtonElement>('button[data-tab]')) {
 		const id = button.dataset.tab ?? '';
 		const active = id === page;
@@ -48,18 +49,50 @@ function syncRail(bar: HTMLElement): void {
 	}
 }
 
+/** The rail's ☰ (the portrait tablet's menu entry — it has no app bar): the drawer the
+ *  phone's app bar opens, reached from the rail's head. The landscape phone's rail hides
+ *  it (layouts.css — its app bar carries its own ☰). */
+function railMenuButton(open: () => void): HTMLButtonElement {
+	const button = document.createElement('button');
+	button.className = 'ggs-rail-menu';
+	button.setAttribute('aria-label', t('remote.menu'));
+	const pill = document.createElement('span');
+	pill.className = 'pill';
+	pill.appendChild(codicon('menu'));
+	button.appendChild(pill);
+	button.addEventListener('click', open);
+	return button;
+}
+
+/** The rail's ‹ (the portrait tablet's back entry — the form draws no app bar, so the ‹ the
+ *  phone's app bar carries rides the rail's head instead, above ☰, while a page covers the
+ *  editor). The landscape phone hides it (layouts.css): its app bar carries its own ‹. */
+function railBackButton(): HTMLButtonElement {
+	const button = document.createElement('button');
+	button.className = 'ggs-rail-back';
+	button.setAttribute('aria-label', t('remote.page.back'));
+	const pill = document.createElement('span');
+	pill.className = 'pill';
+	pill.appendChild(codicon('chevron-left'));
+	button.appendChild(pill);
+	button.addEventListener('click', () => void pageBack());
+	return button;
+}
+
 /** Rebuild the buttons when the destinations change, else only the active mark and badges
- *  (bottomTabs.syncTabs answers the same keying for the bar; the rail keeps its own key so
- *  the two never fight over one element). The key carries the containers' images too — a
- *  package image replacing a codicon stand-in is a rebuild, or the rail's button would
- *  wear the placeholder forever (the bar's key already says so). */
-function syncButtons(bar: HTMLElement, onTap: (page: PageId) => void): void {
+ * (bottomTabs.syncTabs answers the same keying for the bar; the rail keeps its own key so
+ * the two never fight over one element). The key carries the containers' images too — a
+ * package image replacing a codicon stand-in is a rebuild, or the rail's button would
+ * wear the placeholder forever (the bar's key already says so). */
+function syncButtons(bar: HTMLElement, onTap: (page: PageId) => void, menu: HTMLButtonElement | null, back: HTMLButtonElement | null): void {
 	const tabs = bottomTabs();
 	const images = extensionContainers().map((container) => container.image ?? '').join(' ');
 	const key = `${tabs.map((tab) => `${tab.id}|${tab.label}`).join(' ')}#${images}`;
 	if (bar.dataset.tabsKey !== key) {
 		bar.dataset.tabsKey = key;
 		bar.replaceChildren(
+			...(back ? [back] : []),
+			...(menu ? [menu] : []),
 			...tabs.map((tab) =>
 				railButton(tab.id, tab.label, () => {
 					if (currentPage() !== tab.id) void goTo(tab.id).then(() => syncRail(bar));
@@ -73,13 +106,16 @@ function syncButtons(bar: HTMLElement, onTap: (page: PageId) => void): void {
 
 /** The rail itself. Every tap reports through `onTap` (a reselect on the rail was a plain
  *  re-mark before): the Editor's opens the open editors list (§6.2) — the portrait tablet
- *  has no app bar, the rail's Editor item is its only switcher. */
-export function createNavRail(onTap: (page: PageId) => void = () => undefined): HTMLElement {
+ *  has no app bar, the rail's Editor item is its only switcher. `openMenu`, when given,
+ *  rides the ☰ at the rail's head. */
+export function createNavRail(onTap: (page: PageId) => void = () => undefined, openMenu: (() => void) | null = null): HTMLElement {
 	const bar = document.createElement('nav');
 	bar.className = 'ggs-nav-rail';
 	bar.setAttribute('role', 'tablist');
 	bar.setAttribute('aria-label', t('remote.nav.label'));
-	syncButtons(bar, onTap);
-	onWorkbenchChange(() => syncButtons(bar, onTap));
+	const back = railBackButton();
+	const menu = openMenu ? railMenuButton(openMenu) : null;
+	syncButtons(bar, onTap, menu, back);
+	onWorkbenchChange(() => syncButtons(bar, onTap, menu, back));
 	return bar;
 }

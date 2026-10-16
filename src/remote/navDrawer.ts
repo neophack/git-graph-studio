@@ -10,6 +10,7 @@ import { commands } from '../platform/commands';
 import { formatBytes } from '../platform/ui';
 import { t, tf } from '../platform/i18n';
 import type { MenuDefinition } from '../workbench/titlebar';
+import { currentWorkbench } from '../workbench';
 import { showActionSheet } from './actionSheet';
 import { branchName, workspaceName } from './appBar';
 import { pushBack } from './backStack';
@@ -95,6 +96,12 @@ function commandRow(iconName: string, label: string, id: string, extra: { badge?
 		closeDrawer();
 		void commands.execute(id);
 	}, { ...extra, disabled: !commands.isEnabled(id) });
+}
+
+/** The drawer over the workbench's own application menus — the one surface every touch
+ *  form's ☰ opens: the phone app bar's, the tablet rails' menu buttons. */
+export function openWorkbenchDrawer(): void {
+	openDrawer(() => currentWorkbench?.titleBar.menuDefinitions() ?? []);
 }
 
 /** Open the drawer. `menus` reads the workbench's menus at open time, so every entry's

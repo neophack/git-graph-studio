@@ -56,8 +56,21 @@ export interface WebviewStreamBridge {
 	parseStream(stream: string): { view: string } | { extId: string; panelId: number } | null;
 	setWebviewFrameSource(source: WebviewFrameSource | null): void;
 	/** Mount the live copy of the desktop window's frame for a stream (the viewer side);
-	 *  resolves the disposer once the copy module has loaded. */
-	mountCopy(container: HTMLElement, stream: string): () => void;
+	 *  resolves the disposer once the copy module has loaded. `extId` names the stream's
+	 *  extension (a view's stream id alone does not carry it) — the copy notes this
+	 *  frontend's interactions under it. */
+	mountCopy(container: HTMLElement, stream: string, extId?: string): () => void;
+	/** Note THIS frontend's user just interacted with a copy of `extId`'s webview (a tap,
+	 *  key or scroll sent up for replay): a tap in a mirrored page — Claude's "new session" —
+	 *  replays into the PC's real page, and the panel that opens arrives BACK here as a
+	 *  mirrored create the K7 page hold would keep in the background. The input trail is the
+	 *  one honest witness that the create is this user's own act: the backend reads a
+	 *  replayed tap as the PC user's input, and the mirror's `caller` names no one. */
+	noteCopyInteraction?(extId: string): void;
+	/** Whether THIS frontend's user interacted with a copy of `extId`'s webview within the
+	 *  act's window (a remote answers from its copies; the desktop hosts the real pages and
+	 *  answers false). */
+	recentCopyInteraction?(extId: string): boolean;
 }
 
 /** The desktop window's mirror-host door (§22): the host loads when the first viewer says

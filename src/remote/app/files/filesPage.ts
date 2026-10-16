@@ -1,6 +1,6 @@
 // The files page (docs/remote-client-plan.md §6.1, P1): the page-stack shells' Files
-// destination — the MT-manager flat list, its path bar, its toolbar (the filter box and
-// the sort sheet), the multi-select bars and the floating action button (upload, new
+// destination — the MT-manager flat list, its path bar, its toolbar (the filter box, the
+// sort sheet and the actions ＋), the multi-select bars and the actions sheet (upload, new
 // file, new folder), mounted INTO the explorer's sidebar view: on a page-stack shell the
 // tree hides and this page shows; on the wide forms (tablet landscape, desktop) the tree
 // shows and this page hides — the classic explorer stays theirs (§6.1's own desktop
@@ -16,6 +16,7 @@ import { currentWorkbench, type FsChange } from '../../../workbench';
 import { uploadInto, transferMenuEntries } from '../../../features/explorer';
 import { withinRoots } from '../../pathGate';
 import { openSheet, showActionSheet, closeActionSheet } from '../../actionSheet';
+import { registerFilesActions } from '../../appBar';
 import { createFileList, SORT_KEYS, defaultSort, type FilesSort } from './fileList';
 import { createPathBar } from './pathBar';
 import { createMultiSelect } from './multiSelect';
@@ -87,6 +88,11 @@ export function installFilesPage(): void {
 			label: t(entry.isDir ? 'remote.files.enter' : 'remote.files.open'),
 			run: () => (entry.isDir ? void show(entry.path) : void workbench.editors.openFile(entry.path))
 		},
+		// A Markdown file opens as its rendered preview (the editor actions' own preview
+		// entry is the same open, on the tab already being looked at).
+		...(!entry.isDir && /\.(md|markdown)$/i.test(entry.path)
+			? [{ label: t('remote.files.preview'), run: () => void workbench.editors.openMarkdownPreview(entry.path) } as MenuEntry]
+			: []),
 		...transferMenuEntries(entry.path, entry.isDir),
 		'separator',
 		{ label: t('remote.files.rename'), run: () => select.rename(entry.path) },
@@ -161,25 +167,29 @@ export function installFilesPage(): void {
 	sortButton.type = 'button';
 	sortButton.title = t('remote.files.sort.title');
 	sortButton.addEventListener('click', () => sortSheet());
-	const toolbar = el('div', 'ggs-files-toolbar', [branchChip, filter, sortButton]);
+	// The ＋'s sheet (§6.1; the owner's 2026-10-16 directions: off the list's corner — the
+	// floating one covered the rows' ⋮ — then onto the app bar ahead of its buttons):
+	// upload files, upload folder (by capability, §10.2 item 11 — iOS hides the row), new
+	// file, new folder — the app bar's ＋ and the no-app-bar form's toolbar ＋ share it.
+	const actionsEntries = (): MenuEntry[] => [
+		{ label: t('transfer.uploadHere'), run: () => void uploadInto(dir, false).then(() => list.refresh()) },
+		...(document.documentElement.hasAttribute('data-cap-ios')
+			? []
+			: [{ label: t('transfer.uploadFolderHere'), run: () => void uploadInto(dir, true).then(() => list.refresh()) }]),
+		{ label: t('remote.files.newFile'), run: () => void createNew(false) },
+		{ label: t('remote.files.newFolder'), run: () => void createNew(true) }
+	];
+	const openActionsSheet = (): void => showActionSheet(actionsEntries(), t('remote.files.actions'));
+	// The toolbar's ＋ — the copy the form without an app bar (the tablet portrait, §5.3)
+	// carries; the phone forms' app bar owns the ＋ ahead of its own buttons, and the CSS
+	// hides this one there.
+	const addButton = el('button', 'ggs-files-toolbtn ggs-files-addbtn', [icon('add')]);
+	addButton.type = 'button';
+	addButton.title = t('remote.files.actions');
+	addButton.setAttribute('aria-label', t('remote.files.actions'));
+	addButton.addEventListener('click', openActionsSheet);
+	const toolbar = el('div', 'ggs-files-toolbar', [branchChip, filter, sortButton, addButton]);
 	updateBranchChip();
-
-	// The floating action button (§6.1): upload files, upload folder (by capability,
-	// §10.2 item 11 — iOS hides the row), new file, new folder.
-	const fab = el('button', 'ggs-files-fab', [icon('add')]);
-	fab.type = 'button';
-	fab.setAttribute('aria-label', t('remote.files.actions'));
-	fab.addEventListener('click', () => {
-		const entries: MenuEntry[] = [
-			{ label: t('transfer.uploadHere'), run: () => void uploadInto(dir, false).then(() => list.refresh()) },
-			...(document.documentElement.hasAttribute('data-cap-ios')
-				? []
-				: [{ label: t('transfer.uploadFolderHere'), run: () => void uploadInto(dir, true).then(() => list.refresh()) }]),
-			{ label: t('remote.files.newFile'), run: () => void createNew(false) },
-			{ label: t('remote.files.newFolder'), run: () => void createNew(true) }
-		];
-		showActionSheet(entries, t('remote.files.actions'));
-	});
 
 	/** The one-field sheet a new file or folder takes its name from. */
 	function askName(title: string): Promise<string | null> {
@@ -272,9 +282,12 @@ export function installFilesPage(): void {
 
 	page.append(pathBar.root, toolbar, select.countBar, scroll);
 	scroll.appendChild(list.root);
-	view.append(page, select.actionBar, fab);
+	view.append(page, select.actionBar);
 	list.setSort(loadSort());
 	if (dir) void show(dir);
+	// The app bar's ＋ leads its trailing buttons on the Files page; the sheet stays this
+	// page's own — the current directory's uploads and the new rows.
+	registerFilesActions(actionsEntries);
 
 	// The page mounts at the shell's install moment — the title bar's first frame, which
 	// the workbench builds synchronously while the boot context's roots are still one wire

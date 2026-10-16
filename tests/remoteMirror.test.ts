@@ -18,7 +18,9 @@ import { modeUrl, requestedMode } from '../src/remote/mirror/uiMode';
 import { coarsePointer } from '../src/remote/responsive';
 import { APP_TOKEN, GGS_TOKEN, canonicalize, canonicalizeCss, localizeTokens, panelStream, viewStream, type DownMessage, type MirrorOp, type UpMessage } from '../src/remote/mirror/protocol';
 import { parseStream, setWebviewFrameSource } from '../src/remote/mirror/webviewFrames';
-import { mountScrollHint } from '../src/remote/mirror/webviewCopy';
+import { mountScrollHint, mountWebviewCopy } from '../src/remote/mirror/webviewCopy';
+import { noteCopyInteraction, recentCopyInteraction, resetCopyInteractions } from '../src/remote/mirror/copyInteraction';
+import { setRemoteEnv } from '../src/remote/session';
 
 /** A PC document of its own, so the copy and the original never share a tree. */
 function pcDocument(body: string): Document {
@@ -618,6 +620,56 @@ describe('webview streams (§22.6)', () => {
 		expect(parseStream(panelStream('Anthropic.claude-code', 3))).toEqual({ extId: 'Anthropic.claude-code', panelId: 3 });
 		expect(parseStream('panel:broken')).toBeNull();
 		expect(parseStream('other:x')).toBeNull();
+	});
+
+	it('a copy\'s input trail marks this frontend\'s own act — fresh within the window, stale beyond it, keyed per extension', () => {
+		// The trail a mirrored create reads (2026-10-16: 手机端 claude 打开新的 session 页面
+		// 没有到前台显示): the tap crossed from here, so within the window the panel it
+		// opened is this user's own act and may take the foreground.
+		resetCopyInteractions();
+		expect(recentCopyInteraction('Anthropic.claude-code')).toBe(false);
+		noteCopyInteraction('Anthropic.claude-code');
+		expect(recentCopyInteraction('Anthropic.claude-code')).toBe(true);
+		expect(recentCopyInteraction('acme.other')).toBe(false);
+		const now = vi.spyOn(Date, 'now');
+		try {
+			now.mockReturnValue(Date.now() + 8_001);
+			expect(recentCopyInteraction('Anthropic.claude-code')).toBe(false);
+		} finally {
+			now.mockRestore();
+		}
+	});
+
+	it('a mounted copy notes the inputs it replays under its extension — the hello is housekeeping, not input', () => {
+		resetCopyInteractions();
+		const emitted: { k?: string }[] = [];
+		setRemoteEnv({
+			transport: {
+				emit: (_name: string, payload: { k?: string }) => void emitted.push(payload),
+				listen: () => () => undefined,
+				unlisten: () => undefined
+			} as never,
+			attached: { frontendId: 'remote/5', assetBase: 'https://p/main/', ggsBase: 'https://p/ggs/' } as never,
+			basePath: '/'
+		});
+		try {
+			const pane = document.createElement('div');
+			document.body.appendChild(pane);
+			const dispose = mountWebviewCopy(pane, viewStream('chat'), 'Anthropic.claude-code');
+			expect(emitted.some((message) => message.k === 'hello')).toBe(true);
+			expect(recentCopyInteraction('Anthropic.claude-code')).toBe(false);
+			// Typing into the copy's keyboard proxy crosses as text — the input trail gains it.
+			const proxy = pane.querySelector<HTMLTextAreaElement>('textarea.mirror-proxy')!;
+			proxy.value = 'hi';
+			proxy.dispatchEvent(new Event('input', { bubbles: true }));
+			expect(emitted.some((message) => message.k === 'text')).toBe(true);
+			expect(recentCopyInteraction('Anthropic.claude-code')).toBe(true);
+			dispose();
+			pane.remove();
+		} finally {
+			setRemoteEnv(undefined);
+			resetCopyInteractions();
+		}
 	});
 
 	it('copies the PC frame into a fluid viewer live, and replays the copy’s typing into the frame', async () => {

@@ -226,7 +226,7 @@ export class ExtensionHost {
 
 	readonly webviewCopies = new Set<string>();
 
-	declare mountWebviewCopy: (container: HTMLElement, stream: string) => () => void ;
+	declare mountWebviewCopy: (container: HTMLElement, stream: string, extId?: string) => () => void ;
 
 	declare webviewFrameFor: (stream: string) => HTMLIFrameElement | null ;
 

@@ -8,14 +8,29 @@
 import { commands } from '../platform/commands';
 import { t, tf } from '../platform/i18n';
 import type { MenuEntry } from '../platform/ui';
+import { currentWorkbench } from '../workbench';
 import { showActionSheet } from './actionSheet';
 import { activeEditLock, isEditLocked, onEditLockChange, toggleEditLock } from './editLock';
+import { pageBack, pageBackAvailable } from './pageBack';
 import { activeTab, BUILTIN_VIEWS, currentPage, editorPlaceholderShown, extensionContainers, launchers, onWorkbenchChange, type PageId } from './pages';
 
 export interface AppBarHooks {
 	openDrawer(): void;
 	openEditors(): void;
 	editorActions(): void;
+}
+
+/** The files page's ＋ (the owner's 2026-10-16 direction, continued — the add icon rides the
+ *  app bar, ahead of its other buttons): the page alone knows the directory its sheet acts
+ *  on, so it registers the sheet here at install; until then the ＋ hides. */
+let filesActions: (() => MenuEntry[]) | null = null;
+let rerenderAppBar: (() => void) | null = null;
+
+/** The files page hands its actions sheet (the current directory's uploads, new file and
+ *  folder) to the bar at install; `null` withdraws it. */
+export function registerFilesActions(provider: (() => MenuEntry[]) | null): void {
+	filesActions = provider;
+	rerenderAppBar?.();
 }
 
 /** The workspace's display name, off the title the workbench keeps ("repo - Git Graph Studio"). */
@@ -183,12 +198,52 @@ function syncEditLockButton(button: HTMLButtonElement): void {
 	button.firstElementChild!.className = `codicon codicon-${locked ? 'lock' : 'unlock'}`;
 }
 
+/** The ＋ leads the Files page's trailing buttons (the owner's 2026-10-16 direction:
+ *  codicon-add 放在 ggs-appbar-btn 前面) — its sheet is the files page's own, the current
+ *  directory's uploads and the new file/folder rows. Hidden until the page registered its
+ *  sheet; the forms without an app bar (the tablet portrait) keep the toolbar's own ＋. */
+function filesAddButton(): HTMLButtonElement {
+	const button = barButton('add', t('remote.files.actions'), () => {
+		const entries = filesActions?.();
+		if (entries?.length) showActionSheet(entries, t('remote.files.actions'));
+	}, 'files-add');
+	button.hidden = !filesActions;
+	return button;
+}
+
+/** The Markdown source⇄preview toggle (the owner's 2026-10-16 direction: 顶栏加按钮，
+ *  切换源码还是预览查看): on a Markdown file's tab it opens the rendered preview, on the
+ *  preview it returns to the source. Hidden for every other editor — the active input says
+ *  which side is up (`file` + .md is the source, `markdown` the preview). */
+function markdownToggle(): HTMLButtonElement {
+	const button = barButton('open-preview', t('remote.editor.preview'), () => {
+		const input = currentWorkbench?.editors.activeInput;
+		if (input?.kind === 'markdown') void currentWorkbench!.editors.openFile(input.path);
+		else if (input?.kind === 'file' && /\.(md|markdown)$/i.test(input.path)) void currentWorkbench!.editors.openMarkdownPreview(input.path);
+	}, 'markdown-toggle');
+	syncMarkdownToggle(button);
+	return button;
+}
+
+function syncMarkdownToggle(button: HTMLButtonElement): void {
+	const input = currentWorkbench?.editors.activeInput;
+	const source = input?.kind === 'file' && /\.(md|markdown)$/i.test(input.path);
+	const preview = input?.kind === 'markdown';
+	button.hidden = !(source || preview);
+	if (button.hidden) return;
+	const label = t(preview ? 'remote.editor.source' : 'remote.editor.preview');
+	button.dataset.state = preview ? 'preview' : 'source';
+	button.title = label;
+	button.setAttribute('aria-label', label);
+	button.firstElementChild!.className = `codicon codicon-${preview ? 'code' : 'open-preview'}`;
+}
+
 /** The trailing actions of a page. */
 function trailingActions(page: PageId, hooks: AppBarHooks): HTMLElement[] {
 	const quickOpen = () => barButton('go-to-file', t('remote.appbar.quickOpen'), () => void commands.execute('workbench.quickOpen'));
 	const more = (entries: () => MenuEntry[], title: string) => barButton('kebab-vertical', t('remote.appbar.more'), () => showActionSheet(entries(), title));
-	if (page === 'editor') return [editLockButton(), quickOpen(), barButton('kebab-vertical', t('remote.appbar.more'), () => hooks.editorActions())];
-	if (page === 'explorer') return [quickOpen(), more(filesSheet, t('remote.tabs.explorer'))];
+	if (page === 'editor') return [markdownToggle(), editLockButton(), quickOpen(), barButton('kebab-vertical', t('remote.appbar.more'), () => hooks.editorActions())];
+	if (page === 'explorer') return [filesAddButton(), quickOpen(), more(filesSheet, t('remote.tabs.explorer'))];
 	if (page === 'scm') return [barButton('sync', t('remote.git.sync'), () => void commands.execute('git.sync')), more(gitSheet, t('remote.page.scm'))];
 	// The panel's own header already carries New and Kill beside its view tabs.
 	if (page === 'panel') return [more(panelSheet, t('remote.tabs.panel'))];
@@ -200,6 +255,10 @@ function trailingActions(page: PageId, hooks: AppBarHooks): HTMLElement[] {
 export function createAppBar(hooks: AppBarHooks): HTMLElement {
 	const bar = document.createElement('header');
 	bar.className = 'ggs-appbar';
+	// The ‹ ahead of ☰ while a page covers the editor (§5.1's 层级 rule: the app bar's back
+	// button pops the page stack) — the drawer stays beside it, one tap from every page.
+	const back = barButton('chevron-left', t('remote.page.back'), () => void pageBack(), 'back');
+	back.hidden = true;
 	const menu = barButton('menu', t('remote.menu'), () => hooks.openDrawer(), 'leading');
 	const heading = document.createElement('button');
 	heading.className = 'ggs-appbar-heading';
@@ -222,11 +281,12 @@ export function createAppBar(hooks: AppBarHooks): HTMLElement {
 	});
 	const actions = document.createElement('div');
 	actions.className = 'ggs-appbar-actions';
-	bar.append(menu, heading, actions);
+	bar.append(back, menu, heading, actions);
 	let actionsFor = '';
 	const render = () => {
 		const page = currentPage();
 		const info = pageHeading(page);
+		back.hidden = !pageBackAvailable();
 		titleText.textContent = info.title;
 		subtitle.textContent = info.subtitle;
 		subtitle.hidden = !info.subtitle;
@@ -241,8 +301,15 @@ export function createAppBar(hooks: AppBarHooks): HTMLElement {
 		}
 		const lock = actions.querySelector<HTMLButtonElement>('.edit-lock');
 		if (lock) syncEditLockButton(lock);
+		const markdown = actions.querySelector<HTMLButtonElement>('.markdown-toggle');
+		if (markdown) syncMarkdownToggle(markdown);
+		// A late registration (the page installing after the bar built) unhides in place —
+		// the actions themselves rebuild only on a page change.
+		const add = actions.querySelector<HTMLButtonElement>('.files-add');
+		if (add) add.hidden = !filesActions;
 	};
 	render();
+	rerenderAppBar = render;
 	onWorkbenchChange(render);
 	onEditLockChange(render);
 	return bar;
