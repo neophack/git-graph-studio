@@ -1643,7 +1643,10 @@ every viewer at the desktop minimum, the Rust fit no longer clears the window's
 shells' Files destination is the MT-manager flat list — `src/remote/app/files/`
 (`filesPage.ts` mounts it INTO the explorer's sidebar view: on a page-stack shell the tree
 hides and the page shows, the wide forms keep the classic tree; the git letters ride the
-SCM view's `onStatus` chained in, the opens go through the same `workbench.openFile`),
+SCM view's `onStatus` chained in, the opens go through the same `workbench.openFile`; the
+toolbar's leading chip is the BRANCH switch (2026-10-16, the owner's direction: 手机端文件
+管理页面没有切换分支的按钮) — the current branch off `scm.onHead`, one tap from the shared
+branch sheet below),
 `pathBar.ts` (the root chip and one chip per level, horizontally scrolled to the end, a
 chip long-pressed copies its path, the trailing ▸ lists the sibling folders), `fileList.ts`
 (the two-line rows — the folder's item count and age, the file's size and mtime, the git
@@ -1673,7 +1676,27 @@ click that ends a drag is swallowed), wired in `scm/rowActions.ts` behind the
 `data-page-stack` marker — the unstaged group's rows reveal Discard + Stage, the staged
 Unstage, the merge group Mark Resolved, each the same handler the hover buttons and the
 context menu run (a discard keeps its own confirm); the two-line row layout and the
-commit box's sticky ride CSS keyed on the same marker. The diff editors read their
+commit box's sticky ride CSS keyed on the same marker. **The phone's own Source Control
+page** (2026-10-16, the owner's direction: 手机端源代码管理界面不适合触控，要重新设计 —
+`src/remote/app/scm/scmPage.ts`, mounted INTO the SCM sidebar view exactly the way the
+files page mounts into the explorer's): on a page-stack shell the classic 22 px view
+hides and a touch page shows — the branch row (tap: the shared branch sheet, ahead /
+behind beside the name), the commit card (a 16 px message box over a 48 px primary
+action whose label follows `commitAction`'s rule — Commit / Push n / Sync / Publish —
+with the ⋮ carrying the variants: commit & push, commit & sync, staged only, amend), the
+change groups as 48 px section heads with the group's own verbs (stage-all / unstage-all
+/ discard-all) over 56 px rows (tap opens the change, a left swipe uncovers the row's own
+verb, the ⋮ opens the row's sheet), the initialised submodules as collapsible sections
+with their own commit / pull / push sheet, and 100-rows-per-group paging with a
+show-more row. The page is a VIEW over the one SourceControlView — every action runs
+through its own methods (run, commit, discardFiles, subRun…), every state lives on it
+(message, collapsed groups, sort), so a device-class switch is seamless by construction:
+both renderings refresh once on `onDeviceClassChange`. **The shared branch sheet**
+(`src/remote/app/scm/branchSheet.ts`): the current branch checked, the locals, the
+remotes (the backend's own checkout turns `origin/x` into a tracking `x`), and a
+new-branch row (`scm_create_branch` is a checkout -b — the new branch is the one left
+on); every switch ends in the SCM view's own refresh, whose `onHead`/`onStatus` chains
+update the status bar, the app bar and both phone pages. The diff editors read their
 orientation by form (§6.3: the page-stack shells are INLINE whatever the pane measures —
 a landscape phone's 850 px pane would otherwise split into unreadable halves; the wide
 forms keep the width rule) behind `open.ts`'s `diffInlineShell`. The terminal page's
@@ -1976,7 +1999,16 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   session restore rebuilds that frontend's own tabs. Sidebar view switches and side bar
   hides NO LONGER cross (2026-10-16, S1/G8: each frontend's layout is its own — K7's
   "only what opened" leaves the side bar out); `open`/`openTab` gained an `inactive` flag
-  for the catch-up's background opens.
+  for the catch-up's background opens. **The phone's page is never dragged by a remote
+  act** (2026-10-16, the owner's direction: 文件页面会被其他页面顶到最前): the navigation
+  policy (`platform/hooks.ts` `NavigationPolicy`) gained `holdPage` — while a hold is
+  live, `revealEditorPage` is a no-op (the editor tab still opens; the page showing keeps
+  its place), `nav.ts`'s `holdPhonePage` the remote implementation and the desktop default
+  a no-op release. The sync pairs the hold with its `applying` depth (a remote open /
+  active / close never pulls) and with `localOnly(true)`'s window (a session restore's
+  active-tab activation lands in the background); the extension host holds one around a
+  mirrored panel create / reveal (`frames.ts`'s `applyMirroredState` — another frontend's
+  act, K7). What a phone's own user opens runs outside the walls and still navigates.
   **The presence gate and the catch-up** (2026-10-16, S1 — docs/remote-client-plan.md
   §7.0): `src/remote/presence.ts` keeps the table of which frontends are ACTIVE (the PC
   window while not hidden, a remote page while in the foreground) — every frontend
@@ -2195,7 +2227,11 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   gating), `tests/remoteFiles.test.ts` (the files page's §6.1 acceptance: the row layout,
   enter-and-back with the scroll restored, the sentinel's paging, the sort rules, the
   long-press multi-select — its count bar, its one-zip multi download, the confirmed
-  delete — and the path bar's chips and sibling sheet), `tests/remotePages.test.ts` (P2's
+  delete — and the path bar's chips and sibling sheet), `tests/remoteScm.test.ts` (the
+  phone Source Control page: the branch row and the shared branch sheet's switch /
+  new-branch flows through the backend, the commit card's state-following label and its
+  stage-all-and-commit, the group verbs, the row tap's diff and the ⋮ sheet, and the
+  message kept across a device-class switch), `tests/remotePages.test.ts` (P2's
   §6.3/§6.6: the swipe gesture's mechanics over a stand-in row, the change rows carrying
   the strip through a real SourceControlView on the page-stack marker — and none without
   it — and the output-follow state machine's grace, drop, catch-up and timer stacking),

@@ -14,7 +14,7 @@ import { commands } from '../platform/commands';
 import { codiconOf, resolvedMenuEntries, runMenuEntry, type ResolvedMenuEntry } from '../features/extensions';
 import { extFileDataUrl } from '../platform/extAssets';
 import { t } from '../platform/i18n';
-import { revealEditorPage, dismissFullScreenSideView } from './nav';
+import { revealEditorPageNow as revealEditorPage, dismissFullScreenSideView } from './nav';
 
 /** A page: a built-in side view, an extension container (`ext-container:…`), the editor,
  *  the panel, or an extension launcher (`launch:<command>`). */

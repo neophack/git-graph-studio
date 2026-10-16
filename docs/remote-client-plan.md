@@ -22,6 +22,14 @@
 >
 > **2026-10-16 L2 部分落地记录**(第六批,§18 的地基):**§18.1 `remote_debug_snapshot`**(`src-tauri/src/remote_debug.rs`,新模块):GGS_TEST_HOOKS=1 才应答(否则 Err;注册随 generate_handler! 恒在——宏是编译期名单,这是"才注册"的务实落法,check-ipc.mjs 新增 TEST_ONLY_COMMANDS 表登记为测试专用);返回扩展后端的 pid/启动计数(I1)、每个已装包的登记日志(活面板与视图在内,I3/I4)、`routing::frontends()`(`main` 打头 + 服务过的前端粘性集合——纯观看的镜像会话到不了后端,诚实缺席)、main 窗口的 created/pageLoads 计数(I9;lib.rs 的 build_main_window 与 on_page_load 计数)与 visible/minimized、会话数。routing 增粘性前端集合(call_begin 记录)。**§18.7 探针** `scripts/probes/remote-lifecycle-check.mjs`(新):live-check 的封闭装配(独立 home、固定端口 config.json、bin/VERSION 预置、set-password)+ 应用带 GGS_TEST_HOOKS=1 拉起 + 裸 ws 会话;快照经会话的 INVOKE 读取;启动瞬态先稳(连续两帧快照的后端键一致才开跑);场景跑 T4 的核心(E4/E5 交替,先清旧 WINDOWS 帧、等**携带目标状态**的推送、1 秒界限=I7),每步前后快照对 I1(pid/启动计数不变)与 I9(created/pageLoads 不变)断言,末尾 I5(会话仍在);报告写 target/studio/remote-lifecycle/remote-lifecycle-report.{md,json};本机实测 6 翻转全过(退出码 0)。`LIFECYCLE_TRACE=1` 转储每帧。Rust 测试:`remote_debug` 的计数器与 frontends 两例。**L2 余量**(继续):§18.3 的 T1–T18 其余场景(浏览器侧副本比对走 live-check 的 CDP 相位)、随机序列(§18.4)、长时运行(§18.5)、平台矩阵(§18.6)、`tests/e2e/remote/lifecycle.spec.ts`(如需 Playwright 形态;§18.7 原文写 Playwright,探针先以裸 ws 会话落地——线上场景本就无需浏览器)。
 >
+> **2026-10-16 落地记录(布局手动覆盖的菜单入口——所有者反馈:"平板模式没有菜单入口")**:§4.2 的手动覆盖此前只有读侧(`data-device-override` 无人写入,布局无法手选)。本批补上写侧与入口:responsive.ts 新增 `setDeviceOverride`/`deviceOverride`(localStorage `ggsr.deviceOverride` 持久化——与省流模式同为设备级;写入 `<html data-device-override>` 并**立即**重分类,不等 150 ms 去抖;`initResponsive` 启动即播种,强制形态首帧即穿戴、无闪现;方向感知沿用 overrideClass)。入口两处:设置页"远程"分类首行"布局:自动 / 手机 / 平板 / 桌面"(§8 设备级设置清单的第一项,动作面板选择、非自动带修改点,根搜索可及);命令面板 `remote.layoutMode`"布局模式(自动 / 手机 / 平板 / 桌面)"(remote profile)——平板横屏与桌面形态的 Settings 走桌面对话框,命令是全形态共有的入口。验收:`tests/remoteResponsive.test.ts` 新增三例(覆盖立即生效、跨 resize 仍生效、回到自动恢复算法答案;持久化覆盖首帧即穿戴;设置页"远程"分类的选择与撤回)。
+>
+> **2026-10-16 落地记录(远程工作台加入 /windows 选择页的按钮入口——所有者指示:"远程要有按钮入口可以进入https://ip:port/windows页面")**:此前进入会话(remote.html)后,回窗口选择页只能手改 URL(或等实例退出的 4410 自动跳转)。本批补上显式入口,三处共用一条 `remote.windowsPage` 命令(remote profile):命令面板;导航抽屉"工作区"区"此 PC 上的窗口"行旁新增"窗口选择页"行(browser 图标);窗口切换器(标题栏按钮)首屏列表的最后一行。`windowSwitcher.ts` 新增 `pickerPageUrl(basePath)`(`<basePath>windows`,Hub 前缀下同样成立)与 `goWindowsPicker()`——与 `enterInstance` 同一干净退出(共享 `leaveSession`:先 `detach` 告知 PC、`shutdown` 停死套接字,再整页加载)。K4 不变:这是**导航**不是 spawn,远程工作台自身仍无打开文件/文件夹/新窗口的入口,唯一 spawn 面仍是选择页落地页。验收:`tests/remote.test.ts`(pickerPageUrl 两种 basePath;切换器末行即选择页、点按走干净退出)、`tests/remoteResponsive.test.ts`(抽屉行存在、可用、点按执行命令并关抽屉)。
+>
+> **2026-10-16 落地记录(远程两处修正——所有者指示:"远程时候,左下角的文件打开按钮不要"、"手机端文件管理上长按没有弹出菜单,或者没有打开的菜单的入口")**:**K4 的最后一处**——活动栏最底部的 Open Folder 按钮(`layout.ts` 的 `buildActivityBar`,spacer 之下,远程桌面形态与平板横屏的左下角)按命令配置构建时就不挂载:远程组合根在 workbench 构造前已切到 remote profile,`activeProfile() !== 'remote'` 才挂;欢迎页(workbench.ts 的 `renderWelcome`)同步收紧——Start 不再列 Open Folder / Clone / Close Folder,Recent 整节不列(远程窗口跟随 PC 的文件夹,`open_folder` 本就在 §3.3 的拒绝表里),Keyboard Shortcuts 列按 `commands.visible` 过滤(desktop-only 命令不再占行)。**§6.1 行菜单**——长按不再直接进入多选,而是弹出该行的动作面板(以文件名标题):打开/进入、传输行(文件:下载;文件夹:打包下载 + 上传到此)、重命名、删除(单行二次确认)、复制路径、多选(进入多选并选中该行);多选进行中的长按仍是切换选中,不在复选框上叠菜单。入口三份:长按(450 ms,gestures.ts 同配方)、每行尾部的 ⋮ 按钮(44 px 目标,始终可见——不依赖手势可发现性)、`contextmenu`(Android 长按的 ~500 ms 追随事件与鼠标右键;已开面板不重开,避免重放滑入动画)。长按后的释放 click 被吞掉——此前菜单/多选刚出现就被这次 click 立即反转,读起来正是"长按没反应"。`fileList.ts` 持手势与 ⋮,`filesPage.ts` 经 `menu(entry)` 钩子组装动作(与多选栏同一套动词),`multiSelect.rename` 对外暴露给菜单复用。验收:`tests/remoteFiles.test.ts` 行菜单四例(长按弹菜单且吞点击、⋮ 打开并执行、contextmenu 打开且不重开、多选中长按仍是切换)+ 多选三例改走菜单的 多选 行;`tests/remoteWorkbenchSync.test.ts` 新例(remote profile 构造的 workbench 活动栏无 open 项、欢迎页无桌面专属链接,桌面基线仍在)。
+>
+> **2026-10-16 落地记录(编辑器空状态页重设计——所有者指示:"远程这个页面要重新设计,要更好用,更专业")**:§6.2 的编辑器空状态页(`editorSwitcher.ts` 的 `createEditorEmptyState`)从"图标 + 一句话 + 三个竖排按钮"重做为工作区的小仪表盘,设计语言对齐 §6.1/§6.4 的触控页(圆角卡、磁贴、大写节标、双行行):顶部主题色圆角图标砖 + "没有打开的文件" + 工作区名;**仓库卡**(有仓库时)——分支名、↓n/↑n(各自成对、对间留隙)、待变更徽章(干净树为 accent 色的"没有变更"),一点直达源代码管理页,状态读 `workbench.scm`(isRepo/branch/ahead/behind/changes),随状态栏/活动栏的 DOM 变化经既有观察器刷新;**三个入口磁贴**(浏览文件为主题色、转到文件、查看变更)替换原竖排按钮;**"已打开的编辑器"列表**(原有,别处分组的标签一触可达)与**"本机最近打开"列表**(新)——本设备 MRU 存 localStorage `remote.editor.recent`(Hub 下按 PC 前缀隔离,与文件页排序键同法),`sync` 在任何页面上记录当前活动文件标签(去重、上限 15),展示时按 `withinRoots` 过滤到仍在打开文件夹内的路径(最多 5 行,双行行 + 文件图标着色),点行经 `workbench.editors.openFile` 打开;原 `remote.editor.emptyHint` 文案随一句话提示一并删除。验收:`tests/remoteResponsive.test.ts` 新 describe 两例(仪表盘形态与磁贴动作;MRU 记录/去重/关尽后页面应答)、`tests/remoteFiles.test.ts` 新 describe 两例(真 workbench 下仓库卡分支与变更数并一点到 SCM 页;最近列表只列仍在打开文件夹内的文件)。
+
 > **未开始**:L2 的场景矩阵与随机序列(§18.3–§18.6)——§18.1 与 §18.7 的地基已落(见上)。
 >
 >
@@ -163,6 +171,7 @@
 | `remote.download` 下载、`remote.downloadZip` 打包下载 | ✗ | ✓ | 可以多选 |
 | `remote.transfers` 传输中心 | ✗ | ✓ | §6.7 |
 | `remote.switchWindow` 切换窗口 | ✗ | ✓ | 只切换 PC 上已经打开的窗口，不新建 |
+| `remote.windowsPage` 窗口选择页 | ✗ | ✓ | 整页加载守护进程的 `/windows`（抽屉行与切换器末行同源）；导航不是 spawn（K4——spawn 仍只在那页） |
 | `remote.pcWindow.hide` 在 PC 上关闭窗口、`remote.pcWindow.show` 在 PC 上打开窗口 | ✗ | ✓ | 远程会话不断开（§17） |
 | `remote.screen` 查看 PC 屏幕 | ✗ | ✓ | 降级为"更多"里的一项（§6.8） |
 | `remote.dataSaver` 省流模式 | ✗ | ✓ | |
@@ -339,7 +348,8 @@ export function classify(w: number, h: number, touch: boolean): DeviceClass {
 | 点按文件夹 | 进入该目录，路径栏随之更新，进入动画 120 ms |
 | 点按文件 | 在编辑器页打开，默认只读，带解锁按钮（沿用 `editLock.ts`）。二进制或超大文件进入"打开方式"面板：十六进制视图、大文件查看器、下载 |
 | 返回 | 回到上一级目录，并恢复该目录离开时的滚动位置（本端记忆，不同步） |
-| 长按任意行 | 进入多选，该行被选中，同时震动 10 ms（只有 Android 支持 `navigator.vibrate`） |
+| 长按任意行 | 弹出该行的动作面板（以文件名为标题）：打开/进入、下载（文件夹打包下载、上传到此）、重命名、删除、复制路径、多选（2026-10-16 修订——所有者指示"长按要弹出菜单"；多选经菜单进入，进入时该行选中并震动 10 ms，只有 Android 支持 `navigator.vibrate`）。多选进行中的长按仍是切换该行 |
+| 行尾的 ⋮ | 同一动作面板的另一入口（44 px 目标，始终可见）；`contextmenu`（Android 长按的追随事件、鼠标右键）也打开它 |
 | 多选模式 | 每行左侧出现复选框；App 栏显示"已选 3 项"、全选和取消；底部操作栏提供下载、删除、重命名（单选时可用）、复制路径、更多（移动到、复制到）。下载多项时自动打包成 zip |
 | 下拉 | 刷新当前目录 |
 | 悬浮按钮 ＋ | 打开动作面板：上传文件、上传文件夹（按能力显示）、新建文件、新建文件夹 |
@@ -358,6 +368,7 @@ export function classify(w: number, h: number, touch: boolean): DeviceClass {
 - **手机**：默认自动换行，字号 14 px，可以双指缩放，缩放值按设备记住。App 栏显示文件名、所在目录和解锁按钮（✎）。溢出菜单：查找、转到行、下载此文件、复制路径、在 Git Graph 中查看历史。
 - **辅助键行**（软键盘弹起时出现，沿用 `editorAccessory.ts`）：Tab、← → ↑ ↓、撤销、重做、注释、查找、保存。
 - **打开的文件列表**：点按底部导航的"编辑器"打开面板（沿用 `editorSwitcher.ts`），每行左滑可以关闭。
+- **空状态页**（2026-10-16 重设计，所有者指示"要更好用,更专业"）：工作区的小仪表盘——图标砖与工作区名、仓库卡（分支 + ↓n/↑n + 待变更数，一点到更改页）、三个入口磁贴（浏览文件 / 转到文件 / 查看变更）、"已打开的编辑器"与"本机最近打开"两个列表（最近为本设备 MRU，只列仍在打开文件夹内的文件；见顶部落地记录）。
 - **大文件**：沿用 `openThreshold.ts` 的窗口化编辑器。
 - **保存冲突**：见 §7.3。
 

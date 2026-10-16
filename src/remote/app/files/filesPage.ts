@@ -9,17 +9,17 @@
 // The git letters ride the same status feed the explorer rides (the SCM view's onStatus,
 // chained here — one callback, wrapped) and the file opens go through the same
 // workbench.openFile the explorer's rows reach.
-import { el, icon, notify, relativeTo } from '../../../platform/ui';
-import { t } from '../../../platform/i18n';
-import { createFile, createFolder, type DirEntryInfo } from '../../../platform/ipc/fs';
+import { el, icon, notify, relativeTo, confirmDialog, type MenuEntry } from '../../../platform/ui';
+import { t, tf } from '../../../platform/i18n';
+import { createFile, createFolder, deletePath, type DirEntryInfo } from '../../../platform/ipc/fs';
 import { currentWorkbench, type FsChange } from '../../../workbench';
-import { uploadInto } from '../../../features/explorer';
+import { uploadInto, transferMenuEntries } from '../../../features/explorer';
 import { withinRoots } from '../../pathGate';
 import { openSheet, showActionSheet, closeActionSheet } from '../../actionSheet';
-import type { MenuEntry } from '../../../platform/ui';
 import { createFileList, SORT_KEYS, defaultSort, type FilesSort } from './fileList';
 import { createPathBar } from './pathBar';
 import { createMultiSelect } from './multiSelect';
+import { openBranchSheet } from '../scm/branchSheet';
 
 const SORT_STORE = 'remote.files.sort';
 
@@ -51,12 +51,71 @@ export function installFilesPage(): void {
 		previous?.(next);
 		status = next;
 		list.render();
+		// setRepo crosses here too (its empty map) — a closed folder clears the chip.
+		updateBranchChip();
+	};
+
+	// The branch chip (the owner's 2026-10-16 direction: 手机端文件管理页面没有切换分支的
+	// 按钮): the repository's own state off the SCM view, re-read whenever a refresh or a
+	// setRepo crossed the status feed, and whenever the head moved.
+	const branchChip = el('button', 'ggs-files-branch', [icon('git-branch'), el('span', 'name', [])]);
+	branchChip.type = 'button';
+	branchChip.title = t('remote.branch.switch');
+	branchChip.setAttribute('aria-label', t('remote.branch.switch'));
+	branchChip.addEventListener('click', () => void openBranchSheet());
+	const updateBranchChip = (): void => {
+		const name = workbench.scm.isRepo ? workbench.scm.branch ?? '' : '';
+		branchChip.querySelector('.name')!.textContent = name;
+		branchChip.hidden = name === '';
+	};
+	const previousHead = workbench.scm.onHead;
+	workbench.scm.onHead = (head) => {
+		previousHead?.(head);
+		updateBranchChip();
 	};
 
 	const page = el('div', 'ggs-files-page');
 	const scroll = el('div', 'ggs-files-scroll');
 	let dir = workspaceRoot();
 	let filterText = '';
+
+	/** One row's menu (§6.1's long-press sheet, the owner's 2026-10-16 direction): open /
+	 *  enter, the transfers, rename, delete, copy path, and the 多选 entry — the same
+	 *  verbs the multi-select bars carry, one row at a time. */
+	const rowMenu = (entry: DirEntryInfo): MenuEntry[] => [
+		{
+			label: t(entry.isDir ? 'remote.files.enter' : 'remote.files.open'),
+			run: () => (entry.isDir ? void show(entry.path) : void workbench.editors.openFile(entry.path))
+		},
+		...transferMenuEntries(entry.path, entry.isDir),
+		'separator',
+		{ label: t('remote.files.rename'), run: () => select.rename(entry.path) },
+		{ label: t('remote.files.delete'), run: () => void deleteOne(entry) },
+		{ label: t('remote.files.copyPath'), run: () => void copyPath(entry.path) },
+		'separator',
+		{ label: t('remote.files.multiSelect'), run: () => select.longPress(entry.path) }
+	];
+
+	/** §12.3: a destructive act confirms; one row deletes without touching a selection. */
+	async function deleteOne(entry: DirEntryInfo): Promise<void> {
+		const ok = await confirmDialog(tf('remote.files.deleteConfirm', 1), t('remote.files.delete'));
+		if (!ok) return;
+		try {
+			await deletePath(entry.path, true);
+		} catch (error) {
+			notify('error', String(error));
+		}
+		await list.refresh();
+	}
+
+	async function copyPath(path: string): Promise<void> {
+		try {
+			await navigator.clipboard.writeText(path);
+			notify('info', t('remote.files.pathCopied'));
+		} catch {
+			notify('error', t('remote.files.copyFailed'));
+		}
+	}
 
 	const list = createFileList({
 		enter: (next) => void show(next),
@@ -72,7 +131,8 @@ export function installFilesPage(): void {
 			longPress: (path) => select.longPress(path),
 			toggle: (path) => select.toggle(path)
 		},
-		filter: () => filterText
+		filter: () => filterText,
+		menu: rowMenu
 	});
 
 	const select = createMultiSelect({
@@ -101,7 +161,8 @@ export function installFilesPage(): void {
 	sortButton.type = 'button';
 	sortButton.title = t('remote.files.sort.title');
 	sortButton.addEventListener('click', () => sortSheet());
-	const toolbar = el('div', 'ggs-files-toolbar', [filter, sortButton]);
+	const toolbar = el('div', 'ggs-files-toolbar', [branchChip, filter, sortButton]);
+	updateBranchChip();
 
 	// The floating action button (§6.1): upload files, upload folder (by capability,
 	// §10.2 item 11 — iOS hides the row), new file, new folder.

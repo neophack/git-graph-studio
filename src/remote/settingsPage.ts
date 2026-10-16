@@ -21,6 +21,7 @@ import { assocListDefaults } from '../platform/ipc/assoc';
 import { closeActionSheet, openSheet, showActionSheet, sheetOpen } from './actionSheet';
 import { pushBack } from './backStack';
 import { setDataSaver } from './dataSaver';
+import { deviceOverride, setDeviceOverride, type DeviceOverride } from './responsive';
 import { codicon, toggleSwitch } from './widgets';
 
 /** The page's categories: the phone's own Remote section, the registry's four, extensions. */
@@ -286,6 +287,39 @@ function dataSaverRow(): HTMLButtonElement {
 		() => document.documentElement.hasAttribute('data-data-saver'), (next) => setDataSaver(next));
 }
 
+/** The layout override's vocabulary (§4.2): auto is the algorithm's own answer; the other
+ *  three force a form factor. */
+const LAYOUT_CHOICES: { value: DeviceOverride | 'auto'; label: () => string }[] = [
+	{ value: 'auto', label: () => t('remote.layout.auto') },
+	{ value: 'phone', label: () => t('remote.layout.phone') },
+	{ value: 'tablet', label: () => t('remote.layout.tablet') },
+	{ value: 'desktop', label: () => t('remote.layout.desktop') }
+];
+
+/** The layout override (§4.2's 设备级设置 "布局"): this browser's own choice — the same
+ *  setting the palette's `remote.layoutMode` picks, reached here from Settings. */
+function layoutRow(): HTMLButtonElement {
+	const current: DeviceOverride | 'auto' = deviceOverride() ?? 'auto';
+	const currentChoice = LAYOUT_CHOICES.find((choice) => choice.value === current) ?? LAYOUT_CHOICES[0]!;
+	return settingRow({
+		label: t('remote.layout'),
+		description: t('setting.remote.layout'),
+		modified: current !== 'auto',
+		control: valueControl(currentChoice.label()),
+		run: () => showActionSheet(
+			LAYOUT_CHOICES.map((choice) => ({
+				label: choice.label(),
+				checked: choice.value === current,
+				run: () => {
+					setDeviceOverride(choice.value === 'auto' ? null : choice.value);
+					rerender();
+				}
+			})),
+			t('remote.layout')
+		)
+	});
+}
+
 /* ---------- Levels ---------- */
 
 function categoryLabel(id: CategoryId): string {
@@ -328,6 +362,10 @@ function fillRoot(level: HTMLElement): void {
 		level.appendChild(sectionHeading(categoryLabel(id)));
 		for (const def of defs) level.appendChild(settingRowFor(def));
 	}
+	if (`${t('remote.layout')} ${t('setting.remote.layout')}`.toLowerCase().includes(q)) {
+		any = true;
+		level.append(sectionHeading(categoryLabel('remote')), layoutRow());
+	}
 	if (`${t('remote.drawer.dataSaver')} ${t('setting.remote.dataSaver')}`.toLowerCase().includes(q)) {
 		any = true;
 		level.append(sectionHeading(categoryLabel('remote')), dataSaverRow());
@@ -343,7 +381,7 @@ function fillRoot(level: HTMLElement): void {
 
 function fillCategory(level: HTMLElement, id: CategoryId): void {
 	if (id === 'remote') {
-		level.appendChild(dataSaverRow());
+		level.append(layoutRow(), dataSaverRow());
 		return;
 	}
 	if (id === 'extensions') {

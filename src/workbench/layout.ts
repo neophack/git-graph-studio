@@ -38,7 +38,12 @@ export const layoutMethods: ThisType<Workbench> = {
 		this.activitySpacer = el('div', 'activity-spacer');
 		this.activityBar.appendChild(this.activitySpacer);
 		add('terminal', icon('terminal'), 'Terminal (Ctrl+`)', () => this.panel.toggle('terminal'));
-		add('open', icon('folder-opened'), 'Open Folder... (Ctrl+O)', () => void this.pickFolder());
+		// The remote shell has no machine-level opens (K4, docs/remote-client-plan.md §3.2):
+		// the wire refuses `open_folder` anyway, so the bar's bottom button would only ever
+		// answer with an error. The desktop app keeps it.
+		if (commands.activeProfile() !== 'remote') {
+			add('open', icon('folder-opened'), 'Open Folder... (Ctrl+O)', () => void this.pickFolder());
+		}
 	},
 
 	applyLayout(): void {

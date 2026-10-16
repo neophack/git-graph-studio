@@ -13,6 +13,7 @@ import { createFileList, relativeTime, shortDateTime, defaultSort, type FileList
 import { createPathBar } from '../src/remote/app/files/pathBar';
 import { createMultiSelect } from '../src/remote/app/files/multiSelect';
 import { installFilesPage } from '../src/remote/app/files/filesPage';
+import { createEditorEmptyState } from '../src/remote/editorSwitcher';
 import { bootWorkbench, currentWorkbench } from '../src/workbench';
 
 interface Entry {
@@ -61,6 +62,7 @@ function mountList(dirs: Record<string, Entry[]>, letters: Record<string, string
 	serve(dirs);
 	const entered: string[] = [];
 	const opened: string[] = [];
+	const menus: string[] = [];
 	const scroll = document.createElement('div');
 	scroll.className = 'ggs-files-scroll';
 	const list = createFileList({
@@ -68,11 +70,18 @@ function mountList(dirs: Record<string, Entry[]>, letters: Record<string, string
 		open: (path) => opened.push(path),
 		letter: (path) => letters[path] ?? null,
 		selection: selectionHook,
-		filter: () => ''
+		filter: () => '',
+		// The page's row menu, shaped as filesPage builds it — the 多选 row is the one the
+		// long-press tests tap to enter the selection mode.
+		menu: (entry) => [
+			{ label: `open:${entry.path}`, run: () => (entry.isDir ? entered.push(entry.path) : opened.push(entry.path)) },
+			{ label: 'Select', run: () => select?.longPress(entry.path) },
+			{ label: 'Copy Path', run: () => menus.push(entry.path) }
+		]
 	});
 	scroll.appendChild(list.root);
 	document.body.appendChild(scroll);
-	return { list, root: list.root, scroll, entered, opened };
+	return { list, root: list.root, scroll, entered, opened, menus };
 }
 
 const row = (root: HTMLElement, name: string) =>
@@ -86,6 +95,15 @@ async function longPress(node: HTMLElement): Promise<void> {
 	node.dispatchEvent(new MouseEvent('pointerdown', { clientX: 10, clientY: 10 }));
 	await new Promise((resolve) => setTimeout(resolve, 480));
 	node.dispatchEvent(new MouseEvent('pointerup', { clientX: 10, clientY: 10 }));
+}
+
+/** The gesture path into the selection mode (§6.1 as of the owner's 2026-10-16 direction):
+ * the long-press opens the row's menu, the menu's Select row starts the mode. */
+async function longPressSelect(node: HTMLElement): Promise<void> {
+	await longPress(node);
+	const sheet = document.querySelector('.ggs-action-sheet');
+	if (!sheet) throw new Error('the long-press opened no menu');
+	click([...sheet.querySelectorAll('button')].find((button) => button.textContent === 'Select')!);
 }
 
 /** The multi-select over a mounted list, with its bars. */
@@ -203,12 +221,67 @@ describe('the file list (§6.1)', () => {
 	});
 });
 
-describe('the multi-select (§6.1)', () => {
-	it('starts on a long-press, counts, and cancels', async () => {
+describe('the row menu (§6.1, the owner\'s 2026-10-16 direction: 长按要弹出菜单)', () => {
+	it('a long-press opens the row\'s menu, titled by the entry, and swallows the release\'s click', async () => {
+		const mounted = mountList({ 'C:/repo': [{ name: 'a.ts', isDir: false }, { name: 'b', isDir: true }] });
+		await mounted.list.show('C:/repo');
+		await longPress(row(mounted.root, 'a.ts'));
+		const sheet = document.querySelector('.ggs-action-sheet');
+		expect(sheet).not.toBeNull();
+		expect(sheet!.textContent).toContain('a.ts');
+		// The sheet's rows are the menu's actions, the 多选 entry among them.
+		expect([...sheet!.querySelectorAll('button')].map((button) => button.textContent)).toContain('Select');
+		// The touch release's trailing click lands on the row under the sheet — swallowed,
+		// the file does not open (the symptom the owner reported read as a dead long-press).
+		click(row(mounted.root, 'a.ts'));
+		expect(mounted.opened).toEqual([]);
+		expect(mounted.entered).toEqual([]);
+	});
+
+	it('the ⋮ button opens the same menu, and its rows run', async () => {
+		const mounted = mountList({ 'C:/repo': [{ name: 'a.ts', isDir: false }] });
+		await mounted.list.show('C:/repo');
+		click(row(mounted.root, 'a.ts').querySelector('.ggs-file-more')!);
+		const sheet = document.querySelector('.ggs-action-sheet');
+		expect(sheet).not.toBeNull();
+		// The tap on ⋮ is not the row's own tap: nothing opened beside the sheet.
+		expect(mounted.opened).toEqual([]);
+		click([...sheet!.querySelectorAll('button')].find((button) => button.textContent === 'Copy Path')!);
+		expect(mounted.menus).toEqual(['C:/repo/a.ts']);
+		expect(document.querySelector('.ggs-action-sheet')).toBeNull();
+	});
+
+	it('a contextmenu opens the menu; one already open is not re-opened', async () => {
+		const mounted = mountList({ 'C:/repo': [{ name: 'a.ts', isDir: false }] });
+		await mounted.list.show('C:/repo');
+		const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+		row(mounted.root, 'a.ts').dispatchEvent(event);
+		expect(event.defaultPrevented).toBe(true);
+		expect(document.querySelector('.ggs-action-sheet')).not.toBeNull();
+		// Android fires contextmenu ~500 ms into a long-press: the sheet the timer opened
+		// stays as it is (no restart of its slide-in).
+		const first = document.querySelector('.ggs-action-sheet');
+		row(mounted.root, 'a.ts').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+		expect(document.querySelector('.ggs-action-sheet')).toBe(first);
+	});
+
+	it('while a selection is on, a long-press toggles the row — no menu over the checkboxes', async () => {
 		const mounted = mountList({ 'C:/repo': [{ name: 'a.ts', isDir: false }, { name: 'b.ts', isDir: false }] });
 		await mounted.list.show('C:/repo');
 		const select = selectOver(mounted);
-		await longPress(row(mounted.root, 'a.ts'));
+		await longPressSelect(row(mounted.root, 'a.ts'));
+		await longPress(row(mounted.root, 'b.ts'));
+		expect(select.countBar.textContent).toContain('2');
+		expect(document.querySelector('.ggs-action-sheet')).toBeNull();
+	});
+});
+
+describe('the multi-select (§6.1)', () => {
+	it('starts from the menu\'s Select row, counts, and cancels', async () => {
+		const mounted = mountList({ 'C:/repo': [{ name: 'a.ts', isDir: false }, { name: 'b.ts', isDir: false }] });
+		await mounted.list.show('C:/repo');
+		const select = selectOver(mounted);
+		await longPressSelect(row(mounted.root, 'a.ts'));
 		expect(select.active()).toBe(true);
 		const first = row(mounted.root, 'a.ts');
 		expect(first.classList.contains('selectable')).toBe(true);
@@ -249,7 +322,7 @@ describe('the multi-select (§6.1)', () => {
 		await mounted.list.show('C:/repo');
 		const select = selectOver(mounted, (path) => path.endsWith('/b'));
 		const download = () => [...select.actionBar.querySelectorAll('button')].find((button) => button.textContent === 'Download')!;
-		await longPress(row(mounted.root, 'a.ts'));
+		await longPressSelect(row(mounted.root, 'a.ts'));
 		click(row(mounted.root, 'b'));
 		click(row(mounted.root, 'c.md'));
 		await click(download());
@@ -258,7 +331,7 @@ describe('the multi-select (§6.1)', () => {
 		expect(single).toEqual([]);
 		// One selection alone: the plain download of that file.
 		click([...select.countBar.querySelectorAll('button')].at(-1)!);
-		await longPress(row(mounted.root, 'a.ts'));
+		await longPressSelect(row(mounted.root, 'a.ts'));
 		await click(download());
 		await flush();
 		expect(single).toEqual(['C:/repo/a.ts']);
@@ -274,7 +347,7 @@ describe('the multi-select (§6.1)', () => {
 		const mounted = mountList({ 'C:/repo': [{ name: 'a.ts', isDir: false }, { name: 'b.ts', isDir: false }] });
 		await mounted.list.show('C:/repo');
 		const select = selectOver(mounted);
-		await longPress(row(mounted.root, 'a.ts'));
+		await longPressSelect(row(mounted.root, 'a.ts'));
 		click(row(mounted.root, 'b.ts'));
 		await click([...select.actionBar.querySelectorAll('button')].find((button) => button.textContent === 'Delete')!);
 		// §12.3's confirm: the dialog's own primary button agrees.
@@ -373,5 +446,70 @@ describe('the installed page follows the workspace root', () => {
 		await currentWorkbench!.applyRoots(['C:/other'], false, null);
 		await flush(8);
 		expect(pageRows()).toEqual(['b.md']);
+	});
+});
+
+describe('the editor empty page over a live workbench', () => {
+	/** The booted workbench with a repository behind it, the way a remote session lands on
+	 *  one: the branch and one pending change answered by the scripted backend, the device's
+	 *  recents seeded before the page mounts, and the page mounted into #editorPart exactly
+	 *  as parts.ts mounts it. */
+	async function bootWithRepo(): Promise<void> {
+		localStorage.clear();
+		workbenchShell();
+		document.documentElement.setAttribute('data-remote-shell', '');
+		document.documentElement.setAttribute('data-page-stack', '');
+		backend.reset();
+		backend.handlers = new DefaultingHandlers([
+			['boot_context', () => ({ file: null, actions: [], repo: 'C:/repo', roots: ['C:/repo'], workspaceFile: null })],
+			['open_folder', () => ({ root: 'C:/repo', isRepo: true })],
+			['repo_head', () => ({ branch: 'main', shortHash: 'abc', ahead: 0, behind: 0, upstream: null })],
+			['scm_status', () => [{ path: 'notes.txt', oldPath: null, staged: null, unstaged: 'modified', untracked: false, conflicted: false }]],
+			['repo_submodules', () => []],
+			['list_dir_page', () => ({ entries: [], total: 0, offset: 0, limit: 100 })],
+			['ext_list', () => []],
+			['backup_list', () => []],
+			['pty_create', () => 1]
+		] as [string, (args: Record<string, unknown>) => unknown][]);
+		localStorage.setItem('remote.editor.recent', JSON.stringify(['C:/repo/src/a.ts', 'C:/elsewhere/x.ts']));
+		await import('../src/features/editor'); // pre-warm the editor chunk, as the boot suites do
+		await bootWorkbench();
+		await flush(8);
+		document.getElementById('sidebar')!.hidden = true; // the Editor page
+		document.getElementById('editorPart')!.appendChild(createEditorEmptyState());
+		await flush(4);
+	}
+
+	afterEach(() => {
+		currentWorkbench?.dispose();
+		document.documentElement.removeAttribute('data-remote-shell');
+		document.documentElement.removeAttribute('data-page-stack');
+	});
+
+	it('carries the repository: the branch and the pending changes one tap from the Source Control page', { timeout: 30_000 }, async () => {
+		await bootWithRepo();
+		const empty = document.querySelector<HTMLElement>('.ggs-editor-empty')!;
+		expect(empty.hidden).toBe(false);
+		expect(empty.querySelector('.subtitle')!.textContent).toBe('repo');
+		const card = empty.querySelector<HTMLElement>('.ggs-empty-repo')!;
+		expect(card.hidden).toBe(false);
+		expect(card.querySelector('.name')!.textContent).toBe('main');
+		expect(card.querySelector('.chip')!.textContent).toBe('1 changes');
+		// One tap: the card opens the Source Control page.
+		card.click();
+		await flush(4);
+		expect(document.getElementById('sidebar')!.hidden).toBe(false);
+		expect(document.querySelector('#activitybar .activity-item.active')!.getAttribute('data-view')).toBe('scm');
+	});
+
+	it('offers this device\'s recents — only the files still inside an open folder', { timeout: 30_000 }, async () => {
+		await bootWithRepo();
+		const empty = document.querySelector<HTMLElement>('.ggs-editor-empty')!;
+		const recents = [...empty.querySelectorAll('.recent-list .ggs-editor-row')];
+		// The file inside the open folder is offered with its folder; the one from a folder
+		// that has since been closed is not.
+		expect(recents.map((row) => row.title)).toEqual(['C:/repo/src/a.ts']);
+		expect(recents[0]!.querySelector('.name')!.textContent).toBe('a.ts');
+		expect(recents[0]!.querySelector('.folder')!.textContent).toBe('src');
 	});
 });

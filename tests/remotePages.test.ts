@@ -67,6 +67,35 @@ describe('the swipe-revealed row actions (§6.3)', () => {
 		}
 	});
 
+	it('a closed strip never paints — the drag or the open positions it under its row first', async () => {
+		const { host, row } = rowInHost();
+		Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, value: 112 });
+		try {
+			swipeReveal(row, [{ icon: 'add', label: 'Stage', run: () => undefined }]);
+			const strip = host.querySelector<HTMLElement>('.ggs-swipe-actions')!;
+			// Built, but hidden: resting at the host's top-right it drew over whatever leads
+			// the list — the phone SCM page's groups open with the group head, whose own
+			// stage-all / discard-all pair the strip doubled (2026-10-16).
+			expect(strip.style.visibility).toBe('hidden');
+			// The first decisive horizontal move pins the strip under its row — visible.
+			pointer(row, 'pointerdown', 200);
+			pointer(row, 'pointermove', 180);
+			expect(strip.style.visibility).toBe('visible');
+			expect(strip.style.top).toBe(`${row.offsetTop}px`);
+			expect(strip.style.height).toBe(`${row.offsetHeight}px`);
+			// A short drag snaps shut: hidden again.
+			pointer(row, 'pointerup', 180);
+			expect(strip.style.visibility).toBe('hidden');
+			// A vertical drag is the scroller's, never the strip's.
+			pointer(row, 'pointerdown', 200);
+			pointer(row, 'pointermove', 200, 60);
+			expect(strip.style.visibility).toBe('hidden');
+			pointer(row, 'pointerup', 200, 60);
+		} finally {
+			delete (HTMLElement.prototype as { offsetWidth?: number }).offsetWidth;
+		}
+	});
+
 	it('closes on a short drag, and the drag does not also click the row', async () => {
 		const { row } = rowInHost();
 		const ran: string[] = [];

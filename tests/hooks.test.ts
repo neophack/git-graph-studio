@@ -52,4 +52,21 @@ describe('platform hooks', () => {
 		expect(hook('transferWire')).toBeTypeOf('function');
 		expect(hook('mirror')).not.toBeNull(); // the desktop set's bridge stands until replaced
 	});
+
+	it('the navigation policy\'s holdPage answers a callable release, and the remote set\'s hold gates the reveal (2026-10-16: 文件页面会被其他页面顶到最前)', () => {
+		installRemoteSessionHooks();
+		const navigation = hook('navigation');
+		// The phone's own reveal stands down while a hold is live — and only then.
+		const release = navigation.holdPage();
+		expect(typeof release).toBe('function');
+		// A held page: the reveal is a no-op (no sidebar or panel command runs), and the
+		// release is idempotent.
+		expect(() => {
+			navigation.revealEditorPage();
+			release();
+			release();
+		}).not.toThrow();
+		// Released, an off-phone shell still has nothing to reveal (no page-stack markers).
+		expect(() => navigation.revealEditorPage()).not.toThrow();
+	});
 });

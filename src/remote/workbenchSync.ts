@@ -33,6 +33,7 @@
 // while a session restore rebuilds this frontend's own tabs.
 
 import { emit as tauriEmit, invoke, listen as tauriListen } from '../platform/ipc/core';
+import { hook } from '../platform/hooks';
 import { inputId, type EditorInput } from '../features/editor';
 import type { EditorPlacement } from '../features/editor/types';
 import type { ActiveEditorInfo, EditorArea } from '../features/editor';
@@ -226,8 +227,25 @@ export function attachWorkbenchSync(
 	 *  fresh, so its first real activation crosses. */
 	const freshTabs = new Set<string>();
 	/** Remote operations being applied right now: their own activations must not cross as
-	 *  active switches (their message already said so). */
+	 *  active switches (their message already said so). The depth is PAIRED with a page
+	 *  hold: while a remote operation is landing, the tab it activates opens in the
+	 *  background — the phone's page keeps its place (each frontend's layout is its own,
+	 *  K7; the phone user's own opens run outside these walls and still navigate,
+	 *  2026-10-16: 文件页面会被其他页面顶到最前). */
 	let applying = 0;
+	let navHold: (() => void) | null = null;
+	const beginApply = (): void => {
+		applying++;
+		if (applying === 1) navHold = hook('navigation').holdPage();
+	};
+	const endApply = (): void => {
+		if (applying === 0) return;
+		applying--;
+		if (applying === 0 && navHold !== null) {
+			navHold();
+			navHold = null;
+		}
+	};
 	/** Paths a local open already announced, waiting for the activation their open implies —
 	 *  that activation is not a separate switch. The activation consumes the entry; any
 	 *  activation also clears the rest, whose implied activation it superseded (the editor's
@@ -247,6 +265,11 @@ export function attachWorkbenchSync(
 	 *  crosses). Without a presence the caller's own judgement stands. */
 	let live = options.startImmediately !== false;
 	let quiet = false;
+	/** The session restore's own page hold: the tabs it rebuilds are housekeeping, not the
+	 *  user's acts — its active-tab activation must not drag a phone off the page it is on
+	 *  a second after boot. Taken by `localOnly(true)`, released by `localOnly(false)` and
+	 *  `detach()`. */
+	let restoreHold: (() => void) | null = null;
 	let awaitingSnapshot = false;
 	let catchUpTimer: ReturnType<typeof setTimeout> | null = null;
 	let detachListener: (() => void) | null = null;
@@ -271,12 +294,12 @@ export function attachWorkbenchSync(
 	 *  the poll wins that race), and a cap bounds the worst case. */
 	const holdUntilClosed = (stillOpen: () => boolean): void => {
 		if (!stillOpen()) return;
-		applying++;
+		beginApply();
 		let released = false;
 		const release = (): void => {
 			if (released) return;
 			released = true;
-			applying--;
+			endApply();
 			clearInterval(poll);
 			clearTimeout(cap);
 			window.removeEventListener('pointerdown', onGesture, true);
@@ -301,7 +324,7 @@ export function attachWorkbenchSync(
 	 *  guard outlives the call itself, and an active tab's close holds it until the tab is
 	 *  really gone. */
 	const closeNow = async (key: string): Promise<void> => {
-		applying++;
+		beginApply();
 		try {
 			const wasActive = activeKey !== null && activeKey.startsWith('file:') && keyOf(activeKey.slice(5)) === key;
 			if (!editors.closeFilePath(key)) return;
@@ -309,18 +332,18 @@ export function attachWorkbenchSync(
 			await new Promise((resolve) => setTimeout(resolve, 0));
 			if (wasActive) holdUntilClosed(() => landedFile(key));
 		} finally {
-			applying--;
+			endApply();
 		}
 	};
 	const closeTabNow = async (id: string): Promise<void> => {
-		applying++;
+		beginApply();
 		try {
 			const wasActive = activeKey === `tab:${id}`;
 			if (!editors.closeById(id)) return;
 			await new Promise((resolve) => setTimeout(resolve, 0));
 			if (wasActive) holdUntilClosed(() => landedTab(id));
 		} finally {
-			applying--;
+			endApply();
 		}
 	};
 
@@ -340,7 +363,7 @@ export function attachWorkbenchSync(
 		}
 		if (own.remove !== undefined) announced.delete(own.remove);
 		if (own.removeTab !== undefined) announcedTabs.delete(own.removeTab);
-		applying++;
+		beginApply();
 		let failed = false;
 		try {
 			await step();
@@ -349,7 +372,7 @@ export function attachWorkbenchSync(
 		} catch {
 			failed = true;
 		} finally {
-			applying--;
+			endApply();
 			if (own.add !== undefined) {
 				applyingOpens.delete(own.add);
 				if (failed) {
@@ -698,7 +721,12 @@ export function attachWorkbenchSync(
 		},
 		localOnly(local: boolean): void {
 			quiet = local;
-			if (local) return;
+			if (local) {
+				if (restoreHold === null) restoreHold = hook('navigation').holdPage();
+				return;
+			}
+			restoreHold?.();
+			restoreHold = null;
 			// Leaving local-only absorbs whatever changed: this frontend's own restored tabs
 			// are its baseline, nothing to announce and nothing to close on the others.
 			announced = new Map(editors.openFilePaths().map((path) => [keyOf(path), path]));
@@ -717,6 +745,13 @@ export function attachWorkbenchSync(
 			detachListener?.();
 			detachListener = null;
 			live = false;
+			restoreHold?.();
+			restoreHold = null;
+			if (navHold !== null) {
+				navHold();
+				navHold = null;
+			}
+			applying = 0;
 			editors.openFile = rawOpenFile;
 			editors.onTabsChange = prevOnTabsChange;
 			editors.onActiveChange = prevOnActiveChange;

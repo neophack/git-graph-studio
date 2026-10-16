@@ -637,7 +637,10 @@ export const openMethods: ThisType<EditorGroup> = {
 			stats
 		]));
 		editor.languageName = 'Plain Text';
-		const host = el('div', 'editorState.cm-merge-view');
+		// Space-separated: shell.css bounds the diff host through the `.cm-merge-view`
+		// class (flex sizing and the merge view's height bound) — a dotted single class
+		// would leave the diff growing unbounded over the status bar.
+		const host = el('div', 'editorState cm-merge-view');
 		editor.pane.appendChild(host);
 		// The text editor and the merge views are async chunks, loaded with the first diff.
 		const [{ EditorView, EditorState, baseExtensions, keymap, languageSlot, loadLanguage }, { Chunk, MergeView, goToNextChunk, goToPreviousChunk, unifiedMergeView }] = await Promise.all([textEditor(), loadMerge()]);

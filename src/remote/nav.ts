@@ -35,15 +35,48 @@ export function panelPageOpen(): boolean {
 	return !!panel && !panel.hidden;
 }
 
+/** The page holds (the navigation policy's `holdPage`): while one is live, an editor
+ *  activation lands in the background — the tab opens, the page showing keeps its place.
+ *  A remote-originated operation (the workbench sync applying the PC's tab switch), a
+ *  session restore, a panel another frontend created — none of them is this user's act,
+ *  and none of them may close the page under them (2026-10-16, the owner's direction:
+ *  文件页面会被其他页面顶到最前). */
+let pageHolds = 0;
+
+/** Take one hold; the returned function releases it (idempotent). */
+export function holdPhonePage(): () => void {
+	pageHolds++;
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		pageHolds--;
+	};
+}
+
+/** Whether a hold keeps the current page in place. */
+export function pageHeld(): boolean {
+	return pageHolds > 0;
+}
+
 /** Close the full-screen side view if the phone shell is showing one. */
 export function dismissFullScreenSideView(): void {
 	if (fullScreenSideViewOpen()) void commands.execute('workbench.toggleSidebar');
 }
 
-/** Bring the editor page forward: close the side view and the panel page above it. With the
- *  side view closed, the panel's toggle is a plain hide (panel.ts reveals only a covered
- *  panel). A no-op off the phone. */
-export function revealEditorPage(): void {
+/** Bring the editor page forward NOW — the user's own navigation (goTo, the open editors
+ *  sheet): the page holds never gate it. */
+export function revealEditorPageNow(): void {
 	dismissFullScreenSideView();
 	if (panelPageOpen()) void commands.execute('workbench.togglePanel');
+}
+
+/** Bring the editor page forward because an EDITOR ACTIVATED (the workbench's hook): with
+ *  the side view closed, the panel's toggle is a plain hide (panel.ts reveals only a
+ *  covered panel). A no-op off the phone — and while a page hold is live, a no-op on it:
+ *  the activation that asked is not this user's own act. The user's own navigation goes
+ *  through `revealEditorPageNow`, which no hold gates. */
+export function revealEditorPage(): void {
+	if (pageHolds > 0) return;
+	revealEditorPageNow();
 }

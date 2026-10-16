@@ -22,7 +22,7 @@ import { commands } from '../src/platform/commands';
 import { attachWorkbenchSync, WORKBENCH_SYNC_EVENT, type SyncedEditorArea, type SyncPresence, type SyncedWorkbench, type WorkbenchSyncMessage } from '../src/remote/workbenchSync';
 import { currentPresence } from '../src/remote/presence';
 import { setRemoteEnv } from '../src/remote/session';
-import { provideHook } from '../src/platform/hooks';
+import { provideHook, hook } from '../src/platform/hooks';
 import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
 
 // The remote session's hooks, as boot.ts installs them before the workbench loads: the
@@ -1026,6 +1026,63 @@ describe('a real editor area under the sync', () => {
 		container.remove();
 	});
 
+	it('a remote-applied activation never pulls the phone page — the hold wraps the apply (2026-10-16: 文件页面会被其他页面顶到最前)', async () => {
+		// The navigation policy, instrumented the way nav.ts gates its own reveal: while a
+		// hold is live the page pull is a no-op. Every activation below runs the hook.
+		const original = hook('navigation');
+		let held = 0;
+		let reveals = 0;
+		provideHook('navigation', {
+			...original,
+			revealEditorPage: (): void => {
+				if (held === 0) reveals++;
+			},
+			holdPage: (): (() => void) => {
+				held++;
+				let done = false;
+				return () => {
+					if (!done) {
+						done = true;
+						held--;
+					}
+				};
+			}
+		});
+		try {
+			const container = document.createElement('div');
+			document.body.appendChild(container);
+			const area = new EditorArea(container);
+			const workbench: SyncedWorkbench = { editors: area, openFolders: () => ['C:\\repo'] };
+			const channel = bus();
+			const attached = attachWorkbenchSync(workbench, channel.deps, 'main');
+			const activeOf = (): string | null => {
+				const input = area.activeInput;
+				return input?.kind === 'file' ? input.path ?? null : null;
+			};
+			// A remote open activates a real tab — and never pulls the page; the hold
+			// releases with the apply.
+			channel.deps.send({ by: 'remote/1', k: 'open', path: NOTES });
+			await until(() => activeOf() === NOTES);
+			expect(reveals).toBe(0);
+			expect(held).toBe(0);
+			// The session-restore window holds too: a tab opened through the group (the
+			// restore's own path, never the facade) activates without pulling.
+			attached.localOnly(true);
+			expect(held).toBe(1);
+			await area.groupAt(0).openFile(README);
+			await until(() => activeOf() === README);
+			expect(reveals).toBe(0);
+			attached.localOnly(false);
+			expect(held).toBe(0);
+			// The user's own open — the facade, no hold — still pulls the page.
+			await area.openFile(README);
+			await until(() => reveals === 1);
+			container.remove();
+		} finally {
+			provideHook('navigation', original);
+		}
+	});
+
 	it('closes an extension page tab on the other side, its id the key', async () => {
 		const containerA = document.createElement('div');
 		const containerB = document.createElement('div');
@@ -1364,6 +1421,44 @@ describe('the wired workbench', () => {
 		}
 	});
 
+
+	it('a remote session carries no machine-level opens in its activity bar or welcome page (K4)', async () => {
+		// Desktop baseline: the activity bar's bottom Open Folder button and the welcome
+		// page's Start links exist (the bar is built at construction — the profile the
+		// composition root set beforehand decides, §3.2).
+		expect(document.querySelector('#activitybar .activity-item[data-view="open"]')).not.toBeNull();
+		const desktopHost = document.createElement('div');
+		document.body.appendChild(desktopHost);
+		workbench.renderWelcome(desktopHost);
+		expect([...desktopHost.querySelectorAll('.link')].map((a) => a.textContent)).toContain('Open Folder...');
+		// The remote composition root switches the profile BEFORE the workbench constructs:
+		// the bottom-left button of every remote desktop form never mounts (the owner's
+		// 2026-10-16 direction: 远程时候左下角的文件打开按钮不要), and the welcome page
+		// names no command the wire would refuse. The skeleton lives across tests, and
+		// buildActivityBar appends into it: cleared here so the remote build's own set is
+		// what the DOM holds.
+		workbench.dispose();
+		document.getElementById('activitybar')!.replaceChildren();
+		commands.setActiveProfile('remote');
+		try {
+			const remoteShell = new Workbench();
+			await remoteShell.boot();
+			await flush(4);
+			expect(document.querySelector('#activitybar .activity-item[data-view="open"]')).toBeNull();
+			expect([...document.querySelectorAll('#activitybar .activity-item')].map((item) => (item as HTMLElement).dataset.view)).toContain('explorer');
+			const remoteHost = document.createElement('div');
+			document.body.appendChild(remoteHost);
+			remoteShell.renderWelcome(remoteHost);
+			const links = [...remoteHost.querySelectorAll('.link')].map((a) => a.textContent);
+			expect(links).not.toContain('Open Folder...');
+			expect(links).not.toContain('Clone Git Repository...');
+			expect(links).not.toContain('Close Folder');
+			expect(remoteHost.querySelector('.welcome-inner')!.textContent).not.toContain('Recent');
+			remoteShell.dispose();
+		} finally {
+			commands.setActiveProfile('desktop');
+		}
+	});
 
 	it('stops answering once disposed', async () => {
 		workbench.dispose();

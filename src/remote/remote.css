@@ -176,26 +176,79 @@
 :root.remote-shell[data-page-stack] .cm-sticky-scroll { display: none !important; }
 
 .ggs-editor-empty[hidden] { display: none !important; }
+/* The empty Editor page as a small dashboard of the workspace (the owner's 2026-10-16
+   direction: 更好用,更专业): the mark and the workspace's name up top, the repository's
+   own state as a card, the three ways to something open as tiles, and the two lists below.
+   Top-aligned and scrolling — a list-bearing page, not a centered apology. */
 .ggs-editor-empty {
 	position: absolute; inset: 0; z-index: 30; overflow-y: auto; overscroll-behavior: contain;
-	display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
-	padding: 24px max(20px, env(safe-area-inset-right)) 24px max(20px, env(safe-area-inset-left));
+	-webkit-overflow-scrolling: touch;
+	padding: max(32px, 7vh) max(20px, env(safe-area-inset-right)) 32px max(20px, env(safe-area-inset-left));
 	background: var(--vscode-editor-background); text-align: center;
 }
-.ggs-editor-empty .hero { font-size: 48px; color: var(--ggs-muted); opacity: 0.6; margin-bottom: 4px; }
-.ggs-editor-empty .title { font-size: 17px; font-weight: 600; }
-.ggs-editor-empty .text { max-width: 300px; font-size: 13px; line-height: 19px; color: var(--ggs-muted); }
-.ggs-editor-empty .actions { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: 300px; margin-top: 12px; }
-.ggs-editor-empty .actions button {
-	display: flex; align-items: center; justify-content: center; gap: 8px; height: 44px; border-radius: 10px;
-	border: 1px solid var(--vscode-button-border, var(--ggs-sep));
-	background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, inherit);
-	font-size: 14px; font-weight: 500;
+.ggs-editor-empty .inner { margin: 0 auto; width: 100%; max-width: 400px; display: flex; flex-direction: column; align-items: stretch; }
+.ggs-editor-empty .mark {
+	align-self: center; width: 56px; height: 56px; border-radius: 16px;
+	display: grid; place-items: center;
+	background: var(--vscode-list-inactiveSelectionBackground, rgba(128, 128, 128, 0.15));
 }
-.ggs-editor-empty .actions button.primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: transparent; }
-.ggs-editor-empty .actions button:active { filter: brightness(1.15); }
-.ggs-editor-empty .open-list { width: 100%; max-width: 360px; margin-top: 20px; text-align: left; }
-.ggs-editor-empty .open-list .section { padding: 0 4px 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ggs-muted); }
+@supports (background: color-mix(in srgb, red 50%, transparent)) {
+	.ggs-editor-empty .mark { background: color-mix(in srgb, var(--ggs-accent, var(--vscode-focusBorder)) 15%, transparent); }
+}
+.ggs-editor-empty .mark .codicon { font-size: 27px; color: var(--ggs-accent, var(--vscode-focusBorder)); }
+.ggs-editor-empty .title { margin-top: 14px; font-size: 19px; font-weight: 600; }
+.ggs-editor-empty .subtitle { margin-top: 4px; font-size: 13px; color: var(--vscode-descriptionForeground, var(--ggs-muted)); }
+.ggs-editor-empty .subtitle:empty, .ggs-editor-empty .subtitle[hidden] { display: none; }
+/* The repository card: the branch, ahead/behind and the pending changes — one tap from
+   the Source Control page. */
+.ggs-editor-empty .ggs-empty-repo {
+	display: flex; align-items: center; gap: 8px; min-height: 52px; margin-top: 20px; padding: 0 12px;
+	border: 1px solid var(--vscode-input-border, var(--ggs-sep)); border-radius: 12px;
+	background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+	color: var(--vscode-foreground); text-align: left;
+}
+.ggs-editor-empty .ggs-empty-repo[hidden] { display: none; }
+.ggs-editor-empty .ggs-empty-repo > .codicon-git-branch { flex: none; font-size: 16px; color: var(--vscode-gitDecoration-untrackedResourceForeground, var(--ggs-accent, inherit)); }
+.ggs-editor-empty .ggs-empty-repo .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
+.ggs-editor-empty .ggs-empty-repo .meta { flex: none; display: inline-flex; align-items: center; gap: 2px; font-size: 12px; color: var(--vscode-descriptionForeground); }
+.ggs-editor-empty .ggs-empty-repo .meta:empty { display: none; }
+.ggs-editor-empty .ggs-empty-repo .meta .pair { display: inline-flex; align-items: center; gap: 2px; }
+.ggs-editor-empty .ggs-empty-repo .meta .pair + .pair { margin-left: 6px; }
+.ggs-editor-empty .ggs-empty-repo .meta .codicon { font-size: 13px; }
+.ggs-editor-empty .ggs-empty-repo .chip {
+	flex: none; min-width: 20px; height: 20px; padding: 0 7px; box-sizing: border-box; border-radius: 10px;
+	background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
+	font-size: 11px; font-weight: 600; line-height: 20px; white-space: nowrap;
+}
+.ggs-editor-empty .ggs-empty-repo .chip.clean { background: var(--ggs-accent, var(--vscode-focusBorder)); color: #ffffff; }
+.ggs-editor-empty .ggs-empty-repo .chev { flex: none; font-size: 16px; color: var(--vscode-descriptionForeground); }
+.ggs-editor-empty .ggs-empty-repo:active { background: var(--vscode-list-hoverBackground, var(--ggs-press)); }
+/* The three ways to something open, as tiles. */
+.ggs-editor-empty .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+.ggs-editor-empty .tiles button {
+	display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+	min-height: 88px; padding: 14px 6px 12px; border-radius: 12px;
+	border: 1px solid var(--vscode-button-border, var(--ggs-sep));
+	background: var(--vscode-button-secondaryBackground, transparent);
+	color: var(--vscode-button-secondaryForeground, inherit);
+	font-size: 13px; font-weight: 500;
+}
+.ggs-editor-empty .tiles button:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
+.ggs-editor-empty .tiles .glyph {
+	width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center;
+	background: var(--vscode-list-inactiveSelectionBackground, rgba(128, 128, 128, 0.15));
+}
+@supports (background: color-mix(in srgb, red 50%, transparent)) {
+	.ggs-editor-empty .tiles .glyph { background: color-mix(in srgb, var(--ggs-accent, var(--vscode-focusBorder)) 13%, transparent); }
+}
+.ggs-editor-empty .tiles .glyph .codicon { font-size: 19px; color: var(--ggs-accent, var(--vscode-focusBorder)); }
+.ggs-editor-empty .tiles button.primary .glyph { background: var(--vscode-button-background); }
+.ggs-editor-empty .tiles button.primary .glyph .codicon { color: var(--vscode-button-foreground); }
+.ggs-editor-empty .tiles .label { line-height: 16px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The lists: what is already open, and this device's recents. */
+.ggs-editor-empty .open-list, .ggs-editor-empty .recent-list { margin-top: 24px; text-align: left; }
+.ggs-editor-empty .open-list:empty, .ggs-editor-empty .recent-list:empty { display: none; }
+.ggs-editor-empty .section { padding: 0 4px 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ggs-muted); }
 
 /* The editor's lock toggle in the app bar (editLock.ts): a phone opens files read-only; the
    open lock is tinted so an editable file reads at a glance. */

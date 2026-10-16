@@ -9,15 +9,15 @@
 // watches it: what only a browser session can do — the window switcher, transfers, the
 // traffic readout, Data Saver — stays with the browser.
 import { commands } from '../platform/commands';
-import { formatBytes, notify } from '../platform/ui';
+import { formatBytes, notify, quickPick } from '../platform/ui';
 import { t, tf } from '../platform/i18n';
 import { installActionSheet } from './actionSheet';
 import { installLongPress, swipeBack } from './gestures';
 import { installHasFallbacks } from './hasFallbacks';
 import { backToEditor, currentPage, onWorkbenchChange } from './pages';
-import { onDeviceClassChange } from './responsive';
+import { deviceOverride, onDeviceClassChange, setDeviceOverride, type DeviceOverride } from './responsive';
 import { downloadTo, uploadInto } from '../features/explorer';
-import { openWindowSwitcher, watchLifecycle } from './windowSwitcher';
+import { goWindowsPicker, openWindowSwitcher, watchLifecycle } from './windowSwitcher';
 import { connectionLooksSlow, dataSaverPreferred, setDataSaver } from './dataSaver';
 import { remoteEnv } from './session';
 import { installPhoneSettingsEntry } from './settingsPage';
@@ -26,6 +26,7 @@ import { modeUrl } from './mirror/uiMode';
 import { pageStackOfClass } from './app/deviceClass';
 import { installLayoutHost } from './app/layouts/host';
 import { installFilesPage } from './app/files/filesPage';
+import { installScmPage } from './app/scm/scmPage';
 import { installTerminalFollow } from './terminalFollow';
 
 async function firstFolder(): Promise<string | null> {
@@ -43,6 +44,10 @@ function registerCommands(): void {
 	// desktop app's palette and menus never list the browser's commands.
 	const remoteOnly = { profiles: ['remote'] as const };
 	commands.register({ ...remoteOnly, id: 'remote.switchWindow', title: t('remote.windows'), category: 'Remote', run: () => openWindowSwitcher() });
+	// The picker page (the daemon's `/windows`): the button entry every form factor reaches —
+	// the drawer's row and the switcher's last item ride it. Navigation only; the workbench
+	// itself still never spawns (K4 — the picker page is the one spawn surface).
+	commands.register({ ...remoteOnly, id: 'remote.windowsPage', title: t('remote.windowsPage'), category: 'Remote', run: () => goWindowsPicker() });
 	// The PC window's own lifecycle, from the remote (§17): hide or show THIS window's
 	// desktop half — the session stays attached either way (K12), and "close on the PC"
 	// is exactly that, never the instance's exit.
@@ -103,6 +108,30 @@ function registerCommands(): void {
 		}
 	});
 	commands.register({ ...remoteOnly, id: 'remote.toggleDataSaver', title: t('setting.remote.dataSaver'), category: 'Remote', run: () => setDataSaver(!document.documentElement.hasAttribute('data-data-saver')) });
+	// The layout override (§4.2's 设备级设置 "布局"): the entry every form factor reaches —
+	// the phone Settings page serves the page-stack shells, the palette serves them all
+	// (a desktop-form browser cannot open the phone page, and tablet mode is its offer).
+	commands.register({
+		...remoteOnly,
+		id: 'remote.layoutMode',
+		title: t('remote.layout.pick'),
+		category: 'Remote',
+		run: async () => {
+			const current: DeviceOverride | 'auto' = deviceOverride() ?? 'auto';
+			const entries: { value: string; label: string }[] = [
+				{ value: 'auto', label: t('remote.layout.auto') },
+				{ value: 'phone', label: t('remote.layout.phone') },
+				{ value: 'tablet', label: t('remote.layout.tablet') },
+				{ value: 'desktop', label: t('remote.layout.desktop') }
+			];
+			const pick = await quickPick(
+				entries.map((entry) => ({ label: entry.label, description: entry.value === current ? t('remote.layout.current') : undefined, value: entry.value })),
+				t('remote.layout')
+			);
+			if (pick === null) return;
+			setDeviceOverride(pick === 'phone' || pick === 'tablet' || pick === 'desktop' ? pick : null);
+		}
+	});
 	commands.register({
 		...remoteOnly,
 		id: 'remote.traffic',
@@ -131,11 +160,13 @@ function addSwitcherButton(): void {
 	(center ?? titlebar).appendChild(button);
 }
 
-/** The one-time installs that outlive every layout: the files page (the page-stack
- *  shells' Files destination), the page-stack back gesture (the side bar element persists
- *  across arrangements), the settings entry's routing, and the page marks the CSS reads. */
+/** The one-time installs that outlive every layout: the files page and the phone Source
+ *  Control page (the page-stack shells' Files and Changes destinations), the page-stack
+ *  back gesture (the side bar element persists across arrangements), the settings entry's
+ *  routing, and the page marks the CSS reads. */
 function installOnce(): void {
 	installFilesPage();
+	installScmPage();
 	installTerminalFollow();
 	if (!swipeBackInstalled) {
 		const sidebar = document.getElementById('sidebar');

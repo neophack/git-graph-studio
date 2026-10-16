@@ -21,6 +21,13 @@ export interface NavigationPolicy {
 	fullScreenSideViewOpen(): boolean;
 	dismissFullScreenSideView(): void;
 	revealEditorPage(): void;
+	/** Hold the phone's page still (2026-10-16, the owner's direction: 文件页面会被其他
+	 *  页面顶到最前): while at least one hold is live, `revealEditorPage` is a no-op — the
+	 *  editor tab still opens, but the page showing keeps its place. What a hold wraps is
+	 *  never this user's own act: a remote-originated sync operation, a session restore, a
+	 *  panel another frontend created. The desktop default answers a no-op release — its
+	 *  `revealEditorPage` already is one. */
+	holdPage(): () => void;
 }
 
 /** Which this frontend is: the desktop window, or one remote session. */
@@ -105,10 +112,11 @@ interface HookMap {
 }
 
 const noop = (): void => undefined;
+const noopRelease = (): (() => void) => (): void => undefined;
 
 const defaults: HookMap = {
 	editLock: { defaultLocked: () => false, register: noop },
-	navigation: { phoneShell: () => false, fullScreenSideViewOpen: () => false, dismissFullScreenSideView: noop, revealEditorPage: noop },
+	navigation: { phoneShell: () => false, fullScreenSideViewOpen: () => false, dismissFullScreenSideView: noop, revealEditorPage: noop, holdPage: noopRelease },
 	openThreshold: (desktopBytes) => desktopBytes,
 	// The bare scheme, the shape every protocol handler answers — what a build without
 	// Tauri internals (jsdom, probes) always saw.

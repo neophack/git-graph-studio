@@ -16,7 +16,7 @@ import { startSummaryReporter } from './summary';
 import { panelStream, viewStream } from './mirror/protocol';
 import { parseStream, setWebviewFrameSource } from './mirror/webviewFrames';
 import { editLockDefault, registerEditLock } from './editLock';
-import { dismissFullScreenSideView, fullScreenSideViewOpen, phoneShell, revealEditorPage } from './nav';
+import { dismissFullScreenSideView, fullScreenSideViewOpen, holdPhonePage, phoneShell, revealEditorPage } from './nav';
 import { windowedEditThreshold } from './openThreshold';
 import { addressedHere, frontendClass, frontendId, remoteEnv } from './session';
 import { recentFolders } from '../platform/state';
@@ -77,7 +77,7 @@ export function installRemoteSessionHooks(): void {
 	provideHook('assetUrl', assetUrl);
 	provideHook('session', { remote: () => remoteEnv() !== undefined, frontendId, frontendClass, addressedHere });
 	provideHook('editLock', { defaultLocked: editLockDefault, register: registerEditLock });
-	provideHook('navigation', { phoneShell, fullScreenSideViewOpen, dismissFullScreenSideView, revealEditorPage });
+	provideHook('navigation', { phoneShell, fullScreenSideViewOpen, dismissFullScreenSideView, revealEditorPage, holdPage: holdPhonePage });
 	provideHook('openThreshold', windowedEditThreshold);
 	provideHook('webviewStreams', webviewStreamBridge());
 	provideHook('workbenchSync', installWorkbenchSync as unknown as () => ReturnType<typeof installWorkbenchSync>);

@@ -3,7 +3,9 @@
 // summary and state badge, switch (a full page load — the other window may run another
 // version), close (unsaved files confirmed first) and restart. No "new window": a browser
 // session switches between the windows the PC already opened — spawning is the picker's
-// sandboxed SPAWN, never a session's (K4). Fed by the transport's live WINDOWS pushes.
+// sandboxed SPAWN, never a session's (K4). The picker page (`/windows`) is reachable as the
+// switcher's own last row and the `remote.windowsPage` command — navigation there, not a
+// spawn from here. Fed by the transport's live WINDOWS pushes.
 import { quickInput, confirmDialog, type QuickPickItem } from '../platform/ui';
 import { t, tf } from '../platform/i18n';
 import { remoteEnv } from './session';
@@ -44,12 +46,33 @@ function workbenchUrl(info: InstanceInfo): string {
 	return new URL(`w/${encodeURIComponent(info.id)}/v/${encodeURIComponent(info.version)}/remote.html`, base).href;
 }
 
-/** Leave this window for another of the PC's: the page reloads onto that instance. */
-export function enterInstance(info: InstanceInfo): void {
+/** The picker page's URL: `<basePath>windows` — the daemon's landing page (the
+ *  `https://ip:port/windows` the session was one tap away from and never could reach). */
+export function pickerPageUrl(basePath: string): string {
+	return new URL('windows', new URL(basePath, location.href)).href;
+}
+
+/** The one clean exit every voluntary leave takes: tell the PC this frontend is going,
+ *  stop the socket for good, then load the destination (always a full page — the picker
+ *  and another instance's workbench are pages of their own). */
+function leaveSession(url: string): void {
 	const transport = remoteEnv()?.transport;
 	transport?.detach();
 	transport?.shutdown();
-	location.assign(workbenchUrl(info));
+	location.assign(url);
+}
+
+/** Leave this window for another of the PC's: the page reloads onto that instance. */
+export function enterInstance(info: InstanceInfo): void {
+	leaveSession(workbenchUrl(info));
+}
+
+/** Leave the session for the picker page — the PC's window list and the remote's only
+ *  spawn surface (K4: the workbench itself never spawns; this is navigation, not one). */
+export function goWindowsPicker(): void {
+	const env = remoteEnv();
+	if (!env) return;
+	leaveSession(pickerPageUrl(env.basePath));
 }
 
 /** Open the switcher; the picked window loads in this tab. */
@@ -58,8 +81,15 @@ export async function openWindowSwitcher(): Promise<void> {
 	if (!env) return;
 	const transport = env.transport;
 	const current = env.attached.instance;
-	const picked = await quickInput({ title: t('remote.switcher.title'), items: switcherItems(transport.instances, current) });
+	// The picker page rides as the list's last row (the switcher's exit to the one spawn
+	// surface — every other row stays inside this session, K4).
+	const PICKER = 'page:windows';
+	const picked = await quickInput({
+		title: t('remote.switcher.title'),
+		items: [...switcherItems(transport.instances, current), { label: t('remote.windowsPage'), icon: 'browser', value: PICKER }]
+	});
 	if (!picked) return;
+	if (picked === PICKER) return goWindowsPicker();
 	const id = picked.slice(2);
 	const info = transport.instances.find((i) => i.id === id);
 	if (!info) return;

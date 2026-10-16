@@ -157,6 +157,10 @@ export function createMultiSelect(hooks: MultiSelectHooks) {
 		actionBar,
 		active: () => active,
 		isSelected: (path: string) => selected.has(path),
+		/** The row menu's rename (§6.1): the same inline edit the action bar's button opens —
+		 *  from the menu it runs with no selection active, and the commit's `clear()` is a
+		 *  no-op there. */
+		rename: (path: string) => void rename(path),
 		toggle(path: string): void {
 			if (selected.has(path)) selected.delete(path);
 			else selected.add(path);

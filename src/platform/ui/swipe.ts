@@ -46,6 +46,11 @@ export function swipeReveal(row: HTMLElement, actions: RevealAction[]): () => vo
 		const node = document.createElement('div');
 		node.className = 'ggs-swipe-actions';
 		node.setAttribute('role', 'toolbar');
+		// A closed strip never paints: it sits at the host's top-right until a drag
+		// positions it under its row, and there it would draw over whatever leads the
+		// list — the phone SCM page's groups open with the group head, whose own
+		// stage-all / discard-all pair the strip duplicated (2026-10-16).
+		node.style.visibility = 'hidden';
 		for (const action of actions) {
 			const button = document.createElement('button');
 			button.type = 'button';
@@ -102,14 +107,21 @@ export function swipeReveal(row: HTMLElement, actions: RevealAction[]): () => vo
 		row.classList.remove('revealed');
 		detachAway();
 		snap(0);
+		// The stylesheet's visibility transition keeps the strip painted while the row
+		// slides back over it, hiding it exactly as the slide settles.
+		if (strip) strip.style.visibility = 'hidden';
 	};
 	const width = (): number => stripOf()?.offsetWidth || actions.length * 56;
-	const openRow = (): void => {
+	/** Pin the strip under its row and let it paint (the drag and the open both land here). */
+	const position = (): void => {
 		const node = stripOf();
-		if (node) {
-			node.style.top = `${row.offsetTop}px`;
-			node.style.height = `${row.offsetHeight}px`;
-		}
+		if (!node) return;
+		node.style.top = `${row.offsetTop}px`;
+		node.style.height = `${row.offsetHeight}px`;
+		node.style.visibility = 'visible';
+	};
+	const openRow = (): void => {
+		position();
 		open = true;
 		row.classList.add('revealed');
 		attachAway();
@@ -142,7 +154,11 @@ export function swipeReveal(row: HTMLElement, actions: RevealAction[]): () => vo
 		if (axis === null) {
 			if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
 			axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
-			if (axis === 'x') row.style.transition = 'none';
+			if (axis === 'x') {
+				row.style.transition = 'none';
+				// The row is about to slide: its strip takes its place under it now.
+				position();
+			}
 		}
 		if (axis !== 'x') return;
 		moved = true;

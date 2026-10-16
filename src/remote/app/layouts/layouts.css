@@ -160,13 +160,26 @@
 	border: 0; border-radius: 8px; background: transparent; color: var(--vscode-foreground);
 }
 .ggs-files-toolbtn:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
+/* The branch chip (the owner's 2026-10-16 direction: 手机端文件管理页面没有切换分支的按
+   钮): the current branch at the toolbar's leading edge, one tap from the switch sheet. It
+   yields its width to the filter — the name truncates, never the field. */
+.ggs-files-branch {
+	flex: 0 1 auto; min-width: 0; max-width: 42%; height: 36px; display: inline-flex; align-items: center; gap: 6px;
+	padding: 0 10px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 8px;
+	background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font-size: 13px; white-space: nowrap;
+}
+.ggs-files-branch[hidden] { display: none; }
+.ggs-files-branch .codicon { flex: none; font-size: 16px; color: var(--vscode-gitDecoration-untrackedResourceForeground, var(--ggs-accent, inherit)); }
+.ggs-files-branch .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ggs-files-branch:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
 
 /* The rows (§12.1's heights): two lines, the git letter at the right edge, the folder's ›. */
 .ggs-file-list { display: block; }
 .ggs-file-row {
 	display: flex; align-items: center; gap: 10px;
 	min-height: 60px; padding: 4px max(12px, env(safe-area-inset-right)) 4px max(12px, env(safe-area-inset-left));
-	user-select: none; -webkit-touch-callout: none;
+	user-select: none; -webkit-touch-callout: none; touch-action: pan-y;
 	border-bottom: 1px solid color-mix(in srgb, var(--ggs-sep, rgba(128, 128, 128, 0.25)) 45%, transparent);
 }
 [data-layout="phone-landscape"] .ggs-file-row,
@@ -191,6 +204,14 @@
 .ggs-file-row .status.del { color: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39); }
 .ggs-file-row .status.untracked { color: var(--vscode-gitDecoration-untrackedResourceForeground, #73c991); }
 .ggs-file-row .chev { flex: none; color: var(--vscode-descriptionForeground); font-size: 18px; }
+/* The row's menu entry (§6.1): a ⋮ at the trailing edge — the long-press's discoverable
+   twin, a 44 px target that opens the same sheet whatever the pointer. */
+.ggs-file-more {
+	flex: none; width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center;
+	border: 0; border-radius: 10px; background: transparent; color: var(--vscode-descriptionForeground);
+}
+.ggs-file-more .codicon { font-size: 20px; }
+.ggs-file-more:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
 .ggs-file-sentinel { min-height: 48px; display: flex; align-items: center; justify-content: center; }
 .ggs-file-sentinel .hint { font-size: 12px; color: var(--vscode-descriptionForeground); }
 .ggs-file-empty { padding: 32px 16px; text-align: center; color: var(--vscode-descriptionForeground); font-size: 14px; }
@@ -202,6 +223,9 @@
 }
 .ggs-name-body { display: flex; flex-direction: column; gap: 10px; padding: 4px 0 8px; }
 .ggs-name-buttons { display: flex; gap: 8px; justify-content: flex-end; }
+/* The name sheet's validation line (a refused branch name states its rule). */
+.ggs-name-warn { min-height: 16px; font-size: 12px; line-height: 16px; color: var(--vscode-errorForeground, #f14c4c); }
+.ggs-name-warn:empty { display: none; }
 
 /* The multi-select bars (§6.1): the count bar takes the toolbar's row, the actions ride
    the bottom. */
@@ -242,6 +266,136 @@
 :root[data-page-stack] #sidebar:not([hidden]) .ggs-files-fab { display: inline-flex; }
 .ggs-files-host { position: relative; }
 
+/* ---------- The phone Source Control page (§6.4, the owner's 2026-10-16 direction) ----------
+   Mounted into the SCM sidebar view beside the classic one: the page-stack shells show
+   this page and hide the classic view; the wide forms keep the classic view. The page is
+   a rendering of the same SourceControlView state — the branch row, the commit card, the
+   change groups as thumb-sized sections. */
+:root[data-page-stack] .ggs-scm-host > .sidebar-title,
+:root[data-page-stack] .ggs-scm-host > .view-pane { display: none !important; }
+.ggs-scm-page { display: none; }
+:root[data-page-stack] .ggs-scm-page {
+	flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
+}
+.ggs-scm-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+
+/* The branch row: the repository's own state — name, ahead/behind — one tap from the
+   switch sheet (the same sheet the Files page's chip opens). */
+.ggs-scm-branch {
+	flex: none; display: flex; align-items: center; gap: 8px; min-height: 52px;
+	padding: 0 max(12px, env(safe-area-inset-right)) 0 max(12px, env(safe-area-inset-left));
+	border: 0; border-bottom: 1px solid var(--ggs-sep, rgba(128, 128, 128, 0.25));
+	background: transparent; color: var(--vscode-foreground); text-align: left;
+}
+.ggs-scm-branch[hidden] { display: none; }
+.ggs-scm-branch > .codicon-git-branch { flex: none; font-size: 18px; color: var(--vscode-gitDecoration-untrackedResourceForeground, var(--ggs-accent, inherit)); }
+.ggs-scm-branch .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 600; }
+.ggs-scm-branch .meta { flex: none; display: inline-flex; align-items: center; gap: 2px; font-size: 13px; color: var(--vscode-descriptionForeground); }
+.ggs-scm-branch .meta:empty { display: none; }
+.ggs-scm-branch .chev { flex: none; margin-left: auto; color: var(--vscode-descriptionForeground); }
+.ggs-scm-branch:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
+
+/* The commit card: the message box over the primary action. The action's label follows
+   the repository (Commit / Push n / Sync / Publish — commitInput's own rule); the ⋮
+   carries the variants (amend, commit & push, staged only). */
+.ggs-scm-commit {
+	flex: none; display: flex; flex-direction: column; gap: 8px;
+	padding: 10px max(12px, env(safe-area-inset-right)) 10px max(12px, env(safe-area-inset-left));
+	border-bottom: 1px solid var(--ggs-sep, rgba(128, 128, 128, 0.25));
+}
+.ggs-scm-message {
+	width: 100%; box-sizing: border-box; min-height: 64px; padding: 8px 10px; border-radius: 10px; resize: none;
+	border: 1px solid var(--vscode-input-border, transparent);
+	background: var(--vscode-input-background); color: var(--vscode-input-foreground, inherit);
+	font-size: 16px; /* iOS never zooms (§10.2 item 6) */
+}
+.ggs-scm-commitrow { display: flex; gap: 8px; }
+.ggs-scm-commitbtn {
+	flex: 1 1 auto; min-height: 48px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+	border: 0; border-radius: 12px; background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+	font-size: 15px; font-weight: 600;
+}
+.ggs-scm-commitbtn:active:not(:disabled) { filter: brightness(1.15); }
+.ggs-scm-commitbtn:disabled { opacity: 0.45; }
+.ggs-scm-commitbtn .codicon { font-size: 18px; }
+.ggs-scm-commitmore {
+	flex: none; width: 48px; min-height: 48px; display: inline-flex; align-items: center; justify-content: center;
+	border: 1px solid var(--vscode-input-border, transparent); border-radius: 12px;
+	background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+}
+.ggs-scm-commitmore[hidden] { display: none; }
+.ggs-scm-commitmore .codicon { font-size: 20px; }
+.ggs-scm-commitmore:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
+
+/* The change groups: a 48 px section head (twistie, label, badge, the group's own verbs)
+   over 56 px rows — tap opens the change, the ⋮ opens the row's sheet, a left swipe
+   uncovers the row's own stage / unstage / discard (§6.3's gesture). */
+.ggs-scm-group { display: flex; flex-direction: column; }
+.ggs-scm-grouphead {
+	display: flex; align-items: center; gap: 8px; min-height: 48px;
+	padding: 0 max(4px, env(safe-area-inset-right)) 0 max(12px, env(safe-area-inset-left));
+	border: 0; border-bottom: 1px solid color-mix(in srgb, var(--ggs-sep, rgba(128, 128, 128, 0.25)) 45%, transparent);
+	background: transparent; color: var(--vscode-foreground); text-align: left;
+}
+.ggs-scm-grouphead .twistie { flex: none; font-size: 16px; color: var(--vscode-descriptionForeground); }
+.ggs-scm-grouphead .gicon { flex: none; display: inline-flex; width: 24px; justify-content: center; color: var(--vscode-descriptionForeground); }
+.ggs-scm-grouphead .label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
+.ggs-scm-grouphead .branch { flex: none; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--vscode-descriptionForeground); }
+.ggs-scm-grouphead .badge {
+	flex: none; min-width: 20px; height: 20px; padding: 0 6px; box-sizing: border-box; border-radius: 10px;
+	background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
+	font-size: 11px; font-weight: 600; line-height: 20px; text-align: center;
+}
+.ggs-scm-groupbtn {
+	flex: none; width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center;
+	border: 0; border-radius: 10px; background: transparent; color: var(--vscode-foreground);
+}
+.ggs-scm-groupbtn .codicon { font-size: 20px; }
+.ggs-scm-groupbtn:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
+.ggs-scm-groupbtn .codicon-discard { color: var(--vscode-errorForeground, #f14c4c); }
+.ggs-scm-row {
+	display: flex; align-items: center; gap: 10px; min-height: 56px;
+	padding: 4px max(12px, env(safe-area-inset-right)) 4px max(12px, env(safe-area-inset-left));
+	user-select: none; -webkit-touch-callout: none; touch-action: pan-y;
+	border-bottom: 1px solid color-mix(in srgb, var(--ggs-sep, rgba(128, 128, 128, 0.25)) 45%, transparent);
+}
+[data-layout="phone-landscape"] .ggs-scm-row,
+[data-layout="tablet-portrait"] .ggs-scm-row,
+[data-layout="tablet-landscape"] .ggs-scm-row { min-height: 48px; }
+.ggs-scm-row:active { background: var(--ggs-row-active, var(--vscode-list-hoverBackground)); }
+.ggs-scm-row .gicon { flex: none; display: inline-flex; width: 28px; height: 28px; align-items: center; justify-content: center; }
+.ggs-scm-row .gicon .codicon { font-size: 22px; }
+.ggs-scm-row .text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.ggs-scm-row .name { font-size: 16px; line-height: 21px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ggs-scm-row .dir { font-size: 12px; line-height: 15px; color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ggs-scm-row .dir:empty { display: none; }
+.ggs-scm-row .letter { flex: none; font-size: 12px; font-weight: 600; font-family: ui-monospace, monospace; }
+.ggs-scm-row.git-modified .letter { color: var(--vscode-gitDecoration-modifiedResourceForeground, #e2c08d); }
+.ggs-scm-row.git-added .letter { color: var(--vscode-gitDecoration-addedResourceForeground, #81b88b); }
+.ggs-scm-row.git-deleted .letter { color: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39); }
+.ggs-scm-row.git-renamed .letter { color: var(--vscode-gitDecoration-renamedResourceForeground, #73c991); }
+.ggs-scm-row.git-untracked .letter { color: var(--vscode-gitDecoration-untrackedResourceForeground, #73c991); }
+.ggs-scm-row.git-conflict .letter { color: var(--vscode-errorForeground, #f14c4c); }
+.ggs-scm-row .ggs-scm-rowmore, .ggs-scm-grouphead .ggs-scm-rowmore {
+	flex: none; width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center;
+	border: 0; border-radius: 10px; background: transparent; color: var(--vscode-descriptionForeground);
+}
+.ggs-scm-rowmore .codicon { font-size: 20px; }
+.ggs-scm-rowmore:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
+.ggs-scm-empty { padding: 14px max(12px, env(safe-area-inset-right)) 14px max(12px, env(safe-area-inset-left)); font-size: 13px; color: var(--vscode-descriptionForeground); }
+.ggs-scm-empty.page { padding: 32px 20px; text-align: center; font-size: 14px; }
+.ggs-scm-error { padding: 10px max(12px, env(safe-area-inset-right)) 10px max(12px, env(safe-area-inset-left)); font-size: 13px; color: var(--vscode-errorForeground, #f14c4c); }
+.ggs-scm-showmore {
+	min-height: 48px; border: 0; background: transparent; color: var(--vscode-textLink-foreground, var(--ggs-accent, inherit));
+	font-size: 14px; text-align: center;
+}
+.ggs-scm-showmore:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
+.ggs-scm-init {
+	margin: 12px auto; min-height: 48px; padding: 0 20px; border: 0; border-radius: 12px;
+	background: var(--vscode-button-background); color: var(--vscode-button-foreground); font-size: 15px; font-weight: 600;
+}
+
 /* ---------- The swipe-revealed row actions (§6.3, platform/ui/swipe.ts) ----------
    The strip lives in the row's parent (the host), pinned under the row's box at its
    trailing edge; the ROW translates, its own opaque background sliding with it and
@@ -252,6 +406,11 @@
 .ggs-swipe-actions {
 	position: absolute; top: 0; right: 0; bottom: auto; z-index: 0;
 	display: flex; align-items: stretch;
+	/* A closed strip never paints (swipe.ts hides it until a drag positions it under its
+	   row): resting at the host's top-right it drew over the phone SCM page's group head,
+	   doubling the head's own stage-all / discard-all pair (2026-10-16). The transition
+	   keeps it painted while its row slides shut over it. */
+	visibility: hidden; transition: visibility 160ms;
 }
 .ggs-swipe-actions button {
 	flex: none; width: 56px; display: inline-flex; align-items: center; justify-content: center;

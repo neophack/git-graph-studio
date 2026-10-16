@@ -1,7 +1,8 @@
 // The phone's navigation drawer (docs/ggs-remote-plan.md §11.2): the ☰ in the app bar opens a
 // panel from the left edge with everything the five bottom destinations cannot hold — every
 // page (Search, Terminal, Extensions, Code Analysis and each extension's page beside the
-// bar's own), the workspace actions (Go to File, the Command Palette, this PC's windows), the
+// bar's own), the workspace actions (Go to File, the Command Palette, this PC's windows and
+// the picker page at /windows), the
 // transfers, the full application menus (File, Edit, View, … as sheets), Settings and the
 // Data Saver switch, and the session's traffic. A tap on the backdrop, a swipe to the left,
 // Escape or the phone's back closes it.
@@ -133,15 +134,18 @@ export function openDrawer(menus: () => MenuDefinition[]): void {
 		}, { active: entry.id === page, badge: tabBadge(entry.id)?.text })
 	);
 
-	// The rows only a browser session can serve (this PC's windows, transfers, Data Saver)
-	// are left out where the drawer runs in the PC's own window — the replica's phone mode,
-	// whose viewer carries its own Windows button.
+	// The rows only a browser session can serve (this PC's windows, the picker page,
+	// transfers, Data Saver) are left out where the drawer runs in the PC's own window —
+	// the replica's phone mode, whose viewer carries its own Windows button.
 	const workspaceRows = [
 		commandRow('go-to-file', t('remote.appbar.quickOpen'), 'workbench.quickOpen'),
 		commandRow('terminal-cmd', t('remote.drawer.palette'), 'workbench.commandPalette'),
 		...(env
 			? [
 					commandRow('multiple-windows', t('remote.drawer.windows'), 'remote.switchWindow', { badge: windows > 1 ? String(windows) : undefined }),
+					// The picker page (`/windows`): the daemon's own landing page — the window
+					// list, the typed folder path and the remote's one spawn surface (K4).
+					commandRow('browser', t('remote.windowsPage'), 'remote.windowsPage'),
 					commandRow('device-desktop', t('remote.liveView'), 'remote.liveView')
 				]
 			: [])

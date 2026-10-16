@@ -33,8 +33,9 @@ import { Transport, basePathOf, instanceOf } from '../src/remote/transport';
 import { RelayEngine } from '../src/remote/relay';
 import { scopedStorage } from '../src/remote/storage';
 import { withModifier } from '../src/remote/terminalKeys';
-import { switcherItems } from '../src/remote/windowSwitcher';
+import { openWindowSwitcher, pickerPageUrl, switcherItems } from '../src/remote/windowSwitcher';
 import { setRemoteEnv } from '../src/remote/session';
+import { t } from '../src/platform/i18n';
 import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
 import type { FolderListing } from '../src/remote/folderBrowser';
 import { backend } from './tauriMock';
@@ -680,6 +681,34 @@ describe('remote helpers', () => {
 		expect(items.map((i) => i.value)).toEqual(['w:a', 'w:b']);
 		expect(items[0].detail).toContain('/r/a.rs');
 		expect(items[1].icon).toBe('warning');
+	});
+
+	it('builds the picker page URL off the session base path (the /windows landing page)', () => {
+		expect(pickerPageUrl('/')).toBe(`${location.origin}/windows`);
+		expect(pickerPageUrl('/u/abc/')).toBe(`${location.origin}/u/abc/windows`);
+	});
+
+	it('offers the picker page as the switcher\'s last row — and leaves the session cleanly for it', async () => {
+		document.body.innerHTML = '<div id="overlays"></div>';
+		const left: string[] = [];
+		setRemoteEnv({
+			transport: {
+				instances: [{ id: 'a', title: 'repo', folders: [], version: '1', visible: true, startedAt: 0, state: 'ok' }],
+				detach: () => void left.push('detach'),
+				shutdown: () => void left.push('shutdown')
+			} as never,
+			attached: { instance: 'a' } as never,
+			basePath: '/u/abc/'
+		});
+		const pending = openWindowSwitcher();
+		const rows = [...document.querySelectorAll<HTMLElement>('.quick-input .row')];
+		expect(rows.at(-1)!.querySelector('.label')!.textContent).toBe(t('remote.windowsPage'));
+		rows.at(-1)!.click();
+		await pending;
+		// The same clean exit enterInstance makes: the PC is told, the socket stops for good
+		// — then the picker page loads (jsdom does not navigate; the URL is the case above).
+		expect(left).toEqual(['detach', 'shutdown']);
+		setRemoteEnv(undefined);
 	});
 
 	it('encodes control frames the daemon decodes (msgpack maps with string keys)', () => {

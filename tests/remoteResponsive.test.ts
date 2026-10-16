@@ -5,7 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
 import * as deviceClassModule from '../src/remote/app/deviceClass';
-import { formFactorFor, initResponsive, formFactor } from '../src/remote/responsive';
+import { formFactorFor, initResponsive, formFactor, setDeviceOverride } from '../src/remote/responsive';
 
 // The remote session's hooks, as boot.ts installs them: the editor suite's phone surfaces
 // (the edit lock, the page-stack navigation) read them through platform/hooks lookups.
@@ -17,6 +17,7 @@ import { createAppBar, pageHeading, relativeFolder } from '../src/remote/appBar'
 import { createEditorEmptyState, editorActionEntries, openEditorsSheet } from '../src/remote/editorSwitcher';
 import { ACCESSORY_KEYS, createEditorAccessory } from '../src/remote/editorAccessory';
 import { closeDrawer, drawerOpen, openDrawer } from '../src/remote/navDrawer';
+import { setRemoteEnv } from '../src/remote/session';
 import { currentPage, editorPlaceholderShown, resetWorkbenchWatch } from '../src/remote/pages';
 import { editableFocused, keyboardOpen } from '../src/remote/responsive';
 import { applyContributions, applyExtensionSettings, removeContributions } from '../src/features/extensions';
@@ -88,6 +89,51 @@ describe('form factors', () => {
 		await settle();
 		expect(document.documentElement.dataset.formFactor).toBe('desktop');
 		expect(formFactor()).toBe('desktop');
+		stop();
+	});
+});
+
+// The manual override (§4.2's 设备级设置 "布局"): the entry Settings and the palette pick —
+// forced at once (never the resize debounce), aspect-aware, persisted, and worn from the
+// first frame of the next load.
+describe('the layout override', () => {
+	afterEach(() => {
+		localStorage.removeItem('ggsr.deviceOverride');
+	});
+
+	it('forces the class at once, survives a resize, and Auto returns to the algorithm', async () => {
+		setCoarse(false);
+		setWidth(1440);
+		const stop = initResponsive();
+		await settle();
+		expect(document.documentElement.dataset.device).toBe('desktop');
+		// Tablet mode on a desktop-sized viewport: the override is aspect-aware only.
+		setDeviceOverride('tablet');
+		expect(document.documentElement.dataset.deviceOverride).toBe('tablet');
+		expect(document.documentElement.dataset.device).toBe('tablet-landscape');
+		expect(document.documentElement.dataset.formFactor).toBe('tablet');
+		expect(localStorage.getItem('ggsr.deviceOverride')).toBe('tablet');
+		// A phone-width resize keeps honouring the override — portrait by the aspect.
+		setWidth(390);
+		await settle();
+		expect(document.documentElement.dataset.device).toBe('tablet-portrait');
+		// Auto: the algorithm's own answer for the same viewport returns.
+		setDeviceOverride(null);
+		expect(document.documentElement.dataset.deviceOverride).toBeUndefined();
+		expect(document.documentElement.dataset.device).toBe('phone-portrait');
+		expect(localStorage.getItem('ggsr.deviceOverride')).toBeNull();
+		stop();
+	});
+
+	it('a persisted override is worn from the first frame', () => {
+		localStorage.setItem('ggsr.deviceOverride', 'phone');
+		setCoarse(false);
+		setWidth(1440);
+		const stop = initResponsive();
+		// The first settle honours the override — no desktop flash first.
+		expect(document.documentElement.dataset.deviceOverride).toBe('phone');
+		expect(document.documentElement.dataset.device).toBe('phone-landscape');
+		expect(document.documentElement.hasAttribute('data-page-stack')).toBe(true);
 		stop();
 	});
 });
@@ -438,6 +484,56 @@ describe('open editors sheet', () => {
 	});
 });
 
+describe('the editor empty page', () => {
+	afterEach(() => {
+		localStorage.removeItem('remote.editor.recent');
+		leavePhone();
+	});
+
+	it('is the workspace\'s dashboard: its name, the three tiles, no card off a repository', async () => {
+		const { ran, sidebar } = phoneWorkbench();
+		sidebar.hidden = true; // the Editor page
+		const empty = createEditorEmptyState();
+		document.body.appendChild(empty);
+		await flushMutations();
+		expect(empty.hidden).toBe(false);
+		expect(empty.querySelector('.title')!.textContent).toBe('No open files');
+		expect(empty.querySelector('.subtitle')!.textContent).toBe('ws');
+		// No repository behind the stand-in workbench: the card is not there at all.
+		expect(empty.querySelector<HTMLElement>('.ggs-empty-repo')!.hidden).toBe(true);
+		const tiles = [...empty.querySelectorAll<HTMLButtonElement>('.tiles button')];
+		expect(tiles.map((tile) => tile.querySelector('.label')!.textContent)).toEqual(['Browse Files', 'Go to File', 'Review Changes']);
+		tiles[0]!.click();
+		await flushMutations();
+		expect(ran).toEqual(['workbench.showExplorer']);
+		expect(sidebar.hidden).toBe(false);
+		tiles[2]!.click();
+		await flushMutations();
+		expect(ran).toEqual(['workbench.showExplorer', 'workbench.showScm']);
+	});
+
+	it('records the file being looked at as this device\'s recent — once, wherever it is looked at', async () => {
+		const { group, sidebar } = phoneWorkbench();
+		const tab = addTab(group, 'a.ts', { path: '/home/u/ws/src/remote/a.ts', active: true });
+		sidebar.hidden = true;
+		const empty = createEditorEmptyState(); // its first sync already records the active file
+		document.body.appendChild(empty);
+		await flushMutations();
+		// A regular file is showing: the page itself is not.
+		expect(empty.hidden).toBe(true);
+		expect(JSON.parse(localStorage.getItem('remote.editor.recent')!)).toEqual(['/home/u/ws/src/remote/a.ts']);
+		// The same file looked at again (a reselect, a badge change) never duplicates it.
+		tab.click();
+		await flushMutations();
+		expect(JSON.parse(localStorage.getItem('remote.editor.recent')!)).toEqual(['/home/u/ws/src/remote/a.ts']);
+		// Nothing open anywhere: the page answers, and it is not a dead end — the tiles list.
+		tab.remove();
+		await flushMutations();
+		expect(empty.hidden).toBe(false);
+		expect(empty.querySelectorAll('.tiles button').length).toBe(3);
+	});
+});
+
 /** MutationObserver callbacks run as microtasks. */
 async function flushMutations(): Promise<void> {
 	await Promise.resolve();
@@ -539,6 +635,20 @@ describe('navigation drawer', () => {
 		expect(document.querySelector('.ggs-action-sheet')).not.toBeNull();
 		window.dispatchEvent(new PopStateEvent('popstate'));
 		expect(document.querySelector('.ggs-action-sheet')).toBeNull();
+	});
+
+	it('serves a browser session\'s rows — the picker page entry rides the switcher\'s', () => {
+		phoneWorkbench();
+		const ran: string[] = [];
+		commands.register({ profiles: ['remote'], id: 'remote.windowsPage', title: t('remote.windowsPage'), run: () => void ran.push('picker') });
+		setRemoteEnv({ transport: { instances: [{ id: 'ggs-1' }] } as never, attached: { instance: 'ggs-1' } as never, basePath: '/' });
+		openDrawer(() => []);
+		const row = [...document.querySelectorAll<HTMLButtonElement>('.ggs-drawer-row')].find((candidate) => candidate.querySelector('.label')!.textContent === t('remote.windowsPage'))!;
+		expect(row.disabled).toBe(false);
+		row.click();
+		expect(drawerOpen()).toBe(false);
+		expect(ran).toEqual(['picker']);
+		setRemoteEnv(undefined);
 	});
 });
 
@@ -818,6 +928,32 @@ describe('settings page', () => {
 		expect(settingsPageOpen()).toBe(true);
 		window.dispatchEvent(new PopStateEvent('popstate'));
 		expect(settingsPageOpen()).toBe(false);
+	});
+
+	it('the Remote category picks the layout override — tablet mode has its entry (§4.2)', () => {
+		phoneWorkbench();
+		openSettingsPage();
+		row('Remote Access').click();
+		const layout = () => row(t('remote.layout'));
+		expect(layout().querySelector('.value')!.textContent).toBe(t('remote.layout.auto'));
+		expect(layout().classList.contains('modified')).toBe(false);
+		layout().click();
+		const sheetRows = () => [...document.querySelectorAll<HTMLElement>('.ggs-action-sheet .row')];
+		expect(sheetRows().map((entry) => entry.textContent)).toEqual([
+			t('remote.layout.auto'), t('remote.layout.phone'), t('remote.layout.tablet'), t('remote.layout.desktop'), 'Cancel'
+		]);
+		sheetRows().find((entry) => entry.textContent === t('remote.layout.tablet'))!.click();
+		expect(document.documentElement.dataset.deviceOverride).toBe('tablet');
+		expect(localStorage.getItem('ggsr.deviceOverride')).toBe('tablet');
+		expect(layout().querySelector('.value')!.textContent).toBe(t('remote.layout.tablet'));
+		expect(layout().classList.contains('modified')).toBe(true);
+		// Back to Auto: the dot goes and the override is withdrawn.
+		layout().click();
+		sheetRows().find((entry) => entry.textContent === t('remote.layout.auto'))!.click();
+		expect(document.documentElement.dataset.deviceOverride).toBeUndefined();
+		expect(layout().classList.contains('modified')).toBe(false);
+		// Reset the settled state the pick left behind (no initResponsive ran in this describe).
+		initResponsive()();
 	});
 
 	it('a boolean toggles through the registry and a number steps in its sheet', async () => {

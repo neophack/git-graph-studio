@@ -86,15 +86,29 @@ export const framesMethods: ThisType<ExtensionHost> = {
 					this.releaseWebview(extId, panelId);
 					return;
 				case 'webview.reveal': {
-					const view = this.webviews.get(this.webviewKey(extId, panelId));
-					// A copy closed here reopens: the panel itself lives on in the desktop window.
-					if (view && !this.webviewCopies.has(this.webviewKey(extId, panelId))) this.onOpenWebview?.(panelId, view.title, extId, undefined, true);
-					else if (view) this.onRevealWebviewTab?.(this.webviewTabId(extId, panelId));
+					// Another frontend's reveal, mirrored here: the tab comes forward, but
+					// never the page — a page hold wraps the reveal (its activation is the
+					// OTHER side's act, not this user's; 2026-10-16, 文件页面会被其他页面
+					// 顶到最前 — K7, each frontend's layout is its own).
+					const release = hook('navigation').holdPage();
+					try {
+						const view = this.webviews.get(this.webviewKey(extId, panelId));
+						// A copy closed here reopens: the panel itself lives on in the desktop window.
+						if (view && !this.webviewCopies.has(this.webviewKey(extId, panelId))) this.onOpenWebview?.(panelId, view.title, extId, undefined, true);
+						else if (view) this.onRevealWebviewTab?.(this.webviewTabId(extId, panelId));
+					} finally {
+						release();
+					}
 					return;
 				}
 			}
 		}
-		void this.serveRequest(method, args, extId, handle).catch((error) => extLog('warn', extId, `mirrored ${method} failed: ${String(error)}`));
+		// The mirrored serve runs async (the tab opens when the request settles): the page
+		// hold rides its whole length, so the create's own activation lands in the background.
+		const release = hook('navigation').holdPage();
+		void this.serveRequest(method, args, extId, handle)
+			.catch((error) => extLog('warn', extId, `mirrored ${method} failed: ${String(error)}`))
+			.finally(release);
 	},
 
 	callFrame(handle: FrameHandle, method: string, args: unknown[]): Promise<unknown> {

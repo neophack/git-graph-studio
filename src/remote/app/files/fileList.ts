@@ -6,10 +6,11 @@
 // hidden-files switch covers the other dotfiles; every directory's scroll position is
 // remembered for the way back. Sorting (name / modified / size / type, folders always
 // first) is applied over what is loaded — the backend's own order stays name-based.
-import { el, icon, formatBytes } from '../../../platform/ui';
+import { el, icon, formatBytes, type MenuEntry } from '../../../platform/ui';
 import { fileIcon, fileIconColor } from '../../../platform/fileIcons';
 import { listDirPage, type DirEntryInfo } from '../../../platform/ipc/fs';
 import { t, tf } from '../../../platform/i18n';
+import { showActionSheet, sheetOpen } from '../../actionSheet';
 
 export const FILES_PAGE = 200;
 
@@ -45,12 +46,16 @@ export interface FileListHooks {
 	selection: {
 		active(): boolean;
 		isSelected(path: string): boolean;
-		/** A long-press landed on a row. */
+		/** The row menu's 多选 entry (and a long-press while a selection is already on):
+		 *  the first call starts the mode with this row; later ones toggle. */
 		longPress(path: string): void;
 		toggle(path: string): void;
 	};
 	/** The current filter text (the toolbar's search box), or ''. */
 	filter(): string;
+	/** One row's menu (§6.1's long-press sheet): open/enter, the transfers, rename, delete,
+	 *  copy path, 多选 — built by the page, which owns the actions. */
+	menu(entry: DirEntryInfo): MenuEntry[];
 }
 
 /** The list. `show(dir)` loads and renders; a same-dir `show` is a refresh. */
@@ -164,7 +169,25 @@ export function createFileList(hooks: FileListHooks) {
 			node.classList.add('selectable');
 			box.checked = hooks.selection.isSelected(entry.path);
 		}
+		// The row's menu entry (§6.1): a ⋮ at the trailing edge, always tappable — the
+		// long-press is the gesture, this is the discoverable one (the owner's 2026-10-16
+		// direction: 长按要弹出菜单，或者要有打开菜单的入口).
+		const more = el('button', 'ggs-file-more', [icon('ellipsis')]);
+		more.type = 'button';
+		more.setAttribute('aria-label', t('remote.files.rowMenu'));
+		more.addEventListener('click', (event) => {
+			event.stopPropagation();
+			openMenu(entry);
+		});
+		node.appendChild(more);
+		// A long-press's sheet swallows the release's click: without this the tap that
+		// follows the menu's opening would enter the folder / open the file under it.
+		const swallowClick = { now: false };
 		node.addEventListener('click', (event) => {
+			if (swallowClick.now) {
+				swallowClick.now = false;
+				return;
+			}
 			if (hooks.selection.active()) {
 				if (event.target !== box) hooks.selection.toggle(entry.path);
 				return;
@@ -172,14 +195,20 @@ export function createFileList(hooks: FileListHooks) {
 			if (entry.isDir) hooks.enter(entry.path);
 			else hooks.open(entry.path);
 		});
-		installRowLongPress(node, entry.path);
+		installRowLongPress(node, entry, swallowClick);
 		return node;
 	}
 
-	/** §6.1's long-press (450 ms, 10 px tolerance — gestures.ts's own recipe, kept local so
-	 *  the row's click never races the selection entry): the first long-press starts the
-	 *  selection with this row; later ones toggle. */
-	function installRowLongPress(node: HTMLElement, path: string): void {
+	function openMenu(entry: DirEntryInfo): void {
+		showActionSheet(hooks.menu(entry), entry.name);
+	}
+
+	/** §6.1's long-press (450 ms, 10 px movement tolerance — gestures.ts's own recipe, kept
+	 *  local so the row's click never races the sheet): with no selection on, it opens the
+	 *  row's menu; while a selection is active it toggles the row. The Android
+	 *  `contextmenu` that follows a long-press (~500 ms) is suppressed — the sheet is
+	 *  already open, and re-opening it would restart its slide-in. */
+	function installRowLongPress(node: HTMLElement, entry: DirEntryInfo, swallowClick: { now: boolean }): void {
 		let timer: number | null = null;
 		let start: { x: number; y: number } | null = null;
 		const clear = () => {
@@ -188,12 +217,15 @@ export function createFileList(hooks: FileListHooks) {
 			start = null;
 		};
 		node.addEventListener('pointerdown', (event) => {
-			if (event.pointerType === 'mouse') return; // a mouse right-clicks (the sheet)
+			if (event.pointerType === 'mouse') return; // a mouse right-clicks (contextmenu below)
+			swallowClick.now = false;
 			start = { x: event.clientX, y: event.clientY };
 			timer = window.setTimeout(() => {
 				timer = null;
 				navigator.vibrate?.(10);
-				hooks.selection.longPress(path);
+				swallowClick.now = true;
+				if (hooks.selection.active()) hooks.selection.longPress(entry.path);
+				else openMenu(entry);
 			}, 450);
 		});
 		node.addEventListener('pointermove', (event) => {
@@ -202,6 +234,11 @@ export function createFileList(hooks: FileListHooks) {
 		});
 		node.addEventListener('pointerup', clear);
 		node.addEventListener('pointercancel', clear);
+		node.addEventListener('contextmenu', (event) => {
+			event.preventDefault();
+			if (sheetOpen()) return;
+			if (!hooks.selection.active()) openMenu(entry);
+		});
 	}
 
 	function render(): void {

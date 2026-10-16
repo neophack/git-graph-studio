@@ -39,6 +39,53 @@ export function currentDeviceClass(): DeviceClass | null {
 	return device;
 }
 
+/** The manual override's storage key (§4.2's "设备级设置"): this browser's own choice,
+ *  like Data Saver — never the backend's registry, which is shared with the PC. */
+const OVERRIDE_KEY = 'ggsr.deviceOverride';
+
+/** The override vocabulary: one of the three form factors forced, or null for the
+ *  algorithm's own answer (the default). */
+export type DeviceOverride = 'phone' | 'tablet' | 'desktop' | null;
+
+export function deviceOverride(): DeviceOverride {
+	const value = document.documentElement.dataset['deviceOverride'];
+	return value === 'phone' || value === 'tablet' || value === 'desktop' ? value : null;
+}
+
+/** Set the override (null clears it back to auto): persisted, spelled on <html>, and
+ *  reclassified AT ONCE — an explicit user action never waits the resize debounce. */
+export function setDeviceOverride(override: DeviceOverride): void {
+	try {
+		if (override === null) localStorage.removeItem(OVERRIDE_KEY);
+		else localStorage.setItem(OVERRIDE_KEY, override);
+	} catch {
+		/* storage unavailable */
+	}
+	applyDeviceOverride();
+}
+
+/** Read the persisted override onto <html> (the settle reads it off the attribute). */
+function seedDeviceOverride(): void {
+	let stored: string | null = null;
+	try {
+		stored = localStorage.getItem(OVERRIDE_KEY);
+	} catch {
+		/* storage unavailable */
+	}
+	if (stored === 'phone' || stored === 'tablet' || stored === 'desktop') {
+		document.documentElement.dataset['deviceOverride'] = stored;
+	} else {
+		delete document.documentElement.dataset['deviceOverride'];
+	}
+}
+
+/** Read the persisted override onto <html> and settle. */
+function applyDeviceOverride(): void {
+	seedDeviceOverride();
+	if (settleTimer !== null) window.clearTimeout(settleTimer);
+	settleClass();
+}
+
 /** The pointer kind a replica viewer imposes (docs/ggs-remote-plan.md §22): the PC window
  *  laid out for a phone that watches it has a mouse of its own, but is driven by touch. */
 let pointerOverride: 'coarse' | 'fine' | null = null;
@@ -155,6 +202,9 @@ function apply(): void {
  *  returned stop drops every listener (the remote page never stops; tests do). */
 export function initResponsive(): () => void {
 	document.documentElement.classList.add('remote-shell');
+	// The persisted override (§4.2) seeds <html> before the first settle — a forced form
+	// factor never flashes the algorithm's own answer first.
+	seedDeviceOverride();
 	apply();
 	const coarse = typeof matchMedia === 'function' ? matchMedia('(pointer: coarse)') : null;
 	// Focus moves without a resize (one field to the next, a blur that drops the keyboard
@@ -179,6 +229,7 @@ export function initResponsive(): () => void {
 		document.documentElement.removeAttribute('data-keyboard');
 		document.documentElement.removeAttribute('data-page-stack');
 		delete document.documentElement.dataset.device;
+		delete document.documentElement.dataset.deviceOverride;
 		current = null;
 		device = null;
 		lastSize = { w: 0, h: 0 };

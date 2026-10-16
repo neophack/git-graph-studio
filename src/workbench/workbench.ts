@@ -884,27 +884,38 @@ export class Workbench {
 			return anchor;
 		};
 		const start = el('div', '', [el('h2', '', ['Start'])]);
-		start.appendChild(link('folder-opened', 'Open Folder...', null, () => void this.pickFolder()));
-		start.appendChild(link('repo-clone', 'Clone Git Repository...', null, () => void commands.execute('git.clone')));
+		// The machine-level opens are desktop-profile affordances (K4, docs/remote-client-plan.md
+		// §3.2): over the remote wire they are refused commands, so the links never render there.
+		const remote = commands.activeProfile() === 'remote';
+		if (!remote) {
+			start.appendChild(link('folder-opened', 'Open Folder...', null, () => void this.pickFolder()));
+			start.appendChild(link('repo-clone', 'Clone Git Repository...', null, () => void commands.execute('git.clone')));
+		}
 		if (this.repoPath) {
 			start.appendChild(link('source-control', 'Source Control', null, () => this.showView('scm')));
 			start.appendChild(link('terminal', 'New Terminal', null, () => this.panel.show('terminal')));
-			start.appendChild(link('close', 'Close Folder', null, () => void this.closeFolder()));
+			if (!remote) start.appendChild(link('close', 'Close Folder', null, () => void this.closeFolder()));
 		}
 		inner.appendChild(start);
 
-		const recent = el('div', '', [el('h2', '', ['Recent'])]);
-		const folders = state.recentFolders().filter((f) => f !== this.repoPath);
-		if (folders.length === 0) {
-			recent.appendChild(el('p', 'empty', ['No recent folders']));
-		} else {
-			for (const folder of folders) recent.appendChild(link('folder', basename(folder), folder, () => void this.openRecent(folder)));
+		// Recent folders are the same refused open — a remote window follows the PC's folder,
+		// it never picks one of its own.
+		if (!remote) {
+			const recent = el('div', '', [el('h2', '', ['Recent'])]);
+			const folders = state.recentFolders().filter((f) => f !== this.repoPath);
+			if (folders.length === 0) {
+				recent.appendChild(el('p', 'empty', ['No recent folders']));
+			} else {
+				for (const folder of folders) recent.appendChild(link('folder', basename(folder), folder, () => void this.openRecent(folder)));
+			}
+			inner.appendChild(recent);
 		}
-		inner.appendChild(recent);
 
 		const help = el('div', '', [el('h2', '', ['Keyboard Shortcuts'])]);
 		for (const id of ['workbench.quickOpen', 'workbench.commandPalette', 'workbench.openFolder', 'workbench.toggleSidebar', 'workbench.showExplorer', 'workbench.showScm', 'terminal.toggle', 'workbench.save', 'workbench.closeEditor', 'editor.find']) {
-			const command = commands.get(id)!;
+			const command = commands.get(id);
+			// A desktop-only command has no row in this shell's table either.
+			if (!command || !commands.visible(id)) continue;
 			help.appendChild(el('div', 'shortcut', [el('span', '', [command.title]), el('kbd', '', [effectiveBinding(id, command.keybinding) ?? ''])]));
 		}
 		inner.appendChild(help);
