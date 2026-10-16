@@ -15,6 +15,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { deflateRawSync } from 'node:zlib';
 import { decode as decodeMsgpack, encode as encodeMsgpack } from '@msgpack/msgpack';
 import { DomRecorder } from '../src/remote/mirror/recorder';
+import { attachWorkbenchSync, type SyncedEditorArea, type SyncPresence } from '../src/remote/workbenchSync';
+import { PRESENCE_EVERY_MS } from '../src/remote/presence';
+import { until } from './helpers';
 import { MirrorViewer } from '../src/remote/mirror/viewer';
 import { applyDelta, stringDelta } from '../src/remote/mirror/protocol';
 import type { DownMessage } from '../src/remote/mirror/protocol';
@@ -380,6 +383,8 @@ describe('the 1/10 line, on the modelled wire', () => {
 		// eslint-disable-next-line no-console
 		console.log(`streaming chat: legacy ${legacy.wire()} B, economy ${economy.wire()} B (${ratio.toFixed(1)}x)`);
 		expect(economy.wire()).toBeLessThan(legacy.wire() / 10);
+		// §7.4's row: a 12 s / 360-token reply ≤ 7 KB on the downlink.
+		expect(economy.wire()).toBeLessThanOrEqual(7000);
 	});
 
 	it('a git-graph-style virtualized list under scroll', async () => {
@@ -414,6 +419,8 @@ describe('the 1/10 line, on the modelled wire', () => {
 		// eslint-disable-next-line no-console
 		console.log(`virtualized scroll: legacy ${legacy.wire()} B, economy ${economy.wire()} B (${ratio.toFixed(1)}x)`);
 		expect(economy.wire()).toBeLessThan(legacy.wire() / 10);
+		// §7.4's row: a 2 s Git Graph fling ≤ 7 KB on the downlink.
+		expect(economy.wire()).toBeLessThanOrEqual(7000);
 	}, 30_000); // two full recorder runs of 40 re-rendered windows: CPU-bound, slow under a parallel suite
 
 	it('a JS-driven animation', async () => {
@@ -485,5 +492,127 @@ describe('the 1/10 line, on the modelled wire', () => {
 		// eslint-disable-next-line no-console
 		console.log(`combined: legacy ${totals.legacy} B, economy ${totals.economy} B (${ratio.toFixed(1)}x)`);
 		expect(totals.economy).toBeLessThan(totals.legacy / 10);
+	});
+});
+
+/* ---------- §7.4's sync-family rows (docs/remote-client-plan.md §7.4) ----------
+ * The mirror A/B suites above own the §22.8 rows (Claude streaming, Git Graph scroll —
+ * their budgets are the live check's to measure on the real wire); the D-tier pull rows
+ * (directory pages, a 200 KB file, fifty keystrokes) are the file page's own, measured by
+ * the live check into metrics.json. What THIS suite pins is the family S1 owns: the intent
+ * messages, the presence heartbeats, the gate and the catch-up snapshot — each against
+ * the byte model the A/B suites use (JSON payload + the 64 B EVENT envelope + the 20 B
+ * frame header). */
+
+describe('§7.4 budget rows — the sync family', () => {
+	const HEADER = HEADER_LEN;
+	const wire = (message: unknown): number => HEADER + ENVELOPE + Buffer.byteLength(JSON.stringify(message));
+
+	/** A minimal editor area recording what the sync opened — enough bus for the byte
+	 *  measurements, no DOM. */
+	function bareArea(paths: string[]): { area: SyncedEditorArea; tabs(): string[] } {
+		const open = [...paths];
+		const area: SyncedEditorArea = {
+			async openFile(path) {
+				if (!open.includes(path)) open.push(path);
+				area.onTabsChange?.();
+			},
+			openFilePaths: () => [...open],
+			get activeInput() {
+				return open.length ? { kind: 'file', path: open[open.length - 1] } : null;
+			},
+			onTabsChange: null,
+			onActiveChange: null,
+			closeFilePath(path) {
+				const at = open.indexOf(path);
+				if (at < 0) return false;
+				open.splice(at, 1);
+				area.onTabsChange?.();
+				return true;
+			},
+			revealFilePath(path) {
+				return open.includes(path);
+			},
+			openExtPageIds: () => [],
+			closeById: () => false,
+			revealById: () => false
+		};
+		return { area, tabs: () => [...open] };
+	}
+
+	function barePresence(active: number): SyncPresence & { count: number } {
+		const presence = {
+			count: active,
+			syncAllowed: () => presence.count >= 2,
+			othersActive: () => presence.count >= 2,
+			isDesignatedResponder: () => true,
+			onBecameActive: () => () => undefined,
+			isActive: () => true
+		};
+		return presence;
+	}
+
+	it('a presence announcement stays near the 80 B of §7.0.1 — and the 60 s idle budget is one of them', () => {
+		const message = { by: 'remote/1', k: 'presence', active: true, device: 'phone-portrait' };
+		// §7.0.1's "~80 B" is the payload; with the EVENT envelope and frame header it
+		// still lands far under the idle row's budget.
+		expect(Buffer.byteLength(JSON.stringify(message))).toBeLessThanOrEqual(96);
+		// Row "空闲 60 秒 ≤ 2 KB": a lone active frontend sends exactly one heartbeat in
+		// that minute (PRESENCE_EVERY_MS), and nothing else — the gate holds every intent.
+		expect(PRESENCE_EVERY_MS).toBeGreaterThanOrEqual(60_000);
+		expect(wire(message)).toBeLessThanOrEqual(2048);
+	});
+
+	it('an open intent crosses under 300 B, anchor included (the PC-opens-a-file row)', () => {
+		const message = { by: 'main', k: 'open', path: 'C:/repo/src/features/editor/open.ts', line: 1200, column: 40 };
+		expect(wire(message)).toBeLessThanOrEqual(300);
+		const active = { by: 'main', k: 'active', path: 'C:/repo/src/features/editor/open.ts' };
+		expect(wire(active)).toBeLessThanOrEqual(300);
+	});
+
+	it('PC window closed, one remote, twenty files: zero sync bytes (the K11 row)', async () => {
+		const sent: unknown[] = [];
+		const handlers = new Set<(message: unknown) => void>();
+		const deps = {
+			send: (message: unknown): void => {
+				sent.push(message);
+				for (const handler of [...handlers]) handler(message);
+			},
+			receive: (handler: (message: unknown) => void): (() => void) => {
+				handlers.add(handler as (message: unknown) => void);
+				return () => handlers.delete(handler as (message: unknown) => void);
+			}
+		};
+		const { area } = bareArea([]);
+		attachWorkbenchSync({ editors: area }, deps, 'remote/1', { presence: barePresence(1) });
+		for (let i = 0; i < 20; i++) await area.openFile(`C:\repo\src\file${i}.ts`);
+		area.onActiveChange?.({ kind: 'file', path: 'C:\repo\src\file3.ts' });
+		expect(sent).toEqual([]);
+		expect(sent.length).toBe(0);
+	});
+
+	it('a catch-up snapshot of twenty tabs stays under 2 KB (the PC-reshown row)', async () => {
+		const sent: { by: string; k: string; to?: string; files?: string[] }[] = [];
+		const handlers = new Set<(message: unknown) => void>();
+		const deps = {
+			send: (message: unknown): void => {
+				sent.push(message as { by: string; k: string });
+				for (const handler of [...handlers]) handler(message);
+			},
+			receive: (handler: (message: unknown) => void): (() => void) => {
+				handlers.add(handler as (message: unknown) => void);
+				return () => handlers.delete(handler as (message: unknown) => void);
+			}
+		};
+		const twenty = Array.from({ length: 20 }, (_, i) => `C:\repo\src\features\file${i}.ts`);
+		const { area } = bareArea(twenty);
+		attachWorkbenchSync({ editors: area }, deps, 'remote/1', { presence: barePresence(2) });
+		// The joiner asks at start; this side answers as the designated responder.
+		const pc = bareArea([]);
+		attachWorkbenchSync({ editors: pc.area }, deps, 'main', { presence: barePresence(2) });
+		await until(() => sent.some((m) => m.k === 'stateSnapshot'));
+		const snapshot = sent.find((m) => m.k === 'stateSnapshot');
+		expect(snapshot?.files).toHaveLength(20);
+		expect(wire(snapshot)).toBeLessThanOrEqual(2048);
 	});
 });

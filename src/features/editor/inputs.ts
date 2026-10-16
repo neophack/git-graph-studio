@@ -113,6 +113,11 @@ export interface Editor {
 	encoding?: string;
 	eol?: 'lf' | 'crlf';
 	languageName?: string;
+	/** The disk moved under a DIRTY buffer — another device saved this file while this
+	 *  tab held unsaved changes (docs/remote-client-plan.md §7.3): the conflict bar
+	 *  shows until the user compares, takes the disk version or keeps their own (the
+	 *  next save overwrites). */
+	conflict?: boolean;
 }
 
 

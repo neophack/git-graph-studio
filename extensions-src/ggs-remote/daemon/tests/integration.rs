@@ -550,6 +550,11 @@ async fn attach_invoke_assets_and_instance_exit() {
         Frame::msgpack(ty::ATTACH, &serde_json::json!({ "instance": "ggs-test-1" })),
     )
     .await;
+    // The attach's Sessions push rides ahead of the Relay token (17.4).
+    match instance.recv().await {
+        ToInstance::Sessions { count } => assert_eq!(count, 1),
+        other => panic!("expected Sessions, got {other:?}"),
+    }
     let token = match instance.recv().await {
         ToInstance::EnsureRelay { token } => token,
         other => panic!("expected EnsureRelay, got {other:?}"),
@@ -778,6 +783,105 @@ async fn attach_invoke_assets_and_instance_exit() {
 }
 
 #[tokio::test]
+async fn instance_display_shows_and_hides_and_sessions_ride_the_count() {
+    let h = start().await;
+    set_password(&h).await;
+    let (cookie, csrf) = login(&h).await;
+    let mut ws = browser(&h, &cookie, &csrf).await;
+    let _ = next_of(&mut ws, ty::WINDOWS).await;
+
+    let mut instance = FakeInstance::connect(&h, "ggs-test-1").await;
+    let _ = next_of(&mut ws, ty::WINDOWS).await;
+
+    // ATTACH: the Relay dance, exactly as a session's own workbench runs it — with the
+    // session count riding ahead of the Relay token (17.4: the PC's close button asks
+    // exactly this count before deciding between hiding for the remotes and exiting).
+    send(
+        &mut ws,
+        Frame::msgpack(ty::ATTACH, &serde_json::json!({ "instance": "ggs-test-1" })),
+    )
+    .await;
+    match instance.recv().await {
+        ToInstance::Sessions { count } => assert_eq!(count, 1),
+        other => panic!("expected Sessions, got {other:?}"),
+    }
+    let token = match instance.recv().await {
+        ToInstance::EnsureRelay { token } => token,
+        other => panic!("expected EnsureRelay, got {other:?}"),
+    };
+    let mut relay_ws = relay(&h, &token).await;
+    let _ = next_of(&mut ws, ty::ATTACHED).await;
+
+    // The session's "close the window on the PC" hides it — the instance, not the
+    // session, is what stays: Hide on the control channel, and the socket lives on.
+    send(
+        &mut ws,
+        Frame::msgpack(
+            ty::INSTANCE_DISPLAY,
+            &serde_json::json!({ "instance": "ggs-test-1", "visible": false }),
+        ),
+    )
+    .await;
+    match instance.recv().await {
+        ToInstance::Hide => {}
+        other => panic!("expected Hide, got {other:?}"),
+    }
+    // The instance answers with its Update: hidden AND minimized ride the WINDOWS frame
+    // (the third visible state of 17.4).
+    instance
+        .send(&FromInstance::Update {
+            title: None,
+            folders: None,
+            visible: Some(false),
+            minimized: Some(true),
+            summary: None,
+        })
+        .await;
+    let windows = next_of(&mut ws, ty::WINDOWS).await;
+    let windows: serde_json::Value = windows.decode_msgpack().unwrap();
+    assert_eq!(windows["instances"][0]["visible"], false);
+    assert_eq!(windows["instances"][0]["minimized"], true);
+    assert_eq!(windows["instances"][0]["remoteSessions"], 1);
+
+    // "Open the window on the PC" is the Show the tray always had.
+    send(
+        &mut ws,
+        Frame::msgpack(
+            ty::INSTANCE_DISPLAY,
+            &serde_json::json!({ "instance": "ggs-test-1", "visible": true }),
+        ),
+    )
+    .await;
+    match instance.recv().await {
+        ToInstance::Show => {}
+        other => panic!("expected Show, got {other:?}"),
+    }
+
+    // A window that does not exist: a notice, nothing sent to any instance.
+    send(
+        &mut ws,
+        Frame::msgpack(
+            ty::INSTANCE_DISPLAY,
+            &serde_json::json!({ "instance": "ggs-missing", "visible": false }),
+        ),
+    )
+    .await;
+    let notice = next_of(&mut ws, ty::NOTICE).await;
+    let notice: serde_json::Value = notice.decode_msgpack().unwrap();
+    assert_eq!(notice["kind"], "instance-exited");
+
+    // The session detaches: the count rides back down to zero — the PC's close button
+    // sees the gate close.
+    send(&mut ws, Frame::empty(ty::DETACH)).await;
+    match instance.recv().await {
+        ToInstance::Sessions { count } => assert_eq!(count, 0),
+        other => panic!("expected Sessions zero, got {other:?}"),
+    }
+    drop(instance);
+    let _ = relay_ws.close(None).await;
+}
+
+#[tokio::test]
 async fn resume_replays_missed_frames() {
     let h = start().await;
     set_password(&h).await;
@@ -879,6 +983,7 @@ async fn windows_carries_the_recent_folder_history() {
         title: None,
         folders: Some(vec!["C:/alpha".into()]),
         visible: None,
+        minimized: None,
         summary: None,
     })
     .await;
@@ -1621,6 +1726,11 @@ async fn a_close_with_unsaved_files_blocks_until_forced() {
         Frame::msgpack(ty::ATTACH, &serde_json::json!({ "instance": "ggs-close" })),
     )
     .await;
+    // The attach's Sessions push rides ahead of the Relay token (17.4).
+    match instance.recv().await {
+        ToInstance::Sessions { count } => assert_eq!(count, 1),
+        other => panic!("expected Sessions, got {other:?}"),
+    }
     let token = match instance.recv().await {
         ToInstance::EnsureRelay { token } => token,
         other => panic!("expected EnsureRelay, got {other:?}"),

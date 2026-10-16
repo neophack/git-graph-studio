@@ -65,6 +65,9 @@ export interface MirrorHostBridge {
 export interface WorkbenchSyncHandle {
 	start(): void;
 	localOnly(local: boolean): void;
+	/** The desktop's close-to-hide path (§17): this frontend is going invisible — the
+	 *  presence table must say so at once, whatever the page's own visibility events do. */
+	noteWindowHidden(): void;
 	detach(): void;
 }
 

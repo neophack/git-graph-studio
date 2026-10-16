@@ -83,11 +83,12 @@ tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"
+tauri-plugin-notification = "2"
 tauri-build = { version = "2", features = [] }
 portable-pty = "0.9"
 winreg = "0.52"
-webview2-com = "0.38"
-windows-core = "0.61"
+webview2-com = "0.39"
+windows-core = "0.62"
 objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSMenu", "NSMenuItem"] }
@@ -176,6 +177,7 @@ tauri = { workspace = true }
 tauri-plugin-dialog = { workspace = true }
 tauri-plugin-opener = { workspace = true }
 tauri-plugin-clipboard-manager = { workspace = true }
+tauri-plugin-notification = { workspace = true }
 # The L0 foundation every domain shares (paths, fsx, jsonc, workspace roots, cancel, sink).
 ggs-base = { workspace = true }
 # The ggs-ext/1 wire protocol (ext_process speaks it; ggs-node answers it).

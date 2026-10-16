@@ -292,6 +292,9 @@ mod desktop {
             .plugin(tauri_plugin_dialog::init())
             .plugin(tauri_plugin_opener::init())
             .plugin(tauri_plugin_clipboard_manager::init())
+            // The OS notification channel behind the close-to-hide notice (§17.2, K15):
+            // the window going away for the remotes must not be silent.
+            .plugin(tauri_plugin_notification::init())
             .manage(states.roots)
             .manage(states.launch)
             .manage(states.file_list_cache.clone())
@@ -708,6 +711,18 @@ mod desktop {
                         // A destroyed Relay is why a remote session goes dead: the daemon
                         // asks for a rebuild, and this line is the record of the cause.
                         eprintln!("[remote] relay webview destroyed");
+                    }
+                }
+                // Minimize and restore arrive as resizes on some platforms: the window
+                // list's "minimized" badge follows the change and nothing else (§17.4).
+                if let tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::Resized(_),
+                    ..
+                } = &event
+                {
+                    if label == "main" {
+                        remote_host::note_main_resized(app);
                     }
                 }
                 if let tauri::RunEvent::Exit = event {

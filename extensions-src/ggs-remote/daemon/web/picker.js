@@ -82,6 +82,7 @@ function card(info, now) {
 	const badges = [];
 	if (info.state === 'unresponsive') badges.push(el('span', { class: 'badge bad' }, t('unresponsive')));
 	if (info.sandboxed) badges.push(el('span', { class: 'badge' }, t('sandboxed')));
+	if (info.minimized) badges.push(el('span', { class: 'badge' }, t('minimized')));
 	if (!info.visible) badges.push(el('span', { class: 'badge' }, t('hidden')));
 	if (info.remoteSessions) badges.push(el('span', { class: 'badge' }, t('sessions', { n: info.remoteSessions })));
 	if (summary.terminals) badges.push(el('span', { class: 'badge' }, t('terminals', { n: summary.terminals })));
@@ -111,6 +112,11 @@ function card(info, now) {
 			'div',
 			{ class: 'actions' },
 			el('button', { class: 'primary', onclick: () => openInstance(info) }, t('open')),
+			// The PC window's own lifecycle (docs/remote-client-plan.md §6.8, §17): hide or
+			// show the desktop window — the instance keeps running, this session stays.
+			info.visible && !info.minimized
+				? el('button', { onclick: () => send(T.INSTANCE_DISPLAY, { instance: info.id, visible: false }) }, t('pcHide'))
+				: el('button', { onclick: () => send(T.INSTANCE_DISPLAY, { instance: info.id, visible: true }) }, t('pcShow')),
 			el('button', { onclick: () => send(T.INSTANCE_CLOSE, { instance: info.id, force: false }) }, t('close')),
 			el('button', { onclick: restart }, t('restart'))
 		)

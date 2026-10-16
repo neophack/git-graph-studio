@@ -43,6 +43,29 @@ function registerCommands(): void {
 	// desktop app's palette and menus never list the browser's commands.
 	const remoteOnly = { profiles: ['remote'] as const };
 	commands.register({ ...remoteOnly, id: 'remote.switchWindow', title: t('remote.windows'), category: 'Remote', run: () => openWindowSwitcher() });
+	// The PC window's own lifecycle, from the remote (§17): hide or show THIS window's
+	// desktop half — the session stays attached either way (K12), and "close on the PC"
+	// is exactly that, never the instance's exit.
+	commands.register({
+		...remoteOnly,
+		id: 'remote.pcWindow.hide',
+		title: t('remote.pcWindow.hide'),
+		category: 'Remote',
+		run: () => {
+			const env = remoteEnv();
+			env?.transport.displayInstance(env.attached.instance, false);
+		}
+	});
+	commands.register({
+		...remoteOnly,
+		id: 'remote.pcWindow.show',
+		title: t('remote.pcWindow.show'),
+		category: 'Remote',
+		run: () => {
+			const env = remoteEnv();
+			env?.transport.displayInstance(env.attached.instance, true);
+		}
+	});
 	// Back from this page's own workbench to the PC window's live copy (§22.5), pinned so the
 	// auto rule does not hand a phone straight back here while the PC shows the window.
 	commands.register({ ...remoteOnly, id: 'remote.liveView', title: t('remote.liveView'), category: 'Remote', run: () => location.replace(modeUrl(location.href, 'mirror')) });

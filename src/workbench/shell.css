@@ -417,6 +417,36 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 	to { background: transparent; }
 }
 
+/* The external reload's quieter flash (docs/remote-client-plan.md §7.3): another device
+ * saved this file and the clean tab took the new bytes — the tab marks itself for 1.5 s,
+ * its title carrying the why. */
+.tab.external-reload { animation: tab-external-reload 1.5s var(--ease-out); }
+@keyframes tab-external-reload {
+	from { background: var(--vscode-editorInfo-foreground, var(--vscode-focusBorder)); }
+	to { background: transparent; }
+}
+
+/* The save-conflict bar (§7.3): the disk moved under a dirty buffer — another device
+ * saved this file. One bar over the editor: what happened, and the three ways out
+ * (compare, take the disk version, keep mine). */
+.conflict-bar {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 6px 12px;
+	background: color-mix(in srgb, var(--vscode-editorInfo-foreground, #3794ff) 12%, var(--vscode-editor-background));
+	border-bottom: 1px solid var(--vscode-panel-border, var(--vscode-focusBorder));
+	color: var(--vscode-foreground);
+	font-size: 12px;
+}
+.conflict-bar-text { flex: 1; }
+.conflict-bar-actions { display: flex; gap: 8px; }
+.conflict-bar button {
+	padding: 2px 10px;
+	font-size: 12px;
+	border: 1px solid var(--vscode-button-border, transparent);
+}
+
 /* The delayed tooltip (ui.ts): a hover card anchored under its element. */
 .tooltip {
 	position: fixed; z-index: 100; max-width: 260px; padding: 4px 8px;

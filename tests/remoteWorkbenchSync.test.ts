@@ -19,7 +19,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EditorArea } from '../src/features/editor';
 import { Workbench } from '../src/workbench';
 import { commands } from '../src/platform/commands';
-import { attachWorkbenchSync, WORKBENCH_SYNC_EVENT, type SyncedEditorArea, type SyncedWorkbench, type WorkbenchSyncMessage } from '../src/remote/workbenchSync';
+import { attachWorkbenchSync, WORKBENCH_SYNC_EVENT, type SyncedEditorArea, type SyncPresence, type SyncedWorkbench, type WorkbenchSyncMessage } from '../src/remote/workbenchSync';
+import { currentPresence } from '../src/remote/presence';
 import { setRemoteEnv } from '../src/remote/session';
 import { provideHook } from '../src/platform/hooks';
 import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
@@ -379,15 +380,16 @@ describe('the sync core over a shared bus', () => {
 		expect(late.activePath()).toBe(README);
 	});
 
-	it('carries a view switch to the other side', () => {
+	it('a view switch stays on its own frontend — the sidebar is local layout (G8, K7)', () => {
 		const channel = bus();
 		const pc = fakeWorkbench();
 		const phone = fakeWorkbench();
 		attachWorkbenchSync(pc, channel.deps, 'main');
 		attachWorkbenchSync(phone, channel.deps, 'remote/1');
 		pc.showView('scm');
-		expect(phone.views).toEqual(['scm']);
-		expect(channel.sent).toEqual([{ by: 'main', k: 'view', id: 'scm' }]);
+		expect(pc.views).toEqual(['scm']);
+		expect(phone.views).toEqual([]);
+		expect(channel.sent).toEqual([]);
 	});
 
 	it('ignores its own echo and never ping-pongs', async () => {
@@ -568,40 +570,25 @@ describe('the sync core over a shared bus', () => {
 		expect(channel.sent.length).toBe(1);
 	});
 
-	it('takes the other side off a view the PC closed - the side bar hide crosses', () => {
+	it('a side bar hide stays on its own frontend — layout never crosses (G8, K7)', async () => {
 		const channel = bus();
 		const pc = fakeWorkbench();
 		const phone = fakeWorkbench();
 		attachWorkbenchSync(pc, channel.deps, 'main');
 		attachWorkbenchSync(phone, channel.deps, 'remote/1');
-		pc.showView('ext-container:acme.chat');
-		expect(phone.views).toEqual(['ext-container:acme.chat']);
-		channel.sent.length = 0;
-		// The PC user clicks the Claude Code activity item again: its side bar hides, and the
-		// phone leaves the chat page.
-		pc.toggleSidebar!();
-		expect(channel.sent).toEqual([{ by: 'main', k: 'sidebar', shown: false }]);
-		expect(phone.sidebarShown).toBe(false);
-		expect(phone.sidebarToggles).toBe(1);
-		// Showing it again is a view switch.
-		channel.sent.length = 0;
-		pc.toggleSidebar!();
-		expect(channel.sent).toEqual([{ by: 'main', k: 'view', id: 'ext-container:acme.chat' }]);
-		expect(phone.sidebarShown).toBe(true);
-	});
-
-	it('keeps the phone side-page dismissal local - on a phone it is navigation, not layout', () => {
-		const channel = bus();
-		const pc = fakeWorkbench();
-		const phone = fakeWorkbench();
-		attachWorkbenchSync(pc, channel.deps, 'main');
-		attachWorkbenchSync(phone, channel.deps, 'remote/1', { sidebarHideCrosses: () => false });
 		phone.toggleSidebar!();
-		expect(channel.sent).toEqual([]);
+		expect(phone.sidebarShown).toBe(false);
 		expect(pc.sidebarShown).toBe(true);
-		// A hide arriving at a side bar already hidden is a no-op, never a re-show.
-		pc.toggleSidebar!();
-		expect(phone.sidebarToggles).toBe(1);
+		expect(channel.sent).toEqual([]);
+		// And a stray legacy message of the retired vocabulary changes nothing anywhere
+		// (the bus records what the harness itself injects — read past it).
+		channel.deps.send({ by: 'remote/1', k: 'sidebar', shown: false } as unknown as WorkbenchSyncMessage);
+		expect(pc.sidebarShown).toBe(true);
+		// The bus records the harness's own injection — what matters is that nothing
+		// ECHOED back from either side after it.
+		channel.sent.length = 0;
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(channel.sent).toEqual([]);
 	});
 
 	it('crosses every message as well under 200 bytes', async () => {
@@ -611,10 +598,9 @@ describe('the sync core over a shared bus', () => {
 		attachWorkbenchSync(pc, channel.deps, 'main');
 		attachWorkbenchSync(phone, channel.deps, 'remote/1');
 		await pc.editors.openFile(NOTES, { line: 1200, column: 40 });
-		pc.showView('ext-container:claude-code.claude');
 		pc.setActive(NOTES);
 		phone.close(NOTES);
-		expect(channel.sent.length).toBeGreaterThanOrEqual(3);
+		expect(channel.sent.length).toBeGreaterThanOrEqual(2);
 		for (const message of channel.sent) {
 			expect(JSON.stringify(message).length).toBeLessThan(200);
 		}
@@ -773,6 +759,195 @@ describe('the sync core over a shared bus', () => {
 	});
 });
 
+/* ---------- The presence gate and the catch-up (docs/remote-client-plan.md §7.0) ---------- */
+
+/** A stand-in presence table: `count` is what the roster answers, `became()` fires the
+ *  becoming-active handlers the real document events would, and `designate` picks the
+ *  responder of a state request. */
+function fakePresence(count = 2): SyncPresence & { count: number; became(): void; designate: (requester: string) => boolean } {
+	const handlers = new Set<() => void>();
+	const presence = {
+		count,
+		designate: (): boolean => true,
+		syncAllowed: (): boolean => presence.count >= 2,
+		othersActive: (): boolean => presence.count >= 2,
+		isDesignatedResponder: (requester: string): boolean => presence.designate(requester),
+		onBecameActive: (handler: () => void): (() => void) => {
+			handlers.add(handler);
+			return () => handlers.delete(handler);
+		},
+		isActive: (): boolean => true,
+		became: (): void => {
+			for (const handler of [...handlers]) handler();
+		}
+	};
+	return presence;
+}
+
+describe('the presence gate (§7.0, K11)', () => {
+	it('a lone active frontend sends nothing at all — twenty files, switches and closes', async () => {
+		const channel = bus();
+		const phone = fakeWorkbench();
+		const alone = fakePresence(1);
+		attachWorkbenchSync(phone, channel.deps, 'remote/1', { presence: alone });
+		for (let i = 0; i < 20; i++) await phone.editors.openFile(`${NOTES}.${i}`);
+		phone.setActive(`${NOTES}.3`);
+		phone.close(`${NOTES}.4`);
+		expect(channel.sent).toEqual([]);
+	});
+
+	it('two active frontends sync — and the moment one leaves, the gate closes', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const phone = fakeWorkbench();
+		const pcPresence = fakePresence(2);
+		const phonePresence = fakePresence(2);
+		attachWorkbenchSync(pc, channel.deps, 'main', { presence: pcPresence });
+		attachWorkbenchSync(phone, channel.deps, 'remote/1', { presence: phonePresence });
+		await pc.editors.openFile(NOTES);
+		expect(phone.tabs()).toEqual([NOTES]);
+		channel.sent.length = 0;
+		// The PC window hides: both sides see one active frontend, nothing crosses anymore.
+		pcPresence.count = 1;
+		phonePresence.count = 1;
+		await pc.editors.openFile(README);
+		pc.setActive(README);
+		expect(channel.sent).toEqual([]);
+	});
+
+	it('PC and two remotes: every open reaches both other frontends (K10)', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const a = fakeWorkbench();
+		const b = fakeWorkbench();
+		attachWorkbenchSync(pc, channel.deps, 'main', { presence: fakePresence(3) });
+		attachWorkbenchSync(a, channel.deps, 'remote/1', { presence: fakePresence(3) });
+		attachWorkbenchSync(b, channel.deps, 'remote/2', { presence: fakePresence(3) });
+		await a.editors.openFile(NOTES);
+		expect(pc.tabs()).toEqual([NOTES]);
+		expect(b.tabs()).toEqual([NOTES]);
+		channel.sent.length = 0;
+		// A remote-to-remote switch crosses the same way: B opens a file of its own (which
+		// itself reaches everyone), then switches back — a real switch, not an echo.
+		await b.editors.openFile(README);
+		await until(() => a.tabs().length === 2 && pc.tabs().length === 2);
+		channel.sent.length = 0;
+		b.setActive(NOTES);
+		expect(a.activePath()).toBe(NOTES);
+		expect(pc.activePath()).toBe(NOTES);
+		expect(channel.sent.filter((m) => m.k === 'active')).toEqual([{ by: 'remote/2', k: 'active', path: NOTES }]);
+	});
+});
+
+describe('the catch-up (§7.0.3, K14)', () => {
+	it('a frontend becoming active asks, the designated other answers, and the joiner follows it', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const remote = fakeWorkbench();
+		// The remote worked ALONE (gated): three tabs of its own, one of them active.
+		const remotePresence = fakePresence(1);
+		const remoteSync = attachWorkbenchSync(remote, channel.deps, 'remote/1', { presence: remotePresence });
+		remoteSync.localOnly(true);
+		await remote.editors.openFile(NOTES);
+		await remote.editors.openFile(README);
+		await remote.editors.openFile(`${NOTES}.x`);
+		remote.setActive(README);
+		remoteSync.localOnly(false);
+		expect(channel.sent).toEqual([]);
+		// The PC window comes back: it is active, it asks. The remote answers (it is now the
+		// designated responder, and both count two actives).
+		const pcPresence = fakePresence(2);
+		remotePresence.count = 2;
+		attachWorkbenchSync(pc, channel.deps, 'main', { presence: pcPresence, startImmediately: false }).start();
+		await until(() => channel.sent.some((m) => m.k === 'stateSnapshot'));
+		await until(() => pc.tabs().length === 3);
+		// The union: every remote tab opened on the PC, in the background — the PC's own
+		// active follows the remote's (K14).
+		expect(pc.tabs().sort()).toEqual([`${NOTES}.x`, NOTES, README].sort());
+		expect(pc.activePath()).toBe(README);
+		// The joiner's own tabs the answerer lacks cross back as background opens — here
+		// the PC had none, so nothing crossed back.
+		expect(remote.tabs()).toEqual([NOTES, README, `${NOTES}.x`]);
+		// No tab ever closed over the catch-up, and after it the two sides sync normally.
+		channel.sent.length = 0;
+		await pc.editors.openFile(`${NOTES}.y`);
+		expect(remote.tabs()).toContain(`${NOTES}.y`);
+	});
+
+	it('the joiner pushes its own tabs back, and never closes anything over a snapshot', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const remote = fakeWorkbench();
+		// The PC is the established one (two tabs, one active); the remote worked alone
+		// with a tab of its own the PC lacks.
+		const pcPresence = fakePresence(2);
+		const remotePresence = fakePresence(1);
+		const pcSync = attachWorkbenchSync(pc, channel.deps, 'main', { presence: pcPresence });
+		const remoteSync = attachWorkbenchSync(remote, channel.deps, 'remote/1', { presence: remotePresence });
+		pcSync.localOnly(true);
+		await pc.editors.openFile(NOTES);
+		await pc.editors.openFile(README);
+		pc.setActive(NOTES);
+		pcSync.localOnly(false);
+		const SOLO = `${NOTES}.solo`;
+		remoteSync.localOnly(true);
+		await remote.editors.openFile(SOLO);
+		remoteSync.localOnly(false);
+		channel.sent.length = 0;
+		// The remote becomes active (both sides now count two): it asks, the PC answers.
+		remotePresence.count = 2;
+		remotePresence.became();
+		await until(() => channel.sent.some((m) => m.k === 'stateSnapshot'));
+		await until(() => remote.tabs().length === 3);
+		expect(remote.tabs().sort()).toEqual([SOLO, NOTES, README].sort());
+		expect(remote.activePath()).toBe(NOTES);
+		// The union runs both ways: the remote's own tab crossed back as a background open.
+		await until(() => pc.tabs().includes(SOLO));
+		// Nothing closed anywhere over the catch-up.
+		expect(pc.tabs().sort()).toEqual([SOLO, NOTES, README].sort());
+	});
+
+	it('a snapshot from a remote opens only paths inside this window folders', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		pc.openFolders = () => ['C:\\repo'];
+		const presence = fakePresence(2);
+		const sync = attachWorkbenchSync(pc, channel.deps, 'main', { presence, startImmediately: false });
+		sync.start();
+		// The awaiting window is armed by the start's own catch-up request.
+		await until(() => channel.sent.some((m) => m.k === 'stateRequest'));
+		channel.deps.send({
+			by: 'remote/1',
+			k: 'stateSnapshot',
+			to: 'main',
+			files: ['C:\\repo\\in.txt', 'C:\\Users\\me\\.ggs\\keys\\ai-providers.key'],
+			tabs: [],
+			extTabs: [],
+			active: { kind: 'file', path: 'C:\\repo\\in.txt' }
+		});
+		await until(() => pc.tabs().includes('C:\\repo\\in.txt'));
+		expect(pc.tabs()).toEqual(['C:\\repo\\in.txt']);
+	});
+
+	it('only the designated responder answers — the freshest active frontend', async () => {
+		const channel = bus();
+		const a = fakeWorkbench();
+		const b = fakeWorkbench();
+		const joiner = fakeWorkbench();
+		const aPresence = fakePresence(3);
+		const bPresence = fakePresence(3);
+		// B heard from A more recently than A heard from B: B answers, A stays quiet.
+		aPresence.designate = (): boolean => false;
+		bPresence.designate = (): boolean => true;
+		attachWorkbenchSync(a, channel.deps, 'remote/1', { presence: aPresence });
+		attachWorkbenchSync(b, channel.deps, 'remote/2', { presence: bPresence });
+		attachWorkbenchSync(joiner, channel.deps, 'remote/3', { presence: fakePresence(3), startImmediately: false }).start();
+		await until(() => channel.sent.some((m) => m.k === 'stateSnapshot'));
+		expect(channel.sent.filter((m) => m.k === 'stateSnapshot').every((m) => m.by === 'remote/2')).toBe(true);
+		expect(channel.sent.filter((m) => m.k === 'stateSnapshot')).toHaveLength(1);
+	});
+});
+
 /* ---------- A real editor area under the sync ---------- */
 
 describe('a real editor area under the sync', () => {
@@ -784,10 +959,9 @@ describe('a real editor area under the sync', () => {
 		const container = document.createElement('div');
 		document.body.appendChild(container);
 		const area = new EditorArea(container);
-		const views: string[] = [];
 		// openFolders: the remote-open gate refuses a file outside the window's roots — without
 		// it the remote open below never applied and the open/active waits were vacuous.
-		const workbench: SyncedWorkbench = { editors: area, showView: (view) => views.push(view), openFolders: () => ['C:\\repo'] };
+		const workbench: SyncedWorkbench = { editors: area, openFolders: () => ['C:\\repo'] };
 		const channel = bus();
 		attachWorkbenchSync(workbench, channel.deps, 'main');
 		// Remote open: a real tab lands, active, content read once.
@@ -817,8 +991,8 @@ describe('a real editor area under the sync', () => {
 		const areaA = new EditorArea(containerA);
 		const areaB = new EditorArea(containerB);
 		const channel = bus();
-		attachWorkbenchSync({ editors: areaA, showView: () => undefined }, channel.deps, 'main');
-		attachWorkbenchSync({ editors: areaB, showView: () => undefined }, channel.deps, 'remote/1');
+		attachWorkbenchSync({ editors: areaA }, channel.deps, 'main');
+		attachWorkbenchSync({ editors: areaB }, channel.deps, 'remote/1');
 		const input = { kind: 'extpage', id: 'webview:acme.engine:7', title: 'Claude Code', extId: 'acme.engine', pageId: 'webview' } as const;
 		await areaA.openExtPage({ ...input }, () => undefined);
 		await areaB.openExtPage({ ...input }, () => undefined);
@@ -837,8 +1011,8 @@ describe('a real editor area under the sync', () => {
 		const areaA = new EditorArea(containerA);
 		const areaB = new EditorArea(containerB);
 		const channel = bus();
-		attachWorkbenchSync({ editors: areaA, showView: () => undefined }, channel.deps, 'main');
-		attachWorkbenchSync({ editors: areaB, showView: () => undefined }, channel.deps, 'remote/1');
+		attachWorkbenchSync({ editors: areaA }, channel.deps, 'main');
+		attachWorkbenchSync({ editors: areaB }, channel.deps, 'remote/1');
 		const input = { kind: 'extpage', id: 'webview:acme.graph:3', title: 'Git Graph', extId: 'acme.graph', pageId: 'webview' } as const;
 		await areaA.openExtPage({ ...input }, () => undefined);
 		await areaB.openExtPage({ ...input }, () => undefined);
@@ -863,8 +1037,8 @@ describe('a real editor area under the sync', () => {
 		const areaA = new EditorArea(containerA);
 		const areaB = new EditorArea(containerB);
 		const channel = bus();
-		attachWorkbenchSync({ editors: areaA, showView: () => undefined }, channel.deps, 'main');
-		attachWorkbenchSync({ editors: areaB, showView: () => undefined }, channel.deps, 'remote/1');
+		attachWorkbenchSync({ editors: areaA }, channel.deps, 'main');
+		attachWorkbenchSync({ editors: areaB }, channel.deps, 'remote/1');
 		const diff = {
 			kind: 'diff',
 			id: 'scm:worktree:notes.txt',
@@ -910,8 +1084,8 @@ describe('a real editor area under the sync', () => {
 		areaA.setRoot('C:\\repo');
 		areaB.setRoot('C:\\repo');
 		const channel = bus();
-		attachWorkbenchSync({ editors: areaA, showView: () => undefined }, channel.deps, 'main');
-		attachWorkbenchSync({ editors: areaB, showView: () => undefined }, channel.deps, 'remote/1');
+		attachWorkbenchSync({ editors: areaA }, channel.deps, 'main');
+		attachWorkbenchSync({ editors: areaB }, channel.deps, 'remote/1');
 		await areaB.openFileHistory(NOTES);
 		await until(() => areaA.openTabInputs().some((tab) => tab.id === `history:${NOTES}`));
 		expect(channel.by('remote/1')).toEqual([{ by: 'remote/1', k: 'openTab', input: { kind: 'history', path: NOTES } }]);
@@ -930,7 +1104,7 @@ describe('a real editor area under the sync', () => {
 		document.body.appendChild(container);
 		const area = new EditorArea(container);
 		const channel = bus();
-		attachWorkbenchSync({ editors: area, showView: () => undefined }, channel.deps, 'main');
+		attachWorkbenchSync({ editors: area }, channel.deps, 'main');
 		await area.openDiff({ kind: 'diff', id: 'ext:1', title: 'a ↔ b', left: { revision: '', path: 'a', label: 'a', exists: true, content: 'x\n' }, right: { revision: '', path: 'b', label: 'b', exists: true, content: 'y\n' } });
 		await until(() => area.openTabInputs().length === 1);
 		expect(channel.sent).toEqual([]);
@@ -941,7 +1115,7 @@ describe('a real editor area under the sync', () => {
 		const container = document.createElement('div');
 		document.body.appendChild(container);
 		const area = new EditorArea(container);
-		const workbench: SyncedWorkbench = { editors: area, showView: () => undefined };
+		const workbench: SyncedWorkbench = { editors: area };
 		const channel = bus();
 		attachWorkbenchSync(workbench, channel.deps, 'main');
 		await area.openFile(NOTES);
@@ -1006,6 +1180,11 @@ describe('the wired workbench', () => {
 		workbench = new Workbench();
 		await workbench.boot();
 		await flush(10);
+		// The gate (7.0) needs a second active frontend: the catch-up at start saw none
+		// (correctly skipping it); the table gets one now, as WINDOWS frames would. The
+		// boot's own emits (the presence announce among them) go before the tests read.
+		currentPresence()?.noteExternal('remote/9', true);
+		backend.emits.length = 0;
 	});
 
 	it('a file opened from the Explorer crosses the real event channel', async () => {
@@ -1027,12 +1206,17 @@ describe('the wired workbench', () => {
 		expect(backend.emits.filter((e) => e.event === WORKBENCH_SYNC_EVENT && (e.payload as { by: string }).by === 'main')).toEqual([]);
 	});
 
-	it('a remote view switch moves the sidebar, a local one crosses', async () => {
+	it('a view switch is local layout — neither direction crosses (G8)', async () => {
+		// The retired vocabulary arriving from the wire changes nothing: the sidebar keeps
+		// its own view.
 		backend.emit(WORKBENCH_SYNC_EVENT, { by: 'remote/1', k: 'view', id: 'scm' });
-		await until(() => document.querySelector('.activity-item.active')?.getAttribute('data-view') === 'scm');
+		await flush(5);
+		expect(document.querySelector('.activity-item.active')?.getAttribute('data-view')).not.toBe('scm');
 		backend.emits.length = 0;
 		click(document.querySelector('.activity-item[data-view="search"]'));
-		await until(() => backend.emits.some((e) => e.event === WORKBENCH_SYNC_EVENT && (e.payload as { id?: string }).id === 'search'));
+		await until(() => document.querySelector('.activity-item.active')?.getAttribute('data-view') === 'search');
+		await flush(5);
+		expect(backend.emits.filter((e) => e.event === WORKBENCH_SYNC_EVENT)).toEqual([]);
 	});
 
 	it('a copy closed on the phone closes the PC panel — and the extension learns it', async () => {
@@ -1042,7 +1226,7 @@ describe('the wired workbench', () => {
 		document.body.appendChild(phoneHost);
 		const phoneArea = new EditorArea(phoneHost);
 		const pushes: { event?: string; panelId?: number }[] = [];
-		const phoneSync = attachWorkbenchSync({ editors: phoneArea, showView: () => undefined }, {
+		const phoneSync = attachWorkbenchSync({ editors: phoneArea }, {
 			send: (message) => void mockEmit(WORKBENCH_SYNC_EVENT, message),
 			receive: (handler) => {
 				let unlisten: (() => void) | null = null;
@@ -1252,6 +1436,10 @@ describe('the extension pages across frontends — Claude Code and Git Graph', (
 		await until(() => claudeItem() !== null, 200);
 		expect(claudeItem()).not.toBeNull();
 		backend.emits.length = 0;
+		// The sync's gate needs a second ACTIVE frontend before anything crosses: feed
+		// the table one, as the daemon's WINDOWS frames would the PC's visibility.
+		currentPresence()?.noteExternal('remote/9', true);
+		backend.emits.length = 0;
 	});
 
 	afterEach(() => {
@@ -1262,50 +1450,36 @@ describe('the extension pages across frontends — Claude Code and Git Graph', (
 
 	/* -- Claude Code's sidebar page -- */
 
-	it('opening the Claude Code view on the PC opens it on the other side', async () => {
+	it('opening the Claude Code view is local layout — nothing crosses (G8)', async () => {
 		click(claudeItem());
-		await until(() => sentByMain().length > 0);
-		expect(sentByMain()).toEqual([{ by: 'main', k: 'view', id: CLAUDE_CONTAINER }]);
-		expect(workbench.activeSidebarView).toBe(CLAUDE_CONTAINER);
-	});
-
-	it('the other side opening Claude Code shows its container on the PC — and nothing echoes', async () => {
-		backend.emit(WORKBENCH_SYNC_EVENT, { by: 'remote/1', k: 'view', id: CLAUDE_CONTAINER });
 		await until(() => workbench.activeSidebarView === CLAUDE_CONTAINER);
 		expect(workbench.activeSidebarView).toBe(CLAUDE_CONTAINER);
-		expect(sidebarHidden()).toBe(false);
-		expect(claudeItem()?.classList.contains('active')).toBe(true);
 		await flush(5);
 		expect(sentByMain()).toEqual([]);
 	});
 
-	it('closing the Claude Code view on the PC closes it on the other side', async () => {
+	it('a retired view or sidebar message from the wire changes nothing and echoes nothing', async () => {
+		backend.emit(WORKBENCH_SYNC_EVENT, { by: 'remote/1', k: 'view', id: CLAUDE_CONTAINER });
+		backend.emit(WORKBENCH_SYNC_EVENT, { by: 'remote/1', k: 'sidebar', shown: false });
+		await flush(5);
+		expect(workbench.activeSidebarView).not.toBe(CLAUDE_CONTAINER);
+		expect(sidebarHidden()).toBe(false);
+		expect(sentByMain()).toEqual([]);
+	});
+
+	it('closing the Claude Code view hides the bar locally — the layout never crosses (G8)', async () => {
 		click(claudeItem());
 		await until(() => workbench.activeSidebarView === CLAUDE_CONTAINER);
 		backend.emits.length = 0;
 		// The second click on the active item hides the side bar (VS Code's toggle).
 		click(claudeItem());
-		await until(() => sentByMain().length > 0);
-		expect(sidebarHidden()).toBe(true);
-		expect(sentByMain()).toEqual([{ by: 'main', k: 'sidebar', shown: false }]);
-		// Shown again with Ctrl+B's command: the other side comes back to the same view.
-		backend.emits.length = 0;
-		await commands.execute('workbench.toggleSidebar');
-		await until(() => sentByMain().length > 0);
-		expect(sentByMain()).toEqual([{ by: 'main', k: 'view', id: CLAUDE_CONTAINER }]);
-	});
-
-	it('the other side closing its side page hides the PC side bar, once, never re-showing it', async () => {
-		click(claudeItem());
-		await until(() => workbench.activeSidebarView === CLAUDE_CONTAINER);
-		backend.emits.length = 0;
-		backend.emit(WORKBENCH_SYNC_EVENT, { by: 'remote/1', k: 'sidebar', shown: false });
 		await until(() => sidebarHidden());
 		expect(sidebarHidden()).toBe(true);
-		// A second hide is a no-op — the toggle never flips the bar back open.
-		backend.emit(WORKBENCH_SYNC_EVENT, { by: 'remote/1', k: 'sidebar', shown: false });
+		// Shown again with Ctrl+B's command: still only this frontend's own.
+		backend.emits.length = 0;
+		await commands.execute('workbench.toggleSidebar');
+		await until(() => !sidebarHidden());
 		await flush(5);
-		expect(sidebarHidden()).toBe(true);
 		expect(sentByMain()).toEqual([]);
 	});
 
@@ -1323,17 +1497,16 @@ describe('the extension pages across frontends — Claude Code and Git Graph', (
 		expect(sentByMain()).toEqual([]);
 	});
 
-	it('the phone bottom tab for Claude Code opens the view on the other side', async () => {
+	it('the phone bottom tab for Claude Code opens the view locally — a page is navigation (G8)', async () => {
 		phoneForm(true);
 		const { extensionContainers, goTo } = await import('../src/remote/pages');
 		expect(extensionContainers().map((container) => [container.id, container.title])).toContainEqual([CLAUDE_CONTAINER, 'Claude Code']);
 		await goTo(CLAUDE_CONTAINER);
-		await until(() => sentByMain().length > 0);
-		expect(sentByMain()).toEqual([{ by: 'main', k: 'view', id: CLAUDE_CONTAINER }]);
-		// Tapping it again shows the page, never toggles it away — and sends nothing more.
+		await until(() => workbench.activeSidebarView === CLAUDE_CONTAINER);
+		// Tapping it again shows the page, never toggles it away — and nothing ever crosses.
 		await goTo(CLAUDE_CONTAINER);
 		await flush(5);
-		expect(sentByMain().length).toBe(1);
+		expect(sentByMain()).toEqual([]);
 		expect(sidebarHidden()).toBe(false);
 	});
 

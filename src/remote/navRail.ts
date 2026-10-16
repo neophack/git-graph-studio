@@ -5,7 +5,7 @@
 // always shows its page, the active page is marked, and the badges (open editors, pending
 // changes) carry what the hidden status and activity bars would.
 import { t } from '../platform/i18n';
-import { currentPage, goTo, onWorkbenchChange, pageIcon, type PageId } from './pages';
+import { currentPage, extensionContainers, goTo, onWorkbenchChange, pageIcon, type PageId } from './pages';
 import { bottomTabs, tabBadge } from './bottomTabs';
 
 function railButton(id: PageId, label: string, onTap: () => void): HTMLButtonElement {
@@ -50,10 +50,13 @@ function syncRail(bar: HTMLElement): void {
 
 /** Rebuild the buttons when the destinations change, else only the active mark and badges
  *  (bottomTabs.syncTabs answers the same keying for the bar; the rail keeps its own key so
- *  the two never fight over one element). */
+ *  the two never fight over one element). The key carries the containers' images too — a
+ *  package image replacing its codicon stand-in is a rebuild, or the rail's button would
+ *  wear the placeholder forever (the bar's key already says so). */
 function syncButtons(bar: HTMLElement): void {
 	const tabs = bottomTabs();
-	const key = tabs.map((tab) => `${tab.id}|${tab.label}`).join(' ');
+	const images = extensionContainers().map((container) => container.image ?? '').join(' ');
+	const key = `${tabs.map((tab) => `${tab.id}|${tab.label}`).join(' ')}#${images}`;
 	if (bar.dataset.tabsKey !== key) {
 		bar.dataset.tabsKey = key;
 		bar.replaceChildren(

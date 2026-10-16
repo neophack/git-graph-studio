@@ -740,7 +740,7 @@ export class Workbench {
 
 	disposed = false;
 
-	workbenchSync: { start(): void; localOnly(local: boolean): void; detach(): void } | null = null;
+	workbenchSync: { start(): void; localOnly(local: boolean): void; noteWindowHidden(): void; detach(): void } | null = null;
 
 	trackUnlisten(unlisten: () => void): void {
 		if (this.disposed) unlisten();

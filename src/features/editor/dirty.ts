@@ -1,7 +1,8 @@
 import { backupClear, backupWrite, type FileContents, writeFile } from '../../platform/ipc/fs';
 import { samePath } from '../extensions';
 import { settings } from '../../platform/settings';
-import { basename, notify, toPosix } from '../../platform/ui/index';
+import { t } from '../../platform/i18n';
+import { basename, el, notify, toPosix } from '../../platform/ui/index';
 import { fileIcon } from '../../platform/fileIcons';
 import type { EditorGroup } from './group';
 import { editorState } from './editorState';
@@ -79,6 +80,7 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 			if (!(await editor.doc.save())) return;
 			editor.dirty = false;
 			this.renderTabs();
+			this.clearSaveConflict(editor);
 			this.flashSavedTab(editor);
 			this.forgetBackup(editor);
 			this.onFileSaved?.(editor.input.path);
@@ -104,6 +106,10 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 			editor.dirty = dirty;
 			this.renderTabs();
 		}
+		// A saved baseline is the disk again: whatever conflict the tab carried is settled
+		// the strong way — this side's text won (§7.3's "keep my version" is implicit in
+		// every save).
+		this.clearSaveConflict(editor);
 		this.flashSavedTab(editor);
 		if (!editor.dirty) this.forgetBackup(editor);
 		this.onFileSaved?.(editor.input.path);
@@ -372,9 +378,109 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 			editor.savedEncoding = editor.encoding;
 			this.renderTabs();
 			this.refreshPreviews(path);
+			// The silent reload's one sign (§7.3): the tab flashes that another device
+			// wrote this file, and the hint goes again on its own.
+			this.flashReloadedTab(editor);
 		} catch {
 			// Deleted meanwhile: the tab keeps its last contents, as VS Code does.
 		}
+	},
+
+	/** The §7.3 conflict check: the watcher named a file this tab holds DIRTY — a clean
+	 *  tab would have taken `reloadIfClean`'s silent reload, so the only remaining case
+	 *  is the disk moving under unsaved changes. The watcher's echo of OUR OWN save reads
+	 *  back the baseline this tab knows and is not a conflict; a disk that still equals
+	 *  the buffer never was one. A windowed editor's document lives in the backend and
+	 *  owns its own merge — not this bar's fight. */
+	async markSaveConflict(path: string): Promise<void> {
+		const editor = this.open.find((e) => e.input.kind === 'file' && e.input.path === path);
+		if (!editor || !editor.dirty || !editor.view || editor.doc) return;
+		if (editor.conflict) return; // the bar is already up; a newer write keeps it
+		let file: FileContents;
+		try {
+			file = await readFileRaw(path);
+		} catch {
+			return;
+		}
+		if (file.contents === null) return;
+		// The read was async: the tab may have closed, cleaned or settled meanwhile.
+		if (!editor.dirty || editor.conflict || !this.open.includes(editor) || !editor.view) return;
+		const mine = editor.view.state.doc.toString();
+		const base = editor.savedDoc?.toString();
+		const disk = file.contents;
+		if (disk === mine || disk === base || disk === base?.replace(/\r\n?/g, '\n')) return;
+		editor.conflict = true;
+		this.renderSaveConflictBar(editor, file);
+	},
+
+	/** The three-way bar over a conflicted editor (§7.3): compare, take the disk version,
+	 *  or keep mine (the next save overwrites). One bar per editor, replaced not stacked. */
+	renderSaveConflictBar(editor: Editor, file: FileContents): void {
+		if (editor.input.kind !== 'file') return;
+		const disk = file.contents ?? '';
+		const path = editor.input.path;
+		editor.pane.querySelector('.conflict-bar')?.remove();
+		const take = (): void => {
+			const view = editor.view;
+			if (view) {
+				editorState.cm?.replaceDocument(view, disk);
+				editor.dirty = false;
+				editor.savedDoc = view.state.doc;
+				editor.encoding = file.encoding ?? editor.encoding;
+				editor.eol = file.eol ?? editor.eol;
+				editor.savedEol = editor.eol;
+				editor.savedEncoding = editor.encoding;
+				this.forgetBackup(editor);
+				this.renderTabs();
+				this.refreshPreviews(path);
+			}
+			this.clearSaveConflict(editor);
+		};
+		const bar = el('div', 'conflict-bar', [
+			el('span', 'conflict-bar-text', [t('editor.conflict.savedElsewhere')]),
+			el('span', 'conflict-bar-actions', [
+				el('button', '', [t('editor.conflict.compare')]),
+				el('button', '', [t('editor.conflict.useDisk')]),
+				el('button', '', [t('editor.conflict.keepMine')])
+			])
+		]);
+		const [compare, useDisk, keepMine] = [...bar.querySelectorAll('button')];
+		compare?.addEventListener('click', () => {
+			void this.openDiff({
+				kind: 'diff',
+				id: `conflict:${path}`,
+				title: editor.label,
+				left: { revision: '*', path, label: t('editor.conflict.diskSide'), content: disk, exists: true, local: true },
+				right: { revision: '*', path, label: t('editor.conflict.mineSide'), content: editor.view?.state.doc.toString() ?? '', exists: true, local: true }
+			});
+		});
+		useDisk?.addEventListener('click', take);
+		keepMine?.addEventListener('click', () => this.clearSaveConflict(editor));
+		editor.pane.prepend(bar);
+	},
+
+	/** The conflict is settled (saved, the disk version taken, or "keep mine" chosen): the
+	 *  bar goes, the mark with it. */
+	clearSaveConflict(editor: Editor): void {
+		if (!editor.conflict && !editor.pane.querySelector('.conflict-bar')) return;
+		editor.conflict = false;
+		editor.pane.querySelector('.conflict-bar')?.remove();
+	},
+
+	/** The clean reload's own hint (§7.3): a distinct flash, 1.5 s, with the tab's title
+	 *  telling what happened while the pointer rests on it. */
+	flashReloadedTab(editor: Editor): void {
+		const at = this.open.indexOf(editor);
+		if (at < 0) return;
+		const tab = this.tabs.children[at] as HTMLElement | undefined;
+		if (!tab) return;
+		const previous = tab.title;
+		tab.classList.add('external-reload');
+		tab.title = t('editor.conflict.reloaded');
+		window.setTimeout(() => {
+			tab.classList.remove('external-reload');
+			tab.title = previous;
+		}, 1500);
 	},
 
 	pathRenamed(from: string, to: string): void {

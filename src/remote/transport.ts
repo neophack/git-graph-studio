@@ -36,6 +36,9 @@ export interface InstanceInfo {
 	folders: string[];
 	version: string;
 	visible: boolean;
+	/** The PC window is minimized (docs/remote-client-plan.md §17.4) — its own badge in
+	 *  the window lists, beside shown and hidden. Absent from an older daemon's frames. */
+	minimized?: boolean;
 	remoteSessions: number;
 	startedAt: number;
 	state: string;
@@ -194,6 +197,12 @@ export class Transport {
 
 	restartInstance(instance: string): void {
 		this.send(msgpackFrame(T.INSTANCE_RESTART, { instance }));
+	}
+
+	/** Show or hide an instance's desktop window on the PC (§17.4): the remote stays
+	 *  attached either way — the window goes away, the instance does not. */
+	displayInstance(instance: string, visible: boolean): void {
+		this.send(msgpackFrame(T.INSTANCE_DISPLAY, { instance, visible }));
 	}
 
 	detach(): void {

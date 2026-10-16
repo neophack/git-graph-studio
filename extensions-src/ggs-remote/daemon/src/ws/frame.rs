@@ -56,6 +56,8 @@ pub mod ty {
     pub const SPAWNED: u8 = 0x09;
     pub const INSTANCE_CLOSE: u8 = 0x0A;
     pub const INSTANCE_RESTART: u8 = 0x0B;
+    /// A session asking to show or hide an instance's desktop window (§17.4).
+    pub const INSTANCE_DISPLAY: u8 = 0x0C;
     pub const INVOKE: u8 = 0x10;
     pub const RESULT: u8 = 0x11;
     pub const CANCEL: u8 = 0x12;

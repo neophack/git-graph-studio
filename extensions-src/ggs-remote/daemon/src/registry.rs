@@ -154,6 +154,7 @@ impl Registry {
                 folders: reg.folders,
                 version: reg.version,
                 visible: reg.visible,
+                minimized: false,
                 remote_sessions: 0,
                 started_at: now,
                 busy: Busy::default(),
@@ -242,6 +243,7 @@ impl Registry {
         title: Option<String>,
         folders: Option<Vec<String>>,
         visible: Option<bool>,
+        minimized: Option<bool>,
         summary: Option<crate::control_msg::Summary>,
     ) {
         let touched = self.with(id, |i| {
@@ -253,6 +255,9 @@ impl Registry {
             }
             if let Some(visible) = visible {
                 i.info.visible = visible;
+            }
+            if let Some(minimized) = minimized {
+                i.info.minimized = minimized;
             }
             if let Some(summary) = summary {
                 i.info.busy = Busy {
@@ -413,6 +418,7 @@ mod tests {
         registry.update(
             "ggs-1",
             Some("other".into()),
+            None,
             None,
             None,
             Some(crate::control_msg::Summary {

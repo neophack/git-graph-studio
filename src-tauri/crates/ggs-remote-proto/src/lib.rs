@@ -75,6 +75,11 @@ pub enum FromInstance {
         folders: Option<Vec<String>>,
         visible: Option<bool>,
         summary: Option<Summary>,
+        /// The window is minimized (docs/remote-client-plan.md §17.4): a third visible
+        /// state beside shown and hidden, shown in the remotes' window lists. Absent on
+        /// the wire wherever unknown — an old peer's bytes stay exactly what they were.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        minimized: Option<bool>,
     },
     Pong {
         nonce: u64,
@@ -137,6 +142,17 @@ pub enum ToInstance {
         nonce: u64,
     },
     Show,
+    /// Hide the desktop window while the instance keeps running (docs/remote-client-plan.md
+    /// §17.4): the remotes' "close the window on the PC" — the window goes away, the
+    /// instance, its backends and its extension pages do not. Same path the PC's own close
+    /// button takes; the instance answers with `Update { visible: false }`.
+    Hide,
+    /// The remote-session count of this instance changed (§17.4): pushed whenever a
+    /// session attaches or detaches. The PC's close button asks this before it decides
+    /// between hiding for the remotes and exiting (G13, K12).
+    Sessions {
+        count: u32,
+    },
     /// Graceful exit; `force` skips the unsaved-files check. `idle` marks the idle exit's
     /// ask (§7.10), which an instance running the replica (§22) declines — a browser that
     /// went away must not end the work it left running on the PC.

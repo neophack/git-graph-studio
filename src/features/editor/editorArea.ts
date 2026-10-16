@@ -126,12 +126,25 @@ export class EditorArea {
 		// window listener.
 		new MutationObserver(() => this.scheduleOverlaySync())
 			.observe(this.groupsRoot, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'class', 'style'] });
+		let goneCheck: number | null = null;
 		const onResize = () => {
-			// The workbench's one area never detaches; a test's does, and takes its listener
-			// with it rather than leaking one per constructed area.
+			// A device-class switch (the remote layout host) detaches the whole workbench
+			// part — this area with it — for the span of one synchronous apply, so a resize
+			// seen while disconnected must not kill the placement forever: removal waits out a
+			// grace period, and only an area that STAYS detached (a test's discarded one)
+			// takes its listener with it rather than leaking one per constructed area.
 			if (!container.isConnected) {
-				window.removeEventListener('resize', onResize);
+				if (goneCheck === null) {
+					goneCheck = window.setTimeout(() => {
+						goneCheck = null;
+						if (!container.isConnected) window.removeEventListener('resize', onResize);
+					}, 5_000);
+				}
 				return;
+			}
+			if (goneCheck !== null) {
+				window.clearTimeout(goneCheck);
+				goneCheck = null;
 			}
 			this.scheduleOverlaySync();
 		};
@@ -1292,6 +1305,13 @@ export class EditorArea {
 
 	async reloadIfClean(path: string): Promise<void> {
 		for (const group of this.groups()) await group.reloadIfClean(path);
+	}
+
+	/** The §7.3 save conflict check over every group (the lifecycle's onFsChanged rides
+	 *  this beside reloadIfClean: a clean tab reloads, a dirty one the disk moved under
+	 *  gets the conflict bar). */
+	async markSaveConflict(path: string): Promise<void> {
+		for (const group of this.groups()) await group.markSaveConflict(path);
 	}
 
 	/** Everything else concerns the focused group's active editor; a placement moves the

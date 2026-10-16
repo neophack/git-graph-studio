@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
@@ -135,6 +135,9 @@ struct Link {
     summaries: Mutex<Summaries>,
     remote_host_only: AtomicBool,
     connected: AtomicBool,
+    /// The daemon's last word on how many remote sessions ride this instance (§17.4's
+    /// `Sessions` pushes): the count the PC's close button asks about.
+    sessions: AtomicU32,
 }
 
 fn link() -> &'static Link {
@@ -145,6 +148,7 @@ fn link() -> &'static Link {
         summaries: Mutex::new(Summaries::default()),
         remote_host_only: AtomicBool::new(false),
         connected: AtomicBool::new(false),
+        sessions: AtomicU32::new(0),
     })
 }
 
@@ -206,6 +210,27 @@ fn folders(app: &AppHandle) -> Vec<String> {
 fn main_visible(app: &AppHandle) -> bool {
     app.get_webview_window("main")
         .is_some_and(|w| w.is_visible().unwrap_or(false))
+}
+
+/// Whether the main window is minimized (§17.4): a third visible state beside shown and
+/// hidden, reported in the WINDOWS frames so the remotes can badge it.
+fn main_minimized(app: &AppHandle) -> bool {
+    app.get_webview_window("main")
+        .is_some_and(|w| w.is_minimized().unwrap_or(false))
+}
+
+/// Hide the main window, whatever it is doing (§17). Shared by the PC's own close button
+/// (`remote_host_hide_main`) and the daemon's `Hide`.
+fn hide_main(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.hide()?;
+    }
+    Ok(())
+}
+
+/// The remote sessions the daemon last reported for this instance (§17.4's `Sessions`).
+pub fn session_count() -> u32 {
+    link().sessions.load(Ordering::Relaxed)
 }
 
 fn title(app: &AppHandle) -> String {
@@ -306,6 +331,18 @@ fn handle(app: &AppHandle, message: ToInstance, out: &mpsc::UnboundedSender<From
                 eprintln!("[remote] show the desktop window: {error}");
             }
             send_update(app);
+        }
+        // The remotes' "close the window on the PC" (§17): hide, never exit — the same
+        // path the PC's own close button takes when sessions are attached. The session
+        // stays; the answer is the ordinary `Update { visible: false }`.
+        ToInstance::Hide => {
+            if let Err(error) = hide_main(app) {
+                eprintln!("[remote] hide the desktop window: {error}");
+            }
+            send_update(app);
+        }
+        ToInstance::Sessions { count } => {
+            link().sessions.store(count, Ordering::Relaxed);
         }
         // The replica model (§22): this instance IS the user's Git Graph Studio, a browser
         // only watches it — an idle exit would end a Claude Code turn the browser merely
@@ -465,6 +502,7 @@ fn rebase_root_urls(css: &str, depth: usize) -> String {
     out
 }
 
+#[cfg(debug_assertions)]
 fn guess_type(path: &str) -> &'static str {
     match path.rsplit('.').next().unwrap_or("") {
         "html" => "text/html",
@@ -805,7 +843,32 @@ pub fn send_update(app: &AppHandle) {
         folders: Some(folders(app)),
         visible: Some(main_visible(app)),
         summary: None,
+        minimized: Some(main_minimized(app)),
     });
+}
+
+/// The main window was resized (minimize and restore arrive as resizes on some platforms):
+/// the minimized state only crosses when it CHANGED — an ordinary drag on the window edge
+/// must not push anything (§17.4).
+pub fn note_main_resized(app: &AppHandle) {
+    static LAST_MINIMIZED: OnceLock<Mutex<bool>> = OnceLock::new();
+    let last = LAST_MINIMIZED.get_or_init(|| Mutex::new(false));
+    let minimized = main_minimized(app);
+    let mut guard = last.lock().unwrap_or_else(|p| p.into_inner());
+    if *guard == minimized {
+        return;
+    }
+    *guard = minimized;
+    drop(guard);
+    if link().connected.load(Ordering::Relaxed) {
+        send(FromInstance::Update {
+            title: None,
+            folders: None,
+            visible: None,
+            summary: None,
+            minimized: Some(minimized),
+        });
+    }
 }
 
 /// The open folders changed (open / close folder, a workspace): pushed as they are.
@@ -816,6 +879,7 @@ pub fn notify_folders(folders: &[String]) {
             folders: Some(folders.to_vec()),
             visible: None,
             summary: None,
+            minimized: None,
         });
     }
 }
@@ -885,6 +949,7 @@ fn flush_summary(app: &AppHandle, force: bool) {
             folders: None,
             visible: None,
             summary: Some(merged_summary(app)),
+            minimized: None,
         });
     }
 }
@@ -994,9 +1059,7 @@ fn emulate_focus(_window: &tauri::WebviewWindow, _enabled: bool) {}
 /// remote-host instance): hide it, and tell the daemon it is no longer visible.
 #[tauri::command]
 pub fn remote_host_hide_main(app: AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("main") {
-        window.hide().map_err(|e| e.to_string())?;
-    }
+    hide_main(&app).map_err(|e| e.to_string())?;
     send_update(&app);
     Ok(())
 }
@@ -1007,6 +1070,7 @@ pub fn remote_host_status(app: AppHandle) -> serde_json::Value {
     serde_json::json!({
         "connected": link().connected.load(Ordering::Relaxed),
         "remoteHostOnly": remote_host_only(),
+        "remoteSessions": session_count(),
         "folders": folders(&app),
     })
 }

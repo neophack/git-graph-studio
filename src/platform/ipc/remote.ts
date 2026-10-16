@@ -8,6 +8,10 @@ import { invoke } from './core';
 export interface RemoteHostStatus {
 	folders?: string[];
 	remoteHostOnly?: boolean;
+	/** The remote sessions the daemon last reported for this instance (§17.4's `Sessions`
+	 *  pushes) — the count the PC's close button asks about before deciding between
+	 *  hiding for the remotes and exiting. */
+	remoteSessions?: number;
 }
 
 export const remoteHostStatus = () => invoke<RemoteHostStatus>('remote_host_status');

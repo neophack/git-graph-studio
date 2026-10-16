@@ -357,14 +357,25 @@ export const lifecycleMethods: ThisType<Workbench> = {
 			return;
 		}
 		if (!change.truncated) {
-			for (const relative of change.paths) void this.editors.reloadIfClean(joinRepo(change.root, relative));
+			for (const relative of change.paths) {
+				const path = joinRepo(change.root, relative);
+				// A clean tab reloads silently; a dirty one the disk moved under is a save
+				// conflict (§7.3) — another frontend of this window saved it (each edit
+				// buffer is its own, K7), or any other writer did.
+				void this.editors.reloadIfClean(path);
+				void this.editors.markSaveConflict(path);
+			}
 		} else {
 			// The batch names only some of what changed (a checkout, a build): every clean tab
 			// under that root re-reads its file, or a tab left behind shows the old contents
-			// the moment it is switched to. reloadIfClean skips the ones that did not change.
+			// the moment it is switched to. reloadIfClean skips the ones that did not change;
+			// the dirty ones fall to the conflict check.
 			const root = change.root.replace(/[\\/]+$/, '').toLowerCase();
 			for (const path of this.editors.openFilePaths()) {
-				if (path.toLowerCase().startsWith(root)) void this.editors.reloadIfClean(path);
+				if (path.toLowerCase().startsWith(root)) {
+					void this.editors.reloadIfClean(path);
+					void this.editors.markSaveConflict(path);
+				}
 			}
 		}
 		this.scheduleRefresh(0);

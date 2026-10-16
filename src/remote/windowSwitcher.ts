@@ -20,13 +20,18 @@ export function switcherItems(list: InstanceInfo[], current: string): QuickPickI
 		const flags = [
 			info.id === current ? t('remote.switcher.current') : null,
 			info.state === 'unresponsive' ? t('remote.switcher.unresponsive') : null,
+			info.minimized ? t('remote.switcher.minimized') : null,
 			info.visible ? null : t('remote.switcher.hidden')
 		].filter(Boolean);
 		const active = info.summary?.tabs?.find((tab) => tab.active)?.path;
 		return {
 			label: info.title || info.id,
 			description: [info.folders.join(' · '), ...flags].filter(Boolean).join(' — '),
-			detail: [summaryLine(info), active].filter(Boolean).join(' · '),
+			detail: [
+				summaryLine(info),
+				info.remoteSessions > 0 ? tf('remote.switcher.sessions', info.remoteSessions) : null,
+				active
+			].filter(Boolean).join(' · '),
 			icon: info.state === 'unresponsive' ? 'warning' : info.id === current ? 'check' : 'window',
 			value: `w:${info.id}`
 		};
@@ -58,16 +63,30 @@ export async function openWindowSwitcher(): Promise<void> {
 	const id = picked.slice(2);
 	const info = transport.instances.find((i) => i.id === id);
 	if (!info) return;
-	if (id === current) return;
-	const action = await quickInput({
-		title: info.title || info.id,
-		items: [
-			{ label: t('remote.switcher.open'), icon: 'arrow-right', value: 'open' },
-			{ label: t('remote.switcher.close'), icon: 'close', value: 'close' },
-			{ label: t('remote.switcher.restart'), icon: 'refresh', value: 'restart' }
-		]
-	});
+	// The PC-window actions first (§6.8): hide or show the desktop window without ever
+	// touching the session — "close on the PC" is exactly that, never the instance's exit
+	// (K12). Entering a window remains the switcher's own row.
+	const actions: QuickPickItem[] = [
+		{ label: t('remote.switcher.open'), icon: 'arrow-right', value: 'open' }
+	];
+	if (id === current) {
+		actions.push(
+			{ label: t('remote.pcWindow.hide'), icon: 'close', value: 'hide' },
+			{ label: t('remote.pcWindow.show'), icon: 'window', value: 'show' }
+		);
+	} else if (info.visible && !info.minimized) {
+		actions.push({ label: t('remote.switcher.pcHide'), icon: 'close', value: 'hide' });
+	} else {
+		actions.push({ label: t('remote.switcher.pcShow'), icon: 'window', value: 'show' });
+	}
+	actions.push(
+		{ label: t('remote.switcher.close'), icon: 'close', value: 'close' },
+		{ label: t('remote.switcher.restart'), icon: 'refresh', value: 'restart' }
+	);
+	const action = await quickInput({ title: info.title || info.id, items: actions });
 	if (action === 'open') enterInstance(info);
+	else if (action === 'hide') transport.displayInstance(id, false);
+	else if (action === 'show') transport.displayInstance(id, true);
 	else if (action === 'close') transport.closeInstance(id, false);
 	else if (action === 'restart' && (await confirmDialog(t('remote.switcher.restartConfirm'), t('remote.switcher.restart')))) transport.restartInstance(id);
 }

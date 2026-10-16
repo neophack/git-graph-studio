@@ -289,7 +289,7 @@ with on-demand language support, windowed editing of large files over the backen
 completion (document words, snippets, paths), the find/replace widget, bracket-pair
 colouring, sticky scroll, minimap, bookmarks, markdown preview.
 
-- Frontend: `src/features/editor/group.ts` (the EditorGroup class shell — fields, constructor, the group-lifetime methods, the rest declared and assigned onto the prototype by the module facade), `src/features/editor/open.ts` (the open orchestration: files, diffs, revisions, previews, history, analysis/ext pages), `src/features/editor/mount.ts` (the viewer mounts and fast-view swaps), `src/features/editor/tabs.ts` (tabs + back/forward navigation), `src/features/editor/breadcrumbs.ts`, `src/features/editor/navigate.ts` (go-to-definition, references, goto symbol/line), `src/features/editor/dirty.ts` (save/close lifecycle, autosave, backups, encodings), `src/features/editor/inputs.ts` (the input vocabulary: EditorInput, Editor, inputId), `src/features/editor/{shared,editorState}.ts` (leaf helpers/state, R5), `src/features/editor/editorArea.ts` (split grid),
+- Frontend: `src/features/editor/group.ts` (the EditorGroup class shell — fields, constructor, the group-lifetime methods, the rest declared and assigned onto the prototype by the module facade), `src/features/editor/open.ts` (the open orchestration: files, diffs, revisions, previews, history, analysis/ext pages), `src/features/editor/mount.ts` (the viewer mounts and fast-view swaps), `src/features/editor/tabs.ts` (tabs + back/forward navigation), `src/features/editor/breadcrumbs.ts`, `src/features/editor/navigate.ts` (go-to-definition, references, goto symbol/line), `src/features/editor/dirty.ts` (save/close lifecycle, autosave, backups, encodings; and the §7.3 save conflict, 2026-10-16/S1: a watcher batch naming a file this tab holds DIRTY reads the disk — equal to the saved baseline or the buffer it is the save's own echo — else the three-button conflict bar: compare (a disk-vs-mine diff tab), use the disk version, keep mine; a clean external reload flashes the tab instead), `src/features/editor/inputs.ts` (the input vocabulary: EditorInput, Editor, inputId), `src/features/editor/{shared,editorState}.ts` (leaf helpers/state, R5), `src/features/editor/editorArea.ts` (split grid),
   `src/features/editor/textEditor.ts` (CodeMirror host), `src/features/editor/comments.ts` (VS Code's comment toggles),
   `src/features/editor/docEditView.ts` (windowed large-file editor, scrolling on module 7's `src/scroll/`),
   `src/features/editor/docFind.ts` (the whole-file find/replace bar the windowed editor and the Fast Viewer
@@ -1942,16 +1942,31 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   a diff or file-history tab (a Source Control change clicked, a history entry — its input
   crossing whole, revisions and paths only, so its tab id is the same on both sides and its
   focus and close key like an extension page's; a diff of an extension's provider text
-  stays local),
-  sidebar view switch and — from a side-by-side workbench only, a phone's side-page
-  dismissal being navigation — side bar hide crosses as one `studio://workbench-sync`
-  message (paths only, well under 200 bytes; a mirror-mode page subscribes to nothing and
-  pays nothing) and lands on the other side's own workbench through
-  `src/remote/workbenchSync.ts`: the open facade and the change hooks are wrapped for local
+  stays local)
+  — each as one `studio://workbench-sync` message (paths only, well under 200 bytes; a
+  mirror-mode page subscribes to nothing and pays nothing) landing on the other side's own
+  workbench through `src/remote/workbenchSync.ts`: the open facade and the change hooks
+  are wrapped for local
   operations, remote operations run raw and pre-mark an `announced` set (an echo can never
   re-announce; a local change mid-apply still crosses), a refused close settles both sides
   on "kept open", and the sync is silent until boot is through and local-only while a
-  session restore rebuilds that frontend's own tabs. Its hardening round (2026-10-12, the
+  session restore rebuilds that frontend's own tabs. Sidebar view switches and side bar
+  hides NO LONGER cross (2026-10-16, S1/G8: each frontend's layout is its own — K7's
+  "only what opened" leaves the side bar out); `open`/`openTab` gained an `inactive` flag
+  for the catch-up's background opens.
+  **The presence gate and the catch-up** (2026-10-16, S1 — docs/remote-client-plan.md
+  §7.0): `src/remote/presence.ts` keeps the table of which frontends are ACTIVE (the PC
+  window while not hidden, a remote page while in the foreground) — every frontend
+  announces `{k:'presence',by,active,device}` on the sync channel with a 60 s heartbeat
+  and a 150 s TTL, the daemon's WINDOWS `visible` word (fed by the remote boot's
+  `noteExternal`) is the PC's authoritative state, and one active frontend sends NO intent
+  messages at all (K11 — the PC closed with a lone remote working pays nothing for its own
+  operations). A frontend becoming active CATCHES UP (K14): it sends `stateRequest`, the
+  most recently active other frontend answers `stateSnapshot` (open tab ids — paths and
+  inputs, never contents), and the joiner merges by UNION (missing tabs open in the
+  background, its own cross back as `inactive` opens, nothing ever closes, unsaved
+  buffers survive) and takes the answerer's active tab — the PC reopening follows the
+  remote's state. Its hardening round (2026-10-12, the
   sync-bugs pass, `tests/remoteWorkbenchSync.test.ts` pins each): an applied open is
   verified LANDED (the editor reports a failed open as a notification, not a rejection — an
   unverified pre-mark rebounded at the next tabs diff as a close of the other side's
@@ -1977,7 +1992,25 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   watch, the window's page keeps the focus (`remote_mirror_focus` — WebView2's
   `Emulation.setFocusEmulationEnabled`), a hidden window is sized to the viewer
   (`remote_mirror_fit`, the desktop size restored on Show), closing the window only hides
-  it (`remote_host_hide_main`). A hidden window keeps rendering on its own — hiding a
+  it (`remote_host_hide_main`).
+  **The PC window lifecycle** (2026-10-16, L1 — docs/remote-client-plan.md §17, the G13
+  fix): the close-to-hide decision asks the DAEMON's session count, not only the mirror
+  viewers — the daemon pushes `ToInstance::Sessions { count }` whenever a session attaches
+  or detaches (riding ahead of the Relay token on attach, and down to zero on the last
+  detach), `remote_host_status` reports it as `remoteSessions`, and `closeHidesWindow`
+  (boot.ts's pure half, `tests/remoteLifecycle.test.ts`) hides while a viewer watches, a
+  `--remote-host` runs, or ANY session is attached — a remote on its own workbench used to
+  lose the whole instance (backends, a streaming Claude reply) to the PC user's ×. The
+  hide raises one OS notification (K15, `tauri-plugin-notification`; suppressed by the
+  PC-level `remoteHideNotice` setting, and silently skipped wherever the OS refuses) and
+  tells the presence table at once (`noteWindowHidden` — the gate closes before the
+  page's own visibility event lands). The remotes' side of the lifecycle: the browser's
+  `INSTANCE_DISPLAY` frame (same `remote_may_drive` sandbox boundary as ATTACH) becomes
+  `ToInstance::Hide` / `Show` on the control channel — "close the window on the PC" hides
+  it, the session stays attached; the window switcher and the daemon's picker page badge
+  minimized (`FromInstance::Update.minimized`, `main_minimized` + a Resized-event
+  `note_main_resized` that pushes only on a real change) beside shown/hidden, and count
+  their sessions. A hidden window keeps rendering on its own — hiding a
   Tauri window never tells WebView2 it is invisible (measured 2026-10-12: rAF and 10 ms
   timers at full rate, `visibilityState` "visible"); custom `additionalBrowserArgs` are
   ruled out, since every instance of the app shares one WebView2 browser process per

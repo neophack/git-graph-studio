@@ -107,6 +107,10 @@ export interface AppSettings {
 	 *  `deny` refuses every subscription (the revocation path: flip it and every tap
 	 *  stops; flip back and extensions re-ask). */
 	claudeTapAccess: 'ask' | 'deny';
+	/** Whether closing the PC window while remote sessions keep the instance running
+	 *  also raises the OS notification that says so (§17.2, K15) — the "don't tell me
+	 *  again" of that notice, as a setting. PC device-level; never crosses to a remote. */
+	remoteHideNotice: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -122,7 +126,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	density: 'comfortable',
 	searchSmartCase: true,
 	extensionLogLevel: 'info',
-	claudeTapAccess: 'ask'
+	claudeTapAccess: 'ask',
+	remoteHideNotice: true
 };
 
 /** Any settings write persists the whole object, so a store from an older release pins the
@@ -192,6 +197,7 @@ export const SETTING_DEFS: SettingDef[] = [
 		{ value: 'ask', label: 'settings.claudeTapAccess.ask' },
 		{ value: 'deny', label: 'settings.claudeTapAccess.deny' }
 	] },
+	{ key: 'remoteHideNotice', category: 'general', kind: 'boolean' },
 	{ key: 'terminalShell', category: 'general', kind: 'enum', windowsOnly: true, options: [
 		{ value: 'powershell', label: 'settings.terminalShell.powershell' },
 		{ value: 'ggsBash', label: 'settings.terminalShell.ggsBash' },

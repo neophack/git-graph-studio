@@ -383,6 +383,13 @@ export class EditorGroup {
 
 	declare reloadIfClean: (path: string) => Promise<void> ;
 
+	/** The §7.3 save conflict: the disk moved under this tab's unsaved changes — the bar
+	 *  (compare / use disk / keep mine) shows until one of the three settles it. */
+	declare markSaveConflict: (path: string) => Promise<void> ;
+	declare renderSaveConflictBar: (editor: Editor, file: import('../../platform/ipc/fs').FileContents) => void ;
+	declare clearSaveConflict: (editor: Editor) => void ;
+	declare flashReloadedTab: (editor: Editor) => void ;
+
 	declare pathRenamed: (from: string, to: string) => void ;
 
 	declare pathDeleted: (path: string) => Promise<void> ;

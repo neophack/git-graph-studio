@@ -6,7 +6,8 @@ import { listen } from '../platform/ipc/core';
 import { appNewInstance, bootContext, type BootContext, openDevtools } from '../platform/ipc/app';
 import { backupList, backupRead, type BackupEntry } from '../platform/ipc/fs';
 import { type SymbolIndexStatus } from '../platform/ipc/symbols';
-import { remoteHostHideMain, remoteHostStatus } from '../platform/ipc/remote';
+import { type RemoteHostStatus, remoteHostHideMain, remoteHostStatus } from '../platform/ipc/remote';
+import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -14,13 +15,38 @@ import { type AnalysisStatus } from '../features/analysis';
 import type { AnalysisToolId } from '../features/analysis';
 import { commands } from '../platform/commands';
 import { registerGitCommands } from '../features/scm';
-import { tf } from '../platform/i18n';
+import { t, tf } from '../platform/i18n';
 import { hook } from '../platform/hooks';
 import { openSettingsPanel } from './settingsPanel';
 import { settings, updateSetting } from '../platform/settings';
 import * as state from '../platform/state';
 import { basename, notify } from '../platform/ui/index';
 import { FS_CHANGED_EVENT, FsChange, OPEN_PATHS_EVENT, OpenedPaths, joinRepo, quoteShellPath, whenIdle } from './workbench';
+
+/** The close decision's pure half (§17.2, G13): the window hides instead of the instance
+ *  exiting while a `--remote-host` launch runs, or the daemon reports any remote session
+ *  attached to it (the `Sessions` pushes, §17.4 — a session's own workbench counts exactly
+ *  as much as a PC-screen viewer). Pure so the lifecycle test drives it directly. */
+export function closeHidesWindow(status: Pick<RemoteHostStatus, 'remoteHostOnly' | 'remoteSessions'> | null | undefined): boolean {
+	if (!status) return false;
+	return status.remoteHostOnly === true || (status.remoteSessions ?? 0) > 0;
+}
+
+/** The close-to-hide notice (K15): one OS notification saying the instance is still
+ *  running for the remotes, suppressible as the `remoteHideNotice` setting (the notice's
+ *  own "don't tell me again"). A notification the OS refuses (or a permission never
+ *  granted) simply never shows — nothing may block the close. */
+async function notifyCloseHidden(): Promise<void> {
+	if (!settings.remoteHideNotice) return;
+	try {
+		let granted = await isPermissionGranted();
+		if (!granted) granted = (await requestPermission()) === 'granted';
+		if (!granted) return;
+		sendNotification({ title: t('remote.hideNotice.title'), body: t('remote.hideNotice.body') });
+	} catch {
+		// The plugin's own failure path (§17.2: "or do nothing").
+	}
+}
 
 /** The boot concern of Workbench — assigned onto the prototype by the module facade (index.ts). */
 export const bootMethods: ThisType<Workbench> = {
@@ -318,13 +344,20 @@ export const bootMethods: ThisType<Workbench> = {
 		window.addEventListener('focus', this.onWindowFocusBound);
 		window.addEventListener('blur', this.onWindowBlurBound);
 		void getCurrentWindow().onCloseRequested(async (event) => {
-			// Remote Access's replica (docs/ggs-remote-plan.md §22): while a remote browser
-			// watches this window, or the instance is a remote host, closing only hides it —
-			// the workbench, its terminals and the extension pages (a Claude Code turn in
-			// flight) keep running for the browser.
+			// The PC window lifecycle (docs/remote-client-plan.md §17): while ANY remote
+			// session is connected — its own workbench, not only a PC-screen replica viewer —
+			// or the instance is a remote host, closing only HIDES the window. The
+			// workbench, its terminals and the extension pages (a Claude Code turn in
+			// flight) keep running for the remotes (G13, K12): killing the whole instance
+			// on a window close is exactly what the lifecycle forbids.
 			if (!hook('session').remote() && (await this.keepRunningHidden())) {
 				event.preventDefault();
-				void remoteHostHideMain().catch(() => undefined);
+				// The presence table hears it from its owner at once (§7.0): whatever the
+				// page's own visibility events do, the sync's gate closes now.
+				this.workbenchSync?.noteWindowHidden();
+				void remoteHostHideMain()
+					.then(() => notifyCloseHidden())
+					.catch(() => undefined);
 				return;
 			}
 			// The window is destroyed right after this handler resolves - long before the
@@ -378,7 +411,7 @@ export const bootMethods: ThisType<Workbench> = {
 		const mirror = hook('mirror');
 		if (mirror && await mirror.viewersActive()) return true;
 		const status = await remoteHostStatus().catch(() => null);
-		return status?.remoteHostOnly === true;
+		return closeHidesWindow(status);
 	},
 
 	async boot(): Promise<void> {

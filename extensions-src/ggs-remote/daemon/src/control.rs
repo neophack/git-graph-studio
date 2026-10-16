@@ -191,6 +191,7 @@ async fn read_loop(daemon: &Arc<Daemon>, id: &str, rx: &mut RecvHalf) -> std::io
                 folders,
                 visible,
                 summary,
+                minimized,
             } => {
                 // The same caps as Register (audit F9) — an oversized update is dropped,
                 // the connection stays.
@@ -209,7 +210,7 @@ async fn read_loop(daemon: &Arc<Daemon>, id: &str, rx: &mut RecvHalf) -> std::io
                 }
                 daemon
                     .registry
-                    .update(id, title, folders.clone(), visible, summary);
+                    .update(id, title, folders.clone(), visible, minimized, summary);
                 if let Some(folders) = folders {
                     crate::recent::note_folders(daemon, &folders);
                 }

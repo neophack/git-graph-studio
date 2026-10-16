@@ -16,9 +16,10 @@ use tokio::sync::mpsc;
 use super::conn::{is_relay_bound, Conn};
 use super::frame::{ty, Frame, MAX_MESSAGE};
 use super::msg::{
-    code, Attach, Close, Credit, Hello, HelloAck, InstanceClose, InstanceRestart, Notice, Pong,
-    Spawn, Spawned, Windows, HEARTBEAT_MS, INITIAL_CREDIT, PROTO,
+    code, Attach, Close, Credit, Hello, HelloAck, InstanceClose, InstanceDisplay, InstanceRestart,
+    Notice, Pong, Spawn, Spawned, Windows, HEARTBEAT_MS, INITIAL_CREDIT, PROTO,
 };
+use crate::control_msg::ToInstance;
 use crate::http::{base_path, client_ip, origin_ok, session_of};
 use crate::session::Session;
 use crate::state::Daemon;
@@ -447,6 +448,45 @@ pub fn handle(daemon: &Arc<Daemon>, conn: &Arc<Conn>, mut frame: Frame) {
                             ..Notice::kind("restart-failed")
                         },
                     ),
+                }
+            });
+        }
+        // A session showing or hiding the PC's window (§17.4): the window goes away or
+        // comes back, the instance itself never stops — and the session that asked stays
+        // attached either way. The same boundary as ATTACH and INSTANCE_CLOSE: with the
+        // sandbox on, a desktop window is not a remote session's to touch.
+        ty::INSTANCE_DISPLAY => {
+            let Some(display) = frame.decode_msgpack::<InstanceDisplay>() else {
+                return;
+            };
+            let (daemon, conn) = (daemon.clone(), conn.clone());
+            tokio::spawn(async move {
+                if !remote_may_drive(&daemon, &display.instance) {
+                    notice(
+                        &conn,
+                        Notice {
+                            instance: Some(display.instance.clone()),
+                            message: Some(
+                                "that window is not a remote session's to touch".into(),
+                            ),
+                            ..Notice::kind("display-failed")
+                        },
+                    );
+                    return;
+                }
+                let message = if display.visible {
+                    ToInstance::Show
+                } else {
+                    ToInstance::Hide
+                };
+                if !daemon.registry.send(&display.instance, message) {
+                    notice(
+                        &conn,
+                        Notice {
+                            instance: Some(display.instance.clone()),
+                            ..Notice::kind("instance-exited")
+                        },
+                    );
                 }
             });
         }

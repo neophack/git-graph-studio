@@ -4,6 +4,7 @@
     "hex": "c200000081a852656769737465728aab696e7374616e63655f6964a86767732d31323334a3706964cd04d2a776657273696f6ea6302e312e3130a57469746c65b97265706f20e28094204769742047726170682053747564696fa7666f6c6465727391a7433a2f7265706fa776697369626c65c3ab72656d6f74655f686f7374c2a66c61756e636882a770726f6772616dae433a2f4747532f6767732e657865aa6172677350726566697890a973616e64626f786564c2ad636f6e74726f6c5f746f6b656ea0",
     "message": {
       "Register": {
+        "controlToken": "",
         "folders": [
           "C:/repo"
         ],
@@ -14,11 +15,10 @@
         },
         "pid": 1234,
         "remote_host": false,
+        "sandboxed": false,
         "title": "repo — Git Graph Studio",
         "version": "0.1.10",
-        "visible": true,
-        "sandboxed": false,
-        "controlToken": ""
+        "visible": true
       }
     },
     "name": "register"
@@ -232,5 +232,31 @@
       }
     },
     "name": "quit-idle"
+  },
+  {
+    "direction": "to",
+    "hex": "05000000a448696465",
+    "message": "Hide",
+    "name": "hide"
+  },
+  {
+    "direction": "to",
+    "hex": "1200000081a853657373696f6e7381a5636f756e7402",
+    "message": {
+      "Sessions": {
+        "count": 2
+      }
+    },
+    "name": "sessions"
+  },
+  {
+    "direction": "from",
+    "hex": "3600000081a655706461746585a57469746c65c0a7666f6c64657273c0a776697369626c65c0a773756d6d617279c0a96d696e696d697a6564c3",
+    "message": {
+      "Update": {
+        "minimized": true
+      }
+    },
+    "name": "update-minimized"
   }
 ]

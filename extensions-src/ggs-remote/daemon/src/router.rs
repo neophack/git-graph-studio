@@ -242,6 +242,17 @@ pub fn refresh_session_counts(daemon: &Arc<Daemon>) {
             *counts.entry(inst).or_default() += 1;
         }
     }
+    // What each instance held before the change (§17.4): the Sessions push rides on the
+    // delta, so an attach or detach tells the instance exactly once — its close button
+    // asks this count before deciding between hiding for the remotes and exiting.
+    let before: HashMap<String, u32> = daemon
+        .registry
+        .instances
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, inst)| (id.clone(), inst.info.remote_sessions))
+        .collect();
     daemon.registry.set_session_counts(&counts);
     let now = Instant::now();
     for (id, inst) in daemon.registry.instances.lock().unwrap().iter_mut() {
@@ -252,6 +263,21 @@ pub fn refresh_session_counts(daemon: &Arc<Daemon>) {
         } else {
             inst.relay_idle_since = None;
             inst.idle_since = None;
+        }
+    }
+    // The delta runs over both maps: a count that DROPPED TO ZERO lives only in `before`
+    // (the detach case) — the PC's close button must see the gate close too.
+    let mut ids: Vec<String> = counts.keys().cloned().collect();
+    for id in before.keys() {
+        if !counts.contains_key(id) {
+            ids.push(id.clone());
+        }
+    }
+    for id in &ids {
+        let count = counts.get(id).copied().unwrap_or(0);
+        if before.get(id).copied().unwrap_or(0) != count {
+            let _ = daemon.registry.send(id, ToInstance::Sessions { count });
+            crate::info!("instance {id} now serves {count} remote session(s)");
         }
     }
 }

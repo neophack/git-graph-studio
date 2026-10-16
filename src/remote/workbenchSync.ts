@@ -1,41 +1,58 @@
-// Cross-frontend operation sync (docs/ggs-remote-plan.md §22.7): when the PC keeps its
-// desktop UI while a phone runs its own phone workbench (§22.5), the two frontends would
-// each keep their own tabs and views — a file opened on the PC never appeared on the phone.
-// This module makes the OPERATIONS correspond one-to-one instead: every file a frontend
-// opens, closes or switches to, and every sidebar view it shows, crosses as one tiny intent
-// message and is performed on the other frontends' own workbenches. Paths and ids only —
-// never content, never DOM: the receiving side opens the document through its own editor
-// area (one file read it would have paid anyway). A file open/close/active message is well
-// under 200 bytes; the tabs that cross whole (a diff, a file history) carry their input —
-// revisions, paths and labels, never text.
+// Cross-frontend operation sync (docs/ggs-remote-plan.md §22.7, docs/remote-client-plan.md
+// §7): when the PC keeps its desktop UI while a phone runs its own workbench, the two
+// frontends would each keep their own tabs — a file opened on the PC never appeared on the
+// phone. This module makes the OPERATIONS correspond one-to-one instead: every file a
+// frontend opens, closes or switches to crosses as one tiny intent message and is performed
+// on the other frontends' own workbenches. Paths and ids only — never content, never DOM:
+// the receiving side opens the document through its own editor area (one file read it would
+// have paid anyway). A file open/close/active message is well under 200 bytes; the tabs
+// that cross whole (a diff, a file history) carry their input — revisions, paths and
+// labels, never text.
 //
-// Both sides run the same shared workbench code (src/workbench.ts), so one module serves
-// both: the desktop emits through the real Tauri broadcast (which the Relay forwards to
-// exactly the sessions that LISTEN — a mirror-mode page runs no workbench, subscribes to
-// nothing of this, and pays nothing), the phone's own-UI workbench through the WebSocket
-// shim of the same `@tauri-apps/api/event` surface. Every message carries its sender's
-// frontend id; a frontend ignores its own echoes. Remote operations run through the RAW
-// open/view functions — the wrappers exist for local operations — and pre-mark the
-// `announced` set, so what a remote operation changed never crosses back, while a LOCAL
-// change landing mid-apply still crosses: no ping-pong, no swallowed operations.
+// The sync is GATED on the presence table (§7.0, remote/presence.ts): intent messages cross
+// only while at least two frontends are active (K11 — a lone frontend, typically the PC
+// window closed with one remote working, sends nothing at all), and a frontend becoming
+// active first CATCHES UP (K14): it asks for a snapshot of the open tabs, merges by union
+// (background opens, never a close, unsaved buffers survive) and takes the recently active
+// side's tab as its own. What is NOT synced anymore (K7): sidebar view switches and side
+// bar hides — each frontend's layout is its own (G8, the `view` / `sidebar` messages are
+// gone).
 //
-// The sync stays silent until the workbench's boot is through (a boot's own view wiring is
-// housekeeping, and a reloaded phone page must not pull the PC's sidebar around), and goes
-// local-only while a session restore rebuilds this frontend's own tabs.
+// Both sides run the same shared workbench code, so one module serves both: the desktop
+// emits through the real Tauri broadcast (which the Relay forwards to exactly the sessions
+// that LISTEN — a mirror-mode page runs no workbench, subscribes to nothing of this, and
+// pays nothing), a remote session through the WebSocket shim of the same event surface.
+// Every message carries its sender's frontend id; a frontend ignores its own echoes.
+// Remote operations run through the RAW open functions — the wrappers exist for local
+// operations — and pre-mark the `announced` set, so what a remote operation changed never
+// crosses back, while a LOCAL change landing mid-apply still crosses: no ping-pong, no
+// swallowed operations.
+//
+// The sync stays silent until the workbench's boot is through (a boot's own wiring is
+// housekeeping, and a reloaded phone page must not pull the PC around), and goes local-only
+// while a session restore rebuilds this frontend's own tabs.
 
 import { emit as tauriEmit, invoke, listen as tauriListen } from '../platform/ipc/core';
 import { inputId, type EditorInput } from '../features/editor';
 import type { EditorPlacement } from '../features/editor/types';
 import type { ActiveEditorInfo, EditorArea } from '../features/editor';
-import { phoneShell } from './nav';
 import { frontendId, remoteEnv } from './session';
 import { withinRoots } from './pathGate';
+/** The presence instance of this page's sync — registered into presence.ts's light
+ *  registry (the remote boot reads it without importing this heavier graph). */
+export { currentPresence } from './presence';
+import { Presence, registerPresence } from './presence';
 
 export const WORKBENCH_SYNC_EVENT = 'studio://workbench-sync';
 
-/** One operation crossing the frontends: what its user opened, closed, switched to, or the
- *  sidebar view they showed. `line` / `column` preserve an open's anchor (a search result's
- *  jump); `by` is the sender's frontend id (`main`, `remote/<n>`).
+/** How long a catch-up waits for its snapshot before giving up (the designated responder
+ *  may be gone, or the roster skewed): the joiner then simply starts announcing. */
+const CATCH_UP_WINDOW_MS = 10_000;
+
+/** One operation crossing the frontends: what its user opened, closed or switched to.
+ *  `line` / `column` preserve an open's anchor (a search result's jump); `by` is the
+ *  sender's frontend id (`main`, `remote/<n>`); `inactive` opens a tab without taking the
+ *  focus — the catch-up's union opens ride it.
  *
  *  `closeTab` is the extension pages' close: a webview panel's tab id
  *  (`webview:<extId>:<panelId>`) is the same on every frontend — the PC's real tab and a
@@ -53,23 +70,43 @@ export const WORKBENCH_SYNC_EVENT = 'studio://workbench-sync';
  *  `activeTab` for such a tab carries its input too, so a side that missed the open
  *  converges by opening it.
  *
- *  `sidebar` is the side bar hidden: the PC closing its Claude Code (or any) view takes a
- *  phone off that side page. Only a side-by-side workbench announces it — on a phone the
- *  side view is a full-screen page whose dismissal is navigation (every file tap closes it),
- *  and the PC's layout must not flicker with it. */
+ *  `stateRequest` / `stateSnapshot` are the catch-up protocol (§7.0.3): a frontend becoming
+ *  active asks; the most recently active OTHER frontend (the presence table picks it)
+ *  answers with the open tabs' ids — paths and inputs, never contents — and its active
+ *  tab. The receiver merges by union and follows the active tab. */
 export type WorkbenchSyncMessage =
-	| { by: string; k: 'open'; path: string; line?: number; column?: number }
+	| { by: string; k: 'open'; path: string; line?: number; column?: number; inactive?: boolean }
 	| { by: string; k: 'close'; path: string }
 	| { by: string; k: 'active'; path: string }
-	| { by: string; k: 'view'; id: string }
 	| { by: string; k: 'closeTab'; id: string }
 	| { by: string; k: 'activeTab'; id: string; input?: SyncedTabInput }
 	| { by: string; k: 'openTab'; input: SyncedTabInput }
-	| { by: string; k: 'sidebar'; shown: false };
+	| { by: string; k: 'stateRequest' }
+	| { by: string; k: 'stateSnapshot'; to: string; files: string[]; tabs: SyncedTabInput[]; extTabs: string[]; active: SnapshotActive | null };
+
+/** The active tab of a snapshot: a file by its path, or a tab that crosses whole (an
+ *  extension page, a diff, a history) by the tab id every frontend keys it by. */
+export type SnapshotActive = { kind: 'file'; path: string } | { kind: 'tab'; id: string };
 
 /** The tab inputs that cross whole: diffs between revisions or files on disk, and file
  *  histories. */
 export type SyncedTabInput = Extract<EditorInput, { kind: 'diff' } | { kind: 'history' }>;
+
+/** The presence surface the sync rides on — the real Presence satisfies it, and a test
+ *  fakes it. */
+export interface SyncPresence {
+	/** Intent messages may cross: at least two active frontends (K11). */
+	syncAllowed(): boolean;
+	/** Any OTHER frontend is active right now — the catch-up's precondition (§7.0.3: no
+	 *  other active frontend, skip). */
+	othersActive(): boolean;
+	/** This frontend is the one to answer `requester`'s state request (§7.0.3). */
+	isDesignatedResponder(requester: string): boolean;
+	/** This frontend just became active — the catch-up's trigger. */
+	onBecameActive(handler: () => void): () => void;
+	/** This frontend is active right now. */
+	isActive(): boolean;
+}
 
 /** Whether an open tab's input crosses as `openTab`: a diff only when both sides are read
  *  from the repository or the disk (an extension's provider text is that frontend's own,
@@ -113,17 +150,11 @@ export interface SyncedEditorArea {
 /** The workbench surface the sync rides on. */
 export interface SyncedWorkbench {
 	editors: SyncedEditorArea | EditorArea;
-	showView(view: string, focus?: boolean): void;
 	/** The folders this window has open — the boundary a remote-originated `open` must
 	 *  land inside (the relay gates invokes the same way; this is the receiver's half,
 	 *  so a forged direct emit has nowhere to land either). Optional: without it,
 	 *  remote-originated opens are simply ignored. */
 	openFolders?(): string[];
-	/** The side bar's hide toggle, its state and its view — optional: a workbench without
-	 *  them syncs no side-bar hides. */
-	toggleSidebar?(): void;
-	readonly sidebarShown?: boolean;
-	readonly activeSidebarView?: string;
 }
 
 export interface WorkbenchSyncDeps {
@@ -133,10 +164,13 @@ export interface WorkbenchSyncDeps {
 
 /** A wired sync: `start()` opens the channel (the workbench's boot calls it — housekeeping
  *  before that stays local), `localOnly(true)` pauses announcements while this frontend
- *  rebuilds its own tabs (a session restore), `detach()` restores the unwrapped workbench. */
+ *  rebuilds its own tabs (a session restore), `detach()` restores the unwired workbench. */
 export interface AttachedWorkbenchSync {
 	start(): void;
 	localOnly(local: boolean): void;
+	/** The desktop's close-to-hide path: this frontend is going invisible — the presence
+	 *  table must say so at once, whatever the page's own visibility events do (§17). */
+	noteWindowHidden(): void;
 	detach(): void;
 }
 
@@ -152,15 +186,15 @@ function activeKeyOf(input: { kind: string; path?: string; id?: string } | null)
 }
 
 /** Wire one workbench into the sync: local operations cross as messages, remote messages
- *  land as local operations. Wraps the editor area's open facade and the change hooks, and
- *  the workbench's view switch; composes with whatever handlers were already set. */
+ *  land as local operations. Wraps the editor area's open facade and the change hooks,
+ *  and composes with whatever handlers were already set. */
 export function attachWorkbenchSync(
 	workbench: SyncedWorkbench,
 	deps: WorkbenchSyncDeps,
 	by: string,
-	options: { startImmediately?: boolean; sidebarHideCrosses?: () => boolean; canonicalPath?: (path: string) => Promise<string | null> } = {}
+	options: { startImmediately?: boolean; presence?: SyncPresence; canonicalPath?: (path: string) => Promise<string | null> } = {}
 ): AttachedWorkbenchSync {
-	const sidebarHideCrosses = options.sidebarHideCrosses ?? (() => true);
+	const presence = options.presence;
 	// The real EditorArea satisfies this surface structurally; the cast keeps every read and
 	// write below on one type.
 	const editors = workbench.editors as SyncedEditorArea;
@@ -171,9 +205,6 @@ export function attachWorkbenchSync(
 	 *  spellings are one entry), valued by the spelling to announce with — this side's own
 	 *  while the tab is local, the message's for a remote open still in flight. */
 	let announced = new Map(editors.openFilePaths().map((path) => [keyOf(path), path]));
-	/** The same contract for extension-page tabs: what the others believe is open here. A
-	 *  tab ADDED needs no message (the backend's create mirror opened it everywhere); a tab
-	 *  REMOVED locally is a close that must cross. */
 	/** The open tabs that cross whole, by tab id. */
 	const syncedTabs = (): Map<string, SyncedTabInput> => {
 		const tabs = new Map<string, SyncedTabInput>();
@@ -211,13 +242,18 @@ export function attachWorkbenchSync(
 	/** Closes that arrived while their open was still in flight: applied when it lands. */
 	const pendingCloses = new Set<string>();
 	const pendingTabCloses = new Set<string>();
-	/** Announcements are allowed only while live (booted, not detached) and not local-only. */
+	/** Announcements are allowed only while live (booted, not detached), not local-only —
+	 *  and gated on the presence table (§7.0: fewer than two active frontends, nothing
+	 *  crosses). Without a presence the caller's own judgement stands. */
 	let live = options.startImmediately !== false;
 	let quiet = false;
+	let awaitingSnapshot = false;
+	let catchUpTimer: ReturnType<typeof setTimeout> | null = null;
 	let detachListener: (() => void) | null = null;
 
+	const canSend = (): boolean => live && !quiet && (presence ? presence.syncAllowed() : true);
 	const announce = (message: WorkbenchSyncMessage): void => {
-		if (live && !quiet) deps.send(message);
+		if (canSend()) deps.send(message);
 	};
 	/** Whether an announced open really landed — the editor reports a failed open as a
 	 *  notification, not a rejection, so a resolved promise proves nothing. Without this
@@ -387,7 +423,7 @@ export function attachWorkbenchSync(
 		// there already).
 		for (const id of nowTabs) if (!announcedTabs.has(id) && active?.kind === 'extpage' && active.id === id && activeKey !== `tab:${id}`) freshTabs.add(id);
 		for (const id of freshTabs) if (!nowTabs.has(id)) freshTabs.delete(id);
-		if (live && !quiet) {
+		if (canSend()) {
 			for (const [key, path] of now) if (!announced.has(key)) deps.send({ by, k: 'open', path });
 			for (const [key, spelling] of announced) if (!now.has(key) && !applyingOpens.has(key)) deps.send({ by, k: 'close', path: spelling });
 			// A diff or a file history opened here (a Source Control change clicked, a history
@@ -416,10 +452,10 @@ export function attachWorkbenchSync(
 			// entry would swallow the user's next real switch to that tab.
 			const implied = pendingOpens.delete(keyOf(key.slice(5)));
 			pendingOpens.clear();
-			if (!implied && key !== activeKey && applying === 0 && live && !quiet) announce({ by, k: 'active', path: key.slice(5) });
+			if (!implied && key !== activeKey && applying === 0 && canSend()) announce({ by, k: 'active', path: key.slice(5) });
 		} else if (key !== null && key !== activeKey) {
 			pendingOpens.clear();
-			const crosses = applying === 0 && live && !quiet;
+			const crosses = applying === 0 && canSend();
 			// Fresh: the tabs diff saw it arrive as the active tab, or has not seen it at all
 			// yet (the group's focus re-reports the new tab before its strip re-renders).
 			const id = key.slice(4);
@@ -432,28 +468,95 @@ export function attachWorkbenchSync(
 		activeKey = key;
 	};
 
-	// Which sidebar view is showing — Explorer, Source Control, an extension's container:
-	// the phone navigates its own page for it, the PC its own sidebar.
-	const rawShowView = workbench.showView;
-	workbench.showView = (view: string, focus?: boolean) => {
-		announce({ by, k: 'view', id: view });
-		return rawShowView.call(workbench, view, focus);
-	};
+	/** The snapshot this frontend answers a state request with: the open tabs' ids — paths
+	 *  and inputs, never contents — and the active tab (§7.0.3). */
+	const snapshotMessage = (to: string): WorkbenchSyncMessage => ({
+		by,
+		k: 'stateSnapshot',
+		to,
+		files: editors.openFilePaths(),
+		tabs: [...syncedTabs().values()],
+		extTabs: editors.openExtPageIds(),
+		active: (() => {
+			const input = editors.activeInput;
+			if (!input) return null;
+			if (input.kind === 'file') return input.path ? { kind: 'file', path: input.path } : null;
+			const key = activeKeyOf(input);
+			return key !== null && key.startsWith('tab:') ? { kind: 'tab', id: key.slice(4) } : null;
+		})()
+	});
 
-	// The side bar hidden (an activity item clicked twice, Ctrl+B): the other side leaves the
-	// view it was showing for this one. Showing it again is a view switch.
-	const rawToggleSidebar = workbench.toggleSidebar;
-	if (rawToggleSidebar) {
-		workbench.toggleSidebar = () => {
-			rawToggleSidebar.call(workbench);
-			if (applying > 0) return;
-			if (workbench.sidebarShown === false) {
-				if (sidebarHideCrosses()) announce({ by, k: 'sidebar', shown: false });
-			} else if (workbench.activeSidebarView !== undefined) {
-				announce({ by, k: 'view', id: workbench.activeSidebarView });
+	/** Merge a snapshot on the freshly active frontend (§7.0.3): tabs take the UNION — the
+	 *  other side's open here in the background, mine pushed back as background opens — no
+	 *  tab closes over it and an unsaved buffer always survives; the active tab follows the
+	 *  recently active side (the answerer), which is K14's "the PC reopening follows the
+	 *  remote" and its symmetric cases. A snapshot from a remote passes the same
+	 *  open-boundary gate an `open` message does: only paths inside this window's folders
+	 *  land (lexical check plus the canonical re-check when the backend serves it). */
+	const mergeSnapshot = (message: Extract<WorkbenchSyncMessage, { k: 'stateSnapshot' }>): void => {
+		const remoteOrigin = message.by !== 'main';
+		const roots = workbench.openFolders?.() ?? [];
+		const gateFile = async (path: string): Promise<boolean> => {
+			if (!remoteOrigin) return true;
+			if (!withinRoots(path, roots)) return false;
+			if (!options.canonicalPath) return true;
+			try {
+				const form = await options.canonicalPath(path);
+				return form !== null && withinRoots(form, roots);
+			} catch {
+				return false;
 			}
 		};
-	}
+		void (async () => {
+			const haveFiles = new Set(editors.openFilePaths().map((path) => keyOf(path)));
+			for (const path of message.files) {
+				const key = keyOf(path);
+				if (haveFiles.has(key) || applyingOpens.has(key)) continue;
+				if (!(await gateFile(path))) continue;
+				await run(() => rawOpenFile(path, { inactive: true }), { add: key, spell: path });
+			}
+			for (const input of message.tabs) {
+				const id = inputId(input);
+				if (openTabIds().has(id) || applyingTabs.has(id)) continue;
+				await run(() => openSyncedTab(input), { addTab: id });
+			}
+			// My tabs the other side lacks cross back — the union runs both ways, so the
+			// side that stayed active gains the returning frontend's work as background
+			// tabs instead of learning them one operation at a time.
+			for (const path of editors.openFilePaths()) {
+				if (!message.files.some((theirs) => keyOf(theirs) === keyOf(path))) announce({ by, k: 'open', path, inactive: true });
+			}
+			const theirs = new Set(message.tabs.map((input) => inputId(input)));
+			for (const [id, input] of syncedTabs()) if (!theirs.has(id)) announce({ by, k: 'openTab', input });
+			// The active tab LAST, after the union's background opens: the editor's
+			// openIntent lets only the newest open take the focus, so this one wins it.
+			const active = message.active;
+			if (active?.kind === 'file') {
+				if (!editors.revealFilePath(active.path) && await gateFile(active.path)) {
+					await run(() => rawOpenFile(active.path), { add: keyOf(active.path), spell: active.path });
+				}
+			} else if (active?.kind === 'tab' && !editors.revealById(active.id)) {
+				const input = message.tabs.find((entry) => inputId(entry) === active.id);
+				if (input) await run(() => openSyncedTab(input), { addTab: active.id });
+			}
+		})();
+	};
+
+	/** Ask the others for a snapshot and accept one within the window: the joiner merges,
+	 *  then starts announcing (§7.0.3). No other active frontend — the typical lone remote
+	 *  — skips the whole exchange. */
+	const catchUp = (): void => {
+		if (!live || quiet) return;
+		if (presence && !presence.othersActive()) return;
+		awaitingSnapshot = true;
+		if (catchUpTimer !== null) clearTimeout(catchUpTimer);
+		catchUpTimer = setTimeout(() => {
+			awaitingSnapshot = false;
+			catchUpTimer = null;
+		}, CATCH_UP_WINDOW_MS);
+		deps.send({ by, k: 'stateRequest' });
+	};
+	presence?.onBecameActive(() => catchUp());
 
 	/** One crossed message, applied: the receive handler's body, kept whole so the
 	 *  remote-open gate can call back into it after its async canonical re-check. */
@@ -464,7 +567,10 @@ export function attachWorkbenchSync(
 				// An open of it is already landing here (a local one, or the message's
 				// own earlier copy): it satisfies this message.
 				if (applyingOpens.has(key)) break;
-				void run(() => rawOpenFile(message.path, message.line !== undefined ? { line: message.line, column: message.column } : undefined), { add: key, spell: message.path });
+				const openOptions = message.line !== undefined
+					? { line: message.line, column: message.column, inactive: message.inactive === true }
+					: message.inactive === true ? { inactive: true } : undefined;
+				void run(() => rawOpenFile(message.path, openOptions), { add: key, spell: message.path });
 				break;
 			}
 			case 'close': {
@@ -503,9 +609,6 @@ export function attachWorkbenchSync(
 			case 'openTab':
 				void run(() => openSyncedTab(message.input), { addTab: inputId(message.input) });
 				break;
-			case 'sidebar':
-				if (rawToggleSidebar && workbench.sidebarShown !== false) void run(() => rawToggleSidebar.call(workbench));
-				break;
 			case 'active': {
 				// Not open here (a missed open, or opened before this page arrived): opening
 				// it is the convergence — the active file is the same on both sides. An open
@@ -518,9 +621,9 @@ export function attachWorkbenchSync(
 				}, inFlight ? {} : { add: key, spell: message.path });
 				break;
 			}
-			case 'view':
-				void run(() => rawShowView.call(workbench, message.id));
-				break;
+			case 'stateRequest':
+			case 'stateSnapshot':
+				break; // routed in the receive handler, never applied as an operation
 		}
 	};
 
@@ -530,6 +633,26 @@ export function attachWorkbenchSync(
 			live = true;
 			detachListener = deps.receive((message) => {
 				if (!message || message.by === by) return;
+				// The catch-up protocol rides ahead of the operations: the designated
+				// responder answers a request, the joiner merges the snapshot addressed to
+				// it. Both are presence-shaped, not operations — the open-boundary gate
+				// below guards the snapshot's own file opens (mergeSnapshot re-checks every
+				// path it opens).
+				if (message.k === 'stateRequest') {
+					if (presence && presence.isDesignatedResponder(message.by)) announce(snapshotMessage(message.by));
+					return;
+				}
+				if (message.k === 'stateSnapshot') {
+					if (message.to === by && awaitingSnapshot) {
+						awaitingSnapshot = false;
+						if (catchUpTimer !== null) {
+							clearTimeout(catchUpTimer);
+							catchUpTimer = null;
+						}
+						mergeSnapshot(message);
+					}
+					return;
+				}
 				// A remote-originated file open is the product (the phone opens, the PC
 				// follows) — but only inside the folders this window has open: a forged or
 				// curious session must not make the PC render ~/.ggs into the mirror. The
@@ -560,6 +683,10 @@ export function attachWorkbenchSync(
 				}
 				applyMessage(message);
 			});
+			// A frontend that is already active when the channel opens catches up at once
+			// (§7.0.3's "a new remote connecting"): the boot's own wiring is done, its
+			// restored tabs are its baseline, and the merge only adds.
+			if (presence?.isActive()) catchUp();
 		},
 		localOnly(local: boolean): void {
 			quiet = local;
@@ -574,6 +701,10 @@ export function attachWorkbenchSync(
 			pendingTabCloses.clear();
 			freshTabs.clear();
 		},
+		noteWindowHidden(): void {
+			// The presence table is told by its owner (installWorkbenchSync wires it in);
+			// nothing else of the sync changes — the gate simply closes.
+		},
 		detach(): void {
 			detachListener?.();
 			detachListener = null;
@@ -581,8 +712,6 @@ export function attachWorkbenchSync(
 			editors.openFile = rawOpenFile;
 			editors.onTabsChange = prevOnTabsChange;
 			editors.onActiveChange = prevOnActiveChange;
-			workbench.showView = rawShowView;
-			if (rawToggleSidebar) workbench.toggleSidebar = rawToggleSidebar;
 		}
 	};
 	if (live) attached.start();
@@ -591,14 +720,16 @@ export function attachWorkbenchSync(
 
 /** The sync wired to the app's own event channel: out as the Tauri broadcast every frontend
  *  listens to (the Relay carries it to the sessions that subscribed), in through the same
- *  `listen` the workbench's other backend events use. Silent until `start()`. */
+ *  `listen` the workbench's other backend events use. The presence table rides the same
+ *  channel with its own message kinds. Silent until `start()`. */
 export function installWorkbenchSync(workbench: SyncedWorkbench): AttachedWorkbenchSync {
-	return attachWorkbenchSync(workbench, {
+	const by = frontendId();
+	const wire = <T>(): { send(message: T): void; receive(handler: (message: T) => void): () => void } => ({
 		send: (message) => void tauriEmit(WORKBENCH_SYNC_EVENT, message).catch(() => undefined),
 		receive: (handler) => {
 			let unlisten: (() => void) | null = null;
 			let detached = false;
-			void tauriListen<WorkbenchSyncMessage>(WORKBENCH_SYNC_EVENT, (event) => handler(event.payload))
+			void tauriListen<T>(WORKBENCH_SYNC_EVENT, (event) => handler(event.payload))
 				.then((off) => {
 					if (detached) off();
 					else unlisten = off;
@@ -609,13 +740,16 @@ export function installWorkbenchSync(workbench: SyncedWorkbench): AttachedWorkbe
 				unlisten?.();
 			};
 		}
-	}, frontendId(), {
+	});
+	const presence = new Presence(by, wire(), {
+		// The device label is informational (a badge, a conflict message): the remote names
+		// its form, the desktop is the PC.
+		device: () => (remoteEnv() ? document.documentElement.dataset['device'] ?? 'remote' : 'PC')
+	});
+	registerPresence(presence);
+	const attached = attachWorkbenchSync(workbench, wire(), by, {
 		startImmediately: false,
-		// A phone session's side-page dismissal is navigation, never a layout change to
-		// cross — but only a real browser session's: the PC's own window wearing the phone
-		// shell for a mirror viewer (phoneShell() reads the live DOM marker) keeps crossing,
-		// or every own-UI session attached beside the viewer would miss the hide.
-		sidebarHideCrosses: () => !(remoteEnv() && phoneShell()),
+		presence,
 		// The remote-open gate's canonical re-check (pathGate.ts's symlink note): one path
 		// per call. The backend confines the answers to the boundary's own areas, so a
 		// session's own copy of this command is no oracle — and on a phone the call simply
@@ -625,4 +759,19 @@ export function installWorkbenchSync(workbench: SyncedWorkbench): AttachedWorkbe
 			return forms[0] ?? null;
 		}
 	});
+	const baseStart = attached.start.bind(attached);
+	attached.start = (): void => {
+		baseStart();
+		presence.start();
+	};
+	const baseDetach = attached.detach.bind(attached);
+	attached.detach = (): void => {
+		presence.stop();
+		baseDetach();
+		registerPresence(null);
+	};
+	attached.noteWindowHidden = (): void => {
+		presence.setSelfActive(false);
+	};
+	return attached;
 }

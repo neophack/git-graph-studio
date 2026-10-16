@@ -1,7 +1,7 @@
 {
 	"$schema": "../gen/schemas/desktop-schema.json",
 	"identifier": "default",
-	"description": "The main window's capabilities: core IPC (invoke/events), the custom title bar's window controls (drag, minimize, maximize, close), the folder-open and archive-save dialogs, the clipboard the Copy and Paste actions use, and the opener for external URLs and Reveal in File Explorer.",
+	"description": "The main window's capabilities: core IPC (invoke/events), the custom title bar's window controls (drag, minimize, maximize, close), the folder-open and archive-save dialogs, the clipboard the Copy and Paste actions use, the opener for external URLs and Reveal in File Explorer, and the OS notification behind the close-to-hide notice (module 19, §17.2).",
 	"windows": [
 		"main"
 	],
@@ -19,6 +19,7 @@
 		"opener:default",
 		"opener:allow-reveal-item-in-dir",
 		"clipboard-manager:allow-read-text",
-		"clipboard-manager:allow-write-text"
+		"clipboard-manager:allow-write-text",
+		"notification:default"
 	]
 }

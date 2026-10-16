@@ -81,6 +81,9 @@ pub struct InstanceInfo {
     pub folders: Vec<String>,
     pub version: String,
     pub visible: bool,
+    /// The window is minimized (docs/remote-client-plan.md §17.4): shown in the remotes'
+    /// window lists as its own badge. Absent from an older instance's frames — false.
+    pub minimized: bool,
     pub remote_sessions: u32,
     pub started_at: u64,
     pub busy: Busy,
@@ -143,6 +146,18 @@ pub struct InstanceClose {
 #[serde(rename_all = "camelCase", default)]
 pub struct InstanceRestart {
     pub instance: String,
+}
+
+/// INSTANCE_DISPLAY (docs/remote-client-plan.md §17.4): a session's "close / open the
+/// window on the PC" — `visible: false` hides the desktop window (the instance, its
+/// backends and its extension pages keep running; the remote session stays), `true` shows
+/// it again. The same boundary as ATTACH applies: with the sandbox on, only a sandboxed
+/// instance is a session's to touch.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct InstanceDisplay {
+    pub instance: String,
+    pub visible: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -239,6 +254,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(value, serde_json::json!({ "kind": "relay-restarted" }));
+    }
+
+    #[test]
+    fn instance_info_carries_minimized_and_decodes_without_it() {
+        let info = InstanceInfo {
+            minimized: true,
+            ..InstanceInfo::default()
+        };
+        let value: serde_json::Value =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&info).unwrap()).unwrap();
+        assert_eq!(value["minimized"], true);
+        // An older instance's frame (no field) still decodes — false, not an error.
+        let legacy =
+            rmp_serde::to_vec_named(&serde_json::json!({ "id": "ggs-1" })).unwrap();
+        let back: InstanceInfo = rmp_serde::from_slice(&legacy).unwrap();
+        assert_eq!(back.id, "ggs-1");
+        assert!(!back.minimized);
     }
 
     #[test]
