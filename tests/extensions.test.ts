@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import { ExtensionHost, localizeAssetRoots, SRCDOC_HISTORY_SHIM, themeVars, type ExtInfo, type GalleryEntry } from '../src/features/extensions';
 import { assetUrl } from '../src/remote/assetUrl';
-import { EditorGroup } from '../src/features/editor';
+import { EditorArea, EditorGroup } from '../src/features/editor';
 import { applyContributions, applyExtensionSettings, evaluateWhen, extensionSettingDefs, registerContextProvider, removeContributions, resolvedMenuEntries } from '../src/features/extensions';
 import { extLog, extLogEntries, flushExtLog, resetExtLog } from '../src/features/extensions';
 import { ExtensionsPanel } from '../src/features/extensions';
@@ -23,12 +23,13 @@ import { setRemoteEnv } from '../src/remote/session';
 import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
 import { hook, provideHook } from '../src/platform/hooks';
 import { noteCopyInteraction, resetCopyInteractions } from '../src/remote/mirror/copyInteraction';
+import { attachWorkbenchSync } from '../src/remote/workbenchSync';
 
 // The remote session's hooks, as boot.ts installs them before the workbench loads: the
 // session-aware modules below read them through platform/hooks lookups.
 installRemoteSessionHooks();
 import { saveExtSetting } from '../src/platform/state';
-import { click, flush, key, menuItem, menuLabels, notificationButton, notifications, rightClick, type } from './helpers';
+import { click, flush, key, menuItem, menuLabels, notificationButton, notifications, rightClick, type, until } from './helpers';
 import { Explorer } from '../src/features/explorer';
 
 const BUILTIN: ExtInfo = { id: 'neophack.git-graph-rs', name: 'git-graph-rs', displayName: 'Git Graph', publisher: 'neophack', version: '1.0.23', description: 'Git Graph', builtin: true, icon: null, path: '', categories: ['SCM Providers'], keywords: ['git'], repository: 'https://github.com/neophack/git-graph-rs', license: 'MIT', enginesVscode: '^1.80.0', extensionDependencies: [], extensionPack: [], readme: null, changelog: null, format: 'bundled', capabilities: null };
@@ -2440,8 +2441,34 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 		backend.on('ext_process_start', () => ({ extensionId: 'acme.engine', pid: 4242, commands: [], protocolVersion: 'ggs-ext/1', startCount: 1, lastError: null }));
 		setRemoteEnv({ transport: {} as never, attached: { frontendId: 'remote/4' } as never, basePath: '/' });
 		const navigation = hook('navigation');
+		let holdsTaken = 0;
 		let holds = 0;
-		provideHook('navigation', { ...navigation, holdPage: () => { holds += 1; return () => undefined; } });
+		let gatedReveals = 0;
+		let ungatedReveals = 0;
+		provideHook('navigation', {
+			...navigation,
+			// The real policy's gate, modeled (remote/nav.ts): while a hold is live the
+			// ordinary reveal is a no-op; the ungated door — the own-act call sites alone —
+			// reveals through any hold. `holdsTaken` keeps the call count the assertions
+			// below read (a mirrored create's hold releases once its serve settles).
+			revealEditorPage: (): void => {
+				if (holds === 0) gatedReveals += 1;
+			},
+			revealEditorPageUngated: (): void => {
+				ungatedReveals += 1;
+			},
+			holdPage: (): (() => void) => {
+				holdsTaken += 1;
+				holds += 1;
+				let done = false;
+				return () => {
+					if (!done) {
+						done = true;
+						holds -= 1;
+					}
+				};
+			}
+		});
 		resetCopyInteractions();
 		try {
 			const host = new ExtensionHost();
@@ -2454,27 +2481,33 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 			// The PC's own act: held in the background (K7) — the tab joins, the page stays.
 			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.create', args: [7, 'chat', 'Claude Code', 1, false], served: 'main', caller: null });
 			await flush();
-			expect(holds).toBe(1);
+			expect(holdsTaken).toBe(1);
+			expect(holds).toBe(0);
 			expect(opened).toEqual([[7, true]]);
 			// This page's user just tapped in the extension's copy (the "new session" tap):
-			// the create it caused comes forward — no hold taken.
+			// the create it caused comes forward — no hold taken, and the page pull rides
+			// the UNGATED door (the user's own navigation, never the hold-gated one).
 			noteCopyInteraction('acme.engine');
 			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.create', args: [8, 'chat', 'Claude Code', 1, false], served: 'main', caller: null });
 			await flush();
-			expect(holds).toBe(1);
+			expect(holdsTaken).toBe(1);
 			expect(opened.slice(1)).toEqual([[8, true]]);
+			expect(ungatedReveals).toBe(1);
+			expect(gatedReveals).toBe(0);
 			// A reveal follows the same rule: the own-act reveal comes forward ungated…
 			host['webviewCopies'].add(host['webviewKey']('acme.engine', 8));
 			noteCopyInteraction('acme.engine');
 			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.reveal', args: [8], served: 'main', caller: null });
 			await flush();
-			expect(holds).toBe(1);
+			expect(holdsTaken).toBe(1);
 			expect(revealed).toEqual([host.webviewTabId('acme.engine', 8)]);
+			expect(ungatedReveals).toBe(2);
 			// …and another frontend's reveal is held again once the trail is cold.
 			resetCopyInteractions();
 			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.reveal', args: [8], served: 'main', caller: null });
 			await flush();
-			expect(holds).toBe(2);
+			expect(holdsTaken).toBe(2);
+			expect(gatedReveals).toBe(0);
 			// A create the extension made WITHOUT taking the PC's focus (a background event's
 			// panel — preserveFocus true) joins here in the same posture: the copy keeps the
 			// extension's choice instead of forcing the foreground, or the two sides' active
@@ -2484,11 +2517,104 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.create', args: [9, 'chat', 'Claude Code', 1, true], served: 'main', caller: null });
 			await flush();
 			expect(opened.slice(2)).toEqual([[9, false]]);
-			expect(holds).toBe(3);
+			expect(holdsTaken).toBe(3);
+			// The hole the first cut left (2026-10-16: 手机端 claude 的 new session/history
+			// 点击后新的页面没有到前台): the own-act create/reveal can land while ANOTHER
+			// operation's page hold is still live — a sync apply in flight, a catch-up
+			// merge, the close of the stale tab the same history click deduplicated. The
+			// hold exists to keep REMOTE acts in the background, and this act is not one:
+			// the page pull must cut through it, which the ungated door does.
+			const foreignHold = (hook('navigation') as { holdPage(): () => void }).holdPage();
+			expect(holds).toBe(1);
+			noteCopyInteraction('acme.engine');
+			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.create', args: [10, 'chat', 'Claude Code', 1, false], served: 'main', caller: null });
+			await flush();
+			expect(opened.slice(3)).toEqual([[10, true]]);
+			expect(ungatedReveals).toBe(3);
+			expect(gatedReveals).toBe(0);
+			host['webviewCopies'].add(host['webviewKey']('acme.engine', 10));
+			noteCopyInteraction('acme.engine');
+			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.reveal', args: [10], served: 'main', caller: null });
+			await flush();
+			expect(revealed.slice(2)).toEqual([host.webviewTabId('acme.engine', 10)]);
+			expect(ungatedReveals).toBe(4);
+			expect(gatedReveals).toBe(0);
+			foreignHold();
 		} finally {
 			provideHook('navigation', navigation);
 			resetCopyInteractions();
 			setRemoteEnv(undefined);
+		}
+	});
+
+
+	it('the history click\'s whole train reaches the foreground on the phone — through the stale tab\'s own close hold (2026-10-16: 手机端 claude 的 new session/history 点击后新的页面没有到前台)', async () => {
+		// The real pieces the unit test above models: the REAL page-hold gate (remote/nav.ts
+		// through the installed session hooks), a real EditorArea, the sync attached, and the
+		// phone shell markers — the page pull is observed as the sidebar page's dismissal
+		// command itself. A history click is a train: the PC deduplicates the stale session's
+		// tab (its closeTab crosses first and takes the page hold while the active tab
+		// closes), then the mirrored create of the new panel lands MID-HOLD. The own act cuts
+		// through the hold; a remote act would have stayed in the background behind it.
+		const ENGINE: ExtInfo = {
+			...GGX2, id: 'acme.engine',
+			capabilities: { format: 'ggs/2', id: 'acme.engine', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }
+		};
+		withExtensions(ENGINE);
+		backend.on('ext_read_file', () => { throw new Error('no such file'); });
+		backend.on('ext_process_start', () => ({ extensionId: 'acme.engine', pid: 4242, commands: [], protocolVersion: 'ggs-ext/1', startCount: 1, lastError: null }));
+		backend.on('ext_process_registrations', () => []);
+		backend.on('read_file', () => ({ contents: 'x\n', binary: false, size: 2, encoding: 'utf8', eol: 'lf' }));
+		setRemoteEnv({ transport: {} as never, attached: { frontendId: 'remote/4' } as never, basePath: '/' });
+		resetCopyInteractions();
+		const toggles: string[] = [];
+		commands.register({ id: 'workbench.toggleSidebar', title: 'toggle sidebar', run: () => void toggles.push('sidebar') });
+		commands.register({ id: 'workbench.togglePanel', title: 'toggle panel', run: () => void toggles.push('panel') });
+		document.documentElement.setAttribute('data-remote-shell', '');
+		document.documentElement.setAttribute('data-page-stack', '');
+		const sidebar = document.body.appendChild(document.createElement('div'));
+		sidebar.id = 'sidebar';
+		const container = document.body.appendChild(document.createElement('div'));
+		const handlers = new Set<(message: unknown) => void>();
+		try {
+			const host = new ExtensionHost();
+			const area = new EditorArea(container);
+			host.onOpenWebview = (panelId, title, extId, placement, focus) => {
+				area.openExtPage({ kind: 'extpage', id: host.webviewTabId(extId, panelId), title, extId, pageId: 'webview' }, () => undefined, null, placement, focus);
+			};
+			host.onRevealWebviewTab = (tabId) => void area.revealById(tabId);
+			host.onCloseWebviewTab = (tabId) => void area.closeById(tabId);
+			await host.activateInstalled();
+			await flush();
+			attachWorkbenchSync({ editors: area, openFolders: () => ['C:\repo'] } as never, {
+				send: (message) => { for (const handler of [...handlers]) handler(message); },
+				receive: (handler) => {
+					handlers.add(handler as (message: unknown) => void);
+					return () => handlers.delete(handler as (message: unknown) => void);
+				}
+			}, 'remote/4');
+			// The stale session's tab is open on the phone.
+			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.create', args: [5, 'chat', 'Old chat', 1, false], served: 'main', caller: null });
+			await until(() => area.openExtPageIds().includes('webview:acme.engine:5'));
+			toggles.length = 0;
+			// The history click: the input trail notes, the stale tab's closeTab crosses
+			// (taking the page hold), and the mirrored create lands while it is still live.
+			noteCopyInteraction('acme.engine');
+			for (const handler of [...handlers]) handler({ by: 'main', k: 'closeTab', id: 'webview:acme.engine:5' });
+			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.create', args: [6, 'chat', 'Claude Code', 1, true], served: 'main', caller: null });
+			await until(() => area.openExtPageIds().includes('webview:acme.engine:6'));
+			await flush(60);
+			// The page came forward THROUGH the close's hold: the sidebar page dismissed.
+			expect(toggles).toContain('sidebar');
+			// And the stale tab is gone while the new one holds the surface.
+			expect(area.openExtPageIds()).toEqual(['webview:acme.engine:6']);
+		} finally {
+			resetCopyInteractions();
+			setRemoteEnv(undefined);
+			document.documentElement.removeAttribute('data-remote-shell');
+			document.documentElement.removeAttribute('data-page-stack');
+			sidebar.remove();
+			container.remove();
 		}
 	});
 

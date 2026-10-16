@@ -21,8 +21,16 @@ export interface NavigationPolicy {
 	fullScreenSideViewOpen(): boolean;
 	dismissFullScreenSideView(): void;
 	revealEditorPage(): void;
-	/** Hold the phone's page still (2026-10-16, the owner's direction: 文件页面会被其他
-	 *  页面顶到最前): while at least one hold is live, `revealEditorPage` is a no-op — the
+	/** The same reveal with NO hold gating it — the user's own navigation. An act this
+	 *  frontend's user just caused (a mirrored create their tap in a webview copy opened,
+	 *  2026-10-16: 手机端 claude 的 new session/history 点击后新页面没有到前台) is their
+	 *  own navigation even while another operation's page hold is still live (a sync apply
+	 *  in flight, a catch-up merge): the hold keeps REMOTE acts in the background, and this
+	 *  act is not one. `revealEditorPage`'s own call stays gated — only the explicit
+	 *  own-act call sites may take this door. */
+	revealEditorPageUngated?: () => void;
+	/** Hold the phone's page still (2026-10-16, the owner's direction: 文件页面会被其他页面
+	 *  顶到最前): while at least one hold is live, `revealEditorPage` is a no-op — the
 	 *  editor tab still opens, but the page showing keeps its place. What a hold wraps is
 	 *  never this user's own act: a remote-originated sync operation, a session restore, a
 	 *  panel another frontend created. The desktop default answers a no-op release — its

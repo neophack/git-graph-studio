@@ -82,6 +82,14 @@ export const framesMethods: ThisType<ExtensionHost> = {
 		// replayed tap reads as the PC user's own input, and `caller` names no one); the
 		// copy's input trail is the only witness.
 		const ownAct = (method === 'webview.create' || method === 'webview.reveal') && hook('webviewStreams')?.recentCopyInteraction?.(extId) === true;
+		// The own-act reveal cuts THROUGH the page holds, not just past its own: another
+		// operation's hold can still be live when the mirrored event lands (a sync apply in
+		// flight, a catch-up merge, a close of the stale tab the same click deduplicated) —
+		// `revealEditorPage`'s hold gate would eat the pull and the page this user's own tap
+		// opened would stay in the background behind a hold that exists to stop REMOTE acts
+		// (2026-10-16: 手机端 claude 的 new session/history 点击后新页面没有到前台). This act
+		// is the user's own navigation, and that is the one thing no hold gates.
+		const revealOwnAct = (): void => (hook('navigation').revealEditorPageUngated ?? hook('navigation').revealEditorPage)();
 		if (this.sharesWebviews(extId)) {
 			const panelId = args[0] as number;
 			switch (method) {
@@ -111,13 +119,15 @@ export const framesMethods: ThisType<ExtensionHost> = {
 					// never the page — a page hold wraps the reveal (its activation is the
 					// OTHER side's act, not this user's; 2026-10-16, 文件页面会被其他页面
 					// 顶到最前 — K7, each frontend's layout is its own). Except the reveal
-					// this frontend's own copy interaction caused: that one comes forward.
+					// this frontend's own copy interaction caused: that one comes forward,
+					// ungated — a hold another operation still holds must not keep it back.
 					const release = ownAct ? null : hook('navigation').holdPage();
 					try {
 						const view = this.webviews.get(this.webviewKey(extId, panelId));
 						// A copy closed here reopens: the panel itself lives on in the desktop window.
 						if (view && !this.webviewCopies.has(this.webviewKey(extId, panelId))) this.onOpenWebview?.(panelId, view.title, extId, undefined, true);
 						else if (view) this.onRevealWebviewTab?.(this.webviewTabId(extId, panelId));
+						if (ownAct && view) revealOwnAct();
 					} finally {
 						release?.();
 					}
@@ -127,9 +137,13 @@ export const framesMethods: ThisType<ExtensionHost> = {
 		}
 		// The mirrored serve runs async (the tab opens when the request settles): the page
 		// hold rides its whole length, so the create's own activation lands in the
-		// background — unless the create is this frontend's own act (ownAct above).
+		// background — unless the create is this frontend's own act (ownAct above), whose
+		// page pull then rides after the serve, ungated, for the same reason as the reveal's.
 		const release = ownAct ? null : hook('navigation').holdPage();
 		void this.serveRequest(method, args, extId, handle)
+			.then(() => {
+				if (ownAct) revealOwnAct();
+			})
 			.catch((error) => extLog('warn', extId, `mirrored ${method} failed: ${String(error)}`))
 			.finally(() => release?.());
 	},
