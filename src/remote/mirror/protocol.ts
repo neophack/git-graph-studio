@@ -184,7 +184,15 @@ export function panelStream(extId: string, panelId: number): string {
 export type DownMessage =
 	| { k: 'snap'; to: string; w?: string; seq: number; root: number; doc: SDoc; vp: Viewport; caret?: CaretState; focus?: FocusEntry[] }
 	| { k: 'ops'; to: '*'; w?: string; seq: number; ops: MirrorOp[] }
-	| { k: 'clip'; to: string; w?: string; text: string };
+	| { k: 'clip'; to: string; w?: string; text: string }
+	/** The receipt of one remote chat operation (§8.2): `id` names the operation the
+	 *  remote sent, `ok` whether the PC's session driver could run it. `detail` carries the
+	 *  picked model's label when a `model` op matched one. */
+	| { k: 'chatAck'; to: string; w?: string; id: string; ok: boolean; error?: string; detail?: string }
+	/** A bridged chat stream's state, pushed when it changes (merged within 100 ms):
+	 *  whether a turn runs, the model and permission mode the composer shows, and the
+	 *  pending permission / question cards as the remote's native cards render them. */
+	| { k: 'chatState'; to: '*'; w?: string; busy: boolean; model: string; mode: string; permission?: { title: string; detail: string }; question?: ChatQuestionPayload };
 
 /** Keyboard modifiers as a bit set: 1 ctrl, 2 shift, 4 alt, 8 meta. */
 export type Mods = number;
@@ -220,7 +228,34 @@ type UpBody =
 	 *  its pixels mean nothing on the PC), `e` when it sits at its end. The PC puts its own
 	 *  scroller at the same place, so a page that renders its content around the scroll
 	 *  position (a virtualized list: git-graph-rs) renders the window the viewer looks at. */
-	| { k: 'scroll'; from: string; i: number; f: number; e?: 1 };
+	| { k: 'scroll'; from: string; i: number; f: number; e?: 1 }
+	/** The Claude session bridge (§8.2): one operation for the PC's session driver to run
+	 *  against the chat page — the remote's native composer is the only source. `id` names
+	 *  the operation for its receipt and the reconnect resend's dedup. */
+	| { k: 'chat'; from: string; id: string; op: 'send'; text: string }
+	| { k: 'chat'; from: string; id: string; op: 'stop' }
+	| { k: 'chat'; from: string; id: string; op: 'permission'; decision: 'allow' | 'allowAlways' | 'deny'; message?: string }
+	/** One question's picks, `submit` false while more of the card's questions remain (the
+	 *  card's checkboxes toggle — a pick must land exactly once); the default submits. */
+	| { k: 'chat'; from: string; id: string; op: 'answer'; answers: ChatCardAnswer[]; submit?: boolean }
+	| { k: 'chat'; from: string; id: string; op: 'model'; model: string }
+	| { k: 'chat'; from: string; id: string; op: 'mode'; mode: string };
+
+/** One answer to a pending AskUserQuestion card, the wire shape of claudeChatInject's
+ *  `ChatAnswer` (the protocol names no feature module). */
+export interface ChatCardAnswer {
+	question: string;
+	header: string;
+	picks: string[];
+	other?: string;
+}
+
+/** A pending question card as the remote's native card renders it (§8.2 chatState). */
+export interface ChatQuestionPayload {
+	header: string;
+	multi: boolean;
+	options: { label: string; description?: string }[];
+}
 
 /** An up message before the viewer stamps its `from` on it. */
 export type UpPayload = UpMessage extends infer M ? (M extends unknown ? Omit<M, 'from'> : never) : never;

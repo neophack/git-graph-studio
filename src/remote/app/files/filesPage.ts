@@ -14,6 +14,7 @@ import { t } from '../../../platform/i18n';
 import { createFile, createFolder, type DirEntryInfo } from '../../../platform/ipc/fs';
 import { currentWorkbench, type FsChange } from '../../../workbench';
 import { uploadInto } from '../../../features/explorer';
+import { withinRoots } from '../../pathGate';
 import { openSheet, showActionSheet, closeActionSheet } from '../../actionSheet';
 import type { MenuEntry } from '../../../platform/ui';
 import { createFileList, SORT_KEYS, defaultSort, type FilesSort } from './fileList';
@@ -213,4 +214,24 @@ export function installFilesPage(): void {
 	view.append(page, select.actionBar, fab);
 	list.setSort(loadSort());
 	if (dir) void show(dir);
+
+	// The page mounts at the shell's install moment — the title bar's first frame, which
+	// the workbench builds synchronously while the boot context's roots are still one wire
+	// round trip away (2026-10-16: the page booted with `dir === ''` and showed the
+	// "空目录" placeholder forever — nothing retried once the workspace landed). The
+	// explorer renders into this same view, and its header/rows appear exactly when
+	// setRoots applies, so that render is the signal; the check itself no-ops unless the
+	// first open folder actually moved (a directory still inside it keeps its place).
+	let followedRoot = workspaceRoot();
+	const followRoot = (): void => {
+		const root = workspaceRoot();
+		if (!root || root === followedRoot) return; // none yet, or the one already followed
+		const previous = followedRoot;
+		followedRoot = root;
+		if (!previous || !withinRoots(previous, [root])) void show(root);
+	};
+	if (typeof MutationObserver !== 'undefined') {
+		new MutationObserver(() => followRoot()).observe(view, { childList: true, subtree: true });
+	}
+	followRoot();
 }

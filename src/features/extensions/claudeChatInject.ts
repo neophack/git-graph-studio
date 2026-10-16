@@ -22,6 +22,14 @@ export function chatControls(doc: Document | null | undefined): ChatControls | n
 	return send && input ? { input, send } : null;
 }
 
+/** The composer's whole subtree — the form `chatControls` reads. The one subtree a chat
+ *  stream's replica SKIPS (docs/remote-client-plan.md §8.1): a remote page types into its
+ *  own native composer and drives this one through the bridge, so the form's DOM, its
+ *  values, focus and caret never cross the wire. */
+export function chatComposerRoot(doc: Document | null | undefined): HTMLFormElement | null {
+	return (chatControls(doc)?.send.closest('form') ?? null) as HTMLFormElement | null;
+}
+
 /** Whether the page shows a turn in flight: its send button became "Stop", or its
  *  input's placeholder became the queueing one ("Queue another message…"). */
 export function chatBusy(controls: ChatControls): boolean {
@@ -66,6 +74,25 @@ export function pressSend(controls: ChatControls): boolean {
 	return true;
 }
 
+/** Send `text` through the page's own composer PRESERVING the PC user's draft
+ *  (docs/remote-client-plan.md §8.2): whatever they had typed goes back in after the send —
+ *  a remote send never clobbers a draft it cannot see. The restore waits a tick so the
+ *  page's own submit handling (which clears the input) settles first. Answers false when
+ *  the page would not take the send; the draft is put back either way. */
+export async function sendChatText(controls: ChatControls, text: string): Promise<boolean> {
+	const draft = inputText(controls.input);
+	setChatInput(controls, text);
+	if (!pressSend(controls)) {
+		if (draft !== text) setChatInput(controls, draft);
+		return false;
+	}
+	if (draft.trim() !== '') {
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		setChatInput(controls, draft);
+	}
+	return true;
+}
+
 /** Interrupt the running turn (an empty input turns the send button into "Stop"). */
 export function interruptChat(controls: ChatControls): boolean {
 	if (!chatBusy(controls)) return false;
@@ -90,8 +117,12 @@ async function waitFor(probe: () => boolean, ms: number): Promise<boolean> {
 	for (;;) {
 		if (probe()) return true;
 		if (Date.now() > until) return false;
-		await new Promise((resolve) => setTimeout(resolve, 100));
+		await sleep(100);
 	}
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function escapeRe(text: string): string {
@@ -363,6 +394,48 @@ function submitAnswersButton(doc: Document | null | undefined): HTMLButtonElemen
 }
 
 /**
+ * Pick one question's answers on the pending card the way clicks do — its nav tab, then the
+ * picked options ("Other" last, typing its text into the box that opens) — WITHOUT
+ * submitting: the remote chat bridge answers a multi-question card one question at a time
+ * (each pick the card renders advances it), and the card's checkboxes toggle, so a pick
+ * must land exactly once. Answers false when the card is gone or a pick never matched.
+ */
+export async function pickChatQuestion(doc: Document | null | undefined, answer: ChatAnswer): Promise<boolean> {
+	if (!doc) return false;
+	const tab = questionTab(doc, answer.header);
+	if (tab) {
+		tab.click();
+		await sleep(150); // the card swaps to that question's block
+	}
+	const picks = [...answer.picks.filter((pick) => pick !== 'Other'), ...answer.picks.filter((pick) => pick === 'Other')];
+	for (const pick of picks) {
+		const option = await waitFor(() => optionFor(liveQuestionOptions(doc), pick) !== null, 3000)
+			? optionFor(liveQuestionOptions(doc), pick)
+			: null;
+		if (!option) return false;
+		option.click();
+		await sleep(180); // a render cycle: the card checks it, or advances to the next tab
+		if (pick === 'Other' && answer.other && !typeOtherAnswer(doc, answer.other)) return false;
+	}
+	return true;
+}
+
+/** The card's own "Submit answers" click — the one act that resolves the question. Waits
+ *  for the button to enable (every question holds a pick), then for the card to settle. */
+export async function submitChatQuestion(doc: Document | null | undefined): Promise<boolean> {
+	if (!doc) return false;
+	const submit = await waitFor(() => {
+		const button = submitAnswersButton(doc);
+		return !!button && !button.disabled;
+	}, 3000)
+		? submitAnswersButton(doc)
+		: null;
+	if (!submit) return false;
+	submit.click();
+	return waitFor(() => liveQuestionOptions(doc).length === 0, 8000);
+}
+
+/**
  * Answer the page's pending AskUserQuestion card the way clicks do: per question, open
  * its nav tab, click the picked options ("Other" last — it types its text into the box
  * that opens), then click the card's own "Submit answers" button — the card collects the
@@ -373,31 +446,63 @@ function submitAnswersButton(doc: Document | null | undefined): HTMLButtonElemen
  */
 export async function answerChatQuestion(doc: Document | null | undefined, answers: ChatAnswer[]): Promise<boolean> {
 	if (!doc || !answers.length || !liveQuestionOptions(doc).length) return false;
-	const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 	for (const answer of answers) {
-		const tab = questionTab(doc, answer.header);
-		if (tab) {
-			tab.click();
-			await sleep(150); // the card swaps to that question's block
-		}
-		const picks = [...answer.picks.filter((pick) => pick !== 'Other'), ...answer.picks.filter((pick) => pick === 'Other')];
-		for (const pick of picks) {
-			const option = await waitFor(() => optionFor(liveQuestionOptions(doc), pick) !== null, 3000)
-				? optionFor(liveQuestionOptions(doc), pick)
-				: null;
-			if (!option) return false;
-			option.click();
-			await sleep(180); // a render cycle: the card checks it, or advances to the next tab
-			if (pick === 'Other' && answer.other && !typeOtherAnswer(doc, answer.other)) return false;
-		}
+		if (!(await pickChatQuestion(doc, answer))) return false;
 	}
-	const submit = await waitFor(() => {
-		const button = submitAnswersButton(doc);
-		return !!button && !button.disabled;
-	}, 3000)
-		? submitAnswersButton(doc)
-		: null;
-	if (!submit) return false;
-	submit.click();
-	return waitFor(() => liveQuestionOptions(doc).length === 0, 8000);
+	return submitChatQuestion(doc);
+}
+
+/* ---------- the pending cards, as the remote chat bridge reports them (§8.2 chatState) ---------- */
+
+/** A card's text with its interactive controls left out — the sentence a copy shows, not
+ *  the buttons the native card replaces. */
+function cardText(card: Element): string {
+	const clone = card.cloneNode(true) as Element;
+	clone.querySelectorAll('button, input, textarea, select').forEach((el) => el.remove());
+	return (clone.textContent ?? '').replace(/\s+/g, ' ').trim();
+}
+
+/** The pending permission card reduced to what a remote banner needs — its title sentence
+ *  (the request) and the code/monospace detail when it carries one. Null when no card is
+ *  pending (nothing live to answer). */
+export function pendingChatPermission(doc: Document | null | undefined): { title: string; detail: string } | null {
+	const buttons = permissionButtons(doc);
+	if (!buttons.allow.length && !buttons.allowAlways.length && !buttons.deny.length) return null;
+	const anchor = (buttons.deny[0] ?? buttons.allow[0])!;
+	// The card is the buttons' nearest ancestor that SAYS something — their own row and the
+	// presentational wrappers around it read empty once the buttons are left out.
+	let card: Element | null = anchor.parentElement;
+	while (card && card !== doc?.body && cardText(card) === '' && card.parentElement) card = card.parentElement;
+	if (!card) return { title: '', detail: '' };
+	const detail = card.querySelector('code')?.textContent ?? '';
+	return { title: cardText(card).slice(0, 200), detail: detail.replace(/\s+/g, ' ').trim().slice(0, 200) };
+}
+
+export interface ChatQuestionState {
+	/** The active question's header (its nav tab), when the card marks one. */
+	header: string;
+	/** A multi-select question (checkbox options) picks several. */
+	multi: boolean;
+	options: { label: string; description?: string }[];
+}
+
+/** The pending AskUserQuestion card reduced to its live options — the active question's
+ *  choices with their descriptions, single- or multi-select. Null when nothing is pending.
+ *  The card renders ONE question's options at a time (its nav tabs walk the rest), so this
+ *  is what the remote's native card shows now; the copy above it carries the full prompt. */
+export function pendingChatQuestion(doc: Document | null | undefined): ChatQuestionState | null {
+	if (!doc) return null;
+	const options = liveQuestionOptions(doc);
+	if (!options.length) return null;
+	const out: { label: string; description?: string }[] = [];
+	for (const option of options.slice(0, 12)) {
+		const kids = [...option.children];
+		const label = (kids[0]?.textContent ?? option.textContent ?? '').replace(/\s+/g, ' ').trim();
+		if (!label) continue;
+		const description = kids[1] ? (kids[1].textContent ?? '').replace(/\s+/g, ' ').trim() : '';
+		out.push(description && description !== label ? { label, description } : { label });
+	}
+	const selected = doc.querySelector('[role="tab"][aria-selected="true"]') ?? doc.querySelector('[role="tab"]');
+	const header = (selected?.textContent ?? '').replace(/\s+/g, ' ').trim();
+	return { header, multi: options.some((option) => option.getAttribute('role') === 'checkbox'), options: out };
 }

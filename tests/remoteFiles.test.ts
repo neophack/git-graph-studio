@@ -8,10 +8,12 @@ import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
 installRemoteSessionHooks();
 import { provideHook } from '../src/platform/hooks';
 import { backend } from './tauriMock';
-import { click, flush } from './helpers';
+import { click, flush, workbenchShell, DefaultingHandlers } from './helpers';
 import { createFileList, relativeTime, shortDateTime, defaultSort, type FileListHooks, type SortKey } from '../src/remote/app/files/fileList';
 import { createPathBar } from '../src/remote/app/files/pathBar';
 import { createMultiSelect } from '../src/remote/app/files/multiSelect';
+import { installFilesPage } from '../src/remote/app/files/filesPage';
+import { bootWorkbench, currentWorkbench } from '../src/workbench';
 
 interface Entry {
 	name: string;
@@ -317,5 +319,59 @@ describe('the second line formats', () => {
 		expect(relativeTime(now - 5 * 60)).toContain('5');
 		expect(relativeTime(now - 3 * 86400)).toContain('3');
 		expect(shortDateTime(new Date('2026-10-14T18:20:00').getTime() / 1000)).toBe('10-14 18:20');
+	});
+});
+
+describe('the installed page follows the workspace root', () => {
+	/** The booted workbench with the files page mounted the way the shell mounts it — before
+	 *  the roots land. The shell installs at the title bar's first frame, which the workbench
+	 *  builds synchronously while `boot_context` (a wire round trip on the remote) is still in
+	 *  flight: the page must not stay on its "空目录" placeholder once the workspace applies. */
+	async function bootWithoutRoots(): Promise<void> {
+		localStorage.clear();
+		workbenchShell();
+		// The remote marker: the tree pages through `list_dir_page` like the files page does.
+		document.documentElement.setAttribute('data-remote-shell', '');
+		backend.reset();
+		backend.handlers = new DefaultingHandlers([
+			['boot_context', () => ({ file: null, actions: [], repo: null, roots: [], workspaceFile: null })],
+			['repo_head', () => ({ branch: 'main', shortHash: 'abc', ahead: 0, behind: 0, upstream: null })],
+			['scm_status', () => []],
+			['ext_list', () => []],
+			['backup_list', () => []],
+			['pty_create', () => 1]
+		] as [string, (args: Record<string, unknown>) => unknown][]);
+		serve({
+			'C:/repo': [{ name: 'src', isDir: true }, { name: 'a.txt', isDir: false }],
+			'C:/other': [{ name: 'b.md', isDir: false }]
+		});
+		await import('../src/features/editor'); // pre-warm the editor chunk, as the boot suites do
+		const booted = bootWorkbench();
+		installFilesPage(); // the shell's moment: the constructor is done, the roots are not
+		await booted;
+		await flush(4);
+	}
+
+	const pageRows = (): string[] =>
+		[...document.querySelectorAll('.ggs-files-page .ggs-file-row .l1')].map((line) => line.textContent);
+
+	afterEach(() => {
+		currentWorkbench?.dispose();
+		document.documentElement.removeAttribute('data-remote-shell');
+	});
+
+	it('loads the root once it arrives, and follows a switch to another folder', { timeout: 30_000 }, async () => {
+		await bootWithoutRoots();
+		// The symptom as reported (2026-10-16: 远程文件也显示空目录): the placeholder, no rows.
+		expect(pageRows()).toEqual([]);
+		expect(document.querySelector('.ggs-files-page .ggs-file-empty')).not.toBeNull();
+		await currentWorkbench!.applyRoots(['C:/repo'], true, null);
+		await flush(8);
+		expect(pageRows()).toEqual(['src', 'a.txt']);
+		expect(document.querySelector('.ggs-files-page .ggs-file-empty')).toBeNull();
+		// A directory the window no longer holds is not listable — the page moves to the new root.
+		await currentWorkbench!.applyRoots(['C:/other'], false, null);
+		await flush(8);
+		expect(pageRows()).toEqual(['b.md']);
 	});
 });

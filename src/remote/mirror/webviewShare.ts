@@ -7,11 +7,17 @@
 // replica's own (recorder.ts, replay.ts), rooted at the frame's document instead of the
 // window's; a frame that reloads (`setHtml`) or is replaced (the sidebar rebuilt) restarts
 // them, and every viewer gets a fresh snapshot.
+//
+// A stream the provider bridge runs (its extension among provider_list's bridgedExtIds)
+// is more than a copy (docs/remote-client-plan.md §8): the chat BRIDGE answers the remote's
+// native composer, and the composer's subtree is SKIPPED by the recording — the PC user's
+// draft never crosses, and neither does the remote's own typing.
 
 import { DomRecorder } from './recorder';
 import { InputReplayer } from './replay';
 import { VIEWER_TTL_MS, type DownMessage, type UpMessage } from './protocol';
 import { webviewFrameSource } from './webviewFrames';
+import type { ChatBridge } from './chatBridge';
 
 /** How often a watched stream re-checks its frame (a view resolving, a tab remounting). */
 const FOLLOW_MS = 1000;
@@ -28,6 +34,12 @@ export class WebviewShare {
 	private recorder: DomRecorder | null = null;
 	private replayer: InputReplayer | null = null;
 	private followTimer: ReturnType<typeof setInterval> | null = null;
+	/** The session bridge, once this stream is known to be a bridged extension's chat. */
+	private bridge: ChatBridge | null = null;
+	private bridgeAsked = false;
+	/** The composer-skip rule (§8.1) once that is known — read live by the recorder's
+	 *  options, so the rule a late answer installs is in force from its first flush. */
+	private chatSkipRule: ((node: Node) => boolean) | null = null;
 	private readonly onLoad = () => void this.follow();
 
 	constructor(
@@ -58,6 +70,11 @@ export class WebviewShare {
 				return;
 			case 'bye':
 				this.drop(message.from);
+				return;
+			case 'chat':
+				if (!known) return;
+				this.viewers.set(message.from, this.deps.now());
+				this.bridge?.receive(message);
 				return;
 			default: {
 				if (!known || !this.replayer || !this.recorder) return;
@@ -90,6 +107,11 @@ export class WebviewShare {
 		this.recorder?.stop();
 		this.recorder = null;
 		this.replayer = null;
+		this.bridge?.detach();
+		this.bridge = null;
+		// A later hello asks again: the bridged answer belongs to this doc's lifetime, not
+		// to the share's first one.
+		this.bridgeAsked = false;
 		this.doc = null;
 	}
 
@@ -108,13 +130,54 @@ export class WebviewShare {
 		} catch {
 			doc = null;
 		}
-		if (doc === this.doc) return false;
+		if (doc === this.doc) {
+			// The document is unchanged, but a bridge due since the last look may now be
+			// able to attach (the view's record landing, the provider store answering).
+			if (doc && this.bridge === null && !this.bridgeAsked) void this.ensureBridge(doc);
+			return false;
+		}
 		this.recorder?.stop();
 		this.doc = doc;
-		this.recorder = doc ? new DomRecorder(doc, (ops, seq) => this.deps.send({ k: 'ops', to: '*', w: this.stream, seq, ops })) : null;
-		this.replayer = this.recorder && doc ? new InputReplayer(this.recorder, doc) : null;
+		this.makeRecorder();
+		if (this.bridge) {
+			if (doc) this.bridge.attach(doc);
+			else this.bridge.detach();
+		} else if (doc) {
+			void this.ensureBridge(doc);
+		}
 		for (const viewer of this.viewers.keys()) this.snapshotTo(viewer);
 		return true;
+	}
+
+	private makeRecorder(): void {
+		const doc = this.doc;
+		this.recorder = doc
+			? new DomRecorder(
+				doc,
+				(ops, seq) => this.deps.send({ k: 'ops', to: '*', w: this.stream, seq, ops }),
+				{ skip: (node) => this.chatSkipRule !== null && this.chatSkipRule(node) }
+			)
+			: null;
+		this.replayer = this.recorder && doc ? new InputReplayer(this.recorder, doc) : null;
+	}
+
+	/** Ask once whether this stream is a bridged extension's chat; when it is, install the
+	 *  composer-skip rule and the session bridge, and re-snapshot every viewer so the
+	 *  composer they already hold is replaced by its placeholder (§8.1). */
+	private async ensureBridge(doc: Document): Promise<void> {
+		if (this.bridgeAsked) return;
+		this.bridgeAsked = true;
+		const { streamIsBridgedChat, chatComposerSkipRule, ChatBridge } = await import('./chatBridge');
+		if (!(await streamIsBridgedChat(this.stream)) || this.doc !== doc) return;
+		this.chatSkipRule = chatComposerSkipRule();
+		this.bridge = new ChatBridge(this.stream, { send: (down) => this.deps.send(down) });
+		this.bridge.attach(doc);
+		// The rule is live for the recorder's next serialize; the tables a pre-rule snapshot
+		// seeded (the composer's own nodes) restart with a fresh recorder, so nothing inside
+		// the skipped subtree can emit against ids the viewers no longer hold.
+		this.recorder?.stop();
+		this.makeRecorder();
+		for (const viewer of this.viewers.keys()) this.snapshotTo(viewer);
 	}
 
 	private snapshotTo(viewer: string): void {

@@ -11,9 +11,11 @@ import { remoteEnv } from '../session';
 import { HELLO_EVERY_MS, MIRROR_DOWN, MIRROR_UP, type DownMessage, type UpPayload } from './protocol';
 import { MirrorViewer } from './viewer';
 import { ViewerInput } from './viewerInput';
+import { mountChatPane } from '../app/chat';
 
 /** Mount the live copy of `stream` (`view:<id>` / `panel:<ext>#<id>`) into a pane; the
- *  answer unmounts it. */
+ *  answer unmounts it. A bridged chat stream's pane also grows its native composer here:
+ *  the gate (app/chat) waits for the PC's first `chatState` before anything mounts. */
 export function mountWebviewCopy(container: HTMLElement, stream: string): () => void {
 	const env = remoteEnv();
 	if (!env) return () => undefined;
@@ -43,6 +45,14 @@ export function mountWebviewCopy(container: HTMLElement, stream: string): () => 
 	});
 	input = new ViewerInput(viewer, send, container.ownerDocument, { embedded: true, parent: host });
 	const listener = transport.listen(MIRROR_DOWN, (event) => viewer.receive(event.payload as DownMessage));
+	const stopChatPane = mountChatPane(container, {
+		stream,
+		send,
+		listen: (handler) => {
+			const token = transport.listen(MIRROR_DOWN, (event) => handler(event.payload as DownMessage));
+			return () => transport.unlisten(token);
+		}
+	});
 	const hello = () => send({ k: 'hello', vw: host.clientWidth, vh: host.clientHeight, touch });
 	hello();
 	const timer = setInterval(hello, HELLO_EVERY_MS);
@@ -54,6 +64,7 @@ export function mountWebviewCopy(container: HTMLElement, stream: string): () => 
 		clearInterval(timer);
 		document.removeEventListener('visibilitychange', onVisible);
 		transport.unlisten(listener);
+		stopChatPane();
 		send({ k: 'bye' });
 		input?.dispose();
 		viewer.dispose();

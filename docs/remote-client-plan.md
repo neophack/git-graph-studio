@@ -10,7 +10,11 @@
 >
 > **2026-10-16 S1+L1 落地记录**(同日第四批):**S1 同步策略**(§7.0/§7.2/§7.3)。`src/remote/presence.ts`(新):在场表——每个前端在 `studio://workbench-sync` 通道上广播 `{k:'presence',by,active,device}`,60 s 心跳、150 s TTL 超时、`noteExternal` 接收守护进程 WINDOWS 帧的 `visible`(PC 活跃的权威来源,远程 boot 在每次 WINDOWS 帧后喂入,含启动时补喂);活跃判定为 `document.visibilityState !== 'hidden'`(prerender 视为在途)。`workbenchSync.ts` 重写:门控(活跃前端 <2 时 announce 与 tabs-diff 全部静默,K11;无 presence 参数时行为不变,供旧用例)、追平(变为活跃或 start 时发 `stateRequest`,最近活跃的其他前端应答 `stateSnapshot`——并集合并、缺的标签后台打开(`open`/`openTab` 消息可带 `inactive`)、任何一方不关标签、加入方采纳应答方的活动标签,K14;远程来源的快照文件走与 open 相同的根边界+canonical 复查)、删除 `view`/`sidebar` 两类消息(G8,侧栏与视图切换回归本端布局,`sidebarHideCrosses` 与 showView/toggleSidebar 包装一并删除)。§7.3 保存冲突:`dirty.ts` 的 `markSaveConflict`(监视器命中的脏文件读盘比对——等于 savedDoc 或当前缓冲即视为保存回声,不算冲突)→ 三按钮信息条(比较=磁盘/我的内容差异 tab、使用磁盘版本、保留我的版本),干净重载加 `external-reload` 1.5 s 标签闪烁;`lifecycle.ts` 的 onFsChanged 对每个命名路径 reload 与冲突检查都调。设置新增 `remoteHideNotice`(PC 设备级)。**L1 PC 窗口生命周期**(§17,G13 修复):ggs-remote-proto 增 `ToInstance::Hide`、`ToInstance::Sessions{count}`、`FromInstance::Update.minimized`(serde 缺省不序列化,旧字节不变;control.json 向量新增三条并 bless 同步到守护进程副本——proto 的 bless 写自身 tests/vectors/,需拷回守护进程);守护进程 `INSTANCE_DISPLAY`(0x0C)帧(ws socket,同一 `remote_may_drive` 沙箱边界,未知实例回 notice),`refresh_session_counts` 在计数变化时推 `Sessions`(含归零,遍历 before∪after);`InstanceInfo.minimized` 进 WINDOWS。应用侧 `remote_host.rs`:`Hide` 走 `hide_main`(与 `remote_host_hide_main` 同路径)、`Sessions` 存入 Link、`remote_host_status` 增 `remoteSessions`、`main_minimized`+`note_main_resized`(lib.rs 的 Resized 窗口事件,仅在 minimized 真变时推 Update)。前端 `closeHidesWindow` 纯判定(`keepRunningHidden` 走它:镜像观看者或 remoteSessions>0 即隐藏)+ K15 系统通知(tauri-plugin-notification 新依赖,capability `notification:default`;通知被拒时静默,绝不阻塞关闭)+ `noteWindowHidden()`(关闭隐藏路径把在场表置为不活跃);窗口切换器与守护进程 picker.js 增 minimized 徽标、sessions 数与"在 PC 上关闭/打开窗口"动作,`remote.pcWindow.hide/show` 命令(remote profile)。验收:`remoteWorkbenchSync.test.ts` 改写(view/sidebar 断言改为 G8 本端;新增门控/三前端 K10/追平用例)、`remoteTraffic.test.ts` 增 §7.4 同步族预算行(在场 ~80B 载荷、意图 ≤300B、单独 20 文件 0B、20 标签快照 ≤2KB、Claude 流式与 Git Graph 滚动显式 ≤7KB——实测 6989/6834B)、`remoteLifecycle.test.ts`(新,closeHidesWindow+Presence 单测)、守护进程集成 `instance_display_shows_and_hides_and_sessions_ride_the_count`(Sessions 先于 EnsureRelay 的次序,两个旧用例补消费)。**余量**(随 S2/L2):L2 的 §18 场景矩阵与 `remote_debug_snapshot`、托盘退出的确认对话框、追平合并里 diff/history 标签的后台打开(openDiff 无 inactive 参数,仍取焦点)。
 >
-> **未开始**:S2/S3 同步与 Claude 桥、L2 生命周期测试——§13 的依赖顺序不变(S1、L1 已落,S2 可开始)。
+> **2026-10-16 落地记录(所有者第四轮指示——picker 路径输入行保留)**:窗口选择页"此 PC 上的窗口"**上方输入文件夹路径打开 ggs 的输入行要保留**(所有者 2026-10-16 原话:"网页上'此 PC 上的窗口'上面输入文件夹路径打开ggs的要保留")。恢复:picker.html 的 `open-row` 输入行与沙箱入口行、picker.js 的 `openTypedFolder`(回车/按钮发 `SPAWN`)、最近列表"没有窗口打开它"时点"打开"即 spawn、`api/session` 的 `folderInput`/`sandbox` 读取(这两个字段后端一直在答,2026-10-15 只是页面停用了它),守护进程 ws 的 `SPAWN` 帧恢复走 `lifecycle::spawn`(`via_remote=true`:沙箱开着时照 §23 约束在根内、根外文件夹在 lifecycle 拒绝)。K4 相应收窄:**远程工作台**(remote.html 会话)仍然没有打开文件/文件夹/新窗口的入口——`pathGate` 的 REFUSED_COMMANDS、`GET /api/browse` 的删除、工作台切换器无"新窗口"全部不变;picker 落地页是唯一例外,也是远程唯一的 spawn 入口。验收:守护进程集成测试 `the_picker_keeps_its_folder_input_and_a_spawn_reaches_lifecycle`(browse 仍 404、session 带 `folderInput:true`、SPAWN 到达 lifecycle 并以"no GGS installation"失败——被听见并按真实规则回答,而非一刀切拒绝)。
+>
+> **2026-10-16 S2 落地记录**(第五批):**§8 Claude 会话桥**全部落成。§8.1 副本排除输入框:`DomRecorder` 新增 `skip(node)` 选项(RecorderOptions),被跳过的子树序列化为一个带 `data-mirror-skip` 与高度内联样式的空占位——子树内的 childList/属性/文本记录在 flush 一开始就被丢弃,控件、滚动、焦点与光标从未登记也就从不过线;规则由 `claudeChatInject.ts` 新增的 `chatComposerRoot(doc)`(`chatControls` 的 form)提供,`chatBridge.ts` 的 `chatComposerSkipRule()` 按结构判定(FORM 且正是当前 composer 的 form),页面重挂 composer 即被下一次 serialize 抓住,不靠元素引用;fluid 副本(FLUID_CSS)隐藏占位,原生输入区取其空间。装配在 `webviewShare.ts`:流属于 `provider_list` 的 `bridgedExtIds`(`streamIsBridgedChat`,经 `WebviewFrameSource.extOf` 拿 view 的属主——extensionHost 注册、`webviewExtOf` 实现)才装桥,装桥时同步换上 skip 规则、重启 recorder(旧表里 composer 的节点不再对着观看者已不持有的 id 发射)并向所有观看者重发快照;share 随最后一个观看者 stop 后再次 hello 会重新装桥。§8.2 消息:`chat`(op: send/stop/permission/answer/model/mode,带操作 id)/`chatAck`(回执,`detail` 带模型回执的标签)/`chatState`(busy/model/mode/permission/question,100 ms 合并、变化才推)走 MIRROR_UP/DOWN,`w` 为流 id;PC 侧 `mirror/chatBridge.ts` 分发到 claudeChatInject 的既有驱动——`sendChatText`(新)发完把 PC 用户草稿写回、发不出去也原样放回;`answerChatQuestion` 拆出 `pickChatQuestion`/`submitChatQuestion`(answer 消息带 `submit?: boolean`:多题卡逐题 pick,复选框只落一次,最后一题才提交);重发按 id 去重(128 条 LRU,重复 id 只补回执)。远程侧 `remote/app/chat/`:`index.ts` 是挂载门(等 PC 的第一帧 chatState 才懒加载 composer——src/ 依旧不出现扩展 id)、`composer.ts`(原生 textarea:草稿按流存本端 localStorage、忙碌时 ➤ 变停止且发送进本端队列——气泡可撤回,回复结束自动按序发出,队列按标签页存 sessionStorage、重连后按原 id 重发;失败回执把文本放回输入框并提示;模型/模式为行内询问;后台提醒=标题 ● + 震动 + 已授权时的系统通知)、`chatCards.ts`(权限三键与问题选项的原生大按钮卡,Other 的回答框)。IME 门控(§10.2 第 8 项):`isComposing`/`keyCode 229`/compositionend 后 50 ms 内的 Enter 一律不是发送;手机(粗指针)Enter 换行,细指针 Ctrl/⌘+Enter 发送。验收:`tests/remoteChat.test.ts` 十八例(skip 规则×4——占位、子树零字节、结构重挂、fluid 隐藏;桥×4——初始状态与变化才推、发送与草稿写回、五类操作各带回执、重发去重;composer×7——含 100 字 0 B、IME、队列与重挂恢复、失败回退、原生卡;门×1;share 全链路×2——占位快照、chatState、chat 操作落页、PC 侧打字零字节、stop 后重桥),`tests/claudeChatInject.test.ts` 补 composer root 与草稿三例。**S2 余量**(随 Q):底部导航 Claude 项的圆点提醒、Playwright 的 chat.spec(§14 矩阵)、真机 IME/通知检查、多题卡的原生 UI 逐题引导(协议已带 submit 标志,远程 UI 目前按单题卡一步提交)。
+>
+> **未开始**:S3 滚动所有权、L2 生命周期测试——§13 的依赖顺序不变(S1、L1、S2 已落,S3 与 L2 可开始)。
 >
 >
 > 与其他文档的关系：
@@ -37,6 +41,12 @@
 > PC 重新打开时是跟随远程的状态。2 要弹出。4 导入导出是远程界面才有的功能，本地 pc 不需要。
 
 第三轮带来的改动：K14–K16（§1），以及 §7.0、§11、§16、§17.2 的相应条目。
+
+所有者的指示（2026-10-16，第四轮）：
+
+> 网页上"此 PC 上的窗口"上面输入文件夹路径打开ggs的要保留。
+
+第四轮带来的改动：K4 修订与 §3.3 修订（§1、§3.3）——窗口选择页的路径输入行恢复，详见顶部 2026-10-16 落地记录。
 
 第二轮带来的改动：K9–K13（§1）、G13–G16（§2）、§6.5 与 §9 的 Git Graph 方案（改为沿用现有代码）、§7.0 的同步门控与追平、§11 对导入导出的说明，以及新增的 §17（PC 窗口生命周期）和 §18（生命周期与插件稳定性测试）。
 
@@ -70,7 +80,7 @@
 | K1 | PC 桌面（`index.html`）与远程（`remote.html`）是两个入口、两套外壳、两套命令配置。 |
 | K2 | 远程界面根据视口的**尺寸、长宽比、方向和指针类型**自动选择设备形态：手机竖屏、手机横屏、平板竖屏、平板横屏、桌面浏览器。旋转屏幕或改变窗口大小后实时切换，不刷新页面。 |
 | K3 | PC 桌面有"打开文件、打开文件夹、新窗口"，**没有**上传和下载。 |
-| K4 | 远程有上传和下载，**没有**"打开文件、打开文件夹、新窗口"。远程只在 PC 已经打开的窗口之间切换。 |
+| K4 | 远程有上传和下载，**没有**"打开文件、打开文件夹、新窗口"。远程只在 PC 已经打开的窗口之间切换。（2026-10-16 第四轮修订：这说的是**远程工作台**；窗口选择页"此 PC 上的窗口"上方输入文件夹路径打开 ggs 的输入行**保留**——见顶部落地记录。） |
 | K5 | 手机上的文件列表以点按为先：大行高、平铺的目录列表、路径栏、长按多选。参考 MT 管理器。 |
 | K6 | 支持 Chrome、Edge、Firefox、Safari，包括 Android 与 iOS 上的浏览器和常见的 App 内置浏览器，按 §10 的分级执行。 |
 | K7 | 同步只覆盖"打开了什么"和"对话内容"。具体包括：打开哪个文件要同步；文件修改不同步；Claude 的对话内容同步，发送后实时看到回答；Claude 输入框的内容和光标不同步；Git Graph 只同步"打开了"，滚动位置不同步。 |
@@ -152,9 +162,9 @@
 
 ### 3.3 撤回与收紧
 
-- **删除**：`src/remote/openOnPc.ts`、`src/remote/folderBrowser.ts` 中只供远程使用的部分、`desktopHooks.ts` 中会话版的 `folderOpen`、`windowSwitcher.ts` 的"新窗口…"，以及守护进程 `GET /api/browse` 和窗口选择页的 `folderInput` 输入行。
+- **删除**：`src/remote/openOnPc.ts`、`src/remote/folderBrowser.ts` 中只供远程使用的部分、`desktopHooks.ts` 中会话版的 `folderOpen`、`windowSwitcher.ts` 的"新窗口…"，以及守护进程 `GET /api/browse`。（2026-10-16 修订：原同在此列的"窗口选择页的 `folderInput` 输入行"按所有者第四轮指示**恢复**——见顶部落地记录。）
 - **门禁**：`pathGate.ts` 的 `REFUSED_COMMANDS` 新增 `open_folder`、`app_new_instance`、`settings_write`、`assoc_apply`、`context_menu_apply`、`user_path_apply`、`providers_shell_refresh`。`open_folder` 今天已有专门的拒绝规则，并入这张表。
-- 守护进程的 `SPAWN` 只保留给托盘与管理 API（PC 前的用户）。远程会话发起的 `SPAWN` 返回 `FORBIDDEN`。
+- 守护进程的 `SPAWN` 保留给托盘与管理 API（PC 前的用户）；远程侧唯一使用它的是窗口选择页的路径输入行（2026-10-16 恢复，`via_remote=true`——沙箱开着时 spawn 落在沙箱根内、根外文件夹拒绝）。**远程工作台**（remote.html 会话）发起的 `SPAWN` 仍然不存在——远程应用从不发这一帧。
 
 ## 4. 设备分类与自适应
 

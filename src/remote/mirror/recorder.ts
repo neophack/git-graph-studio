@@ -144,6 +144,11 @@ export interface RecorderOptions {
 	/** The pre-economy wire: full values every change, every flush, no holds. For the A/B
 	 *  traffic tests only — the app always runs the economy. */
 	legacy?: boolean;
+	/** Subtrees this predicate accepts cross as ONE empty placeholder that keeps its size —
+	 *  the subtree's DOM, form values, focus and caret never reach a viewer
+	 *  (docs/remote-client-plan.md §8.1: the chat composer of a bridged chat stream, whose
+	 *  remote types into its own native composer instead). */
+	skip?: (node: Node) => boolean;
 }
 
 export class DomRecorder {
@@ -314,6 +319,15 @@ export class DomRecorder {
 		if (!doc) return;
 		this.unwatch(doc);
 		this.release(doc);
+	}
+
+	/** Whether `node` sits inside — or is the root of — a skipped subtree (§8.1): records
+	 *  from within never become ops, and the placeholder's own attribute churn stays local. */
+	private skippedSubtree(node: Node): boolean {
+		const skip = this.options.skip;
+		if (!skip) return false;
+		for (let cur: Node | null = node; cur; cur = cur.parentNode) if (skip(cur)) return true;
+		return false;
 	}
 
 	// ---- the delta bases ----
@@ -512,6 +526,17 @@ export class DomRecorder {
 		if (el.namespaceURI && el.namespaceURI !== XHTML) {
 			out.ns = el.namespaceURI;
 			out.n = el.localName;
+		}
+		if (this.options.skip?.(el)) {
+			// §8.1: a skipped subtree is ONE empty placeholder that keeps its height, so the
+			// copy's layout does not collapse — and nothing inside it crosses, ever. The
+			// viewer hides the placeholder (its own native composer takes the space).
+			const height = Math.round(el.getBoundingClientRect().height);
+			const style = height > 0 ? `height:${height}px` : '';
+			out.a = style ? { 'data-mirror-skip': '', style } : { 'data-mirror-skip': '' };
+			this.setAttrBase(el, 'data-mirror-skip', '');
+			if (style) this.setAttrBase(el, 'style', style);
+			return out;
 		}
 		const attrs = this.attrs(el);
 		if (attrs) {
@@ -720,6 +745,9 @@ export class DomRecorder {
 		const attrs = new Map<Element, Set<string>>();
 		const texts = new Set<Node>();
 		for (const record of records) {
+			// §8.1: a skipped subtree is opaque — its childList, attribute and text records
+			// are the composer's own typing, and none of it crosses.
+			if (this.skippedSubtree(record.target)) continue;
 			if (record.type === 'childList') {
 				for (const node of Array.from(record.removedNodes)) {
 					const id = this.ids.get(node);

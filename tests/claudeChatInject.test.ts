@@ -5,9 +5,9 @@
 // with an empty input, a click on it interrupts, a submit with text sends.
 
 import { describe, expect, it } from 'vitest';
-import { answerChatPermission, answerChatQuestion, chatBusy, chatControls, chatModelPill, interruptChat, pickChatModel, pressSend, setChatInput, setChatPermissionMode } from '../src/features/extensions';
+import { answerChatPermission, answerChatQuestion, chatBusy, chatComposerRoot, chatControls, chatModelPill, interruptChat, pickChatModel, pressSend, sendChatText, setChatInput, setChatPermissionMode } from '../src/features/extensions';
 
-function chatPage() {
+function chatPage(stuckSend = false) {
 	const doc = document.implementation.createHTMLDocument('chat');
 	doc.body.innerHTML = `
 		<div class="permissionRequest"><div role="textbox" contenteditable="true">rm -rf build</div></div>
@@ -24,7 +24,7 @@ function chatPage() {
 	const render = () => {
 		const text = input.textContent ?? '';
 		button.setAttribute('aria-label', busy && !text.trim() ? 'Stop' : 'Send message');
-		button.disabled = !busy && !text.trim();
+		button.disabled = stuckSend || (!busy && !text.trim());
 		input.setAttribute('aria-label', busy ? 'Queue another message…' : 'Ask Claude to edit…');
 	};
 	input.addEventListener('input', render);
@@ -88,6 +88,38 @@ describe('the Claude Code chat driver', () => {
 		expect(page.interrupts()).toBe(1);
 		expect(chatBusy(controls)).toBe(false);
 		expect(page.sent).toEqual([]);
+	});
+});
+
+// The composer root and the draft-preserving send (docs/remote-client-plan.md §8): the
+// composer's own form is the subtree a chat stream's replica SKIPS, and a remote send
+// never clobbers the draft the PC user had typed.
+describe('the composer root and the draft-preserving send (S2)', () => {
+	it('names the composer’s own form — the subtree the replica skips (§8.1)', () => {
+		const page = chatPage();
+		expect(chatComposerRoot(page.doc)).toBe(page.doc.querySelector('form'));
+		expect(chatComposerRoot(document.implementation.createHTMLDocument('empty'))).toBe(null);
+		expect(chatComposerRoot(null)).toBe(null);
+	});
+
+	it('sends the remote’s text and writes the PC user’s draft back afterwards (§8.2)', async () => {
+		const page = chatPage();
+		const controls = chatControls(page.doc)!;
+		setChatInput(controls, 'my half-typed draft');
+		expect(await sendChatText(controls, 'run the tests')).toBe(true);
+		expect(page.sent).toEqual(['run the tests']);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect((controls.input.textContent ?? '').trim()).toBe('my half-typed draft');
+	});
+
+	it('a send the page refuses leaves the draft where it was and answers false', async () => {
+		const page = chatPage(true); // a page whose send never enables
+		const controls = chatControls(page.doc)!;
+		setChatInput(controls, 'the draft stays');
+		expect(controls.send.disabled).toBe(true);
+		expect(await sendChatText(controls, 'nope')).toBe(false);
+		expect(page.sent).toEqual([]);
+		expect((controls.input.textContent ?? '').trim()).toBe('the draft stays');
 	});
 });
 

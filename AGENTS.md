@@ -744,7 +744,11 @@ page shows the integration's state (`claude_mcp_status`).
   `src/features/extensions/claudeChatInject.ts` (the host's Claude Code chat driver behind
   `ggs.claudeChat.*`: the composer typed into and sent, the turn interrupted, the model
   picker chosen, the AskUserQuestion card answered, the Account & usage bar collapsed
-  through its own toggle — the page's own DOM, same-origin),
+  through its own toggle — the page's own DOM, same-origin; and the S2 seams the remote
+  session bridge rides, 2026-10-16: `chatComposerRoot` — the skipped subtree a bridged
+  chat stream's replica never copies, `sendChatText` — a send that writes the PC user's
+  draft back, the `pickChatQuestion`/`submitChatQuestion` split, and the pending
+  permission/question cards read off for `chatState`),
   `src/features/editor/editorDiagnosticsView.ts (the rendering half) + the store in src/features/extensions/editorDiagnostics.ts` (the diagnostics store: the host's
   `languages.createDiagnosticCollection` entries land as CodeMirror squiggles in the open
   editors) + `src/features/editor/editorDiagnosticsView.ts` (the CodeMirror half, loaded with the editor
@@ -1592,10 +1596,12 @@ explicit `?mirror=1`. A session NEVER opens folders, files or new windows (K4):
 `open_folder` / `app_new_instance` join the gate's `REFUSED_COMMANDS` beside
 `settings_write` and the OS-integration commands (R0 — a session's settings stay on its
 device, never written to the PC's file), the window switcher lost its "new window" row,
-the daemon's `GET /api/browse` endpoint is deleted, a SPAWN frame over the browser socket
-is refused outright (spawning is the tray's and the admin API's), and the picker page's
-typed-path row and sandbox-open button went with it (the recent list enters an open
-window only). The remote's folder restore rides `boot_context`'s new `roots` /
+and the daemon's `GET /api/browse` endpoint is deleted. **The picker page keeps its typed
+folder-path row** (2026-10-16, the owner's direction: 网页上"此 PC 上的窗口"上面输入文件夹路径打开
+ggs 的要保留): the row above the window list sends `SPAWN` — the one remote spawn door,
+`via_remote=true` so the sandbox confines it when on, the `folderInput` setting and the
+sandbox's own open entry riding `api/session` as before; the remote WORKBENCH still never
+spawns and the recent list's tap spawns only from the picker. The remote's folder restore rides `boot_context`'s new `roots` /
 `workspaceFile` answer instead of an `open_folder` invoke. The frame codec falls back to
 fflate where `CompressionStream('deflate-raw')` is missing (C0 — Safari 16.0–16.3 and
 Chrome 100–102 exchange compressed frames again; the build target is the A-level floor
@@ -1924,8 +1930,25 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   in the pane, its up messages carry the stream (`view:<id>` / `panel:<ext>#<id>`), and
   `webviewShare.ts` on the PC records that one frame's document and replays the copy's
   taps and keys into it; `webviewFrames.ts` is the lookup the desktop's extension host
-  registers (and the resolve of a view nobody showed yet) — so a question asked on
-  either side streams on both. A mirrored `webview.create` / `webview.reveal` opens the
+  registers (and the resolve of a view nobody showed yet, plus `extOf` — which extension
+  owns a stream) — so a question asked on
+  either side streams on both. **The Claude session bridge** (2026-10-16, S2 —
+  docs/remote-client-plan.md §8): a stream whose extension is among `provider_list`'s
+  `bridgedExtIds` is more than a copy — `chatBridge.ts` (PC side) runs the remote's
+  native-composer operations against the page's own composer through claudeChatInject's
+  drivers (`sendChatText` preserves the PC user's draft; permission, question —
+  `pickChatQuestion`/`submitChatQuestion` split so a multi-question card's checkboxes land
+  once — model, mode), receipts every operation (`chatAck`), dedups resends by operation
+  id, and pushes the page's state (`chatState`: busy, model, mode, the pending permission
+  and question cards) merged within 100 ms and only on change; the stream's recorder
+  SKIPS the composer subtree (§8.1 — `chatComposerRoot` via a structural rule that catches
+  re-mounts; one empty `data-mirror-skip` placeholder, its DOM, values, focus and caret
+  never crossing), with the recorder restarted when the rule lands so no stale node ids
+  emit. The remote half is `src/remote/app/chat/`: `index.ts` mounts nothing until the
+  PC's first `chatState` says the stream is a bridged chat (no extension id in `src/`),
+  `composer.ts` is the native textarea (draft per stream in this browser, queue per tab
+  with resend by id, IME-aware Enter — composition's own key is never a send), and
+  `chatCards.ts` the native permission/question cards. A mirrored `webview.create` / `webview.reveal` opens the
   copy tab in the FOREGROUND whichever side clicked (2026-10-12, the owner's direction:
   a Claude chat or Git Graph page opened on one side must open on the other — the old
   background-unless-asked policy hid the copy behind the other side's current page), and
@@ -2162,6 +2185,11 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   §6.3/§6.6: the swipe gesture's mechanics over a stand-in row, the change rows carrying
   the strip through a real SourceControlView on the page-stack marker — and none without
   it — and the output-follow state machine's grace, drop, catch-up and timer stacking),
+  `tests/remoteChat.test.ts` (S2's §8 session bridge: the composer-skip rule — the
+  placeholder, the subtree's zero bytes, the structural re-mount catch, the fluid copy
+  hiding it; the PC bridge's receipts, merged state pushes and resend dedup; the native
+  composer's send, queue, IME-aware Enter, failed-receipt fallback and cards; the pane
+  gate; and the share's full path, bridge included),
   `tests/remote.test.ts` +
   `tests/remoteResponsive.test.ts` (the shims, transport,
   relay engine; the phone's page model, app bar, navigation, drawer, sheets, editing row

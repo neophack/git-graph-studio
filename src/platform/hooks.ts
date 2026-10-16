@@ -39,6 +39,8 @@ export interface SessionInfo {
 export interface WebviewFrameSource {
 	frameFor(stream: string): HTMLIFrameElement | null;
 	ensure(stream: string): void;
+	/** The extension that owns a stream's page — the bridged-chat test (chatBridge.ts). */
+	extOf?(stream: string): string | null;
 }
 
 /** The webview stream vocabulary the extension host speaks on both mirror sides: the
