@@ -272,6 +272,45 @@ describe('editor area (M3 3.1)', () => {
 		expect(document.querySelector('.ext-overlay-layer')!.childElementCount).toBe(0);
 	});
 
+	it('keeps placing the overlays after a resize seen while the area was detached — the device-class switch\'s span (2026-10-16: the remote layout host moves the workbench part out of the document and back)', async () => {
+		files({ 'C:\\repo\\a.ts': 'a\n' });
+		const part = document.getElementById('editorGroup')!;
+		const area = new EditorArea(part);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		const frame = document.createElement('iframe');
+		await area.openExtPage({ kind: 'extpage', id: 'extpage:x:1', title: 'Claude', extId: 'x', pageId: 'webview' }, (host) => { host.appendChild(frame); });
+		const host = frame.parentElement!;
+		const placeholder = document.querySelector<HTMLElement>('.editor-pane.ext-page')!;
+		// jsdom lays nothing out (every rect zero): the placement math runs against stubbed
+		// boxes, moved between the passes to make the follow observable.
+		let box = { left: 10, top: 20, width: 300, height: 200 };
+		const zero = { left: 0, top: 0, width: 0, height: 0 };
+		const rectOf = (b: { left: number; top: number; width: number; height: number }) =>
+			({ ...b, right: b.left + b.width, bottom: b.top + b.height, x: b.left, y: b.top, toJSON: () => ({}) }) as DOMRect;
+		placeholder.getBoundingClientRect = () => rectOf(box);
+		(document.querySelector('.ext-overlay-layer') as HTMLElement).getBoundingClientRect = () => rectOf(zero);
+		const place = async () => {
+			window.dispatchEvent(new Event('resize'));
+			// scheduleOverlaySync coalesces to the next frame with a 100 ms timer bound.
+			await new Promise((resolve) => setTimeout(resolve, 150));
+		};
+		await place();
+		expect(host.style.left).toBe('10px');
+		expect(host.style.top).toBe('20px');
+		// The switch's span: the workbench part — this area with it — is out of the document,
+		// and a resize crosses in that window (a synthetic nudge dispatched mid-switch, a
+		// future reordering of the layout host's apply). The placement listener must survive
+		// the transient detach, or the overlay never follows its tab again.
+		part.remove();
+		window.dispatchEvent(new Event('resize'));
+		document.body.appendChild(part);
+		box = { left: 40, top: 60, width: 300, height: 200 };
+		await place();
+		expect(host.style.left).toBe('40px');
+		expect(host.style.top).toBe('60px');
+	});
+
 	it('a locked group keeps its editors — placed opens land elsewhere (claude-code locks its chat group)', async () => {
 		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n', 'C:\\repo\\c.ts': 'c\n' });
 		const area = new EditorArea(document.getElementById('editorGroup')!);

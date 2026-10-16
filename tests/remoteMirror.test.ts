@@ -710,6 +710,50 @@ describe('webview streams (§22.6)', () => {
 		pc.receive({ k: 'bye', from: 'remote/3', w: stream });
 	});
 
+	it('recovers the copy when its pane re-parents and the frame is reborn empty — a device-class switch must not blank the chat (2026-10-16: 切换窗口尺寸后 Claude 页面空白)', async () => {
+		const frame = document.createElement('iframe');
+		document.body.appendChild(frame);
+		const pcDoc = frame.contentDocument!;
+		pcDoc.body.innerHTML = '<div id="log"><p>answer</p></div>';
+		const stream = viewStream('chat');
+		setWebviewFrameSource({ frameFor: () => frame, ensure: () => undefined });
+		const sent: DownMessage[] = [];
+		const pc = new MirrorHost(document, { send: (message) => sent.push(message), fit: () => undefined, focus: () => undefined, now: () => 0 });
+		const pane = document.createElement('div');
+		document.body.appendChild(pane);
+		let copy: MirrorViewer;
+		const resnaps: number[] = [];
+		copy = new MirrorViewer(pane, 'remote/3', { appBase: 'https://p/main/', ggsBase: 'https://p/ggs/', resnap: () => { resnaps.push(resnaps.length); pc.receive({ k: 'resnap', from: 'remote/3', w: stream }); }, stream, fluid: true });
+		pc.receive({ k: 'hello', from: 'remote/3', w: stream, vw: 390, vh: 700, touch: true });
+		await vi.waitFor(() => expect(sent.some((message) => message.k === 'snap')).toBe(true));
+		const deliver = () => {
+			for (const message of sent.splice(0)) copy.receive(message);
+		};
+		deliver();
+		expect(copy.root?.getElementById('log')?.textContent).toBe('answer');
+		// The device-class switch: the layout host detaches the workbench part (the copy's
+		// pane rides inside it) and re-attaches it into the next arrangement. A browser
+		// discards the frame's browsing context on the detach and reborns it empty on the
+		// attach; jsdom keeps the document, so the rebirth is emulated — a fresh empty
+		// document under the same element, then the load its initial navigation fires.
+		pcDoc.getElementById('log')!.insertAdjacentHTML('beforeend', '<p>streaming…</p>');
+		const parent = pane.parentElement!;
+		const copyFrame = pane.querySelector('iframe')!;
+		parent.removeChild(pane);
+		Object.defineProperty(copyFrame, 'contentDocument', { value: document.implementation.createHTMLDocument(), configurable: true });
+		parent.appendChild(pane);
+		copyFrame.dispatchEvent(new Event('load'));
+		expect(resnaps).toHaveLength(1);
+		// The PC answers the resnap with a snapshot, and the copy rebuilds whole — the
+		// conversation is back, carrying what streamed meanwhile, not a blank pane.
+		await vi.waitFor(() => expect(sent.some((message) => message.k === 'snap')).toBe(true));
+		deliver();
+		expect(copy.root?.getElementById('log')?.textContent).toBe('answerstreaming…');
+		copy.dispose();
+		pane.remove();
+		pc.receive({ k: 'bye', from: 'remote/3', w: stream });
+	});
+
 	it('re-snapshots every viewer when the frame loads a new document', async () => {
 		const frame = document.createElement('iframe');
 		document.body.appendChild(frame);

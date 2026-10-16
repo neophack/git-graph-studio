@@ -150,6 +150,12 @@ export class MirrorViewer {
 	private canonAdopted = new Map<number, string>();
 	private frame: HTMLIFrameElement | null = null;
 	private seq: number | null = null;
+	/** The document this copy last filled. A frame re-parented through a detach (the layout
+	 *  host's device-class switch moves the workbench part out of the DOM and back) has its
+	 *  browsing context DISCARDED and reborn — the element then answers a different, empty
+	 *  document, and the content written into the old one is gone. */
+	private liveDoc: Document | null = null;
+	private readonly onFrameLoad = () => this.checkContext();
 	private viewport: Viewport = { w: 1, h: 1 };
 	private ready = false;
 	/** A fluid copy's scrollers that sit at their end: they follow the content's growth. */
@@ -220,6 +226,7 @@ export class MirrorViewer {
 		this.frame?.remove();
 		this.frame = null;
 		this.seq = null;
+		this.liveDoc = null;
 		this.canonText.clear();
 		this.canonAttr.clear();
 		this.canonVal.clear();
@@ -245,6 +252,10 @@ export class MirrorViewer {
 			return;
 		}
 		if (message.k !== 'ops' || this.seq === null) return;
+		// Every batch doubles as the cheap health probe: a frame whose context a re-parent
+		// rebuilt empty must ask for a fresh snapshot, not apply ops onto its dead tree.
+		this.checkContext();
+		if (this.seq === null) return;
 		if (message.seq <= this.seq) return;
 		if (message.seq !== this.seq + 1) {
 			this.seq = null;
@@ -279,10 +290,16 @@ export class MirrorViewer {
 		this.canonCss.clear();
 		this.canonAdopted.clear();
 		this.frame?.remove();
+		this.seq = null;
+		this.liveDoc = null;
 		const frame = this.host.ownerDocument.createElement('iframe');
 		frame.className = this.deps.fluid ? 'mirror-frame webview-copy-frame' : 'mirror-frame';
 		frame.setAttribute('sandbox', 'allow-same-origin');
 		if (!this.deps.fluid) frame.setAttribute('scrolling', 'no');
+		// The re-parent probe (checkContext): a frame moved through a detach is reborn, and
+		// its fresh about:blank navigation fires load on the element — the moment the copy's
+		// loss is noticed.
+		frame.addEventListener('load', this.onFrameLoad);
 		this.stuck.clear();
 		this.lastScan = 0;
 		if (this.scrollTimer !== null) clearTimeout(this.scrollTimer);
@@ -295,6 +312,7 @@ export class MirrorViewer {
 		const target = frame.contentDocument;
 		if (!target) return;
 		this.fillDoc(target, doc);
+		this.liveDoc = target;
 		this.seq = seq;
 		this.stick();
 		// The rebuilt copy starts from the state the snapshot carried: the caret bar and
@@ -307,8 +325,33 @@ export class MirrorViewer {
 		}
 	}
 
+	/** A frame whose browsing context was discarded and reborn — its pane re-parented through
+	 *  a detach (a device-class switch adopts the workbench part into the next arrangement by
+	 *  removing it and re-attaching it) — answers a different, EMPTY document, and nothing
+	 *  refills it: the written copy would sit blank forever (2026-10-16, 切换窗口尺寸后
+	 *  Claude 页面空白). The reborn frame's own load event, the batches that keep naming the
+	 *  stream and the layout switch's resize nudge all land here; the answer is a fresh
+	 *  snapshot — asked for only once the frame is back IN the document, so the rebuilt copy
+	 *  lands in a context the next move does not take with it. */
+	private checkContext(): void {
+		const frame = this.frame;
+		if (!frame || this.seq === null || this.liveDoc === null) return;
+		if (!frame.isConnected) return;
+		let doc: Document | null = null;
+		try {
+			doc = frame.contentDocument ?? null;
+		} catch {
+			doc = null;
+		}
+		if (doc === this.liveDoc) return;
+		this.seq = null;
+		this.liveDoc = null;
+		this.deps.resnap();
+	}
+
 	/** Size the frame to the PC's viewport and scale it into the host, centred. */
 	layout(): void {
+		this.checkContext();
 		const frame = this.frame;
 		if (!frame) return;
 		if (this.deps.fluid) {

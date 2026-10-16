@@ -12,6 +12,7 @@ import { formFactorFor, initResponsive, formFactor } from '../src/remote/respons
 installRemoteSessionHooks();
 import { installActionSheet, closeActionSheet, showActionSheet } from '../src/remote/actionSheet';
 import { createBottomTabs } from '../src/remote/bottomTabs';
+import { createNavRail } from '../src/remote/navRail';
 import { createAppBar, pageHeading, relativeFolder } from '../src/remote/appBar';
 import { createEditorEmptyState, editorActionEntries, openEditorsSheet } from '../src/remote/editorSwitcher';
 import { ACCESSORY_KEYS, createEditorAccessory } from '../src/remote/editorAccessory';
@@ -318,6 +319,34 @@ describe('bottom navigation', () => {
 		expect(empty.hidden).toBe(false);
 		// …which lists what is open, one tap from it.
 		expect([...empty.querySelectorAll('.ggs-editor-row .name')].map((name) => name.textContent)).toEqual(['Git Graph']);
+	});
+});
+
+describe('navigation rail', () => {
+	afterEach(leavePhone);
+
+	it('rebuilds its button when a container\'s package image arrives — the codicon stand-in is a stand-in, not a life sentence', async () => {
+		phoneWorkbench();
+		const container = document.createElement('div');
+		container.className = 'activity-item';
+		container.dataset.view = 'ext-container:anthropic.claude-code.claude-sidebar';
+		container.setAttribute('aria-label', 'Claude Code');
+		document.querySelector('#activitybar .activity-spacer')!.before(container);
+		const rail = createNavRail();
+		document.body.appendChild(rail);
+		await flushMutations();
+		const key = 'ext-container:anthropic.claude-code.claude-sidebar';
+		const button = () => rail.querySelector<HTMLButtonElement>(`[data-tab="${key}"]`)!;
+		expect(button().querySelector('img')).toBeNull();
+		// The package image lands (applyExtensionViews swaps the activity item's children for
+		// the loaded img): the destinations did not change, but the rail's keying carries the
+		// images, so the button rebuilds wearing it — before the fix the key ignored them and
+		// the rail kept the codicon until the destinations themselves changed.
+		const image = document.createElement('img');
+		image.src = 'data:image/png;base64,AA==';
+		container.replaceChildren(image);
+		await flushMutations();
+		expect(button().querySelector('img')?.getAttribute('src')).toBe('data:image/png;base64,AA==');
 	});
 });
 
