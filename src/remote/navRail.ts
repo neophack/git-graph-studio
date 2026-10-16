@@ -5,11 +5,15 @@
 // 2026-10-16 direction, 左轨图标不配文字 — VS Code's activity bar shape). The same page
 // model (pages.ts) drives it: a tap always shows its page, the active page is marked, and
 // the badges (open editors, pending changes) carry what the hidden status and activity
-// bars would.
+// bars would. The destination SET is the form's (the owner's 2026-10-16 direction, 平板
+// 左轨要有搜索、插件、终端): the portrait tablet's rail carries the drawer's full page
+// list uncapped (railTabs), the landscape phone's keeps the bottom bar's five-cap economy.
 import { onLocaleChange, t } from '../platform/i18n';
 import { currentPage, extensionContainers, goTo, onWorkbenchChange, pageIcon, type PageId } from './pages';
 import { pageBack, pageBackAvailable } from './pageBack';
 import { bottomTabs, tabBadge } from './bottomTabs';
+import { drawerPages } from './navDrawer';
+import { currentDeviceClass, onDeviceClassChange } from './responsive';
 import { codicon } from './widgets';
 
 function railButton(id: PageId, label: string, onTap: () => void): HTMLButtonElement {
@@ -79,15 +83,25 @@ function railBackButton(): HTMLButtonElement {
 	return button;
 }
 
+/** The rail's destinations by form: the portrait tablet's rail carries every page the drawer
+ *  lists — search, extensions and terminal with them (the owner's 2026-10-16 direction, 平板
+ *  左轨要有搜索、插件、终端; the five-cap is the bottom bar's economy, and a tablet's rail has
+ *  an activity bar's height to spend); every other form that shows the rail (the landscape
+ *  phone, height 360–430 px) keeps the capped set. */
+function railTabs(): { id: PageId; label: string }[] {
+	return currentDeviceClass() === 'tablet-portrait' ? drawerPages() : bottomTabs();
+}
+
 /** Rebuild the buttons when the destinations change, else only the active mark and badges
  * (bottomTabs.syncTabs answers the same keying for the bar; the rail keeps its own key so
- * the two never fight over one element). The key carries the containers' images too — a
- * package image replacing a codicon stand-in is a rebuild, or the rail's button would
- * wear the placeholder forever (the bar's key already says so). */
+ * the two never fight over one element). The key carries the device class (the form picks
+ * the destination set) and the containers' images too — a package image replacing a
+ * codicon stand-in is a rebuild, or the rail's button would wear the placeholder forever
+ * (the bar's key already says so). */
 function syncButtons(bar: HTMLElement, onTap: (page: PageId) => void, menu: HTMLButtonElement | null, back: HTMLButtonElement | null): void {
-	const tabs = bottomTabs();
+	const tabs = railTabs();
 	const images = extensionContainers().map((container) => container.image ?? '').join(' ');
-	const key = `${tabs.map((tab) => `${tab.id}|${tab.label}`).join(' ')}#${images}`;
+	const key = `${currentDeviceClass() ?? ''}#${tabs.map((tab) => `${tab.id}|${tab.label}`).join(' ')}#${images}`;
 	if (bar.dataset.tabsKey !== key) {
 		bar.dataset.tabsKey = key;
 		bar.replaceChildren(
@@ -117,6 +131,9 @@ export function createNavRail(onTap: (page: PageId) => void = () => undefined, o
 	const menu = openMenu ? railMenuButton(openMenu) : null;
 	syncButtons(bar, onTap, menu, back);
 	onWorkbenchChange(() => syncButtons(bar, onTap, menu, back));
+	// A device-class flip (into or out of the portrait tablet) changes which destination set
+	// the rail carries: re-read it as the layout host rearranges the same element.
+	onDeviceClassChange(() => syncButtons(bar, onTap, menu, back));
 	// A language switch relabels the rail's own chrome (its aria name, the ☰ and the ‹)
 	// and rebuilds the destinations — syncButtons keys on the labels, so the re-read under
 	// the new locale replaces the buttons.

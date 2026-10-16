@@ -438,6 +438,31 @@ describe('navigation rail', () => {
 		await flushMutations();
 		expect(button().querySelector('img')?.getAttribute('src')).toBe('data:image/png;base64,AA==');
 	});
+
+	it('the portrait tablet\'s rail carries every page — search, extensions and terminal with them — the five-cap is the bottom bar\'s economy, not the rail\'s', async () => {
+		// The settled device class is what the rail reads: a touch 820×1080 viewport is the
+		// portrait tablet; the flip below lands the landscape phone.
+		setCoarse(true);
+		setWidth(820, 1080);
+		const stop = initResponsive();
+		phoneWorkbench();
+		const rail = createNavRail();
+		document.body.appendChild(rail);
+		expect(document.documentElement.dataset.device).toBe('tablet-portrait');
+		const ids = () => [...rail.querySelectorAll<HTMLButtonElement>('button[data-tab]')].map((button) => button.dataset.tab);
+		// The drawer's own page list, uncapped (the owner's 2026-10-16 direction, 平板左轨要有
+		// 搜索、插件、终端): the launchers and containers ride between Changes and Terminal
+		// when installed.
+		expect(ids()).toEqual(['explorer', 'editor', 'search', 'scm', 'panel', 'extensions', 'analysis']);
+		expect(rail.querySelector<HTMLButtonElement>('button[data-tab="extensions"]')!.getAttribute('aria-label')).toBe('Extensions');
+		expect(rail.querySelector<HTMLButtonElement>('button[data-tab="panel"]')!.getAttribute('aria-label')).toBe('Terminal');
+		// The landscape phone's rail keeps the capped five — its height is the scarce side.
+		setWidth(844, 390);
+		await settle();
+		expect(document.documentElement.dataset.device).toBe('phone-landscape');
+		expect(ids()).toEqual(['explorer', 'editor', 'scm', 'panel', 'search']);
+		stop();
+	});
 });
 
 describe('app bar', () => {

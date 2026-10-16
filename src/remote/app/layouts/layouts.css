@@ -36,6 +36,10 @@
 	background: var(--vscode-activityBar-background, var(--vscode-sideBar-background));
 	border-right: 1px solid var(--vscode-activityBar-border, var(--ggs-sep, rgba(128, 128, 128, 0.25)));
 	user-select: none;
+	/* The portrait tablet's rail carries the drawer's full page set (the owner's 2026-10-16
+	   direction, 平板左轨要有搜索、插件、终端): a set taller than the rail scrolls rather than
+	   overflowing — the landscape phone's five never come close. */
+	overflow-y: auto;
 }
 .ggs-nav-rail button {
 	flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
