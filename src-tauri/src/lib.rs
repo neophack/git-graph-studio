@@ -50,6 +50,7 @@ pub mod measure;
 pub mod pty;
 /// Remote Access (module 19): this instance's registration with a local `ggs-remote/1`
 /// daemon, the remote workbench's assets and the hidden Relay webview.
+pub mod remote_debug;
 pub mod remote_host;
 #[cfg(test)]
 mod stage_bench;
@@ -65,7 +66,7 @@ mod desktop {
     use crate::{
         can_commands, viewer_commands, cmd_analysis, cmd_app, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_providers,
         cmd_scm, cmd_search, cmd_symbols, ext_child, ext_gallery, ext_process, mcp, measure,
-        pty, remote_host,
+        pty, remote_debug, remote_host,
     };
     use ggs_base::workspace::WorkspaceRoots;
     use crate::cli::{cli_help, launch_path_of, parse_startup_actions, wants_help};
@@ -126,10 +127,11 @@ mod desktop {
             .first()
             .cloned()
             .expect("tauri.conf.json declares the main window");
-        tauri::WebviewWindowBuilder::from_config(app, &config)?
-            .visible(visible)
-            .on_web_resource_request(revalidate_assets)
-            .build()
+                tauri::WebviewWindowBuilder::from_config(app, &config)?
+                    .visible(visible)
+                    .on_web_resource_request(revalidate_assets)
+                    .build()
+                    .inspect(|_| remote_debug::note_main_window_created())
     }
 
     /// Show the desktop window, building it first when this instance has none (the Remote
@@ -434,6 +436,14 @@ mod desktop {
             })
             .on_page_load(|webview, payload| {
                 stamp(&format!("page load event ({:?})", payload.event()));
+                // §18.1's I9 counter: every finished load of the MAIN window's document.
+                // A hidden-then-shown window must never reload (§17's invariant), and the
+                // probe reads the count through remote_debug_snapshot to prove it.
+                if webview.label() == "main"
+                    && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
+                {
+                    remote_debug::note_main_page_load();
+                }
                 // The dev-only probe hook (scripts/probes/claude-code-sandbox.mjs): a
                 // GGS_DEV_HARNESS value names the dev harness page the window opens at boot —
                 // the same navigation the Help menu's dev-only entry performs, driven from
@@ -671,6 +681,7 @@ mod desktop {
                 remote_host::remote_host_set_summary,
                 remote_host::remote_host_frontend_gone,
                 remote_host::remote_host_status,
+                remote_debug::remote_debug_snapshot,
                 remote_host::remote_host_hide_main,
                 remote_host::remote_mirror_fit,
                 remote_host::remote_mirror_focus

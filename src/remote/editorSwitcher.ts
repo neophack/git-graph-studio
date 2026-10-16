@@ -12,6 +12,7 @@ import type { MenuEntry } from '../platform/ui';
 import { closeActionSheet, openSheet, sheetButton, showActionSheet } from './actionSheet';
 import { commandEntry, relativeFolder } from './appBar';
 import { activeTab, clearEditorPlaceholder, currentPage, editorPlaceholderShown, editorTabs, goTo, launcherForTab, onWorkbenchChange } from './pages';
+import { revealEditorPage } from './nav';
 
 /** One open editor's row: its icon, name (with the unsaved dot), folder, and a close button. */
 function editorRow(tab: HTMLElement, rerender: () => void): HTMLElement {
@@ -47,6 +48,10 @@ function editorRow(tab: HTMLElement, rerender: () => void): HTMLElement {
 	const open = () => {
 		closeActionSheet();
 		clearEditorPlaceholder();
+		// The chooser answers from wherever it was opened: bring the editor page forward
+		// (a full-screen side view or the panel page may still cover it) before the tab's
+		// own click activates it.
+		revealEditorPage();
 		tab.click();
 	};
 	row.addEventListener('click', open);

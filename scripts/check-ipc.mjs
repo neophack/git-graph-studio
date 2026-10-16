@@ -124,6 +124,11 @@ function testScriptedNames() {
 	return names;
 }
 
+/** §18.1's test-only commands (docs/remote-client-plan.md, L2): registered in the backend
+ *  for the lifecycle probe (scripts/probes/remote-lifecycle-check.mjs) and refused unless
+ *  GGS_TEST_HOOKS=1 — named by no side in src/ by design, so not dead candidates. */
+const TEST_ONLY_COMMANDS = new Set(['remote_debug_snapshot']);
+
 /** Event-name constants: ggs-base's events module (Rust) vs platform/ipc/events.ts (TS).
  *  Both are introduced by P3; until then the comparison is skipped. */
 function eventTableComparison() {
@@ -157,7 +162,7 @@ export function checkIpc() {
 	}
 	if (errors.length > 0) throw new Error(`IPC contract violations (docs/architecture-restructure-plan.md §5.6):\n${errors.join('\n')}`);
 
-	const dead = [...rust.names].filter((n) => !ts.has(n) && !gate.has(n) && !scripted.has(n)).sort();
+	const dead = [...rust.names].filter((n) => !ts.has(n) && !gate.has(n) && !scripted.has(n) && !TEST_ONLY_COMMANDS.has(n)).sort();
 	if (dead.length > 0) {
 		console.error(`check-ipc: ${dead.length} registered commands no side names (dead-command candidates, reviewed not fatal): ${dead.join(', ')}`);
 	}

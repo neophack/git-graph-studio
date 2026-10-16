@@ -38,9 +38,6 @@ import type { EditorPlacement } from '../features/editor/types';
 import type { ActiveEditorInfo, EditorArea } from '../features/editor';
 import { frontendId, remoteEnv } from './session';
 import { withinRoots } from './pathGate';
-/** The presence instance of this page's sync — registered into presence.ts's light
- *  registry (the remote boot reads it without importing this heavier graph). */
-export { currentPresence } from './presence';
 import { Presence, registerPresence } from './presence';
 
 export const WORKBENCH_SYNC_EVENT = 'studio://workbench-sync';
@@ -104,6 +101,9 @@ export interface SyncPresence {
 	isDesignatedResponder(requester: string): boolean;
 	/** This frontend just became active — the catch-up's trigger. */
 	onBecameActive(handler: () => void): () => void;
+	/** The roster changed — someone joined, left or flipped. Optional: a presence without
+	 *  it simply never roster-triggers a catch-up. */
+	onRosterChange?(handler: () => void): () => void;
 	/** This frontend is active right now. */
 	isActive(): boolean;
 }
@@ -557,6 +557,14 @@ export function attachWorkbenchSync(
 		deps.send({ by, k: 'stateRequest' });
 	};
 	presence?.onBecameActive(() => catchUp());
+	// The catch-up's other half (§7.0.3): a frontend that STARTED alone — its start's own
+	// catch-up skipped, the table naming no other active frontend yet (a fresh remote's
+	// roster is empty until the PC's heartbeat or a WINDOWS word lands) — asks the moment
+	// the roster first names one. The awaiting window keeps a heartbeat-seconds-later
+	// arrival from stacking a second request.
+	presence?.onRosterChange?.(() => {
+		if (!awaitingSnapshot) catchUp();
+	});
 
 	/** One crossed message, applied: the receive handler's body, kept whole so the
 	 *  remote-open gate can call back into it after its async canonical re-check. */

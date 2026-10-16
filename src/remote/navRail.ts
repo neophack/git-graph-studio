@@ -51,9 +51,9 @@ function syncRail(bar: HTMLElement): void {
 /** Rebuild the buttons when the destinations change, else only the active mark and badges
  *  (bottomTabs.syncTabs answers the same keying for the bar; the rail keeps its own key so
  *  the two never fight over one element). The key carries the containers' images too — a
- *  package image replacing its codicon stand-in is a rebuild, or the rail's button would
+ *  package image replacing a codicon stand-in is a rebuild, or the rail's button would
  *  wear the placeholder forever (the bar's key already says so). */
-function syncButtons(bar: HTMLElement): void {
+function syncButtons(bar: HTMLElement, onTap: (page: PageId) => void): void {
 	const tabs = bottomTabs();
 	const images = extensionContainers().map((container) => container.image ?? '').join(' ');
 	const key = `${tabs.map((tab) => `${tab.id}|${tab.label}`).join(' ')}#${images}`;
@@ -63,6 +63,7 @@ function syncButtons(bar: HTMLElement): void {
 			...tabs.map((tab) =>
 				railButton(tab.id, tab.label, () => {
 					if (currentPage() !== tab.id) void goTo(tab.id).then(() => syncRail(bar));
+					onTap(tab.id);
 				})
 			)
 		);
@@ -70,14 +71,15 @@ function syncButtons(bar: HTMLElement): void {
 	syncRail(bar);
 }
 
-/** The rail itself. A reselect on the rail is a plain re-mark (the landscape phone has no
- *  app bar to open a switcher onto); list pages scroll back to their top like the bar's. */
-export function createNavRail(): HTMLElement {
+/** The rail itself. Every tap reports through `onTap` (a reselect on the rail was a plain
+ *  re-mark before): the Editor's opens the open editors list (§6.2) — the portrait tablet
+ *  has no app bar, the rail's Editor item is its only switcher. */
+export function createNavRail(onTap: (page: PageId) => void = () => undefined): HTMLElement {
 	const bar = document.createElement('nav');
 	bar.className = 'ggs-nav-rail';
 	bar.setAttribute('role', 'tablist');
 	bar.setAttribute('aria-label', t('remote.nav.label'));
-	syncButtons(bar);
-	onWorkbenchChange(() => syncButtons(bar));
+	syncButtons(bar, onTap);
+	onWorkbenchChange(() => syncButtons(bar, onTap));
 	return bar;
 }

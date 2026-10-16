@@ -78,6 +78,24 @@ fn routes() -> &'static Mutex<HashMap<String, ExtRoutes>> {
     ROUTES.get_or_init(Default::default)
 }
 
+/// Every frontend that has ever called into a backend of this instance, sticky for the
+/// process's lifetime (`call_begin` adds) — the desktop `main` leads the list. What a
+/// lifecycle probe reads as "the registered frontends" (§18.1): a remote that only
+/// WATCHES a mirror never reaches a backend, so it is honestly absent from here.
+fn seen_frontends() -> &'static Mutex<std::collections::BTreeSet<String>> {
+    static SEEN: OnceLock<Mutex<std::collections::BTreeSet<String>>> = OnceLock::new();
+    SEEN.get_or_init(Default::default)
+}
+
+/// The frontends the router has served, the desktop `main` first (§18.1's snapshot list).
+pub fn frontends() -> Vec<String> {
+    let mut out = vec![WEBVIEW_HOME.to_owned()];
+    if let Ok(seen) = seen_frontends().lock() {
+        out.extend(seen.iter().cloned());
+    }
+    out
+}
+
 fn with<T>(ext_id: &str, edit: impl FnOnce(&mut ExtRoutes) -> T) -> T {
     let mut all = routes().lock().unwrap_or_else(|p| p.into_inner());
     edit(all.entry(ext_id.to_owned()).or_default())
@@ -115,6 +133,9 @@ fn panel_key(id: &Value) -> Option<String> {
 pub fn call_begin(ext_id: &str, frontend: &str) -> CallGuard {
     static SEQ: AtomicU64 = AtomicU64::new(1);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    if let Ok(mut seen) = seen_frontends().lock() {
+        seen.insert(frontend.to_owned());
+    }
     with(ext_id, |routes| {
         routes.calls.push((seq, frontend.to_owned()))
     });

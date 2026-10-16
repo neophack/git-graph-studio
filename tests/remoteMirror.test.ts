@@ -18,6 +18,7 @@ import { modeUrl, requestedMode } from '../src/remote/mirror/uiMode';
 import { coarsePointer } from '../src/remote/responsive';
 import { APP_TOKEN, GGS_TOKEN, canonicalize, canonicalizeCss, localizeTokens, panelStream, viewStream, type DownMessage, type MirrorOp, type UpMessage } from '../src/remote/mirror/protocol';
 import { parseStream, setWebviewFrameSource } from '../src/remote/mirror/webviewFrames';
+import { mountScrollHint } from '../src/remote/mirror/webviewCopy';
 
 /** A PC document of its own, so the copy and the original never share a tree. */
 function pcDocument(body: string): Document {
@@ -881,5 +882,147 @@ describe('webview streams (§22.6)', () => {
 		rig.copy.dispose();
 		rig.pane.remove();
 		rig.pc.receive({ k: 'bye', from: 'remote/5', w: viewStream('graph') });
+	});
+
+	// §9.2's scroll ownership. The clock is the rig's own: a lease is advanced by moving it.
+	describe('scroll ownership (§9.2)', () => {
+		/** A graph frame over a host's share with a movable clock, its PC scroller stubbed
+		 *  (height 8000, view 1000 — fraction 0.5 is top 3500) and a button to click. */
+		async function ownRig() {
+			const frame = document.createElement('iframe');
+			document.body.appendChild(frame);
+			const pcDoc = frame.contentDocument!;
+			pcDoc.body.innerHTML = '<div id="scroller" style="overflow-y: auto"><button id="row">commit</button></div>';
+			const pcScroller = pcDoc.getElementById('scroller') as HTMLElement;
+			stubScroller(pcScroller, { height: 8000, view: 1000 });
+			let clicked = 0;
+			pcDoc.getElementById('row')!.addEventListener('click', () => { clicked += 1; });
+			const stream = viewStream('graph');
+			setWebviewFrameSource({ frameFor: () => frame, ensure: () => undefined });
+			const sent: DownMessage[] = [];
+			let clock = 10_000;
+			// jsdom cannot forge `isTrusted`, so the rig's events all count as the PC user's.
+			const pc = new MirrorHost(document, { send: (message) => sent.push(message), fit: () => undefined, focus: () => undefined, now: () => clock, trusted: () => true });
+			// A copy of the stream, to read the node ids the way a viewer names them (the
+			// copy's ids ARE the PC's — that is the mirror's premise).
+			const pane = document.createElement('div');
+			document.body.appendChild(pane);
+			const copy = new MirrorViewer(pane, 'remote/5', { appBase: 'https://p/main/', ggsBase: 'https://p/ggs/', resnap: () => undefined, stream, fluid: true });
+			pc.receive({ k: 'hello', from: 'remote/5', w: stream, vw: 390, vh: 700, touch: true, device: 'phone-portrait' });
+			await vi.waitFor(() => expect(sent.some((message) => message.k === 'snap')).toBe(true));
+			for (const message of sent.splice(0)) copy.receive(message);
+			const scrollerId = copy.idOf(copy.root!.getElementById('scroller')!)!;
+			const rowId = copy.idOf(copy.root!.getElementById('row')!)!;
+			const scroll = (f: number) => pc.receive({ k: 'scroll', from: 'remote/5', w: stream, i: scrollerId, f });
+			/** The PC user's own wheel on the frame — the rig's `trusted` hook counts it as
+			 *  the PC user's (jsdom cannot forge `isTrusted`, which the real host reads). */
+			const pcWheel = () => {
+				pcDoc.dispatchEvent(new Event('wheel'));
+			};
+			const owns = () => sent.filter((message): message is Extract<DownMessage, { k: 'own' }> => message.k === 'own');
+			return {
+				pc, sent, frame, pcScroller, scroll, pcWheel, owns,
+				clicks: () => clicked,
+				rowId: () => rowId,
+				advance: (ms: number) => { clock += ms; },
+				stop: () => {
+					copy.dispose();
+					pane.remove();
+					pc.receive({ k: 'bye', from: 'remote/5', w: stream });
+				}
+			};
+		}
+
+		it('a lone viewer’s scroll drives the panel — today’s behavior unchanged', async () => {
+			const rig = await ownRig();
+			try {
+				rig.scroll(0.5);
+				expect(rig.pcScroller.scrollTop).toBe(3500);
+				rig.scroll(0.75);
+				expect(rig.pcScroller.scrollTop).toBe(5250);
+			} finally {
+				rig.stop();
+			}
+		});
+
+		it('the PC user’s wheel owns the panel: the remote’s scroll is dropped and told who holds', async () => {
+			const rig = await ownRig();
+			try {
+				rig.pcWheel();
+				// The change is broadcast: every copy learns main holds.
+				expect(rig.owns().at(-1)).toMatchObject({ k: 'own', to: '*', who: 'main', name: 'PC' });
+				rig.scroll(0.5);
+				expect(rig.pcScroller.scrollTop).toBe(0);
+				// The dropped scroll is answered to its author alone, with the lease left.
+				const told = rig.owns().at(-1)!;
+				expect(told).toMatchObject({ to: 'remote/5', who: 'main', name: 'PC' });
+				expect(told.ms).toBeGreaterThan(0);
+				expect(told.ms).toBeLessThanOrEqual(3000);
+			} finally {
+				rig.stop();
+			}
+		});
+
+		it('ownership transfers three seconds after the holder’s last interaction', async () => {
+			const rig = await ownRig();
+			try {
+				rig.scroll(0.5);
+				expect(rig.pcScroller.scrollTop).toBe(3500);
+				rig.pcWheel();
+				rig.scroll(0.75);
+				expect(rig.pcScroller.scrollTop).toBe(3500); // still main’s panel
+				rig.advance(3001);
+				rig.scroll(0.75);
+				expect(rig.pcScroller.scrollTop).toBe(5250);
+				expect(rig.owns().at(-1)).toMatchObject({ to: '*', who: 'remote/5', name: 'phone-portrait' });
+			} finally {
+				rig.stop();
+			}
+		});
+
+		it('a non-owner’s tap still replays during the lease, and does not take ownership', async () => {
+			const rig = await ownRig();
+			try {
+				rig.pcWheel();
+				rig.pc.receive({ k: 'ptr', from: 'remote/5', w: viewStream('graph'), ev: 'down', b: 0, m: 0, d: 1, i: rig.rowId(), fx: 0.5, fy: 0.5 });
+				rig.pc.receive({ k: 'ptr', from: 'remote/5', w: viewStream('graph'), ev: 'up', b: 0, m: 0, d: 1, i: rig.rowId(), fx: 0.5, fy: 0.5 });
+				expect(rig.clicks()).toBe(1);
+				// The click was not a scroll: main still holds, and the next scroll still drops.
+				rig.scroll(0.5);
+				expect(rig.pcScroller.scrollTop).toBe(0);
+				expect(rig.owns().at(-1)).toMatchObject({ who: 'main' });
+			} finally {
+				rig.stop();
+			}
+		});
+
+		it('the PC user’s wheel takes the panel back from a scrolling remote', async () => {
+			const rig = await ownRig();
+			try {
+				rig.scroll(0.5);
+				expect(rig.pcScroller.scrollTop).toBe(3500);
+				rig.pcWheel();
+				rig.scroll(0.75);
+				expect(rig.pcScroller.scrollTop).toBe(3500); // the remote cannot yank the PC’s view
+			} finally {
+				rig.stop();
+			}
+		});
+
+		it('the follow hint pill names the owner and clears when the ownership comes home', async () => {
+			const host = document.createElement('div');
+			host.className = 'webview-copy';
+			document.body.appendChild(host);
+			const hint = mountScrollHint(host, 'remote/5');
+			hint.receive({ k: 'own', to: 'remote/5', w: 'view:graph', who: 'main', name: 'PC', ms: 3000 });
+			const pill = host.querySelector<HTMLElement>('.scroll-follow-hint')!;
+			expect(pill.textContent).toBe('Scrolling follows the PC');
+			hint.receive({ k: 'own', to: '*', w: 'view:graph', who: 'remote/9', name: 'tablet-landscape', ms: 3000 });
+			expect(host.querySelector('.scroll-follow-hint')!.textContent).toBe('Scrolling follows a tablet');
+			hint.receive({ k: 'own', to: '*', w: 'view:graph', who: 'remote/5', name: '', ms: 3000 });
+			expect(host.querySelector('.scroll-follow-hint')).toBeNull();
+			hint.dispose();
+			host.remove();
+		});
 	});
 });

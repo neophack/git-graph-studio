@@ -743,12 +743,10 @@ page shows the integration's state (`claude_mcp_status`).
   `extensions.openLogFile` commands),
   `src/features/extensions/claudeChatInject.ts` (the host's Claude Code chat driver behind
   `ggs.claudeChat.*`: the composer typed into and sent, the turn interrupted, the model
-  picker chosen, the AskUserQuestion card answered, the Account & usage bar collapsed
-  through its own toggle — the page's own DOM, same-origin; and the S2 seams the remote
-  session bridge rides, 2026-10-16: `chatComposerRoot` — the skipped subtree a bridged
-  chat stream's replica never copies, `sendChatText` — a send that writes the PC user's
-  draft back, the `pickChatQuestion`/`submitChatQuestion` split, and the pending
-  permission/question cards read off for `chatState`),
+  picker chosen, the AskUserQuestion card answered — `answerChatQuestion` over the
+  `pickChatQuestion`/`submitChatQuestion` split — the permission card answered, the
+  permission mode set, and the Account & usage bar collapsed through its own toggle — the
+  page's own DOM, same-origin),
   `src/features/editor/editorDiagnosticsView.ts (the rendering half) + the store in src/features/extensions/editorDiagnostics.ts` (the diagnostics store: the host's
   `languages.createDiagnosticCollection` entries land as CodeMirror squiggles in the open
   editors) + `src/features/editor/editorDiagnosticsView.ts` (the CodeMirror half, loaded with the editor
@@ -1930,25 +1928,27 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   in the pane, its up messages carry the stream (`view:<id>` / `panel:<ext>#<id>`), and
   `webviewShare.ts` on the PC records that one frame's document and replays the copy's
   taps and keys into it; `webviewFrames.ts` is the lookup the desktop's extension host
-  registers (and the resolve of a view nobody showed yet, plus `extOf` — which extension
-  owns a stream) — so a question asked on
-  either side streams on both. **The Claude session bridge** (2026-10-16, S2 —
-  docs/remote-client-plan.md §8): a stream whose extension is among `provider_list`'s
-  `bridgedExtIds` is more than a copy — `chatBridge.ts` (PC side) runs the remote's
-  native-composer operations against the page's own composer through claudeChatInject's
-  drivers (`sendChatText` preserves the PC user's draft; permission, question —
-  `pickChatQuestion`/`submitChatQuestion` split so a multi-question card's checkboxes land
-  once — model, mode), receipts every operation (`chatAck`), dedups resends by operation
-  id, and pushes the page's state (`chatState`: busy, model, mode, the pending permission
-  and question cards) merged within 100 ms and only on change; the stream's recorder
-  SKIPS the composer subtree (§8.1 — `chatComposerRoot` via a structural rule that catches
-  re-mounts; one empty `data-mirror-skip` placeholder, its DOM, values, focus and caret
-  never crossing), with the recorder restarted when the rule lands so no stale node ids
-  emit. The remote half is `src/remote/app/chat/`: `index.ts` mounts nothing until the
-  PC's first `chatState` says the stream is a bridged chat (no extension id in `src/`),
-  `composer.ts` is the native textarea (draft per stream in this browser, queue per tab
-  with resend by id, IME-aware Enter — composition's own key is never a send), and
-  `chatCards.ts` the native permission/question cards. A mirrored `webview.create` / `webview.reveal` opens the
+  registers (and the resolve of a view nobody showed yet) — so a question asked on
+  either side streams on both. **The copy IS the chat UI** (2026-10-16, the owner's
+  fifth-round direction, superseding the S2 session bridge of the same day: 远程 claude
+  不要单独自己写界面，使用 claude 原始界面 — the hand-written native composer, cards
+  and `chat/chatAck/chatState` bridge are withdrawn, whole): the remote types and clicks
+  Claude's own composer and cards straight in the copy, every keystroke and tap replaying
+  into the PC's page the way any copy input does, and the recorder has no skipped subtree —
+  the composer's DOM, values, focus and caret cross like the rest of the page (K7's
+  composer carve-out with them). **Scroll ownership** (2026-10-16, S3 —
+  docs/remote-client-plan.md §9.2): a stream's scrolling has ONE owner at a time — the
+  end that last interacted with the page, holding a 3-second lease its own further input
+  renews. Only the owner's `scroll`/`wheel` replays execute (`webviewShare.ts`'s
+  `gateScroll`); another end's scroll attempt is dropped — nothing transfers while the
+  lease holds — and its author is told who holds (the `own` message, addressed to it),
+  so its copy's pill names the holder ("Scrolling follows the PC" — `mountScrollHint` in
+  webviewCopy.ts; a viewer's hello now carries its device label). The PC user's own
+  wheel, touch or key on the frame takes `main` the ownership outright (trusted events
+  only — the ones the replayer dispatches are not), so a remote never yanks the PC's
+  view while they read; pointer, key and text from a non-owner still replay (clicking a
+  commit row or typing is not scrolling) but take ownership only once the lease has
+  lapsed. A lone viewer is always the owner — the pre-S3 behavior unchanged. A mirrored `webview.create` / `webview.reveal` opens the
   copy tab in the FOREGROUND whichever side clicked (2026-10-12, the owner's direction:
   a Claude chat or Git Graph page opened on one side must open on the other — the old
   background-unless-asked policy hid the copy behind the other side's current page), and
@@ -1989,7 +1989,13 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   inputs, never contents), and the joiner merges by UNION (missing tabs open in the
   background, its own cross back as `inactive` opens, nothing ever closes, unsaved
   buffers survive) and takes the answerer's active tab — the PC reopening follows the
-  remote's state. Its hardening round (2026-10-12, the
+  remote's state. The catch-up's fresh-connect race is closed (2026-10-16, the owner's
+  "远程编辑器没有同步打开 PC 的打开页面"): a remote that just connected holds an EMPTY
+  roster — the PC's heartbeat has not arrived and the connect's WINDOWS word landed before
+  the table existed — so its start's own catch-up skipped ("no other active frontend")
+  and nothing ever retried; now the WINDOWS external words are REMEMBERED
+  (`noteExternalPresence`) and replay into the table at registration, and a roster that
+  first names an active other (`onRosterChange`) triggers the catch-up too. Its hardening round (2026-10-12, the
   sync-bugs pass, `tests/remoteWorkbenchSync.test.ts` pins each): an applied open is
   verified LANDED (the editor reports a failed open as a notification, not a rejection — an
   unverified pre-mark rebounded at the next tabs diff as a close of the other side's
@@ -2087,7 +2093,12 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   changes — and the page's own action sheets: the editor's, the repository's git set,
   the terminal's), the bottom navigation (`bottomTabs.ts`: Files · Editor · Changes ·
   each extension's page, five at most, with the open-editors and pending-changes badges;
-  a second tap reselects — the Editor's opens the open editors list), the drawer
+  a second tap reselects a list page to its top, and EVERY tap of the Editor opens the
+  open editors list — §6.2's phone tab strip, the chooser between the pages the PC and
+  this device have open (2026-10-16, the owner's "点击编辑没有弹出选择哪个页面的选项":
+  the first tap used to only show the page; with nothing open the page's empty state
+  answers instead of an empty chooser; the rail `navRail.ts` answers the same way — the
+  portrait tablet has no app bar, its Editor item is the only switcher), the drawer
   (`navDrawer.ts`: every page, Go to File, the palette, this PC's windows, transfers,
   the full menus as sheets, Data Saver and Settings), the editor page's chrome
   (`editorSwitcher.ts`: the tab strip hidden, the open editors and the editor's actions
@@ -2174,7 +2185,10 @@ output follow is module 11's `outputFollow.ts` (above), driven by
 - Tests: `tests/remoteMirror.test.ts` (the replica: snapshot and every mutation kind into
   the copy, URL tokens, the CSP drop, the sequence-gap resnap, the input replay, the host's
   viewer lifecycle, the transfer entries joining the mirrored
-  menu and sheet with locally-run clicks), `tests/remoteLayouts.test.ts` (the five layouts:
+  menu and sheet with locally-run clicks, and §9.2's scroll ownership — the lone viewer's
+  replay, the drop under another's lease with the holder told, the transfer once the
+  3-second lease lapses, the non-owner's click still replaying, the PC's wheel taking
+  the panel back, and the follow-hint pill's name and clear), `tests/remoteLayouts.test.ts` (the five layouts:
   each device class's arrangement, the §4.2 switch — parts move, never rebuild, so the
   tabs, the dirty marks and the terminal session are the same DOM across all five — the
   overlays closing and the navigation state carrying across a switch, and §5.7's phone key
@@ -2185,11 +2199,6 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   §6.3/§6.6: the swipe gesture's mechanics over a stand-in row, the change rows carrying
   the strip through a real SourceControlView on the page-stack marker — and none without
   it — and the output-follow state machine's grace, drop, catch-up and timer stacking),
-  `tests/remoteChat.test.ts` (S2's §8 session bridge: the composer-skip rule — the
-  placeholder, the subtree's zero bytes, the structural re-mount catch, the fluid copy
-  hiding it; the PC bridge's receipts, merged state pushes and resend dedup; the native
-  composer's send, queue, IME-aware Enter, failed-receipt fallback and cards; the pane
-  gate; and the share's full path, bridge included),
   `tests/remote.test.ts` +
   `tests/remoteResponsive.test.ts` (the shims, transport,
   relay engine; the phone's page model, app bar, navigation, drawer, sheets, editing row
@@ -2205,6 +2214,15 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   Secure-cookie exemption, so the specs ride the shipping self-signed shape; the workbench
   pair behind `GGS_REMOTE_E2E_FULL=1` and a build that bundles claude-code),
   `scripts/probes/remote-live-check.mjs` (the live LAN end-to-end probe),
+  `scripts/probes/remote-lifecycle-check.mjs` (§18's lifecycle probe, L2: the app under
+  `GGS_TEST_HOOKS=1`, the §18.1 `remote_debug_snapshot` command as ground truth over the
+  session's invoke path, every scenario a walk of §18.2's events with the invariants
+  re-checked per step; carries T4's core — the remote closing and opening the PC window,
+  I1/I5/I7/I9 — with the T1–T18 matrix, the random sequences and the long run to grow on
+  it; `LIFECYCLE_TRACE=1` dumps every frame), and `src-tauri/src/remote_debug.rs` (the
+  test-only snapshot command itself: refused unless `GGS_TEST_HOOKS=1`, listed in
+  check-ipc's TEST_ONLY_COMMANDS; the main window's created/pageLoads counters and
+  routing's served-frontends set live with it),
   `tests/remoteRound.ts` (§17.3's remote round: the sweeps re-run with every invoke
   crossing the real shim chain — tauriShim → Transport → frames → RelayEngine — against the
   same scripted handlers; the mock Channel carries the `__GGS_CHAN__:` stream marker),

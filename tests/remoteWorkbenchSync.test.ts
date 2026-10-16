@@ -762,10 +762,12 @@ describe('the sync core over a shared bus', () => {
 /* ---------- The presence gate and the catch-up (docs/remote-client-plan.md §7.0) ---------- */
 
 /** A stand-in presence table: `count` is what the roster answers, `became()` fires the
- *  becoming-active handlers the real document events would, and `designate` picks the
- *  responder of a state request. */
-function fakePresence(count = 2): SyncPresence & { count: number; became(): void; designate: (requester: string) => boolean } {
-	const handlers = new Set<() => void>();
+ * becoming-active handlers the real document events would, `roster()` the roster-change
+ * handlers a heartbeat or a WINDOWS word would, and `designate` picks the responder of a
+ * state request. */
+function fakePresence(count = 2): SyncPresence & { count: number; became(): void; roster(): void; designate: (requester: string) => boolean } {
+	const becameHandlers = new Set<() => void>();
+	const rosterHandlers = new Set<() => void>();
 	const presence = {
 		count,
 		designate: (): boolean => true,
@@ -773,12 +775,19 @@ function fakePresence(count = 2): SyncPresence & { count: number; became(): void
 		othersActive: (): boolean => presence.count >= 2,
 		isDesignatedResponder: (requester: string): boolean => presence.designate(requester),
 		onBecameActive: (handler: () => void): (() => void) => {
-			handlers.add(handler);
-			return () => handlers.delete(handler);
+			becameHandlers.add(handler);
+			return () => becameHandlers.delete(handler);
+		},
+		onRosterChange: (handler: () => void): (() => void) => {
+			rosterHandlers.add(handler);
+			return () => rosterHandlers.delete(handler);
 		},
 		isActive: (): boolean => true,
 		became: (): void => {
-			for (const handler of [...handlers]) handler();
+			for (const handler of [...becameHandlers]) handler();
+		},
+		roster: (): void => {
+			for (const handler of [...rosterHandlers]) handler();
 		}
 	};
 	return presence;
@@ -945,6 +954,39 @@ describe('the catch-up (§7.0.3, K14)', () => {
 		await until(() => channel.sent.some((m) => m.k === 'stateSnapshot'));
 		expect(channel.sent.filter((m) => m.k === 'stateSnapshot').every((m) => m.by === 'remote/2')).toBe(true);
 		expect(channel.sent.filter((m) => m.k === 'stateSnapshot')).toHaveLength(1);
+	});
+
+	it('a fresh remote that started with an empty roster catches up once the PC names itself', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const remote = fakeWorkbench();
+		// The PC is the established one: two tabs, one active, and active itself.
+		const pcPresence = fakePresence(2);
+		const pcSync = attachWorkbenchSync(pc, channel.deps, 'main', { presence: pcPresence });
+		pcSync.localOnly(true);
+		await pc.editors.openFile(NOTES);
+		await pc.editors.openFile(README);
+		pc.setActive(README);
+		pcSync.localOnly(false);
+		channel.sent.length = 0;
+		// The remote connects FRESH (2026-10-16: 远程编辑器没有同步打开 PC 的打开页面): its
+		// own table is still empty — the PC's heartbeat has not arrived and the connect's
+		// WINDOWS word raced the workbench — so its start's catch-up finds no other active
+		// frontend and skips, exactly a fresh phone's first seconds.
+		const remotePresence = fakePresence(1);
+		attachWorkbenchSync(remote, channel.deps, 'remote/1', { presence: remotePresence, startImmediately: false }).start();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(channel.sent.filter((m) => m.k === 'stateRequest')).toEqual([]);
+		// The PC's word lands — a heartbeat, a WINDOWS frame: the roster gains an active
+		// other, and the joiner asks at last.
+		remotePresence.count = 2;
+		remotePresence.roster();
+		await until(() => channel.sent.some((m) => m.k === 'stateRequest' && m.by === 'remote/1'));
+		await until(() => remote.tabs().length === 2);
+		expect(remote.tabs().sort()).toEqual([NOTES, README].sort());
+		// K14: the joiner follows the PC's active tab — the phone's Editor page opens on
+		// what the PC was looking at.
+		expect(remote.activePath()).toBe(README);
 	});
 });
 

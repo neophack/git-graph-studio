@@ -23,10 +23,8 @@ const XLINK = 'http://www.w3.org/1999/xlink';
  *  minimize / maximize / close never show: a remote page has no window to drive, and a
  *  tap on them would replay into the PC's real controls. */
 const BASE_CSS = 'html{touch-action:pinch-zoom}.window-controls{display:none!important}*{-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none}';
-/** A fluid copy scrolls natively under the finger. The placeholder a skipped subtree
- *  crosses as (§8.1, the chat composer) is hidden: the pane's own native surface takes
- *  that space instead. */
-const FLUID_CSS = '*{-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none}[data-mirror-skip]{display:none!important}';
+/** A fluid copy scrolls natively under the finger. */
+const FLUID_CSS = '*{-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none}';
 /** No native caret in the copy — the painted bar is the PC's. Its own sheet, so the page's
  *  own `caret-color` stays readable for that bar (caretColor lifts it for the read). */
 const HIDE_CARETS_CSS = '*{caret-color:transparent!important}';

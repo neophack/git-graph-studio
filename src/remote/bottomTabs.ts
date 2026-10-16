@@ -1,11 +1,12 @@
-// The phone's bottom navigation (docs/ggs-remote-plan.md §11.2): the activity bar's job on a
-// screen too narrow for it — at most five destinations, each a page of pages.ts: Files, the
-// Editor, Changes, then the installed extensions' pages (a `scm/title` launcher such as Git
-// Graph, a views container such as Claude Code), with Terminal and Search filling any slot
-// left. A tap always shows its page; tapping the page already showing is a reselect — the
-// Editor's opens the open editors list, a list page scrolls back to its top. Badges carry
-// what the hidden status and activity bars would: the open editors (a dot while one is
-// unsaved) and the pending changes. Everything else lives in the drawer (navDrawer.ts).
+// The phone's bottom navigation (docs/ggs-remote-plan.md §11.2, docs/remote-client-plan.md
+// §6.2): the activity bar's job on a screen too narrow for it — at most five destinations,
+// each a page of pages.ts: Files, the Editor, Changes, then the installed extensions' pages
+// (a `scm/title` launcher such as Git Graph, a views container such as Claude Code), with
+// Terminal and Search filling any slot left. A tap always shows its page; the Editor's tap
+// also opens the open editors list (the phone's tab strip, one tap away every time), and a
+// reselect of a list page scrolls it back to its top. Badges carry what the hidden status
+// and activity bars would: the open editors (a dot while one is unsaved) and the pending
+// changes. Everything else lives in the drawer (navDrawer.ts).
 import { t } from '../platform/i18n';
 import {
 	BUILTIN_VIEWS,
@@ -110,7 +111,7 @@ function scrollPageToTop(): void {
 
 /** Rebuild the buttons when the destinations change (an extension installs, its icon
  *  loads); otherwise only the active mark and badges move. */
-export function syncTabs(bar: HTMLElement, onReselect: (page: PageId) => void): void {
+export function syncTabs(bar: HTMLElement, onReselect: (page: PageId) => void, onTap: (page: PageId) => void = () => undefined): void {
 	const tabs = bottomTabs();
 	// Keyed on the containers' images too: a package image replaces the codicon once it loads.
 	const images = extensionContainers().map((container) => container.image ?? '').join(' ');
@@ -122,6 +123,7 @@ export function syncTabs(bar: HTMLElement, onReselect: (page: PageId) => void): 
 				tabButton(tab, () => {
 					if (currentPage() === tab.id) onReselect(tab.id);
 					else void goTo(tab.id).then(() => syncActive(bar));
+					onTap(tab.id);
 				})
 			)
 		);
@@ -129,9 +131,11 @@ export function syncTabs(bar: HTMLElement, onReselect: (page: PageId) => void): 
 	syncActive(bar);
 }
 
-/** The bar itself. `onReselect` handles a tap on the page already showing (the shell opens
- *  the open editors list for the Editor); list pages scroll to the top by default. */
-export function createBottomTabs(onReselect: (page: PageId) => void = () => undefined): HTMLElement {
+/** The bar itself. `onReselect` handles a tap on the page already showing (a list page
+ *  scrolls back to its top); `onTap` reports EVERY tap, the reselects included — the
+ *  Editor's chooser rides it (§6.2: tapping the bottom navigation's Editor opens the
+ *  open-editors panel, the first tap of it no less than a second). */
+export function createBottomTabs(onReselect: (page: PageId) => void = () => undefined, onTap: (page: PageId) => void = () => undefined): HTMLElement {
 	const bar = document.createElement('nav');
 	bar.className = 'ggs-bottom-tabs';
 	bar.setAttribute('role', 'tablist');
@@ -140,7 +144,7 @@ export function createBottomTabs(onReselect: (page: PageId) => void = () => unde
 		if (BUILTIN_VIEWS[page] || page.startsWith('ext-container:')) scrollPageToTop();
 		onReselect(page);
 	};
-	syncTabs(bar, reselect);
-	onWorkbenchChange(() => syncTabs(bar, reselect));
+	syncTabs(bar, reselect, onTap);
+	onWorkbenchChange(() => syncTabs(bar, reselect, onTap));
 	return bar;
 }

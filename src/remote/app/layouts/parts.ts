@@ -14,6 +14,7 @@ import { createAppBar } from '../../appBar';
 import { createBottomTabs } from '../../bottomTabs';
 import { createEditorAccessory } from '../../editorAccessory';
 import { createEditorEmptyState, openEditorActions, openEditorsSheet } from '../../editorSwitcher';
+import { editorTabs } from '../../pages';
 import { createNavRail } from '../../navRail';
 import { createTerminalKeys } from '../../terminalKeys';
 import { openDrawer } from '../../navDrawer';
@@ -44,6 +45,14 @@ export function collectLayoutParts(): LayoutParts {
 	if (panel && !panel.querySelector('.ggs-terminal-keys')) panel.appendChild(createTerminalKeys());
 	const editorPart = document.getElementById('editorPart');
 	if (editorPart && !editorPart.querySelector('.ggs-editor-empty')) editorPart.appendChild(createEditorEmptyState());
+	// The Editor destination is the phone's tab strip (§6.2): every tap of it — the bar's
+	// and the rail's alike, the first no less than a reselect — opens the open editors
+	// list, the chooser between the pages the PC and this device have open. With nothing
+	// open the page's own empty state is the better surface, so the chooser only answers
+	// when there is something to choose.
+	const editorChooser = (): void => {
+		if (editorTabs().length > 0) openEditorsSheet();
+	};
 	return {
 		titlebar: document.getElementById('titlebar')!,
 		workbench,
@@ -53,10 +62,10 @@ export function collectLayoutParts(): LayoutParts {
 			openEditors: openEditorsSheet,
 			editorActions: openEditorActions
 		}),
-		bottomTabs: createBottomTabs((page) => {
-			if (page === 'editor') openEditorsSheet();
+		bottomTabs: createBottomTabs(() => undefined, editorChooser),
+		navRail: createNavRail((page) => {
+			if (page === 'editor') editorChooser();
 		}),
-		navRail: createNavRail(),
 		editorAccessory: createEditorAccessory(),
 		remoteIndicator: createRemoteIndicator()
 	};

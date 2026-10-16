@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { closeHidesWindow } from '../src/workbench/boot';
-import { PRESENCE_EVERY_MS, PRESENCE_TTL_MS, Presence, type PresenceMessage } from '../src/remote/presence';
+import { noteExternalPresence, PRESENCE_EVERY_MS, PRESENCE_TTL_MS, Presence, registerPresence, type PresenceMessage } from '../src/remote/presence';
 
 /* ---------- The close decision (§17.2, G13) ---------- */
 
@@ -163,5 +163,26 @@ describe('Presence', () => {
 		pc.setSelfActive(true);
 		expect(became).toHaveLength(1);
 		pc.stop();
+	});
+
+	it('a WINDOWS word that raced the table replays into it at registration', () => {
+		const channel = bus();
+		// The connect's WINDOWS frame reaches the boot while the workbench — and with it
+		// the sync's table — is still boots away (2026-10-16: the fresh remote's first
+		// catch-up found an empty roster and skipped): the word is remembered, and the
+		// table that registers later answers as if it had heard it live.
+		noteExternalPresence('main', true);
+		const remote = new Presence('remote/1', channel.deps);
+		registerPresence(remote);
+		expect(remote.othersActive()).toBe(true);
+		expect(remote.syncAllowed()).toBe(true);
+		// A later frame forwards straight through, remembered for the next registration.
+		noteExternalPresence('main', false);
+		expect(remote.othersActive()).toBe(false);
+		registerPresence(null);
+		const next = new Presence('remote/2', channel.deps);
+		registerPresence(next);
+		expect(next.othersActive()).toBe(false);
+		registerPresence(null);
 	});
 });

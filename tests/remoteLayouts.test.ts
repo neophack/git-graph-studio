@@ -217,6 +217,52 @@ describe('the five layouts', () => {
 		expect(currentPage()).toBe('scm');
 	});
 
+	it('tapping the Editor destination opens the open editors chooser — the phone\'s tab strip (§6.2)', async () => {
+		setWidth(390, 844);
+		document.documentElement.setAttribute('data-remote-shell', '');
+		stopResponsive = initResponsive();
+		stopHost = installLayoutHost();
+		const strip = document.querySelector<HTMLElement>('.editor-group-box .tabs-container')!;
+		const barEditor = () => document.querySelector<HTMLButtonElement>('.ggs-bottom-tabs [data-tab="editor"]')!;
+		const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+		// From the Files page with nothing open: the tap shows the editor page's empty
+		// state — a chooser with nothing to choose is not a chooser.
+		await commands.execute('workbench.showExplorer');
+		expect(currentPage()).toBe('explorer');
+		barEditor().click();
+		await flush();
+		expect(currentPage()).toBe('editor');
+		expect(document.querySelector('.ggs-editors-sheet')).toBeNull();
+
+		// Two tabs open (the shape a PC catch-up leaves): the FIRST tap of the Editor
+		// opens the chooser listing them — one tap, not a second tap of the page.
+		await commands.execute('workbench.showExplorer');
+		const a = addTab(strip, 'a.ts');
+		const b = addTab(strip, 'b.ts', { dirty: true });
+		b.classList.remove('active');
+		barEditor().click();
+		await flush();
+		const sheet = () => document.querySelector<HTMLElement>('.ggs-editors-sheet')!;
+		expect(sheet()).not.toBeNull();
+		expect([...sheet().querySelectorAll('.ggs-editor-row .name')].map((name) => name.textContent)).toEqual(['a.ts', 'b.ts']);
+		expect([...sheet().querySelectorAll('.ggs-editor-row')][0]!.classList.contains('current')).toBe(true);
+		// Choosing one closes the chooser and lands on that tab over the editor page.
+		[...sheet().querySelectorAll('.ggs-editor-row')][1]!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		expect(document.querySelector('.ggs-editors-sheet')).toBeNull();
+		expect(currentPage()).toBe('editor');
+
+		// The portrait tablet's rail answers the same way — it has no app bar, the rail's
+		// Editor item is its only switcher.
+		await become(744, 1133, true);
+		await commands.execute('workbench.showExplorer');
+		document.querySelector<HTMLButtonElement>('.ggs-nav-rail [data-tab="editor"]')!.click();
+		await flush();
+		expect(document.querySelector('.ggs-editors-sheet')).not.toBeNull();
+		expect(document.querySelector('.ggs-editors-sheet .ggs-editor-row .name')!.textContent).toBe('a.ts');
+	});
+
 	it('gates the workbench global chords off the phone forms, keeps the editor own keys (§5.7)', async () => {
 		setWidth(390, 844);
 		document.documentElement.setAttribute('data-remote-shell', '');

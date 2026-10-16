@@ -562,14 +562,6 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 		return this.webviews.get(this.webviewKey(parsed.extId, parsed.panelId))?.frame ?? null;
 	},
 
-	/** The extension that owns a stream's page (chatBridge.ts's bridged-chat test). */
-	webviewExtOf(stream: string): string | null {
-		const parsed = hook('webviewStreams')?.parseStream(stream) ?? null;
-		if (!parsed) return null;
-		if ('view' in parsed) return this.webviewViews.get(parsed.view)?.extId ?? null;
-		return parsed.extId;
-	},
-
 	ensureWebviewShown(stream: string): void {
 		const parsed = hook('webviewStreams')?.parseStream(stream) ?? null;
 		if (parsed && 'view' in parsed && !this.resolvedWebviewViews.has(parsed.view)) this.noteViewVisible(parsed.view, true);

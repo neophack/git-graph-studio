@@ -13,7 +13,7 @@ import { dataSaverPreferred } from './dataSaver';
 import { showBanner } from './banner';
 import { installRemoteShell } from './shell';
 import { installRemoteSessionHooks } from './desktopHooks';
-import { currentPresence } from './presence';
+import { noteExternalPresence } from './presence';
 import { requestedMode } from './mirror/uiMode';
 import './remote.css';
 
@@ -72,18 +72,16 @@ async function boot(): Promise<void> {
 	installRemoteSessionHooks();
 	// The daemon's `visible` word is the authoritative source for whether the PC window
 	// is active (§7.0.1): every WINDOWS frame feeds it into the sync's presence table,
-	// overriding whatever stale announcement it holds.
+	// overriding whatever stale announcement it holds. The word is remembered for the
+	// table that does not exist yet — the connect's frame always beats the workbench's
+	// boot — and replays into it at the sync's own registration.
 	transport.onWindows((list) => {
 		const info = list.find((entry) => entry.id === instance);
-		if (info) currentPresence()?.noteExternal('main', info.visible && !info.minimized);
+		if (info) noteExternalPresence('main', info.visible && !info.minimized);
 	});
 	status('Loading Git Graph Studio…');
 	await import('./app/main');
 	installRemoteShell();
-	// The table exists now (the workbench's sync created it): the WINDOWS frame that
-	// arrived before it lands too — the first word about the PC window is not missed.
-	const first = transport.instances.find((entry) => entry.id === instance);
-	if (first) currentPresence()?.noteExternal('main', first.visible && !first.minimized);
 }
 
 function watchNotices(transport: Transport): void {

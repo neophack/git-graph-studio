@@ -25,8 +25,12 @@ test('the right password reaches the window picker', async ({ page, daemon }) =>
 	await page.locator('#password').fill('e2e-probe-kayak-42');
 	await page.locator('button[type=submit], form button.primary').first().click();
 	await expect(page).toHaveURL(/\/windows/, { timeout: 15_000 });
-	// No window is registered: the page offers a new one (§13).
-	await expect(page.getByRole('button', { name: /new window|新窗口/i })).toBeVisible();
+	// No window is registered: the page says so and offers the folder-path row — the one
+	// spawn door from the remote side (the standalone "new window" button is gone since
+	// 2026-10-12; the row was restored 2026-10-16, docs/ggs-remote-plan.md §3.3).
+	await expect(page.locator('#empty')).toBeVisible();
+	await expect(page.locator('#open-folder')).toBeVisible();
+	await expect(page.locator('#open-go')).toBeVisible();
 });
 
 test('the session cookie is HttpOnly and SameSite=Strict', async ({ request, daemon }) => {

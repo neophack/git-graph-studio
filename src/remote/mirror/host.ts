@@ -29,6 +29,9 @@ export interface MirrorHostDeps {
 	/** The page must believe it has the focus while viewers drive it. */
 	focus(enabled: boolean): void;
 	now(): number;
+	/** Which frame events count as the PC user's own (§9.2's scroll ownership) — passed
+	 *  through to every webview stream's share; the browser's trusted ones by default. */
+	trusted?: (event: Event) => boolean;
 }
 
 /** The window size a viewer's viewport asks for: the desktop workbench at the viewer's
@@ -119,7 +122,7 @@ export class MirrorHost {
 		if (message.k !== 'hello') return;
 		this.shareModule ??= import('./webviewShare');
 		void this.shareModule.then(({ WebviewShare }) => {
-			const next = this.shares.get(stream) ?? new WebviewShare(stream, { send: (down) => this.deps.send(down), now: () => this.deps.now() });
+			const next = this.shares.get(stream) ?? new WebviewShare(stream, { send: (down) => this.deps.send(down), now: () => this.deps.now(), trusted: this.deps.trusted });
 			this.shares.set(stream, next);
 			next.receive(message);
 			this.settle();

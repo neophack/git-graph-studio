@@ -220,7 +220,8 @@ describe('bottom navigation', () => {
 	it('shows its page on every tap — never toggles it away — and a second tap reselects', async () => {
 		const { ran, sidebar, group } = phoneWorkbench();
 		const reselected: string[] = [];
-		const bar = createBottomTabs((page) => void reselected.push(page));
+		const taps: string[] = [];
+		const bar = createBottomTabs((page) => void reselected.push(page), (page) => void taps.push(page));
 		document.body.appendChild(bar);
 		const tab = (id: string) => bar.querySelector<HTMLButtonElement>(`[data-tab="${id}"]`)!;
 		expect([...bar.querySelectorAll('button')].map((button) => button.dataset.tab)).toEqual(['explorer', 'editor', 'scm', 'panel', 'search']);
@@ -229,10 +230,12 @@ describe('bottom navigation', () => {
 		tab('scm').click();
 		await flushMutations();
 		expect(ran).toEqual(['workbench.showScm']);
+		expect(taps).toEqual(['scm']);
 		expect(tab('scm').classList.contains('active')).toBe(true);
 		// The page already showing: a reselect, not a toggle (the old bar hid the side view).
 		tab('scm').click();
 		expect(reselected).toEqual(['scm']);
+		expect(taps).toEqual(['scm', 'scm']);
 		expect(sidebar.hidden).toBe(false);
 		// The Editor: the side view gives way; a file open counts on the badge, its unsaved
 		// state colours it.
@@ -245,6 +248,7 @@ describe('bottom navigation', () => {
 		expect(tab('editor').querySelector('.badge')!.classList.contains('dirty')).toBe(true);
 		tab('editor').click();
 		expect(reselected).toEqual(['scm', 'editor']);
+		expect(taps).toEqual(['scm', 'scm', 'editor', 'editor']);
 		// Terminal: the panel page; the Editor then takes the page back from it.
 		tab('panel').click();
 		await flushMutations();
@@ -253,6 +257,22 @@ describe('bottom navigation', () => {
 		await flushMutations();
 		expect(document.getElementById('panel')!.hidden).toBe(true);
 		expect(currentPage()).toBe('editor');
+	});
+
+	it('the Editor tap reports on EVERY tap — the chooser rides it, first tap included (§6.2)', async () => {
+		const { group, sidebar } = phoneWorkbench();
+		const taps: string[] = [];
+		const bar = createBottomTabs(() => undefined, (page) => void taps.push(page));
+		document.body.appendChild(bar);
+		const tab = (id: string) => bar.querySelector<HTMLButtonElement>(`[data-tab="${id}"]`)!;
+		// From the Files page, with an editor open: the tap that SHOWS the page reports too.
+		addTab(group, 'a.ts', { path: '/home/u/ws/src/a.ts', active: true });
+		tab('editor').click();
+		await flushMutations();
+		expect(taps).toEqual(['editor']);
+		expect(sidebar.hidden).toBe(true);
+		tab('editor').click();
+		expect(taps).toEqual(['editor', 'editor']);
 	});
 
 	it('carries the extensions\' pages — a scm/title launcher and a views container — in place of Terminal and Search', async () => {

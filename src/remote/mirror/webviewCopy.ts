@@ -4,18 +4,58 @@
 // page of its own. Every webview lives in the desktop window (ext_routing.rs): the copy is
 // the very conversation the PC shows, laid out at this pane's size (the viewer's fluid
 // mode), scrolled here, and every tap and key typed into it is replayed into the PC's page
-// (webviewShare.ts) — asked on either side, the answer streams on both.
+// (webviewShare.ts) — asked on either side, the answer streams on both. The page it shows is
+// the extension's own, composer included (2026-10-16, the owner's direction): nothing here
+// builds a second chat UI around the copy.
 
 import { showBanner } from '../banner';
 import { remoteEnv } from '../session';
+import { t, tf } from '../../platform/i18n';
 import { HELLO_EVERY_MS, MIRROR_DOWN, MIRROR_UP, type DownMessage, type UpPayload } from './protocol';
 import { MirrorViewer } from './viewer';
 import { ViewerInput } from './viewerInput';
-import { mountChatPane } from '../app/chat';
+
+/** §9.2's follow hint: the pill names the stream's scroll owner while this end is not
+ *  it, and clears itself when the 3-second lease lapses or the ownership comes home. */
+export function mountScrollHint(host: HTMLElement, me: string): { receive(message: DownMessage): void; dispose(): void } {
+	let hint: HTMLElement | null = null;
+	let timer: ReturnType<typeof setTimeout> | null = null;
+	const hide = () => {
+		if (timer !== null) clearTimeout(timer);
+		timer = null;
+		hint?.remove();
+		hint = null;
+	};
+	const show = (label: string, ms: number) => {
+		if (!hint) {
+			hint = host.ownerDocument.createElement('div');
+			hint.className = 'scroll-follow-hint';
+			host.appendChild(hint);
+		}
+		hint.textContent = tf('remote.scrollFollows', label);
+		if (timer !== null) clearTimeout(timer);
+		timer = setTimeout(hide, Math.max(ms, 1000));
+	};
+	const label = (name: string): string =>
+		name.startsWith('phone') ? t('remote.device.phone')
+		: name.startsWith('tablet') ? t('remote.device.tablet')
+		: name === 'desktop' ? t('remote.device.desktop')
+		: name;
+	return {
+		receive(message) {
+			if (message.k !== 'own') return;
+			if (message.who === me) {
+				hide();
+				return;
+			}
+			show(message.who === 'main' ? t('remote.device.pc') : label(message.name), message.ms);
+		},
+		dispose: hide
+	};
+}
 
 /** Mount the live copy of `stream` (`view:<id>` / `panel:<ext>#<id>`) into a pane; the
- *  answer unmounts it. A bridged chat stream's pane also grows its native composer here:
- *  the gate (app/chat) waits for the PC's first `chatState` before anything mounts. */
+ *  answer unmounts it. */
 export function mountWebviewCopy(container: HTMLElement, stream: string): () => void {
 	const env = remoteEnv();
 	if (!env) return () => undefined;
@@ -44,16 +84,16 @@ export function mountWebviewCopy(container: HTMLElement, stream: string): () => 
 		}
 	});
 	input = new ViewerInput(viewer, send, container.ownerDocument, { embedded: true, parent: host });
-	const listener = transport.listen(MIRROR_DOWN, (event) => viewer.receive(event.payload as DownMessage));
-	const stopChatPane = mountChatPane(container, {
-		stream,
-		send,
-		listen: (handler) => {
-			const token = transport.listen(MIRROR_DOWN, (event) => handler(event.payload as DownMessage));
-			return () => transport.unlisten(token);
+	const hint = mountScrollHint(host, from);
+	const listener = transport.listen(MIRROR_DOWN, (event) => {
+		const message = event.payload as DownMessage;
+		if (message.k === 'own') {
+			if (message.w === stream && (message.to === '*' || message.to === from)) hint.receive(message);
+			return;
 		}
+		viewer.receive(message);
 	});
-	const hello = () => send({ k: 'hello', vw: host.clientWidth, vh: host.clientHeight, touch });
+	const hello = () => send({ k: 'hello', vw: host.clientWidth, vh: host.clientHeight, touch, device: document.documentElement.dataset['device'] });
 	hello();
 	const timer = setInterval(hello, HELLO_EVERY_MS);
 	const onVisible = () => {
@@ -64,8 +104,8 @@ export function mountWebviewCopy(container: HTMLElement, stream: string): () => 
 		clearInterval(timer);
 		document.removeEventListener('visibilitychange', onVisible);
 		transport.unlisten(listener);
-		stopChatPane();
 		send({ k: 'bye' });
+		hint.dispose();
 		input?.dispose();
 		viewer.dispose();
 		host.remove();

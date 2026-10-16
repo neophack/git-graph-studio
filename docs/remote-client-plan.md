@@ -14,7 +14,15 @@
 >
 > **2026-10-16 S2 落地记录**(第五批):**§8 Claude 会话桥**全部落成。§8.1 副本排除输入框:`DomRecorder` 新增 `skip(node)` 选项(RecorderOptions),被跳过的子树序列化为一个带 `data-mirror-skip` 与高度内联样式的空占位——子树内的 childList/属性/文本记录在 flush 一开始就被丢弃,控件、滚动、焦点与光标从未登记也就从不过线;规则由 `claudeChatInject.ts` 新增的 `chatComposerRoot(doc)`(`chatControls` 的 form)提供,`chatBridge.ts` 的 `chatComposerSkipRule()` 按结构判定(FORM 且正是当前 composer 的 form),页面重挂 composer 即被下一次 serialize 抓住,不靠元素引用;fluid 副本(FLUID_CSS)隐藏占位,原生输入区取其空间。装配在 `webviewShare.ts`:流属于 `provider_list` 的 `bridgedExtIds`(`streamIsBridgedChat`,经 `WebviewFrameSource.extOf` 拿 view 的属主——extensionHost 注册、`webviewExtOf` 实现)才装桥,装桥时同步换上 skip 规则、重启 recorder(旧表里 composer 的节点不再对着观看者已不持有的 id 发射)并向所有观看者重发快照;share 随最后一个观看者 stop 后再次 hello 会重新装桥。§8.2 消息:`chat`(op: send/stop/permission/answer/model/mode,带操作 id)/`chatAck`(回执,`detail` 带模型回执的标签)/`chatState`(busy/model/mode/permission/question,100 ms 合并、变化才推)走 MIRROR_UP/DOWN,`w` 为流 id;PC 侧 `mirror/chatBridge.ts` 分发到 claudeChatInject 的既有驱动——`sendChatText`(新)发完把 PC 用户草稿写回、发不出去也原样放回;`answerChatQuestion` 拆出 `pickChatQuestion`/`submitChatQuestion`(answer 消息带 `submit?: boolean`:多题卡逐题 pick,复选框只落一次,最后一题才提交);重发按 id 去重(128 条 LRU,重复 id 只补回执)。远程侧 `remote/app/chat/`:`index.ts` 是挂载门(等 PC 的第一帧 chatState 才懒加载 composer——src/ 依旧不出现扩展 id)、`composer.ts`(原生 textarea:草稿按流存本端 localStorage、忙碌时 ➤ 变停止且发送进本端队列——气泡可撤回,回复结束自动按序发出,队列按标签页存 sessionStorage、重连后按原 id 重发;失败回执把文本放回输入框并提示;模型/模式为行内询问;后台提醒=标题 ● + 震动 + 已授权时的系统通知)、`chatCards.ts`(权限三键与问题选项的原生大按钮卡,Other 的回答框)。IME 门控(§10.2 第 8 项):`isComposing`/`keyCode 229`/compositionend 后 50 ms 内的 Enter 一律不是发送;手机(粗指针)Enter 换行,细指针 Ctrl/⌘+Enter 发送。验收:`tests/remoteChat.test.ts` 十八例(skip 规则×4——占位、子树零字节、结构重挂、fluid 隐藏;桥×4——初始状态与变化才推、发送与草稿写回、五类操作各带回执、重发去重;composer×7——含 100 字 0 B、IME、队列与重挂恢复、失败回退、原生卡;门×1;share 全链路×2——占位快照、chatState、chat 操作落页、PC 侧打字零字节、stop 后重桥),`tests/claudeChatInject.test.ts` 补 composer root 与草稿三例。**S2 余量**(随 Q):底部导航 Claude 项的圆点提醒、Playwright 的 chat.spec(§14 矩阵)、真机 IME/通知检查、多题卡的原生 UI 逐题引导(协议已带 submit 标志,远程 UI 目前按单题卡一步提交)。
 >
-> **未开始**:S3 滚动所有权、L2 生命周期测试——§13 的依赖顺序不变(S1、L1、S2 已落,S3 与 L2 可开始)。
+> **2026-10-16 落地记录(所有者第五轮指示——远程 Claude 用原始界面)**:远程的 Claude **不再自己写界面**(所有者 2026-10-16 原话:"远程claude不要单独自己写界面导致bug很多,使用claude原始界面")。S2 的会话桥整体撤回:删除 `src/remote/app/chat/`(原生输入框/权限卡/问题卡)、`mirror/chatBridge.ts`、协议的 `chat`/`chatAck`/`chatState` 消息族、recorder 的 `skip` 选项与 `data-mirror-skip` 占位、`chatComposerRoot`/`sendChatText`、`webviewExtOf`/`extOf` 链路、`remote.chat.*` 文案与 `.chat-native-*` 样式、`tests/remoteChat.test.ts`。远程的 Claude 页回到**纯副本**:对话区与输入框都是 PC 上那份 Claude 原始页面,打字、点按钮(发送/停止/权限卡/问题卡/模型选择)全部经副本的输入回放进入 PC 的真实页面——即 §8 落地之前的行为。代价如实记录:K7 中"Claude 输入框的内容与光标不同步"不再成立(副本输入本就回放过线),§7.4"在 Claude 输入框里打 100 个字 → 0 B"一行随之作废,§6.4 的"本端的原生输入框"与 §8 全部内容仅作历史。claudeChatInject 的 `pickChatQuestion`/`submitChatQuestion` 拆分保留(`answerChatQuestion` 自用),`ggs.claudeChat.*` 宿主命令不受影响。
+>
+> **2026-10-16 S3 落地记录**(第六批):**§9.2 滚动所有权**。每条 webview 流的滚动同一时刻只有一个所有者——最后与页面交互(滚轮/触摸/按键)的一端,持有 3 秒租约,自己的后续交互续期。实现:`webviewShare.ts` 的 `gateScroll` 在回放前检查租约——所有者的 `scroll`/`wheel` 照常执行;他人租约存续期间,非所有者的滚动被**丢弃**(不回放、不转移),并向其单发 `own` 消息(持有人 id、设备名、剩余租约),副本据此显示"滚动跟随 <设备名>"提示条(`webviewCopy.ts` 的 `mountScrollHint`,3 秒后自清,所有权回家即清);指针/按键/文本不属滚动,非所有者的点击照常回放,但只在租约失效后才取得所有权。PC 本端:帧上的 `wheel`/`pointerdown`/`keydown`(仅 `isTrusted`,回放器派发的事件不算)让 `main` **立即**取得所有权——本机页面已原生滚了,租约追随现实,远程拽不走 PC 用户正在看的画面。hello 增 `device`(本端 `data-device`),供提示条点名;`own` 为新下行消息,变更时广播、被丢弃时单发。只有一端在看时它天然是所有者——行为与落地前一致。验收:`tests/remoteMirror.test.ts` §9.2 组六例(独占回放、PC 滚轮持有时丢弃并告知、3 秒后转移、非所有者点击照常且不夺权、PC 滚轮从远程手里收回、提示条命名与清除)。
+>
+> **2026-10-16 落地记录(远程编辑器两处修正——所有者反馈:"远程编辑请没有同步打开pc的打开页面,点击编辑也没有弹出选择哪个页面的选项")**:**§7.0.3 追平的新连竞态**——新远程连接的最初几秒名册是空的(PC 的心跳未到,连接时的 WINDOWS `visible` 词又落在工作台的表创建之前,start 的追平按"无其他活跃前端"跳过,此后再无触发点),远程编辑器页因此看不到 PC 已打开的页面;现在 `presence.ts` 记住 WINDOWS 外部词(`noteExternalPresence`)并在表注册时重放,且名册首次出现活跃他端(`onRosterChange`,workbenchSync 订阅、`awaitingSnapshot` 防重)补发一次追平。**§6.2 对齐**——底部导航与导航轨的"编辑器"**每次点按**都打开已打开编辑器面板(此前首次点按只切页、面板要再点一次),无已打开编辑器时由编辑器页的空状态应答;面板选行先 `revealEditorPage` 再点标签。验收:`remoteWorkbenchSync.test.ts` 新例(空名册起步的远端在名册得知 PC 后追平并跟随其活动标签)、`remoteLifecycle.test.ts` 新例(外部词迟到重放)、`remoteLayouts.test.ts` 新例(选择面板三态:空→空状态、有标签→面板、选行→落地该页)、`remoteResponsive.test.ts`(onTap 每击必报)。
+>
+> **2026-10-16 L2 部分落地记录**(第六批,§18 的地基):**§18.1 `remote_debug_snapshot`**(`src-tauri/src/remote_debug.rs`,新模块):GGS_TEST_HOOKS=1 才应答(否则 Err;注册随 generate_handler! 恒在——宏是编译期名单,这是"才注册"的务实落法,check-ipc.mjs 新增 TEST_ONLY_COMMANDS 表登记为测试专用);返回扩展后端的 pid/启动计数(I1)、每个已装包的登记日志(活面板与视图在内,I3/I4)、`routing::frontends()`(`main` 打头 + 服务过的前端粘性集合——纯观看的镜像会话到不了后端,诚实缺席)、main 窗口的 created/pageLoads 计数(I9;lib.rs 的 build_main_window 与 on_page_load 计数)与 visible/minimized、会话数。routing 增粘性前端集合(call_begin 记录)。**§18.7 探针** `scripts/probes/remote-lifecycle-check.mjs`(新):live-check 的封闭装配(独立 home、固定端口 config.json、bin/VERSION 预置、set-password)+ 应用带 GGS_TEST_HOOKS=1 拉起 + 裸 ws 会话;快照经会话的 INVOKE 读取;启动瞬态先稳(连续两帧快照的后端键一致才开跑);场景跑 T4 的核心(E4/E5 交替,先清旧 WINDOWS 帧、等**携带目标状态**的推送、1 秒界限=I7),每步前后快照对 I1(pid/启动计数不变)与 I9(created/pageLoads 不变)断言,末尾 I5(会话仍在);报告写 target/studio/remote-lifecycle/remote-lifecycle-report.{md,json};本机实测 6 翻转全过(退出码 0)。`LIFECYCLE_TRACE=1` 转储每帧。Rust 测试:`remote_debug` 的计数器与 frontends 两例。**L2 余量**(继续):§18.3 的 T1–T18 其余场景(浏览器侧副本比对走 live-check 的 CDP 相位)、随机序列(§18.4)、长时运行(§18.5)、平台矩阵(§18.6)、`tests/e2e/remote/lifecycle.spec.ts`(如需 Playwright 形态;§18.7 原文写 Playwright,探针先以裸 ws 会话落地——线上场景本就无需浏览器)。
+>
+> **未开始**:L2 的场景矩阵与随机序列(§18.3–§18.6)——§18.1 与 §18.7 的地基已落(见上)。
 >
 >
 > 与其他文档的关系：
@@ -363,27 +371,12 @@ export function classify(w: number, h: number, touch: boolean): DeviceClass {
 
 ### 6.4 Claude 页
 
-```text
-┌──────────────────────────────┐
-│ ‹  Claude · Sonnet ▾   ■ 停止 │ ← 模型选择；回复进行中显示"停止"
-├──────────────────────────────┤
-│   对话内容（PC 页面的流式副本）  │ ← 可滚动，自动跟随到底部
-│   …                          │
-│ ┌──────────────────────────┐ │
-│ │ ⚠ 需要批准：Bash `npm test`│ │ ← 原生卡片（§8.3）
-│ │ [拒绝]  [始终允许] [允许]   │ │
-│ └──────────────────────────┘ │
-├──────────────────────────────┤
-│ [ 给 Claude 发消息…        ] ➤ │ ← 本端的原生输入框，不同步
-│  模式：自动 ▾   📎             │
-└──────────────────────────────┘
-```
+> **2026-10-16 修订**(所有者第五轮指示,见顶部落地记录):远程 Claude **使用原始界面**——整页(对话区与输入框)都是 PC 上那份 Claude 页面的流式副本,打字、发送、停止、权限卡、问题卡、模型选择全部直接在副本里操作,经副本输入回放进入 PC 的真实页面。下文描述的"本端原生输入框/原生卡片"已随 S2 会话桥撤回,仅作历史。
 
-- **对话区**是 PC 上那份聊天页面的流式副本，但不包含输入框区域（§8.1）。用户可以自由上下滚动，滚动只在本端发生；位于底部时自动跟随新内容，离开底部时出现"↓ 新消息"按钮。
-- **输入框**是本端的原生 `textarea`，随内容自动增高，最多 6 行。草稿按窗口存在本端，不同步（K7）。手机上回车换行，点 ➤ 发送；平板外接键盘和桌面上 `Ctrl/⌘+Enter` 发送。中文输入法组字期间不会发送（§10.3 第 8 项）。
-- **发送**：远程把文本发给 PC，PC 的会话驱动把它填进 Claude 自己的输入框并按下发送；回复随对话副本实时流回（§8）。
-- **回复进行中**：➤ 变成"停止"。这时再发送的消息进入本端队列，显示为"排队中"的气泡，可以撤回；当前回复结束后自动发出。
-- **批准与提问**：Claude 请求权限或提出 AskUserQuestion 时，PC 把状态推给远程，远程显示原生卡片，按钮足够大，便于手指点按。也可以直接点副本里的原卡片，点击会照常回放到 PC。
+- **对话区**是 PC 上那份聊天页面的流式副本。用户可以自由上下滚动，滚动只在本端发生；位于底部时自动跟随新内容，离开底部时出现"↓ 新消息"按钮。
+- **输入框**是副本里 Claude 自己的输入框：远程的打字经回放进入 PC 的真实输入框,PC 的回显(含 PC 用户自己打的字)随副本流回。
+- **发送**：点副本里 Claude 自己的发送按钮(回复进行中它显示"停止",点击即中断)。
+- **批准与提问**：直接点副本里的原卡片,点击照常回放到 PC。
 - **后台提醒**：页面在后台时，如果回复完成或需要批准，底部导航的 Claude 项出现圆点，标签页标题变成"● 需要批准 — GGS"；在浏览器允许的范围内发送系统通知（§10.3 第 10 项）。
 
 ### 6.5 Git Graph 页
@@ -468,10 +461,10 @@ export function classify(w: number, h: number, touch: boolean): DeviceClass {
 | 光标、选区、滚动、折叠、查找条 | **L** | — | |
 | 侧栏视图切换、侧栏隐藏、手机的当前页 | **L** | — | **变更**：删除今天的 `view` / `sidebar` 两类消息（G8） |
 | 布局、主题、字号、语言、排序 | **L** | — | 设备级设置 |
-| Claude 对话内容（消息、流式回复、工具输出、卡片） | **S** | PC → 远程 | 流式 DOM 副本，排除输入框（§8） |
-| Claude 的发送、停止、批准、回答问题、选择模型或模式 | **S** | 远程 → PC | 命令消息（§8.2），每条不超过请求本身的大小加 80 B |
-| Claude 会话状态（忙碌、待批准、待回答、模型、模式） | **S** | PC → 远程 | `chatState`，有变化才推，每条不超过 300 B |
-| Claude 输入框的内容、光标、焦点 | **L** | — | K7。副本中排除该区域，焦点和光标消息也不再发送 |
+| Claude 对话内容（消息、流式回复、工具输出、卡片） | **S** | PC → 远程 | 流式 DOM 副本（~~排除输入框（§8）~~ 第五轮起整页都在副本里） |
+| Claude 的发送、停止、批准、回答问题、选择模型或模式 | 随副本 | 远程 → PC | ~~命令消息（§8.2）~~ 第五轮撤回：直接操作副本里 Claude 自己的控件，经输入回放 |
+| Claude 会话状态（忙碌、待批准、待回答、模型、模式） | 随副本 | PC → 远程 | ~~`chatState`~~ 第五轮撤回：状态就在副本页面上，随 DOM 流过线 |
+| Claude 输入框的内容、光标、焦点 | 随副本 | 双向 | ~~K7 排除~~ 第五轮撤回：原始界面的输入框在副本里，打字经回放、回显随副本 |
 | Claude 对话区的滚动 | **L** | — | |
 | Git Graph 是否打开 | **S** | 双向 | K7 |
 | Git Graph 的滚动 | **不同步** | — | K7。只有一端在看时，它的滚动驱动唯一的面板；同时看时由滚动所有者驱动（§9.2） |
@@ -504,7 +497,7 @@ export function classify(w: number, h: number, touch: boolean): DeviceClass {
 | 在文件页进入 5 个目录（每个 50 项） | ≤ 12 KB | 树展开加 DOM 副本 |
 | 打开一个 200 KB 的文件并浏览 30 秒 | ≤ 60 KB（内容只拉一次） | |
 | 在远程编辑 50 次按键并保存一次 | 下行 ≤ 1 KB；上行为保存的内容本身 | |
-| 在 Claude 输入框里打 100 个字（不发送） | **0 B** | 每个按键都有一次回放和回显 |
+| 在 Claude 输入框里打 100 个字（不发送） | ~~**0 B**~~（已随第五轮撤回作废——原始界面的打字经副本回放过线） | 每个按键都有一次回放和回显 |
 | 发送一条消息，回复流式 12 秒 / 360 token | ≤ 7 KB | 7.0 KB（ggs-remote-plan.md §22.8） |
 | Git Graph 快速滚动 2 秒 | ≤ 7 KB（沿用现有的批量折叠） | 6.8 KB（ggs-remote-plan.md §22.8） |
 | PC 窗口关闭，单个远程打开、切换、关闭 20 个文件 | 同步消息 **0 B**（门控，K11） | 每次操作约 100 B 广播 |
@@ -512,6 +505,8 @@ export function classify(w: number, h: number, touch: boolean): DeviceClass {
 | PC 打开一个文件，远程跟着打开 | ≤ 300 B 意图消息加文件内容（D 档） | |
 
 ## 8. Claude 会话桥
+
+> **已撤回**(2026-10-16,所有者第五轮指示——见顶部落地记录):远程 Claude 使用**原始界面**,本节描述的原生输入框、原生卡片与 chat/chatAck/chatState 桥不再存在,以下仅作历史记录。现状:副本包含 Claude 自己的输入框,打字与点击经副本输入回放进入 PC 的真实页面。
 
 ### 8.1 副本排除输入框
 
@@ -715,7 +710,7 @@ type ChatDown =
 | **P1 文件页与传输中心** | §6.1、§6.7；守护进程的多路径打包；iOS 能力分支 | `remote/app/files/{fileList,pathBar,multiSelect}.ts`、`remote/app/transfers.ts`、`remote/transfer.ts`、守护进程 `http` 下载路由 | `tests/remoteFiles.test.ts`（新）：行布局、进入与返回、滚动位置恢复、长按多选、多选下载打包、排序、无限滚动、隐藏 `.git`；Playwright 的 `transfer.spec.ts` 在 iPhone 与 Pixel 配置下跑通上传与下载 |
 | **P2 编辑器、更改、终端** | §6.2、§6.3、§6.6；行左滑；终端订阅与退订 | `remote/app/editor/*`、`remote/app/scm/*`、`remote/terminalKeys.ts`、`pty.rs` 的订阅 | 新增用例覆盖行手势、差异视图按形态切换、终端退订后不再收到输出、回来时补拉回滚 |
 | **S1 同步策略** | §7.0 的活跃前端、门控、在场表、追平与多远程同步；§7.2：删除 `view` / `sidebar` 消息；§7.3 保存冲突；SCM 行按需拉取；流量预算测试 | `workbenchSync.ts`、`remote/presence.ts`（新）、`workbench/lifecycle.ts`、`features/editor/dirty.ts` | `remoteWorkbenchSync.test.ts` 改写：只有一个活跃前端时零消息；三个前端（PC 加两个远程）两两同步；追平取并集、不关标签、活动标签取最近活跃方；侧栏切换不再跨端，打开与活动标签仍然跨端；保存冲突信息条的三种处理；`remoteTraffic.test.ts` 覆盖 §7.4 的每一行 |
-| **S2 Claude 会话桥** | §8 全部内容；§10.2 第 8、10 项 | `mirror/recorder.ts`（`skip`）、`claudeChatInject.ts`（`chatComposerRoot`）、`mirror/chatBridge.ts`、`remote/app/chat/*` | `tests/claudeChatInject.test.ts` 补充草稿的保存与写回；`tests/remoteChat.test.ts`（新）：发送、排队、停止、权限卡片、问题卡片、回执失败的回退、组字期间不发送；在输入框里打 100 个字的流量为 0 B |
+| **S2 Claude 会话桥** | ~~§8 全部内容；§10.2 第 8、10 项~~ **已撤回**(2026-10-16 所有者第五轮指示,见顶部落地记录——远程 Claude 使用原始界面) | — | — |
 | **S3 Git Graph 滚动所有权** | §9.2；其余沿用现有代码 | `mirror/replay.ts`、`mirror/webviewShare.ts` | 只有一端在看时，它的滚动驱动面板（回归今天的行为）；两端同时看时，非所有者的滚动被忽略，提示条出现，3 秒后所有权可以转移；PC 用户滚动时远程不会把他的画面拽走；打开、关闭、活动标签照常跨端 |
 | **L1 PC 窗口生命周期** | §17：关闭改为隐藏、远程显示或隐藏 PC 窗口的帧、列表徽标、托盘的"退出 GGS" | `workbench/boot.ts`、`remote_host.rs`、`lib.rs`、守护进程 `ws` / `control.rs` / `registry.rs` / `tray`、`web/picker.js`、`remote/windowSwitcher.ts` | Rust：`Hide` / `Show` 的处理、`visible` 在 1 秒内送达；守护进程集成测试：会话持有者才能发送显示或隐藏的帧，沙箱实例的规则不变；vitest：有远程会话连着时关闭窗口只隐藏 |
 | **L2 生命周期与插件稳定性测试** | §18 全部内容 | `scripts/probes/remote-lifecycle-check.mjs`（新）、`tests/e2e/remote/lifecycle.spec.ts`（新）、`tests/remoteLifecycle.test.ts`（新） | §18.4 的发布门槛 |

@@ -8,9 +8,6 @@ export interface WebviewFrameSource {
 	frameFor(stream: string): HTMLIFrameElement | null;
 	/** Make the stream's page exist: a webview view nobody has shown yet resolves now. */
 	ensure(stream: string): void;
-	/** The extension that owns a stream's page (a view's owner; a panel carries it in its
-	 *  key) — what decides whether a stream is a bridged extension's chat (chatBridge.ts). */
-	extOf?(stream: string): string | null;
 }
 
 let source: WebviewFrameSource | null = null;

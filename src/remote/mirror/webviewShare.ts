@@ -6,25 +6,33 @@
 // page, streaming back on the PC. The recorder and the input replay are the window
 // replica's own (recorder.ts, replay.ts), rooted at the frame's document instead of the
 // window's; a frame that reloads (`setHtml`) or is replaced (the sidebar rebuilt) restarts
-// them, and every viewer gets a fresh snapshot.
-//
-// A stream the provider bridge runs (its extension among provider_list's bridgedExtIds)
-// is more than a copy (docs/remote-client-plan.md §8): the chat BRIDGE answers the remote's
-// native composer, and the composer's subtree is SKIPPED by the recording — the PC user's
-// draft never crosses, and neither does the remote's own typing.
+// them, and every viewer gets a fresh snapshot. The page the copy shows is Claude's own,
+// composer included (2026-10-16, the owner's direction: 远程 claude 使用原始界面 — no
+// hand-written remote chat UI), so every control in it replays through the same input path.
 
 import { DomRecorder } from './recorder';
 import { InputReplayer } from './replay';
 import { VIEWER_TTL_MS, type DownMessage, type UpMessage } from './protocol';
 import { webviewFrameSource } from './webviewFrames';
-import type { ChatBridge } from './chatBridge';
 
 /** How often a watched stream re-checks its frame (a view resolving, a tab remounting). */
 const FOLLOW_MS = 1000;
 
+/** How long the last interaction holds a stream's scroll ownership (§9.2: 3 seconds). */
+const SCROLL_LEASE_MS = 3000;
+
+/** The events that count as the PC user interacting with this frame (§9.2: wheel, touch,
+ *  key). Observed, capture-phase, passive — the page's own handling is untouched. */
+const LOCAL_INPUTS = ['wheel', 'pointerdown', 'keydown'] as const;
+
+const LOCAL_OPTS = { capture: true, passive: true } as const;
+
 export interface WebviewShareDeps {
 	send(message: DownMessage): void;
 	now(): number;
+	/** Which events count as the PC user's own input on the frame (§9.2) — the browser's
+	 *  trusted ones by default; a test rig may say every event does. */
+	trusted?: (event: Event) => boolean;
 }
 
 export class WebviewShare {
@@ -34,13 +42,19 @@ export class WebviewShare {
 	private recorder: DomRecorder | null = null;
 	private replayer: InputReplayer | null = null;
 	private followTimer: ReturnType<typeof setInterval> | null = null;
-	/** The session bridge, once this stream is known to be a bridged extension's chat. */
-	private bridge: ChatBridge | null = null;
-	private bridgeAsked = false;
-	/** The composer-skip rule (§8.1) once that is known — read live by the recorder's
-	 *  options, so the rule a late answer installs is in force from its first flush. */
-	private chatSkipRule: ((node: Node) => boolean) | null = null;
+	/** The stream's scroll owner (§9.2): who last interacted — `main` (the PC user's own
+	 *  wheel, touch or key on this frame) or a viewer id — and when the lease lapses.
+	 *  Only the owner's `scroll` replays; another end's scroll is dropped until it holds. */
+	private scrollOwner: { who: string; until: number } | null = null;
+	/** Each viewer's device label, from its hello — the follow hint names the owner. */
+	private readonly viewerDevices = new Map<string, string>();
 	private readonly onLoad = () => void this.follow();
+	/** The PC user's own input on this frame: main takes the scroll ownership outright —
+	 *  the real page already scrolled natively, the lease follows reality (§9.2). Only
+	 *  trusted events count: the ones the replayer dispatches below are not. */
+	private readonly onLocalInput = (event: Event): void => {
+		if ((this.deps.trusted ?? ((e) => e.isTrusted))(event)) this.setScrollOwner('main');
+	};
 
 	constructor(
 		readonly stream: string,
@@ -56,6 +70,7 @@ export class WebviewShare {
 		switch (message.k) {
 			case 'hello':
 				this.viewers.set(message.from, this.deps.now());
+				if (message.device) this.viewerDevices.set(message.from, message.device);
 				if (known) return;
 				webviewFrameSource()?.ensure(this.stream);
 				if (this.followTimer === null) this.followTimer = setInterval(() => void this.follow(), FOLLOW_MS);
@@ -71,19 +86,56 @@ export class WebviewShare {
 			case 'bye':
 				this.drop(message.from);
 				return;
-			case 'chat':
-				if (!known) return;
-				this.viewers.set(message.from, this.deps.now());
-				this.bridge?.receive(message);
-				return;
 			default: {
 				if (!known || !this.replayer || !this.recorder) return;
 				this.viewers.set(message.from, this.deps.now());
+				if (!this.gateScroll(message)) return;
 				const text = this.replayer.handle(message);
 				if (message.k === 'copy') this.deps.send({ k: 'clip', to: message.from, w: this.stream, text: text ?? '' });
 				this.recorder.flush();
 			}
 		}
+	}
+
+	/** §9.2's scroll ownership. Every input message is an interaction (a bare hover is
+	 *  not); the last end to interact owns the stream's scrolling for SCROLL_LEASE_MS,
+	 *  renewed by its own further input. Only the owner's `scroll` and `wheel` replay —
+	 *  another end's scroll attempt is dropped (nothing transfers while the lease holds)
+	 *  and its author is told who holds it, so its copy shows the follow hint. Pointer,
+	 *  key and text from a non-owner still replay — clicking a commit row or typing is
+	 *  not scrolling — but take ownership only once the lease has lapsed. Answers whether
+	 *  the message may replay. */
+	private gateScroll(message: UpMessage): boolean {
+		if (message.k === 'ptr' && message.ev === 'hover') return true;
+		const now = this.deps.now();
+		const owner = this.scrollOwner;
+		if (owner === null || owner.until <= now || owner.who === message.from) {
+			this.setScrollOwner(message.from);
+			return true;
+		}
+		if (message.k === 'scroll' || message.k === 'wheel') {
+			this.pushOwn(message.from);
+			return false;
+		}
+		return true;
+	}
+
+	/** Take or renew the lease for `who` (`main` or a viewer id); a change of holder is
+	 *  broadcast, so every copy shows or clears its follow hint. */
+	private setScrollOwner(who: string): void {
+		const changed = this.scrollOwner?.who !== who;
+		this.scrollOwner = { who, until: this.deps.now() + SCROLL_LEASE_MS };
+		if (changed) this.pushOwn('*');
+	}
+
+	/** Name the current holder for a viewer's hint (`main` is the PC; a viewer is the
+	 *  device label its hello carried, its id when it carried none). */
+	private pushOwn(to: string): void {
+		const owner = this.scrollOwner;
+		if (!owner) return;
+		const name = owner.who === 'main' ? 'PC' : this.viewerDevices.get(owner.who) ?? owner.who;
+		const ms = Math.max(0, owner.until - this.deps.now());
+		this.deps.send({ k: 'own', to, w: this.stream, who: owner.who, name, ms });
 	}
 
 	/** Forget viewers gone silent; answers whether anyone still watches. */
@@ -96,6 +148,9 @@ export class WebviewShare {
 	private drop(viewer: string): void {
 		if (!this.viewers.delete(viewer)) return;
 		this.replayer?.forget(viewer);
+		// The holder left: the lease is vacant (the next interaction anywhere takes it);
+		// other copies' hints expire on their own timers.
+		if (this.scrollOwner?.who === viewer) this.scrollOwner = null;
 		if (this.viewers.size === 0) this.stop();
 	}
 
@@ -104,15 +159,19 @@ export class WebviewShare {
 		this.followTimer = null;
 		this.frame?.removeEventListener('load', this.onLoad);
 		this.frame = null;
+		this.wireLocalInput(null);
 		this.recorder?.stop();
 		this.recorder = null;
 		this.replayer = null;
-		this.bridge?.detach();
-		this.bridge = null;
-		// A later hello asks again: the bridged answer belongs to this doc's lifetime, not
-		// to the share's first one.
-		this.bridgeAsked = false;
 		this.doc = null;
+		this.scrollOwner = null;
+	}
+
+	private wireLocalInput(doc: Document | null): void {
+		this.doc?.removeEventListener('wheel', this.onLocalInput, LOCAL_OPTS);
+		this.doc?.removeEventListener('pointerdown', this.onLocalInput, LOCAL_OPTS);
+		this.doc?.removeEventListener('keydown', this.onLocalInput, LOCAL_OPTS);
+		if (doc) for (const type of LOCAL_INPUTS) doc.addEventListener(type, this.onLocalInput, LOCAL_OPTS);
 	}
 
 	/** Track the stream's current frame and document; a new document restarts the
@@ -130,54 +189,19 @@ export class WebviewShare {
 		} catch {
 			doc = null;
 		}
-		if (doc === this.doc) {
-			// The document is unchanged, but a bridge due since the last look may now be
-			// able to attach (the view's record landing, the provider store answering).
-			if (doc && this.bridge === null && !this.bridgeAsked) void this.ensureBridge(doc);
-			return false;
-		}
+		if (doc === this.doc) return false;
 		this.recorder?.stop();
 		this.doc = doc;
+		this.wireLocalInput(doc);
 		this.makeRecorder();
-		if (this.bridge) {
-			if (doc) this.bridge.attach(doc);
-			else this.bridge.detach();
-		} else if (doc) {
-			void this.ensureBridge(doc);
-		}
 		for (const viewer of this.viewers.keys()) this.snapshotTo(viewer);
 		return true;
 	}
 
 	private makeRecorder(): void {
 		const doc = this.doc;
-		this.recorder = doc
-			? new DomRecorder(
-				doc,
-				(ops, seq) => this.deps.send({ k: 'ops', to: '*', w: this.stream, seq, ops }),
-				{ skip: (node) => this.chatSkipRule !== null && this.chatSkipRule(node) }
-			)
-			: null;
+		this.recorder = doc ? new DomRecorder(doc, (ops, seq) => this.deps.send({ k: 'ops', to: '*', w: this.stream, seq, ops })) : null;
 		this.replayer = this.recorder && doc ? new InputReplayer(this.recorder, doc) : null;
-	}
-
-	/** Ask once whether this stream is a bridged extension's chat; when it is, install the
-	 *  composer-skip rule and the session bridge, and re-snapshot every viewer so the
-	 *  composer they already hold is replaced by its placeholder (§8.1). */
-	private async ensureBridge(doc: Document): Promise<void> {
-		if (this.bridgeAsked) return;
-		this.bridgeAsked = true;
-		const { streamIsBridgedChat, chatComposerSkipRule, ChatBridge } = await import('./chatBridge');
-		if (!(await streamIsBridgedChat(this.stream)) || this.doc !== doc) return;
-		this.chatSkipRule = chatComposerSkipRule();
-		this.bridge = new ChatBridge(this.stream, { send: (down) => this.deps.send(down) });
-		this.bridge.attach(doc);
-		// The rule is live for the recorder's next serialize; the tables a pre-rule snapshot
-		// seeded (the composer's own nodes) restart with a fresh recorder, so nothing inside
-		// the skipped subtree can emit against ids the viewers no longer hold.
-		this.recorder?.stop();
-		this.makeRecorder();
-		for (const viewer of this.viewers.keys()) this.snapshotTo(viewer);
 	}
 
 	private snapshotTo(viewer: string): void {

@@ -230,8 +230,6 @@ export class ExtensionHost {
 
 	declare webviewFrameFor: (stream: string) => HTMLIFrameElement | null ;
 
-	declare webviewExtOf: (stream: string) => string | null ;
-
 	declare ensureWebviewShown: (stream: string) => void ;
 
 	constructor() {
@@ -279,8 +277,7 @@ export class ExtensionHost {
 		if (hook('session').frontendClass() === 'main') {
 			hook('webviewStreams')?.setWebviewFrameSource({
 				frameFor: (stream) => this.webviewFrameFor(stream),
-				ensure: (stream) => this.ensureWebviewShown(stream),
-				extOf: (stream) => this.webviewExtOf(stream)
+				ensure: (stream) => this.ensureWebviewShown(stream)
 			});
 		}
 		// A provider switch restarted a bridged extension's backend (cmd_providers): the

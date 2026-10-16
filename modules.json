@@ -317,6 +317,7 @@
 			],
 			"rust": [
 				"src-tauri/src/remote_host.rs",
+				"src-tauri/src/remote_debug.rs",
 				"src-tauri/crates/ggs-remote-proto/",
 				"src-tauri/crates/ggs-config/"
 			],
@@ -324,7 +325,12 @@
 				"tests/remote.test.ts",
 				"tests/remoteResponsive.test.ts",
 				"tests/remoteMirror.test.ts",
-				"tests/remoteWorkbenchSync.test.ts"
+				"tests/remoteWorkbenchSync.test.ts",
+				"tests/remoteLayouts.test.ts",
+				"tests/remoteLifecycle.test.ts",
+				"tests/remoteFiles.test.ts",
+				"tests/remotePages.test.ts",
+				"tests/remoteTraffic.test.ts"
 			]
 		}
 	]

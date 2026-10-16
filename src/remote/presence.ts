@@ -27,9 +27,25 @@ export function currentPresence(): Presence | null {
 	return installed;
 }
 
-/** The sync's installer registers its table; `null` on detach. */
+/** The daemon's authoritative words that arrived before any table existed (a fresh
+ * remote's connect-time WINDOWS frame reaches the boot while its workbench — and with it
+ * the sync's table — is still a wire round trip away): remembered here and replayed into
+ * the table the moment one registers, so the fresh page's first catch-up already knows
+ * whether the PC window is active (§7.0.1). */
+const externalWords = new Map<string, boolean>();
+
+/** Feed the daemon's authoritative word on another frontend to the installed table,
+ * remembering it for the one that registers later. */
+export function noteExternalPresence(by: string, active: boolean): void {
+	externalWords.set(by, active);
+	installed?.noteExternal(by, active);
+}
+
+/** The sync's installer registers its table; `null` on detach. The remembered external
+ * words replay into the newcomer — the word the boot fed before the table existed. */
 export function registerPresence(instance: Presence | null): void {
 	installed = instance;
+	if (instance) for (const [by, active] of externalWords) instance.noteExternal(by, active);
 }
 
 /** A heartbeat every 60 s; a frontend whose last sign of life is older than 150 s counts

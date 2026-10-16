@@ -207,14 +207,14 @@ fn folders(app: &AppHandle) -> Vec<String> {
     app.state::<ggs_base::workspace::WorkspaceRoots>().list()
 }
 
-fn main_visible(app: &AppHandle) -> bool {
+pub(crate) fn main_visible(app: &AppHandle) -> bool {
     app.get_webview_window("main")
         .is_some_and(|w| w.is_visible().unwrap_or(false))
 }
 
 /// Whether the main window is minimized (§17.4): a third visible state beside shown and
 /// hidden, reported in the WINDOWS frames so the remotes can badge it.
-fn main_minimized(app: &AppHandle) -> bool {
+pub(crate) fn main_minimized(app: &AppHandle) -> bool {
     app.get_webview_window("main")
         .is_some_and(|w| w.is_minimized().unwrap_or(false))
 }
