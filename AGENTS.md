@@ -192,7 +192,10 @@ and the keyboard all resolve through one registry. Settings, keybindings and dis
 language are user data under `~/.ggs/`; theme and UI quality are enforced, not hoped for.
 
 - Frontend: `src/platform/commands.ts` (registry), `src/platform/keybindings.ts`, `src/platform/settings.ts` (setting
-  registry `SETTING_DEFS`), `src/workbench/settingsPanel.ts` (generated Settings dialog),
+  registry `SETTING_DEFS`), `src/workbench/settingsPanel.ts` (generated Settings dialog — near-fullscreen, flat and
+  compact since 2026-10-16: every modified row carries a reset-to-default button, a badge-counted Modified
+  pseudo-category collects them, the search box names its result count, and the enum schemas' i18n-key labels
+  translate through `t()`),
   `src/platform/i18n.ts` (`t(key)`, en / zh-cn; the string tables live in `src/platform/i18n/{en,zh-cn}.ts`, the
   English table the key set is typed against), `src/themeMetrics.ts` (WCAG contrast per theme),
   `src/uiMetrics.ts` (layout invariants)

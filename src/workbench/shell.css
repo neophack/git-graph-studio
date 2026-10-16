@@ -1012,7 +1012,9 @@ body.resizing iframe { pointer-events: none; }
 .settings-input-wide { flex: 1; width: auto; min-width: 0; max-width: 260px; }
 /* The File Associations grid: equal-width columns so the checkboxes and extension names
    line up vertically however long each name is (.c beside .patch); auto-fill keeps the
-   phantom tracks, so a short catalogue still renders full-width, tidy columns. */
+   phantom tracks, so a short catalogue still renders full-width, tidy columns. The wrapper
+   carries the width so a failed catalogue reads as one full-width message instead. */
+.settings-extlist-wrap { flex: 1; min-width: 0; }
 .settings-extlist { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 4px 12px; max-width: 560px; }
 .settings-extlist-item { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer; }
 

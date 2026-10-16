@@ -63,7 +63,10 @@ function settingRow(label: string, description: string, control: HTMLElement, mo
 function select(value: string, options: { value: string; label: string }[], onChange: (value: string) => void): HTMLSelectElement {
 	const select = el('select', 'settings-select') as HTMLSelectElement;
 	for (const option of options) {
-		const element = el('option', '', [option.label]) as HTMLOptionElement;
+		// The enum schemas carry their labels as i18n keys (`settings.linuxDmabuf.auto`); the
+		// literal labels (theme names, "12 px") pass through `t()` unchanged — an unknown
+		// key returns itself — so one path serves both.
+		const element = el('option', '', [t(option.label as 'settings.theme')]) as HTMLOptionElement;
 		element.value = option.value;
 		select.appendChild(element);
 	}
@@ -102,11 +105,19 @@ function numberInput(value: number, onChange: (value: number) => void, min: numb
 
 /** The File Associations control: one checkbox per catalogued extension, its checked
  *  state the current selection. The catalogue comes from the backend (`assoc_list_defaults`)
- *  so the platform list and the Settings dialog can never drift apart. */
+ *  so the platform list and the Settings dialog can never drift apart. The grid lives in a
+ *  wrapper so a failed or empty catalogue reads as a full-width message, not a word-broken
+ *  strip inside one 64 px grid cell. */
 function extensionListControl(): HTMLElement {
-	const grid = el('div', 'settings-extlist');
+	const wrap = el('div', 'settings-extlist-wrap');
+	const unavailable = () => wrap.appendChild(el('span', 'empty', [t('assoc.unavailable')]));
 	void assocListDefaults()
 		.then((catalog) => {
+			if (catalog.length === 0) {
+				unavailable();
+				return;
+			}
+			const grid = el('div', 'settings-extlist');
 			for (const entry of catalog) {
 				const box = el('input', 'settings-checkbox') as HTMLInputElement;
 				box.type = 'checkbox';
@@ -120,9 +131,10 @@ function extensionListControl(): HTMLElement {
 				const label = el('label', 'settings-extlist-item', [box, el('span', '', [`.${entry.ext}`])]);
 				grid.appendChild(label);
 			}
+			wrap.appendChild(grid);
 		})
-		.catch(() => grid.appendChild(el('span', 'empty', [t('assoc.unavailable')])));
-	return grid;
+		.catch(unavailable);
+	return wrap;
 }
 
 /** The control one schema entry renders. */
