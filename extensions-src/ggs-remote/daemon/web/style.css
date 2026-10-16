@@ -89,12 +89,12 @@ form button { margin-top: 10px; }
 .tabs li.active { font-weight: 600; }
 .tabs li.dirty::after { content: " ●"; color: var(--warn); }
 .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; }
-/* The recent-paths list (2026-10-12): one compact row per folder, open on click. */
+/* The recent-paths list (2026-10-12): one compact row per folder, open on click. Only the
+ * folders no window has open are listed (2026-10-16) — the rest are the window cards. */
 .recent { list-style: none; padding: 0; margin: 0; }
 .recent li { display: flex; gap: 8px; align-items: center; padding: 4px 2px; border-top: 1px solid var(--line); }
 .recent li:first-child { border-top: 0; }
 .recent .path { flex: 1; min-width: 0; font-family: var(--mono, Consolas, "Courier New", monospace); font-size: 12px; word-break: break-all; }
-.recent li.open .path { color: var(--muted); }
 .links { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); margin-top: 8px; }
 .link { text-align: center; }
 .link img { width: 190px; height: 190px; background: #fff; border: 1px solid var(--line); border-radius: 4px; }

@@ -1029,17 +1029,22 @@ async fn lang_js_follows_the_app_settings() {
     assert_eq!(pair.body, "window.ggsLang = \"zh-cn\";\n");
 }
 
-/// The window picker's folder-input row is a setting (2026-10-12): on by default, and the
-/// session the picker loads carries the state (the admin patch route itself is covered by
-/// config.rs's unit tests — this harness runs on the ephemeral port 0, which any patch
-/// would refuse).
+/// The window picker's folder-input row is a setting (2026-10-12) and is KEPT at the
+/// owner's 2026-10-16 direction — the session the picker loads carries the state, and a
+/// SPAWN frame is served again (the typed-path row above the window list). With no GGS
+/// installation known to this harness the spawn fails inside lifecycle's pick_spec — not
+/// at a blanket refusal — which is the picker's real first-run answer. The browse
+/// endpoint stays gone (§3.3 keeps that half: a session's own Open Folder is not a
+/// thing, and the typed-path row takes the path as typed, no listing needed). The admin
+/// patch route itself is covered by config.rs's unit tests — this harness runs on the
+/// ephemeral port 0, which any patch would refuse.
 #[tokio::test]
-async fn the_folder_browser_endpoint_is_gone_and_a_session_never_spawns() {
+async fn the_picker_keeps_its_folder_input_and_a_spawn_reaches_lifecycle() {
     let h = start().await;
     set_password(&h).await;
     let (cookie, csrf) = login(&h).await;
-    // §3.3's retraction: the browse endpoint left with the session's Open Folder — a
-    // session switches between the windows the PC already opened.
+    // §3.3's retraction keeps this half: the browse endpoint left with the session's
+    // Open Folder.
     let answered = http(
         h.public,
         "GET",
@@ -1049,13 +1054,29 @@ async fn the_folder_browser_endpoint_is_gone_and_a_session_never_spawns() {
     )
     .await;
     assert_eq!(answered.status, 404, "{}", answered.body);
-    // And a SPAWN frame over the browser socket is refused outright (K4).
+    // The row's own setting rides the session answer (2026-10-12).
+    let session = http(
+        h.public,
+        "GET",
+        "/api/session",
+        &[("Cookie", &cookie)],
+        None,
+    )
+    .await;
+    assert_eq!(session.status, 200);
+    assert!(
+        session.body.contains("\"folderInput\":true"),
+        "{}",
+        session.body
+    );
+    // And the SPAWN the row sends is served: no installation is known in this harness,
+    // so lifecycle itself refuses — the frame was heard, not blanket-rejected.
     let mut ws = browser(&h, &cookie, &csrf).await;
     send(
         &mut ws,
         Frame::msgpack(
             ty::SPAWN,
-            &serde_json::json!({ "folder": "C:\nope", "visible": false }),
+            &serde_json::json!({ "folder": "C:\\nope", "visible": false }),
         ),
     )
     .await;
@@ -1063,7 +1084,10 @@ async fn the_folder_browser_endpoint_is_gone_and_a_session_never_spawns() {
     let notice: serde_json::Value = notice.decode_msgpack().unwrap();
     assert_eq!(notice["kind"], "spawn-failed");
     assert!(
-        notice["message"].as_str().unwrap().contains("PC user"),
+        notice["message"]
+            .as_str()
+            .unwrap()
+            .contains("no GGS installation"),
         "{notice}"
     );
 }

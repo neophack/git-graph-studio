@@ -266,8 +266,7 @@ mod tests {
             rmp_serde::from_slice(&rmp_serde::to_vec_named(&info).unwrap()).unwrap();
         assert_eq!(value["minimized"], true);
         // An older instance's frame (no field) still decodes — false, not an error.
-        let legacy =
-            rmp_serde::to_vec_named(&serde_json::json!({ "id": "ggs-1" })).unwrap();
+        let legacy = rmp_serde::to_vec_named(&serde_json::json!({ "id": "ggs-1" })).unwrap();
         let back: InstanceInfo = rmp_serde::from_slice(&legacy).unwrap();
         assert_eq!(back.id, "ggs-1");
         assert!(!back.minimized);

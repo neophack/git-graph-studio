@@ -19,6 +19,14 @@
 			<span class="spacer"></span>
 			<button class="danger" id="sign-out" data-i18n="signOut"></button>
 		</div>
+		<div class="pw-row" id="open-row" style="margin-top:8px">
+			<input type="text" id="open-folder" data-i18n-placeholder="folderOptional" data-i18n-aria="folderOptional" autocomplete="off" spellcheck="false">
+			<button class="primary" id="open-go" data-i18n="open"></button>
+		</div>
+		<div class="pw-row" id="sandbox-row" style="margin-top:8px" hidden>
+			<button class="primary" id="sandbox-open" data-i18n="openSandbox"></button>
+			<p class="muted" style="margin:0" data-i18n="sandboxHint"></p>
+		</div>
 		<p class="muted" id="empty" hidden data-i18n="noWindows"></p>
 		<div class="windows" id="windows"></div>
 		<label class="check" style="margin-top:10px"><input type="checkbox" id="auto-enter"> <span data-i18n="autoEnter"></span></label>

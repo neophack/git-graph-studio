@@ -369,20 +369,26 @@ pub fn handle(daemon: &Arc<Daemon>, conn: &Arc<Conn>, mut frame: Frame) {
             }
         }
         ty::SPAWN => {
-            // SPAWN is the PC user's own (docs/remote-client-plan.md §3.3): the tray and
-            // the management API spawn through `lifecycle::spawn` in-process; a frame on
-            // this socket is by definition a browser session's, and a session switches
-            // between the windows the PC already opened — it never creates one (K4).
-            let _ = frame.decode_msgpack::<Spawn>();
-            notice(
-                conn,
-                Notice {
-                    message: Some(
-                        "spawning windows is the PC user's own — open one at the PC".to_owned(),
+            // The picker page's own open (kept at the owner's 2026-10-16 direction — the
+            // typed folder-path row above the window list): via_remote sandboxes the spawn
+            // when the sandbox is on (§23), and lifecycle confines the folder to the root.
+            // What K4 still bars is a WORKBENCH session opening folders or new windows —
+            // the remote app never sends this frame; only the picker does.
+            let spawn = frame.decode_msgpack::<Spawn>().unwrap_or_default();
+            let (daemon, conn) = (daemon.clone(), conn.clone());
+            tokio::spawn(async move {
+                let visible = if spawn.visible { Some(true) } else { None };
+                match crate::lifecycle::spawn(&daemon, spawn.folder, visible, true).await {
+                    Ok(instance) => conn.push(Frame::msgpack(ty::SPAWNED, &Spawned { instance })),
+                    Err(message) => notice(
+                        &conn,
+                        Notice {
+                            message: Some(message),
+                            ..Notice::kind("spawn-failed")
+                        },
                     ),
-                    ..Notice::kind("spawn-failed")
-                },
-            );
+                }
+            });
         }
         ty::INSTANCE_CLOSE => {
             let Some(close) = frame.decode_msgpack::<InstanceClose>() else {
@@ -466,9 +472,7 @@ pub fn handle(daemon: &Arc<Daemon>, conn: &Arc<Conn>, mut frame: Frame) {
                         &conn,
                         Notice {
                             instance: Some(display.instance.clone()),
-                            message: Some(
-                                "that window is not a remote session's to touch".into(),
-                            ),
+                            message: Some("that window is not a remote session's to touch".into()),
                             ..Notice::kind("display-failed")
                         },
                     );
