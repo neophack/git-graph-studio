@@ -69,8 +69,10 @@ function railMenuButton(open: () => void): HTMLButtonElement {
 }
 
 /** The rail's ‹ (the portrait tablet's back entry — the form draws no app bar, so the ‹ the
- *  phone's app bar carries rides the rail's head instead, above ☰, while a page covers the
- *  editor). The landscape phone hides it (layouts.css): its app bar carries its own ‹. */
+ *  phone's app bar carries rides the rail's foot instead, pinned beneath the destinations
+ *  while a page covers the editor — the owner's 2026-10-16 direction, 平板模式下返回按钮放
+ *  左边栏底下; the head position it first took, above ☰, went with the move). The landscape
+ *  phone hides it (layouts.css): its app bar carries its own ‹. */
 function railBackButton(): HTMLButtonElement {
 	const button = document.createElement('button');
 	button.className = 'ggs-rail-back';
@@ -104,16 +106,25 @@ function syncButtons(bar: HTMLElement, onTap: (page: PageId) => void, menu: HTML
 	const key = `${currentDeviceClass() ?? ''}#${tabs.map((tab) => `${tab.id}|${tab.label}`).join(' ')}#${images}`;
 	if (bar.dataset.tabsKey !== key) {
 		bar.dataset.tabsKey = key;
-		bar.replaceChildren(
-			...(back ? [back] : []),
-			...(menu ? [menu] : []),
-			...tabs.map((tab) =>
+		// The rail builds as two halves: a scrolling body (the ☰ and the destinations — the
+		// portrait tablet's uncapped set rolls inside it) over a pinned foot (the ‹, the
+		// owner's 2026-10-16 direction 平板模式下返回按钮放左边栏底下: the back button rides the
+		// rail's bottom, VS Code's activity bar shape, however many destinations ride above).
+		const body = document.createElement('div');
+		body.className = 'ggs-rail-body';
+		if (menu) body.appendChild(menu);
+		for (const tab of tabs) {
+			body.appendChild(
 				railButton(tab.id, tab.label, () => {
 					if (currentPage() !== tab.id) void goTo(tab.id).then(() => syncRail(bar));
 					onTap(tab.id);
 				})
-			)
-		);
+			);
+		}
+		const foot = document.createElement('div');
+		foot.className = 'ggs-rail-foot';
+		if (back) foot.appendChild(back);
+		bar.replaceChildren(body, foot);
 	}
 	syncRail(bar);
 }

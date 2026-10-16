@@ -1101,7 +1101,7 @@ type FormFactor = 'phone' | 'tablet' | 'desktop';
 | 功能（模块） | 适配内容 | 涉及文件 |
 | ------------ | -------- | -------- |
 | 文件资源管理器（3） | 行高 44 px；长按菜单；新建/重命名用底部输入框；**上传**（多文件、文件夹 `webkitdirectory`、拖放；`transfer.ts` 256 KB 分片 + 断点续传）；**下载**（单文件直接下，多选/文件夹由后端流式 zip：新增 `fs_zip_stream(paths, channel)`，复用 `zip` crate）；Git 状态颜色保留 | `explorer.ts`、`transfer.ts`、`cmd_fs.rs` |
-| Quick Open / 搜索（4、5） | 手机全屏输入页；结果虚拟列表；符号跳转、调用树、上下文窗口以页面栈导航 | `filePicker.ts`、`searchView.ts`、`callTree.ts`、`contextView.ts` |
+| Quick Open / 搜索（4、5） | 手机全屏输入页,自带 ‹ 返回头(2026-10-16:全屏下点外永远点不中、手机无 Esc——返回头即 `finish(null)`,系统返回键经 `quickInputBack.ts` 作顶层 closer 先剥它;桌面卡片隐藏该行) ;结果虚拟列表；符号跳转、调用树、上下文窗口以页面栈导航 | `filePicker.ts`、`searchView.ts`、`callTree.ts`、`contextView.ts`、`quickInput.ts`、`quickInputBack.ts` |
 | 编辑器（6） | CodeMirror 6 原生支持触屏选择；键盘出现时用 `--vvh` 收缩；编辑工具条（撤销、重做、查找、保存、Tab、缩进、注释）；查找替换改为顶部单行 | `textEditor.ts`、`findWidget.ts`、`editor.ts` |
 | 大文件查看器（7） | `src/scroll/` 自绘滚动：在 `input.ts` 增加触摸拖动与惯性（Pointer Events + 速度衰减）；滚动条触控热区 24 px | `scroll/input.ts`、`scroll/scrollbar.ts` |
 | 对比与合并（8） | 手机档左右对比自动改为行内 diff（`@codemirror/merge` 的 `unifiedMergeView`）；三方合并按冲突块卡片逐个处理 | `editor.ts`、`mergeEditor.ts` |

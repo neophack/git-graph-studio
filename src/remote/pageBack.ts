@@ -3,8 +3,9 @@
 // portrait tablet, a full-screen page — a side view (Files, Search, Changes, an extension's
 // container) or the panel — covers the editor, and until this module the only ways back were
 // the edge swipe and the destination bars. Three surfaces share this one vocabulary: the app
-// bar's leading ‹ (the phone forms), the navigation rail's head ‹ (the portrait tablet,
-// which draws no app bar), and the system back key — the page rides backStack as the BOTTOM
+// bar's leading ‹ (the phone forms), the navigation rail's foot ‹ (the portrait tablet,
+// which draws no app bar — the owner's 2026-10-16 direction, 平板模式下返回按钮放左边栏底下),
+// and the system back key — the page rides backStack as the BOTTOM
 // closer, so a back closes the page (any sheet over it peels first) before it could ever
 // leave the workbench.
 //

@@ -17,3 +17,5 @@ claude-remote-server/claude-remote-data/
 
 # Playwright per-run output (tests/e2e)
 test-results/
+# Vitest's per-run cache (results and typecheck artifacts)
+.vitest/

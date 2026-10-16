@@ -23,13 +23,14 @@ import { goWindowsPicker } from '../src/remote/windowSwitcher';
 import { setRemoteEnv } from '../src/remote/session';
 import { currentPage, editorPlaceholderShown, resetWorkbenchWatch } from '../src/remote/pages';
 import { installPageBack, pageBackAvailable, resetPageBack } from '../src/remote/pageBack';
+import { installQuickInputBack, resetQuickInputBack } from '../src/remote/quickInputBack';
 import { editableFocused, keyboardOpen } from '../src/remote/responsive';
 import { applyContributions, applyExtensionSettings, removeContributions } from '../src/features/extensions';
 import { installLongPress, LONG_PRESS_MS } from '../src/remote/gestures';
 import { createTerminalKeys } from '../src/remote/terminalKeys';
 import { TERMINAL_SEND_EVENT } from '../src/features/terminal';
 import { Panel } from '../src/workbench/panel';
-import { showContextMenu, showMenuBelow, setMenuPresenter, type MenuEntry, type MenuItem } from '../src/platform/ui';
+import { showContextMenu, showMenuBelow, setMenuPresenter, dismissQuickInput, quickInput, type MenuEntry, type MenuItem } from '../src/platform/ui';
 import { commands } from '../src/platform/commands';
 import { EditorGroup } from '../src/features/editor';
 import { closeSettingsPage, installPhoneSettingsEntry, openSettingsPage, settingsPageOpen } from '../src/remote/settingsPage';
@@ -565,11 +566,17 @@ describe('page back', () => {
 		expect(back().hidden).toBe(true);
 	});
 
-	it('the rail\'s ‹ is the portrait tablet\'s back — the form draws no app bar', async () => {
+	it('the rail\'s ‹ is the portrait tablet\'s back, pinned at the rail\'s foot — the form draws no app bar (the owner\'s 2026-10-16 direction, 平板模式下返回按钮放左边栏底下)', async () => {
 		const { sidebar } = phoneWorkbench();
 		const rail = createNavRail(() => undefined, () => undefined);
 		document.body.appendChild(rail);
 		const back = () => rail.querySelector<HTMLButtonElement>('.ggs-rail-back')!;
+		// The foot, not the head it first took: beneath every destination — the rail's last
+		// button — in its own pinned half, so the portrait tablet's uncapped set can never
+		// scroll it away.
+		expect([...rail.querySelectorAll('button')].at(-1)).toBe(back());
+		expect(back().closest('.ggs-rail-foot')).not.toBeNull();
+		expect(back().closest('.ggs-rail-body')).toBeNull();
 		expect(back().hidden).toBe(false);
 		sidebar.hidden = true;
 		await flushMutations();
@@ -599,6 +606,90 @@ describe('page back', () => {
 		await flush();
 		expect(sidebar.hidden).toBe(true);
 		expect(currentPage()).toBe('editor');
+	});
+});
+
+// The quick input's back (quickInputBack.ts + quickInput's own ‹ row): on a page-stack shell
+// the palette, Go to File and every quick pick draw as FULL-SCREEN pages — the outside click
+// the desktop card closes on can never land, and a phone has no Escape. The row is the
+// visible way out; the system back key peels the input first, before any page beneath it.
+describe('quick input back', () => {
+	afterEach(() => {
+		closeDrawer();
+		closeActionSheet();
+		resetPageBack();
+		resetQuickInputBack();
+		// Close whatever quick input a case left open, then drain any ignorePop a consumed
+		// entry left behind, and leave the phone shell.
+		dismissQuickInput();
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		leavePhone();
+	});
+
+	/** The overlays root quickInput appends into — the stand-in body carries none, so the
+	 *  first caller creates it (as index.html does). */
+	function ensureOverlays(): HTMLElement {
+		return document.getElementById('overlays') ?? Object.assign(document.body.appendChild(document.createElement('div')), { id: 'overlays' });
+	}
+
+	it('the ‹ row rides the full-screen quick input — a tap resolves it as Escape does', async () => {
+		phoneWorkbench();
+		const box = () => ensureOverlays().querySelector<HTMLElement>('.quick-input');
+		ensureOverlays();
+		const picked = quickInput({ title: 'Go to File', items: [{ label: 'src/a.ts', value: 'a' }] });
+		await flush();
+		expect(box()).not.toBeNull();
+		expect(box()!.querySelector('.qback-title')?.textContent).toBe('Go to File');
+		box()!.querySelector<HTMLButtonElement>('.qback-btn')!.click();
+		await expect(picked).resolves.toBe(null);
+		expect(box()).toBeNull();
+		// A picked row closes the same way — the closer never leaks into the next input.
+		const second = quickInput({ items: [{ label: 'x', value: 'x' }] });
+		await flush();
+		expect(dismissQuickInput()).toBe(true);
+		await expect(second).resolves.toBe(null);
+		expect(dismissQuickInput()).toBe(false);
+	});
+
+	it('the system back peels the quick input first, the page beneath it second', async () => {
+		const { sidebar } = phoneWorkbench();
+		ensureOverlays();
+		installPageBack();
+		installQuickInputBack();
+		await flushMutations();
+		// The Files page covers the editor, and a quick input covers the page.
+		const picked = quickInput({ items: [{ label: 'src/a.ts', value: 'a' }] });
+		await flushMutations();
+		expect(ensureOverlays().querySelector('.quick-input')).not.toBeNull();
+		expect(sidebar.hidden).toBe(false);
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		await flush();
+		// One back closes the quick input only — the page underneath is still showing.
+		expect(ensureOverlays().querySelector('.quick-input')).toBeNull();
+		await expect(picked).resolves.toBe(null);
+		expect(sidebar.hidden).toBe(false);
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		await flush();
+		expect(sidebar.hidden).toBe(true);
+		expect(currentPage()).toBe('editor');
+	});
+
+	it('a wide form never arms the entry — its quick input stays the outside-click card', async () => {
+		phoneWorkbench();
+		ensureOverlays();
+		document.documentElement.removeAttribute('data-page-stack');
+		installQuickInputBack();
+		const picked = quickInput({ items: [{ label: 'x', value: 'x' }] });
+		await flushMutations();
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		await flush();
+		// Nothing armed: the box survived the back — the outside click still serves there.
+		expect(ensureOverlays().querySelector('.quick-input')).not.toBeNull();
+		// The ‹ row works on every form regardless; only its VISIBILITY is the page-stack
+		// CSS's choice (hidden on the wide card).
+		ensureOverlays().querySelector<HTMLButtonElement>('.quick-input .qback-btn')!.click();
+		await expect(picked).resolves.toBe(null);
+		expect(ensureOverlays().querySelector('.quick-input')).toBeNull();
 	});
 });
 

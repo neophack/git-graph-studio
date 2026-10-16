@@ -691,6 +691,9 @@ export const en = {
 	'remote.editorToolbar.comment': 'Toggle Comment',
 	'remote.windows': 'Windows…',
 	'remote.windowsPage': 'Window Picker Page',
+	// The quick input's own back row — the full-screen form's one visible way out (shown by
+	// the remote phone shells' CSS; the desktop card keeps Esc and the outside click).
+	'quickInput.back': 'Back',
 	'remote.sheet.back': 'Back',
 	'remote.page.back': 'Back to the editor',
 	'remote.tabs.editor': 'Editor',

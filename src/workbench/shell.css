@@ -626,6 +626,10 @@ body.resizing iframe { pointer-events: none; }
 	border: 1px solid var(--vscode-widget-border); border-radius: 6px; box-shadow: 0 0 8px 2px var(--vscode-widget-shadow);
 }
 .quick-input .title { font-size: 11px; padding: 0 0 4px 2px; color: var(--vscode-descriptionForeground); }
+/* The back row is the full-screen form's own affordance (a phone has no Esc and nothing to
+   click outside the card) — the remote shell's page-stack CSS shows it; the desktop card
+   keeps Esc and the outside click, so the row stays hidden here. */
+.quick-input .qback { display: none; }
 .quick-input .input { height: 26px; }
 .quick-input .hint { font-size: 12px; padding: 4px 2px 0; color: var(--vscode-descriptionForeground); }
 .quick-input .hint.error { color: var(--vscode-errorForeground); }

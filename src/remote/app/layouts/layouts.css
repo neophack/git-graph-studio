@@ -29,18 +29,24 @@
    activity bar shape; the portrait tablet's icon-over-label form went with it); the rail
    hugs the leading edge with the safe area. */
 .ggs-nav-rail {
-	flex: none; display: flex; flex-direction: column; align-items: stretch; gap: 2px;
+	flex: none; display: flex; flex-direction: column; align-items: stretch;
 	width: calc(56px + env(safe-area-inset-left));
 	padding: calc(4px + env(safe-area-inset-top)) 4px calc(4px + env(safe-area-inset-bottom)) env(safe-area-inset-left);
 	box-sizing: border-box;
 	background: var(--vscode-activityBar-background, var(--vscode-sideBar-background));
 	border-right: 1px solid var(--vscode-activityBar-border, var(--ggs-sep, rgba(128, 128, 128, 0.25)));
 	user-select: none;
-	/* The portrait tablet's rail carries the drawer's full page set (the owner's 2026-10-16
-	   direction, 平板左轨要有搜索、插件、终端): a set taller than the rail scrolls rather than
-	   overflowing — the landscape phone's five never come close. */
+}
+/* The rail's two halves: the destinations (with the ☰) scroll — the portrait tablet carries
+   the drawer's full page set (the owner's 2026-10-16 direction, 平板左轨要有搜索、插件、终端),
+   and a set taller than the rail rolls inside the body — while the foot never moves: the ‹
+   pinned at the rail's bottom (the owner's 2026-10-16 direction, 平板模式下返回按钮放左边栏
+   底下) stays reachable however many destinations ride above it. */
+.ggs-rail-body {
+	flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; align-items: stretch; gap: 2px;
 	overflow-y: auto;
 }
+.ggs-rail-foot { flex: none; }
 .ggs-nav-rail button {
 	flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
 	min-height: 52px; padding: 4px 2px; border: 0; border-radius: 12px;
@@ -75,9 +81,15 @@
 .ggs-layout[data-layout="phone-landscape"] .ggs-nav-rail .ggs-rail-menu { display: none; }
 /* The rail's ‹ (§5.1's 层级 rule: a full-screen page over the editor pops back to it): the
    portrait tablet's own back entry — the form draws no app bar, so the ‹ the phone's app
-   bar carries rides the rail's head, above ☰, only while a page covers the editor. The
-   landscape phone's app bar carries its own ‹; its rail shows none. */
+   bar carries rides the rail's foot (the owner's 2026-10-16 direction, 平板模式下返回按钮放
+   左边栏底下), set off from the destinations by a hairline like the head ☰'s, only while a
+   page covers the editor. The landscape phone's app bar carries its own ‹; its rail shows
+   none. */
 .ggs-nav-rail .ggs-rail-back[hidden] { display: none; }
+.ggs-layout[data-layout="tablet-portrait"] .ggs-nav-rail .ggs-rail-back {
+	margin-top: 8px; padding-top: 10px;
+	border-top: 1px solid var(--vscode-activityBar-border, var(--ggs-sep, rgba(128, 128, 128, 0.25)));
+}
 .ggs-layout[data-layout="phone-landscape"] .ggs-nav-rail .ggs-rail-back { display: none; }
 
 /* ---------- Phone landscape (§5.2) ----------

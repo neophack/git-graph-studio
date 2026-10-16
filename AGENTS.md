@@ -2157,7 +2157,13 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   keyboard (`data-keyboard`) and the body follows the visual viewport, so the bars step
   aside or lift with the content. A swipe from the left edge closes a side-view page
   (`gestures.ts`'s `swipeBack`, wired in `shell.ts`), the quick input (palette, quick
-  picks) becomes a full-screen page (`remote.css`), and every file opens read-only with a
+  picks) becomes a full-screen page (`remote.css`) that carries its own ‹ back row —
+  `quickInput.ts` builds the row on every form (the desktop card hides it: Esc and the
+  outside click serve there) and answers `dismissQuickInput()`, and `quickInputBack.ts`
+  rides that close on the system back key as backStack's TOP closer while the input is
+  open on a page-stack shell (2026-10-16, the owner's direction: the full-screen form
+  left no way down — no outside to click, no Esc key, and the back key left the
+  workbench) — and every file opens read-only with a
   lock button in the app bar — one tap reconfigures that editor editable in place, the
   next locks it again (`editLock.ts`, the button in `appBar.ts`; 2026-10-12 it replaced
   the unlock bar that took a row above the editor; the compartment leads the extension list because CodeMirror's

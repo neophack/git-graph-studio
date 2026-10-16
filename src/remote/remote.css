@@ -567,6 +567,18 @@
 	display: flex; flex-direction: column; border-radius: 0; border: 0;
 }
 :root.remote-shell[data-page-stack] .quick-input .input { height: 44px; font-size: 16px; }
+/* The full-screen form's back row (quickInputBack.ts rides the same close on the system
+   back key): the card covers the window, so the outside click can never land and a phone
+   has no Escape — the ‹ is the visible way out, the title folding into the row beside it. */
+:root.remote-shell[data-page-stack] .quick-input .qback { display: flex; align-items: center; gap: 2px; flex: none; margin: 0 0 4px; }
+:root.remote-shell[data-page-stack] .quick-input .qback-btn {
+	width: 44px; height: 44px; flex: none; display: inline-flex; align-items: center; justify-content: center;
+	padding: 0; border: 0; border-radius: 12px; background: transparent; color: inherit;
+}
+:root.remote-shell[data-page-stack] .quick-input .qback-btn:active { background: var(--ggs-press); }
+:root.remote-shell[data-page-stack] .quick-input .qback-btn .codicon { font-size: 20px; }
+:root.remote-shell[data-page-stack] .quick-input .qback-title { font-size: 16px; font-weight: 600; }
+:root.remote-shell[data-page-stack] .quick-input > .title { display: none; }
 :root.remote-shell[data-page-stack] .quick-input .list { flex: 1; max-height: none; overscroll-behavior: contain; }
 :root.remote-shell[data-page-stack] .quick-input .list .row { min-height: 48px; }
 /* A text field under 16 px makes iOS zoom the page on focus. */

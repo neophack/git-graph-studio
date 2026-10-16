@@ -689,6 +689,7 @@ export const zhCn: typeof en = {
 	'remote.editorToolbar.comment': '切换注释',
 	'remote.windows': '窗口…',
 	'remote.windowsPage': '窗口选择页',
+	'quickInput.back': '返回',
 	'remote.sheet.back': '返回',
 	'remote.page.back': '返回编辑器',
 	'remote.tabs.editor': '编辑器',

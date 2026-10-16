@@ -17,6 +17,7 @@ import { installLongPress, swipeBack } from './gestures';
 import { installHasFallbacks } from './hasFallbacks';
 import { backToEditor, currentPage, onWorkbenchChange } from './pages';
 import { installPageBack } from './pageBack';
+import { installQuickInputBack } from './quickInputBack';
 import { deviceOverride, onDeviceClassChange, setDeviceOverride, type DeviceOverride } from './responsive';
 import { downloadTo, uploadInto } from '../features/explorer';
 import { goWindowsPicker, openWindowSwitcher, watchLifecycle } from './windowSwitcher';
@@ -170,13 +171,15 @@ function addSwitcherButton(): void {
 /** The one-time installs that outlive every layout: the files page and the phone Source
  *  Control page (the page-stack shells' Files and Changes destinations), the page-stack
  *  back gesture (the side bar element persists across arrangements), the page-back entry
- *  (the app bar's ‹, the rail's ‹ and the system back key ride it), the settings entry's
- *  routing, and the page marks the CSS reads. */
+ *  (the app bar's ‹, the rail's ‹ and the system back key ride it), the quick input's own
+ *  back entry (its full-screen form's ‹ row and the system back key ride that), the
+ *  settings entry's routing, and the page marks the CSS reads. */
 function installOnce(): void {
 	installFilesPage();
 	installScmPage();
 	installTerminalFollow();
 	installPageBack();
+	installQuickInputBack();
 	if (!swipeBackInstalled) {
 		const sidebar = document.getElementById('sidebar');
 		if (sidebar) {

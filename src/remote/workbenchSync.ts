@@ -34,6 +34,7 @@
 
 import { emit as tauriEmit, invoke, listen as tauriListen } from '../platform/ipc/core';
 import { hook } from '../platform/hooks';
+import { load as loadState, save as saveState } from '../platform/state';
 import { inputId, type EditorInput } from '../features/editor';
 import type { EditorPlacement } from '../features/editor/types';
 import type { ActiveEditorInfo, EditorArea } from '../features/editor';
@@ -126,6 +127,74 @@ function syncedTabInput(input: EditorInput): SyncedTabInput | null {
 function keyOf(path: string): string {
 	const key = path.replace(/\\/g, '/');
 	return /^[A-Za-z]:\//.test(key) ? key.toLowerCase() : key;
+}
+
+/* ---------- Closes that outlive a shut gate (K11 against E7, 2026-10-16) ----------
+ *
+ * A close that forms while K11's gate is shut (one active frontend — typically the PC
+ * window hidden while a phone works) crosses nothing, and nothing repairs it later: the
+ * catch-up's union never closes, so the side that missed the close keeps the tab and hands
+ * it back at every catch-up — a phone's closed files all reappear after a refresh the
+ * moment the PC window returns (远程关闭的文件，刷新后又都出来了). The closes are therefore
+ * RECORDED when they cannot cross, in this browser's own storage (a phone's scoped storage
+ * keys it per PC under a Hub) so a page refresh carries them into the next frontend, and
+ * delivered the moment the gate opens — K11's silence itself is untouched: nothing crosses
+ * while fewer than two frontends are active.
+ *
+ * An entry lives until this frontend re-opens the file (the user's newer intent), it ages
+ * out, or the record's cap drops it. A catch-up snapshot that still CLAIMS a recorded close
+ * is a stale answerer: the merge neither opens the tab back nor pushes it around, and the
+ * unsent close crosses. A genuine re-open on the other side crosses as an `open`, lands
+ * here, and clears the entry — the guard never refuses the other side's user. */
+
+/** One recorded close: the spelling to announce with, when it formed, and whether it has
+ *  crossed since (a sent close is not re-asserted — the other side's genuine re-open must
+ *  not be undone by a repeat). */
+interface DeferredCloseEntry {
+	spelling: string;
+	at: number;
+	sent: boolean;
+}
+
+interface DeferredCloseRecord {
+	files: Record<string, DeferredCloseEntry>;
+	tabs: Record<string, DeferredCloseEntry>;
+}
+
+/** The storage key of the record (platform/state prefixes it). Exported for the tests. */
+export const DEFERRED_CLOSES_KEY = 'sync.deferredCloses';
+/** How many closes the record keeps (the oldest drop off) and how long an entry lives: a
+ *  close that never met an open gate again must not haunt a later session's merges. */
+const DEFERRED_CLOSES_MAX = 40;
+const DEFERRED_CLOSES_TTL_MS = 24 * 60 * 60 * 1000;
+
+function loadDeferredCloses(): DeferredCloseRecord {
+	const raw = loadState<Partial<DeferredCloseRecord> | null>(DEFERRED_CLOSES_KEY, null);
+	const floor = Date.now() - DEFERRED_CLOSES_TTL_MS;
+	const keep = (box: Record<string, DeferredCloseEntry> | undefined): Record<string, DeferredCloseEntry> => {
+		const out: Record<string, DeferredCloseEntry> = {};
+		for (const [key, entry] of Object.entries(box ?? {})) {
+			if (entry && typeof entry.spelling === 'string' && typeof entry.at === 'number' && entry.at >= floor) {
+				out[key] = { spelling: entry.spelling, at: entry.at, sent: entry.sent === true };
+			}
+		}
+		return out;
+	};
+	return { files: keep(raw?.files), tabs: keep(raw?.tabs) };
+}
+
+function saveDeferredCloses(record: DeferredCloseRecord): void {
+	const cap = (box: Record<string, DeferredCloseEntry>): Record<string, DeferredCloseEntry> => {
+		const entries = Object.entries(box);
+		if (entries.length <= DEFERRED_CLOSES_MAX) return box;
+		entries.sort((a, b) => a[1].at - b[1].at);
+		return Object.fromEntries(entries.slice(entries.length - DEFERRED_CLOSES_MAX));
+	};
+	try {
+		saveState(DEFERRED_CLOSES_KEY, { files: cap(record.files), tabs: cap(record.tabs) });
+	} catch {
+		// Storage unavailable (private mode / quota): this page's closes defer in memory only.
+	}
 }
 
 /** The editor-area surface the sync rides on — the real `EditorArea` satisfies it
@@ -280,6 +349,28 @@ export function attachWorkbenchSync(
 	const canSend = (): boolean => live && !quiet && (presence ? presence.syncAllowed() : true);
 	const announce = (message: WorkbenchSyncMessage): void => {
 		if (canSend()) deps.send(message);
+	};
+	/** The closes that could not cross yet (a shut K11 gate), keyed like `announced`. */
+	let deferred = loadDeferredCloses();
+	/** Deliver every not-yet-crossed recorded close — the gate just opened, or a message
+	 *  from another frontend proved it open. Sent entries stay recorded (the merge guard
+	 *  reads them) but never re-cross: the other side's genuine re-open must win. */
+	const tryFlushDeferred = (): void => {
+		if (!canSend()) return;
+		let sent = false;
+		for (const [key, entry] of Object.entries(deferred.files)) {
+			if (entry.sent) continue;
+			deps.send({ by, k: 'close', path: entry.spelling });
+			deferred.files[key] = { ...entry, sent: true };
+			sent = true;
+		}
+		for (const [id, entry] of Object.entries(deferred.tabs)) {
+			if (entry.sent) continue;
+			deps.send({ by, k: 'closeTab', id: entry.spelling });
+			deferred.tabs[id] = { ...entry, sent: true };
+			sent = true;
+		}
+		if (sent) saveDeferredCloses(deferred);
 	};
 	/** Whether an announced open really landed — the editor reports a failed open as a
 	 *  notification, not a rejection, so a resolved promise proves nothing. Without this
@@ -449,17 +540,59 @@ export function attachWorkbenchSync(
 		// there already).
 		for (const id of nowTabs) if (!announcedTabs.has(id) && active?.kind === 'extpage' && active.id === id && activeKey !== `tab:${id}`) freshTabs.add(id);
 		for (const id of freshTabs) if (!nowTabs.has(id)) freshTabs.delete(id);
+		// The close intents form whether or not the gate lets them cross right now (the
+		// bookkeeping below consumes them either way): under a shut gate they are RECORDED,
+		// never lost — the union merge could not repair a lost close, only hand the tab
+		// back at the next catch-up (K11 against E7, the note above).
+		const fileCloses: [string, string][] = [];
+		for (const [key, spelling] of announced) if (!now.has(key) && !applyingOpens.has(key)) fileCloses.push([key, spelling]);
+		const tabCloses: string[] = [];
+		for (const id of announcedTabs) if (!nowTabs.has(id) && !applyingTabs.has(id)) tabCloses.push(id);
 		if (canSend()) {
 			for (const [key, path] of now) if (!announced.has(key)) deps.send({ by, k: 'open', path });
-			for (const [key, spelling] of announced) if (!now.has(key) && !applyingOpens.has(key)) deps.send({ by, k: 'close', path: spelling });
+			for (const [, spelling] of fileCloses) deps.send({ by, k: 'close', path: spelling });
 			// A diff or a file history opened here (a Source Control change clicked, a history
 			// entry): the other side opens the same tab. An extension page's tab needs no
 			// message — its create mirror opened it everywhere.
 			for (const [id, input] of synced) if (!announcedTabs.has(id)) deps.send({ by, k: 'openTab', input });
-			for (const id of announcedTabs) if (!nowTabs.has(id) && !applyingTabs.has(id)) deps.send({ by, k: 'closeTab', id });
+			for (const id of tabCloses) deps.send({ by, k: 'closeTab', id });
+		} else if (live && !quiet) {
+			// The gate is shut (K11): nothing crosses, but the closes are this user's intent —
+			// record them for the moment it opens. A local re-open meanwhile clears its entry
+			// below (the newer intent reversed it).
+			let recorded = false;
+			const at = Date.now();
+			for (const [key, spelling] of fileCloses) {
+				deferred.files[key] = { spelling, at, sent: false };
+				recorded = true;
+			}
+			for (const id of tabCloses) {
+				deferred.tabs[id] = { spelling: id, at, sent: false };
+				recorded = true;
+			}
+			if (recorded) saveDeferredCloses(deferred);
 		}
+		// A recorded close whose file is open here again was reversed by the user (or by the
+		// other side's genuine re-open crossing): the entry goes.
+		let cleared = false;
+		for (const key of now.keys()) {
+			if (deferred.files[key] !== undefined) {
+				delete deferred.files[key];
+				cleared = true;
+			}
+		}
+		for (const id of nowTabs) {
+			if (deferred.tabs[id] !== undefined) {
+				delete deferred.tabs[id];
+				cleared = true;
+			}
+		}
+		if (cleared) saveDeferredCloses(deferred);
 		announced = new Map([...now, ...[...applyingOpens].map((key) => [key, announced.get(key) ?? key] as [string, string])]);
 		announcedTabs = new Set([...nowTabs, ...applyingTabs]);
+		// The gate may have opened with this very change (a roster word arriving between two
+		// tabs changes): a recorded close never waits for the next one.
+		tryFlushDeferred();
 	};
 
 	// A file tab or an extension page taking the focus crosses as one message — the open's
@@ -538,22 +671,43 @@ export function attachWorkbenchSync(
 			for (const path of message.files) {
 				const key = keyOf(path);
 				if (haveFiles.has(key) || applyingOpens.has(key)) continue;
+				// A close this frontend recorded while the gate was shut: the answerer's
+				// snapshot is stale exactly here — do not open the tab back. The unsent close
+				// crosses below, so the two sides converge on "closed" instead of the union
+				// handing the tab back (E7).
+				if (deferred.files[key] !== undefined) continue;
 				if (!(await gateFile(path))) continue;
 				await run(() => rawOpenFile(path, { inactive: true }), { add: key, spell: path });
 			}
 			for (const input of message.tabs) {
 				const id = inputId(input);
 				if (openTabIds().has(id) || applyingTabs.has(id)) continue;
+				if (deferred.tabs[id] !== undefined) continue;
 				await run(() => openSyncedTab(input), { addTab: id });
 			}
 			// My tabs the other side lacks cross back — the union runs both ways, so the
 			// side that stayed active gains the returning frontend's work as background
-			// tabs instead of learning them one operation at a time.
+			// tabs instead of learning them one operation at a time. A recorded close is
+			// never pushed back: the tab below this entry was closed by this user (an open
+			// copy here is a restore racing the close, not a tab to hand around).
 			for (const path of editors.openFilePaths()) {
+				if (deferred.files[keyOf(path)] !== undefined) continue;
 				if (!message.files.some((theirs) => keyOf(theirs) === keyOf(path))) announce({ by, k: 'open', path, inactive: true });
 			}
 			const theirs = new Set(message.tabs.map((input) => inputId(input)));
-			for (const [id, input] of syncedTabs()) if (!theirs.has(id)) announce({ by, k: 'openTab', input });
+			for (const [id, input] of syncedTabs()) {
+				if (deferred.tabs[id] !== undefined) continue;
+				if (!theirs.has(id)) announce({ by, k: 'openTab', input });
+			}
+			// The answerer still claiming a recorded close is stale about it: the close
+			// that never crossed does so now (sent ones already had their chance — a repeat
+			// would undo the other side's genuine re-open).
+			for (const entry of Object.values(deferred.files)) {
+				if (!entry.sent) announce({ by, k: 'close', path: entry.spelling });
+			}
+			for (const entry of Object.values(deferred.tabs)) {
+				if (!entry.sent) announce({ by, k: 'closeTab', id: entry.spelling });
+			}
 			// The active tab LAST, after the union's background opens: the editor's
 			// openIntent lets only the newest open take the focus, so this one wins it. The
 			// follow runs as one remote apply (beginApply): the page hold keeps this
@@ -561,16 +715,19 @@ export function attachWorkbenchSync(
 			// background, and the reveal it is about to receive is the OTHER side's act, not
 			// this user's (K7; 2026-10-16, the owner's direction: 远程点击页面后又被替换) —
 			// and the applying guard keeps the reveal's own activation from announcing back
-			// (the answerer is already on that tab).
+			// (the answerer is already on that tab). A recorded close guards this too: the
+			// stale answerer's active tab is not followed back open.
 			const active = message.active;
 			if (active !== null) {
 				beginApply();
 				try {
 					if (active.kind === 'file') {
-						if (!editors.revealFilePath(active.path) && await gateFile(active.path)) {
-							await run(() => rawOpenFile(active.path), { add: keyOf(active.path), spell: active.path });
+						if (deferred.files[keyOf(active.path)] === undefined) {
+							if (!editors.revealFilePath(active.path) && await gateFile(active.path)) {
+								await run(() => rawOpenFile(active.path), { add: keyOf(active.path), spell: active.path });
+							}
 						}
-					} else if (active.kind === 'tab' && !editors.revealById(active.id)) {
+					} else if (active.kind === 'tab' && deferred.tabs[active.id] === undefined && !editors.revealById(active.id)) {
 						const input = message.tabs.find((entry) => inputId(entry) === active.id);
 						if (input) await run(() => openSyncedTab(input), { addTab: active.id });
 					}
@@ -595,13 +752,17 @@ export function attachWorkbenchSync(
 		}, CATCH_UP_WINDOW_MS);
 		deps.send({ by, k: 'stateRequest' });
 	};
-	presence?.onBecameActive(() => catchUp());
+	presence?.onBecameActive(() => {
+		tryFlushDeferred();
+		catchUp();
+	});
 	// The catch-up's other half (§7.0.3): a frontend that STARTED alone — its start's own
 	// catch-up skipped, the table naming no other active frontend yet (a fresh remote's
 	// roster is empty until the PC's heartbeat or a WINDOWS word lands) — asks the moment
 	// the roster first names one. The awaiting window keeps a heartbeat-seconds-later
 	// arrival from stacking a second request.
 	presence?.onRosterChange?.(() => {
+		tryFlushDeferred();
 		if (!awaitingSnapshot) catchUp();
 	});
 
@@ -680,6 +841,10 @@ export function attachWorkbenchSync(
 			live = true;
 			detachListener = deps.receive((message) => {
 				if (!message || message.by === by) return;
+				// A message from another frontend proves the gate is open: a recorded close
+				// that has been waiting for exactly this moment crosses before anything of
+				// this message's own doing can.
+				tryFlushDeferred();
 				// The catch-up protocol rides ahead of the operations: the designated
 				// responder answers a request, the joiner merges the snapshot addressed to
 				// it. Both are presence-shaped, not operations — the open-boundary gate
@@ -732,7 +897,10 @@ export function attachWorkbenchSync(
 			});
 			// A frontend that is already active when the channel opens catches up at once
 			// (§7.0.3's "a new remote connecting"): the boot's own wiring is done, its
-			// restored tabs are its baseline, and the merge only adds.
+			// restored tabs are its baseline, and the merge only adds. The recorded closes
+			// cross FIRST — the answerer's snapshot is then built without the tabs they
+			// closed, and the merge has nothing stale to guard.
+			tryFlushDeferred();
 			if (presence?.isActive()) catchUp();
 		},
 		localOnly(local: boolean): void {
@@ -752,6 +920,9 @@ export function attachWorkbenchSync(
 			pendingCloses.clear();
 			pendingTabCloses.clear();
 			freshTabs.clear();
+			// The restore never announces, so a close it raced stays recorded — with the
+			// gate open it crosses now.
+			tryFlushDeferred();
 		},
 		noteWindowHidden(): void {
 			// The presence table is told by its owner (installWorkbenchSync wires it in);

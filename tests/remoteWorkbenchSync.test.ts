@@ -19,7 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EditorArea } from '../src/features/editor';
 import { Workbench } from '../src/workbench';
 import { commands } from '../src/platform/commands';
-import { attachWorkbenchSync, WORKBENCH_SYNC_EVENT, type SyncedEditorArea, type SyncPresence, type SyncedWorkbench, type WorkbenchSyncMessage } from '../src/remote/workbenchSync';
+import { attachWorkbenchSync, DEFERRED_CLOSES_KEY, WORKBENCH_SYNC_EVENT, type SyncedEditorArea, type SyncPresence, type SyncedWorkbench, type WorkbenchSyncMessage } from '../src/remote/workbenchSync';
 import { currentPresence } from '../src/remote/presence';
 import { setRemoteEnv } from '../src/remote/session';
 import { provideHook, hook } from '../src/platform/hooks';
@@ -845,6 +845,136 @@ describe('the presence gate (§7.0, K11)', () => {
 		expect(a.activePath()).toBe(NOTES);
 		expect(pc.activePath()).toBe(NOTES);
 		expect(channel.sent.filter((m) => m.k === 'active')).toEqual([{ by: 'remote/2', k: 'active', path: NOTES }]);
+	});
+});
+
+/* ---------- Closes that outlive the shut gate (K11 against E7, 2026-10-16) ----------
+ *
+ * A close formed while the gate is shut crosses nothing (K11), but is recorded — in this
+ * browser's storage, so even a page refresh carries it — and crosses the moment the gate
+ * opens again. Without it, the side that missed the close kept the tab and every catch-up
+ * handed it back: 远程关闭的文件，刷新后又都出来了. */
+describe('closes under a shut gate survive it (K11 vs E7)', () => {
+	beforeEach(() => {
+		localStorage.removeItem('ggstudio.' + DEFERRED_CLOSES_KEY);
+	});
+	afterEach(() => {
+		localStorage.removeItem('ggstudio.' + DEFERRED_CLOSES_KEY);
+	});
+
+	const deferredRecord = (): { files: string[]; tabs: string[] } => {
+		const raw = localStorage.getItem('ggstudio.' + DEFERRED_CLOSES_KEY);
+		const parsed = raw === null ? null : (JSON.parse(raw) as { files: Record<string, unknown>; tabs: Record<string, unknown> });
+		return {
+			files: Object.keys(parsed?.files ?? {}),
+			tabs: Object.keys(parsed?.tabs ?? {})
+		};
+	};
+
+	it('a close that formed under the shut gate crosses when the gate reopens — and the catch-up never resurrects it', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const phone = fakeWorkbench();
+		const pcPresence = fakePresence(2);
+		const phonePresence = fakePresence(2);
+		attachWorkbenchSync(pc, channel.deps, 'main', { presence: pcPresence });
+		attachWorkbenchSync(phone, channel.deps, 'remote/1', { presence: phonePresence });
+		await pc.editors.openFile(NOTES);
+		await pc.editors.openFile(README);
+		expect(phone.tabs()).toEqual([NOTES, README]);
+		channel.sent.length = 0;
+		// The PC window hides (close-to-hide, §17): one active frontend, the gate shuts —
+		// the phone's closes cross nothing (K11's promise), but are recorded.
+		pcPresence.count = 1;
+		phonePresence.count = 1;
+		phone.close(NOTES);
+		phone.close(README);
+		expect(channel.sent).toEqual([]);
+		expect(deferredRecord().files.length).toBe(2);
+		// The PC window returns: the phone's roster learns it, the gate opens, the recorded
+		// closes cross BEFORE any catch-up can answer with the stale tabs.
+		pcPresence.count = 2;
+		phonePresence.count = 2;
+		phonePresence.roster();
+		await until(() => pc.tabs().length === 0);
+		// The catch-ups that follow (both sides became active) see consistent state: nothing
+		// reopens anywhere.
+		await until(() => channel.sent.some((m) => m.k === 'stateSnapshot'));
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(phone.tabs()).toEqual([]);
+		expect(pc.tabs()).toEqual([]);
+	});
+
+	it('a refresh carries the record: a fresh frontend flushes it and a stale snapshot cannot hand the tabs back (E7)', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const pcPresence = fakePresence(2);
+		const phone1Presence = fakePresence(2);
+		attachWorkbenchSync(pc, channel.deps, 'main', { presence: pcPresence });
+		const phone1 = fakeWorkbench();
+		const phone1Attached = attachWorkbenchSync(phone1, channel.deps, 'remote/1', { presence: phone1Presence });
+		await pc.editors.openFile(NOTES);
+		await pc.editors.openFile(README);
+		expect(phone1.tabs()).toEqual([NOTES, README]);
+		// The PC hides; the phone closes both — nothing crosses; the page then dies before
+		// the PC ever returns (the user refreshed later).
+		pcPresence.count = 1;
+		phone1Presence.count = 1;
+		phone1.close(NOTES);
+		phone1.close(README);
+		expect(channel.sent.filter((m) => m.k === 'close')).toEqual([]);
+		phone1Attached.detach();
+		expect(pc.tabs()).toEqual([NOTES, README]);
+		// The PC returns and the phone refreshes: a FRESH frontend with no tabs, its
+		// persisted record along. The flush at start crosses the closes before its catch-up
+		// — and even a raced stale answer cannot reopen what the record guards.
+		pcPresence.count = 2;
+		const phone2 = fakeWorkbench();
+		attachWorkbenchSync(phone2, channel.deps, 'remote/2', { presence: fakePresence(2) });
+		await until(() => pc.tabs().length === 0);
+		await until(() => channel.sent.some((m) => m.k === 'stateSnapshot'));
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(phone2.tabs()).toEqual([]);
+		// The guard also holds when the stale answer races the closes outright: a snapshot
+		// claiming the closed files is not obeyed.
+		channel.deps.send({
+			by: 'main',
+			k: 'stateSnapshot',
+			to: 'remote/2',
+			files: [NOTES, README],
+			tabs: [],
+			extTabs: [],
+			active: { kind: 'file', path: NOTES }
+		});
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(phone2.tabs()).toEqual([]);
+	});
+
+	it('the other side\'s genuine re-open still lands and clears the record', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const phone = fakeWorkbench();
+		const pcPresence = fakePresence(2);
+		const phonePresence = fakePresence(2);
+		attachWorkbenchSync(pc, channel.deps, 'main', { presence: pcPresence });
+		attachWorkbenchSync(phone, channel.deps, 'remote/1', { presence: phonePresence });
+		await pc.editors.openFile(NOTES);
+		channel.sent.length = 0;
+		pcPresence.count = 1;
+		phonePresence.count = 1;
+		phone.close(NOTES);
+		expect(deferredRecord().files.length).toBe(1);
+		// The PC returns and the user there reopens the file: the flush delivers the phone's
+		// close, the PC's own open is the newer intent, and the phone follows it — the
+		// record is gone and nothing fights.
+		pcPresence.count = 2;
+		phonePresence.count = 2;
+		phonePresence.roster();
+		await until(() => pc.tabs().length === 0);
+		await pc.editors.openFile(NOTES);
+		await until(() => phone.tabs().includes(NOTES));
+		expect(pc.tabs()).toEqual([NOTES]);
+		expect(deferredRecord().files.length).toBe(0);
 	});
 });
 

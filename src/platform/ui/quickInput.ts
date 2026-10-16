@@ -2,6 +2,7 @@
 
 import { el } from './dom';
 import { icon } from './codicon';
+import { t } from '../i18n';
 
 export interface QuickPickItem {
 	label: string;
@@ -39,6 +40,21 @@ export interface QuickInputOptions {
 }
 
 const MAX_PICK_ROWS = 60;
+
+/** The quick inputs open right now, newest last — the phone's back key closes the newest
+ *  first, exactly the input Escape would have reached. */
+const openClosers: (() => void)[] = [];
+
+/** Close the topmost open quick input as though Escape closed it. Answers whether one was
+ *  open — the phone's system-back entry rides this (the remote shell's quickInputBack.ts):
+ *  the full-screen form covers the window, so there is no outside to click and no Esc key;
+ *  the back key is the one way down. */
+export function dismissQuickInput(): boolean {
+	const close = openClosers.pop();
+	if (!close) return false;
+	close();
+	return true;
+}
 
 function isQuickPickSource(items: QuickPickItem[] | ((query: string) => QuickPickItem[]) | QuickPickSource): items is QuickPickSource {
 	return typeof items === 'object' && items !== null && 'query' in items;
@@ -78,6 +94,17 @@ export function quickInput(options: QuickInputOptions): Promise<string | null> {
 		input.spellcheck = false;
 		input.setAttribute('aria-label', options.title ?? options.placeholder ?? 'Input');
 		const hint = el('div', 'hint');
+		// The back row: the remote phone shells draw the quick input as a full-screen page,
+		// where the outside click can never land and no Escape key exists — the ‹ is the one
+		// visible way out and finishes with null, exactly Escape. The desktop card hides the
+		// row (shell.css): Esc and clicking outside serve there.
+		const back = el('button', 'qback-btn');
+		back.type = 'button';
+		back.title = t('quickInput.back');
+		back.setAttribute('aria-label', t('quickInput.back'));
+		back.appendChild(icon('chevron-left'));
+		back.addEventListener('click', () => finish(null));
+		box.appendChild(el('div', 'qback', [back, options.title ? el('span', 'qback-title', [options.title]) : null]));
 		if (options.title) box.appendChild(el('div', 'title', [options.title]));
 		box.appendChild(input);
 		box.appendChild(hint);
@@ -89,10 +116,14 @@ export function quickInput(options: QuickInputOptions): Promise<string | null> {
 
 		const finish = (value: string | null) => {
 			generation += 1; // cancels any source scan still streaming into the list
+			const closer = openClosers.indexOf(finishNull);
+			if (closer !== -1) openClosers.splice(closer, 1);
 			box.remove();
 			document.removeEventListener('mousedown', onOutside, true);
 			resolve(value);
 		};
+		const finishNull = () => finish(null);
+		openClosers.push(finishNull);
 		const onOutside = (event: MouseEvent) => {
 			if (!box.contains(event.target as Node)) finish(null);
 		};
