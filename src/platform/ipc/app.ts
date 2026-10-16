@@ -28,6 +28,12 @@ export interface BootContext {
 	reloaded: boolean;
 	opened: OpenedRoot | null;
 	openedFor: string | null;
+	/** The window's current roots with per-root repo-ness — the restore set a frontend
+	 *  that did not open them itself applies (a remote session, whose `open_folder` the
+	 *  path gate refuses). */
+	roots: OpenedRoot[];
+	/** The `.ggs-workspace` file the current roots came from, if any. */
+	workspaceFile: string | null;
 }
 
 export const bootStage = (stage: string, pageMs: number) => invoke<void>('boot_stage', { stage, pageMs });

@@ -1,27 +1,21 @@
-// The remote shell (docs/ggs-remote-plan.md §11): what the remote workbench adds around the
-// unchanged desktop workbench once it has booted — the window switcher in the title bar and
-// the command palette, long-press menus as an action sheet, upload / download commands, the
-// Data Saver hint and the traffic readout; and on a phone the whole app chrome: the app bar,
-// the bottom navigation, the drawer, the editor page's empty state and editing row, and the
-// terminal's key row, all driven by one page model (pages.ts). Layout itself is CSS
-// (remote.css), keyed on the form factor responsive.ts writes. The PC's own window installs
-// the same shell while a phone watches it (the replica's phone mode, mirror/phoneShell.ts):
-// what only a browser session can do — the window switcher, transfers, the traffic readout,
-// Data Saver — stays with the browser.
+// The remote shell (docs/ggs-remote-plan.md §11, docs/remote-client-plan.md §5): what the
+// remote workbench adds around the unchanged workbench core once it has booted — the remote
+// vocabulary of commands (the window switcher, the transfers, the traffic readout, Data
+// Saver), long-press menus as an action sheet, and the LAYOUT HOST: the five form factors'
+// arrangements (remote/app/layouts/) that adopt the workbench frame's own elements plus the
+// phone chrome (the app bar, the bottom navigation, the rail) inside one persistent frame
+// root. Layout itself is CSS (remote.css + layouts.css), keyed on the markers responsive.ts
+// and the host keep on <html>. The PC's own window installs the same shell while a phone
+// watches it: what only a browser session can do — the window switcher, transfers, the
+// traffic readout, Data Saver — stays with the browser.
 import { commands } from '../platform/commands';
 import { formatBytes, notify } from '../platform/ui';
 import { t, tf } from '../platform/i18n';
-import { currentWorkbench } from '../workbench';
 import { installActionSheet } from './actionSheet';
-import { createAppBar } from './appBar';
-import { createBottomTabs } from './bottomTabs';
-import { createEditorAccessory } from './editorAccessory';
-import { createEditorEmptyState, openEditorActions, openEditorsSheet } from './editorSwitcher';
 import { installLongPress, swipeBack } from './gestures';
-import { closeDrawer, openDrawer } from './navDrawer';
+import { installHasFallbacks } from './hasFallbacks';
 import { backToEditor, currentPage, onWorkbenchChange } from './pages';
-import { formFactor, onFormFactorChange } from './responsive';
-import { createTerminalKeys } from './terminalKeys';
+import { onDeviceClassChange } from './responsive';
 import { downloadTo, uploadInto } from '../features/explorer';
 import { openWindowSwitcher, watchLifecycle } from './windowSwitcher';
 import { connectionLooksSlow, dataSaverPreferred, setDataSaver } from './dataSaver';
@@ -29,6 +23,10 @@ import { remoteEnv } from './session';
 import { installPhoneSettingsEntry } from './settingsPage';
 import { remoteHostStatus } from '../platform/ipc/remote';
 import { modeUrl } from './mirror/uiMode';
+import { pageStackOfClass } from './app/deviceClass';
+import { installLayoutHost } from './app/layouts/host';
+import { installFilesPage } from './app/files/filesPage';
+import { installTerminalFollow } from './terminalFollow';
 
 async function firstFolder(): Promise<string | null> {
 	try {
@@ -41,11 +39,15 @@ async function firstFolder(): Promise<string | null> {
 
 function registerCommands(): void {
 	if (!remoteEnv()) return;
-	commands.register({ id: 'remote.switchWindow', title: t('remote.windows'), category: 'Remote', run: () => openWindowSwitcher() });
+	// The remote shell's own vocabulary (§3.2): visible only in the remote profile — the
+	// desktop app's palette and menus never list the browser's commands.
+	const remoteOnly = { profiles: ['remote'] as const };
+	commands.register({ ...remoteOnly, id: 'remote.switchWindow', title: t('remote.windows'), category: 'Remote', run: () => openWindowSwitcher() });
 	// Back from this page's own workbench to the PC window's live copy (§22.5), pinned so the
 	// auto rule does not hand a phone straight back here while the PC shows the window.
-	commands.register({ id: 'remote.liveView', title: t('remote.liveView'), category: 'Remote', run: () => location.replace(modeUrl(location.href, 'mirror')) });
+	commands.register({ ...remoteOnly, id: 'remote.liveView', title: t('remote.liveView'), category: 'Remote', run: () => location.replace(modeUrl(location.href, 'mirror')) });
 	commands.register({
+		...remoteOnly,
 		id: 'remote.uploadFiles',
 		title: t('transfer.upload'),
 		category: 'Remote',
@@ -56,6 +58,7 @@ function registerCommands(): void {
 		}
 	});
 	commands.register({
+		...remoteOnly,
 		id: 'remote.uploadFolder',
 		title: t('transfer.uploadFolder'),
 		category: 'Remote',
@@ -66,6 +69,7 @@ function registerCommands(): void {
 		}
 	});
 	commands.register({
+		...remoteOnly,
 		id: 'remote.download',
 		title: t('transfer.download'),
 		category: 'Remote',
@@ -75,13 +79,9 @@ function registerCommands(): void {
 			await downloadTo(active);
 		}
 	});
+	commands.register({ ...remoteOnly, id: 'remote.toggleDataSaver', title: t('setting.remote.dataSaver'), category: 'Remote', run: () => setDataSaver(!document.documentElement.hasAttribute('data-data-saver')) });
 	commands.register({
-		id: 'remote.toggleDataSaver',
-		title: t('setting.remote.dataSaver'),
-		category: 'Remote',
-		run: () => setDataSaver(!document.documentElement.hasAttribute('data-data-saver'))
-	});
-	commands.register({
+		...remoteOnly,
 		id: 'remote.traffic',
 		title: tf('remote.traffic', '…', '…'),
 		category: 'Remote',
@@ -108,50 +108,21 @@ function addSwitcherButton(): void {
 	(center ?? titlebar).appendChild(button);
 }
 
-/** Create a piece of phone chrome once, then show it only on the phone. */
-function phonePart(selector: string, create: () => HTMLElement, place: (element: HTMLElement) => void, phone: boolean): void {
-	let element = document.querySelector(selector) as HTMLElement | null;
-	if (phone && !element) {
-		element = create();
-		place(element);
-	}
-	if (element) element.hidden = !phone;
-}
-
-function placePhoneChrome(): void {
-	const phone = formFactor() === 'phone';
-	const menus = () => currentWorkbench?.titleBar.menuDefinitions() ?? [];
-	// The app bar takes the title bar's row (the title bar stays in the DOM, CSS-hidden: the
-	// workbench keeps filling it, and the tablet and desktop forms show it).
-	phonePart('.ggs-appbar', () => createAppBar({ openDrawer: () => openDrawer(menus), openEditors: openEditorsSheet, editorActions: openEditorActions }), (bar) => document.getElementById('titlebar')?.before(bar), phone);
-	// In the body's own column under the workbench: the editing row, then the navigation —
-	// in flow rather than fixed, so a raised keyboard (the body follows the visual viewport)
-	// lifts both with the content instead of covering them.
-	phonePart('.ggs-bottom-tabs', () => createBottomTabs((page) => {
-		if (page === 'editor') openEditorsSheet();
-	}), (bar) => document.getElementById('statusbar')?.after(bar), phone);
-	phonePart('.ggs-editor-accessory', createEditorAccessory, (row) => document.querySelector('.ggs-bottom-tabs')?.before(row), phone);
-	phonePart('.ggs-editor-empty', createEditorEmptyState, (pane) => document.getElementById('editorPart')?.appendChild(pane), phone);
-	const panel = document.getElementById('panel');
-	if (panel) phonePart('.ggs-terminal-keys', createTerminalKeys, (keys) => panel.appendChild(keys), phone);
-	if (!phone) closeDrawer();
-	// Settings on a phone is the phone's own page (settingsPage.ts), whichever entry asked —
-	// the drawer's row, the palette, an extension's `workbench.action.openSettings`.
-	installPhoneSettingsEntry(phone);
-	// The full-screen side view's back gesture (§11.2): a swipe from the left edge returns
-	// to the editor, the way every phone app's back navigation works. One binding for the
-	// workbench's lifetime — the sidebar element itself persists across view switches.
+/** The one-time installs that outlive every layout: the files page (the page-stack
+ *  shells' Files destination), the page-stack back gesture (the side bar element persists
+ *  across arrangements), the settings entry's routing, and the page marks the CSS reads. */
+function installOnce(): void {
+	installFilesPage();
+	installTerminalFollow();
 	if (!swipeBackInstalled) {
 		const sidebar = document.getElementById('sidebar');
 		if (sidebar) {
 			swipeBackInstalled = true;
 			swipeBack(sidebar, () => {
-				if (formFactor() === 'phone' && !sidebar.hidden) backToEditor();
+				if (document.documentElement.hasAttribute('data-page-stack') && !sidebar.hidden) backToEditor();
 			});
 		}
 	}
-	// The page on <html>, for the few rules that differ per page (the terminal's key row
-	// shows on the Terminal view only).
 	if (!pageMarked) {
 		pageMarked = true;
 		const mark = () => {
@@ -162,27 +133,29 @@ function placePhoneChrome(): void {
 		mark();
 		onWorkbenchChange(mark);
 	}
+	// Settings on a page-stack shell is the phone's own page (settingsPage.ts), whichever
+	// entry asked — the drawer's row, the palette, an extension's openSettings. The routing
+	// follows the form: every device-class change re-points it.
+	installPhoneSettingsEntry(document.documentElement.hasAttribute('data-page-stack'));
+	onDeviceClassChange((device) => installPhoneSettingsEntry(pageStackOfClass(device)));
 }
 
 let swipeBackInstalled = false;
 let pageMarked = false;
 
-/** Re-place the phone chrome for the current form factor (the replica's phone mode turning
- *  off — no form-factor change fires once the responsive watch has stopped). */
-export function refreshPhoneChrome(): void {
-	placePhoneChrome();
-}
-
-/** Wait for the workbench's first frame (the title bar is filled), then install. */
+/** Wait for the workbench's first frame (the title bar is filled), then install: the layout
+ *  host adopts the frame from wherever the settled device class says this viewport is. */
 export function installRemoteShell(): void {
 	registerCommands();
 	installActionSheet();
 	installLongPress(document);
+	installHasFallbacks();
 	watchLifecycle();
 	if (remoteEnv()) setDataSaver(dataSaverPreferred());
 	const ready = () => {
 		addSwitcherButton();
-		placePhoneChrome();
+		installOnce();
+		installLayoutHost();
 	};
 	const observer = new MutationObserver(() => {
 		if (document.querySelector('#titlebar .titlebar-center')) {
@@ -192,7 +165,6 @@ export function installRemoteShell(): void {
 	});
 	if (document.querySelector('#titlebar .titlebar-center')) ready();
 	else observer.observe(document.body, { childList: true, subtree: true });
-	onFormFactorChange(() => placePhoneChrome());
 	if (connectionLooksSlow() && !document.documentElement.hasAttribute('data-data-saver')) {
 		notify('info', t('remote.dataSaver.suggest'), [{ label: t('remote.dataSaver.enable'), run: () => setDataSaver(true) }]);
 	}

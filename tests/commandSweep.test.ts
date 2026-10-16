@@ -14,6 +14,7 @@ import { bookmarksFor } from '../src/features/editor';
 import * as state from '../src/platform/state';
 import { backend } from './tauriMock';
 import { installRemoteRound, uninstallRemoteRound } from './remoteRound';
+import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
 import { click, DefaultingHandlers, flush, key, menuItem, menuLabels, notifications, texts, until, workbenchShell } from './helpers';
 
 
@@ -36,7 +37,7 @@ beforeEach(async () => {
 	workbench?.dispose();
 	backend.reset();
 	backend.handlers = new DefaultingHandlers([
-		['boot_context', () => ({ file: null, actions: [], repo: REPO })],
+		['boot_context', () => ({ file: null, actions: [], repo: REPO, roots: [{ root: REPO, isRepo: true }], workspaceFile: null })],
 		['open_folder', ({ path }) => ({ root: path, isRepo: true })],
 		['boot_stage', () => null],
 		['list_dir', () => [{ name: 'notes.txt', path: NOTES, isDir: false, size: 12 }, { name: 'README.md', path: README, isDir: false, size: 4 }]],
@@ -82,7 +83,10 @@ beforeEach(async () => {
 		['graph_request', ({ message }) => ({ command: (message as { command: string }).command, error: null, errors: [null], commits: [] })]
 	] as [string, (args: Record<string, unknown>) => unknown][]);
 	(window as unknown as { markdownIt: unknown }).markdownIt = { render: (text: string) => `<p>${text}</p>` };
-	if (remoteRound) await installRemoteRound(remoteRound);
+	if (remoteRound) {
+		await installRemoteRound(remoteRound);
+		installRemoteSessionHooks();
+	}
 	workbench = new Workbench();
 	await workbench.boot();
 	await flush(10);

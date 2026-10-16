@@ -5,10 +5,24 @@
 <html lang="en" class="vscode-dark">
 <head>
 	<meta charset="UTF-8" />
-	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+	<!-- §4.3: the layout viewport resizes under the soft keyboard where the browser
+	     honours `interactive-widget` (Android Chrome 108+); `visualViewport` covers the
+	     rest. `maximum-scale` is deliberately gone — pinch-zoom is a remote right. -->
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
 	<meta name="theme-color" content="#1f1f1f" />
 	<title>Git Graph Studio — Remote</title>
 	<link id="theme-css" rel="stylesheet" href="/theme/dark-modern.css" />
+	<script>
+		/* The C-floor gate (docs/remote-client-plan.md §10.3): browsers without even these
+		   cannot run the app — redirect before any module loads. Feature checks only, no
+		   UA sniffing. */
+		(function () {
+			try {
+				if (typeof WebSocket === 'undefined' || typeof Promise.allSettled !== 'function' || typeof structuredClone !== 'function')
+					location.replace('./unsupported.html');
+			} catch (e) { /* an engine this old may not even parse far enough to matter */ }
+		})();
+	</script>
 	<style>
 		/* Paints before any module loads, so the window is never an empty dark rectangle.
 		   Removed by the Workbench constructor once the shell's first frame is up.

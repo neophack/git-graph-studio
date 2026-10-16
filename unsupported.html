@@ -1,0 +1,38 @@
+<!doctype html>
+<!-- The C-level page (docs/remote-client-plan.md §10.3): remote.html's inline script
+     sends a browser here when even the C-floor APIs are missing — a WebSocket, a
+     Promise.allSettled, a structuredClone. Self-contained: no modules, no theme fetch,
+     readable on whatever engine landed here. -->
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Git Graph Studio — browser too old</title>
+	<style>
+		body {
+			margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+			background: #0a0f16; color: #d8e4ef;
+			font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 15px; line-height: 1.6;
+		}
+		.card { max-width: 480px; padding: 32px 28px; }
+		h1 { font-size: 19px; margin: 0 0 12px; }
+		p { margin: 0 0 10px; color: #9db2c6; }
+		code { font-family: ui-monospace, Consolas, monospace; color: #d8e4ef; background: #14202c; padding: 1px 6px; border-radius: 4px; }
+		ul { margin: 0; padding-left: 20px; color: #9db2c6; }
+	</style>
+</head>
+<body>
+	<div class="card">
+		<h1>This browser is too old for Git Graph Studio Remote</h1>
+		<p>此浏览器版本过低，无法使用 Git Graph Studio 远程界面。</p>
+		<p>The remote workbench needs at least one of:</p>
+		<ul>
+			<li>Chrome / Edge 103 or newer</li>
+			<li>Safari 16.4 or newer (iOS / iPadOS 16.4+)</li>
+			<li>Firefox 115 ESR or newer</li>
+		</ul>
+		<p>Update the browser, or open the page in one of the above.</p>
+		<p>请升级浏览器，或在上述浏览器中打开此页面。</p>
+	</div>
+</body>
+</html>

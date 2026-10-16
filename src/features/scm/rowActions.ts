@@ -6,9 +6,16 @@ import type { DiffRequest } from '../editor/types';
 import { fileIcon, fileIconColor } from '../../platform/fileIcons';
 import type { ScmChange } from '../../platform/ipc/scm';
 import { t, tf, trText } from '../../platform/i18n';
-import { actionButton, basename, confirmDialog, el, icon, showContextMenu, toPosix } from '../../platform/ui/index';
+import { actionButton, basename, confirmDialog, el, icon, showContextMenu, swipeReveal, toPosix, type RevealAction } from '../../platform/ui/index';
 import { LETTER_TITLE, ScmRow, SubRepoState, letterOf } from './view';
 import type { ScmGroup, SourceControlView } from './view';
+
+/** The page-stack shells (the phone orientations and the portrait tablet,
+ *  docs/remote-client-plan.md §5.1–§5.3): their change rows carry the swipe-left gesture —
+ *  the marker responsive.ts keeps on <html>; a desktop build carries neither. */
+function pageStackShell(): boolean {
+	return typeof document !== 'undefined' && document.documentElement.hasAttribute('data-page-stack');
+}
 
 /** The rowActions concern of SourceControlView — assigned onto the prototype by the module facade. */
 export const rowActionsMethods: ThisType<SourceControlView> = {
@@ -161,6 +168,24 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 			}
 			showContextMenu(event.clientX, event.clientY, entries);
 		});
+		// The page-stack shells' row gesture (§6.3): a swipe left uncovers the row's own
+		// stage / unstage verb and — on the unstaged group — the discard, the same handlers
+		// the hover buttons and the context menu run (a discard keeps its own confirm).
+		// A re-render drops the rows whole; the gesture's own listeners ride the row.
+		if (pageStackShell()) {
+			const swipe: RevealAction[] = [];
+			if (key === 'changes') {
+				swipe.push(
+					{ icon: 'discard', label: 'Discard Changes', danger: true, run: () => void this.discardFiles(this.targetsFor(key, file, ['changes'])) },
+					{ icon: 'add', label: 'Stage Changes', run: () => void this.run('git_stage', { paths: this.targetsFor(key, file, ['merge', 'changes']).map((f) => f.path) }) }
+				);
+			} else if (key === 'merge') {
+				swipe.push({ icon: 'add', label: 'Stage Changes (Mark Resolved)', run: () => void this.run('git_stage', { paths: this.targetsFor(key, file, ['merge', 'changes']).map((f) => f.path) }) });
+			} else {
+				swipe.push({ icon: 'remove', label: 'Unstage Changes', run: () => void this.run('git_unstage', { paths: this.targetsFor(key, file, ['staged']).map((f) => f.path) }) });
+			}
+			swipeReveal(row, swipe);
+		}
 		return row;
 	},
 

@@ -147,9 +147,48 @@ export function frameMsgpack<T = unknown>(frame: Frame): T {
 	return decodeMsgpack(frame.payload) as T;
 }
 
-/** Whether the browser can speak compressed frames (§11.5: probe, never sniff the UA). */
+/** Whether the browser can speak compressed frames. With the fflate fallback below the
+ *  answer is yes on every supported browser (§10.1's floor), so HELLO's `caps.deflate`
+ *  advertises it unconditionally — the codec picks the platform streams when present and
+ *  the fallback bundle otherwise (C0, §10.2 item 1). */
 export function canDeflate(): boolean {
-	return typeof CompressionStream === 'function' && typeof DecompressionStream === 'function';
+	return true;
+}
+
+/** One payload codec: the platform's `CompressionStream('deflate-raw')` when it exists
+ *  (Chrome 103+, Firefox 113+, Safari 16.4+), else a lazily imported fflate (~8 KB gz) —
+ *  fflate's `deflate`/`inflate` are raw DEFLATE with no zlib wrapper, byte-compatible with
+ *  the streams' 'deflate-raw', so both sides of any pair cross-decode (the C0 acceptance
+ *  test pins that). */
+interface PayloadCodec {
+	deflate(data: Uint8Array): Promise<Uint8Array>;
+	inflate(data: Uint8Array): Promise<Uint8Array>;
+}
+
+const nativeCodec: PayloadCodec | null =
+	typeof CompressionStream === 'function' && typeof DecompressionStream === 'function'
+		? {
+			async deflate(data) {
+				return pump(new CompressionStream('deflate-raw' as CompressionFormat), data);
+			},
+			async inflate(data) {
+				return pump(new DecompressionStream('deflate-raw' as CompressionFormat), data);
+			}
+		}
+		: null;
+
+let fallbackCodec: Promise<PayloadCodec> | null = null;
+
+function codec(): Promise<PayloadCodec> {
+	if (nativeCodec) return Promise.resolve(nativeCodec);
+	return (fallbackCodec ??= import('fflate').then((fflate) => ({
+		async deflate(data) {
+			return fflate.deflateSync(data);
+		},
+		async inflate(data) {
+			return fflate.inflateSync(data);
+		}
+	})));
 }
 
 async function pump(stream: CompressionStream | DecompressionStream, data: Uint8Array): Promise<Uint8Array> {
@@ -174,14 +213,14 @@ async function pump(stream: CompressionStream | DecompressionStream, data: Uint8
 
 export async function inflate(frame: Frame): Promise<Frame> {
 	if (!(frame.flags & FLAG.COMPRESSED)) return frame;
-	const payload = await pump(new DecompressionStream('deflate-raw' as CompressionFormat), frame.payload);
+	const payload = await (await codec()).inflate(frame.payload);
 	return { ...frame, flags: frame.flags & ~FLAG.COMPRESSED, payload };
 }
 
 /** Compress a frame's payload when it pays (§6.1): above the threshold, JSON / MessagePack. */
 export async function deflate(frame: Frame): Promise<Frame> {
-	if (frame.payload.length <= COMPRESS_THRESHOLD || encOf(frame) === Enc.Raw || !canDeflate()) return frame;
-	const payload = await pump(new CompressionStream('deflate-raw' as CompressionFormat), frame.payload);
+	if (frame.payload.length <= COMPRESS_THRESHOLD || encOf(frame) === Enc.Raw) return frame;
+	const payload = await (await codec()).deflate(frame.payload);
 	if (payload.length >= frame.payload.length) return frame;
 	return { ...frame, flags: frame.flags | FLAG.COMPRESSED, payload };
 }

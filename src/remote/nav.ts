@@ -12,11 +12,13 @@
 // top level, and a heavier import here would weigh down the first-paint chunk.
 import { commands } from '../platform/commands';
 
-/** Whether this is the remote shell on its phone form factor. */
+/** Whether this is a page-stack shell (docs/remote-client-plan.md §5.1–§5.3): the phone
+ *  orientations and the portrait tablet, whose side bar and panel are full-screen pages
+ *  laid over the editor. */
 export function phoneShell(): boolean {
 	if (typeof document === 'undefined') return false;
 	const root = document.documentElement;
-	return root.hasAttribute('data-remote-shell') && root.dataset['formFactor'] === 'phone';
+	return root.hasAttribute('data-remote-shell') && root.hasAttribute('data-page-stack');
 }
 
 /** Whether the phone shell currently shows its full-screen side view. */

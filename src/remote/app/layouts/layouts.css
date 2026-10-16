@@ -1,0 +1,274 @@
+/* The five layouts' frame (docs/remote-client-plan.md §5, A2): the layout host's one frame
+   root (.ggs-layout) fills the body; inside it, each arrangement (.ggs-arrange, stamped
+   with its data-layout by the layout module that built it) places the persistent parts and
+   this sheet sizes the chrome per form. The page-stack shells (both phone orientations and
+   the portrait tablet) inherit remote.css's page-stack block through <html data-page-stack>;
+   only what DIFFERS between the five lives here. Sizes are §12.1's table. */
+
+/* ---------- The frame and the arrangement slots ---------- */
+.ggs-layout { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.ggs-arrange { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.ggs-arrange-row { flex-direction: row; }
+.ggs-arrange-main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+
+/* ---------- Which chrome each arrangement shows ----------
+   Every part is always in the DOM; the layouts park what they do not show, and these rules
+   keep the parked chrome out of sight. The terminal key row is touch chrome too (§6.6):
+   the desktop form's panel shows none. */
+.ggs-layout:not([data-layout="phone-portrait"]):not([data-layout="phone-landscape"]) .ggs-appbar,
+.ggs-layout:not([data-layout="phone-portrait"]) .ggs-bottom-tabs,
+.ggs-layout:not([data-layout="phone-landscape"]):not([data-layout="tablet-portrait"]) .ggs-nav-rail,
+.ggs-layout[data-layout="tablet-landscape"] .ggs-editor-accessory,
+.ggs-layout[data-layout="desktop"] .ggs-editor-accessory,
+.ggs-layout[data-layout="desktop"] .ggs-terminal-keys { display: none !important; }
+
+/* ---------- The navigation rail (§5.2 at 56 px icon-only, §5.3 at 72 px with labels) ----------
+   The bottom navigation's vocabulary stood upright: the same buttons, the same badges, the
+   pills on their side. A landscape phone's rail hugs the leading edge with the safe area;
+   the portrait tablet's is wider and shows the label under the icon. */
+.ggs-nav-rail {
+	flex: none; display: flex; flex-direction: column; align-items: stretch; gap: 2px;
+	width: calc(56px + env(safe-area-inset-left));
+	padding: calc(4px + env(safe-area-inset-top)) 4px calc(4px + env(safe-area-inset-bottom)) env(safe-area-inset-left);
+	box-sizing: border-box;
+	background: var(--vscode-activityBar-background, var(--vscode-sideBar-background));
+	border-right: 1px solid var(--vscode-activityBar-border, var(--ggs-sep, rgba(128, 128, 128, 0.25)));
+	user-select: none;
+}
+.ggs-layout[data-layout="tablet-portrait"] .ggs-nav-rail { width: calc(72px + env(safe-area-inset-left)); }
+.ggs-nav-rail button {
+	flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+	min-height: 52px; padding: 4px 2px; border: 0; border-radius: 12px;
+	background: transparent; color: var(--vscode-activityBar-inactiveForeground, var(--vscode-foreground));
+}
+.ggs-nav-rail button .pill {
+	position: relative; display: inline-flex; align-items: center; justify-content: center;
+	width: 32px; height: 32px; border-radius: 999px;
+}
+.ggs-nav-rail button .codicon { font-size: 20px; }
+.ggs-nav-rail button .ext-icon { width: 20px; height: 20px; object-fit: contain; }
+.ggs-nav-rail button:active .pill { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
+.ggs-nav-rail button.active { color: var(--vscode-activityBar-foreground, var(--vscode-foreground)); }
+.ggs-nav-rail button.active .pill { background: var(--vscode-list-inactiveSelectionBackground, rgba(128, 128, 128, 0.15)); }
+.ggs-nav-rail .label {
+	display: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+	font-size: 11px; line-height: 14px;
+}
+.ggs-layout[data-layout="tablet-portrait"] .ggs-nav-rail .label { display: block; }
+.ggs-nav-rail .badge {
+	position: absolute; top: -2px; right: -6px; min-width: 16px; height: 16px; padding: 0 4px;
+	box-sizing: border-box; border-radius: 999px;
+	background: var(--vscode-activityBarBadge-background, #0078d4); color: var(--vscode-activityBarBadge-foreground, #fff);
+	font-size: 10px; font-weight: 600; line-height: 16px; text-align: center;
+}
+.ggs-nav-rail .badge[hidden] { display: none; }
+.ggs-nav-rail .badge.dirty { background: var(--ggs-dirty, #e2c08d); color: #1f1f1f; }
+
+/* ---------- Phone landscape (§5.2) ----------
+   Height is the scarce side (360–430 px): the app bar compresses to a 40 px top bar and the
+   rail replaces the bottom navigation; the content column keeps the full height. */
+.ggs-layout[data-layout="phone-landscape"] { --ggs-appbar-h: 40px; }
+.ggs-layout[data-layout="phone-landscape"] .ggs-appbar-btn { width: 40px; height: 36px; border-radius: 10px; }
+.ggs-layout[data-layout="phone-landscape"] .ggs-appbar-heading { height: 36px; }
+.ggs-layout[data-layout="phone-landscape"] .ggs-appbar-heading .title { font-size: 15px; line-height: 19px; }
+
+/* ---------- Tablet portrait (§5.3) ----------
+   A page-stack shell (remote.css's block, through <html data-page-stack>) beside the 72 px
+   rail. The tablet drawer's shadow does not belong on a full-screen page. */
+.ggs-layout[data-layout="tablet-portrait"] #sidebar:not([hidden]) { box-shadow: none; }
+
+/* ---------- Tablet landscape (§5.4) ----------
+   The workbench's own frame in three columns: the activity bar widened to a 72 px rail with
+   the label under each icon (the labels are tabletLandscape.ts's own chrome), the side bar
+   as a 320 px collapsible main column (the sash still drags it), the editor area as the
+   detail. No title bar — the frame's own drawing has none; the menus ride the views. */
+.ggs-layout[data-layout="tablet-landscape"] #titlebar { display: none !important; }
+.ggs-layout[data-layout="tablet-landscape"] #activitybar { width: 72px; }
+.ggs-layout[data-layout="tablet-landscape"] #activitybar .activity-item {
+	flex-direction: column; gap: 2px; justify-content: center; height: 60px;
+}
+.ggs-layout[data-layout="tablet-landscape"] #activitybar .rail-label {
+	max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+	font-size: 11px; line-height: 14px; color: inherit; opacity: 0.85;
+}
+/* The side bar is a static column again, not the portrait tablet's drawer. */
+.ggs-layout[data-layout="tablet-landscape"] #sidebar:not([hidden]) {
+	position: static; width: min(320px, 34vw) !important; box-shadow: none;
+}
+
+/* ---------- The desktop browser's remote indicator (§5.5) ----------
+   The status bar's leftmost item: `>< GGS: <workspace>` in the remote item's own colour. */
+.ggs-indicator-remote {
+	display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+	background: var(--vscode-statusBarItem-remoteBackground, #0085d9);
+	color: var(--vscode-statusBarItem-remoteForeground, #ffffff);
+}
+.ggs-indicator-remote .remote-mark { font-weight: 700; letter-spacing: 0.04em; }
+.ggs-indicator-remote .remote-name { max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- The files page (§6.1, P1) ----------
+   Mounted into the explorer's sidebar view: the page-stack shells show it and hide the
+   classic tree; the wide forms keep the tree and hide the page. MT-manager rows: 60 px on
+   a portrait phone, 52 elsewhere (§12.1), the whole row one tap target. */
+:root[data-page-stack] .ggs-files-host > .sidebar-title,
+:root[data-page-stack] .ggs-files-host > .view-pane { display: none !important; }
+.ggs-files-page { display: none; }
+:root[data-page-stack] .ggs-files-page {
+	flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
+}
+.ggs-files-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+
+/* The path bar (§6.1): root chip + one chip per level, horizontally scrollable. */
+.ggs-path-bar {
+	flex: none; display: flex; align-items: center; gap: 2px;
+	height: 40px; padding: 0 max(4px, env(safe-area-inset-right)) 0 max(4px, env(safe-area-inset-left));
+	border-bottom: 1px solid var(--ggs-sep, rgba(128, 128, 128, 0.25));
+	background: var(--vscode-sideBar-background, transparent);
+}
+.ggs-path-track {
+	flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 2px;
+	overflow-x: auto; scrollbar-width: none;
+}
+.ggs-path-track::-webkit-scrollbar { display: none; }
+.ggs-path-chip {
+	flex: none; display: inline-flex; align-items: center; gap: 4px;
+	height: 32px; padding: 0 10px; border: 0; border-radius: 8px;
+	background: transparent; color: var(--vscode-foreground);
+	font-size: 13px; white-space: nowrap;
+}
+.ggs-path-chip:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
+.ggs-path-chip.home .codicon { font-size: 16px; color: var(--ggs-accent, var(--vscode-focusBorder)); }
+.ggs-path-siblings {
+	flex: none; width: 36px; height: 32px; display: inline-flex; align-items: center; justify-content: center;
+	border: 0; border-radius: 8px; background: transparent; color: var(--vscode-descriptionForeground);
+}
+.ggs-path-siblings:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
+
+/* The toolbar: the filter box and the sort button. */
+.ggs-files-toolbar {
+	flex: none; display: flex; align-items: center; gap: 6px; padding: 6px max(8px, env(safe-area-inset-right)) 6px max(8px, env(safe-area-inset-left));
+	border-bottom: 1px solid var(--ggs-sep, rgba(128, 128, 128, 0.25));
+}
+.ggs-files-filter {
+	flex: 1 1 auto; min-width: 0; height: 36px; padding: 0 10px; border-radius: 8px;
+	border: 1px solid var(--vscode-input-border, transparent);
+	background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+	font-size: 16px; /* iOS never zooms (§10.2 item 6) */
+}
+.ggs-files-toolbtn {
+	flex: none; width: 36px; height: 36px; display: inline-flex; align-items: center; justify-content: center;
+	border: 0; border-radius: 8px; background: transparent; color: var(--vscode-foreground);
+}
+.ggs-files-toolbtn:active { background: var(--ggs-press, rgba(128, 128, 128, 0.2)); }
+
+/* The rows (§12.1's heights): two lines, the git letter at the right edge, the folder's ›. */
+.ggs-file-list { display: block; }
+.ggs-file-row {
+	display: flex; align-items: center; gap: 10px;
+	min-height: 60px; padding: 4px max(12px, env(safe-area-inset-right)) 4px max(12px, env(safe-area-inset-left));
+	user-select: none; -webkit-touch-callout: none;
+	border-bottom: 1px solid color-mix(in srgb, var(--ggs-sep, rgba(128, 128, 128, 0.25)) 45%, transparent);
+}
+[data-layout="phone-landscape"] .ggs-file-row,
+[data-layout="tablet-portrait"] .ggs-file-row,
+[data-layout="tablet-landscape"] .ggs-file-row { min-height: 52px; }
+.ggs-file-row:active { background: var(--ggs-row-active, var(--vscode-list-hoverBackground)); }
+.ggs-file-row .check { display: none; flex: none; width: 24px; align-items: center; justify-content: center; }
+.ggs-file-row.selectable .check { display: inline-flex; }
+.ggs-file-row.selectable .check input { width: 20px; height: 20px; accent-color: var(--ggs-accent, var(--vscode-focusBorder)); }
+.ggs-file-row .row-icon { flex: none; display: inline-flex; width: 32px; height: 32px; align-items: center; justify-content: center; }
+.ggs-file-row .row-icon .codicon { font-size: 24px; }
+[data-layout="phone-landscape"] .ggs-file-row .row-icon,
+[data-layout="tablet-portrait"] .ggs-file-row .row-icon { width: 28px; height: 28px; }
+[data-layout="phone-landscape"] .ggs-file-row .row-icon .codicon,
+[data-layout="tablet-portrait"] .ggs-file-row .row-icon .codicon { font-size: 21px; }
+.ggs-file-row .lines { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.ggs-file-row .l1 { font-size: 16px; line-height: 21px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ggs-file-row .l2 { font-size: 12px; line-height: 16px; color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ggs-file-row .status { flex: none; font-size: 12px; font-weight: 600; font-family: ui-monospace, monospace; }
+.ggs-file-row .status.mod { color: var(--vscode-gitDecoration-modifiedResourceForeground, #e2c08d); }
+.ggs-file-row .status.add { color: var(--vscode-gitDecoration-addedResourceForeground, #81b88b); }
+.ggs-file-row .status.del { color: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39); }
+.ggs-file-row .status.untracked { color: var(--vscode-gitDecoration-untrackedResourceForeground, #73c991); }
+.ggs-file-row .chev { flex: none; color: var(--vscode-descriptionForeground); font-size: 18px; }
+.ggs-file-sentinel { min-height: 48px; display: flex; align-items: center; justify-content: center; }
+.ggs-file-sentinel .hint { font-size: 12px; color: var(--vscode-descriptionForeground); }
+.ggs-file-empty { padding: 32px 16px; text-align: center; color: var(--vscode-descriptionForeground); font-size: 14px; }
+.ggs-rename-input, .ggs-name-input {
+	width: 100%; height: 40px; padding: 0 10px; box-sizing: border-box; border-radius: 8px;
+	border: 1px solid var(--vscode-input-border, transparent);
+	background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+	font-size: 16px;
+}
+.ggs-name-body { display: flex; flex-direction: column; gap: 10px; padding: 4px 0 8px; }
+.ggs-name-buttons { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* The multi-select bars (§6.1): the count bar takes the toolbar's row, the actions ride
+   the bottom. */
+.ggs-select-bar {
+	flex: none; display: flex; align-items: center; gap: 8px;
+	padding: 6px max(8px, env(safe-area-inset-right)) 6px max(12px, env(safe-area-inset-left));
+	border-bottom: 1px solid var(--ggs-sep, rgba(128, 128, 128, 0.25));
+	background: var(--vscode-list-activeSelectionBackground, rgba(128, 128, 128, 0.18));
+}
+.ggs-select-bar .count { flex: 1 1 auto; font-size: 14px; font-weight: 600; color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground)); }
+.ggs-select-actions {
+	display: none; flex: none; gap: 4px; padding: 6px max(8px, env(safe-area-inset-right)) 6px max(8px, env(safe-area-inset-left));
+	padding-bottom: calc(6px + env(safe-area-inset-bottom));
+	border-top: 1px solid var(--ggs-sep, rgba(128, 128, 128, 0.25));
+	background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+}
+.ggs-select-actions:not(:empty) { display: flex; }
+.ggs-select-btn {
+	flex: 1 1 0; min-height: 44px; padding: 0 10px; border-radius: 10px;
+	border: 1px solid var(--vscode-input-border, transparent);
+	background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+	font-size: 13px;
+}
+.ggs-select-btn:disabled { opacity: 0.45; }
+.ggs-select-btn.primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: transparent; }
+
+/* The floating action button (§6.1): the + over the list's bottom corner, shown while
+   the page-stack shell's Files page is the page on screen. */
+.ggs-files-fab {
+	display: none; position: absolute; right: max(16px, env(safe-area-inset-right)); bottom: calc(16px + env(safe-area-inset-bottom));
+	width: 56px; height: 56px; border-radius: 18px; border: 0; z-index: 30;
+	background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+	box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+	align-items: center; justify-content: center;
+}
+.ggs-files-fab .codicon { font-size: 22px; }
+:root[data-page-stack] #sidebar:not([hidden]) .ggs-files-fab { display: inline-flex; }
+.ggs-files-host { position: relative; }
+
+/* ---------- The swipe-revealed row actions (§6.3, platform/ui/swipe.ts) ----------
+   The strip lives in the row's parent (the host), pinned under the row's box at its
+   trailing edge; the ROW translates, its own opaque background sliding with it and
+   uncovering the strip. */
+.ggs-swipe-host { position: relative; }
+.ggs-swipe-row { position: relative; z-index: 1; touch-action: pan-y; background: var(--vscode-sideBar-background, inherit); }
+.ggs-swipe-row.revealed { background: var(--vscode-list-hoverBackground, var(--vscode-sideBar-background)); }
+.ggs-swipe-actions {
+	position: absolute; top: 0; right: 0; bottom: auto; z-index: 0;
+	display: flex; align-items: stretch;
+}
+.ggs-swipe-actions button {
+	flex: none; width: 56px; display: inline-flex; align-items: center; justify-content: center;
+	border: 0; background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+	font-size: 18px;
+}
+.ggs-swipe-actions button + button { border-left: 1px solid rgba(255, 255, 255, 0.18); }
+.ggs-swipe-actions button.danger { background: var(--vscode-statusBarItem-errorBackground, #c74e39); color: var(--vscode-statusBarItem-errorForeground, #fff); }
+.ggs-swipe-actions button:active { filter: brightness(1.15); }
+
+/* ---------- The Changes page's rows (§6.3) ----------
+   On the page-stack shells the change row is two lines — the name over the directory,
+   the letter at the right edge (§12.1's heights) — and the commit box rides sticky at the
+   top of the scrolled view. */
+:root[data-page-stack] .view .row .label-block { flex-direction: column; align-items: flex-start; gap: 0; min-width: 0; }
+:root[data-page-stack] .view .row .label-block .description { font-size: 12px; line-height: 15px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:root[data-page-stack] .view .row .label-block .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+:root[data-page-stack] #sidebar .scm-input { position: sticky; top: 0; z-index: 5; background: var(--vscode-sideBar-background, inherit); }
+:root[data-page-stack] #sidebar .pane-header .actions { visibility: visible; opacity: 1; }
+

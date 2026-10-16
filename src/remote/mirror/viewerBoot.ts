@@ -2,9 +2,9 @@
 // boot.ts, it shows the PC window's live copy — nothing of the workbench runs in the
 // browser. Hello on arrival and every few seconds (the PC forgets a silent viewer), bye on
 // leaving; a reload is a new hello and a new snapshot, and the PC never restarts anything.
-// When the copy cannot be this page's UI (§22.5, uiMode.ts) — a phone, and the PC user puts
-// the window on screen, or another viewer owns it in the other form factor — the page
-// switches to its own workbench; the bar's button does the same on request.
+// The copy is the desktop window at its own desktop shell (docs/remote-client-plan.md §11:
+// the phone-shell path is gone — a phone runs its own workbench); this mode is the explicit
+// `?mirror=1`, and the bar's button leaves it for the own workbench on request.
 
 import { showBanner } from '../banner';
 import { setLocale, t } from '../../platform/i18n';
@@ -12,7 +12,7 @@ import type { Attached, Transport } from '../transport';
 import { HELLO_EVERY_MS, MIRROR_DOWN, MIRROR_UP, type DownMessage, type UpPayload } from './protocol';
 import { MirrorViewer } from './viewer';
 import { ViewerInput } from './viewerInput';
-import { isPhoneWidth, modeUrl, type ModeRequest } from './uiMode';
+import { modeUrl } from './uiMode';
 
 // Deliberately not platform/ui/dom's `el`: this page runs no workbench (the comment
 // above), and its call shape is the page's own — a text third argument, not a children
@@ -30,7 +30,7 @@ function allowZoom(): void {
 	meta?.setAttribute('content', 'width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content');
 }
 
-export function bootMirrorViewer(transport: Transport, attached: Attached, basePath: string, request: ModeRequest = 'auto'): void {
+export function bootMirrorViewer(transport: Transport, attached: Attached, basePath: string): void {
 	if (/zh/i.test(navigator.language)) setLocale('zh-cn');
 	// The replica's own transfer surface (upload progress, outcome notices): the workbench's
 	// toasts belong to a workbench this page never runs. Lazy — it drags transfer.ts.
@@ -72,13 +72,6 @@ export function bootMirrorViewer(transport: Transport, attached: Attached, baseP
 		send({ k: 'bye' });
 		location.replace(modeUrl(location.href, 'frontend'));
 	};
-	const phone = () => isPhoneWidth(stage.clientWidth || window.innerWidth);
-	// An explicit `?mirror=1` keeps the copy whatever happens on the PC.
-	if (request === 'auto') {
-		transport.onWindows((list) => {
-			if (phone() && list.find((info) => info.id === attached.instance)?.visible === true) ownUi();
-		});
-	}
 
 	const bar = el('div', 'mirror-bar');
 	const keyboard = el('button', 'mirror-bar-button', t('remote.mirror.keyboard'));
@@ -97,10 +90,6 @@ export function bootMirrorViewer(transport: Transport, attached: Attached, baseP
 
 	transport.listen(MIRROR_DOWN, (event) => {
 		const message = event.payload as DownMessage;
-		if (message?.k === 'own') {
-			if (message.to === from && request === 'auto') ownUi();
-			return;
-		}
 		viewer.receive(message);
 	});
 	hello();

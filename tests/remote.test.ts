@@ -11,6 +11,7 @@ import {
 	CHANNEL_PREFIX,
 	decodeFrames,
 	decodeRawInvoke,
+	deflate,
 	Enc,
 	encodeFrame,
 	encodeFrames,
@@ -20,6 +21,7 @@ import {
 	frameJson,
 	frameMsgpack,
 	frameText,
+	inflate,
 	jsonFrame,
 	makeFrame,
 	msgpackFrame,
@@ -107,6 +109,25 @@ describe('frame codec', () => {
 			// Uncompressed vectors re-encode to the very same bytes.
 			if (!frames.some((f) => f.flags & FLAG.COMPRESSED)) expect(Buffer.from(encodeFrames(frames)).toString('hex'), v.name).toBe(v.hex);
 		}
+	});
+
+	it('compresses through the fflate fallback and cross-decodes with an independent deflate-raw (C0)', async () => {
+		// jsdom carries no CompressionStream, so the codec under test IS the fflate fallback
+		// (§10.2 item 1); Node's zlib stands in for the daemon's own deflate-raw. A browser
+		// without the platform streams still exchanges compressed frames with one that has
+		// them — both directions of the pair are pinned here.
+		const { deflateRawSync, inflateRawSync } = await import('node:zlib');
+		const payload = new TextEncoder().encode(`{"k":"chat","text":"${'a streaming reply long enough to cross the compression threshold. '}"}`.repeat(8));
+		const frame = await deflate(makeFrame(T.EVENT, Enc.Json, payload));
+		expect(frame.flags & FLAG.COMPRESSED, 'payload above the threshold compresses').toBeTruthy();
+		expect(new Uint8Array(inflateRawSync(frame.payload)), 'fflate → zlib').toEqual(payload);
+		const round = await inflate(frame);
+		expect(round.flags & FLAG.COMPRESSED).toBeFalsy();
+		expect(round.payload, 'fflate → fflate').toEqual(payload);
+		const fromZlib = await inflate({ ...frame, payload: new Uint8Array(deflateRawSync(payload)) });
+		expect(fromZlib.payload, 'zlib → fflate').toEqual(payload);
+		// The threshold rule itself is unchanged: tiny payloads never pay the header.
+		expect((await deflate(makeFrame(T.PING, Enc.Json, new Uint8Array(8)))).flags & FLAG.COMPRESSED).toBeFalsy();
 	});
 
 	it('rejects malformed headers', () => {
@@ -436,23 +457,18 @@ describe('relay engine', () => {
 			expect(invoke).not.toHaveBeenCalledWith('read_file', expect.anything(), expect.anything());
 		}
 
-		// Opening the SAME root again (the boot's idempotent reopen) passes; a NEW root
-		// is what the refusal is for.
-		sent.length = 0;
-		invoke.mockClear();
-		relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'open_folder', a: { path: root } }, 1, 0, 7)));
-		await new Promise((r) => setTimeout(r, 10));
-		expect(answer()).toBeUndefined();
-		expect(invoke).toHaveBeenCalledWith('open_folder', { path: root }, expect.anything());
-
-		sent.length = 0;
-		invoke.mockClear();
-		relay.receive(
-			encodeFrame(jsonFrame(T.INVOKE, { c: 'open_folder', a: { path: outside } }, 1, 0, 7))
-		);
-		await new Promise((r) => setTimeout(r, 10));
-		expect(answer()).toBeTruthy();
-		expect(invoke).not.toHaveBeenCalledWith('open_folder', expect.anything(), expect.anything());
+		// open_folder is the desktop's own outright (R0, docs/remote-client-plan.md §3.3):
+		// a session's roots arrive with ATTACH and boot_context, never through its own
+		// invoke — even the idempotent same-root reopen is refused, and the machine-level
+		// integrations with it.
+		for (const command of ['open_folder', 'app_new_instance', 'settings_write', 'providers_shell_refresh']) {
+			sent.length = 0;
+			invoke.mockClear();
+			relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: command, a: { path: root } }, 1, 0, 7)));
+			await new Promise((r) => setTimeout(r, 10));
+			expect(answer(), command).toBeTruthy();
+			expect(invoke).not.toHaveBeenCalledWith(command, expect.anything(), expect.anything());
+		}
 	});
 
 	/** The symlink-proof half (§23.4's follow-up): a repository entry that is really a
@@ -653,7 +669,7 @@ describe('remote helpers', () => {
 		expect(withModifier('x', null)).toBe('x');
 	});
 
-	it('lists the windows with summaries and the new-window entry', () => {
+	it('lists the windows with summaries — and no new-window entry (a session never spawns)', () => {
 		const items = switcherItems(
 			[
 				{ id: 'a', title: 'repo', folders: ['/r'], version: '1', visible: true, remoteSessions: 1, startedAt: 0, state: 'ok', summary: { tabs: [{ path: '/r/a.rs', dirty: true, active: true }], dirty: 1, terminals: 2, scmChanges: 3 } },
@@ -661,7 +677,7 @@ describe('remote helpers', () => {
 			],
 			'a'
 		);
-		expect(items.map((i) => i.value)).toEqual(['w:a', 'w:b', '\u0000new']);
+		expect(items.map((i) => i.value)).toEqual(['w:a', 'w:b']);
 		expect(items[0].detail).toContain('/r/a.rs');
 		expect(items[1].icon).toBe('warning');
 	});
@@ -927,20 +943,6 @@ describe('Open Folder on the PC (remote-ui-redesign-plan §P0)', () => {
 		expect(document.getElementById('notifications')!.textContent).toContain('no such folder');
 	});
 
-	it('the daemon source asks api/browse under the base path and words its refusals', async () => {
-		const { daemonFolderSource } = await import('../src/remote/folderBrowser');
-		const urls: string[] = [];
-		vi.stubGlobal('fetch', async (url: URL) => {
-			urls.push(String(url));
-			return new Response(JSON.stringify({ error: 'folder-input-off' }), { status: 403 });
-		});
-		try {
-			await expect(daemonFolderSource('/u/abc/')('C:\\x y')).rejects.toThrow('turned off');
-			expect(urls[0]).toContain('/u/abc/api/browse?path=C%3A%5Cx%20y');
-		} finally {
-			vi.unstubAllGlobals();
-		}
-	});
 
 	it('the local source lists folders only and climbs lexically', async () => {
 		backend.on('list_dir', () => [
@@ -953,23 +955,4 @@ describe('Open Folder on the PC (remote-ui-redesign-plan §P0)', () => {
 		expect((await localFolderSource('C:\\')('')).parent).toBeNull();
 	});
 
-	it('opens a new PC window for a folder no window shows, and never re-opens this one', async () => {
-		const spawn = vi.fn();
-		const transport = {
-			instances: [{ id: 'i1', title: 'repo', folders: ['C:/Work/Repo'], version: '1', visible: true, remoteSessions: 1, startedAt: 0, state: 'ok' }],
-			recentFolders: [],
-			spawn
-		};
-		setRemoteEnv({ transport: transport as never, attached: { instance: 'i1', frontendId: 'remote/1' } as never, basePath: '/' });
-		try {
-			const { openFolderPathOnPc } = await import('../src/remote/openOnPc');
-			await openFolderPathOnPc('c:\\work\\repo\\');
-			expect(spawn).not.toHaveBeenCalled();
-			expect(document.getElementById('notifications')!.textContent).toContain('already open');
-			await openFolderPathOnPc('D:\\other');
-			expect(spawn).toHaveBeenCalledWith('D:\\other', false);
-		} finally {
-			setRemoteEnv(undefined);
-		}
-	});
 });

@@ -303,6 +303,7 @@ pub async fn download(
             req,
             path: ticket.path.clone(),
             zip: ticket.zip,
+            paths: ticket.paths,
         },
     );
     let first = match tokio::time::timeout(FETCH_TIMEOUT, rx.recv()).await {

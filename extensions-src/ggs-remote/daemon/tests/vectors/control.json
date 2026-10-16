@@ -166,6 +166,22 @@
   },
   {
     "direction": "to",
+    "hex": "3d00000081a9466574636846696c6584a372657104a470617468a0a37a6970c3a5706174687392ac433a2f7265706f2f612e7273ac433a2f7265706f2f622e7473",
+    "message": {
+      "FetchFile": {
+        "path": "",
+        "paths": [
+          "C:/repo/a.rs",
+          "C:/repo/b.ts"
+        ],
+        "req": 4,
+        "zip": true
+      }
+    },
+    "name": "fetch-file-multi"
+  },
+  {
+    "direction": "to",
     "hex": "1800000081ab456e7375726552656c617981a5746f6b656ea3746f6b",
     "message": {
       "EnsureRelay": {

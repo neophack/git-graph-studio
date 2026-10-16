@@ -30,16 +30,23 @@ export const bootMethods: ThisType<Workbench> = {
 		const hasEditor = () => editorView() !== null;
 		const register = commands.register.bind(commands);
 
-		register({ id: 'workbench.openFolder', title: 'Open Folder...', category: 'File', keybinding: 'Ctrl+O', run: () => this.pickFolder() });
+		// The two shells' command configs (docs/remote-client-plan.md §3.2): the desktop
+		// app owns the machine-level vocabulary — opening folders and files through the
+		// native dialogs, spawning windows, closing the workspace, exiting the app, the
+		// devtools. The remote shell never lists or keys these (K3/K4); its own vocabulary
+		// (transfers, the window switcher) registers from the remote shell with
+		// profiles: ['remote'].
+		const desktopOnly = { profiles: ['desktop'] as const };
+		register({ ...desktopOnly, id: 'workbench.openFolder', title: 'Open Folder...', category: 'File', keybinding: 'Ctrl+O', run: () => this.pickFolder() });
 		// A second workbench is a second instance (no single-instance plugin — every launch
 		// its own process, backends and watcher), so "New Window" asks the backend to spawn
 		// one; the new window boots like a fresh launch. On Windows and Linux a second launch
 		// of the app already is a new instance; on macOS this is the discoverable way to
 		// multi-open, where clicking the app's icon again only focuses the running window.
-		register({ id: 'workbench.newWindow', title: 'New Window', category: 'File', keybinding: 'Ctrl+Shift+N', run: () => void appNewInstance().catch((error) => notify('error', tf('workbench.newWindowFailed', String(error)))) });
-		register({ id: 'workbench.openWorkspace', title: 'Open Workspace...', category: 'File', run: () => this.pickWorkspace() });
-		register({ id: 'workbench.openFileStandalone', title: 'Open File...', category: 'File', run: () => this.pickSingleFile() });
-		register({ id: 'workbench.closeFolder', title: 'Close Folder', category: 'File', enabled: hasRepo, run: () => this.closeFolder() });
+		register({ ...desktopOnly, id: 'workbench.newWindow', title: 'New Window', category: 'File', keybinding: 'Ctrl+Shift+N', run: () => void appNewInstance().catch((error) => notify('error', tf('workbench.newWindowFailed', String(error)))) });
+		register({ ...desktopOnly, id: 'workbench.openWorkspace', title: 'Open Workspace...', category: 'File', run: () => this.pickWorkspace() });
+		register({ ...desktopOnly, id: 'workbench.openFileStandalone', title: 'Open File...', category: 'File', run: () => this.pickSingleFile() });
+		register({ ...desktopOnly, id: 'workbench.closeFolder', title: 'Close Folder', category: 'File', enabled: hasRepo, run: () => this.closeFolder() });
 		register({ id: 'workbench.newFile', title: 'New File...', category: 'File', keybinding: 'Ctrl+N', enabled: hasRepo, run: () => this.explorer.newFile() });
 		register({ id: 'workbench.save', title: 'Save', category: 'File', keybinding: 'Ctrl+S', enabled: () => this.editors.hasDirtyEditors(), run: () => this.editors.save() });
 		register({ id: 'workbench.saveAll', title: 'Save All', category: 'File', keybinding: 'Ctrl+K S', enabled: () => this.editors.hasDirtyEditors(), run: () => this.editors.saveAll() });
@@ -92,7 +99,7 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'workbench.action.unlockEditorGroup', title: 'Unlock Editor Group', category: 'View', enabled: () => this.editors.activeGroup.locked, run: () => this.editors.setGroupLock(this.editors.activeGroup, false) });
 		register({ id: 'workbench.action.reopenClosedEditor', title: 'Reopen Closed Editor', category: 'View', keybinding: 'Ctrl+Shift+T', run: () => this.editors.reopenClosed() });
 		register({ id: 'workbench.openSettings', title: 'Settings', category: 'Preferences', keybinding: 'Ctrl+,', run: () => openSettingsPanel() });
-		register({ id: 'workbench.exit', title: 'Exit', category: 'File', keybinding: 'Alt+F4', run: () => getCurrentWindow().close() });
+		register({ ...desktopOnly, id: 'workbench.exit', title: 'Exit', category: 'File', keybinding: 'Alt+F4', run: () => getCurrentWindow().close() });
 
 		register({ id: 'editor.undo', title: 'Undo', category: 'Edit', keybinding: 'Ctrl+Z', enabled: hasEditor, run: () => this.editors.runEditorCommand('undo') });
 		register({ id: 'editor.redo', title: 'Redo', category: 'Edit', keybinding: 'Ctrl+Y', enabled: hasEditor, run: () => this.editors.runEditorCommand('redo') });
@@ -165,7 +172,7 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'ai.providers', title: 'Manage Model Providers', category: 'AI', run: () => this.editors.openProviders() });
 		register({ id: 'help.repository', title: 'Report Issue / Project Page', category: 'Help', run: () => void openUrl('https://github.com/neophack/git-graph-studio') });
 		register({ id: 'help.about', title: 'About', category: 'Help', run: () => notify('info', `Git Graph Studio ${__APP_VERSION__} - a standalone workbench whose views arrive as plugins.`) });
-		register({ id: 'help.openDevTools', title: 'Open Developer Tools', category: 'Help', run: () => void openDevtools().catch((e) => console.error('open_devtools failed:', e)) });
+		register({ ...desktopOnly, id: 'help.openDevTools', title: 'Open Developer Tools', category: 'Help', run: () => void openDevtools().catch((e) => console.error('open_devtools failed:', e)) });
 		// Dev builds only (vite strips the branch from the bundle; vitest is excluded so the
 		// command sweep never navigates): the dev harness page — the full functional pass
 		// (?full=1) runs every module's self-tests plus the two marketplace extensions end
@@ -388,10 +395,30 @@ export const bootMethods: ThisType<Workbench> = {
 		// opened inside this very call (the backend opens it during the splash), so when the
 		// folder the boot picks matches, the answer is applied directly - no second round trip.
 		const context = await bootContext()
-			.catch((): BootContext => ({ file: null, actions: [], repo: null, workspace: null, reloaded: false, opened: null, openedFor: null }));
+			.catch((): BootContext => ({ file: null, actions: [], repo: null, workspace: null, reloaded: false, opened: null, openedFor: null, roots: [], workspaceFile: null }));
 		// A `ggs <file>` launch shows exactly that file, alone.
 		if (context.file) {
 			await this.openFileStandalone(context.file);
+			return;
+		}
+		// A remote session never opens folders itself — `open_folder` is refused at its
+		// gate (docs/remote-client-plan.md §3.3, R0): the instance's current roots arrive
+		// in the boot context (the workspace file they came from included) and apply
+		// directly — exactly the reopen the desktop's own boot resolves to, minus the
+		// invoke. Launch actions and workspaces are the PC's launch vocabulary; a session
+		// attaches to what the window already holds.
+		if (hook('session').remote()) {
+			const roots = context.roots ?? [];
+			if (roots.length > 0) {
+				await this.applyRoots(roots.map((entry) => entry.root), roots.some((entry) => entry.isRepo), context.workspaceFile ?? null);
+			} else {
+				this.statusBar.setRepo(false);
+			}
+			whenIdle(() => {
+				if (state.layout.panelVisible) this.panel.show('terminal');
+				void this.extensionHost.activateInstalled();
+				void this.recoverBackups();
+			});
 			return;
 		}
 		// A `ggs <workspace>.ggs-workspace` launch opens that multi-root workspace. A page

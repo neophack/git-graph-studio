@@ -128,7 +128,7 @@ describe('explorer', () => {
 
 		// Rename through the context menu.
 		rightClick(document.querySelector('.tree .row'));
-		expect(menuLabels()).toEqual(['Open to the Right', 'Open to the Left', 'Open Below', 'Open Above', 'Open in Hex Viewer', 'New File...', 'New Folder...', 'Reveal in File Explorer', 'Download', 'Copy Path', 'Copy Relative Path', 'Rename...', 'Delete']);
+		expect(menuLabels()).toEqual(['Open to the Right', 'Open to the Left', 'Open Below', 'Open Above', 'Open in Hex Viewer', 'New File...', 'New Folder...', 'Reveal in File Explorer', 'Copy Path', 'Copy Relative Path', 'Rename...', 'Delete']);
 		// "Open in Hex Viewer" hands the clicked file's path to the hex tab.
 		const hexed: string[] = [];
 		explorer.onOpenHex = (p) => hexed.push(p);
@@ -198,40 +198,33 @@ describe('explorer', () => {
 		}
 	});
 
-	it('offers downloads and uploads in every environment, hiding them while mirrored', async () => {
+	it("the transfer rows are the remote session's alone — the desktop never shows them (K16)", async () => {
 		fileSystem({ [ROOT]: ['src/', 'README.md'], [`${ROOT}\\src`]: [] });
 		const explorer = new Explorer(document.getElementById('sidebar')!);
 		explorer.setRoot(ROOT);
 		await flush();
 		const rows = () => document.querySelectorAll('.tree .row');
-		// The desktop has the transfers too now (2026-10-13's rewrite): the native pickers
-		// drive them, and a file downloads straight; a folder downloads zipped and receives
-		// uploads.
+		// The desktop app has no transfer rows at all: copying between two folders of one
+		// machine is the system file manager's job, and the native-picker pair left with
+		// its commands (docs/remote-client-plan.md §11).
 		rightClick(rows()[1]);
-		expect(menuLabels()).toContain('Download');
-		expect(menuLabels()).not.toContain('Download as Zip');
+		expect(menuLabels()).not.toContain('Download');
 		rightClick(rows()[0]);
-		expect(menuLabels()).toContain('Download as Zip');
-		expect(menuLabels()).toContain('Upload Files Here…');
-		expect(menuLabels()).toContain('Upload Folder Here…');
-		// While a mirror viewer watches this window the rows hide: the viewer's own
-		// device-run entries own the vocabulary then.
-		setMirrorViewers(true);
-		try {
-			rightClick(rows()[1]);
-			expect(menuLabels()).not.toContain('Download');
-			rightClick(rows()[0]);
-			expect(menuLabels()).not.toContain('Download as Zip');
-		} finally {
-			setMirrorViewers(false);
-		}
-		// A browser session's own UI keeps them (its transport is the remote wire).
-		setRemoteEnv({ transport: {} as never, attached: { frontendId: 'remote/1' } as never, basePath: '/' });
+		expect(menuLabels()).not.toContain('Download as Zip');
+		expect(menuLabels()).not.toContain('Upload Files Here…');
+		// A browser session's own UI keeps them (its transport is the remote wire): a
+		// file downloads straight, a folder downloads zipped and receives uploads.
+		document.documentElement.setAttribute('data-remote-shell', '');
 		try {
 			rightClick(rows()[1]);
 			expect(menuLabels()).toContain('Download');
+			expect(menuLabels()).not.toContain('Download as Zip');
+			rightClick(rows()[0]);
+			expect(menuLabels()).toContain('Download as Zip');
+			expect(menuLabels()).toContain('Upload Files Here…');
+			expect(menuLabels()).toContain('Upload Folder Here…');
 		} finally {
-			setRemoteEnv(undefined);
+			document.documentElement.removeAttribute('data-remote-shell');
 		}
 	});
 

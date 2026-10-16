@@ -40,12 +40,12 @@ function openInstance(info) {
 	location.href = `w/${encodeURIComponent(info.id)}/v/${encodeURIComponent(info.version)}/remote.html`;
 }
 
-/** Open a folder from the recent list: a window already showing it is entered, anything
- *  else spawns a new (invisible) window for it — the same open either way. */
+/** Open a folder from the recent list: the window already showing it is entered — a
+ *  session never spawns (docs/remote-client-plan.md §3.3, K4); a folder no window has
+ *  opens nothing. */
 function openPath(path) {
 	const info = instances.find((i) => (i.folders ?? []).includes(path));
 	if (info) openInstance(info);
-	else send(T.SPAWN, { folder: path, visible: false });
 }
 
 function renderRecent() {
@@ -60,7 +60,7 @@ function renderRecent() {
 				{ class: open ? 'open' : '' },
 				el('span', { class: 'path' }, path),
 				open ? el('span', { class: 'badge' }, t('alreadyOpen')) : null,
-				el('button', { class: 'primary', onclick: () => openPath(path) }, t('open'))
+				open ? el('button', { class: 'primary', onclick: () => openPath(path) }, t('open')) : el('span', { class: 'muted' }, t('notOpenHere'))
 			);
 		})
 	);
@@ -183,19 +183,11 @@ async function connect() {
 	}
 	if (session.status === 401) return toLogin();
 	if (!session.ok) return reconnectLater();
-	const { csrf, folderInput, sandbox } = await session.json();
-	// The folder-path row is a setting (2026-10-12): off hides it, the recent list stays.
-	// The sandbox (§24) hides it too — a typed path outside the sandbox root could never
-	// open; everything a remote session opens lives under the root.
-	if (folderInput === false || (sandbox && sandbox.enabled)) {
-		document.getElementById('open-row').hidden = true;
-	}
-	// The sandbox's own open button (§24): with the typed-path row hidden there is no
-	// other entry into an empty sandbox, and every spawn lands inside the root.
-	document.getElementById('sandbox-row').hidden = !(sandbox && sandbox.enabled);
-	document.getElementById('sandbox-open').addEventListener('click', () => {
-		send(T.SPAWN, { folder: null, visible: false });
-	});
+	const { csrf } = await session.json();
+	// The typed folder-path row and the sandbox's own open button are gone (2026-10-15,
+	// docs/remote-client-plan.md §3.3): a session SPAWN is refused outright — a remote
+	// session switches between the windows the PC already opened, it never creates one
+	// (K4). The window list below is the whole page.
 	const url = new URL('ws', document.baseURI);
 	url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
 	ws = new WebSocket(url);
@@ -209,21 +201,6 @@ async function connect() {
 }
 
 setInterval(() => send(T.PING, {}), 20000);
-
-// The folder-path row: type a path (or pick one from the recent list), open it as a new
-// (invisible) window. The standalone "new window" button is gone (2026-10-12, the owner's
-// direction — it was unused); an empty path opens nothing.
-function openTypedFolder() {
-	const folder = document.getElementById('open-folder').value.trim();
-	if (folder) send(T.SPAWN, { folder, visible: false });
-}
-document.getElementById('open-go').addEventListener('click', openTypedFolder);
-document.getElementById('open-folder').addEventListener('keydown', (event) => {
-	if (event.key === 'Enter') {
-		event.preventDefault();
-		openTypedFolder();
-	}
-});
 
 async function loadDevices() {
 	const response = await fetch('api/devices', { credentials: 'same-origin' });

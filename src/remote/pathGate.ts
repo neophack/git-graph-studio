@@ -186,27 +186,42 @@ export const PATH_GATED: Record<
 	ext_page_file_chunk: { args: ['path', 'repo'], relativeAllowed: true },
 	ext_page_revision_bytes: { args: ['path', 'repo'], relativeAllowed: true },
 	ext_install_from_vsix: { args: ['path'], sameRootOnly: true },
-	// The boundary's own gates: opening anything NEW is not a remote session's to do.
-	open_folder: { args: ['path'], sameRootOnly: true },
+	// The boundary's own gates: opening anything NEW is not a remote session's to do. The
+	// idempotent reopen of a workspace or single file already inside the open roots stays
+	// allowed (`sameRootOnly`); a plain folder's reopen rides `boot_context`'s roots answer
+	// instead (a session never invokes `open_folder` — REFUSED below).
 	open_workspace: { args: ['path'], sameRootOnly: true },
 	open_single_file: { args: ['path'], sameRootOnly: true },
 	// Path completion: the partial input may sit inside a root or be on its way to one.
 	path_completions: { args: ['prefix'], prefixTowardRoot: true }
 };
 
-/** The commands a remote session may not run at all: they widen the very boundary this
- * gate enforces (a remote open of an arbitrary folder would make everything under it
- * "the open workspace"). Opening NEW folders is what the picker's sandboxed SPAWN is
- * for; the idempotent reopen of a folder already inside the open roots — the boot's own
- * first call — stays allowed (`sameRootOnly` in PATH_GATED). The desktop transfer pair
- * (`fs_import` / `fs_export`) is refused for the same reason from both directions: their
- * paths name ANYWHERE on the machine — the native picker's choices are the desktop
- * user's own — so a browser session must never read a file into the workspace through
- * `fs_import` (it could then download it back out) or write one out through `fs_export`.
- * A remote session's transfers ride the confined wire commands instead: the chunked
- * `fs_write_chunk` uploads (root-canonicalized server-side) and the daemon's
- * `download_allowed` ticket downloads. */
-export const REFUSED_COMMANDS = new Set<string>(['fs_import', 'fs_export']);
+/** The commands a remote session may not run at all. Three groups (docs/remote-client-plan.md
+ *  §3.3, the R0 tightening):
+ *
+ *  1. Boundary wideners: `open_folder` widens the very boundary this gate enforces (a remote
+ *     open of an arbitrary folder would make everything under it "the open workspace") — a
+ *     session's roots arrive with ATTACH and `boot_context`, never through its own invoke;
+ *     `app_new_instance` would spawn a sibling process the session then cannot name. Opening
+ *     NEW windows is what the picker's sandboxed SPAWN is for.
+ *  2. The PC's machine-level integrations, which a browser session must never reach: the
+ *     settings file (`settings_write` — a session's settings are its device's own), the OS
+ *     "open with" registrations (`assoc_apply`, `context_menu_apply`) and the bridged
+ *     claude-code shell refresh (`providers_shell_refresh`, which rewrites the spawn
+ *     environment from the settings). (`user_path_apply` is no command at all — it runs at
+ *     boot inside the backend — so it needs no gate entry.)
+ *  A remote session's transfers ride the confined wire commands — the chunked
+ *  `fs_write_chunk` uploads (root-canonicalized server-side) and the daemon's
+ *  `download_allowed` ticket downloads. (The desktop's `fs_import` / `fs_export` pair was
+ *  deleted outright on 2026-10-15, K16 — its commands no longer exist to refuse.) */
+export const REFUSED_COMMANDS = new Set<string>([
+	'open_folder',
+	'app_new_instance',
+	'settings_write',
+	'assoc_apply',
+	'context_menu_apply',
+	'providers_shell_refresh'
+]);
 
 /** Whether the command needs the roots fetched at all — the cheap pre-check that keeps
  *  the untimed majority of invokes free of the policy round trip. */
@@ -316,9 +331,7 @@ export function gateInvoke(
 	extRoots: string[] = []
 ): void {
 	if (REFUSED_COMMANDS.has(command)) {
-		throw new Error(
-            `${command} is the desktop's own — a remote session's transfers ride the confined upload and download paths`
-        );
+		throw new Error(`${command} is the desktop's own — a remote session cannot run it`);
 	}
 	const rule = PATH_GATED[command];
 	if (!rule) return;

@@ -51,7 +51,7 @@ describe('the gate table', () => {
 
 	it('refuses the commands that would widen the boundary', () => {
 		const roots = [ROOT];
-		for (const command of ['open_folder', 'open_workspace', 'open_single_file', 'scm_clone', 'ext_install_from_vsix']) {
+		for (const command of ['open_workspace', 'open_single_file', 'scm_clone', 'ext_install_from_vsix']) {
 			// The idempotent same-root call passes; anything new is refused.
 			expect(() => gateInvoke(command, { path: ROOT }, roots), command).not.toThrow();
 			const arg = command === 'scm_clone' ? 'parent' : 'path';
@@ -61,19 +61,29 @@ describe('the gate table', () => {
 		}
 	});
 
-	it('refuses the desktop transfer pair outright — their paths name the whole machine', () => {
+	it('refuses the desktop-only commands outright (R0, docs/remote-client-plan.md §3.3)', () => {
 		const roots = [ROOT];
-		// fs_import reads ANY disk path into the workspace (the native picker's choice is
-		// the desktop user's own); a remote session could import a file and download it
-		// straight back out. fs_export writes anywhere. Both are the desktop's alone, and
-		// even workspace-rooted arguments change nothing: the refusal is the command's.
-		expect(() => gateInvoke('fs_import', { sources: [INSIDE], targetDir: ROOT }, roots)).toThrow(
-			/the desktop's own/
-		);
-		expect(() => gateInvoke('fs_export', { path: INSIDE, dest: INSIDE, zip: false }, roots)).toThrow(
-			/the desktop's own/
-		);
+		// open_folder is refused even for a root the window already holds: a session's
+		// roots arrive with ATTACH and boot_context, never through its own invoke.
+		// app_new_instance spawns a sibling process; settings_write/assoc_apply/
+		// context_menu_apply/providers_shell_refresh are the PC's own machine-level
+		// integrations (user_path_apply is no command at all — boot-time, unreachable).
+		// Workspace-rooted arguments change nothing: the refusal is the command's, not
+		// the path's.
+		for (const command of [
+			'open_folder',
+			'app_new_instance',
+			'settings_write',
+			'assoc_apply',
+			'context_menu_apply',
+			'providers_shell_refresh'
+		]) {
+			expect(() => gateInvoke(command, { path: ROOT, contents: '{}', extensions: [], on: true, label: 'x' }, roots), command).toThrow(
+				/the desktop's own/
+			);
+		}
 	});
+
 
 	it('lets a completion type its way toward a root, and nowhere else', () => {
 		const roots = [ROOT];

@@ -144,8 +144,7 @@ export function openDrawer(menus: () => MenuDefinition[]): void {
 					commandRow('multiple-windows', t('remote.drawer.windows'), 'remote.switchWindow', { badge: windows > 1 ? String(windows) : undefined }),
 					commandRow('device-desktop', t('remote.liveView'), 'remote.liveView')
 				]
-			: []),
-		commandRow('folder-opened', t('remote.files.openFolder'), 'workbench.openFolder')
+			: [])
 	];
 	const transferRows = [
 		commandRow('cloud-upload', t('transfer.upload'), 'remote.uploadFiles'),

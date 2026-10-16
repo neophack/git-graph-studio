@@ -13,7 +13,6 @@
 // workbench's keybindings.
 
 import { modsOf, type Spot, type UpPayload } from './protocol';
-import { armExplorerTransfer, explorerSpotAt, type MirrorTransferDeps } from './explorerTransfer';
 import type { MirrorViewer } from './viewer';
 
 const TAP_SLOP = 8;
@@ -194,10 +193,6 @@ export class ViewerInput {
 			if (echo() || this.touch) return;
 			const spot = this.spot(event, doc);
 			if (spot) this.send({ k: 'ptr', ev: 'ctx', b: 2, m: modsOf(event), d: 1, ...spot });
-			// The PC's menu (mirrored back) knows no transfers: this page's Explorer entries
-			// join it when it lands (explorerTransfer.ts).
-			const explorerSpot = explorerSpotAt(event.target as Element | null);
-			if (explorerSpot) armExplorerTransfer(doc, explorerSpot, this.transferDeps());
 		}, opts);
 		doc.addEventListener('click', (event) => {
 			if (localTarget(event.target)) return;
@@ -283,10 +278,6 @@ export class ViewerInput {
 			if (this.touch !== touch || touch.moved) return;
 			touch.long = true;
 			this.send({ k: 'ptr', ev: 'ctx', b: 2, m: 0, d: 1, ...spot });
-			// The long press's menu mirrors the PC's own; this page's Explorer transfers join
-			// it when it lands (explorerTransfer.ts).
-			const explorerSpot = explorerSpotAt(touch.target);
-			if (explorerSpot) armExplorerTransfer(doc, explorerSpot, this.transferDeps());
 		}, LONG_PRESS_MS);
 		this.touch = touch;
 	}
@@ -344,23 +335,6 @@ export class ViewerInput {
 		this.send({ k: 'key', key, code, m });
 	}
 
-	/** The Explorer transfer entries' way back to the PC (explorerTransfer.ts): the key that
-	 *  closes a mirrored menu, the press that closes a mirrored sheet's backdrop. */
-	private transferDeps(): MirrorTransferDeps {
-		return {
-			key: (name) => this.sendKey(name, name, 0),
-			press: (el, fx, fy) => this.pressRemote(el, fx, fy)
-		};
-	}
-
-	/** A press replayed onto a mirrored element, in the spot grammar the PC's replayer
-	 *  reads (viewerInput's own `spot`). */
-	private pressRemote(el: Element, fx: number, fy: number): void {
-		const id = this.viewer.idOf(el);
-		if (id === undefined) return;
-		this.send({ k: 'ptr', ev: 'down', b: 0, m: 0, d: 1, i: id, fx, fy });
-		this.send({ k: 'ptr', ev: 'up', b: 0, m: 0, d: 1, i: id, fx, fy });
-	}
 
 	private wireProxy(): void {
 		const proxy = this.proxy;

@@ -122,6 +122,12 @@ pub enum ToInstance {
         req: u32,
         path: String,
         zip: bool,
+        /// The multi-select download's pack (docs/remote-client-plan.md §6.7): two or more
+        /// paths zipped into one archive, sharing `zip_tree`'s walk. Absent on the wire
+        /// wherever the single-path form is used — an old peer's bytes stay exactly what
+        /// they were; `path` stays authoritative for one path.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        paths: Vec<String>,
     },
     EnsureRelay {
         token: String,

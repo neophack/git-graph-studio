@@ -27,6 +27,7 @@ import { Workbench } from '../src/workbench';
 import { commonHandlers, type Handler } from './scenarioFixtures';
 import { backend } from './tauriMock';
 import { installRemoteRound, uninstallRemoteRound } from './remoteRound';
+import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
 import { click, flush, hover, key, rightClick, type, until, workbenchShell as shell } from './helpers';
 
 
@@ -359,7 +360,10 @@ beforeEach(async () => {
 		renderer: { rules: {} }
 	};
 	backend.handlers = richHandlers();
-	if (remoteRound) await installRemoteRound('desktop');
+	if (remoteRound) {
+		await installRemoteRound('desktop');
+		installRemoteSessionHooks();
+	}
 	workbench = new Workbench();
 	await workbench.boot();
 	await flush(12);
@@ -983,6 +987,17 @@ function uiSweepIts(): void {
 
 	it('folder lifecycle', { timeout: 120_000 }, async () => {
 		await surface('folder lifecycle', async (count) => {
+			// A remote session never opens or closes folders (K4): its roots arrive with
+			// the boot context and the window's lifecycle is the PC's. The empty-state
+			// surfaces still walk (their buttons are inert through the session's
+			// folderOpen hook), and the roots a close would have dropped are re-applied
+			// the way the remote boot itself applies them.
+			if (remoteRound) {
+				await workbench.applyRoots([REPO], true, null); count();
+				await flush(10);
+				expect(workbench.currentRepo).toBe(REPO);
+				return;
+			}
 			await commands.execute('workbench.closeFolder'); count();
 			await flush(6);
 			expect(workbench.currentRepo).toBeNull();

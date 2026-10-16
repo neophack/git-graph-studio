@@ -6,6 +6,10 @@
 import { trText } from './i18n';
 import type { MenuItem } from './ui';
 
+/** The shells a command belongs to (docs/remote-client-plan.md §3.2, K1–K4): the desktop
+ *  app and the remote app are two entries with two command configs over one core. */
+export type CommandProfile = 'desktop' | 'remote';
+
 export interface Command {
 	id: string;
 	title: string;
@@ -16,6 +20,10 @@ export interface Command {
 	/** False hides the command from the palette only (its menu entries keep their own
 	 *  enablement) — the manifest `commandPalette` placements' `when` clauses. */
 	paletteHidden?: () => boolean;
+	/** Which shells list the command — menus, palette, keybindings, the action panels all
+	 *  filter on the ACTIVE profile; absent means both. Visibility only: a programmatic
+	 *  `execute` keeps working (an extension's openSettings is not the user's menu row). */
+	profiles?: readonly CommandProfile[];
 	run: () => void | Promise<void>;
 }
 
@@ -86,6 +94,24 @@ export function matchesKeybinding(event: KeyboardEvent, keybinding: string): boo
 
 export class CommandRegistry {
 	private readonly commands = new Map<string, Command>();
+	private profile: CommandProfile = 'desktop';
+
+	/** The shell this frontend runs as (the desktop app's default stays 'desktop'; the
+	 *  remote composition root switches before the workbench registers anything). */
+	setActiveProfile(profile: CommandProfile): void {
+		this.profile = profile;
+	}
+
+	activeProfile(): CommandProfile {
+		return this.profile;
+	}
+
+	/** Whether the command shows in the active shell — menus, palette, keybindings and the
+	 *  action panels all resolve through this one answer. */
+	visible(id: string): boolean {
+		const command = this.commands.get(id);
+		return command === undefined || command.profiles === undefined || command.profiles.includes(this.profile);
+	}
 
 	register(command: Command): Command {
 		this.commands.set(command.id, command);
@@ -126,9 +152,11 @@ export class CommandRegistry {
 		};
 	}
 
-	/** The command a key event triggers, if any (the first registered wins). */
+	/** The command a key event triggers, if any (the first registered wins — and only one
+	 *  visible in the active shell: a remote page never keys the desktop-only opens). */
 	forKeyEvent(event: KeyboardEvent): Command | undefined {
 		for (const command of this.commands.values()) {
+			if (!this.visible(command.id)) continue;
 			const effective = keybindingResolver ? keybindingResolver(command.id) : undefined;
 			const key = (effective === undefined ? command.keybinding : effective) ?? null;
 			if (key !== null && matchesKeybinding(event, key)) return command;
@@ -136,10 +164,11 @@ export class CommandRegistry {
 		return undefined;
 	}
 
-	/** Palette entries: "Category: Title", enabled and not palette-hidden commands only, sorted. */
+	/** Palette entries: "Category: Title", enabled, not palette-hidden and visible in the
+	 *  active shell, sorted. */
 	paletteItems(): { label: string; description?: string; value: string }[] {
 		return this.all()
-			.filter((command) => this.isEnabled(command.id) && command.paletteHidden?.() !== true)
+			.filter((command) => this.visible(command.id) && this.isEnabled(command.id) && command.paletteHidden?.() !== true)
 			.map((command) => ({
 				label: command.category ? `${trText(command.category)}: ${trText(command.title)}` : trText(command.title),
 				description: effectiveBinding(command.id, command.keybinding) ?? undefined,

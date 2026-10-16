@@ -83,7 +83,13 @@ export async function flush(times = 5): Promise<void> {
 }
 
 /** Poll an async end state into view: each round lets queued promises settle, so a
- *  starved worker reaches the state a fast one does — just more rounds later. */
-export async function until(condition: () => boolean, rounds = 40): Promise<void> {
-	for (let i = 0; i < rounds && !condition(); i++) await flush(1);
+ *  starved worker reaches the state a fast one does — just more rounds later. Rounds
+ *  alone are no budget, though: while a cold dynamic import sits in the module
+ *  runner's queue the worker's own loop spins free, and a fixed round count burns out
+ *  in milliseconds (2026-10-15: the full suite's load made commandSweep's folder-
+ *  compare tab and remoteWorkbenchSync's PC folder picker miss their poll budgets the
+ *  same way) — so a wall-clock floor (ms) keeps the poll alive through that stall. */
+export async function until(condition: () => boolean, rounds = 40, ms = 2000): Promise<void> {
+	const start = Date.now();
+	for (let i = 0; (i < rounds || Date.now() - start < ms) && !condition(); i++) await flush(1);
 }

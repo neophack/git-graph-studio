@@ -7,9 +7,20 @@ import { providersShellRefresh } from '../platform/ipc/providers';
 import { assocApply, contextMenuApply } from '../platform/ipc/assoc';
 import { settingsRead, settingsWrite } from '../platform/ipc/settings';
 
+import { hook } from './hooks';
 import { load, save } from './state';
 import { setLocale, t } from './i18n';
 import { el, notify } from './ui';
+
+/** Whether this frontend is a remote session: its settings are the device's own (R0,
+ *  docs/remote-client-plan.md §3.3) — they live in the session's scoped storage and never
+ *  write the PC's `~/.ggs/settings.json`, and the PC's machine-level integrations (the
+ *  OS associations, the PATH entry, the bridged shell refresh) are not its to touch. The
+ *  gate refuses those commands for relayed traffic anyway; this keeps the session from
+ *  asking. */
+function remoteSession(): boolean {
+	return hook('session').remote();
+}
 
 export type AutoSave = 'off' | 'afterDelay' | 'onFocusChange' | 'onWindowChange';
 export type LinuxDmabuf = 'auto' | 'disable' | 'keep';
@@ -402,6 +413,7 @@ export function updateSetting<K extends keyof AppSettings>(key: K, value: AppSet
  *  having applied its environment at its own start. New terminals pick the setting
  *  up on their own; they read it at creation. */
 function applyTerminalShell(): void {
+	if (remoteSession()) return;
 	void settingsWrite(JSON.stringify(settings, null, '\t'))
 		.catch(() => undefined)
 		.then(() => providersShellRefresh())
@@ -412,6 +424,7 @@ function applyTerminalShell(): void {
  *  backend reports per-platform; on Windows the result explains that Default Apps
  *  needs one confirmation (Win10/11 will not let an app set the default silently). */
 function applyFileAssociations(): void {
+	if (remoteSession()) return;
 	void assocApply(settings.fileAssociations)
 		.then((result) => notify('info', t(result.messageKey as 'assoc.applied.windows') + (result.detail ? ` (${result.detail})` : '')))
 		.catch((error: unknown) => notify('error', t('assoc.failed') + String(error)));
@@ -423,6 +436,7 @@ function applyFileAssociations(): void {
  *  no toast), a Settings change notifies like the associations do. A `null` answer is the
  *  scripted backend's "write succeeded" - nothing to report, no toast. */
 function applyExplorerContextMenu(notifyUser: boolean): void {
+	if (remoteSession()) return;
 	void contextMenuApply(settings.explorerContextMenu, t('contextmenu.title'))
 		.then((result) => {
 			const key = result?.messageKey;
@@ -454,8 +468,11 @@ export async function loadSettingsFile(): Promise<void> {
 	}
 }
 
-/** Write the current settings to the file (fire and forget - the form's direction). */
+/** Write the current settings to the file (fire and forget - the form's direction). A
+ *  remote session writes nothing: its settings are the device's own (R0) and stay in the
+ *  session's scoped storage — `settings_write` is refused at the gate besides. */
 export function persistSettingsFile(): void {
+	if (remoteSession()) return;
 	void settingsWrite(JSON.stringify(settings, null, '\t')).catch(() => undefined);
 }
 

@@ -75,6 +75,35 @@ export type { SymbolIndexEvent, SymbolIndexStatus } from '../platform/ipc/symbol
 export const REFRESH_ECHO_MS = 1500;
 
 
+/** Where the Workbench mounts its parts (docs/remote-client-plan.md §3.1): the desktop
+ *  frame's own ids by default; the remote shell passes its own containers so the same
+ *  services and widgets can live in its layouts without a desktop frame around them. */
+export interface WorkbenchMounts {
+	titlebar: HTMLElement;
+	activitybar: HTMLElement;
+	sidebar: HTMLElement;
+	sidebarSash: HTMLElement;
+	editorGroup: HTMLElement;
+	panelSash: HTMLElement;
+	panel: HTMLElement;
+	statusbar: HTMLElement;
+}
+
+/** The desktop frame's mount points — the ids index.html (and remote.html's interim
+ *  skeleton) carry. */
+function desktopMounts(): WorkbenchMounts {
+	return {
+		titlebar: document.getElementById('titlebar')!,
+		activitybar: document.getElementById('activitybar')!,
+		sidebar: document.getElementById('sidebar')!,
+		sidebarSash: document.getElementById('sidebarSash')!,
+		editorGroup: document.getElementById('editorGroup')!,
+		panelSash: document.getElementById('panelSash')!,
+		panel: document.getElementById('panel')!,
+		statusbar: document.getElementById('statusbar')!
+	};
+}
+
 export class Workbench {
 	public openFolders(): string[] {
 		return this.explorer.roots();
@@ -84,17 +113,17 @@ export class Workbench {
 
 	readonly extPageTabs = new Map<string, string>();
 
-	readonly activityBar = document.getElementById('activitybar')!;
+	readonly activityBar: HTMLElement;
 
-	readonly sidebar = document.getElementById('sidebar')!;
+	readonly sidebar: HTMLElement;
 
-	readonly sidebarSash = document.getElementById('sidebarSash')!;
+	readonly sidebarSash: HTMLElement;
 
-	readonly editorPart = document.getElementById('editorPart')!;
+	readonly editorPart: HTMLElement;
 
-	readonly panelElement = document.getElementById('panel')!;
+	readonly panelElement: HTMLElement;
 
-	readonly panelSash = document.getElementById('panelSash')!;
+	readonly panelSash: HTMLElement;
 
 	readonly views: Record<ViewId, HTMLElement> = { explorer: el('div', 'view'), search: el('div', 'view'), scm: el('div', 'view'), extensions: el('div', 'view'), analysis: el('div', 'view') };
 
@@ -148,7 +177,14 @@ export class Workbench {
 
 	refreshTimer: number | null = null;
 
-	constructor() {
+	constructor(mounts: Partial<WorkbenchMounts> = {}) {
+		const host: WorkbenchMounts = { ...desktopMounts(), ...mounts };
+		this.activityBar = host.activitybar;
+		this.sidebar = host.sidebar;
+		this.sidebarSash = host.sidebarSash;
+		this.editorPart = host.editorGroup.parentElement ?? document.getElementById('editorPart')!;
+		this.panelElement = host.panel;
+		this.panelSash = host.panelSash;
 		for (const view of Object.values(this.views)) {
 			view.style.display = 'none';
 			view.style.flex = '1';
@@ -156,7 +192,7 @@ export class Workbench {
 			view.style.flexDirection = 'column';
 			this.sidebar.appendChild(view);
 		}
-		this.titleBar = new TitleBar(document.getElementById('titlebar')!);
+		this.titleBar = new TitleBar(host.titlebar);
 		this.explorer = new Explorer(this.views.explorer);
 		this.search = new SearchView(this.views.search);
 		this.scm = new SourceControlView(this.views.scm, commands);
@@ -179,9 +215,9 @@ export class Workbench {
 		// A row's click opens the extension's detail page (VS Code's extension editor) in an
 		// editor tab — the panel owns the page's content, the workbench owns the tab.
 		this.extensions.onOpenDetail = (ext) => this.openExtensionDetail(ext);
-		this.editors = new EditorArea(document.getElementById('editorGroup')!);
+		this.editors = new EditorArea(host.editorGroup);
 		this.panel = new Panel(this.panelElement);
-		this.statusBar = new StatusBar(document.getElementById('statusbar')!);
+		this.statusBar = new StatusBar(host.statusbar);
 		// The extension host's webview panels (`window.createWebviewPanel`) ride the same
 		// editor-tab path the extension pages do; the status bar and Output view host its items
 		// and channels. All wired here: the host owns the data, the views own the DOM.

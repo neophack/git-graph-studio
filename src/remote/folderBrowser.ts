@@ -1,9 +1,10 @@
-// The PC folder browser (docs/remote-ui-redesign-plan.md §P0): Open Folder for anyone not
-// sitting at the PC — a browser session's own workbench, or a mirror viewer driving the PC
-// window. It always browses the PC's disk (the one the windows run on), never the browser
-// device's: folders only, `..` to climb, the PC's recent folders and starting places first,
-// a typed absolute path taken as is. One quick-input loop over a pluggable listing source —
-// the daemon's `api/browse` for a session, the window's own `list_dir` on the desktop.
+// The PC folder browser — the DESKTOP's own in-window browse (docs/remote-ui-redesign-plan.md
+// §P0, the half the 2026-10-15 retraction keeps): Open Folder for a mirror viewer driving the
+// PC window, where the native dialog would open on the PC's screen alone and the copy cannot
+// see it. It browses the PC's disk through the window's own `list_dir`; folders only, `..` to
+// climb, the PC's recent folders first, a typed absolute path taken as is. One quick-input
+// loop over a listing source. (A browser session's own Open Folder is gone outright — K4,
+// docs/remote-client-plan.md §3.3 — so the daemon's `api/browse` source left with it.)
 import { quickInput, notify, type QuickPickItem } from '../platform/ui';
 import { t, tf } from '../platform/i18n';
 import { listDir } from '../platform/ipc/fs';
@@ -83,19 +84,6 @@ export async function browseFolders(source: FolderSource, options: BrowseOptions
 		else if (picked.startsWith('d:')) next = picked.slice(2);
 		else if (isAbsolute(picked.trim())) next = picked.trim();
 	}
-}
-
-/** The daemon's listing (a browser session): `api/browse` under the session's base path. */
-export function daemonFolderSource(basePath: string): FolderSource {
-	return async (path) => {
-		const url = new URL(`api/browse?path=${encodeURIComponent(path)}`, new URL(basePath, location.href));
-		const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
-		const body = (await response.json().catch(() => ({}))) as FolderListing & { error?: string };
-		if (response.ok) return body;
-		if (body.error === 'folder-input-off') throw new Error(t('remote.folders.disabled'));
-		if (body.error === 'outside-sandbox') throw new Error(t('remote.folders.outsideSandbox'));
-		throw new Error(tf('remote.folders.failed', body.error ?? String(response.status)));
-	};
 }
 
 function parentOf(path: string): string | null {

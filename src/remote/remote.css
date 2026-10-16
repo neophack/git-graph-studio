@@ -1,6 +1,9 @@
-/* The remote shell (docs/ggs-remote-plan.md §11.2): the desktop workbench, re-laid out by
-   form factor. Everything keys on <html data-form-factor data-pointer> (responsive.ts);
-   colours come only from the theme variables. */
+/* The remote shell (docs/ggs-remote-plan.md §11.2, docs/remote-client-plan.md §5): the
+   desktop workbench, re-laid out by form factor. Everything keys on <html data-form-factor
+   data-pointer data-page-stack> (responsive.ts); the page-stack marker covers the phone
+   orientations AND the portrait tablet (the forms whose content is one full-screen column),
+   and the five-way arrangement is layouts.css's data-layout. Colours come only from the
+   theme variables. */
 
 /* A browser tab has no native window to control. */
 .remote-shell .window-controls { display: none !important; }
@@ -29,7 +32,7 @@
    Every bar is in the body's own flex column, and the body follows the visual viewport,
    so a raised keyboard lifts the editing row and the terminal keys with the content.
    =================================================================================== */
-:root.remote-shell[data-form-factor="phone"] {
+:root.remote-shell[data-page-stack] {
 	--ggs-appbar-h: 52px;
 	--ggs-nav-h: 58px;
 	--row-height: 40px;
@@ -44,29 +47,38 @@
 	touch-action: manipulation;
 	overscroll-behavior: none;
 }
-:root.remote-shell[data-form-factor="phone"] body {
+/* iOS Safari zooms the whole page when a text field smaller than 16px gains the focus
+   (§10.2 item 6): every real input in the remote shell types at 16px. */
+:root.remote-shell input[type="text"],
+:root.remote-shell input[type="search"],
+:root.remote-shell input:not([type]),
+:root.remote-shell textarea { font-size: 16px; }
+:root.remote-shell[data-page-stack] body {
 	position: fixed; left: 0; right: 0; top: var(--vv-top, 0px);
-	height: var(--vvh, 100%);
+	/* dvh where the browser has it (before the first JS pass), the visual-viewport height
+	   once responsive.ts writes --vvh (§4.3 — the JS value also tracks iOS panning). */
+	height: 100dvh;
+	height: var(--vvh, 100vh);
 	overscroll-behavior: none;
 }
 /* The desktop chrome steps aside: its jobs moved to the app bar, the navigation and the
    drawer. The title bar stays in the DOM (the workbench keeps filling it). */
-:root.remote-shell[data-form-factor="phone"] #titlebar,
-:root.remote-shell[data-form-factor="phone"] #activitybar,
-:root.remote-shell[data-form-factor="phone"] #statusbar,
-:root.remote-shell[data-form-factor="phone"] #sidebarSash,
-:root.remote-shell[data-form-factor="phone"] #panelSash,
-:root.remote-shell[data-form-factor="phone"] .menubar { display: none !important; }
-:root.remote-shell[data-form-factor="phone"] #workbench { position: relative; }
-:root.remote-shell[data-form-factor="phone"] #editorPart { position: relative; }
+:root.remote-shell[data-page-stack] #titlebar,
+:root.remote-shell[data-page-stack] #activitybar,
+:root.remote-shell[data-page-stack] #statusbar,
+:root.remote-shell[data-page-stack] #sidebarSash,
+:root.remote-shell[data-page-stack] #panelSash,
+:root.remote-shell[data-page-stack] .menubar { display: none !important; }
+:root.remote-shell[data-page-stack] #workbench { position: relative; }
+:root.remote-shell[data-page-stack] #editorPart { position: relative; }
 
 /* Pages over the editor: a side view, or the panel. */
-:root.remote-shell[data-form-factor="phone"] #sidebar:not([hidden]) {
+:root.remote-shell[data-page-stack] #sidebar:not([hidden]) {
 	position: absolute; z-index: 40; inset: 0;
 	width: auto !important; min-width: 0; border-right: 0;
 	padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right);
 }
-:root.remote-shell[data-form-factor="phone"] #panel:not([hidden]) {
+:root.remote-shell[data-page-stack] #panel:not([hidden]) {
 	position: absolute; z-index: 35; inset: 0; height: auto !important; min-height: 0; border-top: 0;
 	padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right);
 }
@@ -150,17 +162,18 @@
 
 /* ---------- The editor page ---------- */
 /* The tab strip and the breadcrumbs move to the app bar and the open editors sheet. */
-:root.remote-shell[data-form-factor="phone"] .tabs-container,
-:root.remote-shell[data-form-factor="phone"] .breadcrumbs,
-:root.remote-shell[data-form-factor="phone"] .welcome { display: none !important; }
+:root.remote-shell[data-page-stack] .tabs-container,
+:root.remote-shell[data-page-stack] .breadcrumbs,
+:root.remote-shell[data-page-stack] .welcome { display: none !important; }
 /* One group on screen: the focused one (an editor an extension opened "beside" takes the
-   page; the open editors sheet reaches the rest). */
-:root.remote-shell[data-form-factor="phone"] .editor-split-child:not(:has(.editor-group-box.focused)) { display: none !important; }
-:root.remote-shell[data-form-factor="phone"] .editor-sash { display: none !important; }
-:root.remote-shell[data-form-factor="phone"] .editor-group-box { min-width: 0; }
-:root.remote-shell[data-form-factor="phone"] .minimap,
-:root.remote-shell[data-form-factor="phone"] .cm-minimap,
-:root.remote-shell[data-form-factor="phone"] .cm-sticky-scroll { display: none !important; }
+   page; the open editors sheet reaches the rest). `.no-focus` is maintained by
+   hasFallbacks.ts — Firefox 115 has no `:has()`. */
+:root.remote-shell[data-page-stack] .editor-split-child.no-focus { display: none !important; }
+:root.remote-shell[data-page-stack] .editor-sash { display: none !important; }
+:root.remote-shell[data-page-stack] .editor-group-box { min-width: 0; }
+:root.remote-shell[data-page-stack] .minimap,
+:root.remote-shell[data-page-stack] .cm-minimap,
+:root.remote-shell[data-page-stack] .cm-sticky-scroll { display: none !important; }
 
 .ggs-editor-empty[hidden] { display: none !important; }
 .ggs-editor-empty {
@@ -212,33 +225,34 @@
 .ggs-editor-accessory button[data-key="done"] { margin-left: auto; }
 
 /* ---------- Side-view pages (Files, Search, Changes, an extension's) ---------- */
-:root.remote-shell[data-form-factor="phone"] #sidebar .sidebar-title { height: 40px; padding: 0 8px 0 16px; font-size: 12px; }
-/* A view title that is only its name repeats the app bar's: the page starts at its content. */
-:root.remote-shell[data-form-factor="phone"] #sidebar .sidebar-title:not(:has(> :not(.label))) { display: none; }
+:root.remote-shell[data-page-stack] #sidebar .sidebar-title { height: 40px; padding: 0 8px 0 16px; font-size: 12px; }
+/* A view title that is only its name repeats the app bar's: the page starts at its
+   content (`.label-only` maintained by hasFallbacks.ts — no `:has()` on Firefox 115). */
+:root.remote-shell[data-page-stack] #sidebar .sidebar-title.label-only { display: none; }
 /* A focused list's ring is a keyboard cue; a finger opened the page. */
-:root.remote-shell[data-form-factor="phone"][data-pointer="coarse"] #sidebar :focus-visible { outline-color: transparent; }
-:root.remote-shell[data-form-factor="phone"] #sidebar .pane-header { height: 34px; font-size: 12px; padding-right: 8px; }
-:root.remote-shell[data-form-factor="phone"] #sidebar .pane-body { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
-:root.remote-shell[data-form-factor="phone"] #sidebar .action-btn { min-width: 36px; min-height: 36px; border-radius: 8px; }
-:root.remote-shell[data-form-factor="phone"] #sidebar .action-btn .codicon { font-size: 18px; }
-:root.remote-shell[data-form-factor="phone"] #sidebar .row:active { background: var(--vscode-list-hoverBackground); }
+:root.remote-shell[data-page-stack][data-pointer="coarse"] #sidebar :focus-visible { outline-color: transparent; }
+:root.remote-shell[data-page-stack] #sidebar .pane-header { height: 34px; font-size: 12px; padding-right: 8px; }
+:root.remote-shell[data-page-stack] #sidebar .pane-body { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+:root.remote-shell[data-page-stack] #sidebar .action-btn { min-width: 36px; min-height: 36px; border-radius: 8px; }
+:root.remote-shell[data-page-stack] #sidebar .action-btn .codicon { font-size: 18px; }
+:root.remote-shell[data-page-stack] #sidebar .row:active { background: var(--vscode-list-hoverBackground); }
 /* An extension's webview page (Claude Code's chat) takes the whole page height. */
-:root.remote-shell[data-form-factor="phone"] #sidebar .ext-container-view > .ext-webview-view-section { flex: 1 1 0; min-height: 0; }
+:root.remote-shell[data-page-stack] #sidebar .ext-container-view > .ext-webview-view-section { flex: 1 1 0; min-height: 0; }
 
 /* ---------- The Terminal page ---------- */
-:root.remote-shell[data-form-factor="phone"] #panel .panel-header { height: 44px; padding: 0 4px 0 8px; border-bottom: 1px solid var(--ggs-sep); }
-:root.remote-shell[data-form-factor="phone"] #panel .panel-title {
+:root.remote-shell[data-page-stack] #panel .panel-header { height: 44px; padding: 0 4px 0 8px; border-bottom: 1px solid var(--ggs-sep); }
+:root.remote-shell[data-page-stack] #panel .panel-title {
 	font-size: 13px; line-height: 44px; text-transform: none; padding: 0 12px; letter-spacing: 0;
 	color: var(--vscode-panelTitle-inactiveForeground, var(--ggs-muted));
 }
-:root.remote-shell[data-form-factor="phone"] #panel .panel-title.active { color: var(--vscode-panelTitle-activeForeground, var(--vscode-foreground)); font-weight: 600; }
-:root.remote-shell[data-form-factor="phone"] #panel .panel-title::after { left: 12px; right: 12px; bottom: 0; height: 2px; border-radius: 1px; }
+:root.remote-shell[data-page-stack] #panel .panel-title.active { color: var(--vscode-panelTitle-activeForeground, var(--vscode-foreground)); font-weight: 600; }
+:root.remote-shell[data-page-stack] #panel .panel-title::after { left: 12px; right: 12px; bottom: 0; height: 2px; border-radius: 1px; }
 /* Maximize / hide belong to a docked panel; the page has the navigation. */
-:root.remote-shell[data-form-factor="phone"] #panel .panel-header > .actions { display: none; }
-:root.remote-shell[data-form-factor="phone"] .terminal-host { padding-left: 6px; }
-:root.remote-shell[data-form-factor="phone"] .terminal-instance { inset: 4px 0 4px 6px; }
-:root.remote-shell[data-form-factor="phone"] .terminal-tabs { width: 112px; }
-:root.remote-shell[data-form-factor="phone"] .terminal-tabs .row { height: 40px; }
+:root.remote-shell[data-page-stack] #panel .panel-header > .actions { display: none; }
+:root.remote-shell[data-page-stack] .terminal-host { padding-left: 6px; }
+:root.remote-shell[data-page-stack] .terminal-instance { inset: 4px 0 4px 6px; }
+:root.remote-shell[data-page-stack] .terminal-tabs { width: 112px; }
+:root.remote-shell[data-page-stack] .terminal-tabs .row { height: 40px; }
 
 /* The terminal's extra key row, at the page's foot — on the Terminal view only. */
 .ggs-terminal-keys {
@@ -386,6 +400,7 @@
 .ggs-settings-page {
 	position: fixed; left: 0; right: 0; z-index: 950;
 	top: calc(var(--vv-top, 0px) + env(safe-area-inset-top, 0px));
+	height: calc(100dvh - env(safe-area-inset-top, 0px));
 	height: calc(var(--vvh, 100vh) - env(safe-area-inset-top, 0px));
 	display: flex; flex-direction: column;
 	background: var(--vscode-editor-background); color: var(--vscode-editor-foreground, var(--vscode-foreground));
@@ -485,25 +500,27 @@
 /* ---------- Full-screen surfaces and toasts on a phone ---------- */
 /* The quick input (the palette, quick picks, file picks) as a full-screen page (§11.3):
    the 600 px desktop card is a thumb-hostile strip at the top of a 390 px screen. */
-:root.remote-shell[data-form-factor="phone"] .quick-input {
+:root.remote-shell[data-page-stack] .quick-input {
 	top: calc(var(--vv-top, 0px) + env(safe-area-inset-top)); left: 0; transform: none;
-	width: 100vw; max-width: none; height: calc(var(--vvh, 100vh) - env(safe-area-inset-top));
+	width: 100vw; max-width: none;
+	height: calc(100dvh - env(safe-area-inset-top));
+	height: calc(var(--vvh, 100vh) - env(safe-area-inset-top));
 	display: flex; flex-direction: column; border-radius: 0; border: 0;
 }
-:root.remote-shell[data-form-factor="phone"] .quick-input .input { height: 44px; font-size: 16px; }
-:root.remote-shell[data-form-factor="phone"] .quick-input .list { flex: 1; max-height: none; overscroll-behavior: contain; }
-:root.remote-shell[data-form-factor="phone"] .quick-input .list .row { min-height: 48px; }
+:root.remote-shell[data-page-stack] .quick-input .input { height: 44px; font-size: 16px; }
+:root.remote-shell[data-page-stack] .quick-input .list { flex: 1; max-height: none; overscroll-behavior: contain; }
+:root.remote-shell[data-page-stack] .quick-input .list .row { min-height: 48px; }
 /* A text field under 16 px makes iOS zoom the page on focus. */
-:root.remote-shell[data-form-factor="phone"] input:not([type="checkbox"]):not([type="radio"]),
-:root.remote-shell[data-form-factor="phone"] textarea,
-:root.remote-shell[data-form-factor="phone"] select { font-size: 16px; }
+:root.remote-shell[data-page-stack] input:not([type="checkbox"]):not([type="radio"]),
+:root.remote-shell[data-page-stack] textarea,
+:root.remote-shell[data-page-stack] select { font-size: 16px; }
 /* Toasts sit above the navigation, full width. */
-:root.remote-shell[data-form-factor="phone"] #notifications {
+:root.remote-shell[data-page-stack] #notifications {
 	left: max(8px, env(safe-area-inset-left)); right: max(8px, env(safe-area-inset-right)); width: auto; max-width: none;
 	bottom: calc(var(--ggs-nav-h) + env(safe-area-inset-bottom) + 8px);
 }
-:root.remote-shell[data-form-factor="phone"][data-keyboard] #notifications { bottom: 8px; }
-:root.remote-shell[data-form-factor="phone"] .notification { border-radius: 12px; }
+:root.remote-shell[data-page-stack][data-keyboard] #notifications { bottom: 8px; }
+:root.remote-shell[data-page-stack] .notification { border-radius: 12px; }
 
 /* The transport's banner (relay restored, PC reconnecting, a new version). */
 .remote-banner {
@@ -514,7 +531,7 @@
 	border: 1px solid var(--vscode-notifications-border, var(--vscode-widget-border, transparent));
 	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3); font-size: 13px;
 }
-:root.remote-shell[data-form-factor="phone"] .remote-banner { top: calc(env(safe-area-inset-top) + var(--ggs-appbar-h) + 8px); }
+:root.remote-shell[data-page-stack] .remote-banner { top: calc(env(safe-area-inset-top) + var(--ggs-appbar-h) + 8px); }
 .remote-banner button {
 	background: var(--vscode-button-background); color: var(--vscode-button-foreground);
 	border: 0; border-radius: 6px; padding: 4px 10px; min-height: 32px;

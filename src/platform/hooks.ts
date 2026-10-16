@@ -69,10 +69,14 @@ export interface WorkbenchSyncHandle {
 }
 
 /** The remote wire's transfer transport (module 19's chunked uploads and ticket
- *  downloads) — what `uploadInto` / `downloadTo` dispatch to on a remote session. */
+ *  downloads) — what `uploadInto` / `downloadTo` / `downloadManyTo` dispatch to on a
+ *  remote session. */
 export interface TransferWireTransport {
 	uploadFiles(dir: string, folder: boolean, onProgress?: (progress: { name: string; sent: number; total: number }, index: number, count: number) => void): Promise<{ uploaded: string[]; failed: { name: string; error: string }[] }>;
 	download(path: string, zip?: boolean): Promise<void>;
+	/** The multi-select pack (docs/remote-client-plan.md §6.7): two or more paths as one
+	 *  zipped download. */
+	downloadMany?(paths: string[]): Promise<void>;
 }
 
 /** Open Folder for someone not sitting at the PC (docs/remote-ui-redesign-plan.md §P0):

@@ -785,7 +785,9 @@ describe('a real editor area under the sync', () => {
 		document.body.appendChild(container);
 		const area = new EditorArea(container);
 		const views: string[] = [];
-		const workbench: SyncedWorkbench = { editors: area, showView: (view) => views.push(view) };
+		// openFolders: the remote-open gate refuses a file outside the window's roots — without
+		// it the remote open below never applied and the open/active waits were vacuous.
+		const workbench: SyncedWorkbench = { editors: area, showView: (view) => views.push(view), openFolders: () => ['C:\\repo'] };
 		const channel = bus();
 		attachWorkbenchSync(workbench, channel.deps, 'main');
 		// Remote open: a real tab lands, active, content read once.
@@ -968,7 +970,7 @@ const REPO = 'C:\\repo';
 /** The scripted backend every wired workbench boots against. */
 function workbenchHandlers(extra: [string, (args: Record<string, unknown>) => unknown][] = []): DefaultingHandlers {
 	return new DefaultingHandlers([
-		['boot_context', () => ({ file: null, actions: [], repo: REPO })],
+		['boot_context', () => ({ file: null, actions: [], repo: REPO, roots: [{ root: REPO, isRepo: true }], workspaceFile: null })],
 		['open_folder', ({ path }) => ({ root: path, isRepo: true })],
 		['boot_stage', () => null],
 		['list_dir', () => [{ name: 'notes.txt', path: NOTES, isDir: false, size: 12 }, { name: 'README.md', path: README, isDir: false, size: 4 }]],
@@ -1007,10 +1009,10 @@ describe('the wired workbench', () => {
 	});
 
 	it('a file opened from the Explorer crosses the real event channel', async () => {
-		const notesRow = async (): Promise<Element | null> =>
+		const notesRow = (): Element | null =>
 			[...document.querySelectorAll('.tree .row')].find((row) => row.textContent?.includes('notes.txt')) ?? null;
-		await until(async () => (await notesRow()) !== null);
-		click(await notesRow());
+		await until(() => notesRow() !== null);
+		click(notesRow());
 		await until(() => workbench.editors.openFilePaths().length > 0);
 		const sent = backend.emits.filter((e) => e.event === WORKBENCH_SYNC_EVENT).map((e) => e.payload);
 		expect(sent).toContainEqual({ by: 'main', k: 'open', path: NOTES });
@@ -1089,18 +1091,23 @@ describe('the wired workbench', () => {
 		expect(labelsOf('Help')).toContain('Keyboard Shortcuts');
 		expect(labelsOf('Help')).toContain('Open Developer Tools');
 		expect(labelsOf('View')).toContain('Editor Layout');
-		// A real browser session: no PC-side window spawn, no PC-side devtools.
+		// A real browser session runs the REMOTE profile (its composition root switches
+		// before the workbench registers, §3.2): no machine-level vocabulary at all — no
+		// window spawn, no devtools, and no opens of any kind (K4: a session switches
+		// between the windows the PC already opened).
 		setRemoteEnv({ transport: {} as never, attached: { frontendId: 'remote/1' } as never, basePath: '/' });
+		commands.setActiveProfile('remote');
 		try {
 			expect(labelsOf('File')).not.toContain('New Window');
 			expect(labelsOf('Help')).not.toContain('Open Developer Tools');
-			expect(labelsOf('File')).toContain('Open Folder...');
-			// Its own opens are refused (pathGate): Open Folder browses the PC instead, and
-			// the entries with no remote path hide (remote-ui-redesign-plan §P0).
+			expect(labelsOf('File')).not.toContain('Open Folder...');
 			expect(labelsOf('File')).not.toContain('Open File...');
 			expect(labelsOf('File')).not.toContain('Open Workspace...');
 			expect(labelsOf('File')).not.toContain('Open Recent');
+			expect(labelsOf('File')).not.toContain('Close Folder');
+			expect(labelsOf('File')).not.toContain('Exit');
 		} finally {
+			commands.setActiveProfile('desktop');
 			setRemoteEnv(undefined);
 		}
 		// The PC window while a mirror viewer drives it: the native-dialog and new-window
@@ -1119,6 +1126,7 @@ describe('the wired workbench', () => {
 		const root = document.documentElement;
 		root.setAttribute('data-remote-shell', '');
 		root.dataset['formFactor'] = 'phone';
+		root.setAttribute('data-page-stack', '');
 		try {
 			expect(labelsOf('Help')).not.toContain('Keyboard Shortcuts');
 			expect(labelsOf('View')).not.toContain('Editor Layout');
@@ -1126,33 +1134,10 @@ describe('the wired workbench', () => {
 		} finally {
 			root.removeAttribute('data-remote-shell');
 			delete root.dataset['formFactor'];
+			root.removeAttribute('data-page-stack');
 		}
 	});
 
-	it('a session Open Folder browses the PC and opens the folder in a PC window', async () => {
-		const spawn = vi.fn();
-		const urls: string[] = [];
-		vi.stubGlobal('fetch', async (url: URL) => {
-			urls.push(String(url));
-			return new Response(JSON.stringify({ path: 'C:\\Users\\me', parent: 'C:\\Users', dirs: [{ name: 'proj', path: 'C:\\Users\\me\\proj' }] }));
-		});
-		setRemoteEnv({ transport: { instances: [], recentFolders: [], spawn } as never, attached: { instance: 'i1', frontendId: 'remote/1' } as never, basePath: '/' });
-		const before = backend.calls.length;
-		try {
-			void commands.execute('workbench.openFolder');
-			await until(() => document.querySelector('.quick-input .row') !== null);
-			click(document.querySelector('.quick-input .row'));
-			await until(() => spawn.mock.calls.length > 0);
-			// The PC's own disk, through the daemon — never the device's picker, never this
-			// window's refused open_folder.
-			expect(urls[0]).toContain('api/browse?path=');
-			expect(spawn).toHaveBeenCalledWith('C:\\Users\\me', false);
-			expect(backend.calls.slice(before).map((call) => call.command)).not.toContain('open_folder');
-		} finally {
-			setRemoteEnv(undefined);
-			vi.unstubAllGlobals();
-		}
-	});
 
 	it('stops answering once disposed', async () => {
 		workbench.dispose();
@@ -1237,9 +1222,13 @@ function phoneForm(on: boolean): void {
 	if (on) {
 		root.setAttribute('data-remote-shell', '');
 		root.dataset['formFactor'] = 'phone';
+		// The page-stack marker (§5.1–§5.3) the navigation gates read; responsive.ts keeps
+		// it beside the form factor.
+		root.setAttribute('data-page-stack', '');
 	} else {
 		root.removeAttribute('data-remote-shell');
 		delete root.dataset['formFactor'];
+		root.removeAttribute('data-page-stack');
 	}
 }
 
@@ -1332,20 +1321,6 @@ describe('the extension pages across frontends — Claude Code and Git Graph', (
 		await flush(5);
 		expect(sidebarHidden()).toBe(true);
 		expect(sentByMain()).toEqual([]);
-	});
-
-	it('the PC window wearing the phone shell still crosses the side bar hide', async () => {
-		// The replica's phone mode marks the PC's own DOM (mirror/phoneShell.ts) but has no
-		// remote session env: a hide here is layout, and an own-UI session attached beside
-		// the mirror viewer must still hear it.
-		phoneForm(true);
-		click(claudeItem());
-		await until(() => workbench.activeSidebarView === CLAUDE_CONTAINER);
-		backend.emits.length = 0;
-		await commands.execute('workbench.toggleSidebar');
-		await until(() => sentByMain().length > 0);
-		expect(sidebarHidden()).toBe(true);
-		expect(sentByMain()).toEqual([{ by: 'main', k: 'sidebar', shown: false }]);
 	});
 
 	it('the phone bottom tab for Claude Code opens the view on the other side', async () => {

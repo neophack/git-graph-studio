@@ -20,7 +20,6 @@ import { emit } from '../../platform/ipc/core';
 import { DomRecorder } from './recorder';
 import { InputReplayer } from './replay';
 import { VIEWER_TTL_MS, MIRROR_DOWN, type DownMessage, type UpMessage } from './protocol';
-import { isPhoneWidth } from './uiMode';
 import type { WebviewShare } from './webviewShare';
 
 export interface MirrorHostDeps {
@@ -32,11 +31,11 @@ export interface MirrorHostDeps {
 	now(): number;
 }
 
-/** The window size a viewer's viewport asks for. A phone (below 600 px) gets its own size —
- *  the window then wears the phone shell (phoneShell.ts) and the copy is 1:1; anything
- *  wider gets the desktop workbench at the viewer's proportions, never below its minimum. */
+/** The window size a viewer's viewport asks for: the desktop workbench at the viewer's
+ *  proportions, never below its minimum. A phone never reaches here (docs/remote-client-
+ *  plan.md §11): it runs its own workbench, and a window sized for a phone — the old phone
+ *  shell — is gone. */
 export function fitFor(vw: number, vh: number): { width: number; height: number } {
-	if (isPhoneWidth(vw)) return { width: Math.max(320, Math.round(vw)), height: Math.max(480, Math.round(vh)) };
 	const width = Math.max(800, Math.round(vw));
 	const height = Math.max(500, Math.round(vw > 0 ? (width * vh) / vw : 760));
 	return { width, height };
@@ -137,13 +136,8 @@ export class MirrorHost {
 		switch (message.k) {
 			case 'hello': {
 				this.viewers.set(message.from, { seen: this.deps.now(), vw: message.vw, vh: message.vh });
-				const [ownerId, owner] = this.owner()!;
-				if (ownerId === message.from) {
+				if (this.owner()![0] === message.from) {
 					this.fitOwner();
-				} else if (isPhoneWidth(message.vw) !== isPhoneWidth(owner.vw)) {
-					// The window is laid out for the owner's form factor: this viewer runs its
-					// own workbench (and says bye as its page leaves).
-					this.deps.send({ k: 'own', to: message.from });
 				}
 				if (!known) {
 					this.settle();

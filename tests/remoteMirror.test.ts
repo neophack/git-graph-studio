@@ -14,20 +14,10 @@ import { MirrorViewer } from '../src/remote/mirror/viewer';
 import { InputReplayer, keyCodeFor } from '../src/remote/mirror/replay';
 import { MirrorHost, fitFor } from '../src/remote/mirror/host';
 import { isSpecialKey, ViewerInput } from '../src/remote/mirror/viewerInput';
-import { armExplorerTransfer, explorerSpotAt, type ExplorerSpot, type MirrorTransferDeps } from '../src/remote/mirror/explorerTransfer';
-import { downloadTo, uploadInto } from '../src/features/explorer';
-import { isPhoneWidth, modeUrl, requestedMode, wantsOwnUi } from '../src/remote/mirror/uiMode';
-import { enterPhone, leavePhone } from '../src/remote/mirror/phoneShell';
+import { modeUrl, requestedMode } from '../src/remote/mirror/uiMode';
 import { coarsePointer } from '../src/remote/responsive';
 import { APP_TOKEN, GGS_TOKEN, canonicalize, canonicalizeCss, localizeTokens, panelStream, viewStream, type DownMessage, type MirrorOp, type UpMessage } from '../src/remote/mirror/protocol';
 import { parseStream, setWebviewFrameSource } from '../src/remote/mirror/webviewFrames';
-
-// The replica's transfer entries run this page's own transfers; the real module talks to a
-// transport the mirror tests never install, so its two entry points stand mocked.
-vi.mock('../src/features/explorer/transfer', () => ({
-	downloadTo: vi.fn(async () => true),
-	uploadInto: vi.fn(async () => [])
-}));
 
 /** A PC document of its own, so the copy and the original never share a tree. */
 function pcDocument(body: string): Document {
@@ -108,9 +98,11 @@ describe('the replica protocol', () => {
 		expect(canonicalize('data:image/png;base64,AA', app, app)).toBe('data:image/png;base64,AA');
 	});
 
-	it('sizes a hidden PC window to the viewer: a phone 1:1, wider screens never below the desktop minimum', () => {
+	it('sizes a hidden PC window to the viewer, never below the desktop minimum (§11: the phone-sized fit is gone)', () => {
 		expect(fitFor(1600, 900)).toEqual({ width: 1600, height: 900 });
-		expect(fitFor(390, 844)).toEqual({ width: 390, height: 844 });
+		// A phone never mirrors (it runs its own workbench); an explicit phone-width viewer
+		// still gets the desktop floor, the copy scales down on its screen.
+		expect(fitFor(390, 844)).toEqual({ width: 800, height: Math.round((800 * 844) / 390) });
 		expect(fitFor(700, 300)).toEqual({ width: 800, height: 500 });
 	});
 
@@ -553,149 +545,6 @@ describe('the input replay', () => {
 	});
 });
 
-describe('the replica\'s transfer entries', () => {
-	/** The Explorer of a copy: path-carrying rows in a pane-body, the overlays menus land in. */
-	function explorerDoc(top: string): Document {
-		const doc = document.implementation.createHTMLDocument('copy');
-		doc.body.innerHTML = `<div class="view-pane"><div class="pane-body list"><div class="tree">${top}</div></div></div><div id="overlays"></div>`;
-		return doc;
-	}
-
-	const singleRoot = `
-		<div class="row" data-path="C:\\repo\\src" data-dir="1"></div>
-		<div class="children" data-parent="C:\\repo\\src"><div class="row" data-path="C:\\repo\\src\\main.rs" data-dir="0"></div></div>
-		<div class="row" data-path="C:\\repo\\readme.md" data-dir="0"></div>`;
-	const multiRoot = `
-		<div class="row" data-path="C:\\alpha" data-dir="1"></div>
-		<div class="row" data-path="D:\\beta" data-dir="1"></div>`;
-
-	it('reads the row under a click, and the workspace root off the blank list', () => {
-		const doc = explorerDoc(singleRoot);
-		expect(explorerSpotAt(doc.querySelector('.tree > .row[data-dir="0"]')!)).toEqual({ path: 'C:\\repo\\readme.md', isDir: false });
-		expect(explorerSpotAt(doc.querySelector('.tree > .row[data-dir="1"]')!)).toEqual({ path: 'C:\\repo\\src', isDir: true });
-		const nested = doc.querySelector('.children .row')!;
-		expect(explorerSpotAt(nested)).toEqual({ path: 'C:\\repo\\src\\main.rs', isDir: false });
-		// The blank area menus the root: the single root every top row shares…
-		expect(explorerSpotAt(doc.querySelector('.tree')!)).toEqual({ path: 'C:\\repo', isDir: true });
-		expect(explorerSpotAt(doc.querySelector('.pane-body')!)).toEqual({ path: 'C:\\repo', isDir: true });
-		// …and the multi-root virtual level, whose first row is a root itself.
-		const multi = explorerDoc(multiRoot);
-		expect(explorerSpotAt(multi.querySelector('.tree')!)).toEqual({ path: 'C:\\alpha', isDir: true });
-		// One top row alone: its parent is the root.
-		const lone = explorerDoc('<div class="row" data-path="C:\\solo\\only" data-dir="0"></div>');
-		expect(explorerSpotAt(lone.querySelector('.tree')!)).toEqual({ path: 'C:\\solo', isDir: true });
-	});
-
-	it('leaves other lists and empty trees alone', () => {
-		const doc = document.implementation.createHTMLDocument('copy');
-		doc.body.innerHTML = '<div class="pane-body list ext-tree"><div class="tree"><div class="row">a setting row</div></div></div>';
-		expect(explorerSpotAt(doc.querySelector('.row')!)).toBeNull();
-		expect(explorerSpotAt(doc.querySelector('.tree')!)).toBeNull();
-		const empty = explorerDoc('');
-		expect(explorerSpotAt(empty.querySelector('.tree')!)).toBeNull();
-		expect(explorerSpotAt(doc.body)).toBeNull();
-	});
-
-	/** Arm for a folder spot, then land the surface the PC would mirror. */
-	async function land(doc: Document, surface: HTMLElement, spot: ExplorerSpot = { path: 'C:\\repo\\src', isDir: true }): Promise<void> {
-		const key = vi.fn();
-		const press = vi.fn();
-		armExplorerTransfer(doc, spot, { key, press } satisfies MirrorTransferDeps);
-		doc.getElementById('overlays')!.appendChild(surface);
-		await new Promise((resolve) => setTimeout(resolve, 0));
-	}
-
-	it('joins a mirrored context menu with entries this page runs', async () => {
-		const doc = explorerDoc(singleRoot);
-		const menu = doc.createElement('div');
-		menu.className = 'context-menu';
-		menu.appendChild(doc.createElement('div')).className = 'item';
-		await land(doc, menu);
-		const labels = [...menu.querySelectorAll('.item[data-ggs-local] .label')].map((label) => label.textContent);
-		expect(labels).toEqual(['Download as Zip', 'Upload Files Here…', 'Upload Folder Here…']);
-		// A file's menu carries the plain download alone.
-		const fileMenu = doc.createElement('div');
-		fileMenu.className = 'context-menu';
-		await land(doc, fileMenu, { path: 'C:\\repo\\readme.md', isDir: false });
-		expect([...fileMenu.querySelectorAll('.item[data-ggs-local] .label')].map((l) => l.textContent)).toEqual(['Download']);
-	});
-
-	it('a joined entry closes the mirrored menu both sides and transfers', async () => {
-		vi.mocked(downloadTo).mockClear();
-		const doc = explorerDoc(singleRoot);
-		const menu = doc.createElement('div');
-		menu.className = 'context-menu';
-		const key = vi.fn();
-		const press = vi.fn();
-		armExplorerTransfer(doc, { path: 'C:\\repo\\src', isDir: true }, { key, press } satisfies MirrorTransferDeps);
-		doc.getElementById('overlays')!.appendChild(menu);
-		await new Promise((resolve) => setTimeout(resolve, 0));
-		(menu.querySelector('.item[data-ggs-local]') as HTMLElement).click();
-		expect(key).toHaveBeenCalledWith('Escape');
-		expect(menu.style.display).toBe('none');
-		expect(vi.mocked(downloadTo)).toHaveBeenCalledWith('C:\\repo\\src', true);
-		expect(vi.mocked(uploadInto)).not.toHaveBeenCalled();
-	});
-
-	it('joins the phone shell\'s sheet before its Cancel row, closed by a backdrop press', async () => {
-		vi.mocked(uploadInto).mockClear();
-		const doc = explorerDoc(singleRoot);
-		const backdrop = doc.createElement('div');
-		backdrop.className = 'ggs-action-sheet-backdrop';
-		const sheet = doc.createElement('div');
-		sheet.className = 'ggs-action-sheet';
-		const body = doc.createElement('div');
-		body.className = 'ggs-sheet-body';
-		body.setAttribute('role', 'menu');
-		const existing = doc.createElement('button');
-		existing.className = 'row';
-		const cancel = doc.createElement('button');
-		cancel.className = 'row cancel';
-		body.append(existing, cancel);
-		sheet.appendChild(body);
-		backdrop.appendChild(sheet);
-		const key = vi.fn();
-		const press = vi.fn();
-		armExplorerTransfer(doc, { path: 'C:\\repo', isDir: true }, { key, press } satisfies MirrorTransferDeps);
-		doc.body.appendChild(backdrop);
-		await new Promise((resolve) => setTimeout(resolve, 0));
-		const rows = [...body.querySelectorAll('.row[data-ggs-local]')];
-		expect(rows.map((row) => row.textContent)).toEqual(['Download as Zip', 'Upload Files Here…', 'Upload Folder Here…']);
-		expect(rows[0]!.previousElementSibling!.classList.contains('separator')).toBe(true); // after the PC's rows, before Cancel
-		expect(cancel.previousElementSibling).toBe(rows[rows.length - 1]);
-		(rows[1] as HTMLElement).click();
-		expect(press).toHaveBeenCalledWith(backdrop, 0.5, 0.04);
-		expect(key).not.toHaveBeenCalled();
-		expect(backdrop.style.display).toBe('none');
-		expect(vi.mocked(uploadInto)).toHaveBeenCalledWith('C:\\repo', false);
-	});
-
-	it('never forwards a click that lands on a joined entry', async () => {
-		vi.mocked(downloadTo).mockClear();
-		const doc = explorerDoc(singleRoot);
-		const page = document.implementation.createHTMLDocument('page');
-		const sent: Record<string, unknown>[] = [];
-		const input = new ViewerInput({ idOf: () => 1 } as unknown as MirrorViewer, (message) => sent.push(message as Record<string, unknown>), page);
-		input.attach(doc);
-		const row = doc.querySelector('.row[data-dir="1"]')!;
-		row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 4, clientY: 4 }));
-		expect(sent.filter((message) => message['k'] === 'ptr' && message['ev'] === 'ctx')).toHaveLength(1);
-		const menu = doc.createElement('div');
-		menu.className = 'context-menu';
-		doc.getElementById('overlays')!.appendChild(menu);
-		await new Promise((resolve) => setTimeout(resolve, 0));
-		const entry = menu.querySelector('.item[data-ggs-local]') as HTMLElement;
-		const before = sent.length;
-		entry.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-		entry.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-		entry.click();
-		// Nothing of the entry crossed to the PC — only the Escape that closes its menu.
-		expect(sent.slice(before).filter((message) => message['k'] === 'ptr')).toHaveLength(0);
-		expect(sent.slice(before)).toContainEqual({ k: 'key', key: 'Escape', code: 'Escape', m: 0 });
-		expect(vi.mocked(downloadTo)).toHaveBeenCalledWith('C:\\repo\\src', true);
-		input.dispose();
-	});
-});
 
 describe('the host', () => {
 	it('greets a viewer with a snapshot and a fit, and forgets a silent one', () => {
@@ -707,7 +556,8 @@ describe('the host', () => {
 		const host = new MirrorHost(document, { send: (message) => sent.push(message), fit, focus, now: () => now });
 		host.receive({ k: 'hello', from: 'remote/7', vw: 390, vh: 844, touch: true });
 		expect(sent[0]).toMatchObject({ k: 'snap', to: 'remote/7' });
-		expect(fit).toHaveBeenCalledWith(390, 844);
+		// The desktop floor applies to every viewer (§11: no phone-sized window any more).
+		expect(fit).toHaveBeenCalledWith(800, Math.round((800 * 844) / 390));
 		expect(focus).toHaveBeenCalledWith(true);
 		expect(host.viewerCount).toBe(1);
 		// A repeated hello is a keepalive, not a second snapshot.
@@ -733,21 +583,7 @@ describe('the host', () => {
 	});
 });
 
-describe('one window, different UIs', () => {
-	it('gives a phone its own UI while the PC user has the window on screen', () => {
-		expect(isPhoneWidth(390)).toBe(true);
-		expect(isPhoneWidth(1280)).toBe(false);
-		// The PC keeps the desktop UI, the phone runs the phone app instead of a shrunken copy.
-		expect(wantsOwnUi('auto', true, true)).toBe(true);
-		// A hidden window is the phone's to lay out: the copy, 1:1.
-		expect(wantsOwnUi('auto', true, false)).toBe(false);
-		// A desktop browser watches the desktop UI as it is.
-		expect(wantsOwnUi('auto', false, true)).toBe(false);
-		// The URL forces either mode.
-		expect(wantsOwnUi('mirror', true, true)).toBe(false);
-		expect(wantsOwnUi('frontend', false, false)).toBe(true);
-	});
-
+describe('one window, one UI', () => {
 	it('pins a switch in the URL so a reload keeps it', () => {
 		const page = 'https://pc:47615/w/abc/v/1/?frontend=1#x';
 		expect(requestedMode(new URL(page).search)).toBe('frontend');
@@ -757,47 +593,19 @@ describe('one window, different UIs', () => {
 		expect(requestedMode('')).toBe('auto');
 	});
 
-	it('fits the window to its first viewer only and sends the other form factor its own UI', () => {
+	it('fits the window to its first viewer only; later viewers share the copy (§11: the own-UI redirect is gone)', () => {
 		document.body.innerHTML = '<p>pc</p>';
 		const sent: DownMessage[] = [];
 		const fit = vi.fn();
 		const host = new MirrorHost(document, { send: (message) => sent.push(message), fit, focus: () => undefined, now: () => 0 });
-		host.receive({ k: 'hello', from: 'remote/1', vw: 390, vh: 844, touch: true });
-		expect(fit).toHaveBeenLastCalledWith(390, 844);
-		// A desktop browser joining a phone-shaped window: no refit, its own workbench.
+		host.receive({ k: 'hello', from: 'remote/1', vw: 1200, vh: 800, touch: false });
+		expect(fit).toHaveBeenLastCalledWith(1200, 800);
+		// A differently-sized viewer joining: no refit, no redirect — it watches the copy.
 		host.receive({ k: 'hello', from: 'remote/2', vw: 1440, vh: 900, touch: false });
-		expect(fit).toHaveBeenCalledTimes(1);
-		expect(sent).toContainEqual({ k: 'own', to: 'remote/2' });
-		// A second phone shares the copy.
-		host.receive({ k: 'hello', from: 'remote/3', vw: 400, vh: 800, touch: true });
-		expect(sent.filter((message) => message.k === 'own')).toHaveLength(1);
 		expect(fit).toHaveBeenCalledTimes(1);
 		// The owner leaves: the next viewer inherits the window.
 		host.receive({ k: 'bye', from: 'remote/1' });
-		host.receive({ k: 'bye', from: 'remote/2' });
-		expect(fit).toHaveBeenLastCalledWith(400, 800);
-	});
-});
-
-describe('the phone mode of the PC window', () => {
-	it('wears the phone shell while a phone watches, and gives the desktop back after', () => {
-		const root = document.documentElement;
-		const width = window.innerWidth;
-		Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
-		try {
-			enterPhone();
-			expect(root.hasAttribute('data-remote-shell')).toBe(true);
-			expect(root.dataset['formFactor']).toBe('phone');
-			// The clicks come from a finger, whatever the PC's own pointer is.
-			expect(root.dataset['pointer']).toBe('coarse');
-			expect(coarsePointer()).toBe(true);
-		} finally {
-			Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
-			leavePhone();
-		}
-		expect(root.hasAttribute('data-remote-shell')).toBe(false);
-		expect(root.dataset['formFactor']).toBeUndefined();
-		expect(root.classList.contains('remote-shell')).toBe(false);
+		expect(fit).toHaveBeenLastCalledWith(1440, 900);
 	});
 });
 

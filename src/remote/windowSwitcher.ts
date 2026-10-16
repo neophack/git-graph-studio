@@ -1,14 +1,13 @@
 // The window switcher inside the remote workbench (docs/ggs-remote-plan.md §13, R10/R12/R20/
-// R21): every GGS window on the PC with its content summary and state badge, switch (a full
-// page load — the other window may run another version), new window, close (unsaved files
-// confirmed first) and restart. Fed by the transport's live WINDOWS pushes.
+// R21; docs/remote-client-plan.md §3.3): every GGS window on the PC with its content
+// summary and state badge, switch (a full page load — the other window may run another
+// version), close (unsaved files confirmed first) and restart. No "new window": a browser
+// session switches between the windows the PC already opened — spawning is the picker's
+// sandboxed SPAWN, never a session's (K4). Fed by the transport's live WINDOWS pushes.
 import { quickInput, confirmDialog, type QuickPickItem } from '../platform/ui';
 import { t, tf } from '../platform/i18n';
 import { remoteEnv } from './session';
 import type { InstanceInfo, Notice } from './transport';
-import { browseFolders, daemonFolderSource } from './folderBrowser';
-
-const NEW = '\u0000new';
 
 function summaryLine(info: InstanceInfo): string {
 	const s = info.summary ?? {};
@@ -17,7 +16,7 @@ function summaryLine(info: InstanceInfo): string {
 }
 
 export function switcherItems(list: InstanceInfo[], current: string): QuickPickItem[] {
-	const items: QuickPickItem[] = list.map((info) => {
+	return list.map((info) => {
 		const flags = [
 			info.id === current ? t('remote.switcher.current') : null,
 			info.state === 'unresponsive' ? t('remote.switcher.unresponsive') : null,
@@ -32,8 +31,6 @@ export function switcherItems(list: InstanceInfo[], current: string): QuickPickI
 			value: `w:${info.id}`
 		};
 	});
-	items.push({ label: t('remote.switcher.newWindow'), icon: 'add', value: NEW });
-	return items;
 }
 
 function workbenchUrl(info: InstanceInfo): string {
@@ -58,13 +55,6 @@ export async function openWindowSwitcher(): Promise<void> {
 	const current = env.attached.instance;
 	const picked = await quickInput({ title: t('remote.switcher.title'), items: switcherItems(transport.instances, current) });
 	if (!picked) return;
-	if (picked === NEW) {
-		// The folder is the PC's (the daemon's browser), optional: dismissing opens an
-		// empty window, as before.
-		const folder = await browseFolders(daemonFolderSource(env.basePath), { recent: transport.recentFolders, title: t('remote.switcher.newWindowFolder') });
-		transport.spawn(folder, false);
-		return;
-	}
 	const id = picked.slice(2);
 	const info = transport.instances.find((i) => i.id === id);
 	if (!info) return;

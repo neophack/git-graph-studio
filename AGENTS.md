@@ -219,40 +219,34 @@ full context menu, and external file drops (a drag from the OS over the tree cop
 the folder under the cursor — the row itself, a file row's parent, or the root; elsewhere
 the drop keeps opening the files, `workbench.ts` routes Tauri's window-level drag events)
 — over filesystem services that also serve the editors — and the workbench's **file
-transfers** (rewritten 2026-10-13): one vocabulary, every environment. `src/features/explorer/transfer.ts`
-is the layer the Explorer's context menu, the remote shell's commands and the mirror's
-appended rows all ride — `uploadInto` / `downloadTo` dispatch on the environment: a
-browser session's own UI runs the remote wire transport (module 19's chunked uploads and
-ticket downloads, `src/remote/transfer.ts`), and the desktop app drives the native pickers
-plus the backend's own copies — `fs_import` (picked sources land inside the target folder
-beside whatever exists, the ` (copy)` rule the drop copy uses) and `fs_export` (a file
-copies to the save dialog's destination; a folder zips into it), both streaming progress
-over a `Channel` with a Cancel action (`fs_transfer_cancel`, the generation-counter shape
-search cancellation uses). The wire's upload confinement is unchanged; the desktop pair is
-refused to remote sessions outright (`pathGate.ts`'s `REFUSED_COMMANDS` — their paths name
-anywhere on the machine, the native picker's business). While a mirror viewer watches the
-window the desktop rows hide (`transferMenuShown` over the hostStub's cached viewer
-answer): the viewer's own device-run entries are the vocabulary then, and a PC-run row
-would open a dialog the phone cannot see.
+transfers** (the remote's own since 2026-10-15, docs/remote-client-plan.md §11/K16):
+upload and download are the BROWSER session's vocabulary and nobody else's.
+`src/features/explorer/transfer.ts` is the layer the remote Explorer's context menu and the
+remote shell's commands ride — `uploadInto` / `downloadTo` run the remote wire transport
+(module 19's chunked `fs_write_chunk` uploads and one-time ticket downloads,
+`src/remote/transfer.ts`); a frontend with no `transferWire` hook (the desktop app) has no
+transfers at all and the entry points answer empty. The desktop's same-day-retired pair —
+native pickers over `fs_import` / `fs_export`, its rows in the PC's menu, the mirrored
+viewer's appended device-run rows — is deleted front and back: copying between two folders
+of one machine is the system file manager's job, and the commands no longer exist to
+refuse. `zip_tree` / `zip_trees` (the remote download's packing — one path, or the
+multi-select's several) and `copy_into` (the external drop's
+no-clobber copy — not a transfer) stay.
 
 - Frontend: `src/features/explorer/explorer.ts` (the context menu adapts to the remote shell: the
-  desktop-only Reveal hides; the transfer rows show in every environment, mirrored
-  windows excepted), `src/features/explorer/transfer.ts` (the transfer layer, the `TransferSink` progress
+  desktop-only Reveal hides; the transfer rows show on the remote shell alone), `src/features/explorer/transfer.ts` (the wire-only transfer layer, the `TransferSink` progress
   surface the mirror page re-installs)
 - Backend: `src-tauri/src/cmd_fs.rs` (tree, file contents of the working tree / index / any
   revision, new-rename-delete, the external-drop copy-in `copy_into` — a dragged entry
-  never clobbers what exists: it lands beside it as a " (copy)" sibling; the desktop
-  transfer pair `fs_import` / `fs_export` over the same no-clobber engine with streamed
-  progress and cancellation; the shared `zip_tree` the remote download path and the export
-  both pack through; the confined chunked upload writes), `src-tauri/src/watcher.rs` (one recursive `notify` watch,
+  never clobbers what exists: it lands beside it as a " (copy)" sibling; the shared
+  `zip_tree` the remote download path packs through; the confined chunked upload writes),
+  `src-tauri/src/watcher.rs` (one recursive `notify` watch,
   debounced `FsChange` batches — external changes appear by themselves)
 - Tests: `tests/explorer.test.ts` (the tree, the menus, the drops, the transfer rows'
-  environments), `tests/transfer.test.ts` (the desktop half over the tauriMock recording —
-  the picker-to-command flows, the streamed progress, the Cancel action, the remote
-  delegation), `cmd_fs.rs`'s `transfer_tests` (the engine: no-clobber copies, per-entry
-  failures, whole-job cancellation with no partial left behind, the zip export without
-  `.git`), the dev harness's real-IPC transfer check (`?full=1`, the Channel's events
-  over the real bridge)
+  environments), `tests/transfer.test.ts` (the wire half over the tauriMock recording —
+  the picker-to-upload flow, the no-wire desktop's empty answers), `ggs-fs`'s copy tests
+  (the no-clobber engine the drop copy rides), the dev harness's real-IPC transfer check
+  (`?full=1`, the Channel's events over the real bridge)
 
 ### 4. Quick Open
 
@@ -428,7 +422,12 @@ setting exists, the terminal opens the system's own `$SHELL`, and the Settings d
 hides the row); the choice rides every `pty_create`, so it reaches the next terminal
 without a restart.
 
-- Frontend: `src/features/terminal/terminal.ts`
+- Frontend: `src/features/terminal/terminal.ts` (+ `outputFollow.ts`, the output-follow
+  state machine of docs/remote-client-plan.md §6.6: a frontend not looking at the terminal
+  page carries no terminal traffic — the remote's `terminalFollow.ts` drives
+  `setOutputFollow`, a 30 s grace rides a page hop, the drop after it unsubscribes the
+  sessions' OUTPUT listeners alone (their lifetime listeners stay), and a return re-takes
+  them catching up from `pty_tail`'s 64 KB replay; the desktop never drives it false)
 - Backend: `src-tauri/src/pty.rs`
 
 ### 12. Extension Platform
@@ -1584,6 +1583,98 @@ window of this machine to a phone's or another computer's browser over HTTPS and
 `ggs-remote/1` WebSocket protocol; a self-hosted relay (`ggs-remote-hub`, no accounts, no
 database) carries the link through NAT. The whole design lives in
 `docs/ggs-remote-plan.md` — this section is the map of where its parts live.
+**The 2026-10-15 client rewrite** (docs/remote-client-plan.md — its §3.3 retraction and
+R0/C0 landed the same day): remote.html is ALWAYS the remote app — its own composition
+root `src/remote/app/main.ts` (the command registry switched to the `remote` profile
+before the workbench registers; the desktop's `main.ts` never runs in a session, so the
+mirror-host hooks no longer override the session's), with the live DOM copy demoted to an
+explicit `?mirror=1`. A session NEVER opens folders, files or new windows (K4):
+`open_folder` / `app_new_instance` join the gate's `REFUSED_COMMANDS` beside
+`settings_write` and the OS-integration commands (R0 — a session's settings stay on its
+device, never written to the PC's file), the window switcher lost its "new window" row,
+the daemon's `GET /api/browse` endpoint is deleted, a SPAWN frame over the browser socket
+is refused outright (spawning is the tray's and the admin API's), and the picker page's
+typed-path row and sandbox-open button went with it (the recent list enters an open
+window only). The remote's folder restore rides `boot_context`'s new `roots` /
+`workspaceFile` answer instead of an `open_folder` invoke. The frame codec falls back to
+fflate where `CompressionStream('deflate-raw')` is missing (C0 — Safari 16.0–16.3 and
+Chrome 100–102 exchange compressed frames again; the build target is the A-level floor
+`chrome103/safari16.4/firefox115`, the C-floor gate redirects to `unsupported.html`),
+`:has()` left the remote styles (hasFallbacks.ts maintains the classes), and the device
+classification is `src/remote/app/deviceClass.ts`'s five classes (§4: size + aspect +
+pointer, 150 ms debounce, keyboard freeze, 24 px hysteresis, a manual override) written to
+`data-device` with the three-way `data-form-factor` derived from it. Upload and download
+became the browser's alone — see module 3's transfer paragraph.
+**The five layouts** (2026-10-16, A2's frame): the plan's §5 five form factors each own a
+layout module — `src/remote/app/layouts/{phonePortrait,phoneLandscape,tabletPortrait,tabletLandscape,desktop}.ts`
+— arranged by one persistent frame root the layout host (`layouts/host.ts`) owns. A
+device-class change (rotation included — `responsive.ts`'s `onDeviceClassChange`, the
+three-way factor never reports a portrait↔landscape flip) runs §4.2's switch process: the
+overlays close (the drawer, the action sheet, the settings page), the navigation state is
+recorded in pages.ts's ONE vocabulary (the phone's current page, the tablet's nav item, the
+desktop's side view), the old arrangement unmounts, the new one ADOPTS the same part
+elements (`layouts/parts.ts` collects them once — the workbench frame's own elements plus
+the app bar, the bottom navigation, the rail `navRail.ts`, the editing row, the remote
+indicator; parts MOVE, never rebuild, so tabs, dirty buffers and terminal sessions survive
+by construction — `tests/remoteLayouts.test.ts`), and the recorded page re-applies (§5.6).
+The phone chrome is the layout's: portrait is the app bar + page column + editing row +
+bottom navigation, landscape swaps in the 56 px icon rail and a 40 px top bar (the height
+is 360–430 px), the portrait tablet shows the 72 px labelled rail beside the same page
+column, the landscape tablet is the workbench's own three-column frame with the activity
+bar widened to a labelled rail and the side bar a 320 px main column, and the desktop form
+is VS Code's frame with the remote indicator (`>< GGS: <workspace>`, in
+`statusBarItem.remoteBackground`) leading the status bar's left cluster. The page-stack
+shells (both phone orientations AND the portrait tablet — §5.1–§5.3) share remote.css's
+phone block through `<html data-page-stack>` (responsive.ts maintains it from the device
+class; `nav.ts`'s page-stack navigation and the menus' phone gates key on it), §5.7's key
+gating rides the host (the phone forms swallow page-level modifier chords — the browser's
+own Ctrl keys back — while keys aimed at a focused editor keep their meaning), and
+`layouts/layouts.css` carries the per-arrangement sizing. **The replica's phone-shell path
+is gone the same day** (§11's deletion list): `mirror/phoneShell.ts`, `hostStub.ts`'s
+`watchPhoneMode`, the mirror protocol's `own` message and `remote_mirror_fit`'s
+phone-sized branch — the PC window keeps its desktop shell at every size (`fitFor` floors
+every viewer at the desktop minimum, the Rust fit no longer clears the window's
+`set_min_size`), and a phone always runs its own workbench rather than being mirrored.
+**The files page** (2026-10-16, P1, docs/remote-client-plan.md §6.1): the page-stack
+shells' Files destination is the MT-manager flat list — `src/remote/app/files/`
+(`filesPage.ts` mounts it INTO the explorer's sidebar view: on a page-stack shell the tree
+hides and the page shows, the wide forms keep the classic tree; the git letters ride the
+SCM view's `onStatus` chained in, the opens go through the same `workbench.openFile`),
+`pathBar.ts` (the root chip and one chip per level, horizontally scrolled to the end, a
+chip long-pressed copies its path, the trailing ▸ lists the sibling folders), `fileList.ts`
+(the two-line rows — the folder's item count and age, the file's size and mtime, the git
+letter at the right edge, the middle-ellipsis name; `list_dir_page` 200 a page with an
+IntersectionObserver sentinel; per-directory scroll memory on the way back; sort by
+name/modified/size/type × asc/desc with folders always first and a hidden-files switch,
+remembered per device), and `multiSelect.ts` (the 450 ms long-press starts the selection,
+the count bar and the bottom action bar — download, delete behind one confirm for the whole
+selection, rename inline, copy path). The listing's second line is fed by `DirEntryInfo`'s
+new optional `modified`/`children` (ggs-fs's `read_dir_sorted` — same metadata call plus
+one `read_dir` per folder, computed on the PC). The floating + opens the action sheet:
+upload files, upload folder (hidden on iOS, the `data-cap-ios` capability stamp), new
+file, new folder. **The multi-path download pack** (§6.7): a selection of two or more
+downloads as ONE zip — `zip_trees` (ggs-fs, beside `zip_tree`: one root answers exactly
+it, several roots each under their own name, same-named roots take a numeric suffix)
+behind `ToInstance::FetchFile`'s new `paths` field (ggs-remote-proto, serde-defaulted and
+absent on the wire for the single form — the shared control vectors carry both shapes),
+the daemon's download-ticket body and `DownloadTicket` carry it, and the browser wire's
+`downloadMany` posts it; the app's `serve_file` packs through the same headers-first
+stream as a folder zip, named after the selection's parent.
+**The Changes page and the terminal page** (2026-10-16, P2, §6.3/§6.6): the change rows
+on the page-stack shells carry the swipe-left gesture — `platform/ui/swipe.ts`
+(`swipeReveal`, in the shared kit: the action strip lives in the row's list host pinned
+under the row's box, the ROW translates with the finger, the first decisive move picks
+the axis so a vertical drag still scrolls, one row open closes the previous, and the
+click that ends a drag is swallowed), wired in `scm/rowActions.ts` behind the
+`data-page-stack` marker — the unstaged group's rows reveal Discard + Stage, the staged
+Unstage, the merge group Mark Resolved, each the same handler the hover buttons and the
+context menu run (a discard keeps its own confirm); the two-line row layout and the
+commit box's sticky ride CSS keyed on the same marker. The diff editors read their
+orientation by form (§6.3: the page-stack shells are INLINE whatever the pane measures —
+a landscape phone's 850 px pane would otherwise split into unreadable halves; the wide
+forms keep the width rule) behind `open.ts`'s `diffInlineShell`. The terminal page's
+output follow is module 11's `outputFollow.ts` (above), driven by
+`src/remote/terminalFollow.ts` from pages.ts's watcher.
 
 - **The security sandbox** (2026-10-12, the owner's direction, plan §23): when enabled, every
   instance a remote session opens runs OS-sandboxed — the engine is Microsoft's open-source
@@ -1927,8 +2018,9 @@ database) carries the link through NAT. The whole design lives in
   to the module's naming seam (below): it names the daemon it drives.
 - **The app side** (`src/remote/` + `remote.html` + `relay.html` + `vite.remote.config.ts` +
   `src-tauri/src/remote_host.rs` + `capabilities/remote-relay.json`): the same frontend with
-  its `@tauri-apps/api` seam aliased onto the WebSocket shims (`tauriShim/`), the
-  responsive shell, and the hidden Relay webview that executes a remote browser's
+  its `@tauri-apps/api` seam aliased onto the WebSocket shims (`tauriShim/`), the responsive
+  shell (the five layouts above rotate the frame; `shell.ts` installs the host after the
+  workbench's first frame), and the hidden Relay webview that executes a remote browser's
   invoke/Channel/listen calls with the real Tauri API. The phone form factor is an app,
   not a shrunken desktop (redesigned 2026-10-12): one column of full-screen pages over
   one page model (`pages.ts` — the page showing is read off the workbench's own DOM, and
@@ -2025,8 +2117,19 @@ database) carries the link through NAT. The whole design lives in
   alone excepted: its job is to find and drive the daemon by name.
 - Tests: `tests/remoteMirror.test.ts` (the replica: snapshot and every mutation kind into
   the copy, URL tokens, the CSP drop, the sequence-gap resnap, the input replay, the host's
-  viewer lifecycle, the PC window's phone mode, the transfer entries joining the mirrored
-  menu and sheet with locally-run clicks), `tests/remote.test.ts` +
+  viewer lifecycle, the transfer entries joining the mirrored
+  menu and sheet with locally-run clicks), `tests/remoteLayouts.test.ts` (the five layouts:
+  each device class's arrangement, the §4.2 switch — parts move, never rebuild, so the
+  tabs, the dirty marks and the terminal session are the same DOM across all five — the
+  overlays closing and the navigation state carrying across a switch, and §5.7's phone key
+  gating), `tests/remoteFiles.test.ts` (the files page's §6.1 acceptance: the row layout,
+  enter-and-back with the scroll restored, the sentinel's paging, the sort rules, the
+  long-press multi-select — its count bar, its one-zip multi download, the confirmed
+  delete — and the path bar's chips and sibling sheet), `tests/remotePages.test.ts` (P2's
+  §6.3/§6.6: the swipe gesture's mechanics over a stand-in row, the change rows carrying
+  the strip through a real SourceControlView on the page-stack marker — and none without
+  it — and the output-follow state machine's grace, drop, catch-up and timer stacking),
+  `tests/remote.test.ts` +
   `tests/remoteResponsive.test.ts` (the shims, transport,
   relay engine; the phone's page model, app bar, navigation, drawer, sheets, editing row
   and settings page; the transfer layer — chunked resumable uploads with per-file failure

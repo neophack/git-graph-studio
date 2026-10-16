@@ -929,68 +929,38 @@ async fn lang_js_follows_the_app_settings() {
 /// config.rs's unit tests — this harness runs on the ephemeral port 0, which any patch
 /// would refuse).
 #[tokio::test]
-async fn session_carries_the_folder_input_switch() {
+async fn the_folder_browser_endpoint_is_gone_and_a_session_never_spawns() {
     let h = start().await;
     set_password(&h).await;
-    let (cookie, _csrf) = login(&h).await;
-    let session = http(
+    let (cookie, csrf) = login(&h).await;
+    // §3.3's retraction: the browse endpoint left with the session's Open Folder — a
+    // session switches between the windows the PC already opened.
+    let answered = http(
         h.public,
         "GET",
-        "/api/session",
+        "/api/browse?path=C%3A%5C",
         &[("Cookie", &cookie)],
         None,
     )
     .await;
-    assert_eq!(session.status, 200);
-    assert!(
-        session.body.contains("\"folderInput\":true"),
-        "{}",
-        session.body
-    );
-    h.daemon.config.lock().unwrap().folder_input = false;
-    let session = http(
-        h.public,
-        "GET",
-        "/api/session",
-        &[("Cookie", &cookie)],
-        None,
+    assert_eq!(answered.status, 404, "{}", answered.body);
+    // And a SPAWN frame over the browser socket is refused outright (K4).
+    let mut ws = browser(&h, &cookie, &csrf).await;
+    send(
+        &mut ws,
+        Frame::msgpack(
+            ty::SPAWN,
+            &serde_json::json!({ "folder": "C:\nope", "visible": false }),
+        ),
     )
     .await;
+    let notice = next_of(&mut ws, ty::NOTICE).await;
+    let notice: serde_json::Value = notice.decode_msgpack().unwrap();
+    assert_eq!(notice["kind"], "spawn-failed");
     assert!(
-        session.body.contains("\"folderInput\":false"),
-        "{}",
-        session.body
+        notice["message"].as_str().unwrap().contains("PC user"),
+        "{notice}"
     );
-}
-
-/// The session's folder browser (docs/remote-ui-redesign-plan.md §P0): a browser's Open
-/// Folder lists THIS PC's folders — never without a session, never with the typed-path
-/// switch off, folder names only.
-#[tokio::test]
-async fn the_folder_browser_needs_a_session_and_the_folder_input_switch() {
-    let h = start().await;
-    set_password(&h).await;
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir(dir.path().join("project")).unwrap();
-    std::fs::write(dir.path().join("notes.txt"), b"x").unwrap();
-    let query = format!(
-        "/api/browse?path={}",
-        dir.path()
-            .to_string_lossy()
-            .bytes()
-            .map(|b| format!("%{b:02X}"))
-            .collect::<String>()
-    );
-    let anonymous = http(h.public, "GET", &query, &[], None).await;
-    assert_eq!(anonymous.status, 401, "{}", anonymous.body);
-    let (cookie, _csrf) = login(&h).await;
-    let listed = http(h.public, "GET", &query, &[("Cookie", &cookie)], None).await;
-    assert_eq!(listed.status, 200, "{}", listed.body);
-    assert!(listed.body.contains("\"project\""), "{}", listed.body);
-    assert!(!listed.body.contains("notes.txt"), "{}", listed.body);
-    h.daemon.config.lock().unwrap().folder_input = false;
-    let off = http(h.public, "GET", &query, &[("Cookie", &cookie)], None).await;
-    assert_eq!(off.status, 403, "{}", off.body);
 }
 
 /// §7.8's one-time download, end to end: the ticket is minted for the session that asked
@@ -1027,7 +997,7 @@ async fn a_download_ticket_streams_the_file_once() {
         async move { http(port, "GET", &url, &[], None).await }
     });
     match instance.recv().await {
-        ToInstance::FetchFile { req, path, zip } => {
+        ToInstance::FetchFile { req, path, zip, .. } => {
             assert_eq!(path, "C:/repo/笔记.txt");
             assert!(!zip);
             instance
@@ -1132,7 +1102,7 @@ async fn a_download_ticket_streams_the_file_once() {
         async move { http(port, "GET", &url, &[], None).await }
     });
     match instance.recv().await {
-        ToInstance::FetchFile { req, path, zip } => {
+        ToInstance::FetchFile { req, path, zip, .. } => {
             assert_eq!(path, "C:/big/repo");
             assert!(zip);
             instance
@@ -1229,6 +1199,97 @@ async fn a_download_ticket_streams_the_file_once() {
     let aborted = get.await.unwrap();
     assert_eq!(aborted.status, 200);
     assert_eq!(aborted.body, "", "the truncated archive must not land");
+}
+
+/// The multi-select pack (docs/remote-client-plan.md §6.7): a ticket over two or more
+/// paths crosses to the instance as one `FetchFile` carrying them all, and the archive
+/// it answers streams down as a zip. A `paths` body of fewer than two is not the multi
+/// form — the plain single-path rules apply (an empty `path` with one `paths` entry is
+/// no download at all).
+#[tokio::test]
+async fn a_multi_path_ticket_packs_one_zip() {
+    let h = start().await;
+    set_password(&h).await;
+    let (cookie, _csrf) = login(&h).await;
+    let mut instance = FakeInstance::connect(&h, "ggs-38741").await;
+
+    let minted = http(
+        h.public,
+        "POST",
+        "/api/download-ticket",
+        &[("Cookie", &cookie), ("Content-Type", "application/json")],
+        Some(r#"{"instance":"ggs-38741","path":"","zip":true,"paths":["C:/repo/a.rs","C:/repo/src","C:/repo/b.ts"]}"#),
+    )
+    .await;
+    assert_eq!(minted.status, 200, "{}", minted.body);
+    let url = serde_json::from_str::<serde_json::Value>(&minted.body).unwrap()["url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let get = tokio::spawn({
+        let port = h.public;
+        let url = url.clone();
+        async move { http(port, "GET", &url, &[], None).await }
+    });
+    match instance.recv().await {
+        ToInstance::FetchFile {
+            req,
+            path,
+            zip,
+            paths,
+        } => {
+            assert_eq!(path, "");
+            assert!(zip);
+            assert_eq!(paths, vec!["C:/repo/a.rs", "C:/repo/src", "C:/repo/b.ts"]);
+            instance
+                .send(&FromInstance::FileReply {
+                    req,
+                    status: 200,
+                    name: "repo.zip".into(),
+                    total: 0,
+                    chunk: Vec::new(),
+                    done: false,
+                })
+                .await;
+            instance
+                .send(&FromInstance::FileReply {
+                    req,
+                    status: 200,
+                    name: "repo.zip".into(),
+                    total: 0,
+                    chunk: b"PK\x03\x04multi".to_vec(),
+                    done: false,
+                })
+                .await;
+            instance
+                .send(&FromInstance::FileReply {
+                    req,
+                    status: 200,
+                    name: "repo.zip".into(),
+                    total: 0,
+                    chunk: Vec::new(),
+                    done: true,
+                })
+                .await;
+        }
+        other => panic!("expected FetchFile, got {other:?}"),
+    }
+    let zip = get.await.unwrap();
+    assert_eq!(zip.status, 200, "{}", zip.body);
+    assert_eq!(zip.body, "PK\x03\x04multi");
+    assert!(zip.headers.contains("content-type: application/zip"));
+
+    // One path in `paths` is not the multi form: with no `path` either, the ticket is
+    // refused outright (the single form's own rule).
+    let refused = http(
+        h.public,
+        "POST",
+        "/api/download-ticket",
+        &[("Cookie", &cookie), ("Content-Type", "application/json")],
+        Some(r#"{"instance":"ggs-38741","path":"","zip":true,"paths":["C:/repo/a.rs"]}"#),
+    )
+    .await;
+    assert_eq!(refused.status, 404, "{}", refused.body);
 }
 
 /// §17.1's pair-unlock row: the QR and the links stay behind the pair page's password

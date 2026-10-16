@@ -1,16 +1,11 @@
-// The workbench's file transfers — one vocabulary, every environment (2026-10-13's
-// rewrite): the PC app and a browser session both Upload and Download through here. The
-// transport is the environment's own — a browser session rides the remote wire
-// (src/remote/transfer.ts: chunked `fs_write_chunk` uploads, one-time ticket downloads),
-// and the desktop app drives the native pickers and the backend's own copies (`fs_import`
-// / `fs_export`, streamed progress, the Cancel action; a remote session never reaches
-// those commands — the Relay refuses them, src/remote/pathGate.ts, because their paths
-// name anywhere on the machine). A desktop upload lands beside what already exists
-// (the ` (copy)` naming the Explorer's own drop copy uses — it never clobbers).
-import { Channel } from '../../platform/ipc/core';
-import { fsExport, fsImport, type TransferProgress, type TransferReport, fsTransferCancel } from '../../platform/ipc/fs';
-import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
-
+// The remote session's file transfers — one vocabulary over the remote wire
+// (src/remote/transfer.ts: chunked `fs_write_chunk` uploads, one-time ticket downloads).
+// Upload and download are the BROWSER's own (K16, docs/remote-client-plan.md §11): the
+// desktop app had a same-vocabulary pair over its native pickers (`fs_import` /
+// `fs_export`) until 2026-10-15, when the owner retired it — copying between two folders
+// of the same machine is the system file manager's job, and the rows left the PC's menu
+// with the commands themselves. A desktop without a `transferWire` hook (the app) has no
+// transfers at all, and these entry points answer empty rather than reaching for one.
 import { t, tf } from '../../platform/i18n';
 import { hook } from '../../platform/hooks';
 import { basename, notify, progressToast, type MenuEntry } from '../../platform/ui/index';
@@ -49,10 +44,10 @@ interface ProgressTick {
 class TransferToast {
 	private handle: ReturnType<TransferSink['progress']> | null = null;
 
-	constructor(private readonly title: (label: string) => string, private readonly onCancel?: () => void) {}
+	constructor(private readonly title: (label: string) => string) {}
 
 	tick({ label, percent }: ProgressTick): void {
-		this.handle ??= sink.progress(this.title(label), this.onCancel);
+		this.handle ??= sink.progress(this.title(label));
 		this.handle.update(percent, this.title(label));
 	}
 
@@ -62,94 +57,65 @@ class TransferToast {
 	}
 }
 
-/** Report a settled transfer: the failures by name, the landed count, a cancel. */
-function reportOutcome(landed: string[], failed: { name: string; error: string }[], cancelled: boolean, kind: 'upload' | 'download'): void {
+/** Report a settled transfer: the failures by name and the landed count — a mixed
+ *  outcome tells both (the wire never cancels; its failures are per-entry). */
+function reportOutcome(landed: string[], failed: { name: string; error: string }[], kind: 'upload' | 'download'): void {
 	if (failed.length > 0) sink.error(tf('transfer.failed', failed.map((f) => f.name).join(', ')));
-	if (cancelled) sink.info(t('transfer.canceled'));
-	else if (landed.length > 0) {
+	if (landed.length > 0) {
 		sink.info(kind === 'upload' ? tf('transfer.uploaded', landed.length) : tf('transfer.downloaded', basename(landed[0] ?? '')));
 	}
 }
 
-/** A report as the backend answers it, missing fields defaulted (an older backend's answer
- *  degrades to empty, never crashes). */
-function normalizeReport(report: TransferReport | null): TransferReport {
-	return {
-		landed: report?.landed ?? [],
-		failed: report?.failed ?? [],
-		cancelled: report?.cancelled ?? false
-	};
-}
-
 /** Pick files (or a folder) and land them in `dir`, with a progress toast and the outcome
- *  notified — the one upload entry every environment runs. Resolves with the paths that
+ *  notified — the one upload entry, over the remote wire. Resolves with the paths that
  *  landed. */
 export async function uploadInto(dir: string, folder = false): Promise<string[]> {
-	if (hook('session').remote()) {
-		const toast = new TransferToast((label) => tf('transfer.uploading', label));
-		const wire = await hook('transferWire')!();
-		const outcome = await wire.uploadFiles(dir, folder, (p, index, count) => {
-			const label = count > 1 ? `${index + 1}/${count} ${p.name}` : p.name;
-			toast.tick({ label, percent: p.total > 0 ? Math.round(((index + p.sent / p.total) / count) * 100) : null });
-		});
-		toast.close();
-		reportOutcome(outcome.uploaded, outcome.failed, false, 'upload');
-		return outcome.uploaded;
-	}
-	// The desktop: the native picker chooses sources anywhere on the machine, and the job
-	// carries its own stop button (fs_transfer_cancel).
-	const picked = await openDialog({ multiple: true, directory: folder, title: t(folder ? 'transfer.uploadFolder' : 'transfer.upload') });
-	const sources = Array.isArray(picked) ? picked : picked ? [picked] : [];
-	if (sources.length === 0) return [];
-	const toast = new TransferToast((label) => tf('transfer.uploading', label), () => void fsTransferCancel().catch(() => undefined));
-	const channel = new Channel<TransferProgress>();
-	channel.onmessage = (p) => toast.tick({ label: p.name, percent: p.total > 0 ? Math.round((p.bytes / p.total) * 100) : null });
-	const report = normalizeReport(await fsImport(sources, dir, channel)
-		.catch((error: unknown) => {
-		sink.error(tf('transfer.failed', String(error)));
-		return null;
-	}));
-	toast.close();
-	reportOutcome(report.landed, report.failed, report.cancelled, 'upload');
-	return report.landed;
-}
-
-/** Download a file or a folder (zipped by the backend) to the user's chosen destination —
- *  the one download entry every environment runs. Resolves whether the download ran. */
-export async function downloadTo(path: string, zip = false): Promise<boolean> {
-	if (hook('session').remote()) {
-		const wire = await hook('transferWire')!();
-		try {
-			await wire.download(path, zip);
-			return true;
-		} catch (error) {
-			sink.error(tf('transfer.failed', String(error)));
-			return false;
-		}
-	}
-	// The desktop: the save dialog names the destination anywhere on the machine; a folder
-	// (or an explicit zip) packs into an archive.
-	const suggested = basename(path) + (zip ? '.zip' : '');
-	const dest = await saveDialog({
-		defaultPath: suggested,
-		...(zip ? { filters: [{ name: 'Zip', extensions: ['zip'] }] } : {})
+	const load = hook('transferWire');
+	if (!load) return [];
+	const toast = new TransferToast((label) => tf('transfer.uploading', label));
+	const wire = await load();
+	const outcome = await wire.uploadFiles(dir, folder, (p, index, count) => {
+		const label = count > 1 ? `${index + 1}/${count} ${p.name}` : p.name;
+		toast.tick({ label, percent: p.total > 0 ? Math.round(((index + p.sent / p.total) / count) * 100) : null });
 	});
-	if (!dest) return false;
-	const toast = new TransferToast((label) => tf('transfer.downloading', label), () => void fsTransferCancel().catch(() => undefined));
-	const channel = new Channel<TransferProgress>();
-	channel.onmessage = (p) => toast.tick({ label: p.name, percent: p.total > 0 ? Math.round((p.bytes / p.total) * 100) : null });
-	const report = normalizeReport(await fsExport(path, dest, zip, channel)
-		.catch((error: unknown) => {
-		sink.error(tf('transfer.failed', String(error)));
-		return null;
-	}));
 	toast.close();
-	reportOutcome(report.landed, report.failed, report.cancelled, 'download');
-	return report.landed.length > 0;
+	reportOutcome(outcome.uploaded, outcome.failed, 'upload');
+	return outcome.uploaded;
 }
 
-/** The Explorer context menu's transfer rows (one vocabulary, every environment): a file
- *  downloads, a folder downloads zipped and receives uploads. */
+/** Download a file or a folder (zipped by the daemon) — the one download entry, over the
+ * remote wire's one-time ticket. Resolves whether the download ran. */
+export async function downloadTo(path: string, zip = false): Promise<boolean> {
+	const load = hook('transferWire');
+	if (!load) return false;
+	try {
+		await (await load()).download(path, zip);
+		return true;
+	} catch (error) {
+		sink.error(tf('transfer.failed', String(error)));
+		return false;
+	}
+}
+
+/** Download several files and folders as ONE zip (§6.7's multi-select pack). A wire
+ *  without the multi form falls back to one download per selection. Resolves whether
+ *  anything ran. */
+export async function downloadManyTo(paths: string[]): Promise<boolean> {
+	const load = hook('transferWire');
+	if (!load || paths.length === 0) return false;
+	const wire = await load();
+	try {
+		if (wire.downloadMany) await wire.downloadMany(paths);
+		else for (const path of paths) await wire.download(path, false);
+		return true;
+	} catch (error) {
+		sink.error(tf('transfer.failed', String(error)));
+		return false;
+	}
+}
+
+/** The Explorer context menu's transfer rows — a remote session's own (a file downloads, a
+ *  folder downloads zipped and receives uploads). */
 export function transferMenuEntries(path: string, isDir: boolean): MenuEntry[] {
 	return isDir ? [
 		{ label: t('transfer.downloadZip'), run: () => void downloadTo(path, true) },
@@ -158,13 +124,4 @@ export function transferMenuEntries(path: string, isDir: boolean): MenuEntry[] {
 	] : [
 		{ label: t('transfer.download'), run: () => void downloadTo(path) }
 	];
-}
-
-/** Whether the Explorer shows its transfer rows: always on a remote session's own UI; on
- *  the desktop, never while a mirror viewer watches this window — the viewer's own
- *  device-run rows are the transfer vocabulary then (a PC-run row would open a native
- *  dialog the phone cannot see), and they return the moment the viewer leaves. */
-export function transferMenuShown(): boolean {
-	if (hook('session').remote()) return true;
-	return !(hook('mirror')?.viewersNow() ?? false);
 }

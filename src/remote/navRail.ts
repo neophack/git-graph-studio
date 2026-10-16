@@ -1,0 +1,80 @@
+// The vertical navigation rail (docs/remote-client-plan.md §5.2, §5.3): the bottom
+// navigation's destinations stood on their side — icon-only at 56 px on a landscape phone
+// (no bottom bar: the height is 360–430 px and the content needs all of it), icon over
+// label at 72 px on a portrait tablet. The same page model (pages.ts) drives it: a tap
+// always shows its page, the active page is marked, and the badges (open editors, pending
+// changes) carry what the hidden status and activity bars would.
+import { t } from '../platform/i18n';
+import { currentPage, goTo, onWorkbenchChange, pageIcon, type PageId } from './pages';
+import { bottomTabs, tabBadge } from './bottomTabs';
+
+function railButton(id: PageId, label: string, onTap: () => void): HTMLButtonElement {
+	const button = document.createElement('button');
+	button.dataset.tab = id;
+	if (id.startsWith('ext-container:') || id.startsWith('launch:')) button.dataset.ext = '';
+	button.setAttribute('role', 'tab');
+	button.setAttribute('aria-label', label);
+	const pill = document.createElement('span');
+	pill.className = 'pill';
+	pill.appendChild(pageIcon(id));
+	const badge = document.createElement('span');
+	badge.className = 'badge';
+	badge.hidden = true;
+	pill.appendChild(badge);
+	// The label span exists in every form; the rail's width decides whether CSS shows it
+	// (§5.2 hides, §5.3 shows) — one element, no rebuild between the two rails.
+	const text = document.createElement('span');
+	text.className = 'label';
+	text.textContent = label;
+	button.append(pill, text);
+	button.addEventListener('click', onTap);
+	return button;
+}
+
+/** Mark the page showing and refresh the badges (the bar's own syncActive answers for the
+ *  buttons themselves — the rail's buttons carry the same classes and badge structure). */
+function syncRail(bar: HTMLElement): void {
+	const page = currentPage();
+	for (const button of bar.querySelectorAll<HTMLButtonElement>('button[data-tab]')) {
+		const id = button.dataset.tab ?? '';
+		const active = id === page;
+		button.classList.toggle('active', active);
+		button.setAttribute('aria-selected', active ? 'true' : 'false');
+		const badge = button.querySelector<HTMLElement>('.badge')!;
+		const value = tabBadge(id);
+		badge.hidden = value === null;
+		badge.textContent = value?.text ?? '';
+		badge.classList.toggle('dirty', value?.dot ?? false);
+	}
+}
+
+/** Rebuild the buttons when the destinations change, else only the active mark and badges
+ *  (bottomTabs.syncTabs answers the same keying for the bar; the rail keeps its own key so
+ *  the two never fight over one element). */
+function syncButtons(bar: HTMLElement): void {
+	const tabs = bottomTabs();
+	const key = tabs.map((tab) => `${tab.id}|${tab.label}`).join(' ');
+	if (bar.dataset.tabsKey !== key) {
+		bar.dataset.tabsKey = key;
+		bar.replaceChildren(
+			...tabs.map((tab) =>
+				railButton(tab.id, tab.label, () => {
+					if (currentPage() !== tab.id) void goTo(tab.id).then(() => syncRail(bar));
+				})
+			)
+		);
+	}
+	syncRail(bar);
+}
+
+/** The rail itself. A reselect on the rail is a plain re-mark (the landscape phone has no
+ *  app bar to open a switcher onto); list pages scroll back to their top like the bar's. */
+export function createNavRail(): HTMLElement {
+	const bar = document.createElement('nav');
+	bar.className = 'ggs-nav-rail';
+	bar.setAttribute('role', 'tablist');
+	bar.setAttribute('aria-label', t('remote.nav.label'));
+	syncButtons(bar);
+	onWorkbenchChange(() => syncButtons(bar));
+	return bar;
+}

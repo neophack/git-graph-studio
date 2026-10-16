@@ -83,8 +83,23 @@ export function uploadFiles(dir: string, folder = false, onProgress?: (p: Upload
 }
 
 /** Download a file or a folder (zipped by the instance) to this device: the one-time
- *  ticket the browser then navigates to. */
+ * ticket the browser then navigates to. */
 export async function download(path: string, zip = false): Promise<void> {
+	await downloadTicket({ path, zip });
+}
+
+/** Download several files and folders as ONE zip (§6.7's multi-select pack): the instance
+ * packs them (`zip_trees`), the browser's download manager owns the rest. Two paths at
+ * least — a single selection belongs to the plain download. */
+export async function downloadMany(paths: string[]): Promise<void> {
+	if (paths.length < 2) {
+		if (paths.length === 1) await download(paths[0], false);
+		return;
+	}
+	await downloadTicket({ paths });
+}
+
+async function downloadTicket(body: { path: string; zip: boolean } | { paths: string[] }): Promise<void> {
 	const env = remoteEnv();
 	if (!env) throw new Error('downloads need a remote session');
 	const base = new URL(env.basePath, location.href);
@@ -92,7 +107,7 @@ export async function download(path: string, zip = false): Promise<void> {
 		method: 'POST',
 		credentials: 'same-origin',
 		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ instance: env.attached.instance, path, zip })
+		body: JSON.stringify({ instance: env.attached.instance, ...body })
 	});
 	if (!response.ok) throw new Error(`download refused (${response.status})`);
 	const { url } = (await response.json()) as { url: string };

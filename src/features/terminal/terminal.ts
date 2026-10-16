@@ -4,7 +4,7 @@
 
 import type { Terminal } from '@xterm/xterm';
 import type { FitAddon } from '@xterm/addon-fit';
-import { ptyCreate, ptyKill, ptyResize, ptyWrite } from '../../platform/ipc/pty';
+import { ptyCreate, ptyKill, ptyResize, ptyTail, ptyWrite } from '../../platform/ipc/pty';
 import { listen, type UnlistenFn } from '../../platform/ipc/core';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 
@@ -13,6 +13,7 @@ import { loadXterm } from '../../platform/lazy';
 import { actionButton, el, icon, notify, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 import { THEME_EVENT, settings } from '../../platform/settings';
 import { t } from '../../platform/i18n';
+import { OutputFollow } from './outputFollow';
 
 interface Session {
 	id: number;
@@ -23,6 +24,10 @@ interface Session {
 	row: HTMLElement;
 	exited: boolean;
 	unlisten: UnlistenFn[];
+	/** The OUTPUT subscription, held apart from the lifetime listeners (the exit watch) so
+	 *  the remote's page-follow (docs/remote-client-plan.md §6.6) can drop and re-take it
+	 *  alone: a frontend not looking at the terminal page carries no terminal traffic. */
+	outputUnlisten: UnlistenFn | null;
 }
 
 function cssVar(name: string): string {
@@ -62,6 +67,14 @@ export class TerminalView {
 	 *  not replace (and so close) the previous page's shells under the same numbers. */
 	private nextId = Math.floor(Math.random() * 0x3fff_ffff);
 	private visible = false;
+	/** §6.6's page-follow state machine: the sessions' output subscriptions live only
+	 *  while this frontend looks at the terminal page (the remote's terminalFollow drives
+	 *  it; the desktop never calls setFollowing(false)). */
+	private readonly follow = new OutputFollow<Session>({
+		sessions: () => this.sessions,
+		subscribe: (session, catchUp) => this.subscribeOutput(session, catchUp),
+		drop: (session) => this.dropOutput(session)
+	});
 
 	/** The user pressed Enter in a shell: the repository may have changed. */
 	onCommandEntered: (() => void) | null = null;
@@ -220,14 +233,15 @@ export class TerminalView {
 		});
 
 		const row = el('div', 'row');
-		const session: Session = { id, name: 'shell', term, fit, element, row, exited: false, unlisten: [] };
+		const session: Session = { id, name: 'shell', term, fit, element, row, exited: false, unlisten: [], outputUnlisten: null };
 		this.sessions.push(session);
 		this.activate(session);
 		fit.fit();
 
-		// The listeners go up BEFORE the shell starts: its first prompt arrives within
-		// milliseconds of the spawn and would otherwise be lost.
-		session.unlisten.push(await listen<string>(`studio://pty-output-${id}`, (event) => term.write(event.payload)));
+		// The lifetime listeners go up BEFORE the shell starts: its first prompt arrives
+		// within milliseconds of the spawn and would otherwise be lost. The output listener
+		// rides the page-follow instead (subscribeOutput) — its first take is here, before
+		// the spawn, for exactly the same reason.
 		session.unlisten.push(await listen(`studio://pty-exit-${id}`, () => {
 			session.exited = true;
 			term.write('\r\n\x1b[90m[The terminal process has exited. Press any key to close it.]\x1b[0m\r\n');
@@ -237,6 +251,11 @@ export class TerminalView {
 			});
 			this.renderList();
 		}));
+		await this.subscribeOutput(session, false).then(() => {
+			// A session spawned while the page is away (§6.6) starts without its output
+			// subscription: the next return takes it with the tail catch-up.
+			if (!this.follow.shouldSubscribeNew()) this.dropOutput(session);
+		});
 
 		let shellName: string;
 		try {
@@ -271,6 +290,39 @@ export class TerminalView {
 		}, 100));
 	}
 
+	/** Take a session's output subscription. `catchUp` (a return after the subscription was
+	 *  actually dropped) repaints from the backend's 64 KB tail first — the buffer still
+	 *  holds the older half of it, and appending would duplicate every line. */
+	private async subscribeOutput(session: Session, catchUp: boolean): Promise<void> {
+		if (session.outputUnlisten || session.exited) return;
+		if (catchUp) {
+			session.term.reset();
+			try {
+				session.term.write(await ptyTail(session.id));
+			} catch {
+				/* the session died while away: the exit listener owns that */
+			}
+		}
+		session.outputUnlisten = await listen<string>(`studio://pty-output-${session.id}`, (event) => session.term.write(event.payload));
+	}
+
+	private dropOutput(session: Session): void {
+		session.outputUnlisten?.();
+		session.outputUnlisten = null;
+	}
+
+	/** §6.6 (the remote terminal page): whether THIS frontend is looking at the terminal
+	 *  page. The follow state machine owns the grace and the catch-up; the desktop panel
+	 *  never calls this with false (its terminals are always local). */
+	setOutputFollow(following: boolean): void {
+		this.follow.setFollowing(following);
+	}
+
+	/** Whether a session's output subscription is held (the page-follow tests' seam). */
+	outputSubscribed(id: number): boolean {
+		return this.sessions.some((session) => session.id === id && session.outputUnlisten !== null);
+	}
+
 	private activate(session: Session): void {
 		this.active = session;
 		for (const other of this.sessions) other.element.hidden = other !== session;
@@ -293,6 +345,7 @@ export class TerminalView {
 			window.clearTimeout(pending);
 			this.resizeTimers.delete(session.id);
 		}
+		this.dropOutput(session);
 		for (const unlisten of session.unlisten) unlisten();
 		session.term.dispose();
 		session.element.remove();

@@ -21,7 +21,7 @@ beforeEach(() => {
 	shell();
 	backend.reset();
 	backend.handlers = new DefaultingHandlers([
-		['boot_context', () => ({ file: FILE, actions: [], repo: null })],
+		['boot_context', () => ({ file: FILE, actions: [], repo: null, roots: [], workspaceFile: null })],
 		['boot_stage', () => null],
 		['read_file', () => ({ contents: '# Hello\n', binary: false, size: 8 })],
 		['open_single_file', () => null],
@@ -54,7 +54,7 @@ describe('single-file mode', () => {
 	});
 
 	it('File > Open File... switches an open folder into single-file mode', async () => {
-		backend.handlers.set('boot_context', () => ({ file: null, actions: [], repo: 'C:\\repo' }));
+		backend.handlers.set('boot_context', () => ({ file: null, actions: [], repo: 'C:\\repo', roots: [{ root: 'C:\\repo', isRepo: true }], workspaceFile: null }));
 		backend.handlers.set('open_folder', ({ path }) => ({ root: path, isRepo: true }));
 		backend.handlers.set('repo_head', () => ({ branch: 'main', shortHash: 'abc', ahead: 0, behind: 0, upstream: null }));
 		backend.handlers.set('scm_status', () => []);

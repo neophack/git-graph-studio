@@ -49,6 +49,9 @@ pub struct DownloadTicket {
     pub instance: String,
     pub path: String,
     pub zip: bool,
+    /// The multi-select pack (docs/remote-client-plan.md §6.7): two or more paths zipped
+    /// into one archive. Empty for the single-path form.
+    pub paths: Vec<String>,
 }
 
 pub const PAIR_TICKET_TTL: Duration = Duration::from_secs(300);

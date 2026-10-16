@@ -150,6 +150,7 @@
 	<script type="module">
 		import { initResponsive } from '/src/remote/responsive.ts';
 		import '/src/remote/remote.css';
+		import '/src/remote/app/layouts/layouts.css';
 		initResponsive();
 		await import('/src/main.ts');
 		const { installRemoteShell } = await import('/src/remote/shell.ts');

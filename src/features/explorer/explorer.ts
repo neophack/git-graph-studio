@@ -10,7 +10,7 @@ import { fileIcon, fileIconColor } from '../../platform/fileIcons';
 import type { StatusMap } from '../../platform/ipc/scm';
 import { contextUri, menuSection, resourceContext } from '../extensions';
 import { tf } from '../../platform/i18n';
-import { transferMenuEntries, transferMenuShown } from './transfer';
+import { transferMenuEntries } from './transfer';
 import { actionButton, basename, confirmDialog, el, icon, joinPath, liveSidebarTitle, notify, relativeTo, showContextMenu, toPosix, type MenuEntry } from '../../platform/ui/index';
 
 /** Remote traffic (docs/ggs-remote-plan.md §10.3): over the WebSocket every byte is metered,
@@ -756,13 +756,11 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 			// has no such place. Hidden on the remote shell (the opener shim's
 			// remote-picker fallback stays for anything else that reveals).
 			...(remoteShell() ? [] : [{ label: 'Reveal in File Explorer', run: () => void revealItemInDir(path).catch((e) => notify('error', String(e))) }] as MenuEntry[]),
-			// File transfers (src/transfer.ts): one vocabulary, every environment — a file
-			// downloads (the native save dialog on the desktop, the device on a browser
-			// session), a folder downloads zipped and receives uploads. While a mirror
-			// viewer watches this window the rows hide: the viewer's own device-run entries
-			// own the vocabulary then (a PC-run row would open a dialog the phone cannot
-			// see).
-			...(transferMenuShown() ? transferMenuEntries(path, isDir) : []),
+			// File transfers are the remote session's own (K16, docs/remote-client-plan.md
+			// §11): a file downloads to the device, a folder downloads zipped and receives
+			// uploads — over the remote wire. The desktop app has no rows: copying between
+			// two folders of one machine is the system file manager's job.
+			...(remoteShell() ? transferMenuEntries(path, isDir) : []),
 			...(isDir ? [
 				{ label: 'Module Analysis', run: () => this.onModuleAnalysis?.(this.selectedFolders(path)) },
 				{ label: 'Open in Integrated Terminal', run: () => this.onOpenInTerminal?.(path) }

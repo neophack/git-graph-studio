@@ -9,3 +9,7 @@ export const ptyCreate = (id: number, cols: number, rows: number, shell: string)
 export const ptyWrite = (id: number, data: string) => invoke<void>('pty_write', { id, data });
 export const ptyResize = (id: number, cols: number, rows: number) => invoke<void>('pty_resize', { id, cols, rows });
 export const ptyKill = (id: number) => invoke<void>('pty_kill', { id });
+/** The session's recent output, at most the backend's 64 KB tail - the catch-up replay a
+ *  frontend re-taking its output subscription writes first (docs/remote-client-plan.md
+ *  §6.6: the terminal page's follow). */
+export const ptyTail = (id: number) => invoke<string>('pty_tail', { id });

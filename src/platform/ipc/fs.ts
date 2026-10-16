@@ -3,14 +3,20 @@
 // list every walk reuses, and the desktop transfer pair — the ggs-fs crate's commands
 // behind the app's adapters. The result shapes live here once; the Explorer, the editors,
 // the viewers and the compare tools all import them from this module.
-import { invoke, type Channel } from './core';
+import { invoke } from './core';
 
-/** One entry of a `list_dir` answer: name, workspace-absolute path, kind and size. */
+/** One entry of a `list_dir` answer: name, workspace-absolute path, kind and size. The
+ *  optional second-line facts (the remote files page's rows, docs/remote-client-plan.md
+ *  §6.1) are absent on older scripted recordings. */
 export interface DirEntryInfo {
 	name: string;
 	path: string;
 	isDir: boolean;
 	size: number;
+	/** Seconds since the epoch, when the platform reports it. */
+	modified?: number;
+	/** A folder's direct child count, when known. */
+	children?: number;
 }
 
 /** One window of a paged listing (`list_dir_page`): the order `list_dir` spells, sliced,
@@ -80,27 +86,4 @@ export const backupWrite = (path: string, contents: string) => invoke<void>('bac
 export const backupList = () => invoke<BackupEntry[]>('backup_list');
 export const backupRead = (path: string) => invoke<string>('backup_read', { path });
 export const backupClear = (path: string) => invoke<void>('backup_clear', { path });
-export const fsTransferCancel = () => invoke<void>('fs_transfer_cancel');
 
-/** One progress report of a desktop transfer (`fs_export` / `fs_import`). */
-export interface TransferProgress {
-	name: string;
-	bytes: number;
-	total: number;
-}
-
-/** What a desktop transfer settled on: the paths that landed, per-entry failures, and
- *  whether the Cancel action stopped it early. */
-export interface TransferReport {
-	landed: string[];
-	failed: { name: string; error: string }[];
-	cancelled: boolean;
-}
-
-/** The desktop transfer pair: picked sources copy into the target folder (the no-clobber
- *  ` (copy)` engine), a file/folder copies out to the save dialog's destination (a folder
- *  zips into it); progress streams over a Channel, Cancel rides `fsTransferCancel`. */
-export const fsImport = (sources: string[], targetDir: string, onProgress: Channel<TransferProgress>) =>
-	invoke<TransferReport>('fs_import', { sources, targetDir, onProgress });
-export const fsExport = (path: string, dest: string, zip: boolean, onProgress: Channel<TransferProgress>) =>
-	invoke<TransferReport>('fs_export', { path, dest, zip, onProgress });

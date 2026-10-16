@@ -1,4 +1,6 @@
-// The workbench menus: the title bar's menu tree and the remote-session pruning of desktop-only entries.
+// The workbench menus: the title bar's menu tree, pruned per the shell's command config
+// (docs/remote-client-plan.md §3.2 — the registry's profiles decide; the one runtime case
+// left here is the mirror viewer driving the desktop window).
 
 import type { Workbench } from './workbench';
 
@@ -12,26 +14,29 @@ import { basename, type MenuEntry } from '../platform/ui/index';
 export const menusMethods: ThisType<Workbench> = {
 	menus() {
 		const item = (id: string) => commands.menuItem(id);
-		// Who the File menu serves (docs/remote-ui-redesign-plan.md §P0): a browser session,
-		// or this PC window while a mirror viewer drives it. Either way New Window, Open File
-		// and Open Workspace would open a native dialog or a window only the PC's screen
-		// shows (a session's own opens are refused outright) — they hide; Open Folder stays,
-		// browsing the PC (`folderOpen`). A session's recent folders live in that browser
-		// (the daemon's list), so its Open Recent hides too.
-		const session = () => hook('session').remote();
-		const remoteFacing = () => session() || (hook('mirror')?.viewersNow() ?? false);
+		// Who the File menu serves (§3.2, K3/K4): the remote shell never lists the
+		// machine-level opens — they are desktop-profile commands. The desktop window
+		// itself keeps them, but while a mirror viewer drives it the native dialogs and
+		// spawned windows would open only on the PC's screen, so they fold away there
+		// too; Open Folder stays (the in-window browse the viewer can see and drive).
+		const remote = () => commands.activeProfile() === 'remote';
+		const watched = () => (hook('mirror')?.viewersNow() ?? false);
+		const hideOpens = () => remote() || watched();
 		return [
 			{ label: t('menu.file'), entries: (): MenuEntry[] => [
-				...(remoteFacing() ? [] : [item('workbench.newWindow')]), item('workbench.newFile'), 'separator',
-				item('workbench.openFolder'), ...(remoteFacing() ? [] : [item('workbench.openFileStandalone'), item('workbench.openWorkspace')]),
-				...(session() ? [] : [{ label: 'Open Recent', submenu: [
+				...(hideOpens() ? [] : [item('workbench.newWindow')]), item('workbench.newFile'), 'separator',
+				...(remote() ? [] : [item('workbench.openFolder')]),
+				...(hideOpens() ? [] : [item('workbench.openFileStandalone'), item('workbench.openWorkspace')]),
+				...(remote() ? [] : [{ label: 'Open Recent', submenu: [
 					...state.recentFolders().map((folder) => ({ label: basename(folder), keybinding: folder, run: () => void this.openRecent(folder) })),
 					...(state.recentFolders().length > 0 ? ['separator' as const] : []),
 					{ label: 'Clear Recently Opened', disabled: state.recentFolders().length === 0, run: () => { state.save('recentFolders', []); } }
 				] }]),
 				'separator', item('workbench.save'), item('workbench.saveAll'), 'separator',
-				item('workbench.closeEditor'), item('workbench.closeFolder'), 'separator',
-				item('workbench.openSettings'), 'separator', item('workbench.exit')
+				item('workbench.closeEditor'),
+				...(remote() ? [] : [item('workbench.closeFolder')]), 'separator',
+				item('workbench.openSettings'), 'separator',
+				...(remote() ? [] : [item('workbench.exit')])
 			] },
 			{ label: t('menu.edit'), entries: (): MenuEntry[] => [item('editor.undo'), item('editor.redo'), 'separator', item('editor.cut'), item('editor.copy'), item('editor.paste'), 'separator', item('editor.find'), item('editor.replace'), item('workbench.showSearch'), item('workbench.replaceInFiles'), 'separator', item('editor.toggleLineComment'), item('editor.toggleBlockComment'), 'separator', item('editor.toggleBookmark'), item('editor.listBookmarks')] },
 			{ label: t('menu.selection'), entries: (): MenuEntry[] => [item('editor.selectAll')] },
@@ -69,8 +74,9 @@ export const menusMethods: ThisType<Workbench> = {
 				// A phone has no keyboard to bind — the shortcuts page is a desktop read.
 				...(hook('navigation').phoneShell() ? [] : [item('help.shortcuts')]),
 				item('help.selfTest'), ...((import.meta.env.DEV && !import.meta.env.VITEST) ? [item('help.devHarness')] : []), 'separator', item('help.repository'), 'separator',
-				// Opens the PC's own (hidden relay) devtools — invisible to a browser user.
-				...(hook('session').remote() ? [] : [item('help.openDevTools')]),
+				// Opens the PC's own (hidden relay) devtools — a desktop-profile command
+				// invisible to a browser user.
+				...(commands.visible('help.openDevTools') ? [item('help.openDevTools')] : []),
 				'separator', item('help.about')
 			] }
 		];

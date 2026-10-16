@@ -4,6 +4,7 @@
 // contextmenu, the terminal key row, the page stack and the edit lock.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
+import * as deviceClassModule from '../src/remote/app/deviceClass';
 import { formFactorFor, initResponsive, formFactor } from '../src/remote/responsive';
 
 // The remote session's hooks, as boot.ts installs them: the editor suite's phone surfaces
@@ -33,9 +34,19 @@ import { setLocale, t } from '../src/platform/i18n';
 import { backend } from './tauriMock';
 import { click, flush, type } from './helpers';
 
-function setWidth(width: number): void {
+function setWidth(width: number, height = 800): void {
 	Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+	Object.defineProperty(window, 'innerHeight', { configurable: true, value: height });
+	// The classifier reads the LAYOUT viewport (§4.1), which jsdom reports as 0 — stub it
+	// the way the plan's own test direction spells (§14.1).
+	Object.defineProperty(document.documentElement, 'clientWidth', { configurable: true, value: width });
+	Object.defineProperty(document.documentElement, 'clientHeight', { configurable: true, value: height });
 	window.dispatchEvent(new Event('resize'));
+}
+
+/** The classifier settles 150 ms after the last resize (§4.2's debounce). */
+async function settle(): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, 170));
 }
 
 function setCoarse(coarse: boolean): void {
@@ -56,14 +67,24 @@ describe('form factors', () => {
 		expect(formFactorFor(1440)).toBe('desktop');
 	});
 
-	it('are written onto <html> and follow resizes', () => {
+	it('are written onto <html> and follow resizes', async () => {
 		setCoarse(true);
 		setWidth(390);
 		const stop = initResponsive();
 		expect(document.documentElement.dataset.formFactor).toBe('phone');
+		expect(document.documentElement.dataset.device).toBe('phone-portrait');
 		expect(document.documentElement.dataset.pointer).toBe('coarse');
 		expect(document.documentElement.classList.contains('remote-shell')).toBe(true);
+		// A touch device grown to 1300×800 is a TABLET landscape, not a desktop (§4.1's
+		// own matrix: iPad Pro 13 landscape) — the desktop form needs the fine pointer.
 		setWidth(1300);
+		await settle();
+		expect(document.documentElement.dataset.formFactor).toBe('tablet');
+		expect(document.documentElement.dataset.device).toBe('tablet-landscape');
+		// The precise pointer at the same size is the desktop browser.
+		setCoarse(false);
+		setWidth(1300);
+		await settle();
 		expect(document.documentElement.dataset.formFactor).toBe('desktop');
 		expect(formFactor()).toBe('desktop');
 		stop();
@@ -71,7 +92,7 @@ describe('form factors', () => {
 });
 
 describe('action sheet', () => {
-	it('replaces context menus on a touch phone only', () => {
+	it('replaces context menus on a touch phone only', async () => {
 		document.body.innerHTML = '<div id="overlays"></div>';
 		setCoarse(true);
 		setWidth(390);
@@ -90,13 +111,14 @@ describe('action sheet', () => {
 		expect(document.querySelector('.ggs-action-sheet')).toBeNull();
 
 		setWidth(1300);
+		await settle();
 		showContextMenu(10, 10, [{ label: 'Rename', run }]);
 		expect(document.querySelector('.ggs-action-sheet')).toBeNull();
 		expect(document.querySelector('.context-menu')).not.toBeNull();
 		stop();
 	});
 
-	it('carries the "..." anchor menus onto the sheet too — no floating cascade on a touch phone', () => {
+	it('carries the "..." anchor menus onto the sheet too — no floating cascade on a touch phone', async () => {
 		document.body.innerHTML = '<div id="overlays"></div><button id="more">…</button>';
 		setCoarse(true);
 		setWidth(390);
@@ -123,6 +145,7 @@ describe('action sheet', () => {
 
 		// Off the phone the anchor menu drops as the floating panel it always was.
 		setWidth(1300);
+		await settle();
 		showMenuBelow(document.getElementById('more')!, [{ label: 'Commit', run: ran }]);
 		expect(document.querySelector('.context-menu')).not.toBeNull();
 		expect(document.querySelector('.ggs-action-sheet')).toBeNull();
@@ -137,6 +160,8 @@ describe('action sheet', () => {
 function phoneWorkbench(): { ran: string[]; sidebar: HTMLElement; panel: HTMLElement; group: HTMLElement } {
 	document.documentElement.setAttribute('data-remote-shell', '');
 	document.documentElement.dataset['formFactor'] = 'phone';
+	// The page-stack marker (§5.1–§5.3): what the shell's navigation and edit-lock gates read.
+	document.documentElement.setAttribute('data-page-stack', '');
 	document.title = 'ws - Git Graph Studio';
 	document.body.innerHTML = [
 		'<div id="titlebar"></div>',
@@ -185,6 +210,7 @@ function leavePhone(): void {
 	removeContributions('preview.graph');
 	delete document.documentElement.dataset['formFactor'];
 	document.documentElement.removeAttribute('data-remote-shell');
+	document.documentElement.removeAttribute('data-page-stack');
 }
 
 describe('bottom navigation', () => {
@@ -520,14 +546,18 @@ describe('phone page stack', () => {
 		return { contents: text, binary: false, size: text.length };
 	});
 
-	function shellForm(factor: 'phone' | 'tablet'): void {
+	/** The phone shell's markers: the remote shell on a page-stack form (responsive.ts
+	 *  writes both from the settled device class). */
+	function shellForm(): void {
 		document.documentElement.setAttribute('data-remote-shell', '');
-		document.documentElement.dataset['formFactor'] = factor;
+		document.documentElement.dataset['formFactor'] = 'phone';
+		document.documentElement.setAttribute('data-page-stack', '');
 	}
 
 	afterEach(() => {
 		delete document.documentElement.dataset['formFactor'];
 		document.documentElement.removeAttribute('data-remote-shell');
+		document.documentElement.removeAttribute('data-page-stack');
 	});
 
 	/** The workbench's own toggle mirrored onto the test DOM: the dismissal crosses the
@@ -540,7 +570,7 @@ describe('phone page stack', () => {
 	}
 
 	it('an editor opening dismisses the full-screen side view, and so does re-opening its tab', async () => {
-		shellForm('phone');
+		shellForm();
 		files();
 		const sidebar = openSideView();
 		const group = new EditorGroup(document.getElementById('editorGroup')!);
@@ -553,7 +583,7 @@ describe('phone page stack', () => {
 	});
 
 	it('the panel showing dismisses the side view, and a covered panel is revealed, not toggled away', () => {
-		shellForm('phone');
+		shellForm();
 		const sidebar = openSideView();
 		backend.on('pty_create', () => 'ggs-bash');
 		const panel = new Panel(document.getElementById('panel')!);
@@ -571,7 +601,7 @@ describe('phone page stack', () => {
 	});
 
 	it('an editor opening closes the Terminal page above it too', async () => {
-		shellForm('phone');
+		shellForm();
 		files();
 		const panel = document.getElementById('panel')!;
 		panel.hidden = false;
@@ -581,8 +611,11 @@ describe('phone page stack', () => {
 		expect(panel.hidden).toBe(true);
 	});
 
-	it('keeps the side bar beside the editor off the phone (tablet web, the app)', async () => {
-		shellForm('tablet');
+	it('keeps the side bar beside the editor off the page-stack shells (tablet landscape, desktop web, the app)', async () => {
+		// §5.3: the PORTRAIT tablet pages like the phone (the page-stack marker); the
+		// landscape tablet and the desktop browser keep VS Code's side-by-side frame.
+		document.documentElement.setAttribute('data-remote-shell', '');
+		document.documentElement.dataset['formFactor'] = 'desktop';
 		files();
 		const sidebar = openSideView();
 		const group = new EditorGroup(document.getElementById('editorGroup')!);
@@ -809,5 +842,59 @@ describe('settings page', () => {
 		row('.md').click();
 		await flush();
 		expect(settings.fileAssociations).toEqual([...DEFAULT_SETTINGS.fileAssociations, 'md']);
+	});
+});
+
+describe('the device classifier (§4.1)', () => {
+	const { classify, settleDeviceClass, withinHysteresis, overrideClass } = deviceClassModule;
+
+	it("covers §4.1's table row by row", () => {
+		// iPhone 15 portrait / landscape; Pixel 7 portrait / landscape.
+		expect(classify(393, 852, true)).toBe('phone-portrait');
+		expect(classify(852, 393, true)).toBe('phone-landscape');
+		expect(classify(412, 915, true)).toBe('phone-portrait');
+		expect(classify(915, 412, true)).toBe('phone-landscape');
+		// A foldable opened out (short edge ~690, touch) is a tablet portrait.
+		expect(classify(690, 720, true)).toBe('tablet-portrait');
+		// iPad mini portrait / landscape; iPad Pro 13 landscape.
+		expect(classify(744, 1133, true)).toBe('tablet-portrait');
+		expect(classify(1133, 744, true)).toBe('tablet-landscape');
+		expect(classify(1376, 1032, true)).toBe('tablet-landscape');
+		// A 13" laptop browser (precise pointer) is a desktop; the same pixels with a
+		// touch screen are a tablet — the pointer kind is what separates them at 1100+.
+		expect(classify(1440, 800, false)).toBe('desktop');
+		expect(classify(1440, 800, true)).toBe('tablet-landscape');
+		// A desktop window dragged narrow is a phone portrait (600… is a tablet).
+		expect(classify(500, 900, false)).toBe('phone-portrait');
+		expect(classify(700, 900, false)).toBe('tablet-portrait');
+	});
+
+	it("keeps the current class inside §4.2's hysteresis band", () => {
+		// A short edge 24 px either side of a boundary keeps the current class.
+		expect(withinHysteresis(null, 512, 900)).toBe(false);
+		expect(withinHysteresis('phone-portrait', 512, 900)).toBe(true);
+		expect(withinHysteresis('phone-portrait', 476, 900)).toBe(true);
+		expect(withinHysteresis('phone-portrait', 470, 900)).toBe(false);
+		// The width boundaries ride along (a 1024-wide window flapping at the edge).
+		expect(withinHysteresis('desktop', 1010, 800)).toBe(true);
+		expect(withinHysteresis('desktop', 990, 800)).toBe(false);
+	});
+
+	it("freezes the class under the keyboard: a height change alone never reclassifies", () => {
+		// 390×844 phone; the keyboard raises: height falls, width stands — frozen.
+		expect(settleDeviceClass('phone-portrait', 390, 400, true, { w: 390, h: 844 }, true, null)).toBe('phone-portrait');
+		// A WIDTH change reclassifies even while frozen (a rotate is a real change).
+		expect(settleDeviceClass('phone-portrait', 844, 390, true, { w: 390, h: 844 }, true, null)).toBe('phone-landscape');
+		// Unfrozen, the same keyboard drop is the tablet/phone boundary's business as usual.
+		expect(settleDeviceClass('phone-portrait', 390, 400, true, { w: 390, h: 844 }, false, null)).toBe('phone-portrait');
+	});
+
+	it("honours the manual override, aspect-aware", () => {
+		expect(overrideClass('phone', 390, 844)).toBe('phone-portrait');
+		expect(overrideClass('phone', 844, 390)).toBe('phone-landscape');
+		expect(overrideClass('desktop', 390, 844)).toBe('desktop');
+		// An unknown value is no override at all.
+		expect(overrideClass('nope', 390, 844)).toBeNull();
+		expect(settleDeviceClass('phone-portrait', 1440, 800, false, { w: 390, h: 844 }, false, 'phone')).toBe('phone-landscape');
 	});
 });

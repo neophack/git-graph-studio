@@ -3,3 +3,4 @@
 // other directly.
 
 export * from './terminal';
+export * from './outputFollow';

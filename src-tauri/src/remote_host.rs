@@ -18,7 +18,7 @@ use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-use ggs_fs::zip_tree;
+use ggs_fs::{zip_tree, zip_trees};
 
 /// The hidden Relay webview's label (its capability file is `capabilities/remote-relay.json`).
 pub const RELAY_LABEL: &str = "remote-relay";
@@ -286,9 +286,12 @@ fn handle(app: &AppHandle, message: ToInstance, out: &mpsc::UnboundedSender<From
                 reply_asset(&out, req, status, &content_type, body);
             });
         }
-        ToInstance::FetchFile { req, path, zip } => {
+        ToInstance::FetchFile { req, path, zip, paths } => {
             let (app, out) = (app.clone(), out.clone());
-            tauri::async_runtime::spawn_blocking(move || serve_file(&app, &out, req, &path, zip));
+            let paths = paths.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                serve_file(&app, &out, req, &path, zip, &paths)
+            });
         }
         ToInstance::EnsureRelay { token } => {
             if let Err(error) = ensure_relay(app, &token) {
@@ -536,6 +539,7 @@ fn serve_file(
     req: u32,
     path: &str,
     zip: bool,
+    paths: &[String],
 ) {
     let fail = |status: u16| {
         let _ = out.send(FromInstance::FileReply {
@@ -547,6 +551,59 @@ fn serve_file(
             done: true,
         });
     };
+    // The multi-select pack (§6.7): every path must pass the same confinement a single
+    // download passes, and the archive is named after the shared parent (the folder the
+    // selection was made in).
+    if paths.len() >= 2 {
+        let roots = download_roots(app);
+        let targets: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        if !targets.iter().all(|target| download_allowed(target, &roots)) {
+            return fail(403);
+        }
+        let name = targets
+            .first()
+            .and_then(|first| first.parent())
+            .and_then(|parent| parent.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "download".into());
+        let _ = out.send(FromInstance::FileReply {
+            req,
+            status: 200,
+            name: format!("{name}.zip"),
+            total: 0,
+            chunk: Vec::new(),
+            done: false,
+        });
+        let fail_started = || {
+            let _ = out.send(FromInstance::FileReply {
+                req,
+                status: 500,
+                name: String::new(),
+                total: 0,
+                chunk: Vec::new(),
+                done: true,
+            });
+        };
+        let mut _scratch: Option<ggs_base::fsx::ScratchFileGuard> = None;
+        let mut temp = match ggs_base::fsx::scratch_file("ggs-scratch") {
+            Ok((file, guard)) => {
+                _scratch = Some(guard);
+                file
+            }
+            Err(_) => return fail_started(),
+        };
+        if zip_trees(&targets, &mut temp).is_err() {
+            return fail_started();
+        }
+        use std::io::Seek;
+        if temp.seek(std::io::SeekFrom::Start(0)).is_err() {
+            return fail_started();
+        }
+        let total = temp.metadata().map(|m| m.len()).unwrap_or(0);
+        stream_out(out, req, temp, format!("{name}.zip"), total);
+        return;
+    }
     let target = PathBuf::from(path);
     if !download_allowed(&target, &download_roots(app)) {
         return fail(403);
@@ -563,7 +620,7 @@ fn serve_file(
     // immediate empty first chunk starts the download; the bytes stream once the tree is
     // packed. A failure after it crosses as an error chunk mid-stream, which the daemon
     // turns into an aborted body — a truncated archive never lands as a complete file.
-    let (mut file, name) = if target.is_dir() || zip {
+    let (file, name) = if target.is_dir() || zip {
         let zip_name = format!("{name}.zip");
         let _ = out.send(FromInstance::FileReply {
             req,
@@ -608,10 +665,31 @@ fn serve_file(
         }
     };
     let total = file.metadata().map(|m| m.len()).unwrap_or(0);
+    stream_out(out, req, file, name, total);
+}
+
+/// The read loop every served download ends in: the file (or the packed temporary) goes
+/// out as CHUNK-sized `FileReply`s, the empty final chunk closing the stream.
+fn stream_out(
+    out: &mpsc::UnboundedSender<FromInstance>,
+    req: u32,
+    mut file: impl std::io::Read,
+    name: String,
+    total: u64,
+) {
+    let fail = |status: u16| {
+        let _ = out.send(FromInstance::FileReply {
+            req,
+            status,
+            name: String::new(),
+            total: 0,
+            chunk: Vec::new(),
+            done: true,
+        });
+    };
     let mut buf = vec![0u8; CHUNK];
     let mut sent_any = false;
     loop {
-        use std::io::Read;
         let n = match file.read(&mut buf) {
             Ok(n) => n,
             Err(_) => return fail(500),
@@ -844,7 +922,10 @@ pub fn remote_host_frontend_gone(app: AppHandle, frontend: String) {
 static DESKTOP_SIZE: Mutex<Option<tauri::LogicalSize<f64>>> = Mutex::new(None);
 
 /// Size the hidden desktop window for a viewer's viewport: the copy then lays out at the
-/// viewer's own proportions. A window the user can see is the user's — left as it is.
+/// viewer's own proportions. A window the user can see is the user's — left as it is. The
+/// desktop workbench's own floor applies (a phone never mirrors — it runs its own workbench,
+/// docs/remote-client-plan.md §11 — so the old phone-sized fit path is gone and the window
+/// minimum never has to step aside).
 #[tauri::command]
 pub fn remote_mirror_fit(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
     let Some(window) = app.get_webview_window("main") else {
@@ -853,16 +934,13 @@ pub fn remote_mirror_fit(app: AppHandle, width: f64, height: f64) -> Result<(), 
     if window.is_visible().unwrap_or(false) {
         return Ok(());
     }
-    let (width, height) = (width.clamp(320.0, 3840.0), height.clamp(320.0, 4000.0));
+    let (width, height) = (width.clamp(800.0, 3840.0), height.clamp(500.0, 4000.0));
     let mut saved = DESKTOP_SIZE.lock().unwrap_or_else(|p| p.into_inner());
     if saved.is_none() {
         let scale = window.scale_factor().map_err(|e| e.to_string())?;
         let size = window.inner_size().map_err(|e| e.to_string())?;
         *saved = Some(size.to_logical(scale));
     }
-    window
-        .set_min_size(None::<tauri::LogicalSize<f64>>)
-        .map_err(|e| e.to_string())?;
     window
         .set_size(tauri::LogicalSize::new(width, height))
         .map_err(|e| e.to_string())

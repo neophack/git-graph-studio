@@ -6,8 +6,7 @@
 //! index, the analysis engine) shares — the exclusion policy stays ONE list here.
 //!
 //! Allowed dependencies: ggs-base, ggs-text (encoding), ignore, rayon, trash, zip,
-//! base64. No tauri — transfer progress crosses through callbacks; cancellation through
-//! ggs_base::cancel::Generation (the TransferState type).
+//! base64. No tauri — the wire upload path and the zip walk are plain calls.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,6 +22,14 @@ pub struct DirEntryInfo {
     pub path: String,
     pub is_dir: bool,
     pub size: u64,
+    /// The entry's modification time, seconds since the epoch — the remote files page's
+    /// second line (docs/remote-client-plan.md §6.1). Same metadata call the size rides.
+    #[serde(default)]
+    pub modified: Option<u64>,
+    /// A folder's direct child count (the "12 项" of the same line), one `read_dir` on the
+    /// PC — the browser never pays for it. Files carry none.
+    #[serde(default)]
+    pub children: Option<u32>,
 }
 
 /// The names VS Code's default `files.exclude` hides from the Explorer.
@@ -38,13 +45,33 @@ pub fn read_dir_sorted(path: &str) -> Result<Vec<DirEntryInfo>, String> {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        let is_dir = meta.is_dir();
+        let children = if is_dir {
+            fs::read_dir(entry.path()).map(|list| {
+                list.flatten()
+                    .filter(|child| {
+                        !EXCLUDED.contains(&child.file_name().to_string_lossy().as_ref())
+                    })
+                    .count() as u32
+            })
+            .ok()
+        } else {
+            None
+        };
         let info = DirEntryInfo {
             name,
             path: entry.path().display().to_string(),
-            is_dir: meta.is_dir(),
+            is_dir,
             size: meta.len(),
+            modified,
+            children,
         };
-        if meta.is_dir() {
+        if is_dir {
             dirs.push(info);
         } else {
             files.push(info);
@@ -453,399 +480,13 @@ pub fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// One progress report of a running desktop transfer: the entry being moved and the byte
-/// counter over the whole job's total.
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TransferProgress {
-    pub name: String,
-    pub bytes: u64,
-    pub total: u64,
-}
-
-/// One entry that never landed, with the error that stopped it.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TransferFailure {
-    pub name: String,
-    pub error: String,
-}
-
-/// What a desktop transfer settled on: the paths that landed, per-entry failures (one bad
-/// entry never strands the rest), and whether the Cancel action stopped it early.
-#[derive(Debug, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TransferReport {
-    pub landed: Vec<String>,
-    pub failed: Vec<TransferFailure>,
-    pub cancelled: bool,
-}
-
-/// The running transfer's generation, for cancellation — the same shape search
-/// cancellation uses: every transfer takes the next number and stops as soon as the
-/// counter moves on.
-#[derive(Default)]
-pub struct TransferState {
-    generation: std::sync::atomic::AtomicU64,
-}
-
-impl TransferState {
-    pub fn next(&self) -> u64 {
-        self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
-    }
-
-    pub fn is_current(&self, generation: u64) -> bool {
-        self.generation.load(std::sync::atomic::Ordering::SeqCst) == generation
-    }
-
-    pub fn cancel(&self) {
-        self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-/// The transfer chunk: progress reports and cancellation land at this granularity.
-const TRANSFER_CHUNK: usize = 1024 * 1024;
-
-/// Where a streaming copy accumulates until it completes (a sibling of the target, so the
-/// final rename never crosses a file system); removed when the copy dies or is cancelled.
-fn transfer_partial(target: &Path) -> PathBuf {
-    let name = target
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    target.with_file_name(format!("{name}.ggs-transfer"))
-}
-
-/// The byte total of a transfer plan: one walk up front so every progress report carries
-/// an honest denominator. Unreadable entries are counted as zero and fail in the copy
-/// pass, which reports them by name.
-pub fn tree_size(root: &Path) -> u64 {
-    let meta = match fs::symlink_metadata(root) {
-        Ok(meta) => meta,
-        Err(_) => return 0,
-    };
-    if !meta.is_dir() {
-        return meta.len();
-    }
-    let mut total = 0;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(path) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&path) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(meta) = entry.metadata() else {
-                continue;
-            };
-            if meta.is_dir() {
-                stack.push(entry.path());
-            } else {
-                total += meta.len();
-            }
-        }
-    }
-    total
-}
-
-/// The import engine (`fs_import`'s core, pure so the tests drive it without Tauri):
-/// copies each source (a file, or a folder tree under its own name) into `dest_dir`,
-/// never clobbering what is already there, streaming progress and honouring cancellation.
-pub fn import_sources(
-    sources: &[String],
-    dest_dir: &str,
-    progress: &dyn Fn(TransferProgress),
-    cancelled: &dyn Fn() -> bool,
-) -> TransferReport {
-    let mut report = TransferReport::default();
-    let dest = match checked(dest_dir) {
-        Ok(dest) if dest.is_dir() => dest,
-        Ok(_) => {
-            report.failed.push(TransferFailure {
-                name: dest_dir.to_owned(),
-                error: "is not a folder".to_owned(),
-            });
-            return report;
-        }
-        Err(error) => {
-            report.failed.push(TransferFailure {
-                name: dest_dir.to_owned(),
-                error,
-            });
-            return report;
-        }
-    };
-    let total: u64 = sources
-        .iter()
-        .map(|s| tree_size(Path::new(s)))
-        .sum();
-    let mut job = TransferJob { bytes: 0, total, progress, cancelled };
-    for source in sources {
-        if job.cancelled() {
-            report.cancelled = true;
-            return report;
-        }
-        let name = Path::new(source)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| source.clone());
-        match import_one(Path::new(source), &dest, &name, &mut job) {
-            Ok(landed) => {
-                if let Some(path) = landed {
-                    report.landed.push(path);
-                }
-            }
-            // A cancel mid-file stops the whole job — every landed file stays whole, and
-            // what never started stays unstarted.
-            Err(error) if error == CANCELLED => {
-                report.cancelled = true;
-                return report;
-            }
-            Err(error) => report.failed.push(TransferFailure { name, error }),
-        }
-    }
-    // The closing report, an empty name: the toast lands at its final counters.
-    job.tick("");
-    report
-}
-
-/// The job-wide state a transfer's every entry shares: the byte counters behind the
-/// progress toast's numerator and denominator, and the callbacks each entry honours.
-pub struct TransferJob<'a> {
-    /// The bytes landed so far, across every source.
-    bytes: u64,
-    /// The whole job's size, walked up front (`tree_size`).
-    total: u64,
-    progress: &'a dyn Fn(TransferProgress),
-    cancelled: &'a dyn Fn() -> bool,
-}
-
-impl TransferJob<'_> {
-    fn cancelled(&self) -> bool {
-        (self.cancelled)()
-    }
-
-    /// Report one chunk's worth of `name` at the job's current counters.
-    fn tick(&self, name: &str) {
-        (self.progress)(TransferProgress {
-            name: name.to_owned(),
-            bytes: self.bytes,
-            total: self.total,
-        });
-    }
-}
-
-/// Import one source. `Ok(None)` is the no-op (a file dropped on its own containing
-/// folder); `Err` fails this source alone.
-pub fn import_one(
-    source: &Path,
-    dest: &Path,
-    name: &str,
-    job: &mut TransferJob,
-) -> Result<Option<String>, String> {
-    let meta = fs::symlink_metadata(source).map_err(|e| format!("{name}: {e}"))?;
-    // An entry landed on its own containing folder is a no-op, not a duplicate.
-    if source.parent().is_some_and(|parent| same_entry(parent, dest)) {
-        return Ok(None);
-    }
-    let dest_canon = fs::canonicalize(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
-    if meta.is_dir() {
-        let source_canon = fs::canonicalize(source).map_err(|e| format!("{name}: {e}"))?;
-        if dest_canon.starts_with(&source_canon) {
-            return Err(format!("{name} cannot be copied into itself"));
-        }
-    }
-    let target = unique_target(dest, name);
-    if meta.is_dir() {
-        import_dir(source, &target, name, job)?;
-    } else {
-        copy_file_streaming(source, &target, name, job)?;
-    }
-    Ok(Some(target.to_string_lossy().into_owned()))
-}
-
-/// Walk a folder source into `target`, creating it and every subfolder, streaming every
-/// file through the partial-rename copy.
-pub fn import_dir(
-    source: &Path,
-    target: &Path,
-    name: &str,
-    job: &mut TransferJob,
-) -> Result<(), String> {
-    fs::create_dir_all(target).map_err(|e| format!("{name}: {e}"))?;
-    let entries = fs::read_dir(source).map_err(|e| format!("{name}: {e}"))?;
-    let children: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-    for child in children {
-        if job.cancelled() {
-            return Err(CANCELLED.to_owned());
-        }
-        let child_name = child
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let child_target = target.join(&child_name);
-        let display = format!("{name}/{child_name}");
-        if child.is_dir() {
-            import_dir(&child, &child_target, &display, job)?;
-        } else {
-            copy_file_streaming(&child, &child_target, &display, job)?;
-        }
-    }
-    Ok(())
-}
-
-/// What a cancelled copy fails with (mapped back into `report.cancelled` by the caller).
-const CANCELLED: &str = "cancelled";
-
-/// Copy one file through a partial sibling, reporting progress and honouring cancellation
-/// at every chunk; a death or a cancel leaves no partial behind.
-pub fn copy_file_streaming(
-    source: &Path,
-    target: &Path,
-    name: &str,
-    job: &mut TransferJob,
-) -> Result<(), String> {
-    use std::io::{Read, Write};
-    let partial = transfer_partial(target);
-    let mut reader =
-        fs::File::open(source).map_err(|e| format!("{name}: {e}"))?;
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("{name}: {e}"))?;
-    }
-    let mut writer = fs::File::create(&partial).map_err(|e| format!("{name}: {e}"))?;
-    let mut buf = vec![0u8; TRANSFER_CHUNK];
-    loop {
-        if job.cancelled() {
-            drop((reader, writer));
-            let _ = fs::remove_file(&partial);
-            return Err(CANCELLED.to_owned());
-        }
-        let n = reader.read(&mut buf).map_err(|e| format!("{name}: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        writer.write_all(&buf[..n]).map_err(|e| format!("{name}: {e}"))?;
-        job.bytes += n as u64;
-        job.tick(name);
-    }
-    drop((reader, writer));
-    fs::rename(&partial, target).map_err(|e| format!("{name}: {e}"))?;
-    Ok(())
-}
-
-/// The export engine (`fs_export`'s core, pure so the tests drive it without Tauri).
-pub fn export_path(
-    source: &Path,
-    dest: &Path,
-    zip: bool,
-    progress: &dyn Fn(TransferProgress),
-    cancelled: &dyn Fn() -> bool,
-) -> TransferReport {
-    let name = source
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "download".to_owned());
-    let mut report = TransferReport::default();
-    let Ok(meta) = fs::symlink_metadata(source) else {
-        report.failed.push(TransferFailure {
-            name,
-            error: "no such file or directory".to_owned(),
-        });
-        return report;
-    };
-    if meta.is_dir() || zip {
-        let total = tree_size(source);
-        let mut counter = TransferCounter { bytes: 0, total, name: name.clone(), progress };
-        let outcome = (|| -> std::io::Result<()> {
-            let file = fs::File::create(dest)?;
-            let mut buffered = std::io::BufWriter::new(file);
-            zip_tree_reporting(source, &mut buffered, &mut |n| counter.file_bytes(n), cancelled)
-                .map_err(|e| match e {
-                    zip::result::ZipError::Io(io) => io,
-                    other => std::io::Error::other(other.to_string()),
-                })?;
-            use std::io::Write;
-            buffered.flush()
-        })();
-        match outcome {
-            Ok(()) => {
-                counter.finish();
-                report.landed.push(dest.to_string_lossy().into_owned());
-            }
-            Err(error) => {
-                // A cancelled or failed export leaves no partial archive behind.
-                let _ = fs::remove_file(dest);
-                if error.to_string().contains(CANCELLED) {
-                    report.cancelled = true;
-                } else {
-                    report
-                        .failed
-                        .push(TransferFailure { name, error: error.to_string() });
-                }
-            }
-        }
-        return report;
-    }
-    let total = meta.len();
-    let mut job = TransferJob { bytes: 0, total, progress, cancelled };
-    match copy_file_streaming(source, dest, &name, &mut job) {
-        Ok(()) => {
-            job.tick(&name);
-            report.landed.push(dest.to_string_lossy().into_owned());
-        }
-        Err(error) if error == CANCELLED => {
-            report.cancelled = true;
-        }
-        Err(error) => report.failed.push(TransferFailure { name, error }),
-    }
-    report
-}
-
-/// The zip export's byte counter: the archive is written compressed, so the progress
-/// reports count the bytes read out of the tree, not the (smaller) archive stream.
-struct TransferCounter<'a> {
-    bytes: u64,
-    total: u64,
-    name: String,
-    progress: &'a dyn Fn(TransferProgress),
-}
-
-impl TransferCounter<'_> {
-    fn file_bytes(&mut self, n: u64) {
-        self.bytes += n;
-        (self.progress)(TransferProgress {
-            name: self.name.clone(),
-            bytes: self.bytes,
-            total: self.total,
-        });
-    }
-
-    fn finish(&self) {
-        (self.progress)(TransferProgress {
-            name: self.name.clone(),
-            bytes: self.bytes,
-            total: self.total,
-        });
-    }
-}
-
-/// Zip a file or a folder tree, skipping `.git` and whatever cannot be read (the remote
-/// download path's silent walk).
+/// Zip a file or a folder tree, skipping `.git` and whatever cannot be read — the remote
+/// download path's silent walk (the desktop export that once fed it progress hooks left
+/// with the transfer pair, K16).
 pub fn zip_tree<W: std::io::Write + std::io::Seek>(
     root: &Path,
     sink: W,
 ) -> zip::result::ZipResult<W> {
-    zip_tree_reporting(root, sink, &mut |_| {}, &|| false)
-}
-
-/// `zip_tree` with the reporting hooks the desktop export drives: every chunk read out of
-/// a file crosses `on_bytes`, and `cancelled` aborts the archive between chunks.
-pub fn zip_tree_reporting<W: std::io::Write + std::io::Seek>(
-    root: &Path,
-    sink: W,
-    on_bytes: &mut dyn FnMut(u64),
-    cancelled: &dyn Fn() -> bool,
-) -> zip::result::ZipResult<W> {
-    use std::io::{Read, Write};
     let mut writer = zip::ZipWriter::new(sink);
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
@@ -856,9 +497,6 @@ pub fn zip_tree_reporting<W: std::io::Write + std::io::Seek>(
     };
     let mut stack = vec![root.to_path_buf()];
     while let Some(path) = stack.pop() {
-        if cancelled() {
-            return Err(zip::result::ZipError::Io(std::io::Error::other(CANCELLED)));
-        }
         if path.is_dir() {
             if path.file_name().is_some_and(|n| n == ".git") {
                 continue;
@@ -875,18 +513,87 @@ pub fn zip_tree_reporting<W: std::io::Write + std::io::Seek>(
             continue;
         };
         let name = rel.to_string_lossy().replace('\\', "/");
-        let Ok(mut reader) = std::fs::File::open(&path) else {
-            continue;
-        };
-        writer.start_file(name, options)?;
-        let mut buf = vec![0u8; TRANSFER_CHUNK];
-        loop {
-            let n = reader.read(&mut buf)?;
-            if n == 0 {
-                break;
+        zip_file_into(&mut writer, options, &name, &path)?;
+    }
+    writer.finish()
+}
+
+/// One file into the archive — the walk's shared write step.
+fn zip_file_into<W: std::io::Write + std::io::Seek>(
+    writer: &mut zip::ZipWriter<W>,
+    options: zip::write::SimpleFileOptions,
+    name: &str,
+    path: &Path,
+) -> zip::result::ZipResult<()> {
+    use std::io::{Read, Write};
+    let Ok(mut reader) = std::fs::File::open(path) else {
+        return Ok(());
+    };
+    writer.start_file(name, options)?;
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        writer.write_all(&buf[..n])?;
+    }
+    Ok(())
+}
+
+/// Zip several files and folders into one archive — the remote multi-select download's
+/// pack (docs/remote-client-plan.md §6.7), over the same silent walk `zip_tree` uses.
+/// ONE root answers exactly `zip_tree` (a folder's contents at the archive's top level).
+/// Several roots each land under their own name (`a.ts`, `src/…` — the root's parent is
+/// the base, so a picked folder keeps its wrapper); two roots that still boil down to one
+/// name (two `main.ts` from sibling folders) take a numeric suffix — nothing overwrites
+/// anything.
+pub fn zip_trees<W: std::io::Write + std::io::Seek>(
+    roots: &[PathBuf],
+    sink: W,
+) -> zip::result::ZipResult<W> {
+    if roots.len() <= 1 {
+        return zip_tree(roots.first().map(PathBuf::as_path).unwrap_or(Path::new("")), sink);
+    }
+    let mut writer = zip::ZipWriter::new(sink);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for root in roots {
+        // Every file of this root, its own walk (`.git` skipped, unreadable skipped).
+        let mut files: Vec<PathBuf> = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n == ".git") {
+                    continue;
+                }
+                if let Ok(entries) = std::fs::read_dir(&path) {
+                    let mut children: Vec<PathBuf> =
+                        entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+                    children.sort();
+                    stack.extend(children.into_iter().rev());
+                }
+                continue;
             }
-            writer.write_all(&buf[..n])?;
-            on_bytes(n as u64);
+            files.push(path);
+        }
+        for path in files {
+            let own = path
+                .strip_prefix(root.parent().unwrap_or(Path::new("")))
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let mut name = own.clone();
+            if !used.insert(name.clone()) {
+                name = format!("{} ({})", own, 2);
+                let mut n = 2;
+                while !used.insert(name.clone()) {
+                    n += 1;
+                    name = format!("{} ({})", own, n);
+                }
+            }
+            zip_file_into(&mut writer, options, &name, &path)?;
         }
     }
     writer.finish()
@@ -1370,149 +1077,6 @@ mod copy_into_tests {
 }
 
 #[cfg(test)]
-mod transfer_tests {
-    use super::*;
-
-    #[test]
-    fn an_import_copies_files_and_trees_without_clobbering() {
-        let src = tempfile::tempdir().unwrap();
-        let dest = tempfile::tempdir().unwrap();
-        fs::write(src.path().join("a.bin"), vec![7u8; 3 * 1024 * 1024]).unwrap();
-        fs::create_dir_all(src.path().join("tree").join("inner")).unwrap();
-        fs::write(src.path().join("tree").join("inner").join("b.txt"), b"deep").unwrap();
-        fs::write(dest.path().join("a.bin"), b"kept").unwrap();
-
-        let sources = [
-            src.path().join("a.bin").to_string_lossy().into_owned(),
-            src.path().join("tree").to_string_lossy().into_owned(),
-        ];
-        let report = import_sources(&sources, &dest.path().to_string_lossy(), &|_| {}, &|| false);
-        assert!(report.failed.is_empty(), "{:?}", report.failed);
-        assert!(!report.cancelled);
-        // The existing file kept its contents; the import landed beside it.
-        assert_eq!(fs::read(dest.path().join("a.bin")).unwrap(), b"kept");
-        assert_eq!(
-            fs::read(dest.path().join("a (copy).bin")).unwrap(),
-            vec![7u8; 3 * 1024 * 1024]
-        );
-        assert_eq!(
-            fs::read(dest.path().join("tree").join("inner").join("b.txt")).unwrap(),
-            b"deep"
-        );
-        // No partial sibling survives a completed copy.
-        assert!(!dest.path().join("a (copy).bin.ggs-transfer").exists());
-        assert_eq!(report.landed.len(), 2, "{:?}", report.landed);
-    }
-
-    #[test]
-    fn an_import_collects_failures_and_reports_progress() {
-        let src = tempfile::tempdir().unwrap();
-        let dest = tempfile::tempdir().unwrap();
-        fs::write(src.path().join("good.txt"), b"ok").unwrap();
-        let sources = [
-            src.path().join("good.txt").to_string_lossy().into_owned(),
-            src.path().join("ghost.txt").to_string_lossy().into_owned(),
-        ];
-        let events: std::sync::Mutex<Vec<TransferProgress>> = std::sync::Mutex::new(Vec::new());
-        let report = import_sources(
-            &sources,
-            &dest.path().to_string_lossy(),
-            &|p| events.lock().unwrap().push(p),
-            &|| false,
-        );
-        assert_eq!(fs::read(dest.path().join("good.txt")).unwrap(), b"ok");
-        assert_eq!(report.landed.len(), 1, "{:?}", report.landed);
-        assert_eq!(report.failed.len(), 1, "{:?}", report.failed);
-        assert!(report.failed[0].name.contains("ghost.txt"));
-        // The progress denominator covers the whole job and the counter reached it.
-        let events = events.into_inner().unwrap();
-        assert_eq!(events.last().unwrap().total, 2);
-        assert_eq!(events.last().unwrap().bytes, 2);
-        assert!(events.iter().all(|p| p.bytes <= p.total));
-    }
-
-    #[test]
-    fn a_cancelled_import_stops_whole_and_leaves_no_partial() {
-        let src = tempfile::tempdir().unwrap();
-        let dest = tempfile::tempdir().unwrap();
-        fs::write(src.path().join("big.bin"), vec![1u8; 5 * 1024 * 1024]).unwrap();
-        fs::write(src.path().join("after.txt"), b"never reached").unwrap();
-        // Cancel from the first chunk report on: the copy dies between chunks, the partial
-        // sibling goes, and the rest of the job never starts.
-        let cancel = std::sync::atomic::AtomicBool::new(false);
-        let sources = [
-            src.path().join("big.bin").to_string_lossy().into_owned(),
-            src.path().join("after.txt").to_string_lossy().into_owned(),
-        ];
-        let report = import_sources(
-            &sources,
-            &dest.path().to_string_lossy(),
-            &|p| {
-                if p.bytes >= 1024 * 1024 {
-                    cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-            },
-            &|| cancel.load(std::sync::atomic::Ordering::SeqCst),
-        );
-        assert!(report.cancelled, "{report:?}");
-        assert!(report.landed.is_empty(), "{:?}", report.landed);
-        assert!(report.failed.is_empty(), "{:?}", report.failed);
-        assert!(!dest.path().join("big.bin").exists(), "no partial survived");
-        assert!(!dest.path().join("big.bin.ggs-transfer").exists());
-        assert!(!dest.path().join("after.txt").exists(), "the job stopped whole");
-    }
-
-    #[test]
-    fn an_export_copies_a_file_and_reports_it() {
-        let src = tempfile::tempdir().unwrap();
-        let dest = tempfile::tempdir().unwrap();
-        fs::write(src.path().join("doc.md"), b"# body").unwrap();
-        let target = dest.path().join("doc.md");
-        let report = export_path(
-            &src.path().join("doc.md"),
-            &target,
-            false,
-            &|_| {},
-            &|| false,
-        );
-        assert_eq!(fs::read(&target).unwrap(), b"# body");
-        assert_eq!(report.landed, [target.to_string_lossy().into_owned()]);
-        assert!(report.failed.is_empty());
-    }
-
-    #[test]
-    fn an_export_zips_a_folder_without_git() {
-        let src = tempfile::tempdir().unwrap();
-        let dest = tempfile::tempdir().unwrap();
-        fs::create_dir_all(src.path().join("sub")).unwrap();
-        fs::write(src.path().join("sub").join("b.txt"), b"deep").unwrap();
-        fs::write(src.path().join("top.txt"), b"top").unwrap();
-        fs::create_dir_all(src.path().join(".git")).unwrap();
-        fs::write(src.path().join(".git").join("HEAD"), b"ref").unwrap();
-        let target = dest.path().join("pack.zip");
-        let report = export_path(src.path(), &target, false, &|_| {}, &|| false);
-        assert!(report.failed.is_empty(), "{:?}", report.failed);
-        let archive = zip::ZipArchive::new(fs::File::open(&target).unwrap()).unwrap();
-        let names: Vec<String> = archive.file_names().map(str::to_owned).collect();
-        assert!(names.contains(&"top.txt".to_owned()), "{names:?}");
-        assert!(names.contains(&"sub/b.txt".to_owned()), "{names:?}");
-        assert!(!names.iter().any(|n| n.starts_with(".git/")), "{names:?}");
-    }
-
-    #[test]
-    fn a_cancelled_export_removes_the_partial_archive() {
-        let src = tempfile::tempdir().unwrap();
-        let dest = tempfile::tempdir().unwrap();
-        fs::write(src.path().join("one.bin"), vec![1u8; 1024 * 1024]).unwrap();
-        fs::write(src.path().join("two.bin"), vec![2u8; 1024 * 1024]).unwrap();
-        let target = dest.path().join("pack.zip");
-        let report = export_path(src.path(), &target, true, &|_| {}, &|| true);
-        assert!(report.cancelled, "{report:?}");
-        assert!(!target.exists(), "no partial archive survived");
-        assert!(report.landed.is_empty());
-    }
-}
-#[cfg(test)]
 mod canonical_tests {
     use super::*;
 
@@ -1558,5 +1122,87 @@ mod canonical_tests {
                 Path::new(&real_form).join("new.txt").to_string_lossy()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod zip_tests {
+    use super::*;
+    use std::io::Read;
+
+    /// The names inside a built archive, in write order.
+    fn entry_names(bytes: Vec<u8>) -> Vec<String> {
+        let reader = std::io::Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(reader).unwrap();
+        (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect()
+    }
+
+    fn temp_tree(dir: &Path) {
+        fs::write(dir.join("a.ts"), b"a").unwrap();
+        fs::write(dir.join("b.rs"), b"b").unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/main.ts"), b"m").unwrap();
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::write(dir.join(".git/HEAD"), b"ref").unwrap();
+    }
+
+    #[test]
+    fn one_root_answers_zip_tree_folder_contents_at_the_top() {
+        let dir = tempfile::tempdir().unwrap();
+        temp_tree(dir.path());
+        let bytes = zip_trees(&[dir.path().to_path_buf()], std::io::Cursor::new(Vec::new()))
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            entry_names(bytes),
+            vec!["a.ts".to_string(), "b.rs".to_string(), "src/main.ts".to_string()]
+        );
+    }
+
+    #[test]
+    fn several_roots_each_keep_their_own_name_and_collisions_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        temp_tree(dir.path());
+        let roots = vec![
+            dir.path().join("src"),          // folder: keeps its wrapper (src/main.ts)
+            dir.path().join("a.ts"),         // file: its own name
+            dir.path().join("b.rs"),
+        ];
+        let bytes = zip_trees(&roots, std::io::Cursor::new(Vec::new()))
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            entry_names(bytes),
+            vec![
+                "src/main.ts".to_string(),
+                "a.ts".to_string(),
+                "b.rs".to_string()
+            ]
+        );
+        // Two same-named files from sibling folders: the second takes a numeric suffix,
+        // neither overwrites the other.
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        fs::write(left.path().join("main.ts"), b"left").unwrap();
+        fs::write(right.path().join("main.ts"), b"right").unwrap();
+        let bytes = zip_trees(
+            &[left.path().join("main.ts"), right.path().join("main.ts")],
+            std::io::Cursor::new(Vec::new()),
+        )
+        .unwrap()
+        .into_inner();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        assert_eq!(names, vec!["main.ts".to_string(), "main.ts (2)".to_string()]);
+        let mut first = String::new();
+        archive.by_index(0).unwrap().read_to_string(&mut first).unwrap();
+        assert_eq!(first, "left");
+        let mut second = String::new();
+        archive.by_index(1).unwrap().read_to_string(&mut second).unwrap();
+        assert_eq!(second, "right");
     }
 }

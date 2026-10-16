@@ -368,21 +368,20 @@ pub fn handle(daemon: &Arc<Daemon>, conn: &Arc<Conn>, mut frame: Frame) {
             }
         }
         ty::SPAWN => {
-            let spawn = frame.decode_msgpack::<Spawn>().unwrap_or_default();
-            let (daemon, conn) = (daemon.clone(), conn.clone());
-            tokio::spawn(async move {
-                let visible = if spawn.visible { Some(true) } else { None };
-                match crate::lifecycle::spawn(&daemon, spawn.folder, visible, true).await {
-                    Ok(instance) => conn.push(Frame::msgpack(ty::SPAWNED, &Spawned { instance })),
-                    Err(message) => notice(
-                        &conn,
-                        Notice {
-                            message: Some(message),
-                            ..Notice::kind("spawn-failed")
-                        },
+            // SPAWN is the PC user's own (docs/remote-client-plan.md §3.3): the tray and
+            // the management API spawn through `lifecycle::spawn` in-process; a frame on
+            // this socket is by definition a browser session's, and a session switches
+            // between the windows the PC already opened — it never creates one (K4).
+            let _ = frame.decode_msgpack::<Spawn>();
+            notice(
+                conn,
+                Notice {
+                    message: Some(
+                        "spawning windows is the PC user's own — open one at the PC".to_owned(),
                     ),
-                }
-            });
+                    ..Notice::kind("spawn-failed")
+                },
+            );
         }
         ty::INSTANCE_CLOSE => {
             let Some(close) = frame.decode_msgpack::<InstanceClose>() else {

@@ -17,7 +17,7 @@ const REPO = 'C:\\repo';
 
 /** Plausible answers for every backend command, so any code path can run to its end. */
 const DEFAULTS: Record<string, (args: Record<string, unknown>) => unknown> = {
-	boot_context: () => ({ file: null, actions: [], repo: REPO }),
+	boot_context: () => ({ file: null, actions: [], repo: REPO, roots: [], workspaceFile: null }),
 	open_folder: ({ path }) => ({ root: path, isRepo: true }),
 	close_folder: () => null,
 	boot_stage: () => null,

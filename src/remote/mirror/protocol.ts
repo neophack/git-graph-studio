@@ -175,18 +175,16 @@ export function panelStream(extId: string, panelId: number): string {
 	return `panel:${extId}#${panelId}`;
 }
 
-/** PC → viewers. `to` names one viewer, or `*`. `own` tells a viewer the window wears
- *  another form factor's UI (another viewer owns it, §22.5): run your own workbench. `w`
- *  names the webview stream a message belongs to; absent, it is the whole window's.
- *  A snapshot carries the current caret and focus state (2026-10-13): both cross as ops
- *  only when they CHANGE, so a viewer attaching later — or resnapping — starts from the
- *  state the PC holds right now, not from nothing until the PC's next move (the input the
- *  PC had focused showed neither caret nor focus styles in a fresh copy). */
+/** PC → viewers. `to` names one viewer, or `*`. `w` names the webview stream a message
+ *  belongs to; absent, it is the whole window's. A snapshot carries the current caret and
+ *  focus state (2026-10-13): both cross as ops only when they CHANGE, so a viewer attaching
+ *  later — or resnapping — starts from the state the PC holds right now, not from nothing
+ *  until the PC's next move (the input the PC had focused showed neither caret nor focus
+ *  styles in a fresh copy). */
 export type DownMessage =
 	| { k: 'snap'; to: string; w?: string; seq: number; root: number; doc: SDoc; vp: Viewport; caret?: CaretState; focus?: FocusEntry[] }
 	| { k: 'ops'; to: '*'; w?: string; seq: number; ops: MirrorOp[] }
-	| { k: 'clip'; to: string; w?: string; text: string }
-	| { k: 'own'; to: string };
+	| { k: 'clip'; to: string; w?: string; text: string };
 
 /** Keyboard modifiers as a bit set: 1 ctrl, 2 shift, 4 alt, 8 meta. */
 export type Mods = number;

@@ -13,7 +13,6 @@ use std::time::Duration;
 
 use ggs_git::runner::Git;
 use ggs_base::workspace::WorkspaceRoots;
-use tauri::ipc::Channel;
 use tauri::State;
 
 /// One directory level of the Explorer tree, folders first, then files, both alphabetically
@@ -642,84 +641,6 @@ pub fn copy_into(
 ) -> Result<Vec<String>, String> {
     cache.invalidate();
     copy_into_paths(&sources, &dest_dir)
-}
-
-// ---- File transfers: the desktop half of the workbench's transfer layer ----
-//
-// One vocabulary in every environment (`src/transfer.ts`): a browser session rides the
-// remote wire (the chunked `fs_write_chunk` uploads and the daemon's one-time download
-// tickets), and the desktop app drives native pickers plus these commands. The boundary
-// stays as it was: a remote session never reaches `fs_import` / `fs_export` at all (the
-// Relay refuses them — src/remote/pathGate.ts), because their paths name anywhere on the
-// machine, which is the desktop user's own picker's business, never a browser's.
-
-/// Stop the running transfer (the progress toast's Cancel action): the copy loop honours
-/// the generation change at the next chunk boundary and settles cancelled.
-#[tauri::command]
-pub fn fs_transfer_cancel(transfer: State<'_, std::sync::Arc<ggs_fs::TransferState>>) {
-    transfer.cancel();
-}
-
-/// Upload from the PC's own disk into an open folder — the desktop half of the transfer
-/// layer's `uploadInto` (`src/transfer.ts`): the native picker chose `sources` anywhere on
-/// the machine and they land inside `target_dir` beside whatever already exists there
-/// (the ` (copy)` naming rule the Explorer's own drop copy applies — a desktop upload
-/// never clobbers). Progress streams through `on_progress`; a cancel stops the whole job
-/// between chunks, leaving every landed file whole.
-#[tauri::command]
-pub async fn fs_import(
-    transfer: State<'_, std::sync::Arc<ggs_fs::TransferState>>,
-    cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
-    sources: Vec<String>,
-    target_dir: String,
-    on_progress: Channel<TransferProgress>,
-) -> Result<TransferReport, String> {
-    let transfer = std::sync::Arc::clone(transfer.inner());
-    let generation = transfer.next();
-    let cache = std::sync::Arc::clone(cache.inner());
-    tauri::async_runtime::spawn_blocking(move || {
-        let report = import_sources(
-            &sources,
-            &target_dir,
-            &|p| {
-                let _ = on_progress.send(p);
-            },
-            &|| !transfer.is_current(generation),
-        );
-        cache.invalidate();
-        report
-    })
-    .await
-    .map_err(|e| format!("The transfer thread failed: {e}"))
-}
-
-/// Download to the PC's own disk — the desktop half of the transfer layer's `downloadTo`
-/// (`src/transfer.ts`): a file copies to `dest` (the save dialog's full path), a folder
-/// (or any path with `zip`) packs into a zip archive there. Progress streams; a cancel
-/// stops it and removes the partial destination.
-#[tauri::command]
-pub async fn fs_export(
-    transfer: State<'_, std::sync::Arc<ggs_fs::TransferState>>,
-    path: String,
-    dest: String,
-    zip: Option<bool>,
-    on_progress: Channel<TransferProgress>,
-) -> Result<TransferReport, String> {
-    let transfer = std::sync::Arc::clone(transfer.inner());
-    let generation = transfer.next();
-    tauri::async_runtime::spawn_blocking(move || {
-        export_path(
-            Path::new(&path),
-            Path::new(&dest),
-            zip.unwrap_or(false),
-            &|p| {
-                let _ = on_progress.send(p);
-            },
-            &|| !transfer.is_current(generation),
-        )
-    })
-    .await
-    .map_err(|e| format!("The transfer thread failed: {e}"))
 }
 
 /// Every file under the open folder (repo-relative, forward slashes), for "Go to File", the

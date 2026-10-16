@@ -51,6 +51,7 @@ async fn open_folder_impl(folders: &FolderSwitch<'_>, path: &str) -> Result<Open
     let already_open = folders.roots.first_is(&root);
     folders.reset();
     folders.roots.set(vec![root.clone()]);
+    folders.roots.set_workspace(None);
     if !already_open {
         crate::ext_process::host().notify_workspace(std::slice::from_ref(&root));
         crate::cmd_providers::apply_claude_integration(std::slice::from_ref(&root));
@@ -363,6 +364,7 @@ pub async fn open_workspace(
     folders.reset();
     let root_paths: Vec<String> = roots.iter().map(|root| root.root.clone()).collect();
     folders.roots.set(root_paths.clone());
+    folders.roots.set_workspace(Some(path.clone()));
     crate::ext_process::host().notify_workspace(&[]);
     crate::cmd_providers::apply_claude_integration(&[]);
     crate::remote_host::notify_folders(&root_paths);
@@ -480,6 +482,12 @@ pub struct BootContext {
     reloaded: bool,
     opened: Option<OpenedFolder>,
     opened_for: Option<String>,
+    /// The window's CURRENT roots, each with its own `isRepo` — the restore set a
+    /// frontend that did not open them itself applies (a remote session, whose
+    /// `open_folder` the gate refuses; docs/remote-client-plan.md §3.3).
+    roots: Vec<OpenedFolder>,
+    /// The `.ggs-workspace` file the current roots came from, if any.
+    workspace_file: Option<String>,
 }
 
 #[tauri::command]
@@ -494,6 +502,16 @@ pub async fn boot_context(app: tauri::AppHandle) -> Result<BootContext, String> 
     let actions = launch.startup_actions();
     let workspace = launch.startup_workspace();
     let repo = app.state::<WorkspaceRoots>().first();
+    let roots: Vec<OpenedFolder> = app
+        .state::<WorkspaceRoots>()
+        .list()
+        .into_iter()
+        .map(|root| {
+            let is_repo = find_repo_root(&root).is_some();
+            OpenedFolder { is_repo, root }
+        })
+        .collect();
+    let workspace_file = app.state::<WorkspaceRoots>().workspace();
     let (opened, opened_for) =
         if !reloaded && file.is_none() && actions.is_empty() && workspace.is_none() {
             match repo.clone() {
@@ -516,6 +534,8 @@ pub async fn boot_context(app: tauri::AppHandle) -> Result<BootContext, String> 
         reloaded,
         opened,
         opened_for,
+        roots,
+        workspace_file,
     })
 }
 

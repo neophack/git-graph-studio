@@ -7,6 +7,8 @@
 
 import { provideHook, type WebviewStreamBridge } from '../platform/hooks';
 import { extLog } from '../features/extensions';
+import { notify } from '../platform/ui';
+import { t } from '../platform/i18n';
 import { assetUrl } from './assetUrl';
 import { installMirrorHost, mirrorViewersActive, mirrorViewersNow } from './mirror/hostStub';
 import { installWorkbenchSync } from './workbenchSync';
@@ -81,10 +83,12 @@ export function installRemoteSessionHooks(): void {
 	provideHook('workbenchSync', installWorkbenchSync as unknown as () => ReturnType<typeof installWorkbenchSync>);
 	provideHook('summaryReporter', startSummaryReporter);
 	provideHook('transferWire', () => import('./transfer'));
-	// Open Folder browses the PC and opens in a PC window (openOnPc.ts) — never the
-	// browser device's own disk, never this window's refused `open_folder`.
+	// Open Folder is the desktop's own on a remote page (K4, docs/remote-client-plan.md
+	// §3.3): its menu row and keybinding never show (the command is desktop-profile), and
+	// anything that reaches the picker anyway is told so, plainly, instead of falling
+	// through to a native dialog this browser cannot see.
 	provideHook('folderOpen', async () => {
-		await (await import('./openOnPc')).openFolderOnPc();
+		notify('info', t('remote.folders.desktopOnly'));
 		return true;
 	});
 }

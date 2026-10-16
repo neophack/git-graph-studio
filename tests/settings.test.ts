@@ -5,6 +5,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { setLocale, t } from '../src/platform/i18n';
+import { provideHook } from '../src/platform/hooks';
 import { DEFAULT_SETTINGS, THEMES, applyTheme, loadSettingsFile, migrateStoredSettings, settings, updateSetting } from '../src/platform/settings';
 import { openSettingsPanel } from '../src/workbench/settingsPanel';
 import { EditorGroup } from '../src/features/editor';
@@ -96,6 +97,27 @@ describe('settings store', () => {
 		updateSetting('showOutline', true);
 		expect(heard).toEqual(['showOutline']);
 		document.removeEventListener('app:settings-changed', listener);
+	});
+
+	it("a remote session's settings stay on its device — the PC's file is never written (R0)", async () => {
+		// docs/remote-client-plan.md §3.3: a browser session's settings are its device's
+		// own. The store still persists (the scoped localStorage), the event still fires,
+		// but `settings_write` — and the machine-level follow-ups a terminal-shell change
+		// drags along (`providers_shell_refresh`) — never cross the wire.
+		provideHook('session', { remote: () => true, frontendId: () => 'remote/1', frontendClass: () => 'remote', addressedHere: (frontend) => frontend === 'remote/1' });
+		try {
+			backend.reset();
+			updateSetting('showOutline', true);
+			expect(settings.showOutline).toBe(true);
+			updateSetting('terminalShell', 'powershell');
+			await flush(3);
+			expect(backend.callsTo('settings_write')).toHaveLength(0);
+			expect(backend.callsTo('providers_shell_refresh')).toHaveLength(0);
+			expect(backend.callsTo('assoc_apply')).toHaveLength(0);
+			expect(backend.callsTo('context_menu_apply')).toHaveLength(0);
+		} finally {
+			provideHook('session', { remote: () => false, frontendId: () => 'main', frontendClass: () => 'main', addressedHere: (frontend) => frontend === 'main' });
+		}
 	});
 
 	it('switching the theme swaps the stylesheet and the vscode-* classes', () => {

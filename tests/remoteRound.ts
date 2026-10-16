@@ -12,6 +12,7 @@
 // The sweep runs no daemon, so the one HTTP call the remote workbench makes off-socket —
 // the transfer entries' `api/download-ticket` POST — is answered here with a ticket URL:
 // a Download click exercises the whole frontend flow, navigation being jsdom's no-op.
+import { commands } from '../src/platform/commands';
 import { backend, dispatchScripted } from './tauriMock';
 import { T, decodeFrames, encodeFrames, msgpackFrame, type Frame } from '../src/remote/frame';
 import { Transport } from '../src/remote/transport';
@@ -122,8 +123,14 @@ export async function installRemoteRound(formFactor: 'desktop' | 'tablet' | 'pho
 	};
 	document.documentElement.setAttribute('data-remote-shell', '');
 	document.documentElement.dataset.formFactor = formFactor;
+	// The remote session's own boots through src/remote/app/main.ts, which switches the
+	// command registry's profile before the workbench constructs (§3.2): the desktop-only
+	// opens never list, so the sweep's menu walk never reaches the commands the gate
+	// refuses. The round restores the desktop profile when it comes down.
+	commands.setActiveProfile('remote');
 	backend.wire = shimInvoke;
 	previous = () => {
+		commands.setActiveProfile('desktop');
 		backend.wire = null;
 		backend.wireChannel = null;
 		globalThis.fetch = realFetch;
@@ -140,4 +147,5 @@ export async function installRemoteRound(formFactor: 'desktop' | 'tablet' | 'pho
 export function uninstallRemoteRound(): void {
 	previous?.();
 	previous = null;
+	commands.setActiveProfile('desktop');
 }

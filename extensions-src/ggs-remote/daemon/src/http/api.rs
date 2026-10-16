@@ -296,6 +296,9 @@ pub struct TicketBody {
     instance: String,
     path: String,
     zip: bool,
+    /// The multi-select pack (§6.7): two or more paths, one zipped download. `path` stays
+    /// the single-path form's field.
+    paths: Vec<String>,
 }
 
 /// A one-time download URL (§7.8): the browser navigates to it, so it must not depend on a
@@ -314,7 +317,11 @@ pub async fn download_ticket(
     let Some(Json(body)) = body else {
         return error(StatusCode::BAD_REQUEST, "bad-request");
     };
-    if !daemon.registry.exists(&body.instance) || body.path.is_empty() {
+    // The multi form needs its two paths; the single form needs its one. A multi body caps
+    // its paths the way a body field ever gets capped here (a bounded request, not an
+    // unbounded walk handed to the instance).
+    let multi = body.paths.len() >= 2 && body.paths.len() <= 1000;
+    if !daemon.registry.exists(&body.instance) || (body.path.is_empty() && !multi) {
         return error(StatusCode::NOT_FOUND, "no-such-window");
     }
     let ticket = daemon
@@ -326,6 +333,7 @@ pub async fn download_ticket(
             instance: body.instance.clone(),
             path: body.path,
             zip: body.zip,
+            paths: if multi { body.paths } else { Vec::new() },
         });
     let base = base_path(&headers);
     json_response(

@@ -43,12 +43,17 @@ pub fn is_repo_below(roots: &[String], path: &str) -> bool {
 /// a list.
 pub struct WorkspaceRoots {
     repos: std::sync::Mutex<Vec<String>>,
+    /// The `.ggs-workspace` file the roots came from, if any: a frontend attaching to an
+    /// already-open window (a remote session) restores the whole workspace from it, not
+    /// just the first root (`boot_context`'s answer).
+    workspace: std::sync::Mutex<Option<String>>,
 }
 
 impl Default for WorkspaceRoots {
     fn default() -> Self {
         WorkspaceRoots {
             repos: std::sync::Mutex::new(Vec::new()),
+            workspace: std::sync::Mutex::new(None),
         }
     }
 }
@@ -69,9 +74,21 @@ impl WorkspaceRoots {
         *self.repos.lock().unwrap() = roots;
     }
 
+    /// The workspace file the roots came from (`None` when a plain folder is open).
+    pub fn workspace(&self) -> Option<String> {
+        self.workspace.lock().unwrap().clone()
+    }
+
+    /// Record which `.ggs-workspace` file the current roots came from (an open-folder
+    /// pass clears it with `None`).
+    pub fn set_workspace(&self, file: Option<String>) {
+        *self.workspace.lock().unwrap() = file;
+    }
+
     /// Drop every root (a close, or a switch into single-file mode).
     pub fn clear(&self) {
         self.repos.lock().unwrap().clear();
+        *self.workspace.lock().unwrap() = None;
     }
 
     /// Whether `root` is already the first open root (a reopen keeps the warm handles).

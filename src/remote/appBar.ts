@@ -137,15 +137,14 @@ export function gitSheet(): MenuEntry[] {
 	];
 }
 
-/** The Files page's actions. */
+/** The Files page's actions. No Open Folder — a remote page opens files, not folders (K4). */
 export function filesSheet(): MenuEntry[] {
 	return [
 		commandEntry('workbench.newFile', t('remote.files.newFile')),
 		commandEntry('remote.uploadFiles', t('transfer.upload')),
 		commandEntry('remote.uploadFolder', t('transfer.uploadFolder')),
 		'separator',
-		commandEntry('workbench.quickOpen', t('remote.appbar.quickOpen')),
-		commandEntry('workbench.openFolder', t('remote.files.openFolder'))
+		commandEntry('workbench.quickOpen', t('remote.appbar.quickOpen'))
 	];
 }
 

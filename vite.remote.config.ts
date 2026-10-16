@@ -49,10 +49,14 @@ export default mergeConfig(
 		build: {
 			outDir: resolve(studio, 'dist', 'remote'),
 			emptyOutDir: true,
-			target: ['es2021', 'safari16', 'firefox115', 'chrome100'],
+			// §10.1's A-level floor, aligned with the wire codec's own floor: the frame
+			// compression falls back to fflate below CompressionStream's versions, so the
+			// build itself only owes the floor browsers what they parse (C0, §10.2 item 1).
+			target: ['es2021', 'safari16.4', 'firefox115', 'chrome103'],
 			rollupOptions: {
 				input: {
 					remote: resolve(__dirname, 'remote.html'),
+					unsupported: resolve(__dirname, 'unsupported.html'),
 					sw: resolve(__dirname, 'src/remote/sw.ts')
 				},
 				output: {

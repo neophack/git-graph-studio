@@ -118,8 +118,11 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .pane-header .twistie { width: 16px; font-size: 16px; }
 .pane-header .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Headers without a twistie (the Analysis sections, the Extensions header) keep the
-   twistie's 16px anyway, so every sidebar's headers sit on the same text edge. */
-.pane-header:not(:has(> .twistie)) .label { padding-left: 16px; }
+   twistie's 16px anyway, so every sidebar's headers sit on the same text edge. The
+   `.no-twistie` spelling is the remote's (hasFallbacks.ts — Firefox 115 has no `:has()`);
+   the desktop webviews all carry `:has()`. */
+.pane-header:not(:has(> .twistie)) .label,
+.pane-header.no-twistie .label { padding-left: 16px; }
 /* VS Code renders its pane headers in normal weight for the CJK scripts, whose glyphs
    carry the weight the Latin bold would add. */
 .pane-header:lang(zh) { font-weight: 400; }

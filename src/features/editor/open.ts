@@ -58,6 +58,14 @@ const PREVIEW_DELAY_MS = 300;
 /** Below this width (px) a diff drops the side-by-side layout for a single-column inline view. */
 const DIFF_SPLIT_MIN_WIDTH = 720;
 
+/** The page-stack shells (the phone orientations and the portrait tablet,
+ *  docs/remote-client-plan.md §6.3) read their diffs INLINE whatever the pane measures — a
+ *  landscape phone's 850 px pane would otherwise split into two 400 px halves no one can
+ *  read. The tablet landscape and the desktop browser keep the width rule. */
+function diffInlineShell(): boolean {
+	return typeof document !== 'undefined' && document.documentElement.hasAttribute('data-page-stack');
+}
+
 
 /** Every open Markdown preview, across groups: a source's edits refresh its preview wherever
  *  the preview tab lives, and the scroll sync finds its pair without caring which group
@@ -745,14 +753,14 @@ export const openMethods: ThisType<EditorGroup> = {
 		requestAnimationFrame(() => {
 			// Dropped as a parallel-open duplicate (or already rendered): nothing to build.
 			if (!this.open.includes(editor) || editor.view !== undefined || editor.merge !== undefined) return;
-			split = manualSplit ?? (host.clientWidth >= DIFF_SPLIT_MIN_WIDTH || host.clientWidth === 0);
+			split = manualSplit ?? (!diffInlineShell() && (host.clientWidth === 0 || host.clientWidth >= DIFF_SPLIT_MIN_WIDTH));
 			lastSplit = split;
 			render(split);
 		});
 		editor.diffObserver = new ResizeObserver(() => {
 			// A pinned layout stays; the pane width only rules until the user chooses.
 			if (manualSplit !== undefined) return;
-			const want = host.clientWidth >= DIFF_SPLIT_MIN_WIDTH;
+			const want = !diffInlineShell() && host.clientWidth >= DIFF_SPLIT_MIN_WIDTH;
 			if (want !== split) {
 				split = want;
 				lastSplit = want;

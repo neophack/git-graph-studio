@@ -8,3 +8,4 @@ export * from './notify';
 export * from './progress';
 export * from './contextMenu';
 export * from './quickInput';
+export * from './swipe';
