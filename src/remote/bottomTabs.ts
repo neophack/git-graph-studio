@@ -7,7 +7,7 @@
 // reselect of a list page scrolls it back to its top. Badges carry what the hidden status
 // and activity bars would: the open editors (a dot while one is unsaved) and the pending
 // changes. Everything else lives in the drawer (navDrawer.ts).
-import { t } from '../platform/i18n';
+import { onLocaleChange, t } from '../platform/i18n';
 import {
 	BUILTIN_VIEWS,
 	currentPage,
@@ -146,5 +146,11 @@ export function createBottomTabs(onReselect: (page: PageId) => void = () => unde
 	};
 	syncTabs(bar, reselect, onTap);
 	onWorkbenchChange(() => syncTabs(bar, reselect, onTap));
+	// A language switch relabels the destinations: syncTabs keys on the labels, so the
+	// re-read under the new locale rebuilds the buttons (the bar's own aria label with them).
+	onLocaleChange(() => {
+		bar.setAttribute('aria-label', t('remote.nav.label'));
+		syncTabs(bar, reselect, onTap);
+	});
 	return bar;
 }

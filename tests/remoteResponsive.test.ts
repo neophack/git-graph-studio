@@ -36,7 +36,7 @@ import { closeSettingsPage, installPhoneSettingsEntry, openSettingsPage, setting
 import { openSettingsPanel } from '../src/workbench/settingsPanel';
 import { DEFAULT_SETTINGS, settings } from '../src/platform/settings';
 import { extSettings } from '../src/platform/state';
-import { setLocale, t } from '../src/platform/i18n';
+import { setLocale, t, trText } from '../src/platform/i18n';
 import { backend } from './tauriMock';
 import { click, flush, type, workbenchShell, DefaultingHandlers } from './helpers';
 import { bootWorkbench, currentWorkbench } from '../src/workbench';
@@ -1343,5 +1343,76 @@ describe('the device classifier (§4.1)', () => {
 		// An unknown value is no override at all.
 		expect(overrideClass('nope', 390, 844)).toBeNull();
 		expect(settleDeviceClass('phone-portrait', 1440, 800, false, { w: 390, h: 844 }, false, 'phone')).toBe('phone-landscape');
+	});
+});
+
+// The display language follows the remote shell (the owner's 2026-10-16 direction: 远程
+// 设置中文后菜单还是英文): the shell's surfaces must speak whatever locale the settings
+// say — the ones built once relabel on a switch, the sheets localize at open, and the
+// registry's English command literals resolve through the display layer like everywhere else.
+describe('the display language follows the shell', () => {
+	afterEach(() => {
+		setLocale('en');
+		closeActionSheet();
+		leavePhone();
+	});
+
+	it('the action sheet localizes literal menu labels the way the desktop menu renderer does', () => {
+		setLocale('zh-cn');
+		showActionSheet([
+			{ label: 'Editor Layout', submenu: [{ label: 'Split Editor', run: () => undefined }] },
+			{ label: 'Appearance', run: () => undefined }
+		]);
+		const labels = [...document.querySelectorAll('.ggs-action-sheet .row .label')].map((node) => node.textContent);
+		expect(labels).toContain('编辑器布局');
+		expect(labels).toContain('外观');
+		// The submenu drills in under its localized title, with a localized row inside.
+		(document.querySelectorAll<HTMLButtonElement>('.ggs-action-sheet .row')[0]!).click();
+		expect(document.querySelector('.ggs-action-sheet .ggs-sheet-header .title')!.textContent).toBe('编辑器布局');
+		expect([...document.querySelectorAll('.ggs-action-sheet .row .label')].map((node) => node.textContent)).toContain('拆分编辑器');
+		// A label with no pair passes through untouched (already-localized callers stay).
+		setLocale('en');
+		showActionSheet([{ label: '上传文件…', run: () => undefined }]);
+		expect(document.querySelector('.ggs-action-sheet .row .label')!.textContent).toBe('上传文件…');
+	});
+
+	it('the bottom navigation and the nav rail relabel on a language switch', () => {
+		phoneWorkbench();
+		const bar = createBottomTabs();
+		document.body.appendChild(bar);
+		const rail = createNavRail();
+		document.body.appendChild(rail);
+		expect(bar.querySelector('.label')!.textContent).toBe('Files');
+		expect(rail.querySelector<HTMLButtonElement>('button[data-tab="explorer"]')!.getAttribute('aria-label')).toBe('Files');
+		setLocale('zh-cn');
+		expect(bar.querySelector('.label')!.textContent).toBe('文件');
+		expect(bar.getAttribute('aria-label')).toBe(t('remote.nav.label'));
+		expect(rail.querySelector<HTMLButtonElement>('button[data-tab="explorer"]')!.getAttribute('aria-label')).toBe('文件');
+		expect(rail.querySelector<HTMLButtonElement>('.ggs-rail-back')!.getAttribute('aria-label')).toBe(t('remote.page.back'));
+	});
+
+	it("the app bar's built-once chrome relabels on a language switch", () => {
+		phoneWorkbench();
+		const barEl = createAppBar({ openDrawer: () => undefined, openEditors: () => undefined, editorActions: () => undefined });
+		document.body.appendChild(barEl);
+		const menu = barEl.querySelector<HTMLButtonElement>('.ggs-appbar-btn.leading')!;
+		expect(menu.getAttribute('aria-label')).toBe('Menu');
+		expect(barEl.querySelector<HTMLButtonElement>('.ggs-appbar-btn[title="More Actions"]')).not.toBeNull();
+		setLocale('zh-cn');
+		expect(menu.getAttribute('aria-label')).toBe(t('remote.menu'));
+		// The trailing actions rebuilt: the Files page's kebab carries the localized title.
+		expect(barEl.querySelector<HTMLButtonElement>(`.ggs-appbar-btn[title="${t('remote.appbar.more')}"]`)).not.toBeNull();
+		setLocale('en');
+		expect(barEl.querySelector<HTMLButtonElement>('.ggs-appbar-btn[title="More Actions"]')).not.toBeNull();
+	});
+
+	it("the remote shell's command titles localize through the registry's display path", () => {
+		// shell.ts registers the English literals like every registry entry; the palette
+		// and the menu items resolve them through trText at display time.
+		commands.register({ profiles: ['remote'], id: 'probe.remote.windows', title: 'Windows…', category: 'Remote', run: () => undefined });
+		setLocale('zh-cn');
+		expect(commands.menuItem('probe.remote.windows').label).toBe('窗口…');
+		expect(trText('Live View of the PC Window')).toBe('PC 窗口实时画面');
+		expect(trText('Layout Mode (Auto / Phone / Tablet / Desktop)')).toBe('布局模式（自动 / 手机 / 平板 / 桌面）');
 	});
 });

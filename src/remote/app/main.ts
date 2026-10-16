@@ -23,8 +23,19 @@ import './layouts/layouts.css';
 document.addEventListener('contextmenu', (event) => event.preventDefault());
 
 // The remote's theme and language ride the same settings seam, read over the wire (a
-// read-only invoke; the session's own settings never write back, R0).
-void loadSettingsFile().then(() => initSettings());
+// read-only invoke; the session's own settings never write back, R0). The workbench
+// loads AFTER the settings apply: over the wire the read can lose the race against a
+// cached chunk, and the shell built first would carry the boot-default English labels
+// (menus included) until the next settings change — the language would look stuck.
+loadSettingsFile()
+	.then(() => initSettings())
+	.then(() => import('../../workbench'))
+	.then(({ bootWorkbench }) => bootWorkbench())
+	.catch((error) => {
+		const splash = document.getElementById('boot-splash');
+		splash?.replaceChildren(`The remote workbench failed to start: ${String(error)}`);
+		throw error;
+	});
 
 // This shell's command config and its capability stamp (§10.3).
 commands.setActiveProfile('remote');
@@ -34,11 +45,3 @@ void bootStage('splash module ran', performance.now()).catch(() => undefined);
 requestAnimationFrame(() => {
 	void bootStage('splash painted', performance.now()).catch(() => undefined);
 });
-
-void import('../../workbench')
-	.then(({ bootWorkbench }) => bootWorkbench())
-	.catch((error) => {
-		const splash = document.getElementById('boot-splash');
-		splash?.replaceChildren(`The remote workbench failed to start: ${String(error)}`);
-		throw error;
-	});

@@ -6,7 +6,7 @@
 // selection, a fold or a completion list reacts exactly as to a hardware key); the rest are
 // registry commands. The row never takes the focus: a tap must not drop the keyboard.
 import { commands } from '../platform/commands';
-import { t } from '../platform/i18n';
+import { onLocaleChange, t } from '../platform/i18n';
 
 export interface AccessoryKey {
 	id: string;
@@ -94,5 +94,16 @@ export function createEditorAccessory(): HTMLElement {
 	document.addEventListener('focusin', sync);
 	document.addEventListener('focusout', () => requestAnimationFrame(sync));
 	sync();
+	// A language switch relabels the row's accessible name and the buttons' titles (the
+	// key glyphs themselves are language-free).
+	onLocaleChange(() => {
+		row.setAttribute('aria-label', t('remote.editorToolbar.label'));
+		for (const key of ACCESSORY_KEYS) {
+			const button = row.querySelector<HTMLButtonElement>(`button[data-key="${key.id}"]`);
+			if (!button) continue;
+			button.title = key.label();
+			button.setAttribute('aria-label', key.label());
+		}
+	});
 	return row;
 }

@@ -247,7 +247,21 @@ const zhCnText: Record<string, string> = {
 	'Rebuild Symbol Index': '重建符号索引',
 	Context: '上下文',
 	'Symbol Database': '符号数据库',
-	'Focus Next Part': '聚焦下一区域'
+	'Focus Next Part': '聚焦下一区域',
+	// The remote shell's own commands (src/remote/shell.ts): registered as English literals
+	// like every registry entry, resolved through this table at display time — the pairs
+	// mirror the zh-cn string table's own translations of the same texts.
+	'Windows…': '窗口…',
+	'Window Picker Page': '窗口选择页',
+	'Close This Window on the PC': '在 PC 上关闭此窗口',
+	'Show This Window on the PC': '在 PC 上显示此窗口',
+	'Live View of the PC Window': 'PC 窗口实时画面',
+	'Upload Files…': '上传文件…',
+	'Upload Folder…': '上传文件夹…',
+	'Download to This Device': '下载到本设备',
+	'Data Saver': '省流模式',
+	'Layout Mode (Auto / Phone / Tablet / Desktop)': '布局模式（自动 / 手机 / 平板 / 桌面）',
+	'This session: ↑ … ↓ …': '本次会话：↑ … ↓ …'
 };
 
 let current: Locale = 'en';

@@ -5,7 +5,7 @@
 // header actions), 48 px rows and a Cancel row; a drag down on the grabber or the header, a
 // tap on the backdrop, Escape or the browser's back all dismiss it. One sheet at a time.
 import { setMenuPresenter, type MenuEntry, type MenuItem } from '../platform/ui';
-import { t } from '../platform/i18n';
+import { t, trText } from '../platform/i18n';
 import { pushBack } from './backStack';
 import { coarsePointer, formFactor } from './responsive';
 
@@ -146,7 +146,11 @@ function installDragToDismiss(sheet: HTMLElement, handles: HTMLElement[]): void 
 	}
 }
 
-/** One menu row: the label, a checkmark for a checked entry, a chevron for a submenu. */
+/** One menu row: the label, a checkmark for a checked entry, a chevron for a submenu.
+ *  The label resolves through `trText` exactly as ui.ts's renderMenu does — the entries a
+ *  sheet serves (the workbench's full menus among them) mix registry command titles with
+ *  literal English labels ('Editor Layout', 'Appearance'), and one renderer must not leave
+ *  half of them untranslated on the phone. */
 function menuRow(item: MenuItem, onPick: () => void): HTMLButtonElement {
 	const row = document.createElement('button');
 	row.className = 'row' + (item.checked ? ' checked' : '');
@@ -154,7 +158,7 @@ function menuRow(item: MenuItem, onPick: () => void): HTMLButtonElement {
 	row.disabled = Boolean(item.disabled);
 	const label = document.createElement('span');
 	label.className = 'label';
-	label.textContent = item.label;
+	label.textContent = trText(item.label);
 	row.appendChild(label);
 	if (item.checked) row.appendChild(iconSpan('check', 'trail'));
 	if (item.submenu) row.appendChild(iconSpan('chevron-right', 'trail'));
@@ -187,7 +191,7 @@ export function showActionSheet(entries: MenuEntry[], title?: string, parent?: (
 		body.appendChild(
 			menuRow(item, () => {
 				if (item.submenu) {
-					showActionSheet(item.submenu, item.label, reopen);
+					showActionSheet(item.submenu, trText(item.label), reopen);
 					return;
 				}
 				closeActionSheet();

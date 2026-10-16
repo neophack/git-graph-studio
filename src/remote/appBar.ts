@@ -6,7 +6,7 @@
 // open editors list. Trailing: the page's own actions (Go to File everywhere; the editor's
 // lock toggle and action sheet, the repository's or the terminal's), each a 44 px target.
 import { commands } from '../platform/commands';
-import { t, tf } from '../platform/i18n';
+import { onLocaleChange, t, tf, trText } from '../platform/i18n';
 import type { MenuEntry } from '../platform/ui';
 import { currentWorkbench } from '../workbench';
 import { showActionSheet } from './actionSheet';
@@ -51,11 +51,14 @@ export function changeCount(): string {
 	return document.querySelector('#activitybar .activity-item[data-view="scm"] .badge')?.textContent?.trim() ?? '';
 }
 
-/** A command as a sheet row, carrying its live enablement; `label` overrides the title. */
+/** A command as a sheet row, carrying its live enablement; `label` overrides the title.
+ *  The title resolves through `trText` — registry titles are the English literals and the
+ *  display layer localizes them, so a sheet reads the current language whatever the command
+ *  table registered. */
 export function commandEntry(id: string, label?: string): MenuEntry {
 	const command = commands.get(id);
 	return {
-		label: label ?? (command ? command.title.replace(/\.\.\.$/, '…') : id),
+		label: label ?? (command ? trText(command.title).replace(/\.\.\.$/, '…') : id),
 		disabled: !commands.isEnabled(id),
 		run: () => void commands.execute(id)
 	};
@@ -287,10 +290,15 @@ export function createAppBar(hooks: AppBarHooks): HTMLElement {
 		const page = currentPage();
 		const info = pageHeading(page);
 		back.hidden = !pageBackAvailable();
+		back.title = t('remote.page.back');
+		back.setAttribute('aria-label', t('remote.page.back'));
+		menu.title = t('remote.menu');
+		menu.setAttribute('aria-label', t('remote.menu'));
 		titleText.textContent = info.title;
 		subtitle.textContent = info.subtitle;
 		subtitle.hidden = !info.subtitle;
 		dirty.hidden = !info.dirty;
+		dirty.title = t('remote.editor.unsaved');
 		heading.classList.toggle('switcher', Boolean(info.switcher));
 		chevron.hidden = !info.switcher;
 		heading.setAttribute('aria-label', info.switcher ? tf('remote.appbar.openEditorsOf', info.title) : info.title);
@@ -312,5 +320,12 @@ export function createAppBar(hooks: AppBarHooks): HTMLElement {
 	rerenderAppBar = render;
 	onWorkbenchChange(render);
 	onEditLockChange(render);
+	// A language switch relabels the built-once chrome (the leading buttons above, the
+	// trailing action buttons' titles): the actions rebuild by forgetting which page filled
+	// them, and the next render re-runs their own t() lookups.
+	onLocaleChange(() => {
+		actionsFor = '';
+		render();
+	});
 	return bar;
 }

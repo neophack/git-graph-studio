@@ -120,6 +120,37 @@ describe('settings store', () => {
 		}
 	});
 
+	it("seeds a remote session's device-scope settings from the PC file once, then keeps the device's own (§5.5)", async () => {
+		// docs/remote-linkage-and-settings-plan.md §5.5: 布局、主题、字号、语言 are
+		// DEVICE-level — the remote reads the PC file "首次运行时…作为初值，之后各存各的".
+		// Before this, every reload re-applied the PC file over the browser's stored picks,
+		// so a zh-cn remote of an en PC booted English menus no matter what it had set.
+		provideHook('session', { remote: () => true, frontendId: () => 'remote/1', frontendClass: () => 'remote', addressedHere: (frontend) => frontend === 'remote/1' });
+		const held = { locale: settings.locale, theme: settings.theme, tabSize: settings.tabSize };
+		try {
+			backend.reset();
+			backend.on('settings_read', () => JSON.stringify({ locale: 'en', theme: 'dark-modern', tabSize: 8 }));
+			// First run: nothing of its own stored — the PC's file seeds the device keys too.
+			localStorage.setItem('ggstudio.appSettings', JSON.stringify({}));
+			Object.assign(settings, { locale: 'en', theme: 'monokai', tabSize: 4 });
+			await loadSettingsFile();
+			expect(settings.locale).toBe('en');
+			expect(settings.theme).toBe('dark-modern');
+			expect(settings.tabSize).toBe(8);
+			// Afterwards the device's own picks stand against the PC's file — the shared
+			// keys (tabSize) still follow it.
+			localStorage.setItem('ggstudio.appSettings', JSON.stringify({ locale: 'zh-cn', theme: 'monokai' }));
+			Object.assign(settings, { locale: 'en', theme: 'dark-modern', tabSize: 4 });
+			await loadSettingsFile();
+			expect(settings.locale).toBe('zh-cn');
+			expect(settings.theme).toBe('monokai');
+			expect(settings.tabSize).toBe(8);
+		} finally {
+			provideHook('session', { remote: () => false, frontendId: () => 'main', frontendClass: () => 'main', addressedHere: (frontend) => frontend === 'main' });
+			Object.assign(settings, held);
+		}
+	});
+
 	it('switching the theme swaps the stylesheet and the vscode-* classes', () => {
 		const link = themeLink();
 		applyTheme('light-modern');

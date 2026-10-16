@@ -7,6 +7,7 @@
 import { keybindingsRead, keybindingsWrite } from '../platform/ipc/settings';
 
 import { commands, UNSHIFTED_GLYPHS } from './commands';
+import { t } from './i18n';
 import { el, icon } from './ui';
 
 export interface UserKeybinding {
@@ -96,9 +97,9 @@ export function renderKeybindingsEditor(container: HTMLElement): void {
 	const inner = el('div', 'welcome-inner');
 	const search = el('input', 'input shortcuts-filter') as HTMLInputElement;
 	search.type = 'text';
-	search.placeholder = 'Search keybindings (type to filter, click a row\u2019s pencil to record)';
+	search.placeholder = t('keybindings.searchPlaceholder');
 	search.spellcheck = false;
-	inner.append(el('div', '', [el('h1', '', ['Keyboard Shortcuts'])]), search);
+	inner.append(el('div', '', [el('h1', '', [t('keybindings.title')])]), search);
 	const list = el('div', 'shortcuts-list');
 	inner.appendChild(list);
 	container.appendChild(inner);

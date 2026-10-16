@@ -6,6 +6,7 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import { closeContextMenu, el, icon, isMenuOpen, showMenuBelow, type MenuEntry } from '../platform/ui/index';
+import { onLocaleChange, t, tf } from '../platform/i18n';
 
 export interface MenuDefinition {
 	label: string;
@@ -39,9 +40,13 @@ export class TitleBar {
 	private readonly commandCenter: HTMLElement;
 	private readonly commandCenterLabel: HTMLElement;
 	private readonly maximizeButton: HTMLElement;
+	private readonly minimizeButton: HTMLElement;
+	private readonly closeButton: HTMLElement;
 	private readonly backButton: HTMLElement;
 	private readonly forwardButton: HTMLElement;
 	private menus: MenuDefinition[] = [];
+	/** The open folder's name, kept so a language switch can re-render the command center. */
+	private folderName: string | null = null;
 
 	onCommandCenter: (() => void) | null = null;
 	onBack: (() => void) | null = null;
@@ -64,7 +69,7 @@ export class TitleBar {
 		this.commandCenterLabel = el('span', 'label', ['Git Graph Studio']);
 		this.commandCenter = el('div', 'command-center', [icon('search'), this.commandCenterLabel]);
 		this.commandCenter.setAttribute('role', 'button');
-		this.commandCenter.title = 'Go to File / Command Palette (Ctrl+P)';
+		this.commandCenter.title = t('titlebar.commandCenter');
 		this.commandCenter.addEventListener('click', () => this.onCommandCenter?.());
 		const navButton = (name: 'left' | 'right', title: string, run: () => void) => {
 			const button = el('div', 'titlebar-nav', [icon(`arrow-${name}`)]);
@@ -73,8 +78,8 @@ export class TitleBar {
 			button.addEventListener('click', run);
 			return button;
 		};
-		this.backButton = navButton('left', 'Go Back (Alt+Left)', () => this.onBack?.());
-		this.forwardButton = navButton('right', 'Go Forward (Alt+Right)', () => this.onForward?.());
+		this.backButton = navButton('left', t('titlebar.goBack'), () => this.onBack?.());
+		this.forwardButton = navButton('right', t('titlebar.goForward'), () => this.onForward?.());
 		this.backButton.classList.add('disabled');
 		this.forwardButton.classList.add('disabled');
 		const center = el('div', 'titlebar-center', [this.backButton, this.forwardButton, this.commandCenter]);
@@ -87,16 +92,24 @@ export class TitleBar {
 			button.addEventListener('click', run);
 			return button;
 		};
-		this.maximizeButton = control('maximize', 'Maximize', () => void this.controls.toggleMaximize().then(() => this.updateMaximized()));
-		const right = el('div', 'window-controls', [
-			control('minimize', 'Minimize', () => void this.controls.minimize()),
-			this.maximizeButton,
-			control('close', 'Close', () => void this.controls.close())
-		]);
+		this.minimizeButton = control('minimize', t('titlebar.minimize'), () => void this.controls.minimize());
+		this.maximizeButton = control('maximize', t('titlebar.maximize'), () => void this.controls.toggleMaximize().then(() => this.updateMaximized()));
+		this.closeButton = control('close', t('titlebar.close'), () => void this.controls.close());
+		const right = el('div', 'window-controls', [this.minimizeButton, this.maximizeButton, this.closeButton]);
 
 		container.append(left, center, right);
 		void this.updateMaximized();
 		void this.controls.onResized(() => void this.updateMaximized());
+		// The bar is built once: a language switch relabels its static tooltips and the
+		// command center in place (the menus relabel through their own SETTINGS_EVENT pass).
+		onLocaleChange(() => {
+			this.commandCenter.title = t('titlebar.commandCenter');
+			this.minimizeButton.title = t('titlebar.minimize');
+			this.maximizeButton.title = t('titlebar.maximize');
+			this.closeButton.title = t('titlebar.close');
+			this.setNavigation(!this.backButton.classList.contains('disabled'), !this.forwardButton.classList.contains('disabled'));
+			this.setFolderName(this.folderName);
+		});
 	}
 
 	setMenus(menus: MenuDefinition[]): void {
@@ -141,14 +154,15 @@ export class TitleBar {
 	/** Enablement of the back/forward arrows, as the navigation history allows. */
 	setNavigation(canBack: boolean, canForward: boolean): void {
 		this.backButton.classList.toggle('disabled', !canBack);
-		this.backButton.title = canBack ? 'Go Back (Alt+Left)' : 'Go Back';
+		this.backButton.title = t(canBack ? 'titlebar.goBack' : 'titlebar.goBackPlain');
 		this.forwardButton.classList.toggle('disabled', !canForward);
-		this.forwardButton.title = canForward ? 'Go Forward (Alt+Right)' : 'Go Forward';
+		this.forwardButton.title = t(canForward ? 'titlebar.goForward' : 'titlebar.goForwardPlain');
 	}
 
 	/** The command center shows the open folder, as VS Code's shows the workspace. */
 	setFolderName(name: string | null): void {
-		this.commandCenterLabel.textContent = name ? `Search ${name}` : 'Git Graph Studio';
+		this.folderName = name;
+		this.commandCenterLabel.textContent = name ? tf('titlebar.searchFolder', name) : 'Git Graph Studio';
 	}
 
 	private async updateMaximized(): Promise<void> {

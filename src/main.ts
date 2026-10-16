@@ -28,8 +28,20 @@ if (!tauriBridgePresent()) {
 } else {
 	// The persisted theme (and display language) take effect before the shell loads, so the
 	// window never flashes the default theme at the user. A hand-edited ~/.ggs/settings.json
-	// wins over the stored settings (M3 3.9) - one read before the theme applies.
-	void loadSettingsFile().then(() => initSettings());
+	// wins over the stored settings (M3 3.9) - one read before the theme applies. The
+	// workbench loads AFTER the settings apply: its menus and views build their labels at
+	// construction, and a shell that won the race against this read would carry the
+	// boot-default English until the next settings change.
+	loadSettingsFile()
+		.then(() => initSettings())
+		.then(() => import('./workbench'))
+		.then(({ bootWorkbench }) => bootWorkbench())
+		.catch((error) => {
+			const splash = document.getElementById('boot-splash');
+			// Even on failure the user should see more than a black window.
+			splash?.replaceChildren(`The workbench failed to start: ${String(error)}`);
+			throw error;
+		});
 
 	// The desktop's own remote-shaped halves (the mirror host, the asset protocol, the
 	// workbench sync) install before the workbench loads — the composition root's wiring.
@@ -41,13 +53,4 @@ if (!tauriBridgePresent()) {
 	requestAnimationFrame(() => {
 		void bootStage('splash painted', performance.now()).catch(() => undefined);
 	});
-
-	void import('./workbench')
-		.then(({ bootWorkbench }) => bootWorkbench())
-		.catch((error) => {
-			const splash = document.getElementById('boot-splash');
-			// Even on failure the user should see more than a black window.
-			splash?.replaceChildren(`The workbench failed to start: ${String(error)}`);
-			throw error;
-		});
 }

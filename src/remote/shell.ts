@@ -43,20 +43,23 @@ async function firstFolder(): Promise<string | null> {
 function registerCommands(): void {
 	if (!remoteEnv()) return;
 	// The remote shell's own vocabulary (§3.2): visible only in the remote profile — the
-	// desktop app's palette and menus never list the browser's commands.
+	// desktop app's palette and menus never list the browser's commands. Titles are the
+	// English literals, like every registry entry (the display layer — the palette, the
+	// menu items — resolves them through `trText`, so a language switch relabels them; a
+	// `t()` here would bake whichever language was active at install time).
 	const remoteOnly = { profiles: ['remote'] as const };
-	commands.register({ ...remoteOnly, id: 'remote.switchWindow', title: t('remote.windows'), category: 'Remote', run: () => openWindowSwitcher() });
+	commands.register({ ...remoteOnly, id: 'remote.switchWindow', title: 'Windows…', category: 'Remote', run: () => openWindowSwitcher() });
 	// The picker page (the daemon's `/windows`): the button entry every form factor reaches —
 	// the drawer's row and the switcher's last item ride it. Navigation only; the workbench
 	// itself still never spawns (K4 — the picker page is the one spawn surface).
-	commands.register({ ...remoteOnly, id: 'remote.windowsPage', title: t('remote.windowsPage'), category: 'Remote', run: () => goWindowsPicker() });
+	commands.register({ ...remoteOnly, id: 'remote.windowsPage', title: 'Window Picker Page', category: 'Remote', run: () => goWindowsPicker() });
 	// The PC window's own lifecycle, from the remote (§17): hide or show THIS window's
 	// desktop half — the session stays attached either way (K12), and "close on the PC"
 	// is exactly that, never the instance's exit.
 	commands.register({
 		...remoteOnly,
 		id: 'remote.pcWindow.hide',
-		title: t('remote.pcWindow.hide'),
+		title: 'Close This Window on the PC',
 		category: 'Remote',
 		run: () => {
 			const env = remoteEnv();
@@ -66,7 +69,7 @@ function registerCommands(): void {
 	commands.register({
 		...remoteOnly,
 		id: 'remote.pcWindow.show',
-		title: t('remote.pcWindow.show'),
+		title: 'Show This Window on the PC',
 		category: 'Remote',
 		run: () => {
 			const env = remoteEnv();
@@ -77,11 +80,11 @@ function registerCommands(): void {
 	// auto rule does not hand a phone straight back here while the PC shows the window. A
 	// drawer row serves it on a phone: the drawer's queued close-back() must not cancel the
 	// replace (backStack's leavingPage).
-	commands.register({ ...remoteOnly, id: 'remote.liveView', title: t('remote.liveView'), category: 'Remote', run: () => { leavingPage(); location.replace(modeUrl(location.href, 'mirror')); } });
+	commands.register({ ...remoteOnly, id: 'remote.liveView', title: 'Live View of the PC Window', category: 'Remote', run: () => { leavingPage(); location.replace(modeUrl(location.href, 'mirror')); } });
 	commands.register({
 		...remoteOnly,
 		id: 'remote.uploadFiles',
-		title: t('transfer.upload'),
+		title: 'Upload Files…',
 		category: 'Remote',
 		run: async () => {
 			const dir = await firstFolder();
@@ -92,7 +95,7 @@ function registerCommands(): void {
 	commands.register({
 		...remoteOnly,
 		id: 'remote.uploadFolder',
-		title: t('transfer.uploadFolder'),
+		title: 'Upload Folder…',
 		category: 'Remote',
 		run: async () => {
 			const dir = await firstFolder();
@@ -103,7 +106,7 @@ function registerCommands(): void {
 	commands.register({
 		...remoteOnly,
 		id: 'remote.download',
-		title: t('transfer.download'),
+		title: 'Download to This Device',
 		category: 'Remote',
 		run: async () => {
 			const active = document.querySelector('.tab.active')?.getAttribute('title') ?? (await firstFolder());
@@ -111,14 +114,14 @@ function registerCommands(): void {
 			await downloadTo(active);
 		}
 	});
-	commands.register({ ...remoteOnly, id: 'remote.toggleDataSaver', title: t('setting.remote.dataSaver'), category: 'Remote', run: () => setDataSaver(!document.documentElement.hasAttribute('data-data-saver')) });
+	commands.register({ ...remoteOnly, id: 'remote.toggleDataSaver', title: 'Data Saver', category: 'Remote', run: () => setDataSaver(!document.documentElement.hasAttribute('data-data-saver')) });
 	// The layout override (§4.2's 设备级设置 "布局"): the entry every form factor reaches —
 	// the phone Settings page serves the page-stack shells, the palette serves them all
 	// (a desktop-form browser cannot open the phone page, and tablet mode is its offer).
 	commands.register({
 		...remoteOnly,
 		id: 'remote.layoutMode',
-		title: t('remote.layout.pick'),
+		title: 'Layout Mode (Auto / Phone / Tablet / Desktop)',
 		category: 'Remote',
 		run: async () => {
 			const current: DeviceOverride | 'auto' = deviceOverride() ?? 'auto';
@@ -139,7 +142,7 @@ function registerCommands(): void {
 	commands.register({
 		...remoteOnly,
 		id: 'remote.traffic',
-		title: tf('remote.traffic', '…', '…'),
+		title: 'This session: ↑ … ↓ …',
 		category: 'Remote',
 		run: () => {
 			const stats = remoteEnv()?.transport.stats;

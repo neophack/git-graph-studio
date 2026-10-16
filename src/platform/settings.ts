@@ -455,6 +455,18 @@ function applyExplorerContextMenu(notifyUser: boolean): void {
 
 /* ---------- The user-level settings.json (M3 3.9): the file wins on the next launch ---------- */
 
+/** §5.5's device-scope keys (docs/remote-linkage-and-settings-plan.md): the display
+ *  preferences each frontend owns on its own. A remote session seeds these from the PC's
+ *  `settings.json` once — on its first run, before anything of its own is stored — and
+ *  afterwards keeps its own picks, so a PC-side language or theme never re-clobbers this
+ *  browser's choices on every reload (the bug behind "set Chinese, the menus stay
+ *  English"). The desktop keeps reading its own file every launch. */
+const DEVICE_SCOPED_KEYS = new Set<keyof AppSettings>([
+	'theme', 'locale', 'fontSize', 'density', 'minimap', 'stickyScroll', 'showOutline',
+	'bracketColors', 'wordWrap', 'mouseWheelScrollSensitivity', 'fastScrollSensitivity',
+	'terminalRightClickBehavior'
+]);
+
 /** Apply `~/.ggs/settings.json` over the stored settings, if the file exists: a hand edit is
  *  the other direction of the "edited both ways" contract (picked up on the next launch,
  *  like VS Code's own reload semantics). */
@@ -465,8 +477,21 @@ export async function loadSettingsFile(): Promise<void> {
 		// The file is a store from an older release as much as localStorage is: the same
 		// migration applies (a wheel sensitivity that was only ever a shipped default).
 		const parsed = migrateStoredSettings(JSON.parse(text) as Partial<AppSettings>);
+		// What this browser already picked for itself (R0): a remote session's device-scope
+		// keys stand — the file seeded them on the first run, and every later read would
+		// otherwise undo the device's own choices (a zh-cn pick reverted by an en PC file).
+		const own = remoteSession() ? load<Partial<AppSettings>>('appSettings', {}) : {};
 		for (const def of SETTING_DEFS) {
-			if (parsed[def.key] !== undefined) (settings as unknown as Record<string, unknown>)[def.key] = parsed[def.key];
+			if (parsed[def.key] === undefined) continue;
+			// A device-scope key this browser has picked for itself is restored from its own
+			// store — never re-clobbered by the PC's file (the seeded first run aside).
+			if (DEVICE_SCOPED_KEYS.has(def.key)) {
+				if (own[def.key] !== undefined) {
+					(settings as unknown as Record<string, unknown>)[def.key] = own[def.key];
+					continue;
+				}
+			}
+			(settings as unknown as Record<string, unknown>)[def.key] = parsed[def.key];
 		}
 		save('appSettings', settings);
 	} catch {

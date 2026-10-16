@@ -6,7 +6,7 @@
 // model (pages.ts) drives it: a tap always shows its page, the active page is marked, and
 // the badges (open editors, pending changes) carry what the hidden status and activity
 // bars would.
-import { t } from '../platform/i18n';
+import { onLocaleChange, t } from '../platform/i18n';
 import { currentPage, extensionContainers, goTo, onWorkbenchChange, pageIcon, type PageId } from './pages';
 import { pageBack, pageBackAvailable } from './pageBack';
 import { bottomTabs, tabBadge } from './bottomTabs';
@@ -117,5 +117,14 @@ export function createNavRail(onTap: (page: PageId) => void = () => undefined, o
 	const menu = openMenu ? railMenuButton(openMenu) : null;
 	syncButtons(bar, onTap, menu, back);
 	onWorkbenchChange(() => syncButtons(bar, onTap, menu, back));
+	// A language switch relabels the rail's own chrome (its aria name, the ☰ and the ‹)
+	// and rebuilds the destinations — syncButtons keys on the labels, so the re-read under
+	// the new locale replaces the buttons.
+	onLocaleChange(() => {
+		bar.setAttribute('aria-label', t('remote.nav.label'));
+		back.setAttribute('aria-label', t('remote.page.back'));
+		menu?.setAttribute('aria-label', t('remote.menu'));
+		syncButtons(bar, onTap, menu, back);
+	});
 	return bar;
 }
