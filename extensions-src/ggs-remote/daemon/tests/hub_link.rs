@@ -177,6 +177,52 @@ fn find_cookie_named(head: &str, name: &str) -> Option<String> {
     None
 }
 
+/// One POST to the Hub's own login corner.
+async fn hub_login_post(
+    addr: std::net::SocketAddr,
+    uuid: &str,
+    device: &str,
+    password: &str,
+) -> (u16, String, String) {
+    http(
+        addr,
+        "POST",
+        &format!("/u/{uuid}/api/hub-login"),
+        &[
+            ("content-type", "application/json"),
+            ("origin", &format!("http://127.0.0.1:{}", addr.port())),
+        ],
+        &format!("{{\"password\":\"{password}\",\"device\":\"{device}\",\"remember\":false}}"),
+    )
+    .await
+}
+
+/// The same POST, retried through the settling window: the daemon reports Online the
+/// moment it hears T_READY, but the verifier frame — the credential the Hub's own
+/// password check runs against — is a scheduler turn behind on the Hub's tunnel table,
+/// and the corner's documented answer for that gap is 503 "try again in a moment"
+/// (`not_presenting`, the first five seconds of a tunnel's life). A login fired straight
+/// after `wait_online` can land inside the gap — under CI load it did (run 72,
+/// 2026-10-17: the fresh login on a relinked uuid drew the 503) — so retry it, bounded
+/// by the corner's own rate limiter: eight tries stay inside its ten a minute.
+async fn hub_login_settled(
+    addr: std::net::SocketAddr,
+    uuid: &str,
+    device: &str,
+    password: &str,
+) -> (u16, String, String) {
+    let mut answer = hub_login_post(addr, uuid, device, password).await;
+    for _ in 0..7 {
+        let (status, _head, body) = &answer;
+        if *status != 503 || !body.contains("coming online") {
+            return answer;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        answer = hub_login_post(addr, uuid, device, password).await;
+    }
+    answer
+}
+
 /// The joint login through the Hub (§20.14, one password entry): the Hub checks the password
 /// against the verifier the daemon pushed, forwards the same login, the daemon checks it
 /// again and issues its own session — BOTH cookies ride one answer, and every later request
@@ -184,17 +230,7 @@ fn find_cookie_named(head: &str, name: &str) -> Option<String> {
 /// CSRF value (the first half of every browser-facing test here).
 async fn login_through(addr: std::net::SocketAddr, uuid: &str, password: &str) -> (String, String) {
     let base = format!("/u/{uuid}/");
-    let (status, head, _body) = http(
-        addr,
-        "POST",
-        &format!("{base}api/hub-login"),
-        &[
-            ("content-type", "application/json"),
-            ("origin", &format!("http://127.0.0.1:{}", addr.port())),
-        ],
-        &format!("{{\"password\":\"{password}\",\"device\":\"joint\",\"remember\":false}}"),
-    )
-    .await;
+    let (status, head, _body) = hub_login_settled(addr, uuid, "joint", password).await;
     assert_eq!(status, 200, "the joint login through the hub: {head}");
     // Both halves answered: the daemon's own session cookie AND the Hub's own.
     let daemon_cookie =
@@ -453,20 +489,8 @@ async fn a_plain_http_hub_login_sets_a_cookie_the_browser_keeps() {
     // Both halves of the joint login follow the rule: the daemon's cookie and the Hub's own.
     let both = start().await;
     let base = format!("/u/{}/", both.uuid);
-    let (status, head, _body) = http(
-        both.hub_addr,
-        "POST",
-        &format!("{base}api/hub-login"),
-        &[
-            ("content-type", "application/json"),
-            (
-                "origin",
-                &format!("http://127.0.0.1:{}", both.hub_addr.port()),
-            ),
-        ],
-        &format!("{{\"password\":\"{PASSWORD}\",\"device\":\"cookie-test\",\"remember\":false}}"),
-    )
-    .await;
+    let (status, head, _body) =
+        hub_login_settled(both.hub_addr, &both.uuid, "cookie-test", PASSWORD).await;
     assert_eq!(status, 200, "the joint login through the hub: {head}");
     for name in ["ggsr", "ggsrh"] {
         let line = head
