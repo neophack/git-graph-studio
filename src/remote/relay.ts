@@ -511,7 +511,8 @@ export class RelayEngine {
 			}, PTY_COALESCE_MS)
 		};
 		this.ptyBuffers.set(key, entry);
-		this.send([entry.frameFor(text)]);
+		// The leading chunk splits like the trailing flush: one read can outgrow a frame.
+		this.send(splitFrame(entry.frameFor(text)));
 	}
 
 	private dropListener(session: number, stream: number): void {

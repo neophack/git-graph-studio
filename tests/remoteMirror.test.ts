@@ -135,7 +135,40 @@ describe('the recorder and the viewer', () => {
 		expect(copy.getElementById('a')?.className).toBe('x');
 		expect(copy.getElementById('a')?.hasAttribute('onclick')).toBe(false);
 		expect(copy.querySelector('span')?.textContent).toBe('hello');
-		expect(copy.querySelector('script')?.textContent).toBe('');
+		// The copy's frame runs scripts (WebKit's listener rule): a script element never
+		// stands in it at all, only its inert placeholder.
+		expect(copy.querySelector('script')).toBeNull();
+		expect(copy.querySelector('ggs-inert')?.textContent).toBe('');
+	});
+
+	it('never lets script reach the script-running copy — SVG scripts, late-filled scripts, folded javascript: URLs, handler ops', () => {
+		const r = rig('<div id="root"><svg id="g"><script>svgBoom()</script></svg><a id="l" href="#">x</a></div>');
+		const copy = r.copy();
+		// An SVG script's nodeName is lower-case; the recorder's upper-case test missed it
+		// and its code crossed intact.
+		expect(copy.querySelector('script')).toBeNull();
+		expect(copy.body.innerHTML).not.toContain('svgBoom');
+		// The common injection shape: the element first, its code after.
+		const late = r.pc.createElement('script');
+		r.pc.getElementById('root')!.appendChild(late);
+		r.recorder.flush();
+		late.textContent = 'lateBoom()';
+		r.recorder.flush();
+		expect(copy.body.innerHTML).not.toContain('lateBoom');
+		// URL parsing folds `java\tscript:` back into `javascript:`.
+		r.pc.getElementById('l')!.setAttribute('href', 'java\tscript:alert(1)');
+		r.recorder.flush();
+		expect(copy.getElementById('l')!.getAttribute('href') ?? '').toBe('');
+		expect(canonicalize(' java\nscript:alert(1)', 'http://tauri.localhost/', 'http://tauri.localhost/')).toBe('');
+		// The viewer's own lock: a handler or a script URL arriving on the wire is refused
+		// even if a recorder ever let it through.
+		const id = (r.recorder as unknown as { ids: Map<Node, number> }).ids.get(r.pc.getElementById('l')!)!;
+		r.viewer.receive({ k: 'ops', to: '*', seq: r.sent.length + 1, ops: [
+			{ o: 'attr', i: id, k: 'onclick', v: 'boom()' },
+			{ o: 'attr', i: id, k: 'href', v: 'javascript:boom()' }
+		] } as DownMessage);
+		expect(copy.getElementById('l')!.hasAttribute('onclick')).toBe(false);
+		expect(copy.getElementById('l')!.getAttribute('href') ?? '').toBe('');
 	});
 
 	it('hides the PC window’s own controls — a remote page has no window to drive', () => {

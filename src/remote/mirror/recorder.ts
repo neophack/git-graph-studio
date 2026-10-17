@@ -479,14 +479,17 @@ export class DomRecorder {
 	}
 
 	private attrs(el: Element): Record<string, string> | undefined {
-		const tag = el.nodeName;
+		// Upper-cased: an SVG element's nodeName keeps its own case (`script`), and an SVG
+		// script is as executable in the copy as an HTML one.
+		const tag = el.nodeName.toUpperCase();
 		const base = el.ownerDocument.baseURI;
 		let out: Record<string, string> | undefined;
 		for (const attr of Array.from(el.attributes)) {
 			const name = attr.name;
-			if (name.startsWith('on')) continue;
+			if (/^on/i.test(name)) continue;
 			if (tag === 'IFRAME' && (name === 'src' || name === 'srcdoc' || name === 'sandbox')) continue;
-			if (tag === 'SCRIPT' && name === 'src') continue;
+			// An SVG script names its source in `href` / `xlink:href`, an HTML one in `src`.
+			if (tag === 'SCRIPT' && (name === 'src' || name === 'href' || name === 'xlink:href')) continue;
 			if (tag === 'META' && name === 'http-equiv') return undefined;
 			if (tag === 'LINK' && name === 'href' && /\b(?:modulepreload|preload|prefetch)\b/i.test(el.getAttribute('rel') ?? '')) continue;
 			(out ??= {})[name] = this.attrValue(name, attr.value, base);
@@ -526,7 +529,7 @@ export class DomRecorder {
 				return null;
 		}
 		const el = node as Element;
-		const tag = el.nodeName;
+		const tag = el.nodeName.toUpperCase();
 		const out: SNode = { i: this.assign(el), t: 'e', n: el.namespaceURI === XHTML ? el.localName : el.tagName };
 		if (el.namespaceURI && el.namespaceURI !== XHTML) {
 			out.ns = el.namespaceURI;
@@ -760,6 +763,10 @@ export class DomRecorder {
 			if (!node.isConnected || this.ids.has(node)) continue;
 			const parent = node.parentNode;
 			if (!parent || this.ids.get(parent) === undefined) continue;
+			// An emptied element stays empty: a script's code most often arrives AFTER the
+			// element (`append(s); s.textContent = code`), as a child this loop would
+			// otherwise ship — and appended to the copy's connected script it would run.
+			if (EMPTIED.has(parent.nodeName.toUpperCase()) || parent.nodeName === 'IFRAME') continue;
 			let covered = false;
 			for (let up: Node | null = parent; up; up = up.parentNode) {
 				if (added.has(up) && !this.ids.has(up)) {
@@ -794,8 +801,9 @@ export class DomRecorder {
 			const id = this.ids.get(el);
 			if (id === undefined || !el.isConnected) continue;
 			for (const name of names) {
-				if (!name || name.startsWith('on')) continue;
+				if (!name || /^on/i.test(name)) continue;
 				if (el.nodeName === 'IFRAME' && (name === 'src' || name === 'srcdoc' || name === 'sandbox')) continue;
+				if (el.nodeName.toUpperCase() === 'SCRIPT' && (name === 'src' || name === 'href' || name === 'xlink:href')) continue;
 				const heat = this.heatFor(el, name);
 				heat.at = this.flushSeq;
 				const raw = el.getAttribute(name);

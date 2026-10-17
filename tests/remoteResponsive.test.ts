@@ -1532,3 +1532,41 @@ describe('the display language follows the shell', () => {
 		expect(trText('Layout Mode (Auto / Phone / Tablet / Desktop)')).toBe('布局模式（自动 / 手机 / 平板 / 桌面）');
 	});
 });
+
+/** Firefox 115 (the A-level floor) has no `:has()`, and an engine that cannot parse one
+ *  selector of a list drops the WHOLE rule — so a `:has()` spelling and its hasFallbacks.ts
+ *  class sharing one selector list left the fallback matching nothing on exactly the
+ *  engine it exists for. Every `:has()` selector stands in a rule of its own. */
+describe(':has() fallbacks', () => {
+	it('never shares a selector list with another selector', async () => {
+		const { readdirSync, readFileSync, statSync } = await import('node:fs');
+		const { join } = await import('node:path');
+		const sheets: string[] = [];
+		const walk = (dir: string) => {
+			for (const name of readdirSync(dir)) {
+				const path = join(dir, name);
+				if (statSync(path).isDirectory()) walk(path);
+				else if (name.endsWith('.css')) sheets.push(path);
+			}
+		};
+		walk('src');
+		const mixed: string[] = [];
+		for (const sheet of sheets) {
+			const text = readFileSync(sheet, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+			for (const match of text.matchAll(/([^{};]+)\{/g)) {
+				const selector = match[1].trim();
+				if (!selector.includes(':has(')) continue;
+				// Top-level commas only: the ones inside :not(…)/:is(…) are one selector's.
+				let depth = 0;
+				let parts = 1;
+				for (const ch of selector) {
+					if (ch === '(') depth++;
+					else if (ch === ')') depth--;
+					else if (ch === ',' && depth === 0) parts++;
+				}
+				if (parts > 1) mixed.push(`${sheet}: ${selector.replace(/\s+/g, ' ')}`);
+			}
+		}
+		expect(mixed).toEqual([]);
+	});
+});

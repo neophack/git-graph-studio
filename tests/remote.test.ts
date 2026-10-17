@@ -25,6 +25,7 @@ import {
 	jsonFrame,
 	makeFrame,
 	msgpackFrame,
+	nativeDeflateRaw,
 	Reassembler,
 	splitFrame,
 	T
@@ -130,6 +131,30 @@ describe('frame codec', () => {
 		expect(fromZlib.payload, 'zlib → fflate').toEqual(payload);
 		// The threshold rule itself is unchanged: tiny payloads never pay the header.
 		expect((await deflate(makeFrame(T.PING, Enc.Json, new Uint8Array(8)))).flags & FLAG.COMPRESSED).toBeFalsy();
+	});
+
+	it('falls back when the platform streams exist without deflate-raw (Chrome 80–102)', () => {
+		// Those engines ship CompressionStream with 'gzip'/'deflate' only: the constructor
+		// throws on 'deflate-raw'. The probe must read that as "no native codec", or every
+		// compressed frame the daemon sends is dropped on exactly the fallback's browsers
+		// (the fallback path itself is the C0 test's: jsdom carries no streams at all).
+		const streamOf = (formats: string[]) =>
+			class {
+				constructor(format: string) {
+					if (!formats.includes(format)) throw new TypeError(`Unsupported compression format: '${format}'`);
+				}
+			};
+		try {
+			vi.stubGlobal('CompressionStream', streamOf(['gzip', 'deflate']));
+			vi.stubGlobal('DecompressionStream', streamOf(['gzip', 'deflate']));
+			expect(nativeDeflateRaw()).toBe(false);
+			vi.stubGlobal('CompressionStream', streamOf(['gzip', 'deflate', 'deflate-raw']));
+			vi.stubGlobal('DecompressionStream', streamOf(['gzip', 'deflate', 'deflate-raw']));
+			expect(nativeDeflateRaw()).toBe(true);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+		expect(nativeDeflateRaw(), 'jsdom: no streams').toBe(false);
 	});
 
 	it('rejects malformed headers', () => {
@@ -958,7 +983,7 @@ describe('relay engine', () => {
 		// destination — one outside member refuses the whole invoke.
 		sent.length = 0;
 		invoke.mockClear();
-		send('copy_into', { sources: [`${root}/notes.txt`, key], dest_dir: root });
+		send('copy_into', { sources: [`${root}/notes.txt`, key], destDir: root });
 		await new Promise((r) => setTimeout(r, 10));
 		expect(answer()).toBeTruthy();
 		expect(invoke).not.toHaveBeenCalledWith('copy_into', expect.anything(), expect.anything());
@@ -966,7 +991,20 @@ describe('relay engine', () => {
 		// Both inside the roots: through, dest and sources alike.
 		sent.length = 0;
 		invoke.mockClear();
-		send('copy_into', { sources: [`${root}/notes.txt`], dest_dir: `${root}/sub` });
+		// The reverse chain: a workspace file copied OUT to a destination beyond the
+		// roots (the invoke spells it `destDir`, the camelCase Tauri reads — the table
+		// once named the Rust spelling and never saw the argument at all).
+		sent.length = 0;
+		invoke.mockClear();
+		const outside = isWindows ? 'C:\\Users\\me\\AppData\\Roaming' : '/home/me/.config/autostart';
+		send('copy_into', { sources: [`${root}/notes.txt`], destDir: outside });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(answer()).toBeTruthy();
+		expect(invoke).not.toHaveBeenCalledWith('copy_into', expect.anything(), expect.anything());
+
+		sent.length = 0;
+		invoke.mockClear();
+		send('copy_into', { sources: [`${root}/notes.txt`], destDir: `${root}/sub` });
 		await new Promise((r) => setTimeout(r, 10));
 		expect(answer()).toBeUndefined();
 		expect(invoke).toHaveBeenCalledWith('copy_into', expect.anything(), expect.anything());

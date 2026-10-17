@@ -15,7 +15,7 @@
 // at its end as the PC's page grows (the PC's own scroll positions mean nothing in a copy
 // laid out at another width).
 
-import { applyDelta, localizeTokens, type CaretState, type DownMessage, type FocusEntry, type MirrorOp, type SDoc, type SNode, type StrDelta, type Viewport } from './protocol';
+import { applyDelta, localizeTokens, scriptUrl, type CaretState, type DownMessage, type FocusEntry, type MirrorOp, type SDoc, type SNode, type StrDelta, type Viewport } from './protocol';
 
 const XLINK = 'http://www.w3.org/1999/xlink';
 /** The copy's frame sandbox. `allow-same-origin` is what lets THIS page read and write the
@@ -28,13 +28,21 @@ const XLINK = 'http://www.w3.org/1999/xlink';
  *  ever reached the PC (2026-10-17: Safari 的 Claude 页面输入框不能输入、new session 没
  *  反应). The copy still runs nothing: the serialized tree carries nothing executable. */
 const COPY_SANDBOX = 'allow-same-origin allow-scripts';
+/** The element names the copy never instantiates. Because the sandbox runs scripts, the
+ *  viewer cannot lean on the recorder alone: a script element (HTML or SVG — the SVG one's
+ *  nodeName is lower-case, which the recorder once missed) built and connected through the
+ *  DOM executes, and so does one that receives its text after connecting; a plugin
+ *  element nests a document of its own. Each stands in the copy as an inert, hidden
+ *  placeholder that keeps the node id the later ops address. */
+const INERT_TAGS = new Set(['script', 'object', 'embed', 'applet']);
+const INERT_TAG = 'ggs-inert';
 /** The copy is a picture: no caret blinking where the PC has none, no text selection
  *  fighting the replayed one, pinch-zoom kept for phones — and the PC window's own
  *  minimize / maximize / close never show: a remote page has no window to drive, and a
  *  tap on them would replay into the PC's real controls. */
-const BASE_CSS = 'html{touch-action:pinch-zoom}.window-controls{display:none!important}*{-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none}';
+const BASE_CSS = 'ggs-inert{display:none!important}html{touch-action:pinch-zoom}.window-controls{display:none!important}*{-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none}';
 /** A fluid copy scrolls natively under the finger. */
-const FLUID_CSS = '*{-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none}';
+const FLUID_CSS = 'ggs-inert{display:none!important}*{-webkit-user-select:none!important;user-select:none!important;-webkit-touch-callout:none}';
 /** No native caret in the copy — the painted bar is the PC's. Its own sheet, so the page's
  *  own `caret-color` stays readable for that bar (caretColor lifts it for the read). */
 const HIDE_CARETS_CSS = '*{caret-color:transparent!important}';
@@ -513,6 +521,12 @@ export class MirrorViewer {
 
 	private setAttr(el: Element, name: string, value: string): void {
 		if (el.nodeName === 'IFRAME' && (name === 'src' || name === 'srcdoc' || name === 'sandbox')) return;
+		// The copy's own lock, whatever the wire carries: no handler, no refresh, no URL
+		// that runs script (an `href`, a `formaction`, an SVG animation's `to`/`values`).
+		if (/^on/i.test(name) || name.toLowerCase() === 'http-equiv' || scriptUrl(value)) {
+			el.removeAttribute(name);
+			return;
+		}
 		try {
 			if (name.startsWith('xlink:')) el.setAttributeNS(XLINK, name, value);
 			else el.setAttribute(name, value);
@@ -537,7 +551,7 @@ export class MirrorViewer {
 		}
 		let el: Element;
 		try {
-			el = s.ns ? doc.createElementNS(s.ns, s.n) : doc.createElement(s.n);
+			el = INERT_TAGS.has(s.n.toLowerCase()) ? doc.createElement(INERT_TAG) : s.ns ? doc.createElementNS(s.ns, s.n) : doc.createElement(s.n);
 		} catch {
 			el = doc.createElement('span');
 		}

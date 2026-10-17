@@ -1313,6 +1313,21 @@ async fn the_joint_login_is_the_hubs_own_page_and_gates_the_link() {
         "the form posts to the Hub"
     );
     assert!(page.2.contains("Access password"), "the PC's language (en)");
+    // The page signs in with fetch(): its CSP must let it reach its own origin, or every
+    // browser blocks the one request the page exists to make.
+    let csp = page
+        .1
+        .lines()
+        .find(|line| {
+            line.to_ascii_lowercase()
+                .starts_with("content-security-policy:")
+        })
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        page.2.contains("fetch(") && csp.contains("connect-src 'self'"),
+        "the login page's own fetch must be allowed by its CSP: {csp}"
+    );
     assert!(!page.2.contains("__"), "no token survived: {}", page.2);
 
     // One entry, both halves: the wrong password is answered by the Hub alone…

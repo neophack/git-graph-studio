@@ -159,7 +159,7 @@ export const PATH_GATED: Record<
 	// stop (copy `~/.ggs/keys/ai-providers.key` into the workspace, then read it). Both
 	// ends stay inside the open folders — copying between two folders of one machine is
 	// the system file manager's job (the same reasoning that retired fs_import/fs_export).
-	copy_into: { args: ['sources', 'dest_dir'] },
+	copy_into: { args: ['sources', 'destDir'] },
 	// The git/scm write set.
 	git_commit: REPO_ANCHORED,
 	git_discard: REPO_AND_PATH,

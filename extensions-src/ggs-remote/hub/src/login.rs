@@ -51,7 +51,10 @@ pub fn page(tunnel: &Arc<Tunnel>, base_path: &str) -> Response {
         .header(header::CACHE_CONTROL, "no-store")
         .header(
             header::CONTENT_SECURITY_POLICY,
-            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            // `connect-src 'self'`: the page signs in with its own `fetch('api/hub-login')` —
+            // under `default-src 'none'` alone every browser blocked that request, and no
+            // one could sign in through a relay at all.
+            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
         )
         .header("x-content-type-options", "nosniff")
         .header("referrer-policy", "no-referrer")

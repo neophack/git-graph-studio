@@ -258,13 +258,23 @@ export function canonicalize(raw: string, base: string, appRoot: string): string
 	if (value === '' || value.startsWith('#') || /^(?:data|blob|mailto):/i.test(value)) return raw;
 	// `javascript:` executes in the COPY's frame, and the copy's sandbox carries
 	// allow-scripts (viewer.ts) so the viewer's own listeners may run in WebKit — this is
-	// the one URL form that would make that flag execute something, so it never crosses.
-	if (/^javascript:/i.test(value)) return '';
+	// the one URL form that would make that flag execute something, so it never crosses,
+	// in any spelling the URL parser folds back into it (`java\tscript:`).
+	if (scriptUrl(value)) return '';
 	try {
-		return canonicalUrl(new URL(value, base).href, appRoot);
+		const href = new URL(value, base).href;
+		return scriptUrl(href) ? '' : canonicalUrl(href, appRoot);
 	} catch {
 		return raw;
 	}
+}
+
+/** Whether a URL-shaped value would run script where a document resolves it. The URL
+ *  parser drops ASCII tab and newline anywhere and C0 controls and spaces at the ends, so
+ *  `java\tscript:` and ` javascript:` ARE `javascript:` to the browser — a bare prefix
+ *  test let both through. Conservative: every C0 control and space is ignored. */
+export function scriptUrl(value: string): boolean {
+	return /^(?:javascript|vbscript):/i.test(value.replace(/[\u0000-\u0020]/g, ''));
 }
 
 /** Every `url(...)` inside a piece of CSS, canonicalized against `base`. */

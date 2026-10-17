@@ -166,8 +166,23 @@ interface PayloadCodec {
 	inflate(data: Uint8Array): Promise<Uint8Array>;
 }
 
+/** Whether the platform streams speak 'deflate-raw' — not merely whether they exist:
+ *  Chrome 80–102 ship CompressionStream with 'gzip'/'deflate' only, and the constructor
+ *  throws a TypeError on 'deflate-raw', so an existence check alone picked the native
+ *  codec on exactly the engines the fallback is for and every compressed frame dropped. */
+export function nativeDeflateRaw(): boolean {
+	if (typeof CompressionStream !== 'function' || typeof DecompressionStream !== 'function') return false;
+	try {
+		new CompressionStream('deflate-raw' as CompressionFormat);
+		new DecompressionStream('deflate-raw' as CompressionFormat);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 const nativeCodec: PayloadCodec | null =
-	typeof CompressionStream === 'function' && typeof DecompressionStream === 'function'
+	nativeDeflateRaw()
 		? {
 			async deflate(data) {
 				return pump(new CompressionStream('deflate-raw' as CompressionFormat), data);
@@ -194,8 +209,10 @@ function codec(): Promise<PayloadCodec> {
 
 async function pump(stream: CompressionStream | DecompressionStream, data: Uint8Array): Promise<Uint8Array> {
 	const writer = stream.writable.getWriter();
-	void writer.write(data as unknown as BufferSource);
-	void writer.close();
+	// The reader below surfaces a corrupt payload's failure; the writer's own promises
+	// reject with the same error and would otherwise land as unhandled rejections.
+	writer.write(data as unknown as BufferSource).catch(() => undefined);
+	writer.close().catch(() => undefined);
 	const chunks: Uint8Array[] = [];
 	const reader = stream.readable.getReader();
 	for (;;) {

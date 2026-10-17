@@ -168,8 +168,9 @@
 /* One group on screen: the focused one (an editor an extension opened "beside" takes the
    page; the open editors sheet reaches the rest). Both spellings stand: `:has()` where
    the engine has it, `.no-focus` (hasFallbacks.ts) on Firefox 115, which drops the
-   `:has()` selector wholesale. */
-:root.remote-shell[data-page-stack] .editor-split-child:not(:has(.editor-group-box.focused)),
+   `:has()` selector wholesale — and with it every selector sharing its rule, so the two
+   spellings are two rules, never one selector list. */
+:root.remote-shell[data-page-stack] .editor-split-child:not(:has(.editor-group-box.focused)) { display: none !important; }
 :root.remote-shell[data-page-stack] .editor-split-child.no-focus { display: none !important; }
 :root.remote-shell[data-page-stack] .editor-sash { display: none !important; }
 :root.remote-shell[data-page-stack] .editor-group-box { min-width: 0; }
@@ -289,8 +290,9 @@
 :root.remote-shell[data-page-stack] #sidebar .sidebar-title { height: 40px; padding: 0 8px 0 16px; font-size: 12px; }
 /* A view title that is only its name repeats the app bar's: the page starts at its
    content. Both spellings stand: `:has()` where the engine has it, `.label-only`
-   (hasFallbacks.ts) on Firefox 115, which drops the `:has()` selector wholesale. */
-:root.remote-shell[data-page-stack] #sidebar .sidebar-title:not(:has(> :not(.label))),
+   (hasFallbacks.ts) on Firefox 115, which drops the `:has()` rule wholesale — two
+   rules, never one selector list. */
+:root.remote-shell[data-page-stack] #sidebar .sidebar-title:not(:has(> :not(.label))) { display: none; }
 :root.remote-shell[data-page-stack] #sidebar .sidebar-title.label-only { display: none; }
 /* A focused list's ring is a keyboard cue; a finger opened the page. */
 :root.remote-shell[data-page-stack][data-pointer="coarse"] #sidebar :focus-visible { outline-color: transparent; }
