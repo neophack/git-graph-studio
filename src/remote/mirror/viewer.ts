@@ -18,6 +18,16 @@
 import { applyDelta, localizeTokens, type CaretState, type DownMessage, type FocusEntry, type MirrorOp, type SDoc, type SNode, type StrDelta, type Viewport } from './protocol';
 
 const XLINK = 'http://www.w3.org/1999/xlink';
+/** The copy's frame sandbox. `allow-same-origin` is what lets THIS page read and write the
+ *  copy's DOM; `allow-scripts` is NOT for the copy — nothing of it executes, the recorder
+ *  empties every script, strips every `on*` attribute and drops `javascript:` URLs — but
+ *  for the viewer's own listeners: WebKit (Safari, and the phone's browsers built on it)
+ *  treats a listener this page registered on the sandboxed document as that document's own
+ *  script execution and silently blocks every one of them without `allow-scripts` (Chromium
+ *  runs them), which left the copy a dead picture in Safari — no tap, no key, no scroll
+ *  ever reached the PC (2026-10-17: Safari 的 Claude 页面输入框不能输入、new session 没
+ *  反应). The copy still runs nothing: the serialized tree carries nothing executable. */
+const COPY_SANDBOX = 'allow-same-origin allow-scripts';
 /** The copy is a picture: no caret blinking where the PC has none, no text selection
  *  fighting the replayed one, pinch-zoom kept for phones — and the PC window's own
  *  minimize / maximize / close never show: a remote page has no window to drive, and a
@@ -313,7 +323,7 @@ export class MirrorViewer {
 		this.liveDoc = null;
 		const frame = this.host.ownerDocument.createElement('iframe');
 		frame.className = this.deps.fluid ? 'mirror-frame webview-copy-frame' : 'mirror-frame';
-		frame.setAttribute('sandbox', 'allow-same-origin');
+		frame.setAttribute('sandbox', COPY_SANDBOX);
 		if (!this.deps.fluid) frame.setAttribute('scrolling', 'no');
 		// The re-parent probe (checkContext): a frame moved through a detach is reborn, and
 		// its fresh about:blank navigation fires load on the element — the moment the copy's
@@ -542,7 +552,7 @@ export class MirrorViewer {
 			for (const [name, value] of Object.entries(s.a)) bases.set(name, value);
 		}
 		if (el.nodeName === 'IFRAME') {
-			el.setAttribute('sandbox', 'allow-same-origin');
+			el.setAttribute('sandbox', COPY_SANDBOX);
 			el.setAttribute('scrolling', 'no');
 			const inner = s.doc;
 			later.push(() => {

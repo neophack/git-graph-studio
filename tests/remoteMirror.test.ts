@@ -95,6 +95,9 @@ describe('the replica protocol', () => {
 		const app = 'http://tauri.localhost/';
 		expect(canonicalize('https://attacker.example/x.gif?d=secret', 'http://tauri.localhost/', app)).toBe('');
 		expect(canonicalize('http://tracker.example/pixel.png', 'http://tauri.localhost/', app)).toBe('');
+		// The copy's sandbox carries allow-scripts (WebKit's listener rule, viewer.ts), so a
+		// javascript: URL is the one form that would execute in it: dropped like any foreign origin.
+		expect(canonicalize('javascript:alert(1)', 'http://tauri.localhost/', app)).toBe('');
 		expect(canonicalizeCss('a{background:url(https://evil.example/bg.css)}', 'http://tauri.localhost/', app)).toBe('a{background:url("")}');
 		// The token roots and data: URLs keep crossing as before.
 		expect(canonicalize('/assets/a.css', 'http://tauri.localhost/', app)).toBe(`${APP_TOKEN}assets/a.css`);
@@ -140,6 +143,14 @@ describe('the recorder and the viewer', () => {
 		const copy = r.copy();
 		const controls = copy.querySelector('.window-controls')!;
 		expect(copy.defaultView!.getComputedStyle(controls).display).toBe('none');
+	});
+
+	it('sandboxes the copy with allow-scripts beside allow-same-origin — WebKit blocks the viewer’s own listeners on the copy without it (2026-10-17: Safari 的 Claude 页面输入框不能输入、new session 点击没反应 — every listener this page registers on a sandboxed document is that document’s own script execution in WebKit, and only Chromium runs them)', () => {
+		const r = rig('<button id="b">x</button><iframe></iframe>');
+		const root = r.host.querySelector('iframe')!;
+		expect(root.getAttribute('sandbox')).toBe('allow-same-origin allow-scripts');
+		const nested = r.copy().querySelector('iframe')!;
+		expect(nested.getAttribute('sandbox')).toBe('allow-same-origin allow-scripts');
 	});
 
 	it('follows additions, removals, moves, text and attribute changes', () => {

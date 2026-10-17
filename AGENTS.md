@@ -2347,7 +2347,12 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   `tests/e2e/remote/` (the Playwright browser specs — `npm run test:e2e-remote`, the
   Chromium/Firefox/WebKit matrix against TLS daemons: WebKit grants plain-HTTP localhost no
   Secure-cookie exemption, so the specs ride the shipping self-signed shape; the workbench
-  pair behind `GGS_REMOTE_E2E_FULL=1` and a build that bundles claude-code),
+  pair behind `GGS_REMOTE_E2E_FULL=1` and a build that bundles claude-code; and
+  `mirror.spec.ts`, the DOM replica's input layer in a real engine over the dev server
+  alone — no daemon — whose WebKit run is the regression guard for 2026-10-17's Safari
+  fix: WebKit silently drops every listener the page registers on a sandboxed document
+  without `allow-scripts`, which left the mirrored Claude chat unable to take a tap or a
+  keystroke in Safari while Chrome worked),
   `scripts/probes/remote-live-check.mjs` (the live LAN end-to-end probe),
   `scripts/probes/remote-lifecycle-check.mjs` (§18's lifecycle probe, L2: the app under
   `GGS_TEST_HOOKS=1`, the §18.1 `remote_debug_snapshot` command as ground truth over the

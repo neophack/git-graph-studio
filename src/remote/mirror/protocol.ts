@@ -255,7 +255,11 @@ export function canonicalUrl(absolute: string, appRoot: string): string {
 /** Resolve a URL as the document that holds it would, then canonicalize it. */
 export function canonicalize(raw: string, base: string, appRoot: string): string {
 	const value = raw.trim();
-	if (value === '' || value.startsWith('#') || /^(?:data|blob|javascript|about|mailto):/i.test(value)) return raw;
+	if (value === '' || value.startsWith('#') || /^(?:data|blob|mailto):/i.test(value)) return raw;
+	// `javascript:` executes in the COPY's frame, and the copy's sandbox carries
+	// allow-scripts (viewer.ts) so the viewer's own listeners may run in WebKit — this is
+	// the one URL form that would make that flag execute something, so it never crosses.
+	if (/^javascript:/i.test(value)) return '';
 	try {
 		return canonicalUrl(new URL(value, base).href, appRoot);
 	} catch {
