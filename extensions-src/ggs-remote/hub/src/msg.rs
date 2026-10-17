@@ -55,6 +55,22 @@ pub struct TRejected {
     pub reason: String,
 }
 
+/// The PC's password verifier (§20.14, the joint login): the daemon pushes its Argon2id
+/// hash — plus the credential epoch and its display language — right after `T_READY`, and
+/// again whenever the password changes. With it the Hub serves the login page and checks
+/// the password itself; the daemon still runs its own check on the forwarded login (the
+/// joint validation), so neither half alone lets a browser through.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TCredential {
+    /// The daemon's stored PHC-format Argon2id hash — the verifier, never the password.
+    pub hash: String,
+    /// The credential epoch the hash belongs to; a change invalidates the Hub's sessions.
+    pub epoch: u64,
+    /// The PC's display language (`en` / `zh-cn` / …), so the Hub's login page matches it.
+    pub lang: String,
+}
+
 /// A browser connection (or an HTTP request) the Hub opened toward the PC.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]

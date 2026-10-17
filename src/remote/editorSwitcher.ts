@@ -157,21 +157,35 @@ const RECENT_KEY = 'remote.editor.recent';
 const RECENT_STORED = 15;
 const RECENT_SHOWN = 5;
 
+/** The parsed recents, memoized against the store's raw bytes: the empty state's `sync`
+ *  runs on every chrome wave and JSON-parsed the store twice per wave before this (the
+ *  list plus `rememberRecent`'s read). The raw-string key keeps an external change (a
+ *  cleared store included) honest — `getItem` is the cheap half, the parse was the cost. */
+let recentsRaw: string | null = null;
+let recentsCache: string[] = [];
+
 function loadRecents(): string[] {
+	const raw: string = localStorage.getItem(RECENT_KEY) ?? '[]';
+	if (raw === recentsRaw) return recentsCache;
 	try {
-		const parsed: unknown = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]');
-		return Array.isArray(parsed) ? parsed.filter((path): path is string => typeof path === 'string') : [];
+		const parsed: unknown = JSON.parse(raw);
+		recentsCache = Array.isArray(parsed) ? parsed.filter((path): path is string => typeof path === 'string') : [];
 	} catch {
-		return [];
+		recentsCache = [];
 	}
+	recentsRaw = raw;
+	return recentsCache;
 }
 
 function rememberRecent(path: string): void {
 	const previous = loadRecents();
 	if (previous[0] === path) return;
 	const next = [path, ...previous.filter((other) => other !== path)].slice(0, RECENT_STORED);
+	const raw = JSON.stringify(next);
+	recentsCache = next;
+	recentsRaw = raw;
 	try {
-		localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+		localStorage.setItem(RECENT_KEY, raw);
 	} catch {
 		// Storage unavailable (private mode / quota): this session simply keeps no recents.
 	}

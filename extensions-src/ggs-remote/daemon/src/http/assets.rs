@@ -68,13 +68,17 @@ pub async fn fetch_from_instance(
         }
         out.ok_or(StatusCode::BAD_GATEWAY)
     };
-    match tokio::time::timeout(FETCH_TIMEOUT, collect).await {
+    let result = match tokio::time::timeout(FETCH_TIMEOUT, collect).await {
         Ok(result) => result,
-        Err(_) => {
-            daemon.registry.cancel_request(instance, req);
-            Err(StatusCode::GATEWAY_TIMEOUT)
-        }
+        Err(_) => Err(StatusCode::GATEWAY_TIMEOUT),
+    };
+    if result.is_err() {
+        // Every early exit — the oversize bail, the silence, the instance gone mid-answer
+        // — leaves the registry's pending entry behind (a successful `done` chunk clears
+        // its own), and one lingered per failure until the instance detached.
+        daemon.registry.cancel_request(instance, req);
     }
+    result
 }
 
 /// Files whose names carry a content hash never change: cache them for a year — the
@@ -130,7 +134,7 @@ pub async fn app_asset(
     let cacheable = immutable(&path);
     let key = format!("{inst}|{ver}|{path}");
     let cached = if cacheable {
-        daemon.cache.get(&key)
+        daemon.cache.fetch(&key).await
     } else {
         None
     };
@@ -186,7 +190,7 @@ pub async fn app_asset(
                 br,
             };
             if cacheable {
-                daemon.cache.put(&key, entry.clone());
+                daemon.cache.store(&key, entry.clone()).await;
             }
             entry
         }
@@ -196,10 +200,16 @@ pub async fn app_asset(
     } else {
         "no-cache"
     };
-    respond(&headers, entry, cache_control)
+    respond(&headers, &daemon, &key, entry, cache_control).await
 }
 
-fn respond(headers: &HeaderMap, entry: Entry, cache_control: &str) -> Response {
+async fn respond(
+    headers: &HeaderMap,
+    daemon: &Arc<Daemon>,
+    key: &str,
+    entry: Entry,
+    cache_control: &str,
+) -> Response {
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
@@ -221,7 +231,23 @@ fn respond(headers: &HeaderMap, entry: Entry, cache_control: &str) -> Response {
         builder = builder.header(header::CONTENT_ENCODING, "br");
         entry.body
     } else if entry.br {
-        unbrotli(&entry.body)
+        // The decompress matches the compress on the pool (2026-10-16): a cached asset
+        // served to a browser without brotli once inflated up to 64 MB inline, on the one
+        // runtime thread every listener shares. A stream that fails to inflate is a
+        // CORRUPT entry, not an empty asset: evict it from both cache layers (a reload
+        // refetches from the instance) — the old path handed back the partial prefix as
+        // a 200 under a year-long immutable banner.
+        let packed = entry.body;
+        match tokio::task::spawn_blocking(move || unbrotli(&packed)).await {
+            Ok(Some(body)) => body,
+            _ => {
+                daemon.cache.evict(key).await;
+                return super::error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "a cached asset failed to decompress — reload",
+                );
+            }
+        }
     } else {
         entry.body
     };
@@ -344,6 +370,7 @@ pub async fn download(
         }
     };
     if first.status != 200 {
+        daemon.registry.cancel_request(&inst, req);
         return fail(StatusCode::from_u16(first.status).unwrap_or(StatusCode::NOT_FOUND));
     }
     let name = first.name.clone();

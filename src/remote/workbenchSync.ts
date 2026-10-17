@@ -265,7 +265,16 @@ export function attachWorkbenchSync(
 	workbench: SyncedWorkbench,
 	deps: WorkbenchSyncDeps,
 	by: string,
-	options: { startImmediately?: boolean; presence?: SyncPresence; canonicalPath?: (path: string) => Promise<string | null> } = {}
+	options: {
+		startImmediately?: boolean;
+		presence?: SyncPresence;
+		canonicalPath?: (path: string) => Promise<string | null>;
+		/** The same canonicalizer, batched: one round trip for a whole spelled set (the
+		 *  path plus every root) — the desktop applying a phone's snapshot opens paid one
+		 *  invoke per entry, serially, before this existed. Absent falls back to one
+		 *  `canonicalPath` call per entry. */
+		canonicalPaths?: (paths: string[]) => Promise<(string | null)[]>;
+	} = {}
 ): AttachedWorkbenchSync {
 	const presence = options.presence;
 	// The real EditorArea satisfies this surface structurally; the cast keeps every read and
@@ -652,16 +661,18 @@ export function attachWorkbenchSync(
 	 *  the lexical roots would refuse every legitimate file of such a workspace. A null
 	 *  form (the path does not exist yet, or the backend's confinement answered nothing)
 	 *  keeps the lexical answer; a canonicalizer that fails refuses the open. */
-	const canonicalGate = async (path: string, roots: string[]): Promise<boolean> => {
-		try {
-			const spelled = [path, ...roots];
-			const forms = await Promise.all(spelled.map((entry) => options.canonicalPath!(entry)));
-			const canonicalRoots = roots.map((root, at) => forms[at + 1] ?? root);
-			return forms[0] === null || withinRoots(forms[0], canonicalRoots);
-		} catch {
-			return false; // an unanswerable check refuses the open
-		}
-	};
+		const canonicalGate = async (path: string, roots: string[]): Promise<boolean> => {
+			try {
+				const spelled = [path, ...roots];
+				const forms = await (options.canonicalPaths
+					? options.canonicalPaths(spelled)
+					: Promise.all(spelled.map((entry) => options.canonicalPath!(entry))));
+				const canonicalRoots = roots.map((root, at) => forms[at + 1] ?? root);
+				return forms[0] === null || withinRoots(forms[0], canonicalRoots);
+			} catch {
+				return false; // an unanswerable check refuses the open
+			}
+		};
 
 	/** Merge a snapshot on the freshly active frontend (§7.0.3): tabs take the UNION — the
 	 *  other side's open here in the background, mine pushed back as background opens — no
@@ -676,7 +687,7 @@ export function attachWorkbenchSync(
 		const gateFile = async (path: string): Promise<boolean> => {
 			if (!remoteOrigin) return true;
 			if (!withinRoots(path, roots)) return false;
-			if (!options.canonicalPath) return true;
+			if (!options.canonicalPath && !options.canonicalPaths) return true;
 			return canonicalGate(path, roots);
 		};
 		void (async () => {
@@ -915,12 +926,12 @@ export function attachWorkbenchSync(
 				if (remoteOpensFile) {
 					const roots = workbench.openFolders?.() ?? [];
 					if (!withinRoots(message.path, roots)) return;
-					if (options.canonicalPath) {
-						void canonicalGate(message.path, roots).then((allowed) => {
-							if (allowed) applyMessage(message);
-						});
-						return;
-					}
+				if (options.canonicalPath || options.canonicalPaths) {
+					void canonicalGate(message.path, roots).then((allowed) => {
+						if (allowed) applyMessage(message);
+					});
+					return;
+				}
 				}
 				applyMessage(message);
 			});
@@ -1009,14 +1020,16 @@ export function installWorkbenchSync(workbench: SyncedWorkbench): AttachedWorkbe
 	const attached = attachWorkbenchSync(workbench, wire(), by, {
 		startImmediately: false,
 		presence,
-		// The remote-open gate's canonical re-check (pathGate.ts's symlink note): one path
-		// per call. The backend confines the answers to the boundary's own areas, so a
-		// session's own copy of this command is no oracle — and on a phone the call simply
-		// crosses the wire like any other invoke.
+		// The remote-open gate's canonical re-check (pathGate.ts's symlink note). The
+		// backend confines the answers to the boundary's own areas, so a session's own
+		// copy of this command is no oracle — and on a phone the call simply crosses the
+		// wire like any other invoke. The batched form is the one the gate uses: the
+		// whole spelled set (the path and every root) crosses as one invoke.
 		canonicalPath: async (path) => {
 			const forms = (await invoke('remote_canonical_paths', { paths: [path] })) as (string | null)[];
 			return forms[0] ?? null;
-		}
+		},
+		canonicalPaths: async (paths) => (await invoke('remote_canonical_paths', { paths })) as (string | null)[]
 	});
 	const baseStart = attached.start.bind(attached);
 	attached.start = (): void => {

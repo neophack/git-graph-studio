@@ -252,6 +252,15 @@ async fn housekeeping(daemon: Arc<Daemon>) {
             daemon.limiter.lock().unwrap().prune(now);
             let epoch = daemon.auth.epoch();
             daemon.sessions.lock().unwrap().prune(epoch);
+            // The ggs:// resource tokens follow their sessions out (2026-10-16): a token
+            // outlived only by the table entry that forgot it — sessions expire on their
+            // own every day, and a tray daemon meant to run for months once kept every
+            // dead entry forever.
+            daemon
+                .resource_tokens
+                .lock()
+                .unwrap()
+                .retain(|_, (hash, _)| daemon.session_valid(hash));
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             {
                 // Hand freed heap back to the OS while idle (§7.9 memory measures).

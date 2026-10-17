@@ -43,7 +43,9 @@ impl Session {
     }
 
     pub fn id(&self) -> &str {
-        &self.token_hash[..16]
+        // A hand-edited or torn sessions.json with a short hash must not panic every
+        // caller that renders the device list or removes a device.
+        self.token_hash.get(..16).unwrap_or(&self.token_hash)
     }
 }
 

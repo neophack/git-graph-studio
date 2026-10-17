@@ -6,12 +6,17 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use bytes::Bytes;
+
 use crate::msg::HttpRes;
 
 #[derive(Clone)]
 pub struct Entry {
     pub head: HttpRes,
-    pub body: Vec<u8>,
+    /// The body as a refcounted slice: a hit hands every browser the same bytes without a
+    /// per-hit memcpy of up to the 2 MiB entry cap — `Vec` here copied the whole asset on
+    /// every serve.
+    pub body: Bytes,
 }
 
 #[derive(Default)]
@@ -75,7 +80,7 @@ impl AssetCache {
                 (
                     Entry {
                         head: head.clone(),
-                        body,
+                        body: Bytes::from(body),
                     },
                     clock,
                     size,

@@ -156,20 +156,22 @@ async fn run(hub: Arc<Hub>, socket: WebSocket, peer: SocketAddr, host: Option<St
         return;
     }
 
-    // Capacity counts distinct PCs, not connections of the same one.
-    if hub.tunnel(&uuid).is_none() && hub.tunnel_count() >= hub.config.max_tunnels {
-        crate::warn!("tunnel for {uuid} refused: at capacity");
-        reject(&mut sink, "capacity").await;
-        return;
-    }
-
+    // Capacity counts distinct PCs, not connections of the same one. The check and the
+    // register are one critical section (`register_within_limit`): a check-then-register
+    // pair made before let two concurrent handshakes for different uuids each observe
+    // `count == max - 1` and both register, overshooting `max_tunnels`.
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let tunnel = Arc::new(hub.new_tunnel(uuid.clone(), tx));
     // The tunnel joins the table BEFORE T_READY leaves: the daemon reports Online the
     // instant it hears T_READY, and a request landing in the gap between the send and
     // the registration found the uuid "not online" — the first login after `wait_online`
     // raced it and drew a 503 under CI load.
-    if let Some(displaced) = hub.register(uuid.clone(), tunnel.clone()) {
+    let Some(displaced) = hub.register_within_limit(uuid.clone(), tunnel.clone()) else {
+        crate::warn!("tunnel for {uuid} refused: at capacity");
+        reject(&mut sink, "capacity").await;
+        return;
+    };
+    if let Some(displaced) = displaced {
         // The same device key connected again: the newcomer wins (§20.1). The old tunnel's
         // run loop sees T_REPLACED on its own writer, tells its browsers, and unwinds.
         let _ = displaced.send(&Frame::raw(ty::T_REPLACED, 0, Vec::new()));
@@ -279,6 +281,44 @@ fn route(hub: &Arc<Hub>, tunnel: &Arc<Tunnel>, mut frame: Frame) -> bool {
     if frame.ty == ty::T_PONG {
         return true;
     }
+    // The joint login's verifier (§20.14): the daemon's Argon2id hash, right after
+    // T_READY and again on every password change. With it the Hub serves the login page
+    // and checks the password itself; an epoch change ends every Hub-side login issued
+    // under the old password — the daemon ends its own sessions at the same moment.
+    if frame.ty == ty::T_CREDENTIAL {
+        if let Some(presented) = frame.decode_msgpack::<crate::msg::TCredential>() {
+            let plausible = credential_plausible(&presented.hash, &presented.lang);
+            if plausible {
+                let next = crate::state::Credential {
+                    hash: presented.hash,
+                    epoch: presented.epoch,
+                    lang: presented.lang,
+                };
+                let moved = tunnel.set_credential(next);
+                hub.audit.log(
+                    "credential",
+                    &[
+                        ("uuid", serde_json::json!(tunnel.uuid)),
+                        ("epoch", serde_json::json!(presented.epoch)),
+                        ("changed", serde_json::json!(moved)),
+                    ],
+                );
+                if moved {
+                    crate::info!(
+                        "tunnel {}: password changed on the PC — link logins ended",
+                        tunnel.uuid
+                    );
+                    hub.drop_link_sessions(&tunnel.uuid);
+                }
+            } else {
+                crate::warn!(
+                    "tunnel {}: a malformed credential frame was ignored",
+                    tunnel.uuid
+                );
+            }
+        }
+        return true;
+    }
     if frame.ty == ty::CONN_CLOSE {
         if let Some(close) = frame.decode_msgpack::<ConnClose>() {
             tunnel.close_conn(close.session, close.code, &close.reason);
@@ -312,6 +352,45 @@ fn join_key_ok(config: &Config, given: &str) -> bool {
     given.as_bytes().ct_eq(expected).into()
 }
 
+/// The verifier's PHC parameters must sit inside bounds the Hub's verify pool can carry:
+/// the hash crosses from the daemon, and the Argon2 verify reads m/t/p out of the string
+/// itself — a hostile one spelling `$argon2id$v=19$m=1048576,t=1,p=1$…` (still well under
+/// the 512-char length gate) allocates a GiB per attempt through the Hub's own login
+/// corner, OOMing it. The daemon's real parameters (19 MiB, two passes, one lane) sit far
+/// inside; a PHC string missing any of the three is not one the daemon writes.
+fn credential_plausible(hash: &str, lang: &str) -> bool {
+    /// m in KiB, at most 64 MiB — the daemon ships 19 MiB (19456).
+    const MAX_M_KIB: u64 = 65_536;
+    const MAX_T: u64 = 8;
+    const MAX_P: u64 = 4;
+    if !(hash.starts_with("$argon2") && hash.len() <= 512 && lang.len() <= 16) {
+        return false;
+    }
+    // `$argon2id$v=19$m=19456,t=2,p=1$salt$digest` — the parameters are the third `$`
+    // segment's `key=value` list.
+    let Some(params) = hash.split('$').nth(3) else {
+        return false;
+    };
+    let (mut m, mut t, mut p) = (None, None, None);
+    for pair in params.split(',') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        let Ok(value) = value.parse::<u64>() else {
+            continue;
+        };
+        match key {
+            "m" => m = Some(value),
+            "t" => t = Some(value),
+            "p" => p = Some(value),
+            _ => {}
+        }
+    }
+    m.is_some_and(|m| m <= MAX_M_KIB)
+        && t.is_some_and(|t| t <= MAX_T)
+        && p.is_some_and(|p| p <= MAX_P)
+}
+
 fn configured_host(config: &Config) -> Option<String> {
     let url = config.public_url.trim_end_matches('/');
     let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
@@ -340,6 +419,38 @@ mod tests {
         assert!(!join_key_ok(&config, "sesam"));
         assert!(!join_key_ok(&config, "sesames"));
         assert!(!join_key_ok(&config, ""));
+    }
+
+    #[test]
+    fn credential_plausibility_bounds_the_phc_parameters() {
+        // The daemon's own shape passes.
+        assert!(credential_plausible(
+            "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$ZGlnZXN0",
+            "zh-cn"
+        ));
+        // Memory is the attack: 1 GiB (and anything past 64 MiB) is refused outright.
+        assert!(!credential_plausible(
+            "$argon2id$v=19$m=1048576,t=1,p=1$c2FsdA$ZGlnZXN0",
+            "en"
+        ));
+        assert!(!credential_plausible(
+            "$argon2id$v=19$m=19456,t=99,p=1$c2FsdA$ZGlnZXN0",
+            "en"
+        ));
+        assert!(!credential_plausible(
+            "$argon2id$v=19$m=19456,t=2,p=9$c2FsdA$ZGlnZXN0",
+            "en"
+        ));
+        // A missing parameter, a non-PHC string, an over-long language: all refused.
+        assert!(!credential_plausible(
+            "$argon2id$v=19$m=19456,t=2$c2FsdA$ZGlnZXN0",
+            "en"
+        ));
+        assert!(!credential_plausible("not-a-hash", "en"));
+        assert!(!credential_plausible(
+            "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$ZGlnZXN0",
+            "an-over-long-language-tag"
+        ));
     }
 
     #[test]

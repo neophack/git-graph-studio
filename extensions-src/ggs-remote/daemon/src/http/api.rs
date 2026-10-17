@@ -2,7 +2,7 @@
 //! password change, the device list, download tickets — and the loopback pair page's
 //! password-gated calls (R19).
 
-use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::extract::{ConnectInfo, Extension, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -39,10 +39,13 @@ fn verify_permits() -> &'static tokio::sync::Semaphore {
     })
 }
 
-/// Run the rate limiter around a password check; `Err` is the response to send.
+/// Run the rate limiter around a password check; `Err` is the response to send. `origin`
+/// is the address the LOG names when the request rode the Hub tunnel (the `OriginIp`
+/// extension) — the limiter itself keeps keying on `ip`, the shared tunnel bucket.
 pub async fn throttled_verify(
     daemon: &Arc<Daemon>,
     ip: std::net::IpAddr,
+    origin: Option<std::net::IpAddr>,
     password: &str,
 ) -> Result<(), Box<Response>> {
     // Boxed: `Response` alone is past clippy's `result_large_err` ceiling (1.99), and the
@@ -69,7 +72,7 @@ pub async fn throttled_verify(
         Ok(())
     } else {
         let lock = daemon.limiter.lock().unwrap().failure(ip, Instant::now());
-        crate::warn!("password check failed from {ip}");
+        crate::warn!("password check failed from {}", origin.unwrap_or(ip));
         Err(Box::new(match lock {
             Some(wait) => json_response(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -100,6 +103,7 @@ fn cookie_secure(daemon: &Daemon, headers: &HeaderMap) -> bool {
 pub async fn login(
     State(daemon): State<Arc<Daemon>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    origin: Option<Extension<crate::http::OriginIp>>,
     headers: HeaderMap,
     body: Option<Json<LoginBody>>,
 ) -> Response {
@@ -110,8 +114,11 @@ pub async fn login(
         return error(StatusCode::BAD_REQUEST, "bad-request");
     };
     let ip = client_ip(&daemon, peer, &headers);
-    daemon.note_foreign(ip);
-    if let Err(response) = throttled_verify(&daemon, ip, &body.password).await {
+    // The tunnel's extension names the browser behind the Hub; the limiter still keys on
+    // `ip` (the shared bucket), but the log line says who actually knocked.
+    let origin = origin.map(|Extension(crate::http::OriginIp(ip))| ip);
+    daemon.note_foreign(origin.unwrap_or(ip));
+    if let Err(response) = throttled_verify(&daemon, ip, origin, &body.password).await {
         return *response;
     }
     let ua = headers
@@ -119,13 +126,14 @@ pub async fn login(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let epoch = daemon.auth.epoch();
+    let seen_from = origin.unwrap_or(ip);
     let (token, session) =
         daemon
             .sessions
             .lock()
             .unwrap()
-            .create(epoch, &body.device, ua, ip, body.remember);
-    crate::info!("login from {ip} ({})", session.device);
+            .create(epoch, &body.device, ua, seen_from, body.remember);
+    crate::info!("login from {seen_from} ({})", session.device);
     let base = base_path(&headers);
     let max_age = if body.remember {
         format!("; Max-Age={REMEMBER_SECS}")
@@ -214,6 +222,7 @@ pub struct PasswordBody {
 pub async fn change_password(
     State(daemon): State<Arc<Daemon>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    origin: Option<Extension<crate::http::OriginIp>>,
     headers: HeaderMap,
     body: Option<Json<PasswordBody>>,
 ) -> Response {
@@ -227,7 +236,8 @@ pub async fn change_password(
         return error(StatusCode::BAD_REQUEST, "bad-request");
     };
     let ip = client_ip(&daemon, peer, &headers);
-    if let Err(response) = throttled_verify(&daemon, ip, &body.current).await {
+    let origin = origin.map(|Extension(crate::http::OriginIp(ip))| ip);
+    if let Err(response) = throttled_verify(&daemon, ip, origin, &body.current).await {
         return *response;
     }
     set_password(&daemon, &body.password).await
@@ -377,7 +387,7 @@ pub async fn pair_unlock(
     if !daemon.auth.is_set() {
         return error(StatusCode::CONFLICT, "no-password");
     }
-    if let Err(response) = throttled_verify(&daemon, peer.ip(), &body.password).await {
+    if let Err(response) = throttled_verify(&daemon, peer.ip(), None, &body.password).await {
         return *response;
     }
     let unlock = daemon.tickets.lock().unwrap().issue_unlock();

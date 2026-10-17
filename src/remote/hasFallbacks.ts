@@ -12,8 +12,10 @@
 //                                  the phone shows one group at a time (remote.css).
 //
 // The desktop's own webviews (WebView2 evergreen, WKWebView) all carry `:has()`, so the
-// desktop keeps its `:has()` spellings; this maintainer runs only in the remote shell,
-// where the class-based rules replace them.
+// desktop keeps its `:has()` spellings. Here both spellings stand in the stylesheets and
+// the maintainer installs ONLY on an engine without `:has()` (Firefox 115 ESR): the sweep
+// is three whole-document querySelectorAll passes per mutation batch, far too dear to run
+// on engines whose CSS already answers the question.
 let installed = false;
 
 function sweep(): void {
@@ -28,10 +30,28 @@ function sweep(): void {
 	}
 }
 
-/** Install the class maintainers (idempotent — the remote shell installs once). */
+/** Whether this engine needs the class maintainers at all: `:has()` carries the layout
+ *  directly wherever it exists (Chrome 105+, Safari 15.4+, Firefox 121+); only Firefox
+ *  115 ESR — §10.1's floor — lacks it. The stylesheets keep BOTH spellings (an engine
+ *  that cannot parse `:has()` drops just that selector), so on a modern browser the
+ *  maintainer never installs — its sweep was three whole-document querySelectorAll
+ *  passes on every class change anywhere, the page switch's dominant local cost
+ *  (2026-10-16, the response-latency pass). */
+function hasSelectorSupport(): boolean {
+	if (typeof CSS === 'undefined' || typeof CSS.supports !== 'function') return false;
+	try {
+		return CSS.supports('selector(:has(*))');
+	} catch {
+		return false;
+	}
+}
+
+/** Install the class maintainers (idempotent — the remote shell installs once). Engines
+ *  that carry `:has()` install nothing: the stylesheet's own `:has()` rules apply. */
 export function installHasFallbacks(): void {
 	if (installed) return;
 	installed = true;
+	if (hasSelectorSupport()) return;
 	const observer = new MutationObserver(sweep);
 	observer.observe(document.body, { childList: true, subtree: true, attributeFilter: ['class'] });
 	sweep();

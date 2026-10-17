@@ -12,6 +12,9 @@
 	const pending = new Map();
 
 	window.addEventListener('message', (event) => {
+		// Only the host frame (window.parent) answers requests; anything else resolving a
+		// pending id would be a stranger steering this page's state.
+		if (event.source !== window.parent) return;
 		const message = event.data;
 		const waiter = message && pending.get(message.id);
 		if (!waiter) return;

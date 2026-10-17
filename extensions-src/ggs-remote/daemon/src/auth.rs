@@ -207,6 +207,13 @@ impl Auth {
         !self.file.lock().unwrap().hash.is_empty()
     }
 
+    /// The stored Argon2id hash (the joint login's verifier, §20.14): the daemon pushes it
+    /// to its Hub so the relay can check the password itself — the PHC string, never the
+    /// password, and empty when none is set.
+    pub fn verifier(&self) -> String {
+        self.file.lock().unwrap().hash.clone()
+    }
+
     pub fn epoch(&self) -> u64 {
         self.file.lock().unwrap().epoch
     }

@@ -133,6 +133,7 @@ async fn run(
             .map_err(|_| "header")?,
     );
     let connector = tls_connector(settings)?;
+    let plain_link = connector.is_none();
     let (ws, _response) =
         tokio_tungstenite::connect_async_tls_with_config(request, None, false, connector)
             .await
@@ -205,6 +206,22 @@ async fn run(
         tx: tx.clone(),
         sessions: Mutex::new(HashMap::new()),
     });
+    // The joint login's verifier (§20.14): the Hub serves the login page and checks the
+    // password against THIS hash, so it rides ahead of anything a browser might ask for.
+    // The daemon still runs its own Argon2 check on every forwarded login — the joint
+    // validation, neither half alone letting a browser through.
+    //
+    // On a plain-ws link the hash crosses the network in the clear — warned, not refused:
+    // withholding it would send every login's password itself across the same plain
+    // tunnel instead, which is worse.
+    if plain_link {
+        crate::warn!(
+            "hub tunnel: the Hub address is not TLS; the password verifier crosses the network in the clear"
+        );
+    }
+    if !tunnel.send_control(&credential_frame(&daemon)) {
+        return Err("the Hub went away before the verifier left".into());
+    }
     client.status.send_replace(Status::Online {
         uuid: uuid.clone(),
         public_base: ready.public_base.clone(),
@@ -221,6 +238,7 @@ async fn run(
 
     let online_since = Instant::now();
     let mut restart = std::pin::pin!(client.restart.notified());
+    let mut auth_changed = std::pin::pin!(daemon.auth_changed.notified());
     let mut beat = tokio::time::interval(HEARTBEAT);
     beat.tick().await; // immediate
     let mut last_heard = Instant::now();
@@ -263,6 +281,16 @@ async fn run(
                 }
                 Inbound::Ok
             }
+            // The password changed under a live tunnel (§20.14): re-push the verifier. The
+            // new epoch ends the Hub's link sessions the same second the daemon's own
+            // sessions end, and the relay's login page speaks the new password alone.
+            _ = &mut auth_changed => {
+                if !tunnel.send_control(&credential_frame(&daemon)) {
+                    break End::Dropped { was_online: true };
+                }
+                auth_changed.as_mut().set(daemon.auth_changed.notified());
+                Inbound::Ok
+            }
             _ = &mut restart => {
                 if client.generation() != generation {
                     break End::Stopped;
@@ -285,6 +313,22 @@ async fn run(
 /// A heartbeat frame: RAW, session 0.
 fn ping_frame() -> Frame {
     Frame::new(ty::T_PING, crate::ws::frame::Enc::Raw, Vec::new())
+}
+
+/// The verifier frame (§20.14, the joint login): the daemon's Argon2id hash, the credential
+/// epoch it belongs to, and the PC's display language — everything the Hub needs to serve
+/// the login page and check the password itself. The hash is the PHC string from
+/// `auth.json`, never the password; a tunnel only ever exists with a password set (§20.3),
+/// so it is never empty here.
+fn credential_frame(daemon: &Arc<Daemon>) -> Frame {
+    Frame::msgpack(
+        ty::T_CREDENTIAL,
+        &super::msg::TCredential {
+            hash: daemon.auth.verifier(),
+            epoch: daemon.auth.epoch(),
+            lang: daemon.paths.display_language().unwrap_or_default(),
+        },
+    )
 }
 
 #[derive(PartialEq, Eq)]
@@ -323,8 +367,17 @@ fn inbound(daemon: &Arc<Daemon>, tunnel: &Arc<Tunnel>, frame: Frame) -> Inbound 
         return Inbound::Ok;
     }
     if frame.ty == ty::HTTP_REQ && !tunnel.is_bound(frame.session) {
+        // The head of a proxied request — its body chunks are HTTP_REQ-typed too. One
+        // that does not decode is a late chunk of a session that already ended (the
+        // 413/timeout/done paths unbind while the Hub still had chunks in flight), not
+        // a protocol violation: poisoning the tunnel here disconnected every OTHER
+        // browser multiplexed on it. An unroutable frame is dropped; nothing waits on it.
         let Some(head) = frame.decode_msgpack::<super::msg::HttpReq>() else {
-            return Inbound::Poison;
+            crate::info!(
+                "hub tunnel: a frame for the ended session {} was dropped",
+                frame.session
+            );
+            return Inbound::Ok;
         };
         let session = frame.session;
         let (pump_tx, pump_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -394,6 +447,7 @@ fn tls_connector(settings: &Settings) -> Result<Option<Connector>, String> {
         return Ok(None); // plain ws: tests and a front proxy already inside a tunnel
     }
     let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let verify_schemes = provider.signature_verification_algorithms;
     let builder = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| e.to_string())?;
@@ -406,6 +460,7 @@ fn tls_connector(settings: &Settings) -> Result<Option<Connector>, String> {
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(PinnedVerifier {
                 fingerprint: settings.fingerprint.clone(),
+                schemes: verify_schemes,
             }))
             .with_no_client_auth()
     };
@@ -413,11 +468,14 @@ fn tls_connector(settings: &Settings) -> Result<Option<Connector>, String> {
 }
 
 /// A certificate pin (§20.3 `fp=`): trust exactly the certificate whose SHA-256 this is —
-/// the self-signed-Hub answer. With the pin itself the authentication, the signature check
-/// inside the handshake accepts what the pinned key signed.
+/// the self-signed-Hub answer. The fingerprint check alone proves nothing about the peer:
+/// the certificate is public material, so possession of the private key is proven only by
+/// the handshake's CertificateVerify signature — verified here under the pinned
+/// certificate's own public key, never asserted.
 #[derive(Debug)]
 struct PinnedVerifier {
     fingerprint: String,
+    schemes: rustls::crypto::WebPkiSupportedAlgorithms,
 }
 
 impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
@@ -442,34 +500,24 @@ impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.schemes)
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.schemes)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-            rustls::SignatureScheme::RSA_PKCS1_SHA384,
-            rustls::SignatureScheme::RSA_PKCS1_SHA512,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::ED25519,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA512,
-        ]
+        self.schemes.supported_schemes()
     }
 }
 

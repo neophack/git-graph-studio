@@ -72,16 +72,58 @@ async fn serve(
         return http_proxy::too_many_viewers();
     }
     let base_path = format!("/u/{uuid}/");
+    let method = request.method().clone();
+    // The joint login's corner (§20.14): the login page and the password check are the
+    // HUB's own, never proxied — this is what keeps a relay from being turned into a
+    // content host: nothing reaches the PC's tunnel before the password passed HERE.
+    // The page's fetch and redirect are relative, which anchors right only at the
+    // slashless `/u/<uuid>/login`; the trailing-slash spelling resolves them under
+    // `/login/` and the page can never sign in — answer it with the canonical redirect.
+    if (method == Method::GET || method == Method::HEAD) && rest == "login/" {
+        return Response::builder()
+            .status(StatusCode::PERMANENT_REDIRECT)
+            .header(header::LOCATION, format!("{base_path}login"))
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(Body::empty())
+            .expect("a redirect");
+    }
+    if (method == Method::GET || method == Method::HEAD) && rest == "login" {
+        return crate::login::page(&tunnel, &base_path);
+    }
+    if method == Method::POST && (rest == "api/hub-login" || rest == "api/hub-login/") {
+        return crate::login::submit(hub, tunnel, base_path, peer_ip, peer.ip(), request).await;
+    }
+    // The content gate: everything else — proxied pages, assets, the WebSocket — needs the
+    // Hub-side session the joint login issues. The daemon still checks its own cookie on
+    // every proxied request: both halves of one login, both always on duty.
+    if let Some(denial) =
+        crate::login::gate(&hub, &tunnel, &base_path, &method, &rest, request.headers())
+    {
+        return denial;
+    }
     if rest == "ws" && request.method() == Method::GET {
         let headers = request.headers().clone();
         return match WebSocketUpgrade::from_request(request, &()).await {
             Ok(upgrade) => {
-                ws_bridge::bridge(hub, tunnel, upgrade, peer_ip, base_path, headers).await
+                ws_bridge::bridge(hub, tunnel, upgrade, peer_ip, peer.ip(), base_path, headers)
+                    .await
             }
             Err(_) => http_proxy::error_page(StatusCode::BAD_REQUEST, "not a websocket"),
         };
     }
-    http_proxy::proxy(hub, tunnel, uuid, rest, base_path, peer_ip, request).await
+    http_proxy::proxy(
+        hub,
+        tunnel,
+        uuid,
+        rest,
+        base_path,
+        http_proxy::Addresses {
+            peer: peer.ip(),
+            client: peer_ip,
+        },
+        request,
+    )
+    .await
 }
 
 /// The one answer for a well-formed link whose PC is unknown or away (§20.5): a page under
@@ -150,9 +192,13 @@ pub fn forward_headers(headers: &HeaderMap) -> std::collections::BTreeMap<String
 /// behind the proxy chain, in the forms the daemon's `client_ip` / `base_path` read, plus
 /// the scheme the browser spoke (`x-forwarded-proto`) — the daemon's session cookie marks
 /// `Secure` only for https, or a plain-HTTP browser silently drops it and no login ever
-/// holds (§7.6).
+/// holds (§7.6). `peer` is the DIRECT socket address: a front proxy's word for the scheme
+/// is honored only when that peer is one of the trusted proxies (`peer_trusted`, the same
+/// gate `peer_ip` applies to `x-forwarded-for`) — never on the global `trust_proxy` flag
+/// alone, which a browser hitting the Hub port directly could otherwise speak for.
 pub fn hub_extras(
-    config: &crate::config::Config,
+    hub: &crate::state::Hub,
+    peer: IpAddr,
     base_path: &str,
     ip: IpAddr,
     headers: &HeaderMap,
@@ -161,10 +207,11 @@ pub fn hub_extras(
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    // A front proxy's word for the scheme wins when trusted (Caddy ends TLS in front of a
-    // `tls = "none"` Hub); otherwise this Hub's own listener says it. Browsers cannot
-    // smuggle the header through — `FORWARDED_HEADERS` never forwards it.
-    let proto = if config.trust_proxy {
+    // A front proxy's word for the scheme wins when this request's peer is trusted (Caddy
+    // ends TLS in front of a `tls = "none"` Hub); otherwise this Hub's own listener says
+    // it. Browsers cannot smuggle the header through — `FORWARDED_HEADERS` never
+    // forwards it.
+    let proto = if http_proxy::peer_trusted(hub, peer) {
         headers
             .get("x-forwarded-proto")
             .and_then(|v| v.to_str().ok())
@@ -174,7 +221,7 @@ pub fn hub_extras(
         None
     }
     .unwrap_or_else(|| {
-        if config.tls.mode == crate::config::TlsMode::None {
+        if hub.config.tls.mode == crate::config::TlsMode::None {
             "http".to_owned()
         } else {
             "https".to_owned()

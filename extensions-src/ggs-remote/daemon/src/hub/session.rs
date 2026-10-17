@@ -104,6 +104,10 @@ pub async fn ws(
     let mut recheck = tokio::time::interval(RECHECK_EVERY);
     recheck.tick().await;
     let mut last_frame = tokio::time::Instant::now();
+    // Whether the loop left because the tunnel went quiet under us — the one exit that
+    // must free the tunnel session without ending the resume window (the browser may
+    // still be there, merely silent; its next frame resumes on whatever tunnel answers).
+    let mut idle = false;
 
     let ended = loop {
         tokio::select! {
@@ -145,6 +149,7 @@ pub async fn ws(
                     break true;
                 }
                 if last_frame.elapsed() > IDLE_TIMEOUT {
+                    idle = true;
                     break false;
                 }
             }
@@ -159,6 +164,13 @@ pub async fn ws(
             crate::router::end_conn(&daemon, &conn);
         }
         tunnel.close_session(session, 1000, "closed");
+    } else if idle {
+        // Five minutes with no frame (a phone black-holed by NAT, no FIN ever arriving):
+        // free the tunnel session — before, this exit left it bound on both sides, and a
+        // tunnel's ceiling slowly filled with ghosts until every later login 429'd — but
+        // keep the resume window open for the browser's return.
+        conn.go_offline(gen);
+        tunnel.close_session(session, 1000, "idle");
     } else {
         // The tunnel went away under us: keep the resume window open (§6.5) — the browser
         // reconnects through whatever tunnel answers next and presents its sid.
@@ -285,11 +297,24 @@ pub async fn http(
             _ => break false,
         }
     };
-    if !complete || body.len() > MAX_HTTP_BODY {
+    if body.len() > MAX_HTTP_BODY {
         reply_head(
             &tunnel,
             session,
             413,
+            &[("content-type".to_owned(), "text/plain".to_owned())],
+        );
+        tunnel.close_session(session, 1000, "done");
+        return;
+    }
+    if !complete {
+        // A body that never reached its FIN — a timeout, a decode failure, the session's
+        // channel gone. That is a gateway timeout, not a payload problem: 413 here lied
+        // to the browser (and the logs) about a request that was never too large.
+        reply_head(
+            &tunnel,
+            session,
+            504,
             &[("content-type".to_owned(), "text/plain".to_owned())],
         );
         tunnel.close_session(session, 1000, "done");
@@ -347,10 +372,16 @@ pub async fn http(
     while let Some(chunk) = stream.next().await {
         let Ok(chunk) = chunk else { break };
         for piece in chunk.chunks(crate::ws::frame::MAX_PAYLOAD) {
-            let _ = tunnel.send_control(
+            // The tunnel is gone once a send fails: stop pulling the rest of the body —
+            // a multi-gigabyte download used to keep draining, encoding frames nobody
+            // received, for as long as the router produced them.
+            if !tunnel.send_control(
                 &Frame::new(ty::HTTP_RES, crate::ws::frame::Enc::Raw, piece.to_vec())
                     .with_session(session),
-            );
+            ) {
+                tunnel.close_session(session, 1000, "done");
+                return;
+            }
         }
     }
     let mut fin =
@@ -395,12 +426,18 @@ fn synthesize(head: &HttpReq, body: Vec<u8>) -> Result<axum::http::Request<Body>
     let mut request = builder
         .body(Body::from(body))
         .map_err(|e| format!("request build: {e}"))?;
-    // The LAN path gets this from into_make_service_with_connect_info; the router's
-    // rate-limiting and origin checks extract it (the browser's real address, §20.6).
-    let ip: std::net::IpAddr = head.ip.parse().unwrap_or([127, 0, 0, 1].into());
+    // The tunnel's mark is the PEER, not a header: every tunneled request is synthesized
+    // with `TUNNEL_BUCKET` as its peer (an address no LAN connection can carry), so the
+    // shared-bucket rule of audit F6 cannot be forged onto a direct LAN request by anyone
+    // stamping `x-ggs-base-path` themselves (2026-10-16). The limiter keys on that bucket;
+    // the browser's real address rides the unforgeable `OriginIp` extension for the logs,
+    // and reaches the tray through `head.ip` / `note_foreign` above.
+    request.extensions_mut().insert(crate::http::OriginIp(
+        head.ip.parse().unwrap_or(crate::http::TUNNEL_BUCKET),
+    ));
     request
         .extensions_mut()
-        .insert(ConnectInfo(SocketAddr::new(ip, 0)));
+        .insert(ConnectInfo(SocketAddr::new(crate::http::TUNNEL_BUCKET, 0)));
     Ok(request)
 }
 
@@ -511,5 +548,74 @@ mod tests {
         assert_eq!(pump_rx.try_recv().unwrap(), b"pipelined".to_vec());
         // The old connection is ended.
         assert!(daemon.conn_by_sid("sid-old", "hash").is_none());
+    }
+
+    /// A hostile or foreign URL in a forwarded head — an absolute `http://…`, an
+    /// authority-shaped `//host/…` — must stay THIS PC's local path: the synthesized
+    /// request never carries a scheme or authority, so there is nothing to route toward
+    /// another site. The daemon has no outbound fetch in this path at all; this pins that
+    /// a future edit cannot quietly grow one either.
+    #[test]
+    fn a_forwarded_head_naming_a_foreign_site_stays_a_local_path() {
+        let head = |path: &str| HttpReq {
+            method: "GET".into(),
+            path: path.into(),
+            query: String::new(),
+            headers: Default::default(),
+            ip: "203.0.113.9".into(),
+            base_path: "/u/3f9c2a6e-8b1d-8c7a-9e45-2d6f0b8a71c3/".into(),
+        };
+        for foreign in [
+            "http://example.com/secret",
+            "https://example.com/",
+            "http://user:pass@example.com:8443/admin",
+            "//example.com/secret",
+        ] {
+            let request = synthesize(&head(foreign), Vec::new())
+                .unwrap_or_else(|e| panic!("{foreign} must synthesize, not fail: {e}"));
+            let uri = request.uri();
+            assert!(
+                uri.scheme().is_none() && uri.authority().is_none(),
+                "{foreign}: the request must stay origin-form, got {uri:?}"
+            );
+            assert!(
+                uri.path().starts_with('/'),
+                "{foreign}: the PC serves it as its own local path, got {uri:?}"
+            );
+            assert_eq!(
+                uri.host(),
+                None,
+                "{foreign}: there is no host to connect to"
+            );
+        }
+    }
+
+    /// The same heads through the real public router: the answer is the router's own 404 —
+    /// the request never leaves this process. A proxy would have answered a foreign site's
+    /// bytes; nothing here has a client to fetch them with.
+    #[tokio::test]
+    async fn a_foreign_site_head_is_answered_by_the_local_router_alone() {
+        let (_dir, daemon) = daemon();
+        daemon.auth.set_password("local-router-test").await.unwrap();
+        for foreign in ["http://example.com/secret", "//example.com/secret"] {
+            let head = HttpReq {
+                method: "GET".into(),
+                path: foreign.into(),
+                query: String::new(),
+                headers: Default::default(),
+                ip: "203.0.113.9".into(),
+                base_path: "/u/3f9c2a6e-8b1d-8c7a-9e45-2d6f0b8a71c3/".into(),
+            };
+            let request = synthesize(&head, Vec::new()).unwrap();
+            let response = crate::http::public_router(daemon.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::NOT_FOUND,
+                "{foreign}: the local router answers 404, never a fetched site"
+            );
+        }
     }
 }

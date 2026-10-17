@@ -71,8 +71,19 @@ export function installScmPage(): void {
 	const shownExtra = new Map<string, number>();
 
 	// Every state crossing of the one SourceControlView re-renders the page: onChanged after
-	// an operation, onStatus / onHead after a refresh, chained onto whatever was there.
-	const rerender = (): void => render();
+	// an operation, onStatus / onHead after a refresh, chained onto whatever was there. A
+	// crossing BURST (a fetch lands status, head and changes back to back) coalesces into
+	// one rebuild — every row carries click listeners and swipe wiring, and the phone paid
+	// three full rebuilds per refresh before this.
+	let renderQueued = false;
+	const rerender = (): void => {
+		if (renderQueued) return;
+		renderQueued = true;
+		queueMicrotask(() => {
+			renderQueued = false;
+			render();
+		});
+	};
 	const previousChanged = scm.onChanged;
 	scm.onChanged = () => {
 		previousChanged?.();

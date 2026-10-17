@@ -501,7 +501,7 @@ describe('tauri shims', () => {
 
 describe('relay engine', () => {
 	const isWindows = navigator.platform.toLowerCase().includes('win');
-	function engine(symlinks: Record<string, string> = {}) {
+	function engine(symlinks: Record<string, string> = {}, policyDelayMs = 0) {
 		const sent: Frame[] = [];
 		const emitTo = vi.fn(async () => undefined);
 		const listeners = new Map<string, (e: { event: string; id: number; payload: unknown }) => void>();
@@ -511,7 +511,12 @@ describe('relay engine', () => {
 		const invoke = vi.fn(async (cmd: string, args?: unknown) => {
 			if (cmd === 'fail') throw 'boom';
 			if (cmd === 'raw') return new Uint8Array([1, 2]).buffer;
-			if (cmd === 'remote_paths_policy') return [isWindows ? 'C:\\work\\repo' : '/work/repo'];
+			// A real policy fetch crosses IPC (~a millisecond): the delay keeps a test's
+			// concurrent invokes in one fetch wave the way production has them.
+			if (cmd === 'remote_paths_policy') {
+				if (policyDelayMs) await new Promise((r) => setTimeout(r, policyDelayMs));
+				return [isWindows ? 'C:\\work\\repo' : '/work/repo'];
+			}
 			if (cmd === 'remote_ext_roots') return [isWindows ? 'C:\\Users\\me\\.ggs\\extensions' : '/home/me/.ggs/extensions'];
 			// The canonical forms: identity, except the paths a test declares symlinks —
 			// the stand-in for the backend's `remote_canonical_paths`.
@@ -826,17 +831,160 @@ describe('relay engine', () => {
 		expect(sent.find((f) => f.type === T.PONG)?.stream).toBe(77);
 	});
 
-	it('coalesces terminal output', async () => {
+	it('coalesces terminal output behind a leading edge', async () => {
 		const { relay, sent, listeners } = engine();
 		relay.receive(encodeFrame({ ...msgpackFrame(T.LISTEN, { event: 'studio://pty-output-5' }, 13), session: 4 }));
 		await new Promise((r) => setTimeout(r, 5));
 		const handler = listeners.get('studio://pty-output-5')!;
-		for (const chunk of ['a', 'b', 'c']) handler({ event: 'studio://pty-output-5', id: 1, payload: chunk });
-		expect(sent.filter((f) => f.type === T.EVENT).length).toBe(0);
+		handler({ event: 'studio://pty-output-5', id: 1, payload: 'a' });
+		// The leading edge: the first chunk after a quiet gap leaves at once — a key's
+		// echo never waits the 16 ms window.
+		const first = sent.filter((f) => f.type === T.EVENT);
+		expect(first.length).toBe(1);
+		expect(frameJson<{ payload: string }>(first[0]).payload).toBe('a');
+		for (const chunk of ['b', 'c']) handler({ event: 'studio://pty-output-5', id: 1, payload: chunk });
 		await new Promise((r) => setTimeout(r, 30));
 		const events = sent.filter((f) => f.type === T.EVENT);
-		expect(events.length).toBe(1);
-		expect(frameJson<{ payload: string }>(events[0]).payload).toBe('abc');
+		expect(events.length).toBe(2);
+		expect(frameJson<{ payload: string }>(events[1]).payload).toBe('bc');
+	});
+
+	/** The 2026-10-16 response-latency pass: the canonical re-check rides a table in the
+	 *  engine — a hit costs no round trip, so a path-carrying invoke crosses the gate in
+	 *  JS instead of paying a second IPC; the table drops wherever the filesystem can
+	 *  have moved (the write set, the watcher's batch). */
+	it('serves the canonical gate from the table and drops it on writes and watcher batches', async () => {
+		const { relay, invoke, fire } = engine();
+		const root = isWindows ? 'C:\\work\\repo' : '/work/repo';
+		const file = isWindows ? 'C:\\work\\repo\\src\\a.ts' : '/work/repo/src/a.ts';
+		const canon = () => (invoke as ReturnType<typeof vi.fn>).mock.calls.filter(([cmd]) => cmd === 'remote_canonical_paths').length;
+		const policy = () => (invoke as ReturnType<typeof vi.fn>).mock.calls.filter(([cmd]) => cmd === 'remote_paths_policy').length;
+		const read = (path = file) => relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'read_file', a: { path } }, 1, 0, 7)));
+
+		read();
+		await new Promise((r) => setTimeout(r, 10));
+		expect(canon()).toBe(1);
+		expect(invoke).toHaveBeenCalledWith('read_file', { path: file }, expect.anything());
+
+		// Three more reads of the same spelling (and the policy fetch: once, stale-while-
+		// revalidate serves every one of them without a round trip).
+		read();
+		read();
+		read();
+		await new Promise((r) => setTimeout(r, 10));
+		expect(canon()).toBe(1);
+		expect(policy()).toBe(1);
+
+		// A write command's completion drops the table (§23.6's race closed at the
+		// source): a checkout can materialize a symlink, so the next read re-resolves
+		// instead of serving the pre-write form.
+		relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'scm_checkout', a: { repo: root, ref: 'main' } }, 2, 0, 7)));
+		await new Promise((r) => setTimeout(r, 10));
+		expect(canon()).toBe(1);
+		read();
+		await new Promise((r) => setTimeout(r, 10));
+		expect(canon()).toBe(2);
+
+		// The watcher's own batch drops it too — an external change never serves stale.
+		fire('studio://fs-changed', { paths: [file] });
+		read();
+		await new Promise((r) => setTimeout(r, 10));
+		expect(canon()).toBe(3);
+	});
+
+	/** The extension platform's own reads ride `ext_fs` — the hot read path of every
+	 *  installed package. Its READ ops must not drop the canonical table (a blanket drop
+	 *  cost one re-canonicalize per ext read while any extension ran); its writing ops
+	 *  still must. */
+	it('keeps the canonical table across ext_fs reads and drops it on ext_fs writes', async () => {
+		const { relay, invoke } = engine();
+		const file = isWindows ? 'C:\\work\\repo\\src\\a.ts' : '/work/repo/src/a.ts';
+		const canon = () => (invoke as ReturnType<typeof vi.fn>).mock.calls.filter(([cmd]) => cmd === 'remote_canonical_paths').length;
+		const read = () => relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'read_file', a: { path: file } }, 1, 0, 7)));
+		const ext = (op: string) =>
+			relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'ext_fs', a: { op, roots: [], path: file } }, 2, 0, 7)));
+
+		read();
+		await new Promise((r) => setTimeout(r, 10));
+		expect(canon()).toBe(1);
+
+		// Reads and stats flow through the extension platform by the dozen. The first one
+		// fills the EXTENSION roots' forms too (the gate spells them alongside the path) —
+		// one extra round trip, once; every further ext read is table-served, and a read
+		// of the same workspace spelling still costs nothing.
+		ext('read');
+		await new Promise((r) => setTimeout(r, 10));
+		expect(canon()).toBe(2);
+		ext('stat');
+		ext('list');
+		ext('read');
+		await new Promise((r) => setTimeout(r, 10));
+		expect(invoke).toHaveBeenCalledWith('ext_fs', expect.objectContaining({ op: 'read' }), expect.anything());
+		read();
+		await new Promise((r) => setTimeout(r, 10));
+		expect(canon()).toBe(2);
+
+		// A writing op moves the filesystem exactly like any other write command: the
+		// next read re-resolves instead of serving the pre-write form.
+		ext('write');
+		await new Promise((r) => setTimeout(r, 10));
+		read();
+		await new Promise((r) => setTimeout(r, 10));
+		expect(canon()).toBe(3);
+	});
+
+	/** The 2026-10-16 command-surface audit found two path-carrying commands missing from
+	 *  the table: the workspace-wide replace (any absolute `repo`, every matching file
+	 *  rewritten) and the Explorer drop's copy-in (its `sources` are absolute paths from
+	 *  anywhere on the machine — copy the provider key store into the workspace, then
+	 *  read it). Both now gate — and an array argument checks every member. */
+	it('gates replace_in_files and copy_into, array members included', async () => {
+		const { relay, invoke, sent } = engine();
+		const root = isWindows ? 'C:\\work\\repo' : '/work/repo';
+		const key = isWindows
+			? 'C:\\Users\\me\\.ggs\\keys\\ai-providers.key'
+			: '/home/me/.ggs/keys/ai-providers.key';
+		const answer = () => sent.find((f) => f.type === T.RESULT && f.flags & FLAG.ERROR);
+		const send = (c: string, a: Record<string, unknown>) =>
+			relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c, a }, 1, 0, 7)));
+
+		// The replace with the key store as its tree: refused, never invoked.
+		send('replace_in_files', { query: 'x', replacement: 'y', repo: key });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(answer()).toBeTruthy();
+		expect(invoke).not.toHaveBeenCalledWith('replace_in_files', expect.anything(), expect.anything());
+
+		// The copy-in exfiltration chain: the key store as a SOURCE, the workspace as the
+		// destination — one outside member refuses the whole invoke.
+		sent.length = 0;
+		invoke.mockClear();
+		send('copy_into', { sources: [`${root}/notes.txt`, key], dest_dir: root });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(answer()).toBeTruthy();
+		expect(invoke).not.toHaveBeenCalledWith('copy_into', expect.anything(), expect.anything());
+
+		// Both inside the roots: through, dest and sources alike.
+		sent.length = 0;
+		invoke.mockClear();
+		send('copy_into', { sources: [`${root}/notes.txt`], dest_dir: `${root}/sub` });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(answer()).toBeUndefined();
+		expect(invoke).toHaveBeenCalledWith('copy_into', expect.anything(), expect.anything());
+	});
+
+	it('gathers concurrent gate misses into one canonical round trip', async () => {
+		const { relay, invoke } = engine({}, 5);
+		const root = isWindows ? 'C:\\work\\repo' : '/work/repo';
+		const fileA = isWindows ? 'C:\\work\\repo\\a.ts' : '/work/repo/a.ts';
+		const fileB = isWindows ? 'C:\\work\\repo\\b.ts' : '/work/repo/b.ts';
+		relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'read_file', a: { path: fileA } }, 1, 0, 7)));
+		relay.receive(encodeFrame(jsonFrame(T.INVOKE, { c: 'read_file', a: { path: fileB } }, 3, 0, 7)));
+		await new Promise((r) => setTimeout(r, 20));
+		const calls = (invoke as ReturnType<typeof vi.fn>).mock.calls.filter(([cmd]) => cmd === 'remote_canonical_paths');
+		expect(calls.length).toBe(1);
+		const paths = (calls[0][1] as { paths: string[] }).paths;
+		expect(paths).toContain(fileA);
+		expect(paths).toContain(fileB);
 	});
 });
 

@@ -22,6 +22,8 @@ pub mod ty {
     pub const T_REJECTED: u8 = 0x89;
     pub const T_REPLACED: u8 = 0x8A;
     pub const T_PONG: u8 = 0x8B;
+    /// The PC's password verifier (§20.14) — the daemon pushes it after `T_READY`.
+    pub const T_CREDENTIAL: u8 = 0x8C;
 }
 
 pub mod flag {
@@ -143,10 +145,15 @@ impl Frame {
 }
 
 /// Re-stamp the `session` field of every frame in a message (in place, no re-encoding).
+/// The check mirrors `Frame::decode_all` exactly — reserved bytes clean, no trailing
+/// truncation, an empty message refused — because the daemon tears the whole tunnel down
+/// on the first frame it cannot decode (§20.4), and the browser side is unauthenticated:
+/// before this caught up, one empty WebSocket message (or one with dirty reserved bytes)
+/// from anyone holding the link's uuid killed every live remote session on that PC.
 pub fn stamp_session(message: &mut [u8], session: u32) -> bool {
     let mut at = 0;
     while at < message.len() {
-        if message.len() - at < HEADER_LEN {
+        if message.len() - at < HEADER_LEN || message[at + 2] != 0 || message[at + 3] != 0 {
             return false;
         }
         message[at + 4..at + 8].copy_from_slice(&session.to_le_bytes());
@@ -161,7 +168,9 @@ pub fn stamp_session(message: &mut [u8], session: u32) -> bool {
         }
         at += HEADER_LEN + len;
     }
-    true
+    // An empty message carries no frame to stamp; the daemon's decoder refuses it, so the
+    // Hub must too — `true` here would have forwarded it into a dropped tunnel.
+    !message.is_empty()
 }
 
 /// The `session` of the first frame of a message.
@@ -185,6 +194,26 @@ mod tests {
         assert_eq!(session_of(&message), Some(77));
         let mut truncated = message[..30].to_vec();
         assert!(!stamp_session(&mut truncated, 1));
+    }
+
+    /// The daemon drops the whole tunnel on the first undecodable frame (§20.4), and the
+    /// browser side is unauthenticated — so every input `decode_all` refuses, the Hub's
+    /// re-stamp must refuse too, closing only that browser socket instead.
+    #[test]
+    fn everything_the_daemons_decoder_refuses_the_stamp_refuses() {
+        // An empty message: no frame to stamp.
+        assert!(!stamp_session(&mut [], 1));
+        // Dirty reserved header bytes.
+        let mut dirty = Vec::new();
+        Frame::raw(0x10, 0, b"a".to_vec()).encode_into(&mut dirty);
+        dirty[2] = 1;
+        assert!(!stamp_session(&mut dirty, 1));
+        // A payload length that runs past the message.
+        let mut overshot = Vec::new();
+        Frame::raw(0x10, 0, b"ab".to_vec()).encode_into(&mut overshot);
+        let len_at = overshot.len() - 4 - 2;
+        overshot[len_at] = 0xff;
+        assert!(!stamp_session(&mut overshot, 1));
     }
 
     #[test]

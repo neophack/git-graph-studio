@@ -123,25 +123,43 @@ export class Transport {
 	}
 
 	/** Connect, say HELLO and attach to the instance; resolves with ATTACHED, rejects on
-	 *  the daemon's attach-failed notice or a bounded wait with no answer at all. */
+	 *  the daemon's attach-failed notice or a bounded wait with no answer at all.
+	 *  The first connect is a retry, not a verdict — a phone still re-attaching to its
+	 *  network after a background stint, or the daemon's listener a breath from
+	 *  accepting, answers on the second or third try; a 401 that navigates away is
+	 *  final and never retried. */
 	async connect(): Promise<Attached> {
-		await this.open(false);
-		if (this.attachedInfo) return this.attachedInfo;
-		return new Promise<Attached>((resolve, reject) => {
-			const fail = (error: unknown) => {
-				clearTimeout(timer);
-				this.attachWaiters = this.attachWaiters.filter((waiter) => waiter.reject !== fail);
-				reject(error);
-			};
-			const timer = setTimeout(() => fail(new Error('the window did not answer in time')), this.options.attachTimeoutMs ?? ATTACH_TIMEOUT_MS);
-			this.attachWaiters.push({
-				resolve: (info) => {
+		let lastError: unknown = new Error('the first connect failed');
+		for (let attempt = 0; attempt < 4 && !this.closedForGood; attempt++) {
+			if (attempt) await new Promise((r) => setTimeout(r, Math.min(400 * 2 ** attempt, 3200)));
+			this.connecting = true;
+			try {
+				await this.open(false);
+			} catch (error) {
+				lastError = error;
+				continue;
+			} finally {
+				this.connecting = false;
+			}
+			if (this.attachedInfo) return this.attachedInfo;
+			if (this.closedForGood) break;
+			return new Promise<Attached>((resolve, reject) => {
+				const fail = (error: unknown) => {
 					clearTimeout(timer);
-					resolve(info);
-				},
-				reject: fail
+					this.attachWaiters = this.attachWaiters.filter((waiter) => waiter.reject !== fail);
+					reject(error);
+				};
+				const timer = setTimeout(() => fail(new Error('the window did not answer in time')), this.options.attachTimeoutMs ?? ATTACH_TIMEOUT_MS);
+				this.attachWaiters.push({
+					resolve: (info) => {
+						clearTimeout(timer);
+						resolve(info);
+					},
+					reject: fail
+				});
 			});
-		});
+		}
+		throw lastError;
 	}
 
 	allocStream(): number {
@@ -327,6 +345,9 @@ export class Transport {
 	private onClose(code: number, reason: string): void {
 		clearInterval(this.heartbeat);
 		if (this.closedForGood) return;
+		// The first connect's own retry loop owns its failures — a second, parallel
+		// reconnect here would race it to a second socket on the same session.
+		if (this.connecting) return;
 		if (code === 4401) return this.navigate('login', reason || 'expired');
 		if (code === 4410) return this.navigate('picker', 'instance-exited');
 		if (code === 4403 || code === 4409) return this.navigate('login', reason || 'expired');
@@ -334,6 +355,8 @@ export class Transport {
 	}
 
 	private reconnecting = false;
+	/** True while `connect()`'s initial open attempt is in flight (see onClose). */
+	private connecting = false;
 
 	private async reconnect(): Promise<void> {
 		// One retry loop at a time: a visibility comeback while the drop's own retry sleeps

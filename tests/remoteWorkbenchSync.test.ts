@@ -369,6 +369,28 @@ describe('the sync core over a shared bus', () => {
 		expect(pc.opened).toEqual([{ path: MEMBER, line: undefined, column: undefined }]);
 	});
 
+	it('the canonical gate batches the path and the roots into one round trip', async () => {
+		// The spelled set — the path plus every root — crosses as ONE canonicalize call:
+		// one invoke per entry, awaited serially per opened file, was the snapshot-merge
+		// path's N+1 (a whole extra wire round trip per entry between two remotes).
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const REPO = '/repo';
+		const FILE = '/repo/a.ts';
+		pc.openFolders = () => [REPO];
+		const batches: string[][] = [];
+		attachWorkbenchSync(pc, channel.deps, 'main', {
+			canonicalPaths: async (paths) => {
+				batches.push(paths);
+				return paths.map(() => null);
+			}
+		});
+		attachWorkbenchSync(fakeWorkbench(), channel.deps, 'remote/1');
+		channel.deps.send({ by: 'remote/1', k: 'open', path: FILE });
+		await until(() => pc.tabs().includes(FILE));
+		expect(batches).toEqual([[FILE, REPO]]);
+	});
+
 	it('a catch-up snapshot keeps the lexical answer when the canonical check has no form', async () => {
 		// The same semantics in mergeSnapshot's gate: a null canonical form (the file does
 		// not exist yet, or the backend confined its answer) is not a refusal — the lexical

@@ -5,13 +5,18 @@
 // remote workbench's assets, and a graceful close. Nothing touches the user's ~/.ggs/remote.
 //
 //   node scripts/probes/remote-live-check.mjs [--app <ggs exe>] [--daemon <ggs-remote exe>]
-//                                             [--folder <repo>] [--keep]
+//                                             [--folder <repo>] [--keep] [--bench]
+//
+// `--bench` adds the response-latency rows (the 2026-10-16 pass): a non-gated command
+// (the wire's own RTT), a path-gated read repeated on ONE spelling (the canonical
+// table's hit path — the new steady state), and one read per DISTINCT file (a canonical
+// miss every time — what the pre-cache gate cost EVERY path-carrying invoke).
 //
 // Debug app builds load relay.html from the Vite dev server: the script starts
 // `npm run dev:vite` when nothing answers on :5173. The remote build must exist
 // (`npm run build:remote`) for the asset check.
 import { spawn } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import net from 'node:net';
@@ -454,6 +459,36 @@ async function main() {
 		(error) => String(error.message)
 	);
 	check('a failing command rejects with its message', missing !== 'resolved', missing);
+
+	if (process.argv.includes('--bench')) {
+		const files = ((await invoke('list_files', { repo: folder })) ?? [])
+			.map((rel) => resolve(folder, rel))
+			.filter((path) => {
+				try {
+					return statSync(path).size <= 16 * 1024;
+				} catch {
+					return false;
+				}
+			})
+			.slice(0, 200);
+		const pick = files[Math.floor(files.length / 2)] ?? resolve(folder, 'README.md');
+		const round = async (name, fn, n) => {
+			await fn(0); // the warm-up sample stays out of the numbers
+			const times = [];
+			for (let i = 1; i <= n; i++) {
+				const t0 = performance.now();
+				await fn(i);
+				times.push(performance.now() - t0);
+			}
+			times.sort((a, b) => a - b);
+			const q = (p) => times[Math.min(times.length - 1, Math.floor(times.length * p))];
+			console.log(`BENCH  ${name}\n       median ${q(0.5).toFixed(1)} ms · p90 ${q(0.9).toFixed(1)} ms · max ${times[times.length - 1].toFixed(1)} ms  (n=${n})`);
+		};
+		await round('non-gated remote_host_status — the wire itself', () => invoke('remote_host_status', {}), 50);
+		await round('gated read_file, ONE spelling — cache hit, the new steady state', () => invoke('read_file', { path: pick }), 50);
+		await round('gated read_file, DISTINCT files — a miss every time, the old per-invoke cost', (i) => invoke('read_file', { path: files[i % files.length] }), 100);
+	}
+
 	ws.send(mp(T.LISTEN, { event: 'studio://git-output' }, (stream += 2)));
 	check('event subscription accepted', true);
 

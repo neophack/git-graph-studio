@@ -1,0 +1,35 @@
+<!doctype html>
+<!-- What a link answers when the PC's daemon never presented its password verifier
+     (docs/ggs-remote-plan.md §20.14): a daemon older than the joint login. The Hub will
+     not proxy anything it cannot check a password for, so the PC's app needs the update
+     before this link carries a workbench again. Bilingual by construction, like the
+     offline page — no language was pushed with the verifier. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>GGS Remote — update needed</title>
+<style>
+:root { color-scheme: light dark; }
+body {
+	margin: 0; min-height: 100vh; display: grid; place-items: center;
+	font: 16px/1.6 system-ui, sans-serif; text-align: center; padding: 24px;
+}
+.card { max-width: 28em; }
+h1 { font-size: 1.25rem; margin: 0 0 .6em; }
+p { margin: .4em 0; opacity: .85; }
+</style>
+</head>
+<body>
+<main class="card">
+	<h1>This PC needs a GGS update</h1>
+	<p>The relay and this PC check the access password together, and the copy on this PC
+	   predates that. Update Git Graph Studio on the PC (its Remote Access page will
+	   reconnect it), then open this link again.</p>
+	<p>这台电脑上的 Git Graph Studio 需要更新：中继服务器和电脑会一起校验访问密码，而这台
+	   电脑上的版本还没有这一半。在电脑上更新后（其“远程访问”页会自动重连），再打开这个
+	   链接即可。</p>
+</main>
+</body>
+</html>

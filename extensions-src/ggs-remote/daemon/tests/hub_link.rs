@@ -70,15 +70,16 @@ async fn start_owned() -> (Both, tokio::task::JoinHandle<()>) {
         listen: "127.0.0.1:0".into(),
         ..Default::default()
     });
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .unwrap();
+    // The shipped stack (§20.5): the router behind the silence gate on axum-server — the
+    // same `gated` service `ggs_remote_hub::serve` runs, so what this suite exercises is
+    // what a deployment serves. The bare `axum::serve` on the raw router once left the
+    // gate out entirely, and an absolute-form proxy probe answered 404 bytes instead of
+    // the shipped silence (the 2026-10-17 not-a-forward-proxy pass).
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let hub_addr = listener.local_addr().unwrap();
-    let app =
-        ggs_remote_hub::router(hub).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let app = ggs_remote_hub::gated(hub);
     let task = tokio::spawn(async move {
-        let app = app;
-        let _ = axum::serve(listener, app).await;
+        let _ = axum_server::from_tcp(listener).serve(app).await;
     });
 
     // The daemon needs its password before it will expose anything through a Hub (§20.3).
@@ -164,23 +165,29 @@ fn dechunk(body: &str) -> String {
     out
 }
 
-fn find_cookie(head: &str) -> Option<String> {
+/// One named cookie out of a response head (case-insensitive, any position).
+fn find_cookie_named(head: &str, name: &str) -> Option<String> {
     for line in head.lines() {
-        if let Some(rest) = line.strip_prefix("set-cookie: ") {
-            return rest.split(';').next().map(str::to_owned);
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("set-cookie:") && lower.contains(&format!("{name}=")) {
+            let rest = line.split_once(':').unwrap().1;
+            return rest.trim().split(';').next().map(str::to_owned);
         }
     }
     None
 }
 
-/// Login through the Hub for any PC's link: answers the session cookie and the CSRF value
-/// (the first half of every browser-facing test here).
+/// The joint login through the Hub (§20.14, one password entry): the Hub checks the password
+/// against the verifier the daemon pushed, forwards the same login, the daemon checks it
+/// again and issues its own session — BOTH cookies ride one answer, and every later request
+/// (including the WebSocket's upgrade) carries the pair. Answers the cookie header and the
+/// CSRF value (the first half of every browser-facing test here).
 async fn login_through(addr: std::net::SocketAddr, uuid: &str, password: &str) -> (String, String) {
     let base = format!("/u/{uuid}/");
     let (status, head, _body) = http(
         addr,
         "POST",
-        &format!("{base}api/login"),
+        &format!("{base}api/hub-login"),
         &[
             ("content-type", "application/json"),
             ("origin", &format!("http://127.0.0.1:{}", addr.port())),
@@ -188,8 +195,13 @@ async fn login_through(addr: std::net::SocketAddr, uuid: &str, password: &str) -
         &format!("{{\"password\":\"{password}\",\"device\":\"joint\",\"remember\":false}}"),
     )
     .await;
-    assert_eq!(status, 200, "login through the hub: {head}");
-    let cookie = find_cookie(&head).expect("a session cookie");
+    assert_eq!(status, 200, "the joint login through the hub: {head}");
+    // Both halves answered: the daemon's own session cookie AND the Hub's own.
+    let daemon_cookie =
+        find_cookie_named(&head, "ggsr").expect("the daemon's session cookie on the joint login");
+    let hub_cookie =
+        find_cookie_named(&head, "ggsrh").expect("the Hub's own session cookie on the joint login");
+    let cookie = format!("{daemon_cookie}; {hub_cookie}");
 
     let (status, _head, body) = http(
         addr,
@@ -199,7 +211,10 @@ async fn login_through(addr: std::net::SocketAddr, uuid: &str, password: &str) -
         "",
     )
     .await;
-    assert_eq!(status, 200);
+    assert_eq!(
+        status, 200,
+        "the pair of cookies carries the proxied session"
+    );
     let csrf = serde_json::from_str::<serde_json::Value>(&body).unwrap()["csrf"]
         .as_str()
         .unwrap()
@@ -435,12 +450,13 @@ async fn a_plain_http_hub_login_sets_a_cookie_the_browser_keeps() {
     // §7.6: the cookie's `Secure` follows the browser's scheme. A plain-HTTP Hub once got
     // a `Secure` cookie anyway — the login answered 200 while the browser silently dropped
     // it, so no session ever held (raw-socket tests never noticed; only browsers enforce).
+    // Both halves of the joint login follow the rule: the daemon's cookie and the Hub's own.
     let both = start().await;
     let base = format!("/u/{}/", both.uuid);
     let (status, head, _body) = http(
         both.hub_addr,
         "POST",
-        &format!("{base}api/login"),
+        &format!("{base}api/hub-login"),
         &[
             ("content-type", "application/json"),
             (
@@ -451,19 +467,86 @@ async fn a_plain_http_hub_login_sets_a_cookie_the_browser_keeps() {
         &format!("{{\"password\":\"{PASSWORD}\",\"device\":\"cookie-test\",\"remember\":false}}"),
     )
     .await;
-    assert_eq!(status, 200, "login through the hub: {head}");
-    let cookie_line = head
-        .lines()
-        .find(|line| line.to_ascii_lowercase().starts_with("set-cookie:"))
-        .expect("a Set-Cookie on login");
-    assert!(cookie_line.contains("HttpOnly"), "{cookie_line}");
-    assert!(
-        cookie_line.contains(&format!("Path={base}")),
-        "{cookie_line}"
-    );
-    assert!(
-        !cookie_line.to_ascii_lowercase().contains("secure"),
-        "a plain-HTTP browser drops a Secure cookie: {cookie_line}"
+    assert_eq!(status, 200, "the joint login through the hub: {head}");
+    for name in ["ggsr", "ggsrh"] {
+        let line = head
+            .lines()
+            .find(|line| {
+                line.to_ascii_lowercase().starts_with("set-cookie:")
+                    && line.to_ascii_lowercase().contains(&format!("{name}="))
+            })
+            .unwrap_or_else(|| panic!("a {name} Set-Cookie on the joint login: {head}"));
+        assert!(line.contains("HttpOnly"), "{line}");
+        assert!(line.contains(&format!("Path={base}")), "{line}");
+        assert!(
+            !line.to_ascii_lowercase().contains("secure"),
+            "a plain-HTTP browser drops a Secure cookie: {line}"
+        );
+    }
+}
+
+/// The server never forwards unrelated websites (the owner's 2026-10-17 direction,
+/// 防止服务器转发无关网站): an absolute-form request target — `GET http://example.com/…`,
+/// the open-proxy probe shape — closes with zero bytes at the hub's gate, EVEN with a live
+/// link and a valid joint session embedded in the URL (the control request proves both
+/// were good). And a foreign URL spelled INSIDE the link namespace rides the tunnel to
+/// the PC, whose own router answers 404 — example.com is never contacted; no leg of the
+/// relay has an outbound fetch to contact it with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_server_never_forwards_foreign_websites() {
+    let both = start().await;
+    let (cookie, _csrf) = login_through(both.hub_addr, &both.uuid, PASSWORD).await;
+
+    // The proxy-probe shapes, on raw sockets: zero bytes back — live link and valid
+    // session notwithstanding.
+    for target in [
+        "http://example.com/",
+        &format!("http://example.com/u/{}/api/session", both.uuid),
+    ] {
+        let mut stream = tokio::net::TcpStream::connect(both.hub_addr).await.unwrap();
+        stream
+            .write_all(
+                format!(
+                    "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: {cookie}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        assert!(
+            raw.is_empty(),
+            "{target}: the server answered {} bytes for a foreign site: {:?}",
+            raw.len(),
+            String::from_utf8_lossy(&raw)
+        );
+    }
+
+    // Control: the origin-form of the same link, same cookies — still serves.
+    let (status, _head, _body) = http(
+        both.hub_addr,
+        "GET",
+        &format!("/u/{}/api/session", both.uuid),
+        &[("cookie", &cookie)],
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "the drop above was the form, never the link");
+
+    // A foreign URL inside the link namespace is that PC's own local path: the daemon's
+    // router answers 404 through the tunnel — served locally, never dialed out.
+    let (status, _head, body) = http(
+        both.hub_addr,
+        "GET",
+        &format!("/u/{}/http://example.com/secret", both.uuid),
+        &[("cookie", &cookie)],
+        "",
+    )
+    .await;
+    assert_eq!(
+        status, 404,
+        "a foreign URL is a local path on the PC: {body}"
     );
 }
 
@@ -549,6 +632,9 @@ async fn an_offline_link_after_a_disconnect_shows_the_page() {
 struct FakeHub {
     /// Resolves once the generation finished a full handshake (its T_READY went out).
     ready: tokio::sync::oneshot::Receiver<(String, String)>,
+    /// Frames the test injects toward the daemon as if the Hub sent them — the fake's own
+    /// pump keeps answering heartbeats while these cross.
+    inject: tokio::sync::mpsc::UnboundedSender<Frame>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -557,6 +643,7 @@ struct FakeHub {
 /// through `ready` when its half of the handshake completes.
 fn spawn_fake_hub(port: u16) -> FakeHub {
     let (tx, ready) = tokio::sync::oneshot::channel();
+    let (inject_tx, mut inject_rx) = tokio::sync::mpsc::unbounded_channel::<Frame>();
     let task = tokio::task::spawn(async move {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
@@ -607,19 +694,33 @@ fn spawn_fake_hub(port: u16) -> FakeHub {
         let _ = tx.send((uuid, ready_msg.base_path));
 
         // Pump: answer the tunnel heartbeats; everything else is none of a fake's business.
-        while let Some(Ok(message)) = ws.next().await {
-            if let Message::Binary(bytes) = message {
-                for frame in Frame::decode_all(&bytes).unwrap_or_default() {
-                    if frame.ty == ty::T_PING {
-                        let _ = ws
-                            .send(Message::Binary(Frame::empty(ty::T_PONG).encode().into()))
-                            .await;
+        // Frames the test injects cross as the Hub's own, between the heartbeats.
+        loop {
+            tokio::select! {
+                message = ws.next() => {
+                    let Some(Ok(message)) = message else { break };
+                    if let Message::Binary(bytes) = message {
+                        for frame in Frame::decode_all(&bytes).unwrap_or_default() {
+                            if frame.ty == ty::T_PING {
+                                let _ = ws
+                                    .send(Message::Binary(Frame::empty(ty::T_PONG).encode().into()))
+                                    .await;
+                            }
+                        }
                     }
+                }
+                frame = inject_rx.recv() => {
+                    let Some(frame) = frame else { break };
+                    let _ = ws.send(Message::Binary(frame.encode().into())).await;
                 }
             }
         }
     });
-    FakeHub { ready, task }
+    FakeHub {
+        ready,
+        inject: inject_tx,
+        task,
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -704,6 +805,82 @@ async fn a_restarted_hub_is_rejoined_with_the_same_link() {
     assert_eq!(base_two, base_path);
     second.task.abort();
     let _ = second.task.await;
+}
+
+/// A frame for a session that already ended must not poison the tunnel (2026-10-17): the
+/// body chunks of a proxied HTTP request are HTTP_REQ-typed themselves, and one arriving
+/// after the daemon unbound its session (a 413, a body timeout, the done-close racing the
+/// Hub's forwarding) decoded as garbage, was read as a protocol violation, and dropped the
+/// tunnel under every OTHER browser multiplexed on it. The unroutable frame is dropped;
+/// the tunnel answers the next heartbeat as if nothing happened.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_body_chunk_for_an_ended_session_does_not_poison_the_tunnel() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::at(dir.path().join("remote"), dir.path().to_path_buf());
+    paths.ensure().unwrap();
+    let config = Config {
+        port: 0,
+        bind: "127.0.0.1".into(),
+        tls: TlsConfig {
+            mode: TlsMode::None,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    config.save(&paths).unwrap();
+    let daemon = Daemon::new(paths, config).unwrap();
+    let run = daemon.clone();
+    tokio::spawn(async move { ggs_remote::server::run(run).await });
+    daemon.auth.set_password(PASSWORD).await.unwrap();
+
+    let probe = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+
+    let fake = spawn_fake_hub(port);
+    daemon
+        .hub
+        .connect(ggs_remote::hub::Settings {
+            url: format!("http://127.0.0.1:{port}"),
+            join_key: String::new(),
+            fingerprint: String::new(),
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), fake.ready)
+        .await
+        .expect("the handshake")
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !daemon.hub.snapshot().online() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the daemon never went Online"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // The garbage: an HTTP_REQ-typed frame whose payload is a body chunk (raw bytes that
+    // decode as no HttpReq head) for a session the daemon never bound.
+    let late = Frame::new(
+        ty::HTTP_REQ,
+        ggs_remote::ws::frame::Enc::Raw,
+        vec![0xFF, 0xFE, 0xFD, 0xFC],
+    )
+    .with_session(4242);
+    fake.inject.send(late).unwrap();
+
+    // The tunnel survives: the poison of the old code dropped it the moment the frame
+    // arrived (and with the fake's one-connection listener gone, it stayed offline);
+    // the fixed daemon is still Online a moment later.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        daemon.hub.snapshot().online(),
+        "the tunnel was poisoned by an unroutable frame"
+    );
+    fake.task.abort();
+    let _ = fake.task.await;
 }
 
 // ==== The multi-PC joint suite (§20.12): one Hub, several real daemons ====

@@ -39,11 +39,60 @@ pub struct Tunnel {
     pub conns: Mutex<HashMap<u32, mpsc::UnboundedSender<ToConn>>>,
     pub since: Instant,
     /// The per-tunnel daily byte budget (§20.8 `bytes_per_day_per_tunnel`); `None` = off.
-    pub budget: Option<AtomicU64>,
+    /// The day boundary is tracked (`DayBudget::day`): a new UTC day refills the allowance
+    /// — before it was, "per day" was really per-connection, and a PC that spent day one's
+    /// budget was refused for the whole life of the tunnel.
+    budget: Option<Mutex<DayBudget>>,
+    /// The configured allowance each new day refills to.
+    budget_cap: u64,
     /// The operator's kill switch lands here (`blocklist`): one stored permit wakes the run
     /// loop's `killed` arm, whose exit path unregisters the tunnel and tells its browsers
     /// the plain `pc-offline` — a blocked PC looks exactly like an away one.
     pub killed: Notify,
+    /// The PC's password verifier (§20.14): pushed as `T_CREDENTIAL` right after `T_READY`
+    /// and again on every password change. `None` until it arrives — an old daemon never
+    /// sends one, and the joint login treats that link as needing an upgrade.
+    credential: Mutex<Option<Credential>>,
+}
+
+/// What remains of today's byte allowance, and which UTC day it belongs to.
+struct DayBudget {
+    day: u64,
+    left: u64,
+}
+
+/// The UTC day number since the Unix epoch — the budget's refill boundary.
+fn today_number() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() / 86_400)
+        .unwrap_or(0)
+}
+
+/// The verifier half of the joint login (§20.14): the daemon's Argon2id hash, the credential
+/// epoch it belongs to, and the PC's display language for the Hub's own login page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Credential {
+    pub hash: String,
+    pub epoch: u64,
+    pub lang: String,
+}
+
+impl Tunnel {
+    pub fn credential(&self) -> Option<Credential> {
+        self.credential.lock().unwrap().clone()
+    }
+
+    /// The PC presented (or changed) its verifier: store it, and — on an epoch change —
+    /// end every Hub-side login issued under the old password, exactly as the daemon ends
+    /// its own sessions (§7.6's rule carried across the relay). Answers whether the epoch
+    /// moved, so the caller can drop the link sessions.
+    pub fn set_credential(&self, next: Credential) -> bool {
+        let mut slot = self.credential.lock().unwrap();
+        let moved = slot.as_ref().is_some_and(|old| old.epoch != next.epoch);
+        *slot = Some(next);
+        moved
+    }
 }
 
 impl Tunnel {
@@ -109,18 +158,38 @@ impl Tunnel {
         self.tx.send(frame.encode()).is_ok()
     }
 
-    /// The tunnel's remaining daily byte budget, when one is configured.
-    #[allow(deprecated)] // `fetch_update` was renamed `try_update` in 1.99; the crate floor
-                         // (1.94) predates the new name, so the old one stays until the floor passes it.
+    /// The tunnel's remaining daily byte budget, when one is configured. A spend that
+    /// does not fit is refused whole (nothing deducted), the same accounting the atomic
+    /// before it kept.
     pub fn spend(&self, bytes: u64) -> bool {
+        self.spend_on_day(today_number(), bytes)
+    }
+
+    /// The link's remaining allowance as (day, left) — what a replacement tunnel for the
+    /// same uuid inherits. Yesterday's pair crosses too: the day-rollover refill stays
+    /// `spend_on_day`'s own rule, so the first spend of a new day still refills to cap.
+    fn carried_budget(&self) -> Option<(u64, u64)> {
+        let budget = self.budget.as_ref()?;
+        let budget = budget.lock().unwrap();
+        Some((budget.day, budget.left))
+    }
+
+    fn spend_on_day(&self, day: u64, bytes: u64) -> bool {
         let Some(budget) = &self.budget else {
             return true;
         };
-        budget
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
-                left.checked_sub(bytes)
-            })
-            .is_ok()
+        let mut budget = budget.lock().unwrap();
+        if budget.day != day {
+            budget.day = day;
+            budget.left = self.budget_cap;
+        }
+        match budget.left.checked_sub(bytes) {
+            Some(left) => {
+                budget.left = left;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Take this tunnel off the air (§20.6 `blocklist`): the permit wakes the run loop's
@@ -157,6 +226,41 @@ pub struct VisitorBucket {
     pub seen: HashMap<IpAddr, Instant>,
 }
 
+/// One link's browser login on the Hub side of the joint login (§20.14): the cookie token's
+/// SHA-256 (never the token), stamped with the credential epoch it was issued under. The
+/// expiry rules mirror the daemon's own sessions — 30 days from issue when remembered, 12
+/// hours sliding otherwise — so the two halves of a joint login age out together.
+#[derive(Debug, Clone)]
+pub struct LinkSession {
+    pub epoch: u64,
+    pub created: Instant,
+    pub last_seen: Instant,
+    pub remember: bool,
+    pub ip: IpAddr,
+}
+
+/// A link's login lives 30 days from issue when remembered; an unremembered one 12 hours
+/// from its last use (sliding) — the daemon's own constants (§7.6), mirrored.
+pub const LINK_REMEMBER: Duration = Duration::from_secs(30 * 24 * 3600);
+pub const LINK_SLIDING: Duration = Duration::from_secs(12 * 3600);
+/// How many logins one link may carry at once — the daemon's device list holds the same
+/// order of devices, and the oldest falls out past it.
+pub const LINK_SESSIONS_CAP: usize = 64;
+
+impl LinkSession {
+    fn valid_at(&self, epoch: u64, now: Instant) -> bool {
+        if self.epoch != epoch {
+            return false;
+        }
+        let expires = if self.remember {
+            self.created + LINK_REMEMBER
+        } else {
+            self.last_seen + LINK_SLIDING
+        };
+        now < expires
+    }
+}
+
 pub struct Hub {
     pub config: Config,
     pub tunnels: Mutex<HashMap<String, Arc<Tunnel>>>,
@@ -169,11 +273,19 @@ pub struct Hub {
     /// not reset it: a personal remote-workbench link has a handful of viewers, a link
     /// shared like a public site hundreds, and cycling the tunnel must not launder the count.
     pub visitors: Mutex<HashMap<String, VisitorBucket>>,
+    /// The joint login's Hub-side sessions (§20.14): uuid → token hash → session. Nothing
+    /// persisted — a Hub restart asks every browser for the password once more, which is
+    /// the whole of what it costs.
+    pub link_sessions: Mutex<HashMap<String, HashMap<String, LinkSession>>>,
     /// The operator's audit trail (§20.6 `audit_log`); a no-op when off.
     pub audit: Audit,
     /// The operator's kill switch (§20.6 `blocklist`); inert when off.
     pub blocklist: Blocklist,
     pub cache: crate::cache::AssetCache,
+    /// `trusted_proxies` parsed once at start: the CIDR strings were re-parsed on every
+    /// browser request and every tunnel handshake (`peer_ip`). Unparseable entries were
+    /// silently ignored then and still are.
+    pub trusted_nets: Vec<ipnet::IpNet>,
 }
 
 pub const HELLO_WINDOW: Duration = Duration::from_secs(60);
@@ -192,6 +304,11 @@ impl Hub {
         let cache = crate::cache::AssetCache::new(config.asset_cache_mb.max(1) << 20);
         let audit = Audit::open(&config.audit_log);
         let blocklist = Blocklist::open(&config.blocklist);
+        let trusted_nets = config
+            .trusted_proxies
+            .iter()
+            .filter_map(|cidr| cidr.parse::<ipnet::IpNet>().ok())
+            .collect();
         Arc::new(Hub {
             config,
             tunnels: Mutex::new(HashMap::new()),
@@ -207,9 +324,11 @@ impl Hub {
                 bytes_down: AtomicU64::new(0),
             },
             visitors: Mutex::new(HashMap::new()),
+            link_sessions: Mutex::new(HashMap::new()),
             audit,
             blocklist,
             cache,
+            trusted_nets,
         })
     }
 
@@ -223,20 +342,47 @@ impl Hub {
     }
 
     pub fn alloc_session(&self) -> u32 {
-        self.next_session.fetch_add(1, Ordering::Relaxed)
+        // Session 0 is the browser-side spelling of "control" (§6.1); the counter wraps
+        // eventually, and the wrap must not hand the reserved id out.
+        let mut id = self.next_session.fetch_add(1, Ordering::Relaxed);
+        if id == 0 {
+            id = self.next_session.fetch_add(1, Ordering::Relaxed);
+        }
+        id
     }
 
     /// Build a tunnel handle bound to this Hub's writer and registration sequence.
     pub fn new_tunnel(&self, uuid: String, tx: mpsc::UnboundedSender<Vec<u8>>) -> Tunnel {
+        // The day's remaining allowance crosses the reconnect: the replacement tunnel
+        // inherits the link's spent budget — the uuid-keyed reasoning of the visitor
+        // table, applied to bytes. Without it `bytes_per_day_per_tunnel` was really per
+        // connection: a daemon that reconnected after spending it drew a fresh
+        // allowance, repeatedly. (The old tunnel is still registered at this point —
+        // `register_within_limit` swaps it out just after.)
+        let carried = self
+            .tunnels
+            .lock()
+            .unwrap()
+            .get(&uuid)
+            .and_then(|old| old.carried_budget());
         Tunnel {
             uuid,
             id: self.next_tunnel.fetch_add(1, Ordering::Relaxed),
             tx,
             conns: Mutex::new(HashMap::new()),
             since: Instant::now(),
-            budget: (self.config.bytes_per_day_per_tunnel > 0)
-                .then(|| AtomicU64::new(self.config.bytes_per_day_per_tunnel)),
+            budget: (self.config.bytes_per_day_per_tunnel > 0).then(|| {
+                Mutex::new(match carried {
+                    Some((day, left)) => DayBudget { day, left },
+                    None => DayBudget {
+                        day: today_number(),
+                        left: self.config.bytes_per_day_per_tunnel,
+                    },
+                })
+            }),
+            budget_cap: self.config.bytes_per_day_per_tunnel,
             killed: Notify::new(),
+            credential: Mutex::new(None),
         }
     }
 
@@ -257,6 +403,27 @@ impl Hub {
             self.counters.tunnels_total.fetch_add(1, Ordering::Relaxed);
         }
         displaced
+    }
+
+    /// Register a tunnel under the capacity ceiling with the check and the insert under
+    /// ONE lock — the old check-then-register pair let two concurrent handshakes for
+    /// different uuids each observe `count == max - 1` and both register, overshooting
+    /// `max_tunnels`. A same-uuid replacement never counts against the ceiling. Answers
+    /// `None` when refused at capacity; else the displaced tunnel, if any.
+    pub fn register_within_limit(
+        &self,
+        uuid: String,
+        tunnel: Arc<Tunnel>,
+    ) -> Option<Option<Arc<Tunnel>>> {
+        let mut tunnels = self.tunnels.lock().unwrap();
+        if !tunnels.contains_key(&uuid) && tunnels.len() >= self.config.max_tunnels {
+            return None;
+        }
+        let displaced = tunnels.insert(uuid, tunnel);
+        if displaced.is_none() {
+            self.counters.tunnels_total.fetch_add(1, Ordering::Relaxed);
+        }
+        Some(displaced)
     }
 
     pub fn unregister(&self, uuid: &str, id: u64) {
@@ -342,6 +509,94 @@ impl Hub {
         count(&self.ips.hellos, ip, HELLO_WINDOW) <= self.config.handshake_rate
     }
 
+    /// Issue the Hub-side half of a joint login (§20.14): a fresh 256-bit cookie token for
+    /// one link, stamped with the credential epoch the password was verified under. Answers
+    /// the cookie's clear value — the only time it exists — and its `Max-Age`.
+    pub fn issue_link_session(
+        &self,
+        uuid: &str,
+        epoch: u64,
+        remember: bool,
+        ip: IpAddr,
+    ) -> (String, u64) {
+        use base64::Engine;
+        let raw = crate::util::random_bytes::<32>();
+        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
+        let hash = token_hash(&token);
+        let now = Instant::now();
+        let mut links = self.link_sessions.lock().unwrap();
+        let sessions = links.entry(uuid.to_owned()).or_default();
+        sessions.retain(|_, session| session.valid_at(epoch, now));
+        while sessions.len() >= LINK_SESSIONS_CAP {
+            let oldest = sessions
+                .iter()
+                .min_by_key(|(_, session)| session.last_seen)
+                .map(|(hash, _)| hash.clone());
+            match oldest {
+                Some(oldest) => {
+                    sessions.remove(&oldest);
+                }
+                None => break,
+            }
+        }
+        sessions.insert(
+            hash,
+            LinkSession {
+                epoch,
+                created: now,
+                last_seen: now,
+                remember,
+                ip,
+            },
+        );
+        // A dead link's table leaves with it — bounded by the ever-online links.
+        if links.len() > 1024 {
+            let live: std::collections::HashSet<String> =
+                self.tunnels.lock().unwrap().keys().cloned().collect();
+            links.retain(|uuid, sessions| live.contains(uuid) && !sessions.is_empty());
+        }
+        let max_age = if remember {
+            LINK_REMEMBER.as_secs()
+        } else {
+            LINK_SLIDING.as_secs()
+        };
+        (token, max_age)
+    }
+
+    /// The gate's check (§20.14): the cookie names a still-valid login issued under the
+    /// link's CURRENT credential epoch. A sliding session's `last_seen` moves with it.
+    pub fn link_session_valid(&self, uuid: &str, token: &str, epoch: u64) -> bool {
+        let hash = token_hash(token);
+        let now = Instant::now();
+        let mut links = self.link_sessions.lock().unwrap();
+        let Some(session) = links.get_mut(uuid).and_then(|s| s.get_mut(&hash)) else {
+            return false;
+        };
+        if !session.valid_at(epoch, now) {
+            return false;
+        }
+        session.last_seen = now;
+        true
+    }
+
+    /// The password changed on the PC (a new `T_CREDENTIAL` epoch): every login the Hub
+    /// issued under the old verifier ends, exactly as the daemon ends its own sessions.
+    pub fn drop_link_sessions(&self, uuid: &str) {
+        if let Some(sessions) = self.link_sessions.lock().unwrap().get_mut(uuid) {
+            sessions.clear();
+        }
+    }
+}
+
+/// hex(SHA-256(token)) — the stored form of a link-session cookie, so a Hub memory dump
+/// holds no usable credentials (the same rule the daemon's sessions follow, §7.6).
+fn token_hash(token: &str) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(token.as_bytes());
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+impl Hub {
     pub fn login_entry(&self, ip: IpAddr, uuid: &str) -> bool {
         count(&self.ips.logins, (ip, uuid.to_owned()), LOGIN_WINDOW) <= LOGIN_MAX
     }
@@ -448,6 +703,81 @@ mod tests {
 
     fn hub() -> Arc<Hub> {
         Hub::new(Config::default())
+    }
+
+    #[test]
+    fn the_daily_budget_spends_and_refills_on_a_new_day() {
+        let hub = Hub::new(Config {
+            bytes_per_day_per_tunnel: 100,
+            ..Config::default()
+        });
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let t = Arc::new(hub.new_tunnel("u".into(), tx));
+        assert!(t.spend_on_day(20_000, 60));
+        assert!(t.spend_on_day(20_000, 40));
+        assert!(!t.spend_on_day(20_000, 1), "the day's allowance is spent");
+        // A refused spend deducts nothing; a new UTC day refills to the configured amount.
+        assert!(!t.spend_on_day(20_000, 100));
+        assert!(t.spend_on_day(20_001, 100));
+        assert!(!t.spend_on_day(20_001, 1));
+    }
+
+    #[test]
+    fn a_tunnel_without_a_budget_spends_freely() {
+        let hub = hub();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let t = hub.new_tunnel("u".into(), tx);
+        assert!(t.spend(u64::MAX / 2));
+        assert!(t.spend(u64::MAX / 2));
+    }
+
+    #[test]
+    fn a_reconnect_inherits_the_days_spent_budget() {
+        // `new_tunnel` runs while the old tunnel is still registered (the swap happens
+        // right after), so the replacement sees the link's remaining allowance — a
+        // daemon reconnecting on a spent day must not draw a fresh one.
+        let hub = Hub::new(Config {
+            bytes_per_day_per_tunnel: 100,
+            ..Config::default()
+        });
+        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        let a = Arc::new(hub.new_tunnel("u".into(), tx_a));
+        assert!(hub.register("u".into(), a.clone()).is_none());
+        assert!(a.spend_on_day(20_000, 90));
+        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        let b = hub.new_tunnel("u".into(), tx_b);
+        assert!(b.spend_on_day(20_000, 10), "the day's remainder carried");
+        assert!(
+            !b.spend_on_day(20_000, 1),
+            "a reconnect cannot launder a spent daily budget"
+        );
+        // A brand-new link still starts the day full.
+        let (tx_c, _rx_c) = mpsc::unbounded_channel();
+        let c = hub.new_tunnel("fresh".into(), tx_c);
+        assert!(c.spend_on_day(20_000, 100));
+    }
+
+    #[test]
+    fn registration_is_refused_atomically_at_the_ceiling() {
+        let hub = Hub::new(Config {
+            max_tunnels: 1,
+            ..Config::default()
+        });
+        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        let (tx_c, _rx_c) = mpsc::unbounded_channel();
+        let a = Arc::new(hub.new_tunnel("a".into(), tx_a));
+        let b = Arc::new(hub.new_tunnel("b".into(), tx_b));
+        let c = Arc::new(hub.new_tunnel("c".into(), tx_c));
+        assert!(hub.register_within_limit("a".into(), a).is_some());
+        // The second distinct PC is refused — one lock holds the check and the insert, so
+        // a concurrent pair cannot each pass the other's count.
+        assert!(hub.register_within_limit("b".into(), b).is_none());
+        assert_eq!(hub.tunnel_count(), 1);
+        // A same-uuid replacement never counts against the ceiling.
+        let displaced = hub.register_within_limit("a".into(), c).unwrap().unwrap();
+        assert_eq!(hub.tunnel_count(), 1);
+        assert_eq!(displaced.uuid, "a");
     }
 
     #[test]

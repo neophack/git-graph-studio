@@ -136,7 +136,15 @@ pub struct Daemon {
     pub last_foreign: AtomicU64,
     pub started: Instant,
     pub shutdown: Notify,
+    /// Set the moment shutdown is requested over the admin API: the loopback `/admin/status`
+    /// answers 503 while the process drains, so a restart's install/start pass — which asks
+    /// the live daemon before touching it — never mistakes a draining daemon for a serving
+    /// one and leaves nothing running behind it.
+    pub shutdown_requested: AtomicBool,
     pub rebind: Notify,
+    /// The password (or its epoch) changed: the Hub tunnel re-pushes its verifier (§20.14)
+    /// the moment this fires — the relay's own sessions must end with the daemon's.
+    pub auth_changed: Notify,
     pub relay_url_base: Mutex<String>,
     pub ca_fingerprint: Mutex<String>,
     pub cache: crate::cache::AssetCache,
@@ -180,7 +188,9 @@ impl Daemon {
             last_foreign: AtomicU64::new(0),
             started: Instant::now(),
             shutdown: Notify::new(),
+            shutdown_requested: AtomicBool::new(false),
             rebind: Notify::new(),
+            auth_changed: Notify::new(),
             relay_url_base: Mutex::new(String::new()),
             ca_fingerprint: Mutex::new(String::new()),
             cache: crate::cache::AssetCache::new(Some(paths.cache_dir())),
@@ -248,7 +258,8 @@ impl Daemon {
     }
 
     /// The password changed or every device was signed out: clear sessions, rotate resource
-    /// tokens and kick every connection with 4401 (R9).
+    /// tokens and kick every connection with 4401 (R9). The Hub tunnel re-pushes its
+    /// verifier (§20.14) — the relay's link sessions end with these.
     pub fn credentials_changed(&self, reason: &str) {
         self.sessions.lock().unwrap().clear();
         self.resource_tokens.lock().unwrap().clear();
@@ -258,6 +269,7 @@ impl Daemon {
             code: crate::ws::msg::code::CREDENTIALS,
             reason: reason.to_owned(),
         });
+        self.auth_changed.notify_one();
         crate::info!("credentials changed ({reason}): every session ended");
     }
 

@@ -12,5 +12,8 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
 FROM scratch
 COPY --from=build /ggs-remote-hub /ggs-remote-hub
+# Both listen ports are unprivileged; the hub needs no root (and a scratch image has no
+# user database, so the uid is numeric).
+USER 65534
 ENTRYPOINT ["/ggs-remote-hub", "--config", "/etc/ggs-hub/hub.toml"]
 EXPOSE 8443 8080

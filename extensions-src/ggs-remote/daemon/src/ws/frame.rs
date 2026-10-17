@@ -89,6 +89,9 @@ pub mod ty {
     pub const T_REJECTED: u8 = 0x89;
     pub const T_REPLACED: u8 = 0x8A;
     pub const T_PONG: u8 = 0x8B;
+    /// The daemon's password verifier (§20.14) — pushed after `T_READY`, again on every
+    /// password change.
+    pub const T_CREDENTIAL: u8 = 0x8C;
 }
 
 /// Flag bits (§6.1).

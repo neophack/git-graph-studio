@@ -130,6 +130,10 @@ export const PATH_GATED: Record<
 	scm_blame: REPO_AND_PATH,
 	repo_head: REPO_ANCHORED,
 	repo_submodules: { args: ['repo'] },
+	// The workspace-wide replace (2026-10-16 audit of the command surface): it rewrites
+	// every matching file under `repo` — without this entry the gate let a session name
+	// any absolute path as the tree to rewrite.
+	replace_in_files: REPO_ANCHORED,
 	// Search, symbols, analysis — everything that walks a tree.
 	search_workspace: { args: ['repo'] },
 	list_files: REPO_ANCHORED,
@@ -149,6 +153,13 @@ export const PATH_GATED: Record<
 	analysis_import_graph: REPO_ANCHORED,
 	analysis_module_graph: REPO_ANCHORED,
 	analysis_module_diagram: { args: ['repo', 'focus'], relativeAllowed: true },
+	// The Explorer drop's copy-in (2026-10-16 audit of the command surface): the desktop
+	// drag-drop's `sources` may come from anywhere on the machine, but a REMOTE session
+	// reaching anywhere on the machine is the exfiltration chain the boundary exists to
+	// stop (copy `~/.ggs/keys/ai-providers.key` into the workspace, then read it). Both
+	// ends stay inside the open folders — copying between two folders of one machine is
+	// the system file manager's job (the same reasoning that retired fs_import/fs_export).
+	copy_into: { args: ['sources', 'dest_dir'] },
 	// The git/scm write set.
 	git_commit: REPO_ANCHORED,
 	git_discard: REPO_AND_PATH,
@@ -304,14 +315,19 @@ export async function gateInvokeCanonical(
 	const entries: { name: string; spell: string }[] = [];
 	for (const name of rule.args) {
 		const value = record[name];
-		if (typeof value !== 'string') continue;
-		if (absoluteForm(value) !== null) {
-			entries.push({ name, spell: value });
-			continue;
-		}
-		if (rule.relativeAllowed && name !== 'repo') {
-			const resolved = resolveRelative(value, record, policy.roots);
-			if (resolved !== null) entries.push({ name, spell: resolved });
+		if (value === undefined || value === null) continue;
+		// An array argument (copy_into's `sources`) gates every string member the same
+		// way — one outside value refuses the whole invoke.
+		for (const item of Array.isArray(value) ? value : [value]) {
+			if (typeof item !== 'string') continue;
+			if (absoluteForm(item) !== null) {
+				entries.push({ name, spell: item });
+				continue;
+			}
+			if (rule.relativeAllowed && name !== 'repo') {
+				const resolved = resolveRelative(item, record, policy.roots);
+				if (resolved !== null) entries.push({ name, spell: resolved });
+			}
 		}
 	}
 	if (entries.length === 0) return;
@@ -364,28 +380,32 @@ export function gateInvoke(
 	for (const name of rule.args) {
 		const value = record[name];
 		if (value === undefined || value === null) continue;
-		if (typeof value !== 'string') continue;
-		const absolute = absoluteForm(value) !== null;
-		if (!absolute) {
-			if (rule.relativeAllowed && name !== 'repo') {
-				// A relative value is not a free pass: the backend joins it against the
-				// (gated) repo and reads raw, so confine the joined form like any path.
-				const resolved = resolveRelative(value, record, roots);
-				if (resolved === null || !withinRoots(resolved, allowed)) {
-					throw new Error(`${command}: ${value} is outside the folders this window has open`);
+		// An array argument (copy_into's `sources`) checks every string member: one
+		// outside value refuses the whole invoke.
+		for (const item of Array.isArray(value) ? value : [value]) {
+			if (typeof item !== 'string') continue;
+			const absolute = absoluteForm(item) !== null;
+			if (!absolute) {
+				if (rule.relativeAllowed && name !== 'repo') {
+					// A relative value is not a free pass: the backend joins it against the
+					// (gated) repo and reads raw, so confine the joined form like any path.
+					const resolved = resolveRelative(item, record, roots);
+					if (resolved === null || !withinRoots(resolved, allowed)) {
+						throw new Error(`${command}: ${item} is outside the folders this window has open`);
+					}
+					continue;
 				}
-				continue;
+				throw new Error(`${command}: ${name} must be an absolute path inside the open folders`);
 			}
-			throw new Error(`${command}: ${name} must be an absolute path inside the open folders`);
-		}
-		if (!withinRoots(value, allowed)) {
-			if (rule.prefixTowardRoot && towardRoot(value, allowed)) continue;
-			if (rule.sameRootOnly || rule.prefixTowardRoot) {
-				throw new Error(
-					'a remote session cannot open new folders on this PC — open one from the PC, or spawn a sandboxed window'
-				);
+			if (!withinRoots(item, allowed)) {
+				if (rule.prefixTowardRoot && towardRoot(item, allowed)) continue;
+				if (rule.sameRootOnly || rule.prefixTowardRoot) {
+					throw new Error(
+						'a remote session cannot open new folders on this PC — open one from the PC, or spawn a sandboxed window'
+					);
+				}
+				throw new Error(`${command}: ${item} is outside the folders this window has open`);
 			}
-			throw new Error(`${command}: ${value} is outside the folders this window has open`);
 		}
 	}
 }

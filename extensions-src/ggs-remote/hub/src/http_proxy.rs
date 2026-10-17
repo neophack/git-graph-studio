@@ -6,7 +6,7 @@
 
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{header, HeaderName, HeaderValue, Method, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures_util::Stream;
@@ -66,14 +66,7 @@ fn cache_key_of(
 }
 
 pub fn peer_ip(hub: &Hub, peer: IpAddr, request: &Request) -> IpAddr {
-    let trusted = (hub.config.trust_proxy && peer.is_loopback())
-        || hub
-            .config
-            .trusted_proxies
-            .iter()
-            .filter_map(|cidr| cidr.parse::<ipnet::IpNet>().ok())
-            .any(|net| net.contains(&peer));
-    if trusted {
+    if peer_trusted(hub, peer) {
         if let Some(ip) = request
             .headers()
             .get("x-forwarded-for")
@@ -89,15 +82,34 @@ pub fn peer_ip(hub: &Hub, peer: IpAddr, request: &Request) -> IpAddr {
     peer
 }
 
+/// Whether the DIRECT peer may speak the forwarded headers (§20.6): the loopback front
+/// proxy under `trust_proxy`, or an address inside `trusted_proxies` — parsed once at
+/// start, not per request.
+pub fn peer_trusted(hub: &Hub, peer: IpAddr) -> bool {
+    (hub.config.trust_proxy && peer.is_loopback())
+        || hub.trusted_nets.iter().any(|net| net.contains(&peer))
+}
+
+/// The two addresses one browser request carries at the Hub: `peer` is the DIRECT socket
+/// address (the trusted-proxy gate for the headers the Hub itself stamps — never a
+/// browser's own word), `client` the address behind the proxy chain (`peer_ip`'s answer)
+/// — what the PC and the rate limiters see.
+#[derive(Clone, Copy)]
+pub struct Addresses {
+    pub peer: IpAddr,
+    pub client: IpAddr,
+}
+
 pub async fn proxy(
     hub: Arc<Hub>,
     tunnel: Arc<Tunnel>,
     uuid: String,
     rest: String,
     base_path: String,
-    ip: IpAddr,
+    addr: Addresses,
     request: Request,
 ) -> Response {
+    let Addresses { peer, client: ip } = addr;
     hub.counters.http_requests.fetch_add(1, Ordering::Relaxed);
     let method = request.method().clone();
     // `rest` is the axum wildcard capture and never carries a leading slash, so the login
@@ -126,15 +138,16 @@ pub async fn proxy(
     };
 
     let session = hub.alloc_session();
-    if tunnel.sessions() >= hub.config.sessions_per_tunnel {
+    // The slot owns the session entry from here: reserved against the ceiling in one
+    // critical section (a check-then-insert race let a burst of concurrent requests each
+    // pass the check before any insert, overshooting `sessions_per_tunnel` without bound),
+    // and a request whose browser vanishes before the PC's answer head arrives is
+    // cancelled mid-await, which before this guard never revisited its entry — a tunnel's
+    // ceiling slowly filled with ghosts until every request 429'd.
+    let (conn_tx, mut conn_rx) = mpsc::unbounded_channel::<ToConn>();
+    if !tunnel.reserve_conn(hub.config.sessions_per_tunnel, session, conn_tx) {
         return too_many_requests();
     }
-    let (conn_tx, mut conn_rx) = mpsc::unbounded_channel::<ToConn>();
-    tunnel.conns.lock().unwrap().insert(session, conn_tx);
-    // The slot owns the session entry from here: a request whose browser vanishes before
-    // the PC's answer head arrives is cancelled mid-await, and before this guard nothing
-    // revisited its entry — a tunnel's ceiling slowly filled with ghosts until every
-    // request 429'd (an 8-slot tunnel bricked by eight dropped connections).
     let mut slot = SessionSlot {
         tunnel: tunnel.clone(),
         session,
@@ -149,7 +162,7 @@ pub async fn proxy(
         ip: ip.to_string(),
         base_path: base_path.clone(),
     };
-    for (name, value) in hub_extras(&hub.config, &base_path, ip, &headers) {
+    for (name, value) in hub_extras(&hub, peer, &base_path, ip, &headers) {
         head.headers.insert(name, value);
     }
     let mut frames = vec![Frame::msgpack(ty::HTTP_REQ, &head).with_session(session)];
@@ -161,13 +174,24 @@ pub async fn proxy(
             last.flags |= flag::FIN;
         }
     }
-    for frame in &frames {
-        hub.counters
-            .bytes_down
-            .fetch_add(frame.encode().len() as u64, Ordering::Relaxed);
-    }
+    // One encode pass — the old pair of loops encoded every frame twice (once for the
+    // byte counter, once inside `send`) on every proxied request.
+    let mut uplink = 0u64;
+    let mut encoded = Vec::with_capacity(frames.len());
     for frame in frames {
-        if !tunnel.send(&frame) {
+        let bytes = frame.encode();
+        uplink += bytes.len() as u64;
+        encoded.push(bytes);
+    }
+    hub.counters.bytes_down.fetch_add(uplink, Ordering::Relaxed);
+    // The uplink rides the same daily budget the answers do (§20.8) — an asymmetric
+    // budget let a logged-in browser push 1 MiB bodies at the http rate without spending
+    // a byte of it, while every answer the PC sent back paid.
+    if !tunnel.spend(uplink) {
+        return budget_spent();
+    }
+    for bytes in encoded {
+        if tunnel.tx.send(bytes).is_err() {
             return gone_offline();
         }
     }
@@ -182,24 +206,26 @@ pub async fn proxy(
     // The streamed body owns the session from here — its drop is the cleanup.
     slot.disarm();
     let status = StatusCode::from_u16(http.status).unwrap_or(StatusCode::BAD_GATEWAY);
-    hub.audit.log(
-        "http",
-        &[
-            ("uuid", serde_json::json!(uuid)),
-            ("ip", serde_json::json!(ip.to_string())),
-            ("method", serde_json::json!(method.as_str())),
-            ("path", serde_json::json!(mask_path(&format!("/{rest}")))),
-            ("status", serde_json::json!(http.status)),
-            (
-                "content_type",
-                serde_json::json!(header_of(&http.headers, "content-type").unwrap_or_default()),
-            ),
-            (
-                "content_length",
-                serde_json::json!(header_of(&http.headers, "content-length")),
-            ),
-        ],
-    );
+    if hub.audit.enabled() {
+        hub.audit.log(
+            "http",
+            &[
+                ("uuid", serde_json::json!(uuid)),
+                ("ip", serde_json::json!(ip.to_string())),
+                ("method", serde_json::json!(method.as_str())),
+                ("path", serde_json::json!(mask_path(&format!("/{rest}")))),
+                ("status", serde_json::json!(http.status)),
+                (
+                    "content_type",
+                    serde_json::json!(header_of(&http.headers, "content-type").unwrap_or_default()),
+                ),
+                (
+                    "content_length",
+                    serde_json::json!(header_of(&http.headers, "content-length")),
+                ),
+            ],
+        );
+    }
     let mut builder = Response::builder().status(status);
     for (name, value) in &http.headers {
         // Reframing is ours: the framing headers would clash with the streamed body —
@@ -217,13 +243,30 @@ pub async fn proxy(
             HeaderName::from_bytes(name.as_bytes()),
             HeaderValue::from_str(value),
         ) {
-            if builder
-                .headers_ref()
-                .is_some_and(|set| set.contains_key(&name))
+            // Singleton headers keep the first spelling; `set-cookie` is repeatable by
+            // design and every instance must cross — a sign-in that sets two cookies
+            // used to deliver one.
+            if name != header::SET_COOKIE
+                && builder
+                    .headers_ref()
+                    .is_some_and(|set| set.contains_key(&name))
             {
-                continue; // a duplicated header is the first one's
+                continue;
             }
             builder = builder.header(name, value);
+        }
+    }
+    // The sign-out ends the Hub-side login with the daemon's own (§20.14): one password
+    // signed in on both halves, one sign-out leaves both.
+    if method == Method::POST && rest == "api/logout" && status.is_success() {
+        let secure = cookie_secure(&hub, peer, &headers);
+        let cookie = format!(
+            "{}=; HttpOnly; SameSite=Strict; Path={base_path}; Max-Age=0{}",
+            crate::login::COOKIE,
+            if secure { "; Secure" } else { "" }
+        );
+        if let Ok(value) = HeaderValue::from_str(&cookie) {
+            builder = builder.header(header::SET_COOKIE, value);
         }
     }
 
@@ -269,13 +312,13 @@ fn header_of(headers: &[(String, String)], name: &str) -> Option<String> {
 }
 
 /// Chunk `MAX_PAYLOAD` at a time; the caller marks the last FIN.
-fn body_frames(session: u32, body: &[u8]) -> Vec<Frame> {
+pub(crate) fn body_frames(session: u32, body: &[u8]) -> Vec<Frame> {
     body.chunks(crate::frame::MAX_PAYLOAD)
         .map(|chunk| Frame::raw(ty::HTTP_REQ, session, chunk.to_vec()))
         .collect()
 }
 
-async fn wait_head(rx: &mut mpsc::UnboundedReceiver<ToConn>) -> Option<HttpRes> {
+pub(crate) async fn wait_head(rx: &mut mpsc::UnboundedReceiver<ToConn>) -> Option<HttpRes> {
     loop {
         match rx.recv().await {
             Some(ToConn::Bytes(bytes)) => {
@@ -293,17 +336,34 @@ async fn wait_head(rx: &mut mpsc::UnboundedReceiver<ToConn>) -> Option<HttpRes> 
     }
 }
 
+/// The `Secure` mark a link cookie carries: the scheme the browser actually spoke — a
+/// front proxy's `x-forwarded-proto` when THIS request's direct peer is one of the
+/// trusted proxies (`peer_trusted`, the same gate `peer_ip` applies), else this Hub's
+/// own TLS mode (the daemon's own rule, §7.6, applied to the Hub's cookie). The global
+/// `trust_proxy` flag alone must not open it: with `trusted_proxies` set and the Hub
+/// bound publicly, a browser speaking to the port directly could otherwise forge the
+/// attribute onto its own cookies.
+pub(crate) fn cookie_secure(hub: &Hub, peer: IpAddr, headers: &HeaderMap) -> bool {
+    if peer_trusted(hub, peer) {
+        if let Some(proto) = headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| !v.is_empty())
+        {
+            return proto.eq_ignore_ascii_case("https");
+        }
+    }
+    hub.config.tls.mode != crate::config::TlsMode::None
+}
+
 /// Ownership of one session slot on a tunnel, from the request's entry into the table
 /// until the PC's answer head arrives: freed on drop — removed from the table, closed
-/// toward the PC — however `proxy` leaves, cancellation included. Before it, an abandoned
-/// request's entry was never revisited (a failed `to_conn` send did not remove it either),
-/// and the ghosts piled up against `sessions_per_tunnel` until the tunnel refused
-/// everything. Once the head lands the streamed body takes the session over (`disarm`) —
-/// its own drop is the cleanup then.
-struct SessionSlot {
-    tunnel: Arc<Tunnel>,
-    session: u32,
-    armed: bool,
+/// toward the PC — however the request leaves, cancellation included. Once the head lands
+/// the streamed body takes the session over (`disarm`) — its own drop is the cleanup then.
+pub(crate) struct SessionSlot {
+    pub(crate) tunnel: Arc<Tunnel>,
+    pub(crate) session: u32,
+    pub(crate) armed: bool,
 }
 
 impl SessionSlot {
@@ -416,15 +476,16 @@ impl Stream for ProxyBody {
                     fin |= frame.fin();
                     out.extend_from_slice(&frame.payload);
                 }
-                if let Some((hub, key)) = &this.cache {
-                    if this.buffered.len() + out.len() <= CACHE_ENTRY_CAP {
-                        this.buffered.extend_from_slice(&out);
-                        if fin {
-                            hub.cache_store(key, &this.store, std::mem::take(&mut this.buffered));
-                        }
-                    }
+                if this.cache.is_some() && this.buffered.len() + out.len() <= CACHE_ENTRY_CAP {
+                    this.buffered.extend_from_slice(&out);
                 }
                 if fin {
+                    // The same completeness rule the Drop path applies: only a buffer
+                    // that reached the head's content-length is the whole asset. A
+                    // daemon that marks FIN early (an interrupted read) must not plant
+                    // a truncated body in the shared cache under a year-long
+                    // immutable banner.
+                    this.store_if_complete();
                     this.done = true;
                 }
                 if let Some(sleep) = this.idle.as_mut() {
@@ -441,6 +502,14 @@ impl Stream for ProxyBody {
             Poll::Pending => Poll::Pending,
         }
     }
+}
+
+/// The daily byte budget (§20.8): the link's allowance is spent for today.
+pub(crate) fn budget_spent() -> Response {
+    error_page(
+        StatusCode::TOO_MANY_REQUESTS,
+        "this link's daily byte budget is spent",
+    )
 }
 
 pub fn too_many_requests() -> Response {
@@ -477,8 +546,10 @@ impl IntoResponse for crate::cache::Entry {
                 HeaderName::from_bytes(name.as_bytes()),
                 HeaderValue::from_str(value),
             ) {
-                if !seen.insert(name.clone()) {
-                    continue; // a duplicated header is the first one's
+                // Repeatable headers (`set-cookie`) cross in full; singletons keep the
+                // first spelling.
+                if name != header::SET_COOKIE && !seen.insert(name.clone()) {
+                    continue;
                 }
                 builder = builder.header(name, value);
             }

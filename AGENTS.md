@@ -1757,7 +1757,29 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   skipped the re-check). The
   command answers only inside the boundary's own areas — never an existence oracle over
   the rest of the disk — a failed canonicalization refuses the invoke, and the PC's
-  workbenchSync receiver re-checks its remote opens through the same command. The daemon
+  workbenchSync receiver re-checks its remote opens through the same command. The pass
+  rides a canonical table in the Relay engine (2026-10-16, the response-latency pass: a
+  hit costs no round trip, misses of one wave batch into a single flight, `startRelay`
+  warms the policy and the roots' forms) and is dropped wherever the filesystem can have
+  moved — the watcher's `studio://fs-changed` batch, the completion of every
+  filesystem-writing gated command (`FS_WRITING`, closing the checkout-materializes-a-
+  symlink race at the source), and a roots change; the policy itself serves
+  stale-while-revalidate. The terminal-output coalescing (pty.rs's 8 ms window and the
+  Relay's 16 ms pass) went leading-edge the same day: the first chunk after a quiet gap
+  leaves at once (a key's echo never waits), busy streams still coalesce. The same day's
+  full command-surface reconciliation (all `#[tauri::command]`s against PATH_GATED)
+  closed two pre-existing holes: `replace_in_files` (any absolute `repo` rewrote every
+  matching file) and `copy_into` (its `sources` are absolute paths from anywhere on the
+  machine by desktop-drag design — copy the provider key store into the workspace, then
+  read it); both are gated now, and the gate's argument check covers ARRAY members
+  (`sources`' every string, one outside value refusing the whole invoke). The page-switch
+  pass rode along: hasFallbacks' whole-document sweep installs ONLY on engines without
+  `:has()` (the stylesheets carry both spellings), a page move runs its chrome listeners
+  once (pages.ts's microtask wave merges goTo's notify and the observer trigger — they
+  used to run the set twice), no switch ever awaits the wire
+  (`tests/remotePageBench.test.ts`'s frozen-backend cycle), and the real-engine numbers
+  live in `tests/e2e/remote/page-bench.spec.ts` (WebKit: every tab tap settles the DOM in
+  ~1 ms). The daemon
   gained: the sandbox guard on INSTANCE_CLOSE/RESTART, an Argon2 concurrency semaphore,
   a session gate on `/sw.js`, instance-keyed asset cache, rightmost-XFF + a single tunnel
   bucket for login limiting, expiring sandbox tokens, Register/Update field caps, control
@@ -1767,6 +1789,42 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   header-read timeouts + a request-work ceiling, a body idle-gap timeout, and PC response
   header hygiene. Declared honestly (plan §23.7): **the Hub is a full-trust component**
   — e2e.rs is designed but unwired, so everything through a Hub is visible to it.
+
+- **The joint login** (2026-10-16, the owner's direction: 登录页要由服务端和插件联合验证密码、
+  页面由服务端提供，防止别人转发色情反动的网页内容；局域网还是要输密码；服务端转发后只要
+  一次密码 — plan §20.14): through a Hub, the login page and the password check are the
+  SERVER's own before anything is proxied — a relay can no longer be turned into a content
+  host by whoever holds the link's uuid. The daemon pushes its Argon2id verifier
+  (`T_CREDENTIAL` 0x8C: hash, credential epoch, display language) right after `T_READY`
+  and again on every password change (`credentials_changed` → the tunnel's `auth_changed`
+  arm — the Hub drops its link sessions the same second the daemon drops its own). The
+  Hub (`hub/src/login.rs`) serves the login page ITSELF (PC's language, its own card,
+  posting to its own `api/hub-login`), verifies the password against the verifier with
+  its own Argon2 (wrong passwords never wake the PC), then forwards the same login to the
+  daemon's `/api/login`, whose own Argon2 must ALSO pass — one password entry, two
+  verifications, and one answer carrying BOTH cookies (the daemon's `ggsr` verbatim plus
+  the Hub's `ggsrh`, `Path=/u/<uuid>/`, expiry mirroring the daemon's). Everything else on
+  a link — proxied pages, `/w/` assets, shared-cache hits, the WebSocket upgrade — is
+  gated on `ggsrh` (a navigation 302s to the login page, a WS is refused its upgrade, the
+  rest 401); a proxied logout's 2xx carries the `ggsrh` clear-cookie beside the daemon's.
+  A tunnel that never presents a verifier (an older daemon) FAILS CLOSED: "coming online"
+  for its first five seconds, then a fixed update-needed page — never the proxy. The LAN
+  path is untouched: the daemon's own page, own Argon2, own cookie — the password is one
+  and the same. The same day's audit fixed with it: the shared-bucket login mark moved
+  from the forgeable `x-ggs-base-path` header to the PEER address only
+  `hub/session.rs::synthesize` can set (a LAN peer stamping the header once both dodged
+  its own lockout bucket and locked the one every relayed login shares), the Hub's
+  `stamp_session` caught up with the daemon's decoder strictness (one empty binary WS
+  message — or dirty reserved bytes — from anyone holding the uuid used to tear the whole
+  tunnel down), a tunneled WS session idling out now frees its tunnel slot (it parked both
+  sides' bookkeeping forever), the HTTP proxy path uses `reserve_conn` (the check-then-
+  insert race it was written to close), the ws_bridge reader stops when its session is
+  gone (a browser ignoring its close kept feeding the unbounded uplink), `/admin/status`
+  answers 503 from the moment shutdown is requested (the restart's install/start pass once
+  mistook the 200 ms drain for a serving daemon and left nothing running), resource tokens
+  are pruned with their sessions, and the asset cache's disk read/write/trim, the 304
+  revalidation's brotli inflate and the key export/import Argon2 all moved to the blocking
+  pool (the current-thread runtime froze every listener for their duration).
 
 - **The daemon** (`extensions-src/ggs-remote/daemon/`, a crate of its own workspace — the app
   binary never links it): tray, self-signed TLS, Argon2id password + sessions + epochs
@@ -1828,7 +1886,14 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   older, `T_REPLACED`), HTTP and WebSocket proxying with session re-stamping, the offline
   page every not-online link answers, per-IP limits (handshakes, login entries, proxied
   requests, offline-probe bans), joinKey in constant time, and the cross-PC cache for the
-  workbench's immutable assets only. The silence gate (2026-10-12, the owner's direction:
+  workbench's immutable assets only. **The joint login** (2026-10-16, plan §20.14 —
+  `hub/src/login.rs`): the login page is the Hub's own (`web/login.html`, tokens replaced
+  server-side with the PC's display language), `POST /u/<uuid>/api/hub-login` runs the
+  Hub's own Argon2 against the `T_CREDENTIAL` verifier and then forwards the login for the
+  daemon's own check (one password, both halves), the `ggsrh` link session gates everything
+  else a link serves (navigations 302 to the login page, the WS upgrade is refused, the
+  rest 401), and a verifier-less tunnel fails closed (coming-online, then the
+  update-needed page — never the proxy). The silence gate (2026-10-12, the owner's direction:
   "如果不是 /u/uuid 访问，不要返回任何东西，就像没开这个端口一样" +
   "判别不是 uuid 也要返回端口关闭，链接对才返回内容" — only a well-formed link is ever
   answered, everything else is the shape of an unopened port): `gate.rs` wraps the router

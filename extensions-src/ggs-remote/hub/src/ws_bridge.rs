@@ -10,6 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::net::IpAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::frame::{ty, Frame};
@@ -17,11 +18,19 @@ use crate::front::{forward_headers, hub_extras};
 use crate::msg::{ConnClose, ConnOpen};
 use crate::state::{Hub, ToConn, Tunnel};
 
+/// The keepalive cadence on the browser leg — the tunnel leg's own heartbeat rhythm (§20.4).
+const SESSION_PING: Duration = Duration::from_secs(25);
+/// No received message for this long ends the session: three-plus ping intervals of
+/// silence, the same budget the tunnel leg's three-missed-heartbeats rule allows.
+const SESSION_IDLE: Duration = Duration::from_secs(90);
+
 pub async fn bridge(
     hub: Arc<Hub>,
     tunnel: Arc<Tunnel>,
     upgrade: WebSocketUpgrade,
     ip: IpAddr,
+    // The DIRECT socket peer — the trusted-proxy gate for the forwarded headers.
+    peer: IpAddr,
     base_path: String,
     headers: HeaderMap,
 ) -> Response {
@@ -30,7 +39,7 @@ pub async fn bridge(
     }
     upgrade
         .max_message_size(crate::frame::MAX_PAYLOAD + 64)
-        .on_upgrade(move |socket| run(hub, tunnel, socket, ip, base_path, headers))
+        .on_upgrade(move |socket| run(hub, tunnel, socket, ip, peer, base_path, headers))
 }
 
 async fn run(
@@ -38,6 +47,7 @@ async fn run(
     tunnel: Arc<Tunnel>,
     socket: WebSocket,
     ip: IpAddr,
+    peer: IpAddr,
     base_path: String,
     headers: HeaderMap,
 ) {
@@ -68,7 +78,7 @@ async fn run(
         base_path: base_path.clone(),
         headers: forward_headers(&headers),
     };
-    for (name, value) in hub_extras(&hub.config, &base_path, ip, &headers) {
+    for (name, value) in hub_extras(&hub, peer, &base_path, ip, &headers) {
         open.headers.insert(name, value);
     }
     if !tunnel.send(&Frame::msgpack(ty::CONN_OPEN, &open)) {
@@ -84,44 +94,90 @@ async fn run(
     }
 
     crate::info!("session {session} on {} from {ip}", tunnel.uuid);
-    hub.audit.log(
-        "session_open",
-        &[
-            ("uuid", serde_json::json!(tunnel.uuid)),
-            ("session", serde_json::json!(session)),
-            ("ip", serde_json::json!(ip.to_string())),
-        ],
-    );
+    if hub.audit.enabled() {
+        hub.audit.log(
+            "session_open",
+            &[
+                ("uuid", serde_json::json!(tunnel.uuid)),
+                ("session", serde_json::json!(session)),
+                ("ip", serde_json::json!(ip.to_string())),
+            ],
+        );
+    }
 
-    // The writer: downlink messages and closes from the tunnel.
+    // The writer: downlink messages and closes from the tunnel, plus the keepalive ping —
+    // the browser's JS answers a ping automatically, so its pong proves the peer still
+    // lives even while the session carries no traffic. Without it a reader parked on a
+    // vanished browser (sleeping phone, NAT reaping, no FIN) held one of the
+    // `sessions_per_tunnel` slots until the OS gave up on the half-open TCP peer — eight
+    // ghosts and the link's every further request answered 429.
     let writer = tokio::spawn(async move {
-        while let Some(to_conn) = conn_rx.recv().await {
-            match to_conn {
-                ToConn::Bytes(bytes) => {
-                    if sink.send(Message::Binary(bytes.into())).await.is_err() {
-                        break;
+        let mut ping =
+            tokio::time::interval_at(tokio::time::Instant::now() + SESSION_PING, SESSION_PING);
+        loop {
+            tokio::select! {
+                to_conn = conn_rx.recv() => {
+                    match to_conn {
+                        Some(ToConn::Bytes(bytes)) => {
+                            if sink.send(Message::Binary(bytes.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Some(ToConn::Close { code, reason }) => {
+                            let _ = sink
+                                .send(Message::Close(Some(CloseFrame {
+                                    code,
+                                    reason: reason.into(),
+                                })))
+                                .await;
+                            break;
+                        }
+                        None => break,
                     }
                 }
-                ToConn::Close { code, reason } => {
-                    let _ = sink
-                        .send(Message::Close(Some(CloseFrame {
-                            code,
-                            reason: reason.into(),
-                        })))
-                        .await;
-                    break;
+                _ = ping.tick() => {
+                    if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
                 }
             }
         }
     });
 
     // The reader: browser frames, session-stamped, to the PC. Uplink coalescing the browser
-    // already did (§6.4) survives: one WS message becomes one tunnel message.
+    // already did (§6.4) survives: one WS message becomes one tunnel message. Any received
+    // message — data, a pong, anything — refreshes the idle deadline; the writer's pings
+    // keep a live browser answering them, so only a peer that is really gone runs it out.
     let mut close = (1000, "closed".to_owned());
-    while let Some(Ok(message)) = stream.next().await {
+    loop {
+        let next = match tokio::time::timeout(SESSION_IDLE, stream.next()).await {
+            Ok(item) => item,
+            Err(_elapsed) => {
+                close = (1001, "idle".to_owned());
+                break;
+            }
+        };
+        let Some(Ok(message)) = next else { break };
         match message {
             Message::Binary(message_bytes) => {
-                let mut bytes = message_bytes.to_vec();
+                // The daemon may have closed this session (a 4401, a sign-out) while the
+                // browser keeps sending: the writer heard it as `ToConn::Close`, but the
+                // reader would have kept stamping every further frame into the tunnel's
+                // unbounded uplink — frames the PC drops, so nothing ever applied
+                // backpressure. A session that is no longer registered ends the reading.
+                if !tunnel.conns.lock().unwrap().contains_key(&session) {
+                    close = (1000, "closed".to_owned());
+                    break;
+                }
+                // A `Bytes` from a fresh network read is unique, so the stamp usually
+                // happens without a copy (`try_into_mut` + the zero-copy `BytesMut →
+                // Vec` move); the send then moves the buffer — this is the relay's
+                // hottest path, and a dead `.to_vec()` here copied every uplink frame
+                // twice for nothing.
+                let mut bytes = match message_bytes.try_into_mut() {
+                    Ok(owned) => Vec::from(owned),
+                    Err(shared) => shared.to_vec(),
+                };
                 hub.counters
                     .bytes_down
                     .fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -130,7 +186,7 @@ async fn run(
                     break;
                 }
                 if !crate::frame::stamp_session(&mut bytes, session)
-                    || tunnel.tx.send(bytes.to_vec()).is_err()
+                    || tunnel.tx.send(bytes).is_err()
                 {
                     close = (1011, "pc-offline".into());
                     break;
@@ -158,13 +214,15 @@ async fn run(
         },
     ));
     writer.abort();
-    hub.audit.log(
-        "session_close",
-        &[
-            ("uuid", serde_json::json!(tunnel.uuid)),
-            ("session", serde_json::json!(session)),
-            ("code", serde_json::json!(close.0)),
-        ],
-    );
+    if hub.audit.enabled() {
+        hub.audit.log(
+            "session_close",
+            &[
+                ("uuid", serde_json::json!(tunnel.uuid)),
+                ("session", serde_json::json!(session)),
+                ("code", serde_json::json!(close.0)),
+            ],
+        );
+    }
     crate::info!("session {session} on {} closed", tunnel.uuid);
 }

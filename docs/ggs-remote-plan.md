@@ -17,6 +17,7 @@
 > 修订（2026-10-12，远程原理改为副本，§22）：按所有者要求（“整个 GGS 都在 PC 上跑，远程网页只是一个副本显示，核心逻辑在 PC 上”）——远程页默认不再在浏览器里运行工作台，而是 PC 桌面窗口（可隐藏）的实时 DOM 副本；输入回传 PC 重放。浏览器刷新、关闭不再重启任何东西：Claude Code 的对话页面常驻 PC 窗口，关掉网页后对话继续，下次打开看到的就是正在工作的 Claude。手机观看时隐藏的 PC 窗口按手机尺寸重排并换上手机外壳，副本 1:1。旧的浏览器端工作台保留为 `?frontend=1`。
 > 修订（2026-10-12，公开端口静默）：按所有者要求（“如果不是 /u/uuid 访问，不要返回任何东西，就像没开这个端口一样”；“链接对才返回内容；判别不是 uuid 也要返回端口关闭”——同日所有者撤回了“端口扫描时也要端口关闭”的 TCP 层诉求，`listen` 保持 `0.0.0.0:8443` 默认）——§20.5 的公开表面收口为“只有链接形态对才有内容”：`/u/<合法 uuid>/…` 与 PC 自身的 `/tunnel`（仅放行 WebSocket 握手形态——守护进程的连法；对它的普通 HTTP 探测也静默）之外，任何请求**不写一个字节直接断开连接**（`hub/src/gate.rs`：tower 服务返回 `Silent` 错误，hyper 在服务应答 `Ok` 之前不写任何响应，故连接以“端口没开”的形态关闭）。uuid 的**形态判别也在门口**：`/u/` 后的段必须是 `identity::valid_uuid` 的小写带连字符 v8 形态（真实链接的固定拼写；大写、版本位错、百分号编码、`not-a-uuid` 一类都不是链接），否则同样零字节断开；形态合法但未知/离线的 uuid 照旧答同一个离线页（两态一致，PC 睡醒的自动重连 UX 保留，Hub 仍无从泄露哪些 uuid 存在）。`/healthz` 移到 `metrics_listen` 运营口（与 `/metrics` 同口，默认关闭）；`/` 的可选说明页（`landing_page` 配置）整体删除。部署面的同样收口：`deploy/Caddyfile` 只代理 `/u/*` 与 `/tunnel`，其余 `abort`（Caddy 直接关闭连接，不答 502）。物理边界如实记录：TCP 层的 SYN 应答无法隐藏（否则浏览器也连不上，SYN 扫描必见 open）；TLS 模式下 TLS 握手本身仍会完成（证书可见）；静默指 HTTP 层不产生任何响应字节——`nmap` 等探测拿不到任何服务指纹。`hub/tests/tunnel.rs` 的 `paths_outside_the_links_answer_nothing`（含畸形 uuid 各形态）与 fixture 改走 `gated()`（与 `serve` 同栈）回归，`gate.rs` 内含放行判定单测；探针 `remote-hub-multi-check.mjs` 的 healthz 检查改走 metrics 口、新增公开口静默与畸形 uuid 零字节检查。
 > 修订（2026-10-13，实测修复）：§7.8 下载的大文件夹 zip 失败链——实例先整树打包、首片 `FileReply` 迟迟不发，守护进程对首片的 30 s 等待（`FETCH_TIMEOUT`）先到点，浏览器拿到 504 后（手动重试或自动续传）对**同一个一次性 URL** 再请求，票据已随首次请求消耗 → 404，Chrome 显示“未发现文件”。修复：实例在打包**前**先发一个空的首片（携带 zip 名、`total: 0`、`done: false`），响应头立即到达浏览器（下载条即刻出现，打包多久都不受 30 s 限制——守护进程对流式后续片本就无超时）；打包在头片之后失败时发 `status: 500` 的收尾片，守护进程将其转为**中止响应体**（`Err` 项结束流，连接断开），截断的压缩包永远不会以“完整文件”的形态落地。`daemon/tests/integration.rs` 的 `a_download_ticket_streams_the_file_once`（文件流、一次性语义、实例 404 转达、心跳首片 + 延迟字节、流中 500 中止五场景）与活体探针 `remote-live-check.mjs`（文件逐字节 + 文件夹 zip 的 PK 头）回归。
+> 修订（2026-10-16，响应延迟十倍目标——"原来 100 毫秒要做到 10 毫秒内"）：热路径上两处固定的毫秒级开销被拿掉。(1) **§23.6 规范形复检的每次额外往返**：此前每个带路径的 invoke（list_dir、read_file、scm_* ——几乎所有交互命令）在词法通过后都要再做一次完整的 `remote_canonical_paths` Tauri IPC（`spawn_blocking` + 每条路径一次 `fs::canonicalize` 系统调用，roots 也每次重算），串行挡在真 invoke 之前；现在 Relay 内置**规范形缓存表**——命中零往返（纯 JS 比较，微秒级），未命中按批合并为一次往返（同波次并发缺项合一，单飞去重），启动时预热（策略 + roots 的规范形），失效点三处：`studio://fs-changed` 观察批次（Relay 终身一条全局监听）、每个可能写文件系统的命令完成时（`FS_WRITING` 集合——watcher 批次有 100 ms 去抖，checkout 类命令物化符号链接的竞态在源头关掉：写命令完成即清表，下一次读重新解析而非沿用写前的答案）、roots 变化（open_workspace/open_single_file 连策略一起清）。策略本身改 stale-while-revalidate：新鲜期内零往返返回，过期后返回旧值同时后台单飞刷新，首取（无旧值可服）仍阻塞且失败即拒（fail-closed 不变）。`tests/remote.test.ts` 新增三测：命中不重取、写命令/watcher 批次后重取、并发缺项一次往返。(2) **§6.4 终端输出合帧的前沿化**：`pty.rs` 的 8 ms 窗口与 Relay 的 16 ms 合帧原本都是尾沿的——空闲后的**第一块**也要等满窗口（一次按键回显本地就固定 +24 ms）；现在两级都改前沿——安静间隙后的首块立即发射（`gather_batch` 以 `try_recv` 探测、队列有后续即转忙窗，`coalescePty` 首块直发、后续 16 ms 内合并），忙流仍全量合帧（`cargo build` 的广播事件数不回升）。`pty.rs` 新增前沿竞态测（启动信号同步、2 ms 后随块不得并入首批——旧窗口行为会吞掉它）；`tests/remote.test.ts` 的终端合帧测改为前沿契约。两项合计（`--bench` 活体 A/B 实测，2026-10-16，同一台 macOS、同一 loopback 链路、真实 app+daemon+Relay webview，HEAD 与工作树各一轮）：稳态带路径 invoke（同一文件重复读）从 **2.8 ms 中位 / p90 5.5 ms 降到 1.6 ms / 2.5 ms**（−43%/−55%），门禁在裸线 RTT（1.3 ms）之上的开销从 +1.5 ms 降到 +0.3 ms（≈仅载荷差异）；每次不同路径（缓存未命中的上界）2.1→1.9 ms——注意这是 APFS 上 canonicalize 便宜的 macOS，Windows 每路径一次 CreateFile，消除的绝对代价更大。终端首块延迟（pty.rs 同二进制内新旧对照实测）：安静后的孤块 send→成形从 **12.0 ms 降到 0.026 ms**（旧值 = 8 ms 窗口 + 唤醒抖动；relay 侧另省 16 ms 定时器）。本机回环上带路径 invoke 的全链路中位已是 1.6 ms——10 ms 目标在局域网内有余量；Hub 两跳的互联网 RTT 是物理事实。探针的 `--bench` 模式（基线/命中/未命中三行）随本次入库，可随时复测。随本次对命令面做了全量对账（全部 144 个 `#[tauri::command]` 对 `PATH_GATED` 表），**两个预先存在的门禁缺口入档并关闭**（§23.6）：工作区替换 `replace_in_files`（任意绝对 `repo`，匹配文件全树改写——此前不在表内）与资源管理器拖入的 `copy_into`（其 `sources` 按设计"来自机器任意位置的绝对路径"，远程会话把 `~/.ggs/keys/ai-providers.key` 拷进工作区再 `read_file` 即可外泄密封密钥库——2026-10-13 审计关闭的那条链的变体）；门禁的参数检查同时扩展到**数组成员**（`sources` 的每个字符串成员逐一过界，一个越界拒绝整个 invoke），`copy_into` 两端都限在打开的文件夹内（一台机器两个文件夹之间的复制是系统文件管理器的活——与 fs_import/fs_export 退役同一理由）。
 
 ## 目录
 
@@ -433,7 +434,7 @@ Tauri 的 Channel 由后端推送，无法反压到后端。因此流控分两�
 2. **Relay 内：** 每个会话的待发队列上限 32 MB。超过时：
    - 终端输出：合并为“已截断 N 字节”标记，并把截断点之后的最近 64 KB 保留下来（保证屏幕最终正确）；
    - 其他 Channel：发 `NOTICE{kind:"overflow", stream}`，前端的对应视图走自己的“重新加载”路径（与桌面断流重试相同）。
-3. **合并：** 终端输出在两处合帧——`pty.rs` 的读线程先把 8 ms 窗口内（或 32 KB）的读取合成**一次**广播 emit（macOS 上每次广播 emit 都是在每个 webview 里跑一次 `evaluateJavaScript`，逐读 emit 会让一条 `cargo build` 把主线程淹没），Relay 再对同一 `studio://pty-output-*` 订阅按 16 ms 合帧；`FsChange` 类事件按 100 ms 合并去重。
+3. **合并：** 终端输出在两处合帧——`pty.rs` 的读线程先把 8 ms 窗口内（或 32 KB）的读取合成**一次**广播 emit（macOS 上每次广播 emit 都是在每个 webview 里跑一次 `evaluateJavaScript`，逐读 emit 会让一条 `cargo build` 把主线程淹没），Relay 再对同一 `studio://pty-output-*` 订阅按 16 ms 合帧；`FsChange` 类事件按 100 ms 合并去重。两级窗口都是**前沿触发**的（2026-10-16 响应延迟收口）：安静间隙后的第一块立即发射、只有跟在后面的块才进窗口——交互场景（一次按键的回显）不再为合帧付等待，连续忙流仍全量合帧，广播事件数不回升。
 4. **上行合帧（终端输入）**：按键这类高频小 `INVOKE` 由 `transport.ts` 在 16 ms 窗口内合并为一个 WS message（§6.1 一消息多帧），Relay 侧解码后逐帧执行。合帧减少的是消息数；单次按键的回显延迟仍等于链路 RTT（Hub 模式两跳）——已知取舍（§19），需要更低延迟时再评估本地回显。
 5. **拉取型数据（FETCH、文件块读取）** 天然受请求驱动，不需要额外处理。
 
@@ -1632,7 +1633,7 @@ Hub 的路径（§20.5 的静默门，2026-10-12 按所有者要求收口：“�
 | ---- | ---- |
 | 冒充别人的 PC（抢占 uuid） | uuid 由公钥哈希决定，接入时必须用对应私钥签 Hub 的一次性挑战（绑定 Hub 主机名，防跨服务器重放）；没有私钥就拿不到这个 uuid |
 | 不相干的人把你的服务器当免费中继 | 可选 `joinKey`（服务器口令，常量时间比较）；`maxTunnels` 在线 PC 上限；每条隧道并发会话上限（默认 8）与可选的每日流量上限；`T_HELLO` 每 IP 限速 |
-| 把中继当免费网页托管（挂自己的黄色/暴力/任意站点） | 四层（2026-10-12）：**访客上限**——`visitors_per_day_per_tunnel`（默认 32，0 = 关），个人链接的观众是个位数、被当公开网站分享的链接是成百上千个独立 IP，计数挂在 uuid 上（重连不清零），超出即 429；**请求速率**——`http_rate`（默认 600 次/分钟/IP，0 = 关），会话上限只限并发不限速率；**审计**——`audit_log`（默认空 = 关），每个隧道生死、浏览器会话开关、被代理应答**头**一行 JSON（无请求体、无 Cookie、路径中的包令牌脱敏为前 6 位，§16 的同一形状），运营者应对投诉与取证的那条痕；**黑名单**——`blocklist`（默认空 = 关），一文件一行一个 uuid（`#` 注释），30 s 重读一次并在每次握手时检查，被列 PC 的隧道被摘下（浏览器看到的与离线页无差别）且下次握手被 `banned` 拒绝。公网部署另见 §20.6 末的运营提示：joinKey 当邀请制用、日志留存遵循所在司法辖区 |
+| 把中继当免费网页托管（挂自己的黄色/暴力/任意站点） | 五层：**联合登录**（2026-10-16，§20.14，第五层也是最根本的一层）——登录页由 Hub 自己提供、密码由服务端与插件各验一次、没有 Hub 自己的会话就一个字节也不代理，拿到 uuid 的人看到的只有中继写死的登录页；其余四层（2026-10-12）：**访客上限**——`visitors_per_day_per_tunnel`（默认 32，0 = 关），个人链接的观众是个位数、被当公开网站分享的链接是成百上千个独立 IP，计数挂在 uuid 上（重连不清零），超出即 429；**请求速率**——`http_rate`（默认 600 次/分钟/IP，0 = 关），会话上限只限并发不限速率；**审计**——`audit_log`（默认空 = 关），每个隧道生死、浏览器会话开关、被代理应答**头**、链接登录成败一行 JSON（无请求体、无 Cookie、路径中的包令牌脱敏为前 6 位，§16 的同一形状），运营者应对投诉与取证的那条痕；**黑名单**——`blocklist`（默认空 = 关），一文件一行一个 uuid（`#` 注释），30 s 重读一次并在每次握手时检查，被列 PC 的隧道被摘下（浏览器看到的与离线页无差别）且下次握手被 `banned` 拒绝。公网部署另见 §20.6 末的运营提示：joinKey 当邀请制用、日志留存遵循所在司法辖区 |
 | 浏览器端爆破某台 PC 的密码 | PC 守护进程限速（§7.6）按真实 IP：Hub 在 `CONN_OPEN`/`HTTP_REQ` 里带客户端 IP；Hub 另有每 IP、每 uuid 的登录入口限速（10 次/分钟） |
 | 枚举链接 | 122 位哈希，无法遍历；畸形 uuid 在门口即静默（与任何扫描路径无异），形态合法的未知/离线链接返回同一页面；每 IP 访问不在线链接超过 100 次/10 分钟则临时封禁 |
 | 链接泄露 | 链接不是凭据，仍需密码；可“更换链接” |
@@ -1785,7 +1786,7 @@ services:
 | -- | ---- |
 | uuid 推导 | 守护进程与 Hub 用同一组测试向量（公钥 → uuid），含版本位、变体位 |
 | Hub 单元 | 路径解析（大小写、格式错误、不在线统一处理）、挑战签名校验（错误签名、重放、换主机名）、joinKey、限速与封禁 |
-| Hub 集成（`hub/tests/`） | 起 Hub + 两个假 PC：各自链接只到达各自 PC；改密只断开该 PC 的浏览器会话（4401 经 `CONN_CLOSE`）；同一密钥第二次连接 → 旧隧道收到 `T_REPLACED`；joinKey 错误 → `T_REJECTED`；Hub 重启后 PC 自动重连、链接不变；跨 PC 缓存只命中公开资源 |
+| Hub 集成（`hub/tests/`） | 起 Hub + 两个假 PC：各自链接只到达各自 PC；改密只断开该 PC 的浏览器会话（4401 经 `CONN_CLOSE`）；同一密钥第二次连接 → 旧隧道收到 `T_REPLACED`；joinKey 错误 → `T_REJECTED`；Hub 重启后 PC 自动重连、链接不变；跨 PC 缓存只命中公开资源；联合登录（§20.14）——登录页归属与语言、闸门三分支（302/401/拒升级）、错密码不惊动隧道、双 Cookie、`T_CREDENTIAL` 新纪元作废链接登录、空二进制消息不再能杀隧道、无验证器的隧道失败关闭 |
 | 守护进程 | `hub::link` 重连退避、隧道恢复后浏览器会话续上、`trait Conn` 两种实现跑同一组 WS 测试、更换链接后旧链接失效、密钥导出导入往返 |
 | 端到端（Playwright） | `hub.spec.ts`：容器内真 Hub + 两个守护进程 + 一个浏览器同时登录两个链接（Cookie、localStorage、Service Worker 互不影响；A 的 Cookie 访问 B 的路径被拒）、改密重登、更换链接后旧链接显示“不在线”页 |
 | 压测 | `scripts/probes/hub-load.mjs`（已落地）：N 个假 PC（真 Ed25519 握手）+ M 个浏览器 WS 会话，记录 Hub 内存/CPU 到 `metrics.json` 的 `remote.hubLoad`；压测配置 `handshake_rate = 0` |
@@ -1798,6 +1799,24 @@ services:
 | M10 端到端加密（可选） | OPAQUE + AEAD、WASM 构建、加密资源加载 | Hub 端抓包看不到明文 | 2 周 |
 
 M9 依赖 M2（认证）和 M3（多窗口），可与 M5（响应式）并行。加上 M9，总估时约 18 周（不含可选的 M10）。
+
+### 20.14 联合登录：服务端与插件一起验证密码（2026-10-16，业主方向）
+
+业主方向（2026-10-16）：**登录页最好由服务端和插件联合验证密码，页面也要由服务端提供，防止别人转发色情反动的网页内容；局域网还是要输入密码；服务端转发后也只要一次密码就可以认证。** 在此之前，浏览器经 Hub 的一切（包括登录页本身）都来自 PC 经隧道的原样转发，PC 侧的 Argon2 是唯一一道密码检查——拿到 uuid 的人可以让这台 PC 经中继送出任意字节（速率与观众上限只是量的事），中继在事实上可被当作任意内容的托管管道。联合登录把这扇门改成了两半：
+
+| 环节 | 设计 |
+| ---- | ---- |
+| 验证器下发 | `T_CREDENTIAL`（0x8C，守护进程 → Hub，session 0）：`{ hash, epoch, lang }` —— PC 自己存的 Argon2id PHC 串（验证器，绝非密码）、它所属的凭据纪元、PC 的显示语言（登录页跟随）。`T_READY` 之后立刻发一次；**改密时再发**（`credentials_changed` 唤醒 `auth_changed`，隧道内即时重推），新纪元一到，Hub 按 uuid 清掉自己签发的全部链接登录——与 PC 端会话同一秒作废。隧道只在密码存在时才连（§20.3），所以 hash 永不为空 |
+| 服务端登录页 | `GET /u/<uuid>/login` 由 **Hub 自己**应答（`hub/src/login.rs` + `web/login.html`，占位符服务端替换成 PC 语言的内嵌字符串表）：VS Code 风格卡片、密码 + 设备名 + 记住我，表单 POST 到 **Hub 自己的** `api/hub-login`。永不经隧道转发——中继上这个源能出现的页面就是它自己写死的这一页 |
+| 联合验证 | `POST /u/<uuid>/api/hub-login`：① Hub 先用验证器跑自己的 Argon2（阻塞池 + 每 IP×uuid 登录入口限速 10 次/分钟 + 并发信号量；**错密码根本不惊动 PC**）；② 通过后把同一个登录原样转发成 PC 的 `/api/login`，PC 用自己的 Argon2 再验一次并签发自己的会话 Cookie——**两个半区都必须通过**：验证器可能滞后，PC 的判定才是最终守门 |
+| 一次密码 | PC 应答 200 时，同一个响应里带 PC 的 `Set-Cookie: ggsr`（原样透传）与 **Hub 自己的** `Set-Cookie: ggsrh`（`Path=/u/<uuid>/`、HttpOnly、SameSite=Strict、`Secure` 跟随浏览器实际协议；时长跟 PC 一致：记住 30 天、否则 12 小时滑动）。浏览器输一次密码，拿到两半的会话 |
+| 内容闸门 | 除登录角（`login`、`api/hub-login`）外，`/u/<uuid>/` 的一切——代理页面、`/w/` 资源、共享缓存命中、**WebSocket 升级**——都先查 `ggsrh`：没有或失效（过期、改密、纪元变更）→ 文档导航 302 回登录页、WS 拒绝升级、其余 401。**闸门之后再无旁路**：PC 侧自己的 Cookie 检查照旧在每一个被代理请求上执勤（联合验证的另一半始终在岗）。一个从未提交验证器的隧道（旧版守护进程）**失败关闭**：头 5 秒答"正在上线"，之后是"需要更新"页——绝不代理 |
+| 注销对称 | 被代理的 `POST api/login`/`api/logout` 应答 2xx 时，Hub 在同一应答上追加清掉 `ggsrh` 的 `Set-Cookie`——一次登录两半生效，一次注销两半离场 |
+| 局域网不变 | LAN 直连路径一个字节没动：还是守护进程自己的登录页 + 自己的 Argon2 + 自己的 Cookie（§7.6）——**局域网照样要输密码**。经 Hub 时输的那一次密码同时满足两半，LAN 与中继两个入口的密码是同一个 |
+
+会话与限速的账都在 Hub 内存里（`link_sessions`：uuid → token 哈希 → {epoch, created, last_seen, remember}；每链接上限 64，随 `T_CREDENTIAL` 纪元与隧道离场清退），Hub 重启的代价是每个浏览器再输一次密码——这是"无持久化"设计（§20.2）的一致推论。测试：`hub/tests/tunnel.rs`（登录页归属、闸门三分支、错密码不惊动 PC、双 Cookie、改密作废、空帧不再能杀隧道、无验证器失败关闭）与 `daemon/tests/hub_link.rs`（真 Hub + 真守护进程的联合登录端到端：一次密码拿到两半 Cookie 并携之过 WS）。
+
+> 版本组合：新 Hub + 旧守护进程 → 链接答"需要更新"页（失败关闭，上面已述）；旧 Hub + 新守护进程 → 旧 Hub 忽略未知帧类型 `T_CREDENTIAL`，行为与从前完全一致（Hub 不设闸门）。两者都不会把任何一边锁死。
 
 ## 21. 待确认问题
 
@@ -1956,6 +1975,8 @@ M9 依赖 M2（认证）和 M3（多窗口），可与 M5（响应式）并行�
 - **Relay invoke 门禁**（`src/remote/pathGate.ts` + `relay.ts`）：远程会话的路径类 invoke（读写、搜索、比较、viewer、file_log/repo 等）只能落在**打开的文件夹**（+ 单文件启动）内；`open_folder`/`open_workspace` 直接拒绝（打开新目录是 picker 的沙箱 SPAWN 的事）。roots 经新命令 `remote_paths_policy` 由 Relay 本地取（带 3 s 缓存，仅门禁命令才取）。修复的攻击链：伪造 workbenchSync `open` + 未设防的 `read_file` → 读取 `~/.ggs/keys/ai-providers.key` 与密封的 API key → 离线解密全部供应商密钥。
   唯一的例外是 `ext_fs`：它还可以落在扩展平台自己的三块区域（`remote_ext_roots`：已装包的文件 `~/.ggs/extensions`、扩展存储 `~/.ggs/extension-data`、扩展日志 `~/.ggs/logs/extensions`）——与后端 `ext_fs` 契约放行的 roots 一致（扩展宿主本就把它们作为调用的 roots 传入）；扩展激活时读自己安装目录里的文件（Python 复制 `pythonrc.py` 是第一例）是正常流量而非越界，此前这类激活在浏览器会话里全部失败。`~/.ggs` 的其余部分（设置、密钥、Claude 状态）仍在边界之外，且该例外只扩 `ext_fs` 一个命令。
 - **规范形复检**（2026-10-15，§23.4 词法门禁的符号链接缺口）：上面的比较全是词法的，而读写本身跟随符号链接与 junction——仓库里一个指向 `~/.ggs`（provider 密钥库、设置）的链接能通过词法检查，读取却落在界外。修复：每个被门禁的 invoke 在词法通过后做第二道规范形复检（`gateInvokeCanonical`）——参数**连同策略 roots** 一起经新命令 `remote_canonical_paths` 解析（`ggs-fs` 的 `canonical_display`：`fs::canonicalize` 的规范形剥掉 Windows `\\?\` 前缀；lenient 行走，未创建文件的符号链接**祖先**同样解析到真实目标），包含关系按规范形对规范形比较（经 junction 打开的工作区仍包含其成员的规范形）。命令的答案只发给边界自身区域内的路径（打开的文件夹、单文件启动、扩展三区域）——它永远不是全盘的存在性探测器；规范化失败即拒绝（fail-closed）。`null` 形（边界外的探测、完全不可解析）保留词法答案。PC 端 workbenchSync 接收侧的远程 open 也经同一命令复检（`installWorkbenchSync` 的 `canonicalPath`）；上传（`upload_allowed`）与下载（`download_allowed`）两条路原本就在服务端规范化，不变。
+- **规范形缓存表**（2026-10-16，响应延迟收口）：上面的复检原本是每个带路径 invoke 一次**额外**的完整 Tauri IPC（`spawn_blocking` + 每路径一次 `fs::canonicalize`，roots 也每次重算），串行挡在真 invoke 前——LAN 上约 5–15 ms，Windows 上 canonicalize 是每路径一次 CreateFile。现在 Relay 引擎内建缓存表（`relay.ts`）：命中零往返（纯 JS 比较），未命中合并为一次往返——同波次（共享同一次策略取回的并发 invoke）的缺项聚成一批、飞行中去重，起飞前让一个微任务让位给同波次的后来者入批；代数计数让失效竞态下的飞行只应答其等待者、不再回填已作废的表。失效点三处：观察者 `studio://fs-changed` 批次（Relay 终身一条全局监听，外部变化落地即清）、`FS_WRITING` 集合命令完成时（文件系统可能被移动——watcher 批次有 100 ms 去抖，`scm_checkout` 类命令物化符号链接的竞态在源头关闭：写完成即清表，被拒/失败的写也清——代价只是一次回填批，永不是错误答案）、roots 变化（`open_workspace`/`open_single_file` 连策略一起清，策略刷新发现 roots 移动同样清表）。策略取回本身改 stale-while-revalidate（3 s 新鲜期：期内直接返回，过期返回旧值并后台单飞刷新，失败保留旧值继续服务；首取阻塞、失败即拒——fail-closed 语义不变），`startRelay` 时预热策略与 roots 的规范形，首个会话的第一个带路径 invoke 也不付等待。安全性按最坏情况审视：终端会话本就能直接 `cat ~/.ggs`（路径门禁从不约束终端），克隆/checkout 物化链接的路径被 FS_WRITING 清表覆盖，剩余的窗口只有 watcher 去抖内外部（非会话驱动）的变化——不构成会话可驾驶的攻击面。`tests/remote.test.ts`：命中不重取、写命令与 watcher 批次后重取、并发缺项一次往返。
+- **命令面对账与两个缺口**（2026-10-16，随响应延迟收口的全量对账）：全部 `#[tauri::command]` 对 `PATH_GATED` 表逐一核对后，两个带路径的命令此前不在表内——(1) `replace_in_files`（工作区替换）以任意绝对 `repo` 改写全树匹配文件，现按 `REPO_ANCHORED` 门禁并计入 `FS_WRITING`；(2) `copy_into`（资源管理器拖入的拷贝）的 `sources` 按桌面拖放的设计"来自机器任意位置"，远程会话用它把 `~/.ggs/keys/ai-providers.key` 拷进工作区、再经 `read_file` 读走即外泄密封密钥库——现两端（`sources` 与 `dest_dir`）都限在打开的文件夹内，并计入 `FS_WRITING`。同时门禁的参数检查扩展到**数组参数的每个字符串成员**（词法与规范形两道同样扩展；一个越界成员拒绝整个 invoke）。对账确认其余命令面无洞：`fuzzy_files` 只走打开的 roots（State 注入，无调用方可控路径）；`ext_read_file`/`ext_read_file_base64` 经 `safe_join` 限定在已装包目录内；`ext_log_path`/`ext_storage_paths`/`session_log_file`/`mcp_tools` 只应答固定位置与工具名；`zip_tree`/`zip_trees` 走 `download_allowed` 的服务端规范化（不变）。`tests/remote.test.ts` 的 `gates replace_in_files and copy_into, array members included` 回归。
 - **事件桥白名单与身份盖章**：`relayEmit` 只放行 `studio://mirror-up` 与 `studio://workbench-sync`，`from`/`by` 一律盖成 relay 的 `remote/<session>`（会话不能冒充 `main` 或彼此），目标恒为 `main`。
 - **workbenchSync 接收侧**：远端来源的 `open`/`active` 限在打开文件夹内（`Workbench.openFolders()` ← `Explorer.roots()`）。
 - **镜像副本的外域 URL 丢弃**（`protocol.ts`）：副本只加载 app/ggs 令牌根与 `data:`/`blob:`——PC 页面里的外来 http(s) URL 不再是手机端的外泄/追踪通道。

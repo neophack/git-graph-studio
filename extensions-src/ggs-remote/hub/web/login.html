@@ -1,0 +1,151 @@
+<!doctype html>
+<!-- The Hub's own login page (docs/ggs-remote-plan.md §20.14, the joint login): served by
+     the relay itself, never proxied from the PC — the placeholder tokens are replaced
+     server-side with the PC's display language (carried by the T_CREDENTIAL frame), and
+     the form posts to the Hub's api/hub-login, where the password is checked twice: once
+     here against the daemon's Argon2id verifier, once by the daemon itself on the
+     forwarded login. One entry, both halves, and nothing is proxied before it succeeds. -->
+<html lang="__LANG__">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>__TITLE__</title>
+<style>
+/* The daemon pages' card look (daemon/web/style.css), inlined: this page is served by a
+   different binary that shares no assets with the PC. */
+:root {
+	--bg: #f8f8f8; --card: #ffffff; --fg: #3b3b3b; --muted: #616161; --line: #e5e5e5;
+	--accent: #005fb8; --accent-hover: #0258a8; --accent-fg: #ffffff; --danger: #cd3131;
+	--input-bg: #ffffff; --input-line: #cecece; --focus: #005fb8;
+	--hover: rgba(0, 0, 0, 0.04);
+	color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: #181818; --card: #1f1f1f; --fg: #cccccc; --muted: #9d9d9d; --line: #2b2b2b;
+		--accent: #0e639c; --accent-hover: #1177bb; --danger: #f14c4c;
+		--input-bg: #313131; --input-line: #3c3c3c; --focus: #007fd4;
+		--hover: rgba(255, 255, 255, 0.06);
+	}
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.5 "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+body { display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 100vh; min-height: 100svh; padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
+main { width: 100%; max-width: 400px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 12px 16px 14px; }
+.logo { display: block; width: 48px; height: 48px; margin: 0 auto 10px; }
+h1 { font-size: 15px; font-weight: 600; text-align: center; margin: 0 0 12px; }
+label { display: block; margin: 8px 0 2px; color: var(--muted); font-size: 12px; }
+label.check { display: flex; gap: 6px; align-items: center; color: var(--fg); font-size: 13px; }
+input[type=password], input[type=text] { width: 100%; font: inherit; padding: 4px 8px; min-height: 28px; border-radius: 2px; border: 1px solid var(--input-line); background: var(--input-bg); color: var(--fg); }
+input:focus-visible { outline: 1px solid var(--focus); border-color: var(--focus); }
+button { display: inline-flex; align-items: center; justify-content: center; font: inherit; min-height: 28px; padding: 2px 14px; border-radius: 2px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-fg); cursor: pointer; }
+button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+button:disabled { opacity: 0.5; cursor: default; }
+form button { margin-top: 10px; width: 100%; }
+.error { color: var(--danger); min-height: 1.2em; margin: 6px 0 0; }
+.reason { background: var(--hover); border-left: 3px solid var(--accent); padding: 6px 10px; border-radius: 2px; margin: 0 0 8px; }
+</style>
+</head>
+<body>
+<main class="card">
+	<svg class="logo" viewBox="0 0 48 48" aria-hidden="true">
+		<rect x="4" y="6" width="40" height="36" rx="4" fill="none" stroke="var(--accent)" stroke-width="3"/>
+		<path d="M12 18 L20 26 L12 34 M24 34 L36 34" fill="none" stroke="var(--accent)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+	</svg>
+	<h1>__TITLE__</h1>
+	<p class="reason" id="reason" hidden></p>
+	<form id="form">
+		<label for="password">__PASSWORD__</label>
+		<input type="password" id="password" autocomplete="current-password" required autofocus>
+		<label for="device">__DEVICE__</label>
+		<input type="text" id="device" autocomplete="off" maxlength="64">
+		<label class="check"><input type="checkbox" id="remember"> <span>__REMEMBER__</span></label>
+		<button type="submit" id="submit">__SIGN_IN__</button>
+		<p class="error" id="error"></p>
+	</form>
+</main>
+<script>
+(() => {
+	'use strict';
+	// The localized strings, baked in server-side (the placeholder tokens below are
+	// replaced with the PC's display language before this page ever leaves the relay).
+	const STRINGS = {
+		wrong: '__WRONG__',
+		locked: '__LOCKED__',
+		failed: '__FAILED__',
+		offline: '__OFFLINE__',
+		reasons: {
+			'password-changed': '__REASON_PASSWORD_CHANGED__',
+			'credentials-changed': '__REASON_CREDENTIALS_CHANGED__',
+			revoked: '__REASON_REVOKED__',
+			expired: '__REASON_EXPIRED__'
+		}
+	};
+	const t = (key, params) => {
+		let text = STRINGS[key] ?? key;
+		if (params) for (const [name, value] of Object.entries(params)) text = text.replaceAll(`{${name}}`, String(value));
+		return text;
+	};
+	const params = new URLSearchParams(location.search);
+	const reason = params.get('reason');
+	if (reason) {
+		const box = document.getElementById('reason');
+		box.textContent = STRINGS.reasons[reason] ?? reason;
+		box.hidden = false;
+	}
+	// A fresh login is a fresh start: no stale workbench state from a previous session.
+	try { sessionStorage.clear(); } catch { /* storage unavailable */ }
+	const device = document.getElementById('device');
+	try { device.value = localStorage.getItem('ggsr.device') ?? ''; } catch { /* storage unavailable */ }
+
+	let lockTimer;
+	document.getElementById('form').addEventListener('submit', async (event) => {
+		event.preventDefault();
+		const error = document.getElementById('error');
+		const submit = document.getElementById('submit');
+		error.textContent = '';
+		submit.disabled = true;
+		try {
+			const response = await fetch('api/hub-login', {
+				method: 'POST',
+				credentials: 'same-origin',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					password: document.getElementById('password').value,
+					device: device.value,
+					remember: document.getElementById('remember').checked
+				})
+			});
+			const data = await response.json().catch(() => null);
+			if (response.ok) {
+				try { localStorage.setItem('ggsr.device', device.value); } catch { /* storage unavailable */ }
+				const next = params.get('next');
+				location.replace(next && next.startsWith('w/') ? next : 'windows');
+				return;
+			}
+			if (response.status === 429) {
+				let left = data?.retryAfter ?? 60;
+				error.textContent = t('locked', { n: left });
+				clearInterval(lockTimer);
+				lockTimer = setInterval(() => {
+					error.textContent = t('locked', { n: left });
+					if (left-- <= 0) {
+						clearInterval(lockTimer);
+						error.textContent = '';
+						submit.disabled = false;
+					}
+				}, 1000);
+				return;
+			}
+			error.textContent = response.status === 401 ? t('wrong') : t('failed', { msg: data?.error ?? response.status });
+		} catch (e) {
+			error.textContent = t('offline');
+		}
+		submit.disabled = false;
+	});
+})();
+</script>
+</body>
+</html>

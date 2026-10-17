@@ -14,6 +14,7 @@ pub mod front;
 pub mod gate;
 pub mod http_proxy;
 pub mod identity;
+pub mod login;
 pub mod msg;
 pub mod state;
 pub mod tunnel;

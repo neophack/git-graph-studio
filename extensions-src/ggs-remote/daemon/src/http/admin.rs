@@ -125,6 +125,16 @@ pub async fn status(
     Query(q): Query<UnlockQuery>,
 ) -> Response {
     admin_only!(daemon, headers);
+    // A draining daemon is not a serving one: shutdown was requested, the process is
+    // winding down, and the restart flow that asked (`client::install` / `client::start`
+    // consult this endpoint before touching anything) must not mistake the drain for a
+    // live daemon and leave nothing running behind it.
+    if daemon.shutdown_requested.load(Ordering::Relaxed) {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({ "stopping": true }),
+        );
+    }
     let open = !q.unlock.is_empty() && daemon.tickets.lock().unwrap().check_unlock(&q.unlock);
     json_response(StatusCode::OK, status_json(&daemon, open))
 }
@@ -294,7 +304,8 @@ pub async fn unlock(
         return error(StatusCode::CONFLICT, "no-password");
     }
     let local: std::net::IpAddr = [127, 0, 0, 1].into();
-    if let Err(response) = super::api::throttled_verify(&daemon, local, &body.password).await {
+    if let Err(response) = super::api::throttled_verify(&daemon, local, None, &body.password).await
+    {
         return *response;
     }
     let token = daemon.tickets.lock().unwrap().issue_unlock();
@@ -304,6 +315,9 @@ pub async fn unlock(
 pub async fn shutdown(State(daemon): State<Arc<Daemon>>, headers: HeaderMap) -> Response {
     admin_only!(daemon, headers);
     crate::info!("shutdown requested over the admin API");
+    // The flag FIRST: `/admin/status` answers 503 from this line on, so the restart
+    // riding behind this call never sees a draining daemon as a serving one.
+    daemon.shutdown_requested.store(true, Ordering::Relaxed);
     daemon.shutdown.notify_waiters();
     daemon.shutdown.notify_one();
     json_response(StatusCode::OK, serde_json::json!({ "ok": true }))
@@ -427,31 +441,49 @@ pub async fn hub_relink(State(daemon): State<Arc<Daemon>>, headers: HeaderMap) -
 }
 
 /// The device key sealed under the access password — carry the link to a new PC (§20.1).
+/// The seal derives its key with Argon2 (~50 ms of CPU and 19 MiB), so it runs on the
+/// blocking pool like every other Argon2 the daemon performs (2026-10-16) — the runtime's
+/// one thread serves every listener.
 pub async fn hub_export_key(
     State(daemon): State<Arc<Daemon>>,
     headers: HeaderMap,
     Json(body): Json<HubKeyBody>,
 ) -> Response {
     admin_only!(daemon, headers);
-    match crate::hub::identity::export_encrypted(&daemon.paths, &body.password) {
-        Ok(blob) => json_response(StatusCode::OK, serde_json::json!({ "data": blob })),
-        Err(e) => error(StatusCode::BAD_REQUEST, &e),
+    let paths = daemon.paths.clone();
+    let password = body.password;
+    match tokio::task::spawn_blocking(move || {
+        crate::hub::identity::export_encrypted(&paths, &password)
+    })
+    .await
+    {
+        Ok(Ok(blob)) => json_response(StatusCode::OK, serde_json::json!({ "data": blob })),
+        Ok(Err(e)) => error(StatusCode::BAD_REQUEST, &e),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
-/// Install a previously exported key (the same link on a new PC).
+/// Install a previously exported key (the same link on a new PC). Argon2 on the pool, the
+/// export's rule.
 pub async fn hub_import_key(
     State(daemon): State<Arc<Daemon>>,
     headers: HeaderMap,
     Json(body): Json<HubKeyBody>,
 ) -> Response {
     admin_only!(daemon, headers);
-    match crate::hub::identity::import_encrypted(&daemon.paths, &body.password, &body.data) {
-        Ok(uuid) => {
+    let paths = daemon.paths.clone();
+    let (password, data) = (body.password, body.data);
+    match tokio::task::spawn_blocking(move || {
+        crate::hub::identity::import_encrypted(&paths, &password, &data)
+    })
+    .await
+    {
+        Ok(Ok(uuid)) => {
             daemon.hub.key_changed();
             json_response(StatusCode::OK, serde_json::json!({ "uuid": uuid }))
         }
-        Err(e) => error(StatusCode::BAD_REQUEST, &e),
+        Ok(Err(e)) => error(StatusCode::BAD_REQUEST, &e),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 

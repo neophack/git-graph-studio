@@ -31,6 +31,13 @@ pub const BASE_HEADER: &str = "x-ggs-base-path";
 pub const TUNNEL_BUCKET: std::net::IpAddr =
     std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 127));
 
+/// The browser's real address behind the Hub, for the LOGS alone: inserted as a request
+/// extension by `hub/session.rs::synthesize` (never a header — a LAN peer forges headers),
+/// while the limiter keeps keying on `TUNNEL_BUCKET`. Without it every relayed login and
+/// every failed guess logged as `127.0.0.127`, and an incident could not say who came in.
+#[derive(Debug, Clone, Copy)]
+pub struct OriginIp(pub std::net::IpAddr);
+
 /// The public router: what a phone reaches.
 pub fn public_router(daemon: Arc<Daemon>) -> Router {
     Router::new()
@@ -182,11 +189,14 @@ pub fn token_hash_of(headers: &HeaderMap) -> Option<String> {
 /// The client address: the peer, or — behind a trusted local proxy — the first
 /// `X-Forwarded-For` hop (§7.4).
 pub fn client_ip(daemon: &Daemon, peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
-    // Through the tunnel the WHOLE header set is the Hub's (audit F6): it stamps a fresh
-    // address per attempt, so any per-IP accounting on the forwarded value is mintable.
-    // Everything the tunnel carries lands in one shared bucket — the global limiter
-    // still bounds it, and the Hub's own logs hold the real addresses.
-    if headers.contains_key(BASE_HEADER) {
+    // Everything the tunnel carries lands in one shared bucket (audit F6, 2026-10-13): the
+    // Hub stamps a fresh address per attempt, so any per-IP accounting on the forwarded
+    // value is mintable, and the global limiter plus the Hub's own front door bound it
+    // instead. The mark is the PEER address `hub/session.rs::synthesize` sets — an address
+    // no LAN connection can have — never a request header: `x-ggs-base-path` was forgeable
+    // by any LAN peer, and a forged copy once let one device dodge its own lockout bucket
+    // while locking the shared one every relayed login depends on (2026-10-16).
+    if peer.ip() == TUNNEL_BUCKET {
         return TUNNEL_BUCKET;
     }
     let trust = peer.ip().is_loopback() && daemon.config.lock().unwrap().trust_proxy;
@@ -363,6 +373,41 @@ pub fn safe_rel_path(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tunnel's shared-bucket mark is the PEER address `hub/session.rs::synthesize`
+    /// sets — an address no LAN connection can carry (2026-10-16). Before, the mark was
+    /// the `x-ggs-base-path` header itself: a LAN peer stamping it landed every guess in
+    /// the bucket all relayed logins share, locking the owner's phone out over the relay
+    /// while dodging its own lockout bucket.
+    #[test]
+    fn a_forged_base_path_header_cannot_pick_the_tunnel_bucket() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::at(dir.path().join("remote"), dir.path().to_path_buf());
+        paths.ensure().unwrap();
+        let daemon =
+            Daemon::new(paths, crate::config::Config::default()).expect("a scratch daemon");
+
+        let lan_peer: SocketAddr = "192.168.1.9:44123".parse().unwrap();
+        let lan_ip: IpAddr = lan_peer.ip();
+        let mut forged = HeaderMap::new();
+        forged.insert(BASE_HEADER, HeaderValue::from_static("/u/abc/"));
+        forged.insert(
+            header::HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("203.0.113.7"),
+        );
+        assert_eq!(
+            client_ip(&daemon, lan_peer, &forged),
+            lan_ip,
+            "a direct request is keyed by its real peer whatever it stamps"
+        );
+
+        let tunneled = SocketAddr::new(TUNNEL_BUCKET, 0);
+        assert_eq!(
+            client_ip(&daemon, tunneled, &forged),
+            TUNNEL_BUCKET,
+            "the synthesize path's peer marks the shared bucket — headers cannot"
+        );
+    }
 
     #[test]
     fn rejects_traversal() {

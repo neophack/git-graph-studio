@@ -51,7 +51,9 @@ export function installFilesPage(): void {
 	workbench.scm.onStatus = (next) => {
 		previous?.(next);
 		status = next;
-		list.render();
+		// The letters alone move with a status push — the rows, their listeners and the
+		// scroll stay exactly where they are.
+		list.renderLetters();
 		// setRepo crosses here too (its empty map) — a closed folder clears the chip.
 		updateBranchChip();
 	};

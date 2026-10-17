@@ -18,7 +18,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use axum::extract::ConnectInfo;
-use axum::http::{header, HeaderMap, Method, Request, Version};
+use axum::http::{header, HeaderMap, Method, Request, Uri, Version};
 use axum::response::Response;
 use axum::Router;
 use tower_service::Service;
@@ -94,7 +94,7 @@ where
         let allowed = answered(
             request.version(),
             request.method(),
-            request.uri().path(),
+            request.uri(),
             request.headers(),
         );
         if !allowed {
@@ -126,12 +126,22 @@ where
 /// uuid is unknown or merely away stays the router's business (the one identical offline
 /// page). `/tunnel` passes only as a WebSocket handshake. Everything else — `/`,
 /// `/healthz`, `/metrics`, `/favicon.ico`, `/u/not-a-uuid`, any scan path — drops.
-pub fn answered(version: Version, method: &Method, path: &str, headers: &HeaderMap) -> bool {
-    if let Some(rest) = path.strip_prefix("/u/") {
+///
+/// The request-target must also be origin-form. An absolute-form target
+/// (`GET http://example.com/… HTTP/1.1`) is how a client speaks to a PROXY — this Hub
+/// forwards nothing but its own links' paths toward the PCs' tunnels and never fetches,
+/// so a foreign site's URL is not this port's vocabulary, even when a real link path is
+/// embedded inside it. The same silence answers the scan as every other probe: the port
+/// is not an open proxy for unrelated websites.
+pub fn answered(version: Version, method: &Method, uri: &Uri, headers: &HeaderMap) -> bool {
+    if version <= Version::HTTP_11 && (uri.scheme().is_some() || uri.authority().is_some()) {
+        return false;
+    }
+    if let Some(rest) = uri.path().strip_prefix("/u/") {
         let segment = rest.split('/').next().unwrap_or_default();
         return identity::valid_uuid(segment);
     }
-    if path == "/tunnel" {
+    if uri.path() == "/tunnel" {
         return websocket_handshake(version, method, headers);
     }
     false
@@ -167,6 +177,10 @@ fn header_contains(headers: &HeaderMap, name: header::HeaderName, value: &str) -
 mod tests {
     use super::*;
 
+    fn uri(target: &str) -> Uri {
+        target.parse().expect("a test request target")
+    }
+
     fn ws_headers() -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(header::CONNECTION, "Upgrade".parse().unwrap());
@@ -189,7 +203,7 @@ mod tests {
             "/u/3f9c2a6e-8b1d-8c7a-9e45-2d6f0b8a71c3/a/deeper/path",
         ] {
             assert!(
-                answered(Version::HTTP_11, &Method::GET, path, &none),
+                answered(Version::HTTP_11, &Method::GET, &uri(path), &none),
                 "{path} must reach the router"
             );
         }
@@ -218,30 +232,90 @@ mod tests {
             "/u/%33%66%39%63%32%61%36%65-8b1d-8c7a-9e45-2d6f0b8a71c3",
         ] {
             assert!(
-                !answered(Version::HTTP_11, &Method::GET, path, &none),
+                !answered(Version::HTTP_11, &Method::GET, &uri(path), &none),
                 "{path} must drop"
             );
         }
     }
 
+    /// The Hub is not a forward proxy (the relay may never be turned toward unrelated
+    /// websites): an absolute-form request target — the open-proxy probe shape — drops
+    /// with the same silence as every scan path, EVEN when the URL embeds a well-formed
+    /// link path that would otherwise pass. Authority-form and asterisk-form targets are
+    /// proxy speak too.
+    #[test]
+    fn proxy_form_targets_drop_even_when_they_spell_a_link() {
+        let none = HeaderMap::new();
+        for target in [
+            "http://example.com/",
+            "https://example.com/wp-admin/setup.php",
+            "http://example.com:8080/",
+            // The shape this guard exists for: a foreign site wrapped around a REAL link
+            // path — the link inside must not make this port answer for that site.
+            "http://evil.example/u/3f9c2a6e-8b1d-8c7a-9e45-2d6f0b8a71c3/api/session",
+            "https://evil.example/u/3f9c2a6e-8b1d-8c7a-9e45-2d6f0b8a71c3/login",
+            // Authority-form (the CONNECT-adjacent proxy spelling) and the asterisk.
+            "example.com:8443",
+            "*",
+        ] {
+            assert!(
+                !answered(Version::HTTP_11, &Method::GET, &uri(target), &none),
+                "{target} must drop — this port is not a proxy for unrelated sites"
+            );
+        }
+        // POST probes of the same shapes drop identically.
+        assert!(!answered(
+            Version::HTTP_11,
+            &Method::POST,
+            &uri("http://evil.example/u/3f9c2a6e-8b1d-8c7a-9e45-2d6f0b8a71c3/api/login"),
+            &none
+        ));
+        // A perfect WebSocket handshake is not a proxy excuse either: the PCs' leg speaks
+        // origin-form, so an absolute-form `/tunnel` drops with the rest.
+        assert!(!answered(
+            Version::HTTP_11,
+            &Method::GET,
+            &uri("http://127.0.0.1:8443/tunnel"),
+            &ws_headers()
+        ));
+        // The origin-form of the very same embedded link keeps passing — the drop is the
+        // form, never the link.
+        assert!(answered(
+            Version::HTTP_11,
+            &Method::GET,
+            &uri("/u/3f9c2a6e-8b1d-8c7a-9e45-2d6f0b8a71c3/api/session"),
+            &none
+        ));
+    }
+
     #[test]
     fn the_tunnel_passes_only_a_websocket_handshake() {
         let ws = ws_headers();
-        assert!(answered(Version::HTTP_11, &Method::GET, "/tunnel", &ws));
+        assert!(answered(
+            Version::HTTP_11,
+            &Method::GET,
+            &uri("/tunnel"),
+            &ws
+        ));
         // Plain probes of the PCs' leg: nothing.
         assert!(!answered(
             Version::HTTP_11,
             &Method::GET,
-            "/tunnel",
+            &uri("/tunnel"),
             &HeaderMap::new()
         ));
-        assert!(!answered(Version::HTTP_11, &Method::POST, "/tunnel", &ws));
+        assert!(!answered(
+            Version::HTTP_11,
+            &Method::POST,
+            &uri("/tunnel"),
+            &ws
+        ));
         let mut missing_key = ws.clone();
         missing_key.remove(header::SEC_WEBSOCKET_KEY);
         assert!(!answered(
             Version::HTTP_11,
             &Method::GET,
-            "/tunnel",
+            &uri("/tunnel"),
             &missing_key
         ));
         let mut wrong_version = ws;
@@ -249,7 +323,7 @@ mod tests {
         assert!(!answered(
             Version::HTTP_11,
             &Method::GET,
-            "/tunnel",
+            &uri("/tunnel"),
             &wrong_version
         ));
     }

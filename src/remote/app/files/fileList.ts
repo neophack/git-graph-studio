@@ -168,8 +168,19 @@ export function createFileList(hooks: FileListHooks) {
 		]);
 		node.title = `${entry.name}\n${entry.path}`;
 		node.append(check, el('span', 'row-icon', [glyph]), lines);
-		const letter = hooks.letter(entry.path, entry.isDir);
-		if (letter) node.appendChild(el('span', `status ${letterClass(letter)}`, [letter]));
+		// One stable span per row so a git-status push can repaint the letters without
+		// rebuilding the list (see renderLetters): hundreds of rows re-bound their
+		// listeners on every watcher batch before this.
+		const status = el('span', 'status');
+		const paintLetter = (): void => {
+			const letter = hooks.letter(entry.path, entry.isDir);
+			status.className = letter ? `status ${letterClass(letter)}` : 'status';
+			status.textContent = letter ?? '';
+			status.hidden = !letter;
+		};
+		paintLetter();
+		node.appendChild(status);
+		letterPainters.push(paintLetter);
 		if (entry.isDir) node.appendChild(el('span', 'chev', ['›']));
 		if (hooks.selection.active()) {
 			node.classList.add('selectable');
@@ -247,7 +258,11 @@ export function createFileList(hooks: FileListHooks) {
 		});
 	}
 
+	/** The row letter painters of the last render, in row order. */
+	let letterPainters: (() => void)[] = [];
+
 	function render(): void {
+		letterPainters = [];
 		const list = visible();
 		root.replaceChildren(...list.map(row));
 		if (entries.length < total) {
@@ -277,6 +292,13 @@ export function createFileList(hooks: FileListHooks) {
 		},
 		visible,
 		render,
+		/** Re-paint only the git-status letters — the SCM feed refreshes on every watcher
+		 *  batch (continuously, while a build runs in the workspace) and the entry set is
+		 *  unchanged by it; a full rebuild of every loaded row per push was the page's
+		 *  dominant cost on a phone. */
+		renderLetters(): void {
+			for (const paint of letterPainters) paint();
+		},
 		async show(path: string): Promise<void> {
 			if (path === dir) {
 				await this.refresh();

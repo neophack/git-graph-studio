@@ -233,8 +233,30 @@ export function onPageChange(listener: () => void): () => void {
 	return () => pageListeners.delete(listener);
 }
 
+/** One wave per microtask boundary: `goTo`'s own notify and the workbench DOM observers
+ *  both feed the same chrome listeners, and a page move fires BOTH (the command flips the
+ *  DOM the observers watch). Running the wave once — not once per trigger — halves the
+ *  per-switch chrome work (2026-10-16, the response-latency pass: the listeners were the
+ *  switch's dominant local cost, and they ran twice per move). The wave is queued before
+ *  `goTo`'s promise settles, so an `await goTo` still returns with the chrome updated. */
+let waveScheduled = false;
+function scheduleWave(): void {
+	if (waveScheduled) return;
+	waveScheduled = true;
+	queueMicrotask(() => {
+		waveScheduled = false;
+		for (const listener of pageListeners) {
+			try {
+				listener();
+			} catch {
+				/* one listener's failure is its own */
+			}
+		}
+	});
+}
+
 function notifyPageChange(): void {
-	for (const listener of pageListeners) listener();
+	scheduleWave();
 }
 
 /** Clear the empty-state flag: a tab was chosen elsewhere (the open editors sheet). */
@@ -249,6 +271,21 @@ export function clearEditorPlaceholder(): void {
 const watchers = new Set<() => void>();
 let observer: MutationObserver | null = null;
 
+/** Whether `target` sits in the status bar or the activity bar — the two roots whose
+ * records may be the branch chip's or an activity item's. A capped walk: the editor
+ * area's own records (the observer's hottest stream — every CodeMirror mutation, hundreds
+ * per scroll frame) can never be either, and used to pay a `closest()` climb to the
+ * document root each before answering no. */
+function nearStatusOrActivity(target: Element): boolean {
+	for (let hop = 0; hop < 8; hop += 1) {
+		const parent: Element | null = target.parentElement;
+		if (!parent) return false;
+		if (parent.id === 'statusbar' || parent.id === 'activitybar') return true;
+		target = parent;
+	}
+	return false;
+}
+
 /** Mutation targets inside the editor area that change what the chrome shows: the tab strips
  *  and the group boxes. Everything else in there (CodeMirror's own DOM, a terminal's rows)
  *  is skipped at the first class check, so typing costs the chrome nothing. */
@@ -258,16 +295,17 @@ function chromeRelevant(record: MutationRecord): boolean {
 	if (!target) return false;
 	if (target.id === 'sidebar' || target.id === 'panel' || target.id === 'activitybar') return true;
 	const list = target.classList;
-	return list.contains('tabs-container') || list.contains('tab') || list.contains('editor-group-box') || list.contains('editor-groups-root')
-		|| list.contains('editor-split-child') || list.contains('activity-item') || list.contains('panel-title') || list.contains('badge')
-		|| (target as HTMLElement).dataset?.item === 'branch' || target.closest('[data-item="branch"], #activitybar') !== null;
+	if (list.contains('tabs-container') || list.contains('tab') || list.contains('editor-group-box') || list.contains('editor-groups-root')
+		|| list.contains('editor-split-child') || list.contains('activity-item') || list.contains('panel-title') || list.contains('badge')) return true;
+	if ((target as HTMLElement).dataset?.item === 'branch') return true;
+	return nearStatusOrActivity(target) && target.closest('[data-item="branch"], #activitybar') !== null;
 }
 
 function installObserver(): void {
 	if (observer || typeof MutationObserver === 'undefined') return;
 	observer = new MutationObserver((records) => {
 		if (!records.some(chromeRelevant)) return;
-		for (const watcher of watchers) watcher();
+		scheduleWave();
 	});
 	const watch = (id: string, options: MutationObserverInit) => {
 		const target = document.getElementById(id);

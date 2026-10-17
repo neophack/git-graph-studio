@@ -30,6 +30,10 @@ const FLUID_CSS = '*{-webkit-user-select:none!important;user-select:none!importa
 const HIDE_CARETS_CSS = '*{caret-color:transparent!important}';
 /** A fluid copy looks for its scrollers again at most this often while it knows none. */
 const SCROLLER_SCAN_MS = 1000;
+/** …but stops after this many empty hunts until a rebuild or a scroll back to the end:
+ *  a copy whose scroller is never at its end (the viewer reading history up-page) must
+ *  not walk its whole document every second forever. */
+const SCAN_MISS_CAP = 10;
 /** How often a fluid copy reports a scroller's position while it scrolls. */
 const SCROLL_REPORT_MS = 100;
 
@@ -165,6 +169,11 @@ export class MirrorViewer {
 	/** A fluid copy's scrollers that sit at their end: they follow the content's growth. */
 	private stuck = new Set<Element>();
 	private lastScan = 0;
+	/** Consecutive scroller scans that found nothing: the hunt for a page's (late-rendering)
+	 *  scroller stops after this many — a copy whose scroller is never at its end (the
+	 *  viewer scrolled up to read history) used to walk the whole document every second
+	 *  forever. A rebuild or a viewer scroll to the end re-arms it. */
+	private scanMisses = 0;
 	/** The mirrored caret (the phone-mirror cursor): the last caret op's fields, painted
 	 *  into whichever document of the copy holds the editable. */
 	private caret: CaretState | null = null;
@@ -312,6 +321,7 @@ export class MirrorViewer {
 		frame.addEventListener('load', this.onFrameLoad);
 		this.stuck.clear();
 		this.lastScan = 0;
+		this.scanMisses = 0;
 		if (this.scrollTimer !== null) clearTimeout(this.scrollTimer);
 		this.scrollTimer = null;
 		this.scrollReport.clear();
@@ -426,6 +436,9 @@ export class MirrorViewer {
 				if (!el) return;
 				if (atEnd(el)) this.stuck.add(el);
 				else this.stuck.delete(el);
+				// A scroll that reaches the end re-arms the scroller hunt (the cap above
+				// stops it while the viewer reads history up-page).
+				if (atEnd(el)) this.scanMisses = 0;
 				// A scroll this copy applied itself (the end-pin, a snapshot's restore) is
 				// not the viewer's: it reports nothing, so it can neither yank the PC's
 				// scroller nor take the §9.2 lease a real viewer's scrolls need.
@@ -941,10 +954,11 @@ export class MirrorViewer {
 		const doc = this.root;
 		if (!doc) return;
 		const now = Date.now();
-		if (this.stuck.size === 0 && now - this.lastScan >= SCROLLER_SCAN_MS) {
+		if (this.stuck.size === 0 && this.scanMisses < SCAN_MISS_CAP && now - this.lastScan >= SCROLLER_SCAN_MS) {
 			this.lastScan = now;
 			for (const el of Array.from(doc.querySelectorAll('*'))) if (scrollable(el) && atEnd(el)) this.stuck.add(el);
 			if (doc.scrollingElement && scrollable(doc.scrollingElement) && atEnd(doc.scrollingElement)) this.stuck.add(doc.scrollingElement);
+			if (this.stuck.size === 0) this.scanMisses += 1;
 		}
 		for (const el of [...this.stuck]) {
 			if (!el.isConnected) {

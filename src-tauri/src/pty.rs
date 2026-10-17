@@ -152,7 +152,8 @@ pub fn pty_create(
         let event_name = format!("studio://pty-output-{id}");
         let mut pending: Vec<u8> = Vec::new();
         let mut carry: Vec<u8> = Vec::new();
-        while gather_batch(&out_rx, &mut pending) {
+        let mut quiet = true;
+        while gather_batch(&out_rx, &mut pending, &mut quiet) {
             let payload = decode_pty_chunk(&mut carry, &pending);
             if !payload.is_empty() {
                 push_tail(&reader_tail, &payload);
@@ -246,17 +247,40 @@ pub fn session_count(app: &TauriAppHandle) -> u32 {
 /// blocks (the stream is quiet), the rest ride the coalesce window until it goes quiet
 /// again or the batch is big enough to flush. Answers false once the stream ended and
 /// nothing more will come.
-fn gather_batch(rx: &std::sync::mpsc::Receiver<Vec<u8>>, pending: &mut Vec<u8>) -> bool {
+/// One output batch. `quiet` carries the gap state across batches: the FIRST chunk
+/// after a quiet gap leaves at once (the interactive case — a key's echo never waits
+/// the window; whatever already queues behind it rides along), and while the stream
+/// stays chatty the window keeps gathering as before — a `cargo build` still crosses
+/// as far fewer broadcast events. A window that expires with nothing behind it puts
+/// the stream back to quiet, so the next burst's head leads again.
+fn gather_batch(
+    rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    pending: &mut Vec<u8>,
+    quiet: &mut bool,
+) -> bool {
     match rx.recv() {
         Ok(chunk) => pending.extend_from_slice(&chunk),
         Err(_) => return false,
     }
+    let mut gathered = false;
     while pending.len() < OUTPUT_FLUSH_BYTES {
-        match rx.recv_timeout(OUTPUT_COALESCE) {
-            Ok(chunk) => pending.extend_from_slice(&chunk),
-            Err(_) => break,
+        let chunk = if *quiet && !gathered {
+            // Leading edge: nothing is waiting behind the head yet — probe, don't wait.
+            rx.try_recv().ok()
+        } else {
+            rx.recv_timeout(OUTPUT_COALESCE).ok()
+        };
+        match chunk {
+            Some(chunk) => {
+                pending.extend_from_slice(&chunk);
+                gathered = true;
+            }
+            None => break,
         }
     }
+    // Chunks behind the head mean the stream is busy — the next batch gathers behind
+    // the window again; a lone head stays interactive.
+    *quiet = !gathered;
     true
 }
 
@@ -339,16 +363,27 @@ fn with_session<T>(
 /// sequence that this read split (the kernel splits at arbitrary boundaries; a per-read
 /// lossy decode rendered the split sequence as U+FFFD garbage — a CJK filename in `ls`,
 /// a localized git message). `carry` keeps the tail bytes across calls; a final call
-/// with an empty chunk flushes the tail lossily.
+/// with an empty chunk flushes the tail lossily. A hard-invalid byte (binary output
+/// through the terminal) is never held: it leaves as one U+FFFD, because holding it
+/// would wedge the decoder with every later byte piling up behind.
 fn decode_pty_chunk(carry: &mut Vec<u8>, chunk: &[u8]) -> String {
     carry.extend_from_slice(chunk);
-    let complete = match std::str::from_utf8(carry) {
-        Ok(_) => carry.len(),
-        Err(error) => error.valid_up_to(),
-    };
-    let payload = String::from_utf8_lossy(&carry[..complete]).into_owned();
-    carry.drain(..complete);
-    payload
+    let mut payload = String::new();
+    loop {
+        let (complete, invalid) = match std::str::from_utf8(carry) {
+            Ok(_) => (carry.len(), 0),
+            Err(error) => match error.error_len() {
+                None => (error.valid_up_to(), 0),
+                Some(len) => (error.valid_up_to(), len),
+            },
+        };
+        payload.push_str(&String::from_utf8_lossy(&carry[..complete]));
+        carry.drain(..complete + invalid);
+        if invalid == 0 {
+            return payload;
+        }
+        payload.push('\u{FFFD}');
+    }
 }
 
 #[cfg(test)]
@@ -371,7 +406,8 @@ mod tests {
         let mut batches = 0;
         let mut bytes = Vec::new();
         let mut pending = Vec::new();
-        while gather_batch(&rx, &mut pending) {
+        let mut quiet = true;
+        while gather_batch(&rx, &mut pending, &mut quiet) {
             batches += 1;
             bytes.append(&mut pending);
             pending.clear();
@@ -389,15 +425,50 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
         tx.send(b"first".to_vec()).unwrap();
         let mut pending = Vec::new();
-        assert!(gather_batch(&rx, &mut pending));
+        let mut quiet = true;
+        assert!(gather_batch(&rx, &mut pending, &mut quiet));
         assert_eq!(pending, b"first");
         pending.clear();
         std::thread::sleep(super::OUTPUT_COALESCE * 2);
         tx.send(b"second".to_vec()).unwrap();
-        assert!(gather_batch(&rx, &mut pending));
+        assert!(gather_batch(&rx, &mut pending, &mut quiet));
         assert_eq!(pending, b"second");
         drop(tx);
-        assert!(!gather_batch(&rx, &mut pending));
+        assert!(!gather_batch(&rx, &mut pending, &mut quiet));
+    }
+
+    #[test]
+    fn a_quiet_streams_first_chunk_leaves_without_waiting_the_window() {
+        // The leading edge (the 2026-10-16 response-latency pass): after a quiet gap the
+        // head emits at once instead of gathering behind the 8 ms window. Prove it by
+        // racing: the gather thread reports it started (the head was queued before it),
+        // the follower is sent 2 ms later — inside the old 8 ms window (which would have
+        // swallowed it into the head's batch), far behind the new leading edge (which
+        // has already left with the head alone). The start signal keeps the race
+        // scheduling-free: no sleep has to guess when the thread begins.
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let (batch_tx, batch_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        tx.send(b"echo".to_vec()).unwrap();
+        let gather = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let mut pending = Vec::new();
+            let mut quiet = true;
+            while gather_batch(&rx, &mut pending, &mut quiet) {
+                batch_tx.send(pending.clone()).unwrap();
+                pending.clear();
+            }
+        });
+        started_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        tx.send(b"later".to_vec()).unwrap();
+        drop(tx);
+        gather.join().unwrap();
+        let mut batches: Vec<Vec<u8>> = Vec::new();
+        while let Ok(batch) = batch_rx.recv() {
+            batches.push(batch);
+        }
+        assert_eq!(batches, vec![b"echo".to_vec(), b"later".to_vec()]);
     }
 
     #[test]
@@ -474,6 +545,20 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&carry), "\u{FFFD}");
     }
 
+    #[test]
+    fn a_stray_invalid_byte_never_wedges_the_decoder() {
+        // Binary output through the terminal (a `cat` of a binary, a stray continuation
+        // byte) is a hard-invalid sequence, not an incomplete tail: before the
+        // error_len() branch it stuck at the carry's head forever — every later chunk
+        // joined it and nothing was emitted again.
+        let mut carry = Vec::new();
+        let first = decode_pty_chunk(&mut carry, &[b'a', 0x80, b'b']);
+        assert_eq!(first, "a\u{FFFD}b");
+        let second = decode_pty_chunk(&mut carry, "still alive 你".as_bytes());
+        assert_eq!(second, "still alive 你");
+        assert!(carry.is_empty());
+    }
+
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::io::Read;
 
@@ -529,3 +614,4 @@ mod tests {
         let _ = child.kill();
     }
 }
+
