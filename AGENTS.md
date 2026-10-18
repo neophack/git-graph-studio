@@ -2232,14 +2232,28 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   left and right of them on a phone; on the phone every menu is the sheet, its submenus
   drilling in with a back step) — and the phone's back
   button closing the overlay on screen (`backStack.ts`: the closers STACK — a sheet over a
-  full-screen page peels one layer per back, one entry re-armed while layers remain); the
+  full-screen page peels one layer per back, one entry re-armed while layers remain — with
+  the stay guard at the stack's bottom, 2026-10-18: a back that peels every layer shows
+  the "press back again to leave" hint instead of exiting, the entry deliberately left
+  un-armed for the window so a second back leaves, silence re-arming — a phone browser's
+  edge-swipe back never drops the session by accident); the
   page-stack shells' page-back entry is `pageBack.ts` — while a page covers the editor the
   app bar leads with ‹ (`appBar.ts`), the portrait tablet's rail carries ‹ at its head
   (`navRail.ts` — the form draws no app bar), and the system back key rides backStack as
   the page's bottom closer; `responsive.ts` marks a raised
   keyboard (`data-keyboard`) and the body follows the visual viewport, so the bars step
-  aside or lift with the content. A swipe from the left edge closes a side-view page
-  (`gestures.ts`'s `swipeBack`, wired in `shell.ts`), the quick input (palette, quick
+  aside or lift with the content. A horizontal drag over the page column pages the bottom
+  navigation's ring (`swipeNav.ts`, wired in `shell.ts`, 2026-10-18 — the owner's
+  direction: 手机远程时浏览器手势会导致页面退出, 左滑右滑改为切换底部按钮): leftward to the
+  next destination, rightward to the previous, rubber-banded at the ends; the page follows
+  the finger (translate + edge glow) and the commit is a two-phase slide — the page out in
+  the swipe direction, the destination in from the other side, reduced motion collapsing
+  it to a jump. The claim yields to the gestures that own their drag (a swipe-reveal row,
+  a horizontally scrollable strip, a slider) and the click that ends a drag never
+  activates the row under it; the old left-edge `swipeBack` is gone — the bezel's own
+  back keeps its native meaning and the stay guard turns it into the in-app back. The
+  touch polish rides the same pass: the workbench's list rows answer `:active` on coarse
+  pointers and the bottom bar's pill presses down as it darkens. The quick input (palette, quick
   picks) becomes a full-screen page (`remote.css`) that carries its own ‹ back row —
   `quickInput.ts` builds the row on every form (the desktop card hides it: Esc and the
   outside click serve there) and answers `dismissQuickInput()`, and `quickInputBack.ts`

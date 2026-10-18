@@ -18,7 +18,8 @@ import { createAppBar, pageHeading, relativeFolder } from '../src/remote/appBar'
 import { createEditorEmptyState, editorActionEntries, openEditorsSheet } from '../src/remote/editorSwitcher';
 import { ACCESSORY_KEYS, createEditorAccessory } from '../src/remote/editorAccessory';
 import { closeDrawer, drawerOpen, openDrawer } from '../src/remote/navDrawer';
-import { leavingPage, pushBack } from '../src/remote/backStack';
+import { leavingPage, pushBack, installStayGuard, uninstallStayGuard } from '../src/remote/backStack';
+import { installSwipeNav } from '../src/remote/swipeNav';
 import { goWindowsPicker } from '../src/remote/windowSwitcher';
 import { setRemoteEnv } from '../src/remote/session';
 import { currentPage, editorPlaceholderShown, resetWorkbenchWatch } from '../src/remote/pages';
@@ -690,6 +691,186 @@ describe('quick input back', () => {
 		ensureOverlays().querySelector<HTMLButtonElement>('.quick-input .qback-btn')!.click();
 		await expect(picked).resolves.toBe(null);
 		expect(ensureOverlays().querySelector('.quick-input')).toBeNull();
+	});
+});
+
+// The horizontal pager (swipeNav.ts, the owner's 2026-10-18 direction — 手机远程时浏览器
+// 手势会导致页面退出,左右滑改为切换底部按钮): a horizontal drag over the page column
+// follows the finger and pages the bottom navigation's ring — left to the next destination,
+// right to the previous, rubber-banded at the ends; the claim yields to the gestures that
+// own their own drag (a swipe-reveal row, a horizontally scrollable strip), and the click
+// that ends a drag never activates the row under it.
+describe('horizontal pager', () => {
+	afterEach(leavePhone);
+
+	/** phoneWorkbench's DOM wrapped the remote page's own way: the side bar and the editor
+	 *  part inside #workbench, the pager bound to it. */
+	function pagedWorkbench(): { ran: string[]; workbench: HTMLElement; sidebar: HTMLElement } {
+		const base = phoneWorkbench();
+		const workbench = document.createElement('div');
+		workbench.id = 'workbench';
+		document.body.insertBefore(workbench, document.getElementById('titlebar'));
+		workbench.append(document.getElementById('activitybar')!, document.getElementById('sidebar')!, document.getElementById('editorPart')!);
+		installSwipeNav(workbench);
+		return { ran: base.ran, workbench, sidebar: base.sidebar };
+	}
+
+	function touch(node: HTMLElement, type: 'pointerdown' | 'pointermove' | 'pointerup' | 'pointercancel', x: number, y = 40): void {
+		const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y }) as MouseEvent & { pointerType: string; isPrimary: boolean };
+		Object.defineProperty(event, 'pointerType', { value: 'touch' });
+		Object.defineProperty(event, 'isPrimary', { value: true });
+		node.dispatchEvent(event);
+	}
+
+	it('a leftward swipe pages to the next destination with the page following the finger', async () => {
+		vi.useFakeTimers();
+		const { ran, workbench, sidebar } = pagedWorkbench();
+		touch(sidebar, 'pointerdown', 300);
+		touch(sidebar, 'pointermove', 250);
+		touch(sidebar, 'pointermove', 150);
+		// Mid-drag: the column is at the finger and the glow's progress rides along.
+		expect(workbench.style.transform).toBe('translateX(-150px)');
+		expect(workbench.style.getPropertyValue('--ggs-swipe-pr')).not.toBe('0.000');
+		touch(sidebar, 'pointerup', 140);
+		await vi.advanceTimersByTimeAsync(130 + 190 + 10);
+		// Files → Editor: the sidebar page dismissed, the settle cleaned the transform.
+		expect(ran).toContain('workbench.toggleSidebar');
+		expect(sidebar.hidden).toBe(true);
+		expect(workbench.style.transform).toBe('');
+		// The click that ends the drag is not the row's own tap.
+		const tapped = vi.fn();
+		sidebar.addEventListener('click', tapped);
+		sidebar.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		expect(tapped).not.toHaveBeenCalled();
+		// A fresh tap after the drag still works (its pointerdown clears the swallow).
+		touch(sidebar, 'pointerdown', 200);
+		sidebar.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		expect(tapped).toHaveBeenCalledTimes(1);
+		vi.useRealTimers();
+	});
+
+	it('rubber-bands at the ring ends — a rightward swipe from the first destination stays', async () => {
+		vi.useFakeTimers();
+		const { ran, workbench, sidebar } = pagedWorkbench();
+		touch(sidebar, 'pointerdown', 60);
+		touch(sidebar, 'pointermove', 160);
+		touch(sidebar, 'pointermove', 220);
+		// Damped far below the finger's travel, and never a page move.
+		const px = parseFloat(workbench.style.getPropertyValue('--ggs-swipe-x'));
+		expect(px).toBeGreaterThan(0);
+		expect(px).toBeLessThan(96);
+		touch(sidebar, 'pointerup', 220);
+		await vi.advanceTimersByTimeAsync(190 + 10);
+		expect(ran).toEqual([]);
+		expect(workbench.style.transform).toBe('');
+		vi.useRealTimers();
+	});
+
+	it('a cancelled drag (the browser claimed it) snaps back without committing', async () => {
+		vi.useFakeTimers();
+		const { ran, workbench, sidebar } = pagedWorkbench();
+		touch(sidebar, 'pointerdown', 300);
+		touch(sidebar, 'pointermove', 200);
+		touch(sidebar, 'pointercancel', 180);
+		await vi.advanceTimersByTimeAsync(190 + 10);
+		expect(ran).toEqual([]);
+		expect(workbench.style.transform).toBe('');
+		vi.useRealTimers();
+	});
+
+	it('yields to the gestures that own their drag: a swipe-reveal row, a scrollable strip', () => {
+		const { ran, workbench, sidebar } = pagedWorkbench();
+		const row = document.createElement('div');
+		row.className = 'ggs-swipe-row';
+		sidebar.appendChild(row);
+		touch(row, 'pointerdown', 300);
+		touch(row, 'pointermove', 200);
+		touch(row, 'pointerup', 180);
+		const wide = document.createElement('div');
+		Object.defineProperty(wide, 'scrollWidth', { configurable: true, value: 800 });
+		Object.defineProperty(wide, 'clientWidth', { configurable: true, value: 320 });
+		sidebar.appendChild(wide);
+		touch(wide, 'pointerdown', 300);
+		touch(wide, 'pointermove', 200);
+		touch(wide, 'pointerup', 180);
+		expect(ran).toEqual([]);
+		expect(workbench.style.transform).toBe('');
+	});
+
+	it('a destination the bar does not hold sits past the ring: back returns to the last one', async () => {
+		vi.useFakeTimers();
+		const { ran, sidebar } = pagedWorkbench();
+		const ext = document.createElement('div');
+		ext.className = 'activity-item';
+		ext.dataset.view = 'extensions';
+		document.getElementById('activitybar')!.appendChild(ext);
+		for (const item of document.querySelectorAll<HTMLElement>('#activitybar .activity-item')) {
+			item.classList.toggle('active', item.dataset.view === 'extensions');
+		}
+		expect(currentPage()).toBe('extensions');
+		touch(sidebar, 'pointerdown', 60);
+		touch(sidebar, 'pointermove', 180);
+		touch(sidebar, 'pointerup', 260);
+		await vi.advanceTimersByTimeAsync(130 + 190 + 10);
+		expect(ran).toContain('workbench.showSearch');
+		vi.useRealTimers();
+	});
+});
+
+// The stay guard (backStack.ts, same direction): a browser back peels the in-app layers —
+// the overlays, the page over the editor — and the guard beneath them asks before it lets
+// the back leave: the hint shows, the entry stays un-armed for the window (a second back
+// leaves), and silence re-arms.
+describe('stay guard', () => {
+	afterEach(() => {
+		uninstallStayGuard();
+		// Drain any ignorePop a consumed entry left behind, then leave the phone shell.
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		leavePhone();
+	});
+
+	it('peels the overlay first, then asks; a second back in the window would leave', async () => {
+		vi.useFakeTimers();
+		// A clean module state, as a fresh page load gives it (earlier suites leave their
+		// spent closers behind — the file shares one module instance).
+		leavingPage();
+		const hints: number[] = [];
+		installStayGuard(() => hints.push(hints.length));
+		const closed: string[] = [];
+		const release = pushBack(() => closed.push('sheet'));
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		expect(closed).toEqual(['sheet']);
+		expect(hints).toEqual([]);
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		expect(hints.length).toBe(1);
+		// The entry was deliberately left un-armed: this back would leave, not re-ask.
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		expect(hints.length).toBe(1);
+		await vi.advanceTimersByTimeAsync(2600 + 10);
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		expect(hints.length).toBe(2);
+		release();
+		vi.useRealTimers();
+	});
+
+	it('an overlay opened during the leave window sits above the re-armed guard', async () => {
+		vi.useFakeTimers();
+		leavingPage();
+		const hints: number[] = [];
+		installStayGuard(() => hints.push(hints.length));
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		expect(hints.length).toBe(1);
+		const closed: string[] = [];
+		const release = pushBack(() => closed.push('drawer'));
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		// The drawer peeled; the guard kept its window — it did not ask a second time.
+		expect(closed).toEqual(['drawer']);
+		expect(hints.length).toBe(1);
+		await vi.advanceTimersByTimeAsync(2600 + 10);
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		expect(hints.length).toBe(2);
+		release();
+		vi.useRealTimers();
 	});
 });
 

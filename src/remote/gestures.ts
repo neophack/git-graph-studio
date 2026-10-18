@@ -1,7 +1,9 @@
 // Touch gestures for the remote workbench (docs/ggs-remote-plan.md §11.4), hand-written over
 // Pointer Events: long-press (500 ms, 10 px tolerance) becomes the `contextmenu` event every
-// view already handles — iOS Safari never fires one by itself; pinch reports a scale ratio;
-// an edge swipe from the left goes back.
+// view already handles — iOS Safari never fires one by itself; pinch reports a scale ratio.
+// The horizontal swipes that page the bottom navigation's destinations are swipeNav.ts (the
+// shell's own layer over the page column, with its follow-finger animation); the browser's
+// edge-swipe back stays the system's, turned in-app by backStack's stay guard.
 export const LONG_PRESS_MS = 500;
 export const MOVE_TOLERANCE = 10;
 
@@ -92,23 +94,5 @@ export function pinch(el: HTMLElement, onScale: (ratio: number) => void, onEnd?:
 		el.removeEventListener('pointermove', move);
 		el.removeEventListener('pointerup', up);
 		el.removeEventListener('pointercancel', up);
-	};
-}
-
-/** A right swipe starting within 24 px of the left edge and travelling 80 px goes back. */
-export function swipeBack(el: HTMLElement, onBack: () => void): () => void {
-	let start: { x: number; y: number } | null = null;
-	const down = (e: PointerEvent) => {
-		start = e.clientX <= 24 ? { x: e.clientX, y: e.clientY } : null;
-	};
-	const up = (e: PointerEvent) => {
-		if (start && e.clientX - start.x > 80 && Math.abs(e.clientY - start.y) < 60) onBack();
-		start = null;
-	};
-	el.addEventListener('pointerdown', down);
-	el.addEventListener('pointerup', up);
-	return () => {
-		el.removeEventListener('pointerdown', down);
-		el.removeEventListener('pointerup', up);
 	};
 }

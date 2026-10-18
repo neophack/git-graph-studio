@@ -12,12 +12,13 @@ import { commands } from '../platform/commands';
 import { formatBytes, notify, quickPick } from '../platform/ui';
 import { t, tf, onLocaleChange } from '../platform/i18n';
 import { installActionSheet } from './actionSheet';
-import { leavingPage } from './backStack';
-import { installLongPress, swipeBack } from './gestures';
+import { installStayGuard, leavingPage, uninstallStayGuard } from './backStack';
+import { installLongPress } from './gestures';
 import { installHasFallbacks } from './hasFallbacks';
-import { backToEditor, currentPage, onWorkbenchChange } from './pages';
+import { currentPage, onWorkbenchChange } from './pages';
 import { installPageBack } from './pageBack';
 import { installQuickInputBack } from './quickInputBack';
+import { installSwipeNav } from './swipeNav';
 import { deviceOverride, onDeviceClassChange, setDeviceOverride, type DeviceOverride } from './responsive';
 import { downloadTo, uploadInto } from '../features/explorer';
 import { goWindowsPicker, openWindowSwitcher, watchLifecycle } from './windowSwitcher';
@@ -174,26 +175,29 @@ function addSwitcherButton(): void {
 }
 
 /** The one-time installs that outlive every layout: the files page and the phone Source
- *  Control page (the page-stack shells' Files and Changes destinations), the page-stack
- *  back gesture (the side bar element persists across arrangements), the page-back entry
- *  (the app bar's ‹, the rail's ‹ and the system back key ride it), the quick input's own
- *  back entry (its full-screen form's ‹ row and the system back key ride that), the
- *  settings entry's routing, and the page marks the CSS reads. */
+ *  Control page (the page-stack shells' Files and Changes destinations), the horizontal
+ *  pager over the page column (swipeNav.ts — the side bar element persists across
+ *  arrangements), the page-back entry (the app bar's ‹, the rail's ‹ and the system back
+ *  key ride it), the quick input's own back entry (its full-screen form's ‹ row and the
+ *  system back key ride that), the stay guard (a browser back peels the in-app layers and
+ *  asks before it leaves), the settings entry's routing, and the page marks the CSS reads. */
 function installOnce(): void {
 	installFilesPage();
 	installScmPage();
 	installTerminalFollow();
 	installPageBack();
 	installQuickInputBack();
-	if (!swipeBackInstalled) {
-		const sidebar = document.getElementById('sidebar');
-		if (sidebar) {
-			swipeBackInstalled = true;
-			swipeBack(sidebar, () => {
-				if (document.documentElement.hasAttribute('data-page-stack') && !sidebar.hidden) backToEditor();
-			});
-		}
-	}
+	const workbench = document.getElementById('workbench');
+	if (workbench) installSwipeNav(workbench);
+	// The stay guard follows the page-stack marker: armed on the phone orientations and the
+	// portrait tablet, stood down on the wide forms (a desktop browser's back leaves as it
+	// always did).
+	const syncStayGuard = (): void => {
+		if (document.documentElement.hasAttribute('data-page-stack')) installStayGuard(() => notify('info', t('remote.exitHint')));
+		else uninstallStayGuard();
+	};
+	syncStayGuard();
+	onDeviceClassChange(syncStayGuard);
 	if (!pageMarked) {
 		pageMarked = true;
 		const mark = () => {
@@ -211,7 +215,6 @@ function installOnce(): void {
 	onDeviceClassChange((device) => installPhoneSettingsEntry(pageStackOfClass(device)));
 }
 
-let swipeBackInstalled = false;
 let pageMarked = false;
 
 /** Wait for the workbench's first frame (the title bar is filled), then install: the layout

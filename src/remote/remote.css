@@ -159,6 +159,44 @@
 .ggs-bottom-tabs .badge[hidden] { display: none; }
 /* An unsaved editor: the count wears the modified colour. */
 .ggs-bottom-tabs .badge.dirty { background: var(--ggs-dirty); color: #1f1f1f; }
+/* The pill answers the finger with a press-down of its own beside the colour. */
+.ggs-bottom-tabs .pill { transition: background-color 160ms var(--ggs-ease), transform 160ms var(--ggs-ease); }
+.ggs-bottom-tabs button:active .pill { transform: scale(0.88); }
+
+/* ---------- The horizontal pager (swipeNav.ts) ----------
+   A sideways drag over the page column follows the finger: the column translates, an edge
+   glow opens on the side the page leaves toward, and the commit is a two-phase slide (the
+   page out in the swipe direction, the destination in from the other side). The bars stay
+   put — only the page moves, the Material tab-pager shape. The arrangement clips so the
+   translated page never pokes a horizontal scrollbar out of the viewport. */
+:root.remote-shell[data-page-stack] .ggs-arrange { overflow: clip; }
+#workbench.ggs-swipe-drag { will-change: transform; }
+#workbench.ggs-swipe-drag::before,
+#workbench.ggs-swipe-drag::after {
+	content: ''; position: absolute; inset: 0; z-index: 60; pointer-events: none;
+}
+/* The glow doubles as the dimming scrim: the gradient's dark head sits on the edge the
+   page moves away from, fading out over the first third of the page. */
+#workbench.ggs-swipe-drag::before {
+	background: linear-gradient(to right, rgba(0, 0, 0, 0.26), transparent 34%);
+	opacity: var(--ggs-swipe-pl, 0);
+}
+#workbench.ggs-swipe-drag::after {
+	background: linear-gradient(to left, rgba(0, 0, 0, 0.26), transparent 34%);
+	opacity: var(--ggs-swipe-pr, 0);
+}
+#workbench.ggs-swipe-anim::before,
+#workbench.ggs-swipe-anim::after { transition: opacity 130ms var(--ggs-ease); }
+@media (prefers-reduced-motion: reduce) {
+	#workbench.ggs-swipe-anim::before,
+	#workbench.ggs-swipe-anim::after { transition: none; }
+}
+
+/* Touch polish: a finger has no hover, so the workbench's own list rows answer :active —
+   the press feedback every native list gives (the sheets' and the drawer's rows already
+   carry theirs), and a press never selects text under it. */
+:root.remote-shell[data-pointer="coarse"] .row { user-select: none; -webkit-user-select: none; }
+:root.remote-shell[data-pointer="coarse"] .row:active:not(.selected) { background: var(--vscode-list-hoverBackground); }
 
 /* ---------- The editor page ---------- */
 /* The tab strip and the breadcrumbs move to the app bar and the open editors sheet. */

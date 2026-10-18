@@ -633,6 +633,7 @@ export const zhCn: typeof en = {
 	'remote.actionSheet.cancel': '取消',
 	'remote.dataSaver.suggest': '当前连接较慢，是否开启省流模式？',
 	'remote.dataSaver.enable': '开启',
+	'remote.exitHint': '再按一次退出工作台',
 	'transfer.upload': '上传文件…',
 	'transfer.uploadFolder': '上传文件夹…',
 	'transfer.download': '下载',

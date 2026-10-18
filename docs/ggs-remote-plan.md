@@ -1123,9 +1123,9 @@ type FormFactor = 'phone' | 'tablet' | 'desktop';
 | 代码分析（17） | 模块图：`moduleDiagram.ts` 已有平移缩放，补 Pointer Events 双指缩放、点选代替悬停；报告表格在手机档变卡片列表；Import Graph 分页 | `moduleDiagram.ts`、`analysisPages.ts` |
 | 设置 / 命令系统（2） | 手机档设置是专属全屏页面（`settingsPage.ts`，2026-10-12 落地）：单列、分类下钻（逐级滑入、返回步、手机返回键逐级弹出），布尔为行内开关、选择类走底部表单、数字走 − 值 + 步进表单、文件关联与文本/JSON 扩展设置各有一级/一表单，根级搜索横跨全部类别——与桌面对话框共用同一设置注册表；抽屉与 `workbench.openSettings` 在手机档都路由到该页。远程端的 `remote.*` 设置（省流）归入页面的“远程访问”分类 | `settingsPage.ts`、`settings.ts`、`settingsPanel.ts` |
 
-### 11.4 手势（`src/remote/gestures.ts`）
+### 11.4 手势（`src/remote/gestures.ts` + `src/remote/swipeNav.ts`）
 
-用 Pointer Events 自写，不引入库：`longPress(el, cb, 500ms, 移动容差 10px)`、`pinch(el, onScale)`（两个 pointer 的距离比）、`swipeBack(el, cb)`（从左边缘 24 px 内开始的右滑超过 80 px）。所有手势在 `touch-action` 上声明，避免与浏览器默认滚动冲突。
+用 Pointer Events 自写，不引入库：`longPress(el, cb, 500ms, 移动容差 10px)`、`pinch(el, onScale)`（两个 pointer 的距离比）。内容上的水平翻页是 `swipeNav.ts`（2026-10-18，所有者方向：左滑右滑切换底部导航目的地，页面随指平移、两段式滑入滑出；轴向锁定让位于行手势与横向滚动）；原 `swipeBack`（左缘滑动返回）已删除——屏幕边缘保持系统原生返回义，由 `backStack.ts` 的驻留守卫（页面栈外壳布防，全剥完后"再按一次退出"）转为应用内返回。所有手势在 `touch-action` 上声明，避免与浏览器默认滚动冲突。
 
 ### 11.5 浏览器兼容（R15）
 

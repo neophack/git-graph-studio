@@ -118,3 +118,77 @@ test('the phone page switches settle locally, far under a wire round trip', asyn
 		daemon.kill();
 	}
 });
+
+// The horizontal pager (swipeNav.ts, 2026-10-18): a real engine's proof of the swipe
+// vocabulary — a leftward drag over the page column follows the finger (the drag state and
+// the translate are readable mid-gesture) and commits to the next bottom destination; a
+// rightward drag from the ring's first destination rubber-bands and pages nothing. Same
+// gate and fixture as the bench above (the built app + the Vite dev server).
+test('a horizontal swipe pages the bottom navigation with the page following the finger', async ({ browser }, testInfo) => {
+	testInfo.skip(!process.env.GGS_REMOTE_E2E_FULL, 'set GGS_REMOTE_E2E_FULL=1 (needs the built app and the Vite dev server)');
+	if (!existsSync(appExe)) testInfo.skip(true, `app binary missing: ${appExe}`);
+	test.setTimeout(180_000);
+	const home = homeFor('swipe-nav');
+	const daemon = await startDaemon(home);
+	const children: ReturnType<typeof spawn>[] = [];
+	try {
+		if (!(await portOpen(5173))) {
+			const vite = spawn('npm run dev:vite', { cwd: root, shell: true, stdio: 'ignore' });
+			children.push(vite);
+			for (let i = 0; i < 100 && !(await portOpen(5173)); i++) await sleep(200);
+		}
+		const app = spawn(appExe, ['--remote-host', root], { env: hermeticEnv(home), stdio: 'ignore' });
+		children.push(app);
+
+		const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+		const page = await context.newPage();
+		await page.goto(`${daemon.baseURL}/login`);
+		await page.locator('#password').fill(PASSWORD);
+		await page.locator('button[type=submit], form button.primary').first().click();
+		await page.waitForURL(/\/windows/, { timeout: 15_000 });
+		await enterWorkbench(page);
+		await expect(page.locator('.ggs-bottom-tabs [role="tab"], .ggs-bottom-tabs button, .ggs-bottom-tabs .tab').first()).toBeVisible({ timeout: 90_000 });
+		await sleep(2000);
+
+		/** One swipe over the page column, from `x0` to `x1`, answering the ring's state. */
+		const swipe = (x0: number, x1: number): Promise<{ before: string; after: string; midDrag: boolean; midTransform: string; settled: boolean }> =>
+			page.evaluate(
+				async ([startX, endX]: number[]): Promise<{ before: string; after: string; midDrag: boolean; midTransform: string; settled: boolean }> => {
+					const workbench = document.getElementById('workbench')!;
+					const send = (type: string, x: number) => {
+						const event = new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: 300, pointerId: 7, pointerType: 'touch', isPrimary: true });
+						Object.defineProperty(event, 'timeStamp', { value: performance.now() });
+						workbench.dispatchEvent(event);
+					};
+					const active = () => document.querySelector('.ggs-bottom-tabs button.active')?.getAttribute('data-tab') ?? '';
+					const before = active();
+					const step = endX > startX ? 20 : -20;
+					send('pointerdown', startX);
+					for (let x = startX + step; step > 0 ? x < endX : x > endX; x += step) send('pointermove', x);
+					const midDrag = workbench.classList.contains('ggs-swipe-drag');
+					const midTransform = workbench.style.transform;
+					send('pointerup', endX);
+					// The two-phase settle (130 ms out + 190 ms in) and the chrome wave.
+					await new Promise<void>((done) => setTimeout(done, 500));
+					return { before, after: active(), midDrag, midTransform, settled: workbench.style.transform === '' && !workbench.classList.contains('ggs-swipe-drag') };
+				},
+				[x0, x1]
+			);
+
+		// Files → Editor: the page follows the finger leftward and the ring advances.
+		const left = await swipe(320, 120);
+		expect(left.before).toBe('explorer');
+		expect(left.midDrag).toBe(true);
+		expect(left.midTransform).toMatch(/translateX\(-/);
+		expect(left.after).toBe('editor');
+		expect(left.settled).toBe(true);
+		// Editor → Files: the rightward swipe pages back one slot.
+		const right = await swipe(80, 280);
+		expect(right.after).toBe('explorer');
+		expect(right.settled).toBe(true);
+		await context.close();
+	} finally {
+		for (const child of children) child.kill();
+		daemon.kill();
+	}
+});

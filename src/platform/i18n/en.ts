@@ -632,6 +632,8 @@ export const en = {
 	'remote.actionSheet.cancel': 'Cancel',
 	'remote.dataSaver.suggest': 'This connection looks slow. Turn on Data Saver?',
 	'remote.dataSaver.enable': 'Turn On',
+	// The stay guard's hint (backStack.ts): one back peeled every layer, a second leaves.
+	'remote.exitHint': 'Press back again to leave the workbench',
 	// File transfers — one vocabulary, every environment (src/transfer.ts): the desktop app
 	// and a browser session both Upload and Download; the transport is the environment's own.
 	'transfer.upload': 'Upload Files…',
