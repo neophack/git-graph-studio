@@ -206,12 +206,23 @@ function syncEditLockButton(button: HTMLButtonElement): void {
  *  directory's uploads and the new file/folder rows. Hidden until the page registered its
  *  sheet; the forms without an app bar (the tablet portrait) keep the toolbar's own ＋. */
 function filesAddButton(): HTMLButtonElement {
-	const button = barButton('add', t('remote.files.actions'), () => {
-		const entries = filesActions?.();
-		if (entries?.length) showActionSheet(entries, t('remote.files.actions'));
-	}, 'files-add');
+	const button = barButton('add', t('remote.files.actions'), openFilesActions, 'files-add');
 	button.hidden = !filesActions;
 	return button;
+}
+
+/** The files page's ＋ sheet, from wherever the form reaches it — the app bar's ＋ and the
+ *  portrait tablet's rail ⋯ share it. Nothing plays while the page has not registered its
+ *  sheet (the ＋ hides for the same reason). */
+export function openFilesActions(): void {
+	const entries = filesActions?.();
+	if (entries?.length) showActionSheet(entries, t('remote.files.actions'));
+}
+
+/** Whether the files page has registered its sheet — the surfaces that reach it hide until
+ *  then (the app bar's ＋, the rail's ⋯ on the Files page). */
+export function hasFilesActions(): boolean {
+	return filesActions !== null;
 }
 
 /** The Markdown source⇄preview toggle (the owner's 2026-10-16 direction: 顶栏加按钮，

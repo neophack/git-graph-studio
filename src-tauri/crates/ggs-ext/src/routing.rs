@@ -21,6 +21,15 @@
 //! - any other request made while a frontend's call into the backend is in flight goes to
 //!   that frontend (the latest such call wins) — a remote quick pick opens in the remote
 //!   page, not on the desktop;
+//! - a page message's own follow-ups go back to the page that sent it ([`note_webview_message`],
+//!   [`preferred`]): a webview message crosses as a fire-and-forget host event — no call
+//!   stays in flight — and the engine's answer (a file click's `vscode.diff`, the input box
+//!   a Create-Branch tap opens) is a separate host request the call rule cannot attribute.
+//!   The last message's frontend, while fresh, is the click's address (per-frontend
+//!   webviews only; the owner's 2026-10-18 report: the phone's Git Graph file click opened
+//!   the diff on the PC and nothing on the phone). A session's document open also MIRRORS
+//!   to the desktop window ([`routed`]) — one user's two screens stay on the same file
+//!   (the owner's 2026-10-18 direction: remote打开了，pc也要同步打开);
 //! - the rest — the activation's own requests, timers, background work — has no caller,
 //!   and the composition root's default policy decides.
 //!
@@ -36,6 +45,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 
@@ -96,6 +106,20 @@ struct ExtRoutes {
     /// the frontends show as a COPY follows the desktop's live page instead, and its
     /// traffic must not cross every phone's link only to be dropped there.
     hosted: HashMap<String, BTreeSet<String>>,
+    /// The frontend whose page sent the backend's latest webview message, and when it
+    /// arrived — a fire-and-forget push leaves no call in flight, so this is the only
+    /// trace of whose click the engine is working on (see [`preferred`]).
+    last_message: Option<(String, Instant)>,
+}
+
+/// How long a webview message's frontend stays the click's address: the engine's follow-up
+/// (a diff open, an input box) crosses milliseconds after the message lands; past the
+/// window the request is background work again.
+const MESSAGE_ATTRIBUTION_WINDOW: Duration = Duration::from_secs(2);
+
+/// Whether a message stamp taken at `at` is still the click's address at `now`.
+fn message_fresh(at: Instant, now: Instant) -> bool {
+    now.duration_since(at) <= MESSAGE_ATTRIBUTION_WINDOW
 }
 
 /// One live webview panel's replay state.
@@ -166,8 +190,8 @@ fn panel_key(id: &Value) -> Option<String> {
 
 /// How a delivered request mirrors to the other frontends: not at all, to everyone (a
 /// registration, a panel's life, a view's html), or to the named few — webview traffic,
-/// the frontends hosting a live page of the stream it addresses (their own instance of a
-/// per-frontend webview).
+/// the frontends hosting a live page of the stream it addresses, and a page click's
+/// document open, which mirrors to the desktop window ([`routed`]).
 pub enum Mirrored {
     No,
     Everyone,
@@ -209,14 +233,50 @@ pub fn caller(ext_id: &str) -> Option<String> {
     })
 }
 
+/// A webview message crossed into `ext_id`'s backend from `frontend`'s page (`ext_process_push_event`):
+/// the stamp [`preferred`] reads when the engine's follow-up request arrives.
+pub fn note_webview_message(ext_id: &str, frontend: &str) {
+    with(ext_id, |routes| {
+        routes.last_message = Some((frontend.to_owned(), Instant::now()));
+    });
+}
+
+/// The still-fresh message attribution of `ext_id`, a per-frontend webview's page click.
+fn recent_message(ext_id: &str) -> Option<String> {
+    if !per_frontend_webviews(ext_id) {
+        return None;
+    }
+    with(ext_id, |routes| {
+        let (frontend, at) = routes.last_message.as_ref()?;
+        message_fresh(*at, Instant::now()).then(|| frontend.clone())
+    })
+}
+
+/// Whether the request opens a document — the `vscode.diff` / `vscode.open` a page click
+/// fires, whose frontend is the click's and nobody else's (a desktop refresh holding the
+/// caller slot at that instant is not who asked for the diff).
+fn opens_document(method: &str, args: &Value) -> bool {
+    method == "commands.execute"
+        && args
+            .get(0)
+            .and_then(Value::as_str)
+            .is_some_and(|id| id == "vscode.diff" || id == "vscode.open")
+}
+
 /// The frontend a request should reach, when one claims it: the desktop window for a
-/// webview, else the latest frontend call in flight. `None` leaves it to the default
-/// policy.
-pub fn preferred(ext_id: &str, method: &str) -> Option<String> {
+/// webview, else the click attribution and the caller in flight — a document open IS the
+/// latest page click even while another frontend's call runs; every other request follows
+/// its caller first, falling back to the click attribution (a phone tap's input box fires
+/// with no call of its own in flight). `None` leaves it to the default policy.
+pub fn preferred(ext_id: &str, method: &str, args: &Value) -> Option<String> {
     if is_webview(method) {
         return Some(WEBVIEW_HOME.into());
     }
-    caller(ext_id)
+    let attributed = recent_message(ext_id);
+    if opens_document(method, args) {
+        return attributed.or_else(|| caller(ext_id));
+    }
+    caller(ext_id).or(attributed)
 }
 
 /// The desktop window closed a webview panel's tab (the `webviewDisposed` event it pushes
@@ -281,6 +341,20 @@ pub fn routed(ext_id: &str, method: &str, args: &Value) -> Mirrored {
             }
             return Mirrored::Frontends(routes.hosting(&stream));
         }
+        // A page click's document open mirrors to the desktop window: the phone's own page
+        // answers the request (its tab opens there) and the PC opens the same document
+        // beside it — one user's two screens stay on the same file (the owner's 2026-10-18
+        // direction: remote打开了，pc也要同步打开). Only a SESSION's click mirrors: the
+        // desktop's own click served here already, and mirroring it back would open the
+        // document twice; through a Hub the other sessions are other people, and one
+        // user's click must never land in another's page. Prompts (an input box, a quick
+        // pick) mirror nowhere — they expect one answer, not one per screen.
+        if opens_document(method, args) {
+            if recent_message(ext_id).is_some_and(|frontend| frontend != WEBVIEW_HOME) {
+                return Mirrored::Frontends(vec![WEBVIEW_HOME.to_owned()]);
+            }
+            return Mirrored::No;
+        }
         let Some(key) = journal_key(method, args) else {
             return Mirrored::No;
         };
@@ -299,7 +373,15 @@ impl ExtRoutes {
 /// A frontend mounted (or unmounted) its own live page of `stream` — a per-frontend
 /// webview's instance in a remote session (`ext_webview_hosted`). The desktop never
 /// registers: it hosts the served page itself.
-pub fn webview_hosted(ext_id: &str, frontend: &str, stream: &str, up: bool) {
+///
+/// A registration (`up`) answers the panel's banked html when the stream is a panel's:
+/// the registration crosses a full wire round trip that can only start AFTER the create
+/// mirror opened the page, so the backend's own `webview.setHtml` may have been banked in
+/// the gap — addressed to a hosting table this registration had not reached yet, mirrored
+/// nowhere (the page mounted empty and nothing re-delivered it). The answer hands the
+/// stranded html to the very frontend that just registered, closing the race at its only
+/// remaining exit.
+pub fn webview_hosted(ext_id: &str, frontend: &str, stream: &str, up: bool) -> Option<String> {
     with(ext_id, |routes| {
         let frontends = routes.hosted.entry(stream.to_owned()).or_default();
         if up {
@@ -310,7 +392,16 @@ pub fn webview_hosted(ext_id: &str, frontend: &str, stream: &str, up: bool) {
                 routes.hosted.remove(stream);
             }
         }
-    });
+        if !up {
+            return None;
+        }
+        let panel_key = stream.strip_prefix(&format!("panel:{ext_id}#"))?;
+        routes
+            .panels
+            .iter()
+            .find(|panel| panel.key == panel_key)
+            .and_then(|panel| panel.html.clone())
+    })
 }
 
 /// A frontend went away (its remote session ended — the Relay reports it): the live pages
@@ -438,6 +529,7 @@ pub fn reset(ext_id: &str) {
         routes.journal.clear();
         routes.panels.clear();
         routes.hosted.clear();
+        routes.last_message = None;
     });
 }
 
@@ -460,20 +552,138 @@ mod tests {
     #[test]
     fn a_request_follows_the_call_in_flight() {
         let ext = "test.call-in-flight";
-        assert_eq!(preferred(ext, "notify"), None);
+        assert_eq!(preferred(ext, "notify", &json!([])), None);
         let desktop = call_begin(ext, "main");
-        assert_eq!(preferred(ext, "notify").as_deref(), Some("main"));
+        assert_eq!(
+            preferred(ext, "notify", &json!([])).as_deref(),
+            Some("main")
+        );
         let remote = call_begin(ext, "remote/3");
         assert_eq!(
-            preferred(ext, "window.showQuickPick").as_deref(),
+            preferred(ext, "window.showQuickPick", &json!([])).as_deref(),
             Some("remote/3")
         );
         assert_eq!(caller(ext).as_deref(), Some("remote/3"));
         drop(remote);
-        assert_eq!(preferred(ext, "notify").as_deref(), Some("main"));
+        assert_eq!(
+            preferred(ext, "notify", &json!([])).as_deref(),
+            Some("main")
+        );
         drop(desktop);
-        assert_eq!(preferred(ext, "notify"), None);
+        assert_eq!(preferred(ext, "notify", &json!([])), None);
         assert_eq!(caller(ext), None);
+    }
+
+    #[test]
+    fn a_phone_clicks_diff_opens_in_the_phones_page() {
+        // The phone's page clicked a commit file: the message crossed as a push (no call
+        // in flight), and the engine's `vscode.diff` follows it as its own request. The
+        // attribution — not the default policy — answers it, or the diff opens on the PC
+        // and the phone's page waits forever (2026-10-18). A desktop refresh holding the
+        // caller slot at that instant is not who asked for the diff either.
+        let ext = "neophack.git-graph-rs";
+        reset(ext);
+        note_webview_message(ext, "remote/7");
+        let diff = json!(["vscode.diff", [], "title", {}]);
+        assert_eq!(preferred(ext, "commands.execute", &diff).as_deref(), Some("remote/7"));
+        let desktop = call_begin(ext, "main");
+        assert_eq!(preferred(ext, "commands.execute", &diff).as_deref(), Some("remote/7"));
+        drop(desktop);
+        // `vscode.open` (the uncommitted file's working copy) is the same click family.
+        assert_eq!(
+            preferred(ext, "commands.execute", &json!(["vscode.open", []])).as_deref(),
+            Some("remote/7")
+        );
+        // And the click's open mirrors to the desktop window: the phone's tab opens there,
+        // the PC's beside it (one user, two screens). No other frontend sees it.
+        assert!(matches!(
+            routed(ext, "commands.execute", &diff),
+            Mirrored::Frontends(targets) if targets == vec![WEBVIEW_HOME.to_owned()]
+        ));
+        reset(ext);
+    }
+
+    #[test]
+    fn a_desktops_clicks_open_and_prompt_mirror_nothing() {
+        // The desktop's own click served already — mirroring it back would open the
+        // document twice. And a prompt mirrors nowhere under any click: it expects one
+        // answer, not one per screen.
+        let ext = "neophack.git-graph-rs";
+        reset(ext);
+        note_webview_message(ext, "main");
+        assert!(matches!(
+            routed(ext, "commands.execute", &json!(["vscode.diff", [], "title", {}])),
+            Mirrored::No
+        ));
+        note_webview_message(ext, "remote/7");
+        assert!(matches!(
+            routed(ext, "window.showInputBox", &json!([])),
+            Mirrored::No
+        ));
+        assert!(matches!(
+            routed(ext, "commands.execute", &json!(["setContext", ["a:flag", true]])),
+            Mirrored::Everyone
+        ));
+        reset(ext);
+    }
+
+    #[test]
+    fn the_click_attribution_also_serves_the_pages_own_prompts() {
+        // A Create-Branch tap opens an input box: no call of the phone's is in flight, so
+        // the attribution is the only address the request has. A caller still wins for
+        // everything but a document open — the desktop's own palette run must not land on
+        // the phone because the phone happened to click first.
+        let ext = "neophack.git-graph-rs";
+        reset(ext);
+        note_webview_message(ext, "remote/7");
+        assert_eq!(
+            preferred(ext, "window.showInputBox", &json!([])).as_deref(),
+            Some("remote/7")
+        );
+        let desktop = call_begin(ext, "main");
+        assert_eq!(
+            preferred(ext, "window.showInputBox", &json!([])).as_deref(),
+            Some("main")
+        );
+        drop(desktop);
+        reset(ext);
+    }
+
+    #[test]
+    fn a_foreign_extensions_diffs_keep_the_caller_rule() {
+        // The chat's diffs belong to the ONE live page (§22.6) — the copy model's clicks
+        // replay through the desktop's own page — so the attribution stays a per-frontend
+        // webview's rule and claude-code routes exactly as before.
+        let ext = "Anthropic.claude-code";
+        reset(ext);
+        note_webview_message(ext, "remote/7");
+        let diff = json!(["vscode.diff", [], "title", {}]);
+        assert_eq!(preferred(ext, "commands.execute", &diff), None);
+        let desktop = call_begin(ext, "main");
+        assert_eq!(preferred(ext, "commands.execute", &diff).as_deref(), Some("main"));
+        drop(desktop);
+        reset(ext);
+    }
+
+    #[test]
+    fn the_attribution_window_is_short() {
+        // The stamp decays: a request with no caller and no fresh click is background work
+        // again, and the default policy answers it.
+        let now = Instant::now();
+        assert!(message_fresh(now, now));
+        assert!(!message_fresh(now - MESSAGE_ATTRIBUTION_WINDOW - Duration::from_millis(1), now));
+    }
+
+    #[test]
+    fn a_reset_forgets_the_click() {
+        let ext = "neophack.git-graph-rs";
+        reset(ext);
+        note_webview_message(ext, "remote/7");
+        reset(ext);
+        assert_eq!(
+            preferred(ext, "window.showInputBox", &json!([])),
+            None
+        );
     }
 
     #[test]
@@ -494,7 +704,7 @@ mod tests {
             "webviewView.show",
         ] {
             assert_eq!(
-                preferred(ext, method).as_deref(),
+                preferred(ext, method, &json!([])).as_deref(),
                 Some(WEBVIEW_HOME),
                 "{method}"
             );
@@ -622,12 +832,39 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn the_per_frontend_curator_names_the_graph_viewer_alone() {
-        assert!(per_frontend_webviews("neophack.git-graph-rs"));
-        assert!(!per_frontend_webviews("Anthropic.claude-code"));
-        assert!(!per_frontend_webviews("someone.else"));
-    }
+	#[test]
+	fn the_per_frontend_curator_names_the_graph_viewer_alone() {
+		assert!(per_frontend_webviews("neophack.git-graph-rs"));
+		assert!(!per_frontend_webviews("Anthropic.claude-code"));
+		assert!(!per_frontend_webviews("someone.else"));
+	}
+
+	#[test]
+	fn a_registration_answers_the_html_stranded_before_it_landed() {
+		// The phone's pane mounts on the create mirror and registers over the wire; the
+		// backend's own setHtml may have been banked in that gap — addressed to a hosting
+		// table without this frontend, mirrored nowhere. The registration's answer hands
+		// the stranded html back, so the page that mounted empty paints (2026-10-18: the
+		// phone's Git Graph occasionally opened blank).
+		let ext = "test.hosted-answer";
+		reset(ext);
+		routed(ext, "webview.create", &json!([5, "view", "Git Graph", 1, false]));
+        // Nothing banked yet: the registration landed before the backend's own html.
+        assert_eq!(webview_hosted(ext, "remote/7", "panel:test.hosted-answer#5", true), None);
+        routed(ext, "webview.setHtml", &json!([5, "<p>graph</p>"]));
+        // A later page of the same panel (a remount) gets the banked html with its
+        // registration.
+        assert_eq!(
+            webview_hosted(ext, "remote/9", "panel:test.hosted-answer#5", true).as_deref(),
+            Some("<p>graph</p>")
+        );
+        // Views carry no banked html (their resolve is the recovery path), and an unmount
+        // answers nothing.
+        assert_eq!(webview_hosted(ext, "remote/9", "view:graph", true), None);
+        assert_eq!(webview_hosted(ext, "remote/9", "panel:test.hosted-answer#5", false), None);
+        // The stream of another extension's panel never answers this one's html.
+        assert_eq!(webview_hosted(ext, "remote/9", "panel:other.ext#5", true), None);
+	}
 
     #[test]
     fn a_views_html_joins_the_journal_for_the_next_frontend() {

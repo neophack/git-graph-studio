@@ -353,6 +353,10 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 			await editor.doc.reload();
 			return;
 		}
+		if (editor.image) {
+			await editor.image.reload();
+			return;
+		}
 		const view = editor.view;
 		if (!view) return;
 		try {

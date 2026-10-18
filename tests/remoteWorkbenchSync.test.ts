@@ -1452,8 +1452,10 @@ describe('a real editor area under the sync', () => {
 		const areaA = new EditorArea(containerA);
 		const areaB = new EditorArea(containerB);
 		const channel = bus();
-		attachWorkbenchSync({ editors: areaA }, channel.deps, 'main');
-		attachWorkbenchSync({ editors: areaB }, channel.deps, 'remote/1');
+		// The preview's tab input carries an absolute path, so the receiving side needs the
+		// boundary every remote-originated open is confined by (the `openFolders` surface).
+		attachWorkbenchSync({ editors: areaA, openFolders: () => ['C:\\repo'] }, channel.deps, 'main');
+		attachWorkbenchSync({ editors: areaB, openFolders: () => ['C:\\repo'] }, channel.deps, 'remote/1');
 		const ID = `markdown:${README}`;
 		// The phone opens the preview: the tabs diff announces it whole.
 		await areaB.openMarkdownPreview(README);
@@ -1561,6 +1563,136 @@ describe('a real editor area under the sync', () => {
 		expect(channel.by('main')).toEqual([]);
 		containerA.remove();
 		containerB.remove();
+	});
+
+	it('names a remote-opened tab the hold kept back — and never the catch-up\'s quiet unions (2026-10-18: pc 有打开页面，远程没有)', async () => {
+		// A remote open applies under a page hold (K7): the tab lands active behind the
+		// phone's current page, and without a word nothing on the screen says it happened.
+		// The sync tells the navigation hook, which decides what shows; the catch-up
+		// merge's background opens are a re-join, not news, and stay silent.
+		backend.on('read_file_at', () => ({ contents: 'one\n', binary: false, size: 4 }));
+		const original = hook('navigation');
+		const noted: string[] = [];
+		provideHook('navigation', { ...original, noteBackgroundOpen: (title: string): void => void noted.push(title) });
+		try {
+			const container = document.createElement('div');
+			document.body.appendChild(container);
+			const area = new EditorArea(container);
+			const channel = bus();
+			attachWorkbenchSync({ editors: area }, channel.deps, 'remote/1');
+			const diff = {
+				kind: 'diff',
+				id: 'scm:worktree:notes.txt',
+				title: 'notes.txt (Working Tree)',
+				left: { revision: 'HEAD', path: 'notes.txt', label: 'HEAD', exists: true },
+				right: { revision: '*', path: 'notes.txt', label: 'Working Tree', exists: true }
+			} as const;
+			channel.deps.send({ by: 'main', k: 'openTab', input: diff });
+			await until(() => area.openTabInputs().some((tab) => tab.id === 'diff:scm:worktree:notes.txt'));
+			expect(noted).toEqual(['notes.txt (Working Tree)']);
+			// The catch-up's union opens land in the background BY DESIGN — never a word.
+			noted.length = 0;
+			channel.deps.send({ by: 'main', k: 'stateSnapshot', to: 'remote/1', files: [NOTES], tabs: [], extTabs: [], active: { kind: 'file', path: NOTES } });
+			await until(() => area.openFilePaths().includes(NOTES));
+			await flush(2);
+			expect(noted).toEqual([]);
+			container.remove();
+		} finally {
+			provideHook('navigation', original);
+		}
+	});
+
+	it('every whole-tab kind crosses — a help page opens and closes on the other side, a detail page reaches the workbench\'s own mount (2026-10-18: 其余 pc 有打开、远程没有的页面)', async () => {
+		// The whole-tab vocabulary is every kind except a file (the `open` message's own),
+		// a `content` tab (its text lives in the sender's memory) and an extension page
+		// (the backend's create mirror opens it everywhere): hex views, CAN statistics,
+		// folder comparisons, analysis pages, the symbol database, call trees, help,
+		// self-test, providers and extension detail pages all carry ids and paths only,
+		// and the receiving side opens its own instance.
+		const containerA = document.createElement('div');
+		const containerB = document.createElement('div');
+		document.body.append(containerA, containerB);
+		const areaA = new EditorArea(containerA);
+		const areaB = new EditorArea(containerB);
+		const channel = bus();
+		const details: string[] = [];
+		attachWorkbenchSync({ editors: areaA }, channel.deps, 'main');
+		attachWorkbenchSync({ editors: areaB, openExtensionDetailById: (extId: string): boolean => {
+			details.push(extId);
+			return true;
+		} }, channel.deps, 'remote/1');
+		// A help page: static, no wire — the same openTab/closeTab keys as a diff.
+		areaA.openHelp('shortcuts');
+		await until(() => areaB.openTabInputs().some((tab) => tab.id === 'help:shortcuts'));
+		expect(channel.by('main')).toContainEqual({ by: 'main', k: 'openTab', input: { kind: 'help', help: 'shortcuts' } });
+		areaB.closeById('help:shortcuts');
+		await until(() => !areaA.openTabInputs().some((tab) => tab.id === 'help:shortcuts'));
+		// An extension's detail page reaches the receiving workbench's own mount.
+		channel.sent.length = 0;
+		channel.deps.send({ by: 'main', k: 'openTab', input: { kind: 'extdetail', id: 'extdetail:acme.graph', title: 'Git Graph', extId: 'acme.graph' } });
+		await until(() => details.includes('acme.graph'));
+		// A `content` tab never crosses: its text is the sender's own.
+		channel.sent.length = 0;
+		await areaA.openContent({ kind: 'content', id: 'doc:1', title: 'Doc', path: 'doc:1', text: 'private text' });
+		await flush(3);
+		expect(channel.by('main')).toEqual([]);
+		containerA.remove();
+		containerB.remove();
+	});
+
+	it('a remote-originated whole tab naming a path outside the open folders is refused (the boundary an `open` message gets)', async () => {
+		// The whole-tab inputs now carry disk paths (a hex view, a CAN log, a folder
+		// comparison's sides): the receiving side opens them through its own trusted
+		// surface, so the input gets the same confinement a remote `open` does — a forged
+		// session must not make the PC render outside the window's folders into a mirror.
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		const area = new EditorArea(container);
+		const channel = bus();
+		attachWorkbenchSync({ editors: area, openFolders: () => ['C:\\repo'] }, channel.deps, 'main');
+		channel.deps.send({ by: 'remote/9', k: 'openTab', input: { kind: 'hex', path: 'D:\\elsewhere\\secrets.bin' } });
+		await flush(4);
+		expect(area.openTabInputs().some((tab) => tab.id === 'hex:D:\\elsewhere\\secrets.bin')).toBe(false);
+		// A folder comparison with one side outside is refused whole.
+		channel.deps.send({ by: 'remote/9', k: 'openTab', input: { kind: 'folders', id: 'cmp:1', left: 'C:\\repo\\a', right: 'D:\\elsewhere\\b' } });
+		await flush(4);
+		expect(area.openTabInputs().some((tab) => tab.id === 'folders:cmp:1')).toBe(false);
+		// The trusted origin (the PC's own workbench) is unaffected.
+		channel.deps.send({ by: 'main', k: 'openTab', input: { kind: 'help', help: 'welcome' } });
+		await until(() => area.openTabInputs().some((tab) => tab.id === 'help:welcome'));
+		container.remove();
+	});
+
+	it('the user\'s own open cuts through a foreign page hold — the ungated reveal fires at its landing (2026-10-16 precedent, applied to editor opens)', async () => {
+		// A remote operation still in flight holds the page when this frontend's user
+		// opens a file: the activation's own reveal honoured the hold, so the page this
+		// tap asked for would stay back — to its user, nothing opened. The facade's
+		// landing pulls it forward ungated, exactly the cut the webview ops make.
+		const original = hook('navigation');
+		let ungated = 0;
+		provideHook('navigation', {
+			...original,
+			revealEditorPageUngated: (): void => {
+				ungated++;
+			}
+		});
+		try {
+			const container = document.createElement('div');
+			document.body.appendChild(container);
+			const area = new EditorArea(container);
+			const channel = bus();
+			attachWorkbenchSync({ editors: area }, channel.deps, 'main');
+			// A foreign hold — a remote apply still in flight — wraps the user's own open.
+			const release = hook('navigation').holdPage();
+			await area.openFile(NOTES);
+			await until(() => area.openFilePaths().includes(NOTES));
+			await flush(2);
+			release();
+			expect(ungated).toBe(1);
+			container.remove();
+		} finally {
+			provideHook('navigation', original);
+		}
 	});
 
 	it('opens a file history on the other side, and a missed diff converges on its focus', async () => {
@@ -1685,6 +1817,15 @@ describe('the wired workbench', () => {
 		await until(() => workbench.editors.openFilePaths().length > 0);
 		const sent = backend.emits.filter((e) => e.event === WORKBENCH_SYNC_EVENT).map((e) => e.payload);
 		expect(sent).toContainEqual({ by: 'main', k: 'open', path: NOTES });
+	});
+
+	it('a Source Control change diff crosses the real event channel', async () => {
+		backend.handlers.set('read_file_at', () => ({ contents: 'one\n', binary: false, size: 4, encoding: 'utf8', eol: 'lf' }));
+		workbench.scm.openChange({ path: 'notes.txt', oldPath: null, staged: null, unstaged: 'modified', untracked: false }, 'changes', 'M');
+		await until(() => workbench.editors.openTabInputs().some((tab) => tab.id === 'diff:scm:worktree:notes.txt'));
+		await flush(5);
+		const sent = backend.emits.filter((e) => e.event === WORKBENCH_SYNC_EVENT).map((e) => e.payload);
+		expect(sent).toContainEqual({ by: 'main', k: 'openTab', input: { kind: 'diff', id: 'scm:worktree:notes.txt', title: 'notes.txt (Working Tree)', left: { revision: 'HEAD', path: 'notes.txt', label: 'HEAD', exists: true }, right: { revision: '*', path: 'notes.txt', label: 'Working Tree', exists: true } } });
 	});
 
 	it('a remote open lands as a real active tab', async () => {

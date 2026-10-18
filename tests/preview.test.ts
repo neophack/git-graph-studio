@@ -1,5 +1,5 @@
-// The previews: an image file opens in the image preview (checkerboard stage, zoom toolbar,
-// dimensions) instead of a text editor; a Markdown file's preview renders through markdown-it,
+// The previews: image files map to their MIME types (the viewer itself is
+// tests/imageViewer.test.ts); a Markdown file's preview renders through markdown-it,
 // follows the source editor's edits, and resolves relative images from the file's folder.
 
 import { describe, expect, it, vi } from 'vitest';
@@ -13,65 +13,12 @@ const REPO = 'C:\\repo';
 // A 1×1 PNG.
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
-describe('image preview', () => {
+describe('image types', () => {
 	it('maps extensions to MIME types', () => {
 		expect(imageMime('a.PNG')).toBe('image/png');
 		expect(imageMime('b.jpeg')).toBe('image/jpeg');
 		expect(imageMime('c.svg')).toBe('image/svg+xml');
 		expect(imageMime('d.txt')).toBeNull();
-	});
-
-	it('opens an image as a preview with a zoom toolbar', async () => {
-		backend.on('read_file_base64', () => PNG);
-		const group = new EditorGroup(document.getElementById('editorGroup')!);
-		group.setRoot(REPO);
-		await group.openFile(`${REPO}\\logo.png`);
-		await flush();
-		expect(backend.callsTo('read_file')).toEqual([]); // never read as text
-		const pane = document.querySelector('.editor-pane.image-preview')!;
-		expect(pane).not.toBeNull();
-		const image = pane.querySelector<HTMLImageElement>('img.image-preview-img')!;
-		expect(image.src).toBe(`data:image/png;base64,${PNG}`);
-		expect(pane.querySelector('.image-preview-zoom')!.textContent).toBe('Fit');
-		click([...pane.querySelectorAll('button')].find((b) => b.title === 'Zoom In'));
-		expect(pane.querySelector('.image-preview-zoom')!.textContent).toBe('125%');
-		click([...pane.querySelectorAll('button')].find((b) => b.title === 'Actual Size'));
-		expect(pane.querySelector('.image-preview-zoom')!.textContent).toBe('100%');
-		click([...pane.querySelectorAll('button')].find((b) => b.title === 'Fit to Window'));
-		expect(image.classList.contains('fit')).toBe(true);
-		expect(pane.querySelector('.image-preview-status')!.textContent).toContain('B');
-		expect(group.activeInput).toEqual({ kind: 'file', path: `${REPO}\\logo.png` });
-	});
-
-	it('zooms with the mouse wheel, notch by notch like the toolbar', async () => {
-		backend.on('read_file_base64', () => PNG);
-		const group = new EditorGroup(document.getElementById('editorGroup')!);
-		group.setRoot(REPO);
-		await group.openFile(`${REPO}\\logo.png`);
-		await flush();
-		const pane = document.querySelector('.editor-pane.image-preview')!;
-		const image = pane.querySelector<HTMLImageElement>('img.image-preview-img')!;
-		// jsdom loads no images, so the intrinsic size is pinned by hand.
-		Object.defineProperty(image, 'naturalWidth', { value: 320 });
-		Object.defineProperty(image, 'naturalHeight', { value: 240 });
-		const stage = pane.querySelector<HTMLElement>('.image-preview-stage')!;
-		const notch = (deltaY: number) => {
-			const event = new WheelEvent('wheel', { deltaY, cancelable: true });
-			stage.dispatchEvent(event);
-			return event;
-		};
-		const wheelIn = notch(-100);
-		expect(wheelIn.defaultPrevented).toBe(true); // the stage neither scrolls nor zooms the page
-		expect(pane.querySelector('.image-preview-zoom')!.textContent).toBe('125%');
-		expect(image.style.width).toBe('400px');
-		expect(image.classList.contains('fit')).toBe(false);
-		notch(100);
-		expect(pane.querySelector('.image-preview-zoom')!.textContent).toBe('100%');
-		notch(100);
-		expect(pane.querySelector('.image-preview-zoom')!.textContent).toBe('80%');
-		const horizontal = new WheelEvent('wheel', { deltaX: 100, deltaY: 0, cancelable: true });
-		stage.dispatchEvent(horizontal);
-		expect(horizontal.defaultPrevented).toBe(false); // pans, does not zoom
 	});
 });
 

@@ -6,8 +6,11 @@
 // on the other frontends' own workbenches. Paths and ids only — never content, never DOM:
 // the receiving side opens the document through its own editor area (one file read it would
 // have paid anyway). A file open/close/active message is well under 200 bytes; the tabs
-// that cross whole (a diff, a file history) carry their input — revisions, paths and
-// labels, never text.
+// that cross whole — every whole-tab kind there is: a diff, a file history, a Markdown
+// preview, a hex view, a CAN log's statistics, a folder comparison, the Code Analysis
+// pages, the symbol database and call tree, the help / self-test / providers pages, an
+// extension's detail page — carry their input: revisions, paths, ids and labels, never
+// text.
 //
 // The sync is GATED on the presence table (§7.0, remote/presence.ts): intent messages cross
 // only while at least two frontends are active (K11 — a lone frontend, typically the PC
@@ -35,7 +38,7 @@
 import { emit as tauriEmit, invoke, listen as tauriListen } from '../platform/ipc/core';
 import { hook } from '../platform/hooks';
 import { load as loadState, save as saveState } from '../platform/state';
-import { inputId, type EditorInput } from '../features/editor';
+import { inputId, ANALYSIS_PAGE_LABELS, type EditorInput } from '../features/editor';
 import type { EditorPlacement } from '../features/editor/types';
 import type { ActiveEditorInfo, EditorArea } from '../features/editor';
 import { frontendId, remoteEnv } from './session';
@@ -87,9 +90,15 @@ export type WorkbenchSyncMessage =
  *  extension page, a diff, a history) by the tab id every frontend keys it by. */
 export type SnapshotActive = { kind: 'file'; path: string } | { kind: 'tab'; id: string };
 
-/** The tab inputs that cross whole: diffs between revisions or files on disk, file
- *  histories, and Markdown previews (the path — the receiving side renders its own). */
-export type SyncedTabInput = Extract<EditorInput, { kind: 'diff' } | { kind: 'history' } | { kind: 'markdown' }>;
+/** The tab inputs that cross whole: everything an open tab can hold EXCEPT a plain file
+ *  (the `open` message's own vocabulary, with its line anchor), a `content` tab (its text
+ *  lives in the sending frontend's memory — an extension's provider document), and an
+ *  extension page (the backend's create mirror opens it everywhere already). A diff, a
+ *  file history, a Markdown preview, a hex view, a CAN log's statistics, a folder
+ *  comparison, the Code Analysis pages, the symbol database and call tree, the help /
+ *  self-test / providers pages and an extension's detail page — each carries only ids and
+ *  paths, and the receiving side opens its own instance through its own editor area. */
+export type SyncedTabInput = Exclude<EditorInput, { kind: 'file' | 'content' | 'extpage' }>;
 
 /** The presence surface the sync rides on — the real Presence satisfies it, and a test
  *  fakes it. */
@@ -110,13 +119,15 @@ export interface SyncPresence {
 	isActive(): boolean;
 }
 
-/** Whether an open tab's input crosses as `openTab`: a diff only when both sides are read
- *  from the repository or the disk (an extension's provider text is that frontend's own,
- *  and can be any size); a file history and a Markdown preview cross by path alone. */
+/** Whether an open tab's input crosses as `openTab`: every whole-tab kind except the
+ *  three that stay local — a file (the `open` message's own), a `content` tab (in-memory
+ *  text), an extension page (the backend's create mirror). A diff additionally requires
+ *  both sides to be read from the repository or the disk (an extension's provider text is
+ *  that frontend's own, and can be any size). */
 function syncedTabInput(input: EditorInput): SyncedTabInput | null {
-	if (input.kind === 'history' || input.kind === 'markdown') return input;
-	if (input.kind === 'diff' && input.left.content === undefined && input.right.content === undefined) return input;
-	return null;
+	if (input.kind === 'file' || input.kind === 'content' || input.kind === 'extpage') return null;
+	if (input.kind === 'diff' && (input.left.content !== undefined || input.right.content !== undefined)) return null;
+	return input;
 }
 
 /** The sync sets' path key: the editor area keys its tabs by samePath (slashes unified, a
@@ -127,6 +138,36 @@ function syncedTabInput(input: EditorInput): SyncedTabInput | null {
 function keyOf(path: string): string {
 	const key = path.replace(/\\/g, '/');
 	return /^[A-Za-z]:\//.test(key) ? key.toLowerCase() : key;
+}
+
+/** The ABSOLUTE disk paths a whole-tab input makes its receiving side read: only the kinds
+ *  that name files or folders outright — a history, a preview, a hex view, a CAN log, a
+ *  folder comparison's sides, an analysis page's scope. A diff's sides are repository-
+ *  relative reads (the backend joins them under the open repository) except a `local`
+ *  side's absolute path; a call tree's symbol rides the repo-anchored symbol commands, a
+ *  help or detail page names no file at all. This is the receiver's half of the
+ *  remote-open boundary: a remote-originated whole tab gets the same confinement an
+ *  `open` message's path does, or a curious session could make the PC render outside the
+ *  open folders into a mirror (the exact chain the boundary exists to stop). */
+function inputPaths(input: SyncedTabInput): string[] {
+	switch (input.kind) {
+		case 'history':
+		case 'markdown':
+		case 'hex':
+		case 'canlog':
+			return [input.path];
+		case 'folders':
+			return [input.left, input.right];
+		case 'analysis':
+			return input.folders ?? [];
+		case 'diff': {
+			const out: string[] = [];
+			for (const side of [input.left, input.right]) if (side.local) out.push(side.path);
+			return out;
+		}
+		default:
+			return [];
+	}
 }
 
 /* ---------- Closes that outlive a shut gate (K11 against E7, 2026-10-16) ----------
@@ -211,13 +252,23 @@ export interface SyncedEditorArea {
 	closeById(id: string): boolean;
 	revealById(id: string): boolean;
 	/** The open tabs' ids and inputs, and the opens of the tabs that cross whole — optional:
-	 *  an area without them syncs no diff, history or preview tabs. */
+	 *  an area without them syncs no whole tabs. */
 	openTabInputs?(): { id: string; input: EditorInput }[];
 	openDiff?(input: Extract<EditorInput, { kind: 'diff' }>): Promise<void>;
 	openFileHistory?(path: string): Promise<void>;
 	/** Opens this frontend's own rendered preview of a Markdown file — the receiving half of
 	 *  a preview tab that crosses whole. Optional: an area without it drops preview tabs. */
 	openMarkdownPreview?(path: string): Promise<void>;
+	/** The receiving halves of the other whole-tab kinds: each opens this frontend's own
+	 *  instance of the page. Optional — an area without the one a tab needs drops it. */
+	openHex?(path: string): Promise<void>;
+	openFolderCompare?(input: Extract<EditorInput, { kind: 'folders' }>): Promise<void>;
+	openSymbolDatabase?(): Promise<void>;
+	openAnalysisPage?(tool: import('../features/analysis').AnalysisToolId, folders?: string[]): Promise<void>;
+	openCallTree?(symbol: import('../platform/ipc/search').WsSymbol): Promise<void>;
+	openHelp?(help: 'welcome' | 'shortcuts'): void;
+	openSelfTest?(): void;
+	openProviders?(): void;
 }
 
 /** The workbench surface the sync rides on. */
@@ -228,6 +279,9 @@ export interface SyncedWorkbench {
 	 *  so a forged direct emit has nowhere to land either). Optional: without it,
 	 *  remote-originated opens are simply ignored. */
 	openFolders?(): string[];
+	/** Opens the Extensions view's detail page for an installed package — the receiving
+	 *  half of a detail tab that crossed whole. Optional: without it, detail tabs drop. */
+	openExtensionDetailById?(extId: string): boolean;
 }
 
 export interface WorkbenchSyncDeps {
@@ -499,9 +553,52 @@ export function attachWorkbenchSync(
 			}
 		}
 	};
-	/** Open a tab that crosses whole through this frontend's own editor area. */
-	const openSyncedTab = (input: SyncedTabInput): Promise<void> | undefined =>
-		input.kind === 'diff' ? editors.openDiff?.(input) : input.kind === 'history' ? editors.openFileHistory?.(input.path) : editors.openMarkdownPreview?.(input.path);
+	/** Open a tab that crosses whole through this frontend's own editor area — each kind
+	 *  through the surface that renders it; a CAN log is the file open that routes
+	 *  `.blf`/`.asc` to the statistics view, unwrapped so it never re-announces. The
+	 *  landing check (`run`) is the authority on whether the tab came up. */
+	const openSyncedTab = (input: SyncedTabInput): unknown => {
+		switch (input.kind) {
+			case 'diff': return editors.openDiff?.(input);
+			case 'history': return editors.openFileHistory?.(input.path);
+			case 'markdown': return editors.openMarkdownPreview?.(input.path);
+			case 'hex': return editors.openHex?.(input.path);
+			case 'canlog': return rawOpenFile(input.path);
+			case 'folders': return editors.openFolderCompare?.(input);
+			case 'symboldb': return editors.openSymbolDatabase?.();
+			case 'analysis': return editors.openAnalysisPage?.(input.tool, input.folders);
+			case 'calltree': return editors.openCallTree?.(input.symbol);
+			case 'help': return editors.openHelp?.(input.help);
+			case 'selftest': return editors.openSelfTest?.();
+			case 'providers': return editors.openProviders?.();
+			case 'extdetail': return workbench.openExtensionDetailById?.(input.extId);
+		}
+	};
+
+	/** A live remote operation that OPENED something here: it applies under a page hold
+	 *  (K7 — the phone's page keeps its place), so when it lands behind a full-screen page
+	 *  the open is invisible — to its user the phone "never got the page" (the owner's
+	 *  2026-10-18 report: a diff opened on the PC, 远程没有). The navigation hook decides
+	 *  whether anything shows; the catch-up's quiet union opens never pass here. */
+	const noteOpened = (title: string, landed: boolean): void => {
+		if (landed) hook('navigation').noteBackgroundOpen?.(title);
+	};
+	/** A synced tab's banner title: the input's own where it carries one, the page's own
+	 *  label where the tab strip derives one, else the path's basename. */
+	const fileTitle = (path: string): string => path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? path;
+	const tabTitle = (input: SyncedTabInput): string => {
+		switch (input.kind) {
+			case 'diff': case 'extdetail': return input.title;
+			case 'history': case 'markdown': case 'hex': case 'canlog': return fileTitle(input.path);
+			case 'analysis': return ANALYSIS_PAGE_LABELS[input.tool];
+			case 'folders': return 'Folder Compare';
+			case 'symboldb': return 'Symbol Database';
+			case 'calltree': return input.symbol.name;
+			case 'help': return input.help === 'welcome' ? 'Welcome' : 'Keyboard Shortcuts';
+			case 'selftest': return 'Module Self-Tests';
+			case 'providers': return 'Model Providers';
+		}
+	};
 
 	// A local file open crosses with its anchor, the moment the user asked for it, and marks
 	// the path announced — the tabs diff must not repeat it. Everything user-facing opens
@@ -525,6 +622,15 @@ export function attachWorkbenchSync(
 			} else if (pendingCloses.delete(key)) {
 				announced.delete(key);
 				void closeNow(key);
+			} else if (options?.inactive !== true) {
+				// This user's own open landed — behind a foreign page hold, possibly: a
+				// remote operation still in flight, a mirrored webview act. The hold exists
+				// to stop REMOTE acts from yanking the page, and the activation's own
+				// `revealEditorPage` already honoured it; the page this tap asked for comes
+				// forward anyway, ungated — the same cut the webview ops' own-act reveal
+				// makes (2026-10-16: 手机端 claude 的 new session/history 点击后新页面没有到
+				// 前台). Off a page-stack shell the ungated reveal is a no-op.
+				(hook('navigation').revealEditorPageUngated ?? hook('navigation').revealEditorPage)();
 			}
 		};
 		const opened = rawOpenFile(path, options, placement);
@@ -707,6 +813,16 @@ export function attachWorkbenchSync(
 				const id = inputId(input);
 				if (openTabIds().has(id) || applyingTabs.has(id)) continue;
 				if (deferred.tabs[id] !== undefined) continue;
+				// A whole tab from a remote answerer carries disk paths the same way its
+				// files do: the union's opens get the same confinement.
+				let pathsOk = true;
+				for (const path of inputPaths(input)) {
+					if (!(await gateFile(path))) {
+						pathsOk = false;
+						break;
+					}
+				}
+				if (!pathsOk) continue;
 				await run(() => openSyncedTab(input), { addTab: id });
 			}
 			// My tabs the other side lacks cross back — the union runs both ways, so the
@@ -820,7 +936,8 @@ export function attachWorkbenchSync(
 				const openOptions = message.line !== undefined
 					? { line: message.line, column: message.column, inactive: message.inactive === true }
 					: message.inactive === true ? { inactive: true } : undefined;
-				void run(() => rawOpenFile(message.path, openOptions), { add: key, spell: message.path });
+				void run(() => rawOpenFile(message.path, openOptions), { add: key, spell: message.path })
+					.then(() => noteOpened(fileTitle(message.path), landedFile(key)));
 				break;
 			}
 			case 'close': {
@@ -853,11 +970,13 @@ export function attachWorkbenchSync(
 				void run(() => {
 					if (editors.revealById(message.id)) return undefined;
 					return !inFlight && input ? openSyncedTab(input) : undefined;
-				}, inFlight || !input ? {} : { addTab: message.id });
+				}, inFlight || !input ? {} : { addTab: message.id })
+					.then(() => noteOpened(input ? tabTitle(input) : message.id, landedTab(message.id)));
 				break;
 			}
 			case 'openTab':
-				void run(() => openSyncedTab(message.input), { addTab: inputId(message.input) });
+				void run(() => openSyncedTab(message.input), { addTab: inputId(message.input) })
+					.then(() => noteOpened(tabTitle(message.input), landedTab(inputId(message.input))));
 				break;
 			case 'active': {
 				// Not open here (a missed open, or opened before this page arrived): opening
@@ -868,7 +987,8 @@ export function attachWorkbenchSync(
 				void run(() => {
 					if (editors.revealFilePath(message.path)) return undefined;
 					return inFlight ? undefined : rawOpenFile(message.path);
-				}, inFlight ? {} : { add: key, spell: message.path });
+				}, inFlight ? {} : { add: key, spell: message.path })
+					.then(() => noteOpened(fileTitle(message.path), landedFile(key)));
 				break;
 			}
 			case 'stateRequest':
@@ -910,28 +1030,36 @@ export function attachWorkbenchSync(
 				// A remote-originated file open is the product (the phone opens, the PC
 				// follows) — but only inside the folders this window has open: a forged or
 				// curious session must not make the PC render ~/.ggs into the mirror. The
-				// lexical answer stands only until the path resolves — a repository entry
-				// that is really a symlink to ~/.ggs passes `withinRoots` while its reads
-				// land outside — so a supplied `canonicalPath` re-checks the resolution
-				// against the same `remote_canonical_paths` the Relay's own gate rides,
-				// with the gate's own semantics (canonicalGate above): the roots resolve
-				// alongside the path, and a null answer (the backend's confinement, or
-				// nothing to resolve) keeps the lexical one. The check
-				// is async — one round trip is the cost of a refused open, and the
-				// announced/applying machinery already tolerates operations landing out
-				// of order.
+				// same boundary covers a whole tab whose input names disk paths (a hex view,
+				// a CAN log, a folder comparison): the receiving side opens them through its
+				// own trusted surface, so the input gets the confinement an `open` message's
+				// path does. The lexical answer stands only until the path resolves — a
+				// repository entry that is really a symlink to ~/.ggs passes `withinRoots`
+				// while its reads land outside — so a supplied `canonicalPath` re-checks the
+				// resolution against the same `remote_canonical_paths` the Relay's own gate
+				// rides, with the gate's own semantics (canonicalGate above): the roots
+				// resolve alongside the path, and a null answer (the backend's confinement,
+				// or nothing to resolve) keeps the lexical one. The check is async — one
+				// round trip is the cost of a refused open, and the announced/applying
+				// machinery already tolerates operations landing out of order.
 				const remoteOrigin = message.by !== 'main';
-				const remoteOpensFile =
-					remoteOrigin && (message.k === 'open' || message.k === 'active') && typeof message.path === 'string';
-				if (remoteOpensFile) {
-					const roots = workbench.openFolders?.() ?? [];
-					if (!withinRoots(message.path, roots)) return;
-				if (options.canonicalPath || options.canonicalPaths) {
-					void canonicalGate(message.path, roots).then((allowed) => {
-						if (allowed) applyMessage(message);
-					});
-					return;
+				const gatedPaths: string[] = [];
+				if (remoteOrigin && (message.k === 'open' || message.k === 'active') && typeof message.path === 'string') {
+					gatedPaths.push(message.path);
 				}
+				if (remoteOrigin && message.k === 'openTab') gatedPaths.push(...inputPaths(message.input));
+				if (remoteOrigin && message.k === 'activeTab' && message.input !== undefined) gatedPaths.push(...inputPaths(message.input));
+				if (gatedPaths.length > 0) {
+					const roots = workbench.openFolders?.() ?? [];
+					if (gatedPaths.some((path) => !withinRoots(path, roots))) return;
+					if (options.canonicalPath || options.canonicalPaths) {
+						void Promise.all(gatedPaths.map((path) => canonicalGate(path, roots)))
+							.then((allowed) => {
+								if (allowed.every(Boolean)) applyMessage(message);
+							})
+							.catch(() => undefined);
+						return;
+					}
 				}
 				applyMessage(message);
 			});

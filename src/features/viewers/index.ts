@@ -6,3 +6,5 @@ export * from './fastView';
 export * from './hexShared';
 export * from './hexView';
 export * from './hexCompare';
+export * from './imageModel';
+export * from './imageView';

@@ -1,11 +1,10 @@
-// The viewer mounting paths: the CodeMirror/text, windowed, hex, image and CAN-text
+// The viewer mounting paths: the CodeMirror/text, windowed, hex, image-viewer and CAN-text
 // mounts, the fast-view swaps and the text services attach — called from the open
 // orchestration (open.ts), split out so neither file outgrows the other.
 
-import { type FileContents, type FileProbe, fileProbe, readFileBase64 } from '../../platform/ipc/fs';
+import { type FileContents, type FileProbe, fileProbe } from '../../platform/ipc/fs';
 import { declaredLanguageName } from '../extensions';
-import { loadCanViews, loadEditorExtensions, loadFastView, loadHexView } from '../../platform/lazy';
-import { imageMime } from '../../platform/markdown';
+import { loadCanViews, loadEditorExtensions, loadFastView, loadHexView, loadImageView } from '../../platform/lazy';
 import { t } from '../../platform/i18n';
 import { settings } from '../../platform/settings';
 import { basename, el, icon, notify, showContextMenu } from '../../platform/ui/index';
@@ -225,65 +224,22 @@ export const mountMethods: ThisType<import('./group').EditorGroup> = {
 		if (editor.input.kind !== 'file') return;
 		const path = editor.input.path;
 		editor.languageName = 'Image';
-		const image = el('img', 'image-preview-img');
-		image.alt = editor.label;
-		const status = el('div', 'image-preview-status', ['Loading…']);
-		const stage = el('div', 'image-preview-stage', [image]);
-		let zoom = 1;
-		let fit = true;
-		const apply = () => {
-			image.style.width = fit ? '' : `${image.naturalWidth * zoom}px`;
-			image.classList.toggle('fit', fit);
-			zoomLabel.textContent = fit ? 'Fit' : `${Math.round(zoom * 100)}%`;
-		};
-		const zoomLabel = el('span', 'image-preview-zoom', ['Fit']);
-		const button = (label: string, title: string, run: () => void) => {
-			const b = el('button', 'button secondary', [label]);
-			b.title = title;
-			b.addEventListener('click', run);
-			return b;
-		};
-		const toolbar = el('div', 'image-preview-toolbar', [
-			button('−', 'Zoom Out', () => { fit = false; zoom = Math.max(0.1, zoom / 1.25); apply(); }),
-			zoomLabel,
-			button('+', 'Zoom In', () => { fit = false; zoom = Math.min(16, zoom * 1.25); apply(); }),
-			button('1:1', 'Actual Size', () => { fit = false; zoom = 1; apply(); }),
-			button('Fit', 'Fit to Window', () => { fit = true; apply(); })
-		]);
-		// The wheel zooms like a desktop image viewer: a notch up zooms in, down zooms out,
-		// anchored on the pointer — the image fraction under the cursor stays under it. The
-		// Ctrl wheel that would otherwise zoom the whole window is swallowed here too.
-		stage.addEventListener('wheel', (e) => {
-			if (!e.deltaY) return; // a purely horizontal wheel pans
-			e.preventDefault();
-			if (!image.naturalWidth) return; // not loaded yet — nothing to scale
-			const before = image.getBoundingClientRect();
-			const fx = before.width > 0 ? (e.clientX - before.left) / before.width : 0.5;
-			const fy = before.height > 0 ? (e.clientY - before.top) / before.height : 0.5;
-			// Leaving Fit starts from the fitted scale, so the first notch grows the image
-			// as it is on screen rather than jumping to its natural size's zoom.
-			if (fit && before.width > 0) zoom = before.width / image.naturalWidth;
-			fit = false;
-			zoom = e.deltaY < 0 ? Math.min(16, zoom * 1.25) : Math.max(0.1, zoom / 1.25);
-			apply();
-			const after = image.getBoundingClientRect();
-			stage.scrollLeft += after.left + fx * after.width - e.clientX;
-			stage.scrollTop += after.top + fy * after.height - e.clientY;
-		}, { passive: false });
+		const { ImageView } = await loadImageView();
+		const view = new ImageView(path, {
+			// The gallery browses in place: the folder's next image opens and this tab goes,
+			// so a run through a folder leaves one tab, not fifty.
+			onNavigate: (next) => void (async () => {
+				if (!this.open.includes(editor)) return;
+				await this.openFile(next);
+				if (this.open.some((e) => e.input.kind === 'file' && e.input.path === next) && this.open.includes(editor)) await this.close(editor);
+			})(),
+			onOpenHex: () => void this.openHex(path)
+		});
+		editor.image = view;
+		editor.onClose = () => view.dispose();
 		editor.pane.classList.add('image-preview');
-		editor.pane.append(toolbar, stage, status);
-		try {
-			const data = await readFileBase64(path);
-			image.src = `data:${imageMime(editor.label)};base64,${data}`;
-			const size = Math.round((data.length * 3) / 4);
-			image.addEventListener('load', () => {
-				status.textContent = `${image.naturalWidth}×${image.naturalHeight}  ${size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`}`;
-				apply();
-			});
-			status.textContent = `${size < 1024 ? `${size} B` : `${(size / 1024).toFixed(1)} KB`}`;
-		} catch (error) {
-			status.textContent = String(error);
-		}
+		editor.pane.append(view.root);
+		await view.load();
 	},
 
 	async mountTextEditor(editor: Editor, contents: string, parent: HTMLElement = editor.pane): Promise<void> {

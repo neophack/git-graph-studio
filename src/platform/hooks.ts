@@ -36,6 +36,11 @@ export interface NavigationPolicy {
 	 *  panel another frontend created. The desktop default answers a no-op release — its
 	 *  `revealEditorPage` already is one. */
 	holdPage(): () => void;
+	/** A remote-originated open landed while a hold kept the editor page back (the tab is
+	 *  open and active, nothing on screen says so): name it to this frontend's user, with a
+	 *  way forward. Optional — the desktop default answers nothing (its opens never land
+	 *  behind a full-screen page). */
+	noteBackgroundOpen?(title: string): void;
 }
 
 /** Which this frontend is: the desktop window, or one remote session. */

@@ -8,6 +8,7 @@
 // keeps the message typed here (the classic view's own box picks it up on its re-render).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
+import { holdPhonePage } from '../src/remote/nav';
 installRemoteSessionHooks();
 import { backend } from './tauriMock';
 import { click, flush, notificationButton, type, until, workbenchShell, DefaultingHandlers } from './helpers';
@@ -162,6 +163,39 @@ describe('the phone Source Control page (§6.4)', () => {
 		click(rows.find((row) => row.textContent === t('remote.scm.stage'))!);
 		await flush(4);
 		expect(backend.callsTo('git_stage')).toContainEqual({ paths: ['src/a.ts'] });
+	});
+
+	it('a tap opens the change\'s diff page even under a foreign page hold (2026-10-18: pc 有打开页面，远程没有)', { timeout: 30_000 }, async () => {
+		// The change's reads cross the wire, so its landing can fall inside a page hold
+		// a remote operation took — the activation's own reveal honours the hold, and
+		// without the ungated pull the page this tap asked for would stay back: the tab
+		// lands, the page never moves, and to its user "the diff never opened" while the
+		// PC's copy did. The wiring's landing pulls it forward ungated.
+		document.documentElement.setAttribute('data-page-stack', '');
+		try {
+			await bootPhoneRepo();
+			backend.handlers.set('read_file_at', () => ({ contents: 'one\ntwo\n', binary: false, size: 8, encoding: 'utf8', eol: 'lf' }));
+			const sidebar = document.getElementById('sidebar')!;
+			const showScmPage = async (): Promise<void> => {
+				if (sidebar.hidden) await currentWorkbench!.commands.execute('workbench.view.scm');
+				await flush(2);
+			};
+			await showScmPage();
+			expect(sidebar.hidden).toBe(false);
+			const release = holdPhonePage();
+			try {
+				click(rowOf('a.ts'));
+				await until(() => currentWorkbench!.editors.openTabInputs().some((tab) => tab.id === 'diff:scm:worktree:src/a.ts'));
+				await flush(4);
+				// The hold swallowed the activation's own reveal; the landing's ungated
+				// pull brought the editor page forward anyway.
+				expect(sidebar.hidden).toBe(true);
+			} finally {
+				release();
+			}
+		} finally {
+			document.documentElement.removeAttribute('data-page-stack');
+		}
 	});
 
 	it('the staged group unstage-all and the changes group stage-all run their commands', { timeout: 30_000 }, async () => {

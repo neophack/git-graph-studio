@@ -591,7 +591,34 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 		// hosts the served page itself, and a copy's watchers follow the desktop's live page
 		// (the backend addresses its traffic to these registrations alone, ext_routing).
 		if (hook('session').frontendClass() !== 'remote' || !this.backendHosted(extId)) return;
-		void extWebviewHosted(extId, stream, hosted).catch(() => undefined);
+		void extWebviewHosted(extId, stream, hosted)
+			.then((banked) => {
+				// The registration is a full wire round trip that can only start after the
+				// create mirror opened this page: the backend's own setHtml may have been
+				// banked in the gap — addressed to a hosting table this registration had not
+				// reached, mirrored nowhere — and the pane above mounted with an empty
+				// record. The answer carries that stranded html (2026-10-18: the phone's Git
+				// Graph occasionally opened blank); a record a mirror already filled keeps
+				// what it has.
+				if (hosted && typeof banked === 'string' && banked !== '') this.applyBankedPanelHtml(stream, banked);
+			})
+			.catch(() => undefined);
+	},
+
+	/** Paint a panel record with the html its registration answer carried — only a record
+	 *  still waiting for its first document (a mirror raced ahead and delivered one, or a
+	 *  newer html, keeps its own). The frame paints at once when its pane is mounted. */
+	applyBankedPanelHtml(stream: string, html: string): void {
+		const parsed = hook('webviewStreams')?.parseStream(stream) ?? null;
+		if (!parsed || !('panelId' in parsed)) return;
+		const view = this.webviews.get(this.webviewKey(parsed.extId, parsed.panelId));
+		if (!view || view.html !== '') return;
+		view.html = html;
+		if (view.frame) {
+			view.painted = html;
+			loadFrameDoc(view.frame, html, this.webviewTheme, `${parsed.extId}#${parsed.panelId}`, this.webviewAssetBase(parsed.extId));
+			extLog('info', 'host', `webview ${parsed.extId}#${parsed.panelId}: the registration answer painted the deferred first document`);
+		}
 	},
 
 	mountWebviewCopy(container: HTMLElement, stream: string, extId?: string): () => void {

@@ -80,3 +80,18 @@ export function revealEditorPage(): void {
 	if (pageHolds > 0) return;
 	revealEditorPageNow();
 }
+
+/** A remote-originated open landed while a full-screen page kept the editor in the
+ *  background (the page holds above): the tab is open and active, but nothing on the
+ *  screen says so — to its user the phone "never got the page" (the owner's 2026-10-18
+ *  report: a diff opened on the PC, 远程没有). A tappable banner names what opened and
+ *  brings the editor page forward on demand — the current page keeps its place (K7), the
+ *  open stops being invisible. Off a page-stack shell, or with the editor page already
+ *  showing, it is nothing: the activation itself was the affordance. */
+export function noteBackgroundOpen(title: string): void {
+	if (!phoneShell()) return;
+	if (!fullScreenSideViewOpen() && !panelPageOpen()) return;
+	void Promise.all([import('./banner'), import('../platform/i18n')]).then(([{ showBannerText }, { t, tf }]) =>
+		showBannerText(tf('remote.banner.openedInBackground', title), 6000, t('remote.banner.view'), () => revealEditorPageNow())
+	);
+}

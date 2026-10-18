@@ -311,7 +311,9 @@ colouring, sticky scroll, minimap, bookmarks, markdown preview.
 ### 7. Large-File Viewers
 
 A million-line file opens as fast as its bytes can be read; a multi-gigabyte binary is
-paged, never loaded whole.
+paged, never loaded whole; an image opens in a professional viewer driven equally by the
+mouse, the keyboard and the fingers (2026-10-18, the owner's direction: 图像查看要支持手机
+触摸操作，要重写 pc 端和手机端，要更好用，更专业，功能更全，手机端支持手势操作图像).
 
 - Frontend: `src/scroll/` (the row scroll model every viewer and the windowed editor
   share — Zed's ScrollManager in TypeScript: `model.ts` owns the viewport's top as a row
@@ -322,12 +324,29 @@ paged, never loaded whole.
   backend-rope document, the visible rows only), `src/features/viewers/hexShared.ts` (the leaf the two
   hex surfaces share — the offset formatting, the row grid, the Copy Special vocabulary and its
   10 MiB cap, the 64 KiB slab paging and the row-width probe), `src/features/viewers/hexView.ts` (offset / hex / ASCII),
-  `src/features/viewers/hexCompare.ts` (byte-aligned two-pane compare)
+  `src/features/viewers/hexCompare.ts` (byte-aligned two-pane compare),
+  `src/features/viewers/imageView.ts` (the image viewer, a lazy chunk: one GPU-transformed
+  layer over a stage that never scrolls natively — the wheel zooms at the cursor, a drag
+  pans, a double click toggles Fit/100%, the keys cover every action, the status bar reads
+  the pixel and colour under the cursor; on touch two fingers pinch about their centroid,
+  one pans with momentum and rubber-banded edges, a double tap zooms at the tap, a long
+  press opens the action sheet, a tap hides the chrome, and at Fit a horizontal swipe
+  browses the folder's images — the stage carries `data-owns-gestures`, which the phone's
+  page pager yields to; plus Fit Width and the zoom presets, rotate/flip, four backgrounds,
+  the pixel grid, nearest-neighbour rendering when zoomed, the navigator thumbnail, the
+  information panel, copy image/colour/path, and the in-place reload on a disk change),
+  `src/features/viewers/imageModel.ts` (its pure geometry: fit, pan limits, the rubber
+  band, the zoom about a point, the ladder, the screen → pixel inverse),
+  `src/features/viewers/imageGestures.ts` (its Pointer Events recognizer: tap, double tap,
+  long press, pan with fling velocity, pinch)
 - Backend: `src-tauri/crates/ggs-text/` (the viewer engine), byte comparison in the
   `ggs-index` crate's `hexdiff`, chunked reads via `ggs-fs` (the `cmd_fs.rs` adapters)
 - Bench: `src-tauri/crates/ggs-text/examples/viewer_bench.rs` (the open path's phases — syntax set, rope,
   `ViewerDoc::new`, the first highlight window — `viewer_bench [mb]`)
 - Dev probe: `dev/hex-probe.html` (the hex view in isolation, against any theme)
+- Tests: `tests/imageViewer.test.ts` (the image geometry, the gesture recognizer, and the
+  viewer through the editor group — toolbar, wheel, drag, keyboard, pinch, double tap,
+  the gallery and its swipe, the context menu, the reload)
 
 ### 8. Compare & Merge
 
@@ -2273,7 +2292,13 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   this device have open (2026-10-16, the owner's "点击编辑没有弹出选择哪个页面的选项":
   the first tap used to only show the page; with nothing open the page's empty state
   answers instead of an empty chooser; the rail `navRail.ts` answers the same way — the
-  portrait tablet has no app bar, its Editor item is the only switcher), the drawer
+  portrait tablet has no app bar, its Editor item is the only switcher), and the rail
+  carries the portrait tablet's page actions too (2026-10-18, the owner's direction:
+  平板模式相对手机模式有些页面有内容缺失 — the phone app bar's trailing cluster had no
+  entry on the app-bar-less form): the ⋯ pinned in the rail's foot above the ‹ opens the
+  current page's own sheet — the editor's actions, the git commands, the terminal's
+  new/kill, the files ＋ sheet — and hides on the pages whose app bar carries none
+  (Search); the landscape phone's rail hides it in CSS, its app bar owns the actions), the drawer
   (`navDrawer.ts`: every page, Go to File, the palette, this PC's windows, transfers,
   the full menus as sheets, Data Saver and Settings), the editor page's chrome
   (`editorSwitcher.ts`: the tab strip hidden, the open editors and the editor's actions
@@ -2304,7 +2329,8 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   the finger (translate + edge glow) and the commit is a two-phase slide — the page out in
   the swipe direction, the destination in from the other side, reduced motion collapsing
   it to a jump. The claim yields to the gestures that own their drag (a swipe-reveal row,
-  a horizontally scrollable strip, a slider) and the click that ends a drag never
+  a horizontally scrollable strip, a slider, a surface marked `data-owns-gestures` — the
+  image viewer's pinch, pan and gallery swipe) and the click that ends a drag never
   activates the row under it; the old left-edge `swipeBack` is gone — the bezel's own
   back keeps its native meaning and the stay guard turns it into the in-app back. The
   touch polish rides the same pass: the workbench's list rows answer `:active` on coarse

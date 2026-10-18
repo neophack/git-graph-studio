@@ -66,7 +66,7 @@ function richHandlers(): Map<string, Handler> {
 	});
 	map.set('file_probe', ({ path }) => ({ size: 10, binary: String(path).endsWith('blob.bin') }));
 	map.set('read_file_chunk', () => ({ size: 4, base64: Buffer.from([0xde, 0xad, 0xbe, 0xef]).toString('base64') }));
-	map.set('read_file_base64', () => ({ base64: PNG, mime: 'image/png', size: 68 }));
+	map.set('read_file_base64', () => PNG); // cmd_fs::read_file_base64 answers the bare base64 string
 	map.set('scm_status', () => [
 		{ path: 'src/main.rs', oldPath: null, staged: 'M', unstaged: null, untracked: false },
 		{ path: 'notes.txt', oldPath: null, staged: null, unstaged: 'M', untracked: false },
@@ -693,10 +693,10 @@ function uiSweepIts(): void {
 			await commands.execute('markdown.showPreview'); count();
 			await flush(8);
 			await clickAll(document.getElementById('editorGroup')!, '.markdown-preview-body a, .markdown-preview-body button', count, { limit: 5 });
-			// The image preview and its zoom toolbar.
+			// The image viewer and its toolbar.
 			await workbench.editors.openFile(`${REPO}\\logo.png`);
 			await flush(8);
-			await clickAll(document.getElementById('editorGroup')!, '.image-preview-toolbar button, .image-preview-toolbar .action-btn', count);
+			await clickAll(document.getElementById('editorGroup')!, '.image-viewer-toolbar button, .image-viewer-toolbar .action-btn', count);
 			// The hex viewer: toolbar, a cell, the address box, keys.
 			await workbench.editors.openFile(`${REPO}\\blob.bin`);
 			await flush(8);

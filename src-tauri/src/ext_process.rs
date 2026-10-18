@@ -177,6 +177,13 @@ pub fn ext_process_registrations(ext_id: String) -> Vec<Value> {
 /// so each page is fed its own pushes while a copy's watchers carry nothing. The Relay's
 /// session header names the frontend; the desktop never registers (it serves the request
 /// itself), and a session that ends is swept by `remote_host_frontend_gone`.
+///
+/// A registration answers the panel's banked html (the latest `webview.setHtml` the backend
+/// delivered while it lives): the registration is a full wire round trip that can only
+/// start AFTER the create mirror opened the page, so the backend's own html may already
+/// have been banked in the gap — addressed to a hosting table this registration had not
+/// reached yet, mirrored nowhere. The answer lets the registering frontend paint the page
+/// that mounted empty (2026-10-18: the phone's Git Graph occasionally opened blank).
 #[tauri::command]
 pub fn ext_webview_hosted(
     webview: tauri::Webview,
@@ -184,13 +191,12 @@ pub fn ext_webview_hosted(
     ext_id: String,
     stream: String,
     hosted: bool,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let frontend = caller(&webview, &request);
     if !ext_routing::is_session(&frontend) {
-        return Ok(()); // only a remote session hosts a page beside the desktop's own
+        return Ok(None); // only a remote session hosts a page beside the desktop's own
     }
-    ext_routing::webview_hosted(&ext_id, &frontend, &stream, hosted);
-    Ok(())
+    Ok(ext_routing::webview_hosted(&ext_id, &frontend, &stream, hosted))
 }
 
 /// Push one host event into a backend (`ggs.hostEvent`): the same event objects a frame
@@ -205,6 +211,7 @@ pub fn ext_process_push_event(
     ext_id: String,
     event: Value,
 ) -> Result<(), String> {
+    let frontend = caller(&webview, &request);
     // The desktop window's user closed a panel's tab: the pages showing its copy drop it.
     if let Some(panel_id) = ext_routing::panel_closed(&ext_id, &event) {
         use tauri::Emitter;
@@ -215,9 +222,23 @@ pub fn ext_process_push_event(
                 "method": "webview.dispose",
                 "args": [panel_id],
                 "caller": Value::Null,
-                "served": caller(&webview, &request),
+                "served": frontend,
             }),
         );
+    }
+    // A page message is the one trace of whose click the engine works on: the push is
+    // fire-and-forget (no call stays in flight), and the engine's follow-up — a file
+    // click's `vscode.diff`, the input box a Create-Branch tap opens — is a separate host
+    // request that would otherwise answer the default policy and open on the PC while the
+    // phone's page waits (2026-10-18: the phone's Git Graph file click opened nothing on
+    // the phone). The stamp decays in seconds (ext_routing), so background work stays
+    // unattributed.
+    if event
+        .get("event")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind == "webviewMessage" || kind == "webviewViewMessage")
+    {
+        ext_routing::note_webview_message(&ext_id, &frontend);
     }
     state.push_event(&ext_id, event)
 }

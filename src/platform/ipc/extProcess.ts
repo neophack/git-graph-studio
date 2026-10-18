@@ -33,6 +33,9 @@ export const extProcessHostRespond = (extId: string, id: number, ok: boolean, re
 	invoke<void>('ext_process_host_respond', { extId, id, ok, result });
 /** Tell the backend this frontend hosts its own live page of a webview stream (its own
  *  instance of a per-frontend webview — the remote's Git Graph): the backend mirrors its
- *  webview traffic to exactly the frontends hosting one, addressed per frontend. */
+ *  webview traffic to exactly the frontends hosting one, addressed per frontend. A panel's
+ *  registration answers the panel's banked html — the latest setHtml the backend delivered
+ *  while it lives, stranded when it arrived before this registration did (the page mounted
+ *  empty and no mirror re-delivered it). */
 export const extWebviewHosted = (extId: string, stream: string, hosted: boolean) =>
-	invoke<void>('ext_webview_hosted', { extId, stream, hosted });
+	invoke<string | null>('ext_webview_hosted', { extId, stream, hosted });

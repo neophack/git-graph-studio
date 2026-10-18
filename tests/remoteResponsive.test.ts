@@ -465,6 +465,56 @@ describe('navigation rail', () => {
 		expect(ids()).toEqual(['explorer', 'editor', 'scm', 'panel', 'search']);
 		stop();
 	});
+
+	it('the rail\'s ⋯ opens the page\'s action sheet — the phone app bar\'s trailing cluster, which the form drawing no app bar had no entry to (the owner\'s 2026-10-18 direction, 平板模式相对手机模式有些页面有内容缺失)', async () => {
+		setCoarse(true);
+		setWidth(820, 1080);
+		const stop = initResponsive();
+		phoneWorkbench();
+		const rail = createNavRail();
+		document.body.appendChild(rail);
+		expect(document.documentElement.dataset.device).toBe('tablet-portrait');
+		const more = () => rail.querySelector<HTMLButtonElement>('.ggs-rail-actions')!;
+		expect(more()).not.toBeNull();
+		// Pinned in the foot, above the ‹ — the back stays the rail's bottom-most button.
+		expect(more()!.closest('.ggs-rail-foot')).not.toBeNull();
+		expect([...rail.querySelectorAll('button')].at(-1)).toBe(rail.querySelector('.ggs-rail-back'));
+		const rows = () => [...document.querySelectorAll<HTMLButtonElement>('.ggs-action-sheet .row .label')].map((label) => label.textContent);
+		// Changes: the git commands ride it (the app bar's sync icon and git ⋯ by another road).
+		const sidebar = document.getElementById('sidebar')!;
+		sidebar.hidden = false;
+		for (const item of document.querySelectorAll<HTMLElement>('#activitybar .activity-item')) item.classList.toggle('active', item.dataset.view === 'scm');
+		await flushMutations();
+		expect(more()!.hidden).toBe(false);
+		more()!.click();
+		expect(document.querySelector('.ggs-action-sheet')).not.toBeNull();
+		// The rows carry the git sheet's own labels (the label argument overrides the title).
+		const hasRow = (label: string) => rows().some((text) => text === label);
+		expect(hasRow('Sync Changes')).toBe(true);
+		expect(hasRow('Push')).toBe(true);
+		closeActionSheet();
+		// Editor: the editor's actions sheet, headed by the file (save, find, format, …).
+		const group = document.querySelector<HTMLElement>('.editor-group-box .tabs-container')!;
+		const tab = document.createElement('div');
+		tab.className = 'tab active';
+		tab.title = '/home/u/ws/a.ts';
+		tab.dataset.kind = 'file';
+		tab.innerHTML = '<span class="icon"></span><span class="label">a.ts</span><span class="close"></span>';
+		group.appendChild(tab);
+		sidebar.hidden = true;
+		await flushMutations();
+		expect(more()!.hidden).toBe(false);
+		more()!.click();
+		expect(document.querySelector('.ggs-action-sheet .ggs-sheet-header')!.textContent).toContain('a.ts');
+		expect(rows().includes('Save')).toBe(true);
+		closeActionSheet();
+		// Search: the phone app bar carries no actions there either — the ⋯ hides with it.
+		sidebar.hidden = false;
+		for (const item of document.querySelectorAll<HTMLElement>('#activitybar .activity-item')) item.classList.toggle('active', item.dataset.view === 'search');
+		await flushMutations();
+		expect(more()!.hidden).toBe(true);
+		stop();
+	});
 });
 
 describe('app bar', () => {

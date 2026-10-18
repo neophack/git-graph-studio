@@ -15,6 +15,9 @@ import { bottomTabs, tabBadge } from './bottomTabs';
 import { drawerPages } from './navDrawer';
 import { currentDeviceClass, onDeviceClassChange } from './responsive';
 import { codicon } from './widgets';
+import { showActionSheet } from './actionSheet';
+import { gitSheet, hasFilesActions, openFilesActions, panelSheet } from './appBar';
+import { openEditorActions } from './editorSwitcher';
 
 function railButton(id: PageId, label: string, onTap: () => void): HTMLButtonElement {
 	const button = document.createElement('button');
@@ -40,6 +43,8 @@ function syncRail(bar: HTMLElement): void {
 	const page = currentPage();
 	const back = bar.querySelector<HTMLButtonElement>('.ggs-rail-back');
 	if (back) back.hidden = !pageBackAvailable();
+	const actions = bar.querySelector<HTMLButtonElement>('.ggs-rail-actions');
+	if (actions) actions.hidden = pageActions(page) === null;
 	for (const button of bar.querySelectorAll<HTMLButtonElement>('button[data-tab]')) {
 		const id = button.dataset.tab ?? '';
 		const active = id === page;
@@ -85,6 +90,35 @@ function railBackButton(): HTMLButtonElement {
 	return button;
 }
 
+/** The current page's action sheet — the phone app bar's trailing cluster, reached from the
+ *  rail on the form that draws no app bar (the portrait tablet; the owner's 2026-10-18
+ *  direction, 平板模式相对手机模式有些页面有内容缺失 — the editor's save/find/format sheet,
+ *  the git commands, the terminal's new/kill had no entry point there). Null on the pages
+ *  whose phone app bar carries no actions either (Search), so the ⋯ hides with them. The
+ *  landscape phone hides the button in CSS: its app bar owns the actions. */
+function pageActions(page: PageId): (() => void) | null {
+	if (page === 'editor') return openEditorActions;
+	if (page === 'scm') return () => showActionSheet(gitSheet(), t('remote.page.scm'));
+	if (page === 'panel') return () => showActionSheet(panelSheet(), t('remote.tabs.panel'));
+	if (page === 'explorer') return hasFilesActions() ? openFilesActions : null;
+	return null;
+}
+
+/** The rail's ⋯ (the portrait tablet's page actions), pinned in the foot above the ‹ —
+ *  the phone app bar's ⋯ by another road. The sheet builds at click time, so every row's
+ *  enablement is the state of that moment (the app bar's own sheets work the same way). */
+function railActionsButton(): HTMLButtonElement {
+	const button = document.createElement('button');
+	button.className = 'ggs-rail-actions';
+	button.setAttribute('aria-label', t('remote.appbar.more'));
+	const pill = document.createElement('span');
+	pill.className = 'pill';
+	pill.appendChild(codicon('kebab-vertical'));
+	button.appendChild(pill);
+	button.addEventListener('click', () => pageActions(currentPage())?.());
+	return button;
+}
+
 /** The rail's destinations by form: the portrait tablet's rail carries every page the drawer
  *  lists — search, extensions and terminal with them (the owner's 2026-10-16 direction, 平板
  *  左轨要有搜索、插件、终端; the five-cap is the bottom bar's economy, and a tablet's rail has
@@ -100,16 +134,17 @@ function railTabs(): { id: PageId; label: string }[] {
  * the destination set) and the containers' images too — a package image replacing a
  * codicon stand-in is a rebuild, or the rail's button would wear the placeholder forever
  * (the bar's key already says so). */
-function syncButtons(bar: HTMLElement, onTap: (page: PageId) => void, menu: HTMLButtonElement | null, back: HTMLButtonElement | null): void {
+function syncButtons(bar: HTMLElement, onTap: (page: PageId) => void, menu: HTMLButtonElement | null, back: HTMLButtonElement | null, actions: HTMLButtonElement | null): void {
 	const tabs = railTabs();
 	const images = extensionContainers().map((container) => container.image ?? '').join(' ');
 	const key = `${currentDeviceClass() ?? ''}#${tabs.map((tab) => `${tab.id}|${tab.label}`).join(' ')}#${images}`;
 	if (bar.dataset.tabsKey !== key) {
 		bar.dataset.tabsKey = key;
 		// The rail builds as two halves: a scrolling body (the ☰ and the destinations — the
-		// portrait tablet's uncapped set rolls inside it) over a pinned foot (the ‹, the
-		// owner's 2026-10-16 direction 平板模式下返回按钮放左边栏底下: the back button rides the
-		// rail's bottom, VS Code's activity bar shape, however many destinations ride above).
+		// portrait tablet's uncapped set rolls inside it) over a pinned foot (the ⋯ and the
+		// ‹, the owner's 2026-10-16 direction 平板模式下返回按钮放左边栏底下: the back rides the
+		// rail's bottom, VS Code's activity bar shape, however many destinations ride above;
+		// the page actions ⋯ pin above it — the last item stays the back).
 		const body = document.createElement('div');
 		body.className = 'ggs-rail-body';
 		if (menu) body.appendChild(menu);
@@ -123,6 +158,7 @@ function syncButtons(bar: HTMLElement, onTap: (page: PageId) => void, menu: HTML
 		}
 		const foot = document.createElement('div');
 		foot.className = 'ggs-rail-foot';
+		if (actions) foot.appendChild(actions);
 		if (back) foot.appendChild(back);
 		bar.replaceChildren(body, foot);
 	}
@@ -140,19 +176,21 @@ export function createNavRail(onTap: (page: PageId) => void = () => undefined, o
 	bar.setAttribute('aria-label', t('remote.nav.label'));
 	const back = railBackButton();
 	const menu = openMenu ? railMenuButton(openMenu) : null;
-	syncButtons(bar, onTap, menu, back);
-	onWorkbenchChange(() => syncButtons(bar, onTap, menu, back));
+	const actions = railActionsButton();
+	syncButtons(bar, onTap, menu, back, actions);
+	onWorkbenchChange(() => syncButtons(bar, onTap, menu, back, actions));
 	// A device-class flip (into or out of the portrait tablet) changes which destination set
 	// the rail carries: re-read it as the layout host rearranges the same element.
-	onDeviceClassChange(() => syncButtons(bar, onTap, menu, back));
-	// A language switch relabels the rail's own chrome (its aria name, the ☰ and the ‹)
-	// and rebuilds the destinations — syncButtons keys on the labels, so the re-read under
+	onDeviceClassChange(() => syncButtons(bar, onTap, menu, back, actions));
+	// A language switch relabels the rail's own chrome (its aria name, the ☰, the ⋯ and the
+	// ‹) and rebuilds the destinations — syncButtons keys on the labels, so the re-read under
 	// the new locale replaces the buttons.
 	onLocaleChange(() => {
 		bar.setAttribute('aria-label', t('remote.nav.label'));
 		back.setAttribute('aria-label', t('remote.page.back'));
 		menu?.setAttribute('aria-label', t('remote.menu'));
-		syncButtons(bar, onTap, menu, back);
+		actions.setAttribute('aria-label', t('remote.appbar.more'));
+		syncButtons(bar, onTap, menu, back, actions);
 	});
 	return bar;
 }

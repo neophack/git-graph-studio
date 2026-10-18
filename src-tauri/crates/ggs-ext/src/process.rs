@@ -780,8 +780,9 @@ impl ReaderState {
                                 .unwrap_or_default();
                             let args = params.get("args").cloned().unwrap_or_else(|| json!([]));
                             // The frontend that answers: the desktop window for a webview,
-                            // else the caller in flight (ext_routing), else policy.
-                            let claimed = ext_routing::preferred(&self.ext_id, host_method);
+                            // else the click's attribution and the caller in flight
+                            // (ext_routing), else policy.
+                            let claimed = ext_routing::preferred(&self.ext_id, host_method, &args);
                             let frontend = host_request_frontend(hooks, claimed);
                             let caller = ext_routing::caller(&self.ext_id);
                             match ext_routing::routed(&self.ext_id, host_method, &args) {
@@ -807,7 +808,11 @@ impl ReaderState {
                                     // to each frontend hosting a live page of the stream —
                                     // their own instance consumes it; everyone else (a copy's
                                     // watchers above all) never carries it on their link.
-                                    // The serving frontend reads the request itself.
+                                    // A page click's document open rides the same addressing
+                                    // (routing): the session's page answers the request and
+                                    // the named mirror — the desktop window — opens the same
+                                    // document beside it. The serving frontend reads the
+                                    // request itself.
                                     for target in targets {
                                         if target == frontend {
                                             continue;

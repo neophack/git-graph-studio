@@ -4,7 +4,7 @@
 import type { Text } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 import type { MergeView } from '@codemirror/merge';
-import type { FastView, HexView, HexCompareView } from '../viewers/types';
+import type { FastView, HexView, HexCompareView, ImageView } from '../viewers/types';
 import type { CanLogView, CanRawView } from '../can/types';
 import type { EditableDocView } from './docEditView';
 import type { FileHistoryView } from '../scm/types';
@@ -90,6 +90,8 @@ export interface Editor {
 	history?: FileHistoryView;
 	/** A binary (or hex-opened) file's hex view, whose edits Ctrl+S writes back in place. */
 	hex?: HexView;
+	/** An image file's viewer — reloaded in place when the file changes on disk. */
+	image?: ImageView;
 	/** A CAN log (.blf / .asc) statistics view, filled when the backend's parse returns. */
 	canlog?: CanLogView;
 	/** A CAN log's raw frame view — the tab a .blf / .asc opens in, live while it parses. */

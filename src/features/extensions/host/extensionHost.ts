@@ -229,6 +229,9 @@ export class ExtensionHost {
 	/** This remote frontend's own page of a webview stream is up (or gone): the backend
 	 *  mirrors its webview traffic to exactly the frontends hosting one (ext_routing). */
 	declare noteOwnWebviewHosted: (extId: string, stream: string, hosted: boolean) => void ;
+	/** Paint a panel record with the html its `ext_webview_hosted` answer carried — the
+	 *  setHtml stranded between the create mirror and the registration that missed it. */
+	declare applyBankedPanelHtml: (stream: string, html: string) => void ;
 
 	readonly webviewCopies = new Set<string>();
 

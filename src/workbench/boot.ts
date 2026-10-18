@@ -263,7 +263,16 @@ export const bootMethods: ThisType<Workbench> = {
 		this.scm.onStatus = (status) => this.explorer.setStatus(status);
 		this.extensions.onChanged = () => this.scheduleRefresh(0);
 		this.scm.onOpenFile = (path) => void this.editors.openFile(path);
-		this.scm.onOpenDiff = (diff) => void this.editors.openDiff({ kind: 'diff', ...diff });
+		// The change's diff is a user act (a row tap on the phone's Source Control page as
+		// much as a click on the PC's): its open crosses the wire for its reads, and a
+		// foreign page hold live at the landing would swallow the activation's own
+		// `revealEditorPage` — the page this tap asked for would stay back, and to its
+		// user the phone "never opened the diff" (2026-10-18). The landing pulls the page
+		// forward ungated, the same cut the webview ops' own-act reveal makes; off a
+		// page-stack shell the ungated reveal is a no-op.
+		this.scm.onOpenDiff = (diff) => void this.editors.openDiff({ kind: 'diff', ...diff }).then(() =>
+			(hook('navigation').revealEditorPageUngated ?? hook('navigation').revealEditorPage)()
+		);
 		this.scm.onCount = (count) => this.setScmBadge(count);
 		this.scm.onConflicts = (count) => this.statusBar.setConflicts(count);
 		this.scm.onChanged = () => {

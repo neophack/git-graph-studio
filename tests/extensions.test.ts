@@ -2576,6 +2576,42 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 			dispose();
 		});
 
+		it('a page that mounted before its html arrived paints when its registration answers the stranded setHtml (2026-10-18: 远程打开 git graph 偶尔是空的)', async () => {
+			// The create mirror opens the phone's own tab; its pane mounts and registers
+			// over the wire — while the backend's own setHtml may already have been banked
+			// for a hosting table that registration had not reached, mirrored nowhere. The
+			// registration's ANSWER carries that html, and the pane that mounted empty
+			// paints instead of staying blank until the backend happens to set html again.
+			const GRAPH: ExtInfo = {
+				...GGX2, id: 'acme.graph', perFrontendWebviews: true,
+				capabilities: { format: 'ggs/2', id: 'acme.graph', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }
+			};
+			withExtensions(GRAPH);
+			backend.on('ext_read_file', () => { throw new Error('no such file'); });
+			backend.on('ext_process_start', () => ({ extensionId: 'acme.graph', pid: 4242, commands: [], protocolVersion: 'ggs-ext/1', startCount: 1, lastError: null }));
+			// The journal raced the backend's own html: the create replayed, the setHtml
+			// banked after it — the answer is the only copy that reaches this frontend.
+			backend.on('ext_process_registrations', () => [{ method: 'webview.create', args: [3, 'view', 'Config', 1, false] }]);
+			backend.on('ext_webview_hosted', ({ stream, hosted }: { stream: string; hosted: boolean }) =>
+				hosted && stream === 'panel:acme.graph#3' ? '<html><body>the stranded document</body></html>' : null);
+			setRemoteEnv({ transport: {} as never, attached: { frontendId: 'remote/7' } as never, basePath: '/' });
+			try {
+				const host = new ExtensionHost();
+				await host.activateInstalled();
+				await flush();
+				// The pane mounts with an empty record — the deferred first paint.
+				const pane = document.body.appendChild(document.createElement('div'));
+				const dispose = host.mountWebview('acme.graph', 3, pane);
+				const frame = pane.querySelector('iframe.ext-page-frame')!;
+				expect(frame.getAttribute('srcdoc')).toBe(null);
+				// The registration's answer lands: the record fills and the frame paints.
+				await until(() => frame.getAttribute('srcdoc')?.includes('the stranded document'));
+				dispose();
+			} finally {
+				setRemoteEnv(undefined);
+			}
+		});
+
 		it('a mirrored create or reveal this page\'s own copy interaction caused takes the foreground; another frontend\'s stays held (2026-10-16: 手机端 claude 打开新的 session 页面没有到前台显示)', async () => {
 			// The tap that opens the panel crossed from HERE — the copy's input replay into the
 			// PC's real page — so the mirrored create that comes back is this user's own act: it

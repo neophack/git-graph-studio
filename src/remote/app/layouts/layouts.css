@@ -91,6 +91,14 @@
 	border-top: 1px solid var(--vscode-activityBar-border, var(--ggs-sep, rgba(128, 128, 128, 0.25)));
 }
 .ggs-layout[data-layout="phone-landscape"] .ggs-nav-rail .ggs-rail-back { display: none; }
+/* The rail's ⋯ (the portrait tablet's page actions — the phone app bar's trailing cluster:
+   the editor's actions sheet, the git commands, the terminal's new/kill, the files page's
+   ＋ sheet; the owner's 2026-10-18 direction, 平板模式相对手机模式有些页面有内容缺失):
+   pinned in the foot above the ‹, hidden on the pages whose phone app bar carries no
+   actions either (Search). The landscape phone's app bar owns the actions; its rail shows
+   none. */
+.ggs-nav-rail .ggs-rail-actions[hidden] { display: none; }
+.ggs-layout[data-layout="phone-landscape"] .ggs-nav-rail .ggs-rail-actions { display: none; }
 
 /* ---------- Phone landscape (§5.2) ----------
    Height is the scarce side (360–430 px): the app bar compresses to a 40 px top bar and the

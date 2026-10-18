@@ -527,6 +527,16 @@ export class Workbench {
 		);
 	}
 
+	/** The detail page by the installed package's id — Remote Access's cross-frontend tab
+	 *  sync (a detail tab that crossed whole carries the id alone; this instance's own
+	 *  installed list mounts the page). Answers whether the id resolved. */
+	openExtensionDetailById(extId: string): boolean {
+		const ext = this.extensionHost.installedExts.find((candidate) => candidate.id === extId);
+		if (!ext) return false;
+		this.openExtensionDetail(ext);
+		return true;
+	}
+
 	async compareFolders(): Promise<void> {
 		const left = await openDialog({ directory: true, multiple: false, title: 'Choose the left folder' });
 		if (!left) return;

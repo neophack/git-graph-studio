@@ -12,7 +12,8 @@
 // The claim follows swipeReveal's axis-lock recipe (platform/ui/swipe.ts): the first
 // decisive move picks the axis, a vertical drag stays the browser's scroll, and a row that
 // can reveal its actions, a horizontally scrollable strip (an editor's wide content, a
-// terminal) or a range-like control owns its own drag. Everything binds on #workbench —
+// terminal), a surface that declares its own gestures (`data-owns-gestures` — the image
+// viewer's pinch, pan and gallery swipe) or a range-like control owns its own drag. Everything binds on #workbench —
 // the bars and every overlay live outside it, so nothing else needs excluding.
 import { bottomTabs, type BottomTab } from './bottomTabs';
 import { currentPage, goTo } from './pages';
@@ -37,10 +38,11 @@ function reducedMotion(): boolean {
 }
 
 /** A target the pager must not claim: the swipe-reveal row's own drag, a range-like
- *  control, or anything inside a horizontally scrollable strip. */
+ *  control, a surface that owns its gestures, or anything inside a horizontally
+ *  scrollable strip. */
 function claimsTarget(target: EventTarget | null): boolean {
 	let node: Element | null = target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
-	if (node?.closest('.ggs-swipe-row, .ggs-swipe-actions, input[type="range"], [role="slider"]')) return false;
+	if (node?.closest('.ggs-swipe-row, .ggs-swipe-actions, input[type="range"], [role="slider"], [data-owns-gestures]')) return false;
 	for (; node; node = node.parentElement) {
 		// A wider child scrolls sideways on its own; the workbench column itself never does.
 		if (node.scrollWidth > node.clientWidth + 4) return false;
