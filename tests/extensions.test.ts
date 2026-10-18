@@ -2425,13 +2425,150 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 		}
 	});
 
-	it('a mirrored create or reveal this page\'s own copy interaction caused takes the foreground; another frontend\'s stays held (2026-10-16: 手机端 claude 打开新的 session 页面没有到前台显示)', async () => {
-		// The tap that opens the panel crossed from HERE — the copy's input replay into the
-		// PC's real page — so the mirrored create that comes back is this user's own act: it
-		// skips K7's page hold and the new session page comes forward. The backend cannot
-		// say it (a replayed tap reads as the PC user's own input, and the mirror's `caller`
-		// names no one); the copy's input trail is the only witness
-		// (src/remote/mirror/copyInteraction.ts).
+		it('a remote page runs its OWN page of a per-frontend webview — the phone\'s Git Graph (2026-10-18: 一个是手机端页面一个是 pc 端页面) — registered with the backend, fed by the addressed traffic mirrors, never re-resolved over mirrored html', async () => {
+			// The remote and the PC differ in size: a per-frontend webview's page is one page
+			// per frontend — its own layout, its own scroll, nothing shared with the PC's page
+			// and no scroll lease between them. The page registers with the backend
+			// (ext_webview_hosted), the backend's pushes mirror to it alone (addressed), and
+			// the mirrored html spares it a second resolve that would reload the desktop's page.
+			const GRAPH: ExtInfo = {
+				...GGX2, id: 'acme.graph', perFrontendWebviews: true,
+				capabilities: { format: 'ggs/2', id: 'acme.graph', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }
+			};
+			withExtensions(GRAPH);
+			backend.on('ext_read_file', ({ relPath }) => {
+				if (relPath === 'package.json') return JSON.stringify({ main: './main.js', contributes: { viewsContainers: { activitybar: [{ id: 'graph', title: 'Graph', icon: 'i.svg' }] }, views: { graph: [{ type: 'webview', id: 'graph.view', name: 'Graph' }] } } });
+				throw new Error('no such file');
+			});
+			backend.on('ext_process_start', () => ({ extensionId: 'acme.graph', pid: 4242, commands: [], protocolVersion: 'ggs-ext/1', startCount: 1, lastError: null }));
+			backend.on('ext_process_registrations', () => [
+				{ method: 'webviewView.register', args: ['graph.view'] },
+				{ method: 'webviewView.setHtml', args: ['graph.view', '<html><body>graph page</body></html>'] }
+			]);
+			backend.on('ext_webview_hosted', () => null);
+			setRemoteEnv({ transport: {} as never, attached: { frontendId: 'remote/7' } as never, basePath: '/' });
+			try {
+				const host = new ExtensionHost();
+				await host.activateInstalled();
+				await flush();
+				// Not a copy: the extension's pages are this frontend's own.
+				expect(host.sharesWebviews('acme.graph')).toBe(false);
+				expect(host.perFrontendWebviews('acme.graph')).toBe(true);
+				// The phone's sidebar section mounts its own sandboxed page of the view.
+				const pane = document.body.appendChild(document.createElement('div'));
+				const dispose = host.mountWebviewView('graph.view', 'acme.graph', pane);
+				const frame = pane.querySelector('iframe.ext-page-frame') as HTMLIFrameElement;
+				expect(frame).not.toBeNull();
+				expect(frame.getAttribute('srcdoc')).toContain('<body>graph page</body>');
+				expect(host['webviewViews'].get('graph.view')?.frame).toBe(frame);
+				// The page's presence crossed: this frontend's own instance is up on the stream.
+				expect(backend.callsTo('ext_webview_hosted')).toContainEqual({ extId: 'acme.graph', stream: 'view:graph.view', hosted: true });
+				// The backend's traffic, addressed to THIS frontend's page, reaches its gate
+				// (held for the page's load like every first push — then delivered).
+				backend.emit('ext-host-state', { extId: 'acme.graph', method: 'webviewView.postMessage', args: ['graph.view', { command: 'graph', rows: 9 }], served: 'main', caller: null, frontend: 'remote/7' });
+				await flush();
+				let record = host['webviewViews'].get('graph.view')!;
+				expect(record.pending).toEqual([{ command: 'graph', rows: 9 }]);
+				// The same traffic addressed to ANOTHER phone's page never applies here.
+				backend.emit('ext-host-state', { extId: 'acme.graph', method: 'webviewView.postMessage', args: ['graph.view', { command: 'graph', rows: 99 }], served: 'main', caller: null, frontend: 'remote/9' });
+				await flush();
+				expect(host['webviewViews'].get('graph.view')!.pending).toEqual([{ command: 'graph', rows: 9 }]);
+				// The load settles and the held push drains into the page.
+				frame.dispatchEvent(new Event('load'));
+				await new Promise((resolve) => setTimeout(resolve, 250));
+				expect(host['webviewViews'].get('graph.view')!.pending).toEqual([]);
+				// Showing the view resolves nothing: the mirrored html IS the page, and a second
+				// resolve would reload every frontend's live page of it — the desktop's own.
+				host.noteViewVisible('graph.view', true);
+				await flush();
+				expect(backend.callsTo('ext_process_invoke').map((call) => call.method)).not.toContain('webviewView.resolve');
+				// The section goes, the page with it: the backend stops addressing this frontend.
+				dispose();
+				expect(backend.callsTo('ext_webview_hosted')).toContainEqual({ extId: 'acme.graph', stream: 'view:graph.view', hosted: false });
+				// Traffic for a page this frontend no longer hosts is dropped, never queued.
+				backend.emit('ext-host-state', { extId: 'acme.graph', method: 'webviewView.postMessage', args: ['graph.view', { command: 'graph', rows: 7 }], served: 'main', caller: null, frontend: 'remote/7' });
+				await flush();
+				record = host['webviewViews'].get('graph.view')!;
+				expect(record.frame).toBeNull();
+				expect(record.pending).toEqual([]);
+			} finally {
+				setRemoteEnv(undefined);
+			}
+		});
+
+		it('a per-frontend webview\'s panel replays with its html — the phone\'s own page of the config sheet — and a copy-mode extension\'s traffic mirrors never queue on a watcher', async () => {
+			const GRAPH: ExtInfo = {
+				...GGX2, id: 'acme.graph', perFrontendWebviews: true,
+				capabilities: { format: 'ggs/2', id: 'acme.graph', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }
+			};
+			const CHAT: ExtInfo = {
+				...GGX2, id: 'acme.chat',
+				capabilities: { format: 'ggs/2', id: 'acme.chat', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }
+			};
+			withExtensions(GRAPH, CHAT);
+			backend.on('ext_read_file', () => { throw new Error('no such file'); });
+			backend.on('ext_process_start', () => ({ extensionId: 'acme.graph', pid: 4242, commands: [], protocolVersion: 'ggs-ext/1', startCount: 1, lastError: null }));
+			backend.on('ext_process_registrations', ({ extId }) => (extId === 'acme.graph'
+				? [
+					{ method: 'webview.create', args: [3, 'view', 'Config', 1, false] },
+					{ method: 'webview.setHtml', args: [3, '<html><body>config sheet</body></html>'] }
+				]
+				: [{ method: 'webviewView.register', args: ['chat.view'] }]));
+			backend.on('ext_webview_hosted', () => null);
+			setRemoteEnv({ transport: {} as never, attached: { frontendId: 'remote/7' } as never, basePath: '/' });
+			try {
+				const host = new ExtensionHost();
+				const opened: [number, string][] = [];
+				host.onOpenWebview = (panelId, title) => void opened.push([panelId, title]);
+				await host.activateInstalled();
+				await flush();
+				// The attach replay opened the panel's own tab, html and all — the page a late
+				// frontend mounts boots instead of sitting blank.
+				expect(opened).toEqual([[3, 'Config']]);
+				expect(host['webviews'].get(host['webviewKey']('acme.graph', 3))?.html).toContain('config sheet');
+				const pane = document.body.appendChild(document.createElement('div'));
+				const dispose = host.mountWebview('acme.graph', 3, pane);
+				expect(pane.querySelector('iframe.ext-page-frame')?.getAttribute('srcdoc')).toContain('config sheet');
+				expect(backend.callsTo('ext_webview_hosted')).toContainEqual({ extId: 'acme.graph', stream: 'panel:acme.graph#3', hosted: true });
+				dispose();
+				// A copy-mode extension (the chat) never applies another frontend's webview
+				// traffic, and never queues it: the copy follows the desktop's live page.
+				await host['serve']('webviewView.register', ['chat.view'], 'acme.chat', {} as never);
+				backend.emit('ext-host-state', { extId: 'acme.chat', method: 'webviewView.setHtml', args: ['chat.view', '<html><body>chat</body></html>'], served: 'main', caller: null });
+				backend.emit('ext-host-state', { extId: 'acme.chat', method: 'webviewView.postMessage', args: ['chat.view', { token: 'a' }], served: 'main', caller: null, frontend: 'remote/7' });
+				await flush();
+				expect(host['webviewViews'].get('chat.view')?.pending).toEqual([]);
+				// The view's own setHtml still records (a later mount paints it) — but the
+				// traffic mirrors of a stream shown as a copy never queue on this watcher.
+				expect(host['webviewViews'].get('chat.view')?.html).toContain('chat');
+			} finally {
+				setRemoteEnv(undefined);
+			}
+		});
+
+		it('the desktop never registers its own pages — it serves the request itself', async () => {
+			const GRAPH: ExtInfo = {
+				...GGX2, id: 'acme.graph', perFrontendWebviews: true,
+				capabilities: { format: 'ggs/2', id: 'acme.graph', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }
+			};
+			withExtensions(GRAPH);
+			backend.on('ext_read_file', () => { throw new Error('no such file'); });
+			const host = new ExtensionHost();
+			host['webviewViews'].set('graph.view', { extId: 'acme.graph', html: '<html></html>', frame: null, pending: [], loaded: false, painted: null, loadGrace: null, firstPaintTimer: null });
+			const pane = document.body.appendChild(document.createElement('div'));
+			const dispose = host.mountWebviewView('graph.view', 'acme.graph', pane);
+			await flush();
+			expect(backend.callsTo('ext_webview_hosted')).toEqual([]);
+			dispose();
+		});
+
+		it('a mirrored create or reveal this page\'s own copy interaction caused takes the foreground; another frontend\'s stays held (2026-10-16: 手机端 claude 打开新的 session 页面没有到前台显示)', async () => {
+			// The tap that opens the panel crossed from HERE — the copy's input replay into the
+			// PC's real page — so the mirrored create that comes back is this user's own act: it
+			// skips K7's page hold and the new session page comes forward. The backend cannot
+			// say it (a replayed tap reads as the PC user's own input, and the mirror's `caller`
+			// names no one); the copy's input trail is the only witness
+			// (src/remote/mirror/copyInteraction.ts).
 		const ENGINE: ExtInfo = {
 			...GGX2, id: 'acme.engine',
 			capabilities: { format: 'ggs/2', id: 'acme.engine', version: '1.0.0', pages: {}, backend: { kind: 'node', host: 'ggs-node', command: 'out/main.js' }, permissions: [] }

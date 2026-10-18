@@ -41,6 +41,7 @@ vi.mock('@xterm/xterm', () => ({
 		loadAddon(): void { /* no-op */ }
 		open(element: HTMLElement): void { element.classList.add('xterm'); }
 		write(text: string): void { this.written.push(text); }
+		reset(): void { this.written.length = 0; }
 		onData(handler: (data: string) => void): void { this.dataHandlers.push(handler); }
 		onResize(handler: (size: { cols: number; rows: number }) => void): { dispose(): void } { this.resizeHandlers.push(handler); return { dispose: () => undefined }; }
 		onKey(handler: () => void): { dispose(): void } { this.keyHandlers.push(handler); return { dispose: () => undefined }; }
@@ -65,6 +66,10 @@ vi.mock('@xterm/xterm', () => ({
 		pressKey(): void { for (const h of this.keyHandlers) h(); }
 		/** Test hook: the shell's cell grid changed. */
 		triggerResize(cols: number, rows: number): void { for (const h of this.resizeHandlers) h({ cols, rows }); }
+		/** The shared geometry's adoption (§8.6 #5): a `pty-resized` event resizes the term,
+		 *  which tells its own listeners — the view's debounced echo rides that, exactly as
+		 *  with a viewport fit. */
+		resize(cols: number, rows: number): void { this.cols = cols; this.rows = rows; this.triggerResize(cols, rows); }
 	}
 }));
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit(): void { /* no-op */ } } }));

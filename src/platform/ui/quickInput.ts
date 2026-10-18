@@ -94,19 +94,20 @@ export function quickInput(options: QuickInputOptions): Promise<string | null> {
 		input.spellcheck = false;
 		input.setAttribute('aria-label', options.title ?? options.placeholder ?? 'Input');
 		const hint = el('div', 'hint');
-		// The back row: the remote phone shells draw the quick input as a full-screen page,
-		// where the outside click can never land and no Escape key exists — the ‹ is the one
-		// visible way out and finishes with null, exactly Escape. The desktop card hides the
-		// row (shell.css): Esc and clicking outside serve there.
+		// The back entry rides the search box's own row (the owner's 2026-10-18 direction: the
+		// ‹ belongs beside the search box, one row): the remote phone shells draw the quick
+		// input as a full-screen page, where the outside click can never land and no Escape
+		// key exists — the ‹ beside the box is the one visible way out and finishes with null,
+		// exactly Escape. The desktop card hides the button (shell.css): Esc and clicking
+		// outside serve there; the title stays the header above the row on both.
 		const back = el('button', 'qback-btn');
 		back.type = 'button';
 		back.title = t('quickInput.back');
 		back.setAttribute('aria-label', t('quickInput.back'));
 		back.appendChild(icon('chevron-left'));
 		back.addEventListener('click', () => finish(null));
-		box.appendChild(el('div', 'qback', [back, options.title ? el('span', 'qback-title', [options.title]) : null]));
 		if (options.title) box.appendChild(el('div', 'title', [options.title]));
-		box.appendChild(input);
+		box.appendChild(el('div', 'qback', [back, input]));
 		box.appendChild(hint);
 		const list = options.items ? el('div', 'list') : null;
 		if (list) box.appendChild(list);

@@ -640,8 +640,11 @@ describe('quick input back', () => {
 		const picked = quickInput({ title: 'Go to File', items: [{ label: 'src/a.ts', value: 'a' }] });
 		await flush();
 		expect(box()).not.toBeNull();
-		expect(box()!.querySelector('.qback-title')?.textContent).toBe('Go to File');
-		box()!.querySelector<HTMLButtonElement>('.qback-btn')!.click();
+		expect(box()!.querySelector('.title')?.textContent).toBe('Go to File');
+		// The ‹ sits on the search box's own row — the back entry and the input share .qback.
+		const row = box()!.querySelector<HTMLElement>('.qback')!;
+		expect(row.querySelector('.input')).not.toBeNull();
+		row.querySelector<HTMLButtonElement>('.qback-btn')!.click();
 		await expect(picked).resolves.toBe(null);
 		expect(box()).toBeNull();
 		// A picked row closes the same way — the closer never leaks into the next input.

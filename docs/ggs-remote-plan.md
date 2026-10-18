@@ -908,7 +908,7 @@ async function runInvoke(f: Frame) {
 | 2 | 所有 `emit_to("main", …)` 与针对 `main` 窗口的逻辑（共 13 处 emit，逐个审计） | 只投 `main` | 改为投给相关前端，或同时投 `main` 与 `remote-relay` |
 | 3 | `workbench.ts` 的关闭确认、拖放 | 依赖窗口 | 远程端由垫片替代（§9.3），后端无须改 |
 | 4 | 前端标识 | 无 | Relay 在每个 `INVOKE` 的 headers 里附带 `x-ggs-frontend: remote/<session>`，需要区分前端的命令（例如 `ext_*` 的宿主请求来源）从 `tauri::ipc::Request` 的 headers 读取 |
-| 5 | 终端共享 | 终端按前端创建 | 新增 `pty_list`（若无）与“接入现有终端”：订阅已存在的 `studio://pty-output-{id}`，新增 `pty_tail(id, bytes)` 读最近 64 KB 回放；新增 `pty_resize(id, cols, rows)`——接入方视口与创建方不同时按接入方调整（与 VS Code 共享终端一致，桌面侧同步变形；只读接入作为可选项），新开终端按发起前端视口创建 |
+| 5 | 终端共享 | 终端按前端创建 | 新增 `pty_list`（若无）与“接入现有终端”：订阅已存在的 `studio://pty-output-{id}`，新增 `pty_tail(id, bytes)` 读最近 64 KB 回放；新增 `pty_resize(id, cols, rows)`——接入方视口与创建方不同时按接入方调整（与 VS Code 共享终端一致，桌面侧同步变形；只读接入作为可选项），新开终端按发起前端视口创建。**2026-10-18 落地记录**：前端同步进 `TerminalView`（`features/terminal/sessionSync.ts` 的规划器）——终端页 `shown()` 先镜像 `pty_list`（{id, name}），没见过的会话即接入（回放 `pty_tail`、订阅输出、共享输入），不再另起私有 shell（2026-10-18 之前的 bug：远程终端页从不看 PC 上已有的终端）；`pty_create`/`pty_kill`/退出收割广播 `studio://pty-sessions-changed`，页面可见的每个前端页重新镜像；`pty_resize` 记录尺寸、仅真实变化广播 `studio://pty-resized-{id}`（{cols, rows}），各端 xterm 随之变形，同尺寸回声被变化闸门静音（无乒乓）；页面卸载只杀自己创建的 shell，接入的永不被杀。验收：`tests/terminal.test.ts` 十一例 |
 | 6 | 帧宿主插件的 `globalState` 写入 | 单前端 | 维持“后写覆盖”（与 VS Code 多窗口一致），文档说明 |
 | 7 | 同一文件双前端并发编辑 | 无协调 | 后写覆盖 + watcher 推送对端刷新（与 VS Code 同工作区开两窗口一致），文档明确，不做合并 |
 
@@ -1110,7 +1110,7 @@ type FormFactor = 'phone' | 'tablet' | 'desktop';
 | 功能（模块） | 适配内容 | 涉及文件 |
 | ------------ | -------- | -------- |
 | 文件资源管理器（3） | 行高 44 px；长按菜单；新建/重命名用底部输入框；**上传**（多文件、文件夹 `webkitdirectory`、拖放；`transfer.ts` 256 KB 分片 + 断点续传）；**下载**（单文件直接下，多选/文件夹由后端流式 zip：新增 `fs_zip_stream(paths, channel)`，复用 `zip` crate）；Git 状态颜色保留 | `explorer.ts`、`transfer.ts`、`cmd_fs.rs` |
-| Quick Open / 搜索（4、5） | 手机全屏输入页,自带 ‹ 返回头(2026-10-16:全屏下点外永远点不中、手机无 Esc——返回头即 `finish(null)`,系统返回键经 `quickInputBack.ts` 作顶层 closer 先剥它;桌面卡片隐藏该行) ;结果虚拟列表；符号跳转、调用树、上下文窗口以页面栈导航 | `filePicker.ts`、`searchView.ts`、`callTree.ts`、`contextView.ts`、`quickInput.ts`、`quickInputBack.ts` |
+| Quick Open / 搜索（4、5） | 手机全屏输入页,自带 ‹ 返回(2026-10-16:全屏下点外永远点不中、手机无 Esc——返回即 `finish(null)`,系统返回键经 `quickInputBack.ts` 作顶层 closer 先剥它;桌面卡片隐藏该钮;2026-10-18:‹ 与搜索框同一行,标题作页头) ;结果虚拟列表；符号跳转、调用树、上下文窗口以页面栈导航 | `filePicker.ts`、`searchView.ts`、`callTree.ts`、`contextView.ts`、`quickInput.ts`、`quickInputBack.ts` |
 | 编辑器（6） | CodeMirror 6 原生支持触屏选择；键盘出现时用 `--vvh` 收缩；编辑工具条（撤销、重做、查找、保存、Tab、缩进、注释）；查找替换改为顶部单行 | `textEditor.ts`、`findWidget.ts`、`editor.ts` |
 | 大文件查看器（7） | `src/scroll/` 自绘滚动：在 `input.ts` 增加触摸拖动与惯性（Pointer Events + 速度衰减）；滚动条触控热区 24 px | `scroll/input.ts`、`scroll/scrollbar.ts` |
 | 对比与合并（8） | 手机档左右对比自动改为行内 diff（`@codemirror/merge` 的 `unifiedMergeView`）；三方合并按冲突块卡片逐个处理 | `editor.ts`、`mergeEditor.ts` |
@@ -1925,6 +1925,20 @@ M9 依赖 M2（认证）和 M3（多窗口），可与 M5（响应式）并行�
 | 三者综合 | 82.8 KB | 4.2 KB | **19.6×** |
 
 每个场景结束时副本与 PC 的 DOM 逐一相等——省的是线，不是内容。已知取舍：滚动风暴期间副本按 ≤600 ms 一拍落定（快速划过本来就看不清中间帧）；动画运行中 ~1 Hz 采样、停止即落定；连续流式 2 Hz 成段出现；单次属性翻转与交互路径（输入、点击回放的落点重排）不节流、不降档。
+
+### 22.9 每前端一份的扩展页面：手机端的 Git Graph（2026-10-18）
+
+所有者的方向（2026-10-18："远程和 pc 上尺寸不一样，git graph 可以一个 remote 是手机端页面一个是 pc 端页面，不需要同步滚动条"）：§22.6 的副本把 PC 的活页搬给手机——排版按 PC、滚动按 3 秒租约单方持有，虚拟列表还要靠比例上报让 PC 重渲染窗口。对**查看器类**页面（Git Graph：状态在仓库里，页面只是渲染器）这套共享是负担不是功能：手机应该跑自己的页面——自己的宽度、自己的滚动、手机键盘原生输入——PC 一份、手机一份，互不同步滚动条。
+
+做法：按扩展声明"每前端一份"（`ext_routing::per_frontend_webviews`，目前只有 git-graph-rs；策划集在 Rust 侧、随 `ext_list` 的 `perFrontendWebviews` 字段过河，`src/` 不点名），其余后端扩展照旧 §22.6 一份活页加副本（Claude 的会话状态在页面里，共享一份是功能）。
+
+- 路由（`ext_routing.rs`）：后端推给页面的**流量**——`webview.postMessage` / `webviewView.postMessage`、面板的 `webview.setHtml`——不再广播，只发给**登记持有该流活页的前端**（`webview_hosted`，流 → 前端集合）；`ext-host-state` 每个目标一条、带 `frontend` 字段点名（process.rs），Relay 只转发给被点名的会话（`relay.ts`），页面内再按自己的前端 id 精确匹配（extensionHost.ts）——副本观看者的链路上一个字节的别人流量都不走。面板的 html 随面板状态入日志（`webview.setHtml` 记在面板条目里，回放在 create 之后紧接一条 setHtml），晚连上的前端挂自己的页能直接启动。
+- 登记（`ext_webview_hosted` 命令）：远程前端挂上自己的 iframe（`mountWebviewView` / `mountWebview` 的自有路径，本就存在——`sharesWebviews` 对每前端扩展为假）即上报 `view:<id>` / `panel:<ext>#<id>` 活了，卸下即报没了；会话结束由 `remote_host_frontend_gone` 一并清掉。桌面永不登记——它自己应答请求。
+- 页面双向：页面 → 后端走既有事件路（`webviewViewMessage` 经 `ext_process_push_event`，与桌面同一条）；后端 → 页面走上面的定向镜像。远程端**不重复 resolve**（`treeViews.ts`）：日志或镜像已带 html 时 html 就是页面，再 resolve 一次会让每个前端的活页重载（包括 PC 的）；也不上报可见性——后端那一个 visible 位留给桌面的真相，手机离页不能停了 PC 页面的推送。
+- 流量守卫（`frames.ts`）：镜像的 postMessage 只有**持有活帧**的前端应用，没挂页面的丢弃（页面引导时自己要状态，给可能永不打开的面排队是无界增长）；副本扩展（聊天）的流量镜像一概跳过。桌面侧 `gateWebviewMessage` 的无帧队列封顶 8 条丢最旧——本为挂载竞速（几条的突发）而生，别让手机驱动的流在从未打开的面板上无限积压。
+- 取舍（如实）：面板的**生命周期**仍是全实例一份（任一端关闭即处处关闭——与 §22.7 的标签同步一致）；每前端一份的是页面，不是面板对象。远程端对 `webviewView.show`（后端要求亮出视图）仍只落桌面——v1 的边界。
+
+结果：手机打开 Git Graph，得到的是手机宽度的原生页面——原生滚动、原生输入、无租约、无回放；PC 的页面不动（除非 html 真的换了）。`tests/extensions.test.ts` 三个新测试（自有页挂载与登记、定向流量与免 resolve、桌面不登记）与 `tests/remote.test.ts` 的定向转发测试守着这些边界；`routing.rs` 的单测守着策划集、登记表与日志回放。
 
 ## 23. 安全沙箱：远程会话只驱动被操作系统隔离的窗口
 

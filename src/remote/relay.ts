@@ -27,6 +27,10 @@ import {
 } from './frame';
 
 const HOST_REQUEST_EVENT = 'ext-host-request';
+/** A state mirror addressed to ONE frontend — its own live page of a per-frontend webview
+ *  (Git Graph, ggs-remote-plan.md §8.6 #5): it crosses that session's link alone, never
+ *  every phone watching copies of other extensions' pages. */
+const HOST_STATE_EVENT = 'ext-host-state';
 /** Terminal output is coalesced per subscription for this long (§6.4) — the trailing
  *  edge only: the first chunk after a quiet gap leaves at once (a key's echo never
  *  waits the window; what follows within it shares one frame). */
@@ -470,6 +474,7 @@ export class RelayEngine {
 			(e) => {
 				if (!this.sessions.get(session)?.listeners.has(stream)) return;
 				if (event === HOST_REQUEST_EVENT && this.hostRequestTarget((e.payload as { frontend?: string })?.frontend) !== session) return;
+				if (event === HOST_STATE_EVENT && (e.payload as { frontend?: string }).frontend !== undefined && (e.payload as { frontend?: string }).frontend !== `remote/${session}`) return;
 				if (pty && typeof e.payload === 'string') return this.coalescePty(session, stream, e.event, e.id, e.payload);
 				// Split like a result: an event can outgrow one frame (the replica's snapshot of
 				// the PC window, §22), and the daemon refuses a frame past MAX_PAYLOAD.

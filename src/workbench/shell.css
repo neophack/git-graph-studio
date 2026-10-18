@@ -627,11 +627,13 @@ body.resizing iframe { pointer-events: none; }
 	border: 1px solid var(--vscode-widget-border); border-radius: 6px; box-shadow: 0 0 8px 2px var(--vscode-widget-shadow);
 }
 .quick-input .title { font-size: 11px; padding: 0 0 4px 2px; color: var(--vscode-descriptionForeground); }
-/* The back row is the full-screen form's own affordance (a phone has no Esc and nothing to
-   click outside the card) — the remote shell's page-stack CSS shows it; the desktop card
-   keeps Esc and the outside click, so the row stays hidden here. */
-.quick-input .qback { display: none; }
+/* The ‹ is the full-screen form's own affordance (a phone has no Esc and nothing to click
+   outside the card) — the remote shell's page-stack CSS shows it beside the input; the
+   desktop card keeps Esc and the outside click, so the button stays hidden here. */
+.quick-input .qback { display: flex; align-items: center; gap: 6px; }
+.quick-input .qback-btn { display: none; }
 .quick-input .input { height: 26px; }
+.quick-input .qback .input { flex: 1; min-width: 0; width: auto; }
 .quick-input .hint { font-size: 12px; padding: 4px 2px 0; color: var(--vscode-descriptionForeground); }
 .quick-input .hint.error { color: var(--vscode-errorForeground); }
 .quick-input .list { max-height: 300px; overflow: auto; margin-top: 4px; }

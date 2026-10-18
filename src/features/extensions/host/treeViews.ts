@@ -5,6 +5,7 @@ import type { ExtensionHost } from './extensionHost';
 import { extensionViewContributions } from '../contributions';
 import { extLog } from '../extLog';
 import { extFileDataUrl } from '../../../platform/extAssets';
+import { hook } from '../../../platform/hooks';
 import type { SerializedTreeItem } from '../treeView';
 
 
@@ -51,21 +52,38 @@ export const treeViewsMethods: ThisType<ExtensionHost> = {
 			// extension is active — the frame parks the provider until then.
 			if (contribution?.views.some((view) => view.viewId === viewId && view.type === 'webview') && visible && !this.resolvedWebviewViews.has(viewId)) {
 				const frame = this.frames.get(owner);
-				extLog('info', owner, `webview view ${viewId}: resolve via ${frame ? (frame.remote ? 'process backend' : 'frame') : 'NO HANDLE'}`);
-				if (frame) {
+				// A remote own-instance page (a per-frontend webview — the phone's Git Graph,
+				// 2026-10-18) with the mirrored html already in hand does not resolve again:
+				// the html IS the page (the journal or a live mirror carried it), and a second
+				// resolve would setHtml once more — reloading every frontend's live page of
+				// the view, the desktop's own included. The page asks its state over messages
+				// once it boots, and a later setHtml still reaches it like any other.
+				if (frame && hook('session').frontendClass() === 'remote' && (this.webviewViews.get(viewId)?.html ?? '') !== '') {
 					this.resolvedWebviewViews.add(viewId);
-					void this.callFrame(frame, 'webviewView.resolve', [viewId]).catch((error) => {
-						this.resolvedWebviewViews.delete(viewId);
-						extLog('warn', owner, `webview view ${viewId}: resolve failed: ${String(error)}`);
-					});
+				} else {
+					extLog('info', owner, `webview view ${viewId}: resolve via ${frame ? (frame.remote ? 'process backend' : 'frame') : 'NO HANDLE'}`);
+					if (frame) {
+						this.resolvedWebviewViews.add(viewId);
+						void this.callFrame(frame, 'webviewView.resolve', [viewId]).catch((error) => {
+							this.resolvedWebviewViews.delete(viewId);
+							extLog('warn', owner, `webview view ${viewId}: resolve failed: ${String(error)}`);
+						});
+					}
 				}
 			}
 		});
 		const frame = owner ? this.frames.get(owner) : undefined;
 		if (frame && this.treeProviders.has(viewId)) void this.callFrame(frame, 'treeView.setVisible', [viewId, visible]).catch(() => undefined);
 		if (frame && this.webviewViews.has(viewId)) {
-			void this.callFrame(frame, 'webviewView.setVisible', [viewId, visible]).catch(() => undefined);
-			frame.send?.({ type: '__studioExtEvent', event: 'webviewViewVisible', viewId, visible });
+			// One webviewView object, several own pages (a per-frontend webview): a remote
+			// page never reports visibility — the backend's one visible flag stays the
+			// desktop's own truth, and a phone leaving its page must not stop the desktop
+			// page's pushes. The phone's page asks its state when it boots; a hidden section
+			// drops the mirrored pushes at no cost.
+			if (hook('session').frontendClass() !== 'remote') {
+				void this.callFrame(frame, 'webviewView.setVisible', [viewId, visible]).catch(() => undefined);
+				frame.send?.({ type: '__studioExtEvent', event: 'webviewViewVisible', viewId, visible });
+			}
 		}
 	},
 };

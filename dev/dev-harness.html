@@ -95,9 +95,16 @@
 						return out;
 					},
 				'graph_request': function (args) { return graphResponse(args.message); },
-				'pty_create': function () { return 'mockshell'; },
+				// The terminal session sync (§8.6 #5): a stateful little table so the harness's
+				// terminal page mirrors creates and kills the way the real backend announces them.
+				'pty_list': function () { return window.__harness.ptys.map(function (id) { return { id: id, name: 'mockshell' }; }); },
+				'pty_tail': function () { return ''; },
+				'pty_create': function (args) { window.__harness.ptys.push(args.id); return 'mockshell'; },
 				'pty_write': function (args) { window.__harness.typed.push(String(args.data)); return null; },
-				'pty_kill': function () { return null; },
+				'pty_kill': function (args) {
+					window.__harness.ptys = window.__harness.ptys.filter(function (id) { return id !== args.id; });
+					return null;
+				},
 				'git_output_log': function () { return []; },
 				'ext_list': function () { return []; },
 				// The boot round trip the workbench opens with (a null answer here crashes
@@ -110,7 +117,7 @@
 				'keybindings_read': function () { return null; }
 			};
 
-			window.__harness = { pulled: 0, checkedOut: [], oldText: oldText, typed: [] };
+			window.__harness = { pulled: 0, checkedOut: [], oldText: oldText, typed: [], ptys: [] };
 
 			// Tauri injects its IPC bridge before any page script runs; if it is there we are
 			// running under `tauri dev` and must NOT replace it - the whole point of the harness

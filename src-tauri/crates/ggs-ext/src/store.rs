@@ -154,6 +154,12 @@ pub struct ExtInfo {
     /// silent under the desktop's `ggs://` protocol, but one red console line per package in
     /// a browser session, where the same URL is an ordinary HTTP request.
     pub page_bundle: bool,
+    /// The extension's webview pages are per-frontend instances
+    /// (`routing::per_frontend_webviews`, Git Graph): every frontend — the desktop window,
+    /// a remote phone — runs its OWN page of the view, at its own size and its own scroll,
+    /// and the backend's pushes reach each. Every other backend-hosted extension keeps one
+    /// live page per instance in the desktop window, with remote pages showing its copy.
+    pub per_frontend_webviews: bool,
     /// The Studio capabilities the package's `ggs` key declared, as the runtime manifest
     /// the install generated from it.
     pub capabilities: Option<StudioManifest>,
@@ -310,6 +316,7 @@ pub fn bundled_offer(package: &BundledPackage) -> ExtInfo {
         changelog: None,
         format: BUNDLED_FORMAT.to_owned(),
         page_bundle: false,
+        per_frontend_webviews: crate::routing::per_frontend_webviews(&package.id),
         capabilities: Some(package.capabilities.clone()),
     }
 }
@@ -659,9 +666,10 @@ pub fn list_installed(dir: &Path) -> Result<Vec<ExtInfo>, String> {
         let nls = read_nls(&path);
         let display_name = nls_resolve(manifest.display_name, &nls);
         let description = nls_resolve(manifest.description, &nls);
+        let id = format!("{}.{}", manifest.publisher, manifest.name);
         out.push(
             ExtInfo {
-                id: format!("{}.{}", manifest.publisher, manifest.name),
+                id: id.clone(),
                 name: manifest.name,
                 display_name,
                 publisher: manifest.publisher,
@@ -684,6 +692,7 @@ pub fn list_installed(dir: &Path) -> Result<Vec<ExtInfo>, String> {
                     None => meta.format,
                 },
                 page_bundle: path.join("webview").join("index.js").is_file(),
+                per_frontend_webviews: crate::routing::per_frontend_webviews(&id),
                 capabilities,
             }
             .with_docs(&path),

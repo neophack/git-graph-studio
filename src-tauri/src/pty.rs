@@ -14,6 +14,13 @@ struct PtySession {
     /// Distinguishes this session from an earlier one created under the same frontend id: the
     /// reader thread only removes the map entry while it still owns that generation.
     gen: u64,
+    /// The shell's name ([`pty_list`]'s answer to another frontend adopting this session).
+    name: String,
+    /// The session's current size: only a resize that CHANGES it re-broadcasts
+    /// `studio://pty-resized-{id}` — a same-size echo from a frontend following the event
+    /// back must stay silent, or the two frontends would ping-pong resizes forever.
+    cols: u16,
+    rows: u16,
     writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send>,
     /// Kept alive here: dropping the master closes the ConPTY, and a resize needs it.
@@ -21,6 +28,50 @@ struct PtySession {
     /// The last [`TAIL_BYTES`] of output: what a second frontend attaching to this terminal
     /// (a remote session, docs/ggs-remote-plan.md §8.6 #5) replays before it follows live.
     tail: std::sync::Arc<Mutex<String>>,
+}
+
+impl PtySession {
+    /// Adopt a new size; answers whether it actually changed (the resize broadcast's gate).
+    fn set_size(&mut self, cols: u16, rows: u16) -> bool {
+        size_changed(&mut self.cols, &mut self.rows, cols, rows)
+    }
+}
+
+/// One live terminal as `pty_list` answers it — the vocabulary of the session sync every
+/// frontend's terminal page runs (docs/ggs-remote-plan.md §8.6 #5): the remote's terminal
+/// page adopts the PC's terminals instead of spawning its own beside them.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PtySessionInfo {
+    pub id: u32,
+    pub name: String,
+}
+
+/// The payload of `studio://pty-resized-{id}`: the session's new size, so every frontend
+/// showing the terminal deforms with it (a shared terminal, one geometry).
+#[derive(Clone, serde::Serialize)]
+struct PtyResize {
+    cols: u16,
+    rows: u16,
+}
+
+/// The resize-broadcast gate: whether adopting `(new_cols, new_rows)` changes the tracked
+/// size — only a real change re-broadcasts `studio://pty-resized-{id}`, so a frontend
+/// echoing the event back as a same-size resize stays silent (no ping-pong).
+fn size_changed(cols: &mut u16, rows: &mut u16, new_cols: u16, new_rows: u16) -> bool {
+    if *cols == new_cols && *rows == new_rows {
+        return false;
+    }
+    *cols = new_cols;
+    *rows = new_rows;
+    true
+}
+
+/// Announce the session set changed — a terminal appeared or died. Every frontend holding
+/// a terminal page re-lists and adopts or retires sessions (the sync is pull-based: the
+/// event carries no payload, [`pty_list`] after it is the truth).
+fn emit_sessions_changed(app: &TauriAppHandle) {
+    let _ = app.emit("studio://pty-sessions-changed", ());
 }
 
 /// How much recent output each terminal keeps for late joiners.
@@ -115,6 +166,9 @@ pub fn pty_create(
             id,
             PtySession {
                 gen,
+                name: shell_name.clone(),
+                cols,
+                rows,
                 writer,
                 child,
                 master: pair.master,
@@ -122,6 +176,8 @@ pub fn pty_create(
             },
         );
     }
+    // Another frontend's terminal page adopts this session on the announcement (§8.6 #5).
+    emit_sessions_changed(&app);
 
     // Drain the session on its own thread, forwarding output as events; exit ends the
     // stream. The path batches before it emits: a read loop emitting per 8 KiB read turns
@@ -178,6 +234,10 @@ pub fn pty_create(
                 .unwrap_or(false)
             {
                 sessions.sessions.remove(&id);
+                drop(sessions);
+                // The exit event above retires the frontends' own copies; the session-set
+                // change retires a terminal page that never held this one (§8.6 #5).
+                emit_sessions_changed(&event_app);
             }
         }
     });
@@ -197,7 +257,13 @@ pub fn pty_write(app: TauriAppHandle, id: u32, data: String) -> Result<(), Strin
 
 #[tauri::command]
 pub fn pty_resize(app: TauriAppHandle, id: u32, cols: u16, rows: u16) -> Result<(), String> {
-    with_session(&app, id, |session| {
+    // A same-size call (a frontend echoing the event back) resizes nothing and broadcasts
+    // nothing; a real change rides the master AND every other frontend showing the
+    // terminal (§8.6 #5: the attacher's viewport governs, the creator deforms along).
+    let changed = with_session(&app, id, |session| {
+        if !session.set_size(cols, rows) {
+            return Ok(false);
+        }
         session
             .master
             .resize(PtySize {
@@ -206,18 +272,35 @@ pub fn pty_resize(app: TauriAppHandle, id: u32, cols: u16, rows: u16) -> Result<
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| format!("Could not resize the terminal: {e}"))
-    })
+            .map_err(|e| format!("Could not resize the terminal: {e}"))?;
+        Ok(true)
+    })?;
+    if changed {
+        let _ = app.emit(
+            format!("studio://pty-resized-{id}").as_str(),
+            PtyResize { cols, rows },
+        );
+    }
+    Ok(())
 }
 
-/// The live terminal ids (a frontend attaching to an instance lists the terminals it can
-/// join — §8.6 #5).
+/// The live terminals (a frontend attaching to an instance lists the terminals it can
+/// join — §8.6 #5): the session-sync vocabulary, in list order.
 #[tauri::command]
-pub fn pty_list(app: TauriAppHandle) -> Vec<u32> {
+pub fn pty_list(app: TauriAppHandle) -> Vec<PtySessionInfo> {
     let state = app.state::<Mutex<PtyState>>();
-    let mut ids: Vec<u32> = state.lock().unwrap().sessions.keys().copied().collect();
-    ids.sort_unstable();
-    ids
+    let mut sessions: Vec<PtySessionInfo> = state
+        .lock()
+        .unwrap()
+        .sessions
+        .iter()
+        .map(|(id, session)| PtySessionInfo {
+            id: *id,
+            name: session.name.clone(),
+        })
+        .collect();
+    sessions.sort_by_key(|info| info.id);
+    sessions
 }
 
 /// The recent output of a terminal, at most `bytes` (default and cap: [`TAIL_BYTES`]) — the
@@ -291,6 +374,8 @@ pub fn pty_kill(app: TauriAppHandle, id: u32) -> Result<(), String> {
     let mut guard = state.lock().unwrap();
     if let Some(mut session) = guard.sessions.remove(&id) {
         let _ = session.child.kill();
+        drop(guard);
+        emit_sessions_changed(&app);
     }
     Ok(())
 }
@@ -388,7 +473,24 @@ fn decode_pty_chunk(carry: &mut Vec<u8>, chunk: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_pty_chunk, gather_batch, push_tail, shell_command, TAIL_BYTES};
+    use super::{decode_pty_chunk, gather_batch, push_tail, shell_command, size_changed, TAIL_BYTES};
+
+    #[test]
+    fn a_same_size_resize_is_no_change_and_a_real_one_is() {
+        // The broadcast gate (§8.6 #5): a frontend echoing `pty-resized` back as a resize
+        // of the size it just adopted must not answer "changed" — the two frontends would
+        // ping-pong the event forever. Only a genuinely different size does.
+        let mut cols = 80u16;
+        let mut rows = 24u16;
+        assert!(size_changed(&mut cols, &mut rows, 100, 30));
+        assert_eq!((cols, rows), (100, 30));
+        assert!(!size_changed(&mut cols, &mut rows, 100, 30));
+        // One dimension differing is still a real resize.
+        assert!(size_changed(&mut cols, &mut rows, 100, 24));
+        assert_eq!((cols, rows), (100, 24));
+        assert!(size_changed(&mut cols, &mut rows, 80, 24));
+        assert_eq!((cols, rows), (80, 24));
+    }
 
     #[test]
     fn a_burst_of_small_reads_crosses_as_far_fewer_batches() {

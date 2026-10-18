@@ -171,6 +171,28 @@ pub fn ext_process_registrations(ext_id: String) -> Vec<Value> {
     ext_routing::journal(&ext_id)
 }
 
+/// A remote frontend mounted (or unmounted) its own live page of a webview stream — its
+/// own instance of a per-frontend webview (Git Graph, `ext_routing::per_frontend_webviews`):
+/// the backend's webview traffic mirrors to exactly the frontends hosting one, addressed,
+/// so each page is fed its own pushes while a copy's watchers carry nothing. The Relay's
+/// session header names the frontend; the desktop never registers (it serves the request
+/// itself), and a session that ends is swept by `remote_host_frontend_gone`.
+#[tauri::command]
+pub fn ext_webview_hosted(
+    webview: tauri::Webview,
+    request: tauri::ipc::Request<'_>,
+    ext_id: String,
+    stream: String,
+    hosted: bool,
+) -> Result<(), String> {
+    let frontend = caller(&webview, &request);
+    if !ext_routing::is_session(&frontend) {
+        return Ok(()); // only a remote session hosts a page beside the desktop's own
+    }
+    ext_routing::webview_hosted(&ext_id, &frontend, &stream, hosted);
+    Ok(())
+}
+
 /// Push one host event into a backend (`ggs.hostEvent`): the same event objects a frame
 /// gets as `__studioExtEvent` pushes — theme changes, configuration, webview messages,
 /// watcher batches.

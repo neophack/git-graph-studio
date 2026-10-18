@@ -45,6 +45,11 @@ export interface ExtInfo {
 	 *  desktop's `ggs://` protocol, one red console line per package in a browser session).
 	 *  Optional because older `ext_list` recordings predate it. */
 	pageBundle?: boolean;
+	/** The extension's webview pages are per-frontend instances: every frontend (the
+	 *  desktop window, a remote phone) runs its OWN page of the view — its own size, its own
+	 *  scroll, nothing shared with the PC's copy — and the backend's pushes reach each.
+	 *  Optional because older `ext_list` recordings predate it. */
+	perFrontendWebviews?: boolean;
 	/** The `ggs` key declaration, for packages installed from one. */
 	capabilities: StudioManifest | null;
 }

@@ -1,11 +1,13 @@
 import type { WebviewDelivery } from './sharedTypes';
-// The webview surfaces: panels and sidebar views, mirror copies, html composition (with the
-// srcdoc history shield), load watchdogs, session bookkeeping and asset roots.
+// The webview surfaces: panels and sidebar views, mirror copies, the per-frontend
+// instances (a remote's own phone-sized page of Git Graph, 2026-10-18), html composition
+// (with the srcdoc history shield), load watchdogs, session bookkeeping and asset roots.
 
 import { extAssetBase, jsonForScript } from './pages';
 import type { ExtensionHost } from './extensionHost';
 
-import { extLog } from '../extLog';
+import { extLog, extLogOnce } from '../extLog';
+import { extWebviewHosted } from '../../../platform/ipc/extProcess';
 import { hook } from '../../../platform/hooks';
 
 export const WEBVIEW_OPEN_PENDING_MS = 15_000;
@@ -284,6 +286,16 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 			return;
 		}
 		if (!view.frame) {
+			// The queue exists for the mount race (a surface assembling while the first pushes
+			// land — bursts of a few messages). A stream another frontend's own page drives
+			// (a per-frontend webview: the phone's Git Graph asking, the backend answering)
+			// would otherwise grow it without bound on every frontend whose surface never
+			// opens, so past the race's shape the OLDEST go; a page that mounts later asks
+			// its own state.
+			if (view.pending.length >= 8) {
+				view.pending.splice(0, view.pending.length - 7);
+				extLogOnce(`pending-capped:${owner}`, 'info', 'host', `webview ${owner}: postMessage queue capped while no page is mounted — the oldest were dropped`);
+			}
 			view.pending.push(message);
 			extLog('info', 'host', `webview ${owner}: postMessage held — the page has not mounted yet (${view.pending.length} queued)`);
 			return;
@@ -329,6 +341,7 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 		container.appendChild(frame);
 		if (view) {
 			view.frame = frame;
+			this.noteOwnWebviewHosted(extId, hook('webviewStreams')!.panelStream(extId, panelId), true);
 			extLog('info', 'host', `webview ${extId}#${panelId}: mounted (${frame.isConnected ? 'connected' : 'detached'})`);
 			// The messages that arrived while the tab was still mounting (the initial state
 			// among them) deliver once the page's own listeners exist — the load event —
@@ -347,7 +360,10 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 				extLog('info', 'host', `webview ${extId}#${panelId}: mount defers the first paint — the record has no html yet`);
 			}
 		}
-		return () => this.webviewClosed(extId, panelId);
+		return () => {
+			this.noteOwnWebviewHosted(extId, hook('webviewStreams')!.panelStream(extId, panelId), false);
+			this.webviewClosed(extId, panelId);
+		};
 	},
 
 	mountWebviewView(viewId: string, extId: string, container: HTMLElement): () => void {
@@ -363,6 +379,7 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 		// Insert first, load through loadFrameDoc — the same detached-subtree drop.
 		container.appendChild(frame);
 		record.frame = frame;
+		this.noteOwnWebviewHosted(extId, hook('webviewStreams')!.viewStream(viewId), true);
 		// The same delivery gate as a panel's: the section's mount races the provider's
 		// first pushes exactly the way a tab's mount does.
 		frame.addEventListener('load', () => this.armLoadGrace(record, `view:${record.extId}/${viewId}`));
@@ -384,6 +401,7 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 				this.webviewViews.set(viewId, { extId: record.extId, html: record.html, frame: null, pending: [], loaded: false, painted: null, loadGrace: null, firstPaintTimer: null });
 				this.resolvedWebviewViews.delete(viewId);
 			}
+			this.noteOwnWebviewHosted(extId, hook('webviewStreams')!.viewStream(viewId), false);
 			frame.remove();
 		};
 	},
@@ -546,7 +564,19 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 	},
 
 	sharesWebviews(extId: string): boolean {
-		return hook('session').frontendClass() === 'remote' && this.backendHosted(extId);
+		return hook('session').frontendClass() === 'remote' && !this.perFrontendWebviews(extId) && this.backendHosted(extId);
+	},
+
+	perFrontendWebviews(extId: string): boolean {
+		return this.installedExts.find((candidate) => candidate.id === extId)?.perFrontendWebviews === true;
+	},
+
+	noteOwnWebviewHosted(extId: string, stream: string, hosted: boolean): void {
+		// Only a remote frontend's own page of a per-frontend webview registers: the desktop
+		// hosts the served page itself, and a copy's watchers follow the desktop's live page
+		// (the backend addresses its traffic to these registrations alone, ext_routing).
+		if (hook('session').frontendClass() !== 'remote' || !this.backendHosted(extId)) return;
+		void extWebviewHosted(extId, stream, hosted).catch(() => undefined);
 	},
 
 	mountWebviewCopy(container: HTMLElement, stream: string, extId?: string): () => void {

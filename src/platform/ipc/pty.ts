@@ -13,3 +13,12 @@ export const ptyKill = (id: number) => invoke<void>('pty_kill', { id });
  *  frontend re-taking its output subscription writes first (docs/remote-client-plan.md
  *  §6.6: the terminal page's follow). */
 export const ptyTail = (id: number) => invoke<string>('pty_tail', { id });
+/** One live terminal as `pty_list` answers it - the session-sync vocabulary (docs/
+ *  ggs-remote-plan.md §8.6 #5): a frontend's terminal page adopts the terminals that
+ *  already run in the instance (the PC's, from a remote session) instead of spawning
+ *  its own beside them. */
+export interface PtySessionInfo {
+	id: number;
+	name: string;
+}
+export const ptyList = () => invoke<PtySessionInfo[]>('pty_list');

@@ -1,10 +1,16 @@
 // The Terminal view of the panel: xterm.js fronts over the backend's PTY sessions, with the
 // view's actions (new / kill) and the terminal list on the right when more than one shell is
 // open. The panel itself (tabs, maximize, hide) is panel.ts.
+//
+// The sessions are the INSTANCE's, not this frontend's (docs/ggs-remote-plan.md §8.6 #5):
+// the terminal page mirrors `pty_list` — adopting the terminals that already run (the PC's,
+// from a remote session; a terminal the phone opened, on the PC) and retiring the ones that
+// died anywhere — so two frontends looking at the terminal see the same shells, never two
+// private sets beside each other.
 
 import type { Terminal } from '@xterm/xterm';
 import type { FitAddon } from '@xterm/addon-fit';
-import { ptyCreate, ptyKill, ptyResize, ptyTail, ptyWrite } from '../../platform/ipc/pty';
+import { ptyCreate, ptyKill, ptyList, ptyResize, ptyTail, ptyWrite, type PtySessionInfo } from '../../platform/ipc/pty';
 import { listen, type UnlistenFn } from '../../platform/ipc/core';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 
@@ -13,7 +19,8 @@ import { loadXterm } from '../../platform/lazy';
 import { actionButton, el, icon, notify, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 import { THEME_EVENT, settings } from '../../platform/settings';
 import { t } from '../../platform/i18n';
-import { OutputFollow } from './outputFollow';
+import { OutputFollow, FOLLOW_GRACE_MS } from './outputFollow';
+import { planSessionSync } from './sessionSync';
 
 interface Session {
 	id: number;
@@ -24,6 +31,9 @@ interface Session {
 	row: HTMLElement;
 	exited: boolean;
 	unlisten: UnlistenFn[];
+	/** Adopted from the instance's list rather than created here (§8.6 #5): its death is
+	 *  the list's to report, and this frontend's unload never kills it. */
+	attached: boolean;
 	/** The OUTPUT subscription, held apart from the lifetime listeners (the exit watch) so
 	 *  the remote's page-follow (docs/remote-client-plan.md §6.6) can drop and re-take it
 	 *  alone: a frontend not looking at the terminal page carries no terminal traffic. */
@@ -67,6 +77,10 @@ export class TerminalView {
 	 *  not replace (and so close) the previous page's shells under the same numbers. */
 	private nextId = Math.floor(Math.random() * 0x3fff_ffff);
 	private visible = false;
+	/** One sync at a time; events landing mid-sync queue one re-run (a burst of
+	 *  sessions-changed must not adopt the same terminal twice). */
+	private syncing: Promise<void> | null = null;
+	private syncQueued = false;
 	/** §6.6's page-follow state machine: the sessions' output subscriptions live only
 	 *  while this frontend looks at the terminal page (the remote's terminalFollow drives
 	 *  it; the desktop never calls setFollowing(false)). */
@@ -102,8 +116,16 @@ export class TerminalView {
 			});
 		}).observe(this.host);
 		// A page reload (dev hot reload) would otherwise leave the shells running unattached.
+		// An ADOPTED terminal is not this frontend's to kill (§8.6 #5): the PC's shell stays
+		// when the phone's page reloads.
 		window.addEventListener('beforeunload', () => {
-			for (const session of this.sessions) void ptyKill(session.id);
+			for (const session of this.sessions) if (!session.attached) void ptyKill(session.id);
+		});
+		// The instance's terminal set changed — a terminal opened or died anywhere (the
+		// PC's window, another remote session, this frontend): mirror it while this page is
+		// being looked at (§6.6 keeps the traffic away otherwise).
+		void listen('studio://pty-sessions-changed', () => {
+			if (this.visible) void this.syncSessions();
 		});
 		// Keys from outside the terminal's own keyboard — the phone's extra key row (Esc,
 		// Tab, Ctrl+…, arrows; src/remote/terminalKeys.ts) — go to the active shell as is.
@@ -121,9 +143,12 @@ export class TerminalView {
 		});
 	}
 
-	/** The view became visible: make sure a shell is running and fits. */
+	/** The view became visible: mirror the instance's terminals first — a remote session
+	 *  adopts the PC's instead of spawning a private shell beside them — and only an
+	 *  instance with none running gets a fresh one. */
 	async shown(): Promise<void> {
 		this.visible = true;
+		await this.syncSessions();
 		if (this.sessions.length === 0) {
 			await this.create();
 		} else {
@@ -160,12 +185,46 @@ export class TerminalView {
 		this.active?.term.focus();
 	}
 
+	/* ---------- The session sync (§8.6 #5) ---------- */
+
+	/** Mirror the instance's terminal list into this view: adopt what appeared, retire what
+	 *  died. One run at a time; a change landing mid-sync queues a re-run. */
+	syncSessions(): Promise<void> {
+		if (this.syncing) {
+			this.syncQueued = true;
+			return this.syncing;
+		}
+		this.syncing = this.runSync().finally(() => {
+			this.syncing = null;
+			if (this.syncQueued) {
+				this.syncQueued = false;
+				void this.syncSessions();
+			}
+		});
+		return this.syncing;
+	}
+
+	private async runSync(): Promise<void> {
+		let backendSessions: PtySessionInfo[];
+		try {
+			backendSessions = await ptyList();
+		} catch {
+			return; // the command cannot be served right now — the next event retries
+		}
+		if (!Array.isArray(backendSessions)) return; // a degenerate answer (the dev harness's
+		// plain-browser mock answers unscripted commands with null) is no session set
+		const plan = planSessionSync(this.sessions, backendSessions);
+		for (const session of plan.retire) void this.remove(session);
+		for (const info of plan.adopt) await this.adopt(info);
+	}
+
 	/* ---------- Sessions ---------- */
 
-	private async create(): Promise<void> {
+	/** One xterm instance's shared construction — the theme, the clipboard keys, the
+	 *  right-click menu — everything a created and an adopted session need alike. */
+	private async makeTerm(): Promise<{ term: Terminal; fit: FitAddon; element: HTMLElement }> {
 		// xterm is an async chunk: the first terminal pays for its load, the workbench never does.
 		const { Terminal, FitAddon } = await loadXterm();
-		const id = this.nextId++;
 		const term = new Terminal({
 			fontFamily: cssVar('--vscode-editor-font-family') || 'Menlo, Consolas, monospace',
 			fontSize: 14,
@@ -231,9 +290,47 @@ export class TerminalView {
 			];
 			showContextMenu(event.clientX, event.clientY, entries);
 		});
+		return { term, fit, element };
+	}
 
+	/** The lifetime listeners every session carries from birth: its shell's exit, and the
+	 *  shared geometry's changes (another frontend resized the terminal — §8.6 #5 — and
+	 *  this one deforms along; the echo back is a same-size resize the backend ignores). */
+	private async wireLifetime(session: Session): Promise<void> {
+		session.unlisten.push(await listen(`studio://pty-exit-${session.id}`, () => {
+			session.exited = true;
+			session.term.write('\r\n\x1b[90m[The terminal process has exited. Press any key to close it.]\x1b[0m\r\n');
+			const disposable = session.term.onKey(() => {
+				disposable.dispose();
+				void this.remove(session);
+			});
+			this.renderList();
+		}));
+		session.unlisten.push(await listen<{ cols: number; rows: number }>(`studio://pty-resized-${session.id}`, (event) => {
+			const size = event.payload;
+			if (typeof size?.cols !== 'number' || typeof size?.rows !== 'number') return;
+			if (size.cols !== session.term.cols || size.rows !== session.term.rows) {
+				session.term.resize(size.cols, size.rows);
+			}
+		}));
+	}
+
+	/** The live wiring every session gets once its shell exists: keys write the shell, a
+	 *  resize rides the debounced `pty_resize` (the shared terminal's geometry follows the
+	 *  frontmost viewport, §8.6 #5). */
+	private wireShared(session: Session): void {
+		session.term.onData((data) => {
+			void ptyWrite(session.id, data);
+			if (data.includes('\r')) window.setTimeout(() => this.onCommandEntered?.(), 800);
+		});
+		session.term.onResize(({ cols, rows }) => this.resize(session.id, cols, rows));
+	}
+
+	private async create(): Promise<void> {
+		const { term, fit, element } = await this.makeTerm();
+		const id = this.nextId++;
 		const row = el('div', 'row');
-		const session: Session = { id, name: 'shell', term, fit, element, row, exited: false, unlisten: [], outputUnlisten: null };
+		const session: Session = { id, name: 'shell', term, fit, element, row, exited: false, unlisten: [], outputUnlisten: null, attached: false };
 		this.sessions.push(session);
 		this.activate(session);
 		fit.fit();
@@ -242,15 +339,7 @@ export class TerminalView {
 		// within milliseconds of the spawn and would otherwise be lost. The output listener
 		// rides the page-follow instead (subscribeOutput) — its first take is here, before
 		// the spawn, for exactly the same reason.
-		session.unlisten.push(await listen(`studio://pty-exit-${id}`, () => {
-			session.exited = true;
-			term.write('\r\n\x1b[90m[The terminal process has exited. Press any key to close it.]\x1b[0m\r\n');
-			const disposable = term.onKey(() => {
-				disposable.dispose();
-				void this.remove(session);
-			});
-			this.renderList();
-		}));
+		await this.wireLifetime(session);
 		await this.subscribeOutput(session, false).then(() => {
 			// A session spawned while the page is away (§6.6) starts without its output
 			// subscription: the next return takes it with the tail catch-up.
@@ -260,8 +349,8 @@ export class TerminalView {
 		let shellName: string;
 		try {
 			// The Terminal Shell setting rides every creation, so a Settings change reaches
-		// the next terminal without a restart.
-		shellName = await ptyCreate(id, term.cols, term.rows, settings.terminalShell);
+			// the next terminal without a restart.
+			shellName = await ptyCreate(id, term.cols, term.rows, settings.terminalShell);
 		} catch (error) {
 			notify('error', String(error));
 			term.write(`\x1b[31m${String(error)}\x1b[0m\r\n`);
@@ -270,13 +359,35 @@ export class TerminalView {
 			return;
 		}
 		session.name = shellName;
-		term.onData((data) => {
-			void ptyWrite(id, data);
-			if (data.includes('\r')) window.setTimeout(() => this.onCommandEntered?.(), 800);
-		});
-		term.onResize(({ cols, rows }) => this.resize(id, cols, rows));
+		this.wireShared(session);
 		this.renderList();
 		term.focus();
+	}
+
+	/** Adopt a terminal the instance already runs (§8.6 #5): the PC's shell, its 64 KB
+	 *  tail replayed, its output followed live, its input shared — never a second shell
+	 *  spawned beside it. */
+	private async adopt(info: PtySessionInfo): Promise<void> {
+		const { term, fit, element } = await this.makeTerm();
+		const row = el('div', 'row');
+		const session: Session = {
+			id: info.id, name: info.name || 'shell', term, fit, element, row,
+			exited: false, unlisten: [], outputUnlisten: null, attached: true
+		};
+		this.sessions.push(session);
+		// Adoption never steals the active terminal — the first one into an empty view is
+		// the active one, later arrivals take their row.
+		if (!this.active) this.activate(session);
+
+		await this.wireLifetime(session);
+		this.wireShared(session);
+		await this.subscribeOutput(session, true).then(() => {
+			if (!this.follow.shouldSubscribeNew()) this.dropOutput(session);
+		});
+		// §8.6 #5: the attacher's viewport governs the shared geometry — fit resizes the
+		// session when it differs, and every other frontend showing it deforms along.
+		fit.fit();
+		this.renderList();
 	}
 
 	/** Resizing a ConPTY is expensive, and a sash drag crosses a cell boundary many times in a
@@ -313,9 +424,10 @@ export class TerminalView {
 
 	/** §6.6 (the remote terminal page): whether THIS frontend is looking at the terminal
 	 *  page. The follow state machine owns the grace and the catch-up; the desktop panel
-	 *  never calls this with false (its terminals are always local). */
-	setOutputFollow(following: boolean): void {
-		this.follow.setFollowing(following);
+	 *  never calls this with false (its terminals are always local). `graceMs` is the
+	 *  tests' dial (the remote's own driver rides the default). */
+	setOutputFollow(following: boolean, graceMs: number = FOLLOW_GRACE_MS): void {
+		this.follow.setFollowing(following, graceMs);
 	}
 
 	/** Whether a session's output subscription is held (the page-follow tests' seam). */
@@ -340,6 +452,9 @@ export class TerminalView {
 	}
 
 	private async remove(session: Session): Promise<void> {
+		// The exit listener and a session-sync retire can both name a dying session; the
+		// second call is a no-op.
+		if (!this.sessions.includes(session)) return;
 		const pending = this.resizeTimers.get(session.id);
 		if (pending !== undefined) {
 			window.clearTimeout(pending);

@@ -430,8 +430,24 @@ without a restart.
   page carries no terminal traffic — the remote's `terminalFollow.ts` drives
   `setOutputFollow`, a 30 s grace rides a page hop, the drop after it unsubscribes the
   sessions' OUTPUT listeners alone (their lifetime listeners stay), and a return re-takes
-  them catching up from `pty_tail`'s 64 KB replay; the desktop never drives it false)
+  them catching up from `pty_tail`'s 64 KB replay; the desktop never drives it false;
+  + `sessionSync.ts`, the session-sync planner of ggs-remote-plan.md §8.6 #5 — the
+  terminals are the INSTANCE's, one backend list, and every open terminal page mirrors it:
+  a session this frontend does not hold is ADOPTED (the same shell — the PC's, from a
+  remote session; the remote's `shown()` adopts instead of spawning a private shell beside
+  them, the bug of 2026-10-18), an adopted one the backend no longer lists is retired, a
+  session CREATED here keeps its own owner (its spawn may be in flight, its death arrives
+  as the exit event). The view re-lists on every `studio://pty-sessions-changed` broadcast
+  while its page is visible, deforms each term along a `studio://pty-resized-{id}`
+  broadcast (the shared geometry, one size — the echo back is a same-size resize the
+  backend's change gate silences), and a page reload kills only the shells it created —
+  never an adopted one)
 - Backend: `src-tauri/src/pty.rs`
+- Tests: `tests/terminal.test.ts` (the session sync: the planner's rules, adoption on
+  `shown()` — tail replayed, output live, input shared, never a private spawn — the
+  mirror on `pty-sessions-changed`, retirement of a PC-killed terminal, the shared
+  geometry's deform without a resize ping-pong, unload killing only created shells, and
+  the §6.6 follow's drop/return over adopted sessions)
 
 ### 12. Extension Platform
 
@@ -936,10 +952,21 @@ page shows the integration's state (`claude_mcp_status`).
   desktop window (`WEBVIEW_HOME`, 2026-10-12 — one live page per instance, which a
   remote workbench shows as a live copy, module 19's webview streams: before, a webview
   followed whichever frontend last resolved or messaged it, and the other side's Claude
-  chat froze), else the frontend whose call is in flight, else the composition root's
+  chat froze) — except the per-frontend webviews (2026-10-18, the owner's direction:
+  远程和 PC 尺寸不一样，git graph 一个 remote 是手机端页面一个是 pc 端页面，不需要同步滚动条 —
+  plan §22.9): extensions the curated set `per_frontend_webviews` names (Git Graph alone
+  today; the ids live in Rust, cross to `src/` only as `ExtInfo.perFrontendWebviews`)
+  get their own page in EVERY frontend, and the backend's webview traffic
+  (`webview.postMessage` / `webviewView.postMessage`, a panel's `setHtml`) mirrors to
+  exactly the frontends that registered a live page of the stream (`ext_webview_hosted`,
+  per stream, swept when the session ends), each mirror named by its `frontend` field and
+  carried by that session's link alone — a copy's watchers never carry another page's
+  traffic; a panel's html rides the journal behind its create, so a late frontend's own
+  page boots —, else the frontend whose call is in flight, else the composition root's
   policy, the Relay then handing a session's request to that session only; plus the
   compacted registration journal — commands, `setContext` keys, providers, views,
-  status bar items, and the live panels' create args — that a frontend attaching to a
+  status bar items, and the live panels' create args (with the latest html delivered
+  while each lives) — that a frontend attaching to a
   running backend replays through `ext_process_registrations`, and that the
   `ext-host-state` event mirrors live into every frontend but the serving one (a
   panel's create / title / reveal / dispose among them, with the `caller` whose click
@@ -1706,7 +1733,10 @@ orientation by form (§6.3: the page-stack shells are INLINE whatever the pane m
 a landscape phone's 850 px pane would otherwise split into unreadable halves; the wide
 forms keep the width rule) behind `open.ts`'s `diffInlineShell`. The terminal page's
 output follow is module 11's `outputFollow.ts` (above), driven by
-`src/remote/terminalFollow.ts` from pages.ts's watcher.
+`src/remote/terminalFollow.ts` from pages.ts's watcher, and its SESSIONS are the
+instance's — module 11's sessionSync (`sessionSync.ts`, above): the page adopts the PC's
+terminals instead of spawning private shells beside them (the 2026-10-18 fix), and the
+terminal the phone opens reaches the PC's open terminal page over the same mirror.
 
 - **The security sandbox** (2026-10-12, the owner's direction, plan §23): when enabled, every
   instance a remote session opens runs OS-sandboxed — the engine is Microsoft's open-source
@@ -2059,6 +2089,31 @@ output follow is module 11's `outputFollow.ts` (above), driven by
   `closeTab` message turns a copy's close on a phone into the PC panel's close (which
   reaches the extension, the backend's dispose mirror then clearing every remaining
   copy) — before, a closed copy left the PC's page open (the owner's report, same day).
+  **Per-frontend webview instances** (2026-10-18, the owner's direction: 远程和 pc 上
+  尺寸不一样，git graph 可以一个 remote 是手机端页面一个是 pc 端页面，不需要同步滚动条 —
+  plan §22.9): the extensions the backend's curated set names (Git Graph alone; the ids
+  live in Rust `ext_routing::per_frontend_webviews`, crossing to `src/` only as
+  `ExtInfo.perFrontendWebviews`) get their OWN page in every frontend instead of a copy —
+  the phone's pane mounts the extension's real document at the phone's size (the
+  `sharesWebviews` gate turns false, so `mountWebviewView` / `mountWebview` take their own
+  iframe path; `localizeAssetRoots` + the session's `assetUrl` serve the package's assets
+  through the session's own authorized route), scrolled natively, keyboard and input
+  native, no lease and no replay — while the PC keeps its own page. The plumbing: a remote
+  frontend registers each mounted page with the backend (`ext_webview_hosted`, streams
+  `view:<id>` / `panel:<ext>#<id>`, swept by `remote_host_frontend_gone`), and the
+  backend's webview traffic (`webview.postMessage` / `webviewView.postMessage`, a panel's
+  `setHtml`) mirrors to exactly those frontends — one addressed `ext-host-state` per
+  target (`frontend` field), carried by that session's link alone (relay.ts filters it;
+  the host matches its own frontend id exactly), so a copy-mode watcher (the chat) never
+  carries another page's traffic. A remote page never re-resolves a view whose html the
+  journal or a mirror already carried (a second resolve would reload every frontend's
+  live page — the desktop's included), never reports webview-view visibility (the
+  backend's one visible flag stays the desktop's truth), and drops mirrored traffic for
+  streams it is not hosting (never queues it); the desktop's no-frame delivery queue is
+  capped (8, drop-oldest) so a phone-driven stream cannot grow it without bound on a
+  surface that never opens. A panel's html rides the journal behind its create, so a late
+  frontend's own page of the config sheet boots. Panel lifetime stays shared (a close
+  anywhere closes everywhere, like the tab sync); what is per-frontend is the page.
   **Cross-frontend operation sync** (2026-10-12, §22.7): two
   frontends running different UIs (the PC's desktop UI, a phone's own workbench) mirror
   each other's OPERATIONS, not pixels — every file open (with its line anchor), tab close,

@@ -223,6 +223,12 @@ export class ExtensionHost {
 	declare applyMirroredState: (extId: string, method: string, args: unknown[]) => void ;
 
 	declare sharesWebviews: (extId: string) => boolean ;
+	/** Whether the extension's webview pages are per-frontend instances (its own page in
+	 *  every frontend — the remote's phone-sized Git Graph): `ExtInfo.perFrontendWebviews`. */
+	declare perFrontendWebviews: (extId: string) => boolean ;
+	/** This remote frontend's own page of a webview stream is up (or gone): the backend
+	 *  mirrors its webview traffic to exactly the frontends hosting one (ext_routing). */
+	declare noteOwnWebviewHosted: (extId: string, stream: string, hosted: boolean) => void ;
 
 	readonly webviewCopies = new Set<string>();
 
@@ -267,9 +273,14 @@ export class ExtensionHost {
 		// The same backend's registrations another frontend served: applied here too, never
 		// answered (the serving frontend already did) — Claude Code's activity-bar container
 		// is gated on a `setContext` key, and a frontend that missed it never shows the entry.
-		void listen<{ extId: string; method: string; args: unknown[]; served?: string; caller?: string | null }>(HOST_STATE_EVENT, (event) => {
-			const { extId, method, args, served } = event.payload;
+		void listen<{ extId: string; method: string; args: unknown[]; served?: string; caller?: string | null; frontend?: string }>(HOST_STATE_EVENT, (event) => {
+			const { extId, method, args, served, frontend } = event.payload;
 			if (served === hook('session').frontendId()) return;
+			// Webview traffic mirrors carry the one frontend they address — its own live page
+			// of the stream (a per-frontend webview, Git Graph) — and the address is always a
+			// concrete session (process.rs), so the match is exact: `addressedHere`'s
+			// any-remote pass is the Relay's host-request pick, not this page's name.
+			if (frontend !== undefined && frontend !== hook('session').frontendId()) return;
 			this.applyMirroredState(extId, method, args ?? []);
 		}).catch((error) => extLog('warn', 'host', `the extension-host state channel is unavailable: ${String(error)}`));
 		// The desktop window is where every backend extension's webviews live (ext_routing.rs):

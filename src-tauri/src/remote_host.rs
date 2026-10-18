@@ -980,10 +980,12 @@ pub fn remote_host_set_summary(app: AppHandle, frontend: String, summary: Summar
 }
 
 /// A frontend went away (a remote session ended — the Relay reports it): its part of the
-/// merged summary goes. (It owns no webviews to release: every webview lives in the
-/// desktop window, `ext_routing`.)
+/// merged summary goes, and its own live pages of the per-frontend webviews
+/// (`ext_webview_hosted`) stop being addressed by the backend's traffic mirrors
+/// (`ext_routing`) — every shared webview lives on in the desktop window regardless.
 #[tauri::command]
 pub fn remote_host_frontend_gone(app: AppHandle, frontend: String) {
+    ggs_ext::routing::frontend_gone(&frontend);
     link()
         .summaries
         .lock()

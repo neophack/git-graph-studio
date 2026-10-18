@@ -849,6 +849,29 @@ describe('relay engine', () => {
 		expect(delivered).toEqual([[1, 'webview.create'], [2, 'webview.create'], [2, 'webview.setHtml'], [2, 'notify']]);
 	});
 
+	it('mirrors a frontend-addressed state event to that session alone — the phone\'s own Git Graph page (2026-10-18), never every watcher', async () => {
+		// A per-frontend webview's traffic mirror (its own Git Graph page) is addressed to
+		// the one session hosting the page; an extension the other sessions show as a copy
+		// must not carry it on their links. The broadcast mirrors (a registration, a panel's
+		// life) keep reaching every listener.
+		const { relay, sent, fire } = engine();
+		relay.receive(encodeFrame({ ...msgpackFrame(T.LISTEN, { event: 'ext-host-state' }, 9), session: 1 }));
+		await new Promise((r) => setTimeout(r, 5));
+		relay.receive(encodeFrame({ ...msgpackFrame(T.LISTEN, { event: 'ext-host-state' }, 11), session: 2 }));
+		await new Promise((r) => setTimeout(r, 5));
+		fire('ext-host-state', { extId: 'acme.graph', method: 'commands.registerBatch', args: [['a.one']] });
+		fire('ext-host-state', { extId: 'acme.graph', method: 'webviewView.postMessage', args: ['graph.view', { rows: 1 }], frontend: 'remote/2' });
+		fire('ext-host-state', { extId: 'acme.graph', method: 'webview.postMessage', args: [3, { rows: 2 }], frontend: 'remote/9' });
+		const delivered = sent
+			.filter((f) => f.type === T.EVENT)
+			.map((f) => [f.session, (frameJson(f) as { payload: { method: string } }).payload.method]);
+		expect(delivered).toEqual([
+			[1, 'commands.registerBatch'],
+			[2, 'commands.registerBatch'],
+			[2, 'webviewView.postMessage']
+		]);
+	});
+
 	it('answers the daemon heartbeat', async () => {
 		const { relay, sent } = engine();
 		relay.receive(encodeFrame(makeFrame(T.PING, Enc.Raw, new Uint8Array(0), 77)));

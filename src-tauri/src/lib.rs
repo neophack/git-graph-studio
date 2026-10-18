@@ -646,6 +646,7 @@ mod desktop {
                 ext_process::ext_process_invoke,
                 ext_process::ext_process_push_event,
                 ext_process::ext_process_registrations,
+                ext_process::ext_webview_hosted,
                 ext_process::ext_node_runtime,
                 ext_child::ext_child_spawn,
                 ext_child::ext_child_write,

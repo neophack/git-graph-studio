@@ -82,6 +82,21 @@ export const framesMethods: ThisType<ExtensionHost> = {
 		// replayed tap reads as the PC user's own input, and `caller` names no one); the
 		// copy's input trail is the only witness.
 		const ownAct = (method === 'webview.create' || method === 'webview.reveal') && hook('webviewStreams')?.recentCopyInteraction?.(extId) === true;
+		// Webview traffic (a per-frontend page's pushes — the phone's Git Graph, 2026-10-18):
+		// a frontend showing the stream as a COPY follows the desktop's live page and never
+		// applies it, and a frontend whose own page is not mounted drops it — the page asks
+		// its own state when it boots, and queueing every push for a surface that may never
+		// open grows without bound. A panel's setHtml is the exception: the html waits in
+		// the record for the surface's mount (serve holds it), bounded as one string.
+		if (method === 'webview.setHtml' || method === 'webview.postMessage' || method === 'webviewView.postMessage') {
+			if (this.sharesWebviews(extId)) return;
+			if (method !== 'webview.setHtml') {
+				const record = method === 'webview.postMessage'
+					? this.webviews.get(this.webviewKey(extId, args[0] as number))
+					: this.webviewViews.get(args[0] as string);
+				if (!record?.frame) return;
+			}
+		}
 		// The own-act reveal cuts THROUGH the page holds, not just past its own: another
 		// operation's hold can still be live when the mirrored event lands (a sync apply in
 		// flight, a catch-up merge, a close of the stale tab the same click deduplicated) —

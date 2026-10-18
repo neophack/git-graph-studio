@@ -100,11 +100,13 @@ export function syncActive(bar: HTMLElement): void {
 	}
 }
 
-/** Scroll a list page back to its top — the reselect gesture every phone tab bar has. */
+/** Scroll a list page back to its top — the reselect gesture every phone tab bar has. The
+ *  page's scroller is the view column itself on the page-stack shells (remote.css: one
+ *  scroller per page), the pane body inside it on the wide forms. */
 function scrollPageToTop(): void {
 	const sidebar = document.getElementById('sidebar');
 	if (!sidebar) return;
-	for (const scroller of sidebar.querySelectorAll<HTMLElement>('.pane-body, .tree, .list, [class*="scroll"]')) {
+	for (const scroller of sidebar.querySelectorAll<HTMLElement>('.view, .pane-body, .tree, .list, [class*="scroll"]')) {
 		if (scroller.scrollTop > 0 && scroller.offsetParent !== null) scroller.scrollTo({ top: 0, behavior: 'smooth' });
 	}
 }

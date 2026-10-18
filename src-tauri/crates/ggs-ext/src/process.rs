@@ -783,20 +783,48 @@ impl ReaderState {
                             // else the caller in flight (ext_routing), else policy.
                             let claimed = ext_routing::preferred(&self.ext_id, host_method);
                             let frontend = host_request_frontend(hooks, claimed);
-                            if ext_routing::routed(&self.ext_id, host_method, &args) {
-                                // The other frontends mirror the registration (a context
-                                // key, a command, a status bar item) without answering it,
-                                // and follow a webview panel's life with their copy of it.
-                                (hooks.emit)(
-                                    HOST_STATE_EVENT,
-                                    json!({
-                                        "extId": self.ext_id,
-                                        "method": host_method,
-                                        "args": args,
-                                        "caller": ext_routing::caller(&self.ext_id),
-                                        "served": frontend,
-                                    }),
-                                );
+                            let caller = ext_routing::caller(&self.ext_id);
+                            match ext_routing::routed(&self.ext_id, host_method, &args) {
+                                ext_routing::Mirrored::No => {}
+                                ext_routing::Mirrored::Everyone => {
+                                    // The other frontends mirror the registration (a context
+                                    // key, a command, a status bar item) without answering it,
+                                    // and follow a webview panel's life with their copy of it.
+                                    let _ = (hooks.emit)(
+                                        HOST_STATE_EVENT,
+                                        json!({
+                                            "extId": self.ext_id,
+                                            "method": host_method,
+                                            "args": args,
+                                            "caller": caller,
+                                            "served": frontend,
+                                        }),
+                                    );
+                                }
+                                ext_routing::Mirrored::Frontends(targets) => {
+                                    // Webview traffic (a per-frontend webview's page, §8.6:
+                                    // the phone runs its own Git Graph, 2026-10-18), addressed
+                                    // to each frontend hosting a live page of the stream —
+                                    // their own instance consumes it; everyone else (a copy's
+                                    // watchers above all) never carries it on their link.
+                                    // The serving frontend reads the request itself.
+                                    for target in targets {
+                                        if target == frontend {
+                                            continue;
+                                        }
+                                        let _ = (hooks.emit)(
+                                            HOST_STATE_EVENT,
+                                            json!({
+                                                "extId": self.ext_id,
+                                                "method": host_method,
+                                                "args": args,
+                                                "caller": caller,
+                                                "served": frontend,
+                                                "frontend": target,
+                                            }),
+                                        );
+                                    }
+                                }
                             }
                             let payload = json!({
                                 "extId": self.ext_id,
