@@ -2349,12 +2349,26 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 			'<script src="https://10.0.0.5:47615/w/ggs-1/ggs/OtherUsersToken/acme.x-1.0.0/c.js"></script>',
 			'<script src="https://hub.example/u/abc/w/ggs-1/ggs/Tok2/acme.x-1.0.0/d.js"></script>',
 			'<script src="http://127.0.0.1%3A54500/w/ggs-1/ggs/Tok3/acme.x-1.0.0/e.js"></script>',
-			'<a href="https://example.com/w/docs">kept</a>'
+			'<a href="https://example.com/w/docs">kept</a>',
+			// The CSP a backend baked from the desktop's `cspSource` — the bare origins, no
+			// trailing slash, the one form the root pass cannot see. A frontend that rewrote
+			// the URLs onto its own route must rewrite the policy with them, or the browser
+			// blocks every asset the page loads (the phone's Git Graph rendered unstyled,
+			// 2026-10-18).
+			'<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src http://ggs.localhost \'unsafe-inline\'; script-src ggs://localhost \'unsafe-inline\'; img-src http://ggs.localhost https:">',
+			'a longer host stays: http://ggs.localhost.evil/x and a port stays: http://ggs.localhost:47615/x'
 		].join('');
 		const out = localizeAssetRoots(html);
 		for (const file of ['a.js', 'b.css', 'c.js', 'd.js', 'e.js']) expect(out).toContain(`${own}acme.x-1.0.0/${file}`);
 		expect(out).not.toMatch(/OtherUsersToken|Tok2|Tok3/);
 		expect(out).toContain('https://example.com/w/docs');
+		// The policy's sources are this frontend's own route now (path-scoped, matching the
+		// rewritten assets' tree); a longer host or a ported form never matched and stays.
+		expect(out).toContain(`style-src ${own} 'unsafe-inline'`);
+		expect(out).toContain(`script-src ${own} 'unsafe-inline'`);
+		expect(out).toContain(`img-src ${own} https:`);
+		expect(out).toContain('http://ggs.localhost.evil/x');
+		expect(out).toContain('http://ggs.localhost:47615/x');
 	});
 
 	it('a remote page shows the desktop window\'s panels as copies — opened and focused wherever they were opened, closed without disposing', async () => {

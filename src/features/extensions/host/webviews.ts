@@ -124,13 +124,28 @@ function composeWebview(html: string, theme: { kind: 'vscode-dark' | 'vscode-lig
 
 const FOREIGN_ASSET_ROOT = /ggs:\/\/localhost\/|https?:\/\/ggs\.localhost\/|https?:\/\/[^\s"'<>/]+(?:\/u\/[^\s"'<>/]+)?\/w\/[^\s"'<>/]+\/ggs\/[^\s"'<>/]+\//g;
 
+/** The desktop asset origins in their BARE form — no trailing slash — the shape a webview's
+ *  CSP carries them in (`webview.cspSource` bakes `style-src http://ggs.localhost
+ *  'unsafe-inline'` into the page's meta): the root pass consumes the slashed URL forms,
+ *  a policy's source expressions are the bare ones, and a frontend that rewrote the URLs
+ *  onto its own route must rewrite the policy with them — or every asset the page then
+ *  loads violates it and the browser blocks the lot (the phone's own Git Graph page
+ *  rendered unstyled, 2026-10-18: style-src still named the PC's origin while the page's
+ *  own stylesheet loaded through the session's token route). Not followed by `/` (the
+ *  URL forms), a word, a colon or a dot: a ported or longer host never matches. */
+const BARE_DESKTOP_ORIGIN = /(?:ggs:\/\/localhost|https?:\/\/ggs\.localhost)(?![\w/:.])/g;
+
 /** Point every package-asset root in a webview's HTML at THIS frontend's own: the remote
  *  page cannot load `ggs://`, and one user's page must never load through another user's
  *  token (the token is that session's credential). */
 
 export function localizeAssetRoots(html: string): string {
 	const own = hook('assetUrl')('', 'ggs');
-	return html.replace(FOREIGN_ASSET_ROOT, () => own);
+	// The bare-origin pass runs after the root pass, so the slashed URL forms are already
+	// rewritten and only the policy's source expressions remain to carry the desktop
+	// origin. `own` ends in `/`, which a CSP source may — it scopes the policy to that
+	// path, exactly the tree the rewritten assets load from.
+	return html.replace(FOREIGN_ASSET_ROOT, () => own).replace(BARE_DESKTOP_ORIGIN, () => own);
 }
 
 /** Load a webview frame's composed document. Assigning `srcdoc` to a frame whose subtree
