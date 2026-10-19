@@ -16,6 +16,8 @@
 // viewer's pinch, pan and gallery swipe) or a range-like control owns its own drag. Everything binds on #workbench —
 // the bars and every overlay live outside it, so nothing else needs excluding.
 import { bottomTabs, type BottomTab } from './bottomTabs';
+import { drawerPages } from './navDrawer';
+import { currentDeviceClass } from './responsive';
 import { currentPage, goTo } from './pages';
 import { phoneShell } from './nav';
 
@@ -51,6 +53,11 @@ function claimsTarget(target: EventTarget | null): boolean {
 	return true;
 }
 
+/** The destinations the swipe ring walks: the same list the form's visible navigation
+ *  shows — the portrait tablet's rail carries the drawer's uncapped set (search sits
+ *  between editor and scm there), every other form walks the bottom bar's five. */
+const ringTabs = (): BottomTab[] => (currentDeviceClass() === 'tablet-portrait' ? drawerPages() : bottomTabs()) as BottomTab[];
+
 /** Where the page showing sits in the bar's ring. A destination the bar does not hold (a
  *  drawer page such as Extensions, opened over the ring) sits past its end: a rightward
  *  swipe returns to the last destination, a leftward one rubber-bands — the ring goes on
@@ -71,6 +78,7 @@ export function installSwipeNav(workbench: HTMLElement): void {
 	// under a finger.
 	let tabs: BottomTab[] = [];
 	let position = 0;
+	let pointerId: number | null = null;
 	let start: { x: number; y: number } | null = null;
 	let tracking = false;
 	let claimed = false;
@@ -109,6 +117,7 @@ export function installSwipeNav(workbench: HTMLElement): void {
 		if (busy || !e.isPrimary || (e.pointerType !== 'touch' && e.pointerType !== 'pen')) return;
 		if (!phoneShell() || document.documentElement.hasAttribute('data-keyboard')) return;
 		if (!claimsTarget(e.target)) return;
+		pointerId = e.pointerId;
 		tracking = true;
 		claimed = false;
 		dx = 0;
@@ -119,7 +128,9 @@ export function installSwipeNav(workbench: HTMLElement): void {
 		start = { x: e.clientX, y: e.clientY };
 	};
 	const move = (event: Event): void => {
-		if (!tracking) return;
+		// Only the claiming finger drags: a second finger's moves must not teleport the
+		// page (its offset is no drag's), and its lift must not commit.
+		if (!tracking || (event as PointerEvent).pointerId !== pointerId) return;
 		const e = event as PointerEvent;
 		if (!start) return;
 		dx = e.clientX - start.x;
@@ -132,7 +143,7 @@ export function installSwipeNav(workbench: HTMLElement): void {
 				start = null;
 				return;
 			}
-			tabs = bottomTabs();
+			tabs = ringTabs();
 			position = ringPosition(tabs);
 			claimed = true;
 			// A settle still animating from the previous gesture must not bleed its
@@ -189,9 +200,10 @@ export function installSwipeNav(workbench: HTMLElement): void {
 		}, exitMs);
 	};
 	const lift = (event: Event, cancelled: boolean): void => {
-		if (!tracking) return;
+		if (!tracking || (event as PointerEvent).pointerId !== pointerId) return;
 		const wasClaimed = claimed;
 		tracking = false;
+		pointerId = null;
 		start = null;
 		claimed = false;
 		if (!wasClaimed) return;

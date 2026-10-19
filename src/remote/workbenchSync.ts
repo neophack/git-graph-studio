@@ -77,12 +77,12 @@ const CATCH_UP_WINDOW_MS = 10_000;
  *  answers with the open tabs' ids — paths and inputs, never contents — and its active
  *  tab. The receiver merges by union and follows the active tab. */
 export type WorkbenchSyncMessage =
-	| { by: string; k: 'open'; path: string; line?: number; column?: number; inactive?: boolean }
+	| { by: string; k: 'open'; path: string; line?: number; column?: number; inactive?: boolean; quiet?: boolean }
 	| { by: string; k: 'close'; path: string }
 	| { by: string; k: 'active'; path: string }
 	| { by: string; k: 'closeTab'; id: string }
 	| { by: string; k: 'activeTab'; id: string; input?: SyncedTabInput }
-	| { by: string; k: 'openTab'; input: SyncedTabInput }
+	| { by: string; k: 'openTab'; input: SyncedTabInput; quiet?: boolean }
 	| { by: string; k: 'stateRequest' }
 	| { by: string; k: 'stateSnapshot'; to: string; files: string[]; tabs: SyncedTabInput[]; extTabs: string[]; active: SnapshotActive | null };
 
@@ -579,7 +579,9 @@ export function attachWorkbenchSync(
 	 *  (K7 — the phone's page keeps its place), so when it lands behind a full-screen page
 	 *  the open is invisible — to its user the phone "never got the page" (the owner's
 	 *  2026-10-18 report: a diff opened on the PC, 远程没有). The navigation hook decides
-	 *  whether anything shows; the catch-up's quiet union opens never pass here. */
+	 *  whether anything shows; a `quiet` message (the catch-up's union opens — the
+	 *  joiner's direct ones never reach this handler, the answerer's returning ones cross
+	 *  tagged) never announces at all. */
 	const noteOpened = (title: string, landed: boolean): void => {
 		if (landed) hook('navigation').noteBackgroundOpen?.(title);
 	};
@@ -832,12 +834,12 @@ export function attachWorkbenchSync(
 			// copy here is a restore racing the close, not a tab to hand around).
 			for (const path of editors.openFilePaths()) {
 				if (deferred.files[keyOf(path)] !== undefined) continue;
-				if (!message.files.some((theirs) => keyOf(theirs) === keyOf(path))) announce({ by, k: 'open', path, inactive: true });
+				if (!message.files.some((theirs) => keyOf(theirs) === keyOf(path))) announce({ by, k: 'open', path, inactive: true, quiet: true });
 			}
 			const theirs = new Set(message.tabs.map((input) => inputId(input)));
 			for (const [id, input] of syncedTabs()) {
 				if (deferred.tabs[id] !== undefined) continue;
-				if (!theirs.has(id)) announce({ by, k: 'openTab', input });
+				if (!theirs.has(id)) announce({ by, k: 'openTab', input, quiet: true });
 			}
 			// The answerer still claiming a recorded close is stale about it: the close
 			// that never crossed does so now (sent ones already had their chance — a repeat
@@ -937,7 +939,9 @@ export function attachWorkbenchSync(
 					? { line: message.line, column: message.column, inactive: message.inactive === true }
 					: message.inactive === true ? { inactive: true } : undefined;
 				void run(() => rawOpenFile(message.path, openOptions), { add: key, spell: message.path })
-					.then(() => noteOpened(fileTitle(message.path), landedFile(key)));
+					.then(() => {
+						if (message.quiet !== true) noteOpened(fileTitle(message.path), landedFile(key));
+					});
 				break;
 			}
 			case 'close': {
@@ -976,7 +980,9 @@ export function attachWorkbenchSync(
 			}
 			case 'openTab':
 				void run(() => openSyncedTab(message.input), { addTab: inputId(message.input) })
-					.then(() => noteOpened(tabTitle(message.input), landedTab(inputId(message.input))));
+					.then(() => {
+						if (message.quiet !== true) noteOpened(tabTitle(message.input), landedTab(inputId(message.input)));
+					});
 				break;
 			case 'active': {
 				// Not open here (a missed open, or opened before this page arrived): opening

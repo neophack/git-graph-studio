@@ -623,6 +623,7 @@ export class ImageView {
 		this.mode = 'free';
 		this.t = clampPan(view, this.natural, zoomAround(this.t, next, at.x - view.width / 2, at.y - view.height / 2));
 		this.render(animate);
+		this.renderInfo();
 		this.flashHud();
 	}
 
@@ -635,6 +636,7 @@ export class ImageView {
 		this.mode = 'fit';
 		this.applyMode();
 		this.render(animate);
+		this.renderInfo();
 	}
 
 	fitWidth(): void {
@@ -646,6 +648,7 @@ export class ImageView {
 		const top = panLimits(view, this.natural, { ...this.t, scale }).y;
 		this.t = { ...this.t, scale, x: 0, y: top };
 		this.render(true);
+		this.renderInfo();
 	}
 
 	rotate(quarterTurns: number): void {
@@ -666,6 +669,7 @@ export class ImageView {
 		const horizontal = (axis === 'h') !== sideways;
 		this.t = horizontal ? { ...this.t, flipH: !this.t.flipH } : { ...this.t, flipV: !this.t.flipV };
 		this.render(true);
+		this.renderInfo();
 	}
 
 	resetView(): void {
@@ -932,6 +936,7 @@ export class ImageView {
 		if (clamped.x !== settled.x || clamped.y !== settled.y) sprung = true;
 		this.t = clamped;
 		this.pinchAt = null;
+		this.renderInfo();
 		if (sprung) {
 			// Released past an edge or the zoom range: spring back, no momentum.
 			this.render(true);

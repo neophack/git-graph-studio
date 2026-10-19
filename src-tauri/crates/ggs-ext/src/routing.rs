@@ -300,6 +300,9 @@ pub fn panel_closed(ext_id: &str, event: &Value) -> Option<Value> {
 /// to the frontends hosting a live page of its stream (see [`Mirrored`]).
 pub fn routed(ext_id: &str, method: &str, args: &Value) -> Mirrored {
     let key = args.get(0).and_then(panel_key);
+    // Read before the lock: `recent_message` takes the same non-reentrant routes mutex the
+    // body below holds, and a nested `lock()` on the holding thread never returns.
+    let click = recent_message(ext_id);
     with(ext_id, |routes| {
         match (method, key.as_deref()) {
             ("webview.create", Some(key)) => {
@@ -350,7 +353,7 @@ pub fn routed(ext_id: &str, method: &str, args: &Value) -> Mirrored {
         // user's click must never land in another's page. Prompts (an input box, a quick
         // pick) mirror nowhere — they expect one answer, not one per screen.
         if opens_document(method, args) {
-            if recent_message(ext_id).is_some_and(|frontend| frontend != WEBVIEW_HOME) {
+            if click.as_deref().is_some_and(|frontend| frontend != WEBVIEW_HOME) {
                 return Mirrored::Frontends(vec![WEBVIEW_HOME.to_owned()]);
             }
             return Mirrored::No;
@@ -413,6 +416,12 @@ pub fn frontend_gone(frontend: &str) {
             frontends.remove(frontend);
             !frontends.is_empty()
         });
+        // The click attribution dies with its session: a follow-up document open inside the
+        // freshness window must not address a frontend that no longer exists — its request
+        // would wait for an answer nobody can give.
+        if routes.last_message.as_ref().is_some_and(|(stamped, _)| stamped == frontend) {
+            routes.last_message = None;
+        }
     }
 }
 
@@ -538,6 +547,14 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The attribution tests share the one per-frontend-webviews extension id and
+    /// `frontend_gone` sweeps every ext's state, so they take this lock in turn: a test
+    /// running its stamp → assert window while another resets or sweeps would flake.
+    static SERIAL: Mutex<()> = Mutex::new(());
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     #[test]
     fn a_call_names_its_frontend_and_only_the_relay_may_name_a_session() {
         assert_eq!(frontend_of("main", None), "main");
@@ -583,6 +600,7 @@ mod tests {
         // caller slot at that instant is not who asked for the diff either.
         let ext = "neophack.git-graph-rs";
         reset(ext);
+        let _serial = serial();
         note_webview_message(ext, "remote/7");
         let diff = json!(["vscode.diff", [], "title", {}]);
         assert_eq!(preferred(ext, "commands.execute", &diff).as_deref(), Some("remote/7"));
@@ -610,6 +628,7 @@ mod tests {
         // answer, not one per screen.
         let ext = "neophack.git-graph-rs";
         reset(ext);
+        let _serial = serial();
         note_webview_message(ext, "main");
         assert!(matches!(
             routed(ext, "commands.execute", &json!(["vscode.diff", [], "title", {}])),
@@ -635,6 +654,7 @@ mod tests {
         // the phone because the phone happened to click first.
         let ext = "neophack.git-graph-rs";
         reset(ext);
+        let _serial = serial();
         note_webview_message(ext, "remote/7");
         assert_eq!(
             preferred(ext, "window.showInputBox", &json!([])).as_deref(),
@@ -656,6 +676,7 @@ mod tests {
         // webview's rule and claude-code routes exactly as before.
         let ext = "Anthropic.claude-code";
         reset(ext);
+        let _serial = serial();
         note_webview_message(ext, "remote/7");
         let diff = json!(["vscode.diff", [], "title", {}]);
         assert_eq!(preferred(ext, "commands.execute", &diff), None);
@@ -678,12 +699,39 @@ mod tests {
     fn a_reset_forgets_the_click() {
         let ext = "neophack.git-graph-rs";
         reset(ext);
+        let _serial = serial();
         note_webview_message(ext, "remote/7");
         reset(ext);
         assert_eq!(
             preferred(ext, "window.showInputBox", &json!([])),
             None
         );
+    }
+
+    #[test]
+    fn a_gone_session_takes_its_click_attribution() {
+        // The session ended between the page's message and the engine's follow-up: the
+        // stamp must not outlive it, or the document open addresses the departed frontend
+        // and its request waits for an answer nobody can give. Another session's stamp
+        // survives that one's departure.
+        let ext = "neophack.git-graph-rs";
+        reset(ext);
+        let _serial = serial();
+        note_webview_message(ext, "remote/42");
+        frontend_gone("remote/42");
+        let diff = json!(["vscode.diff", [], "title", {}]);
+        assert_eq!(preferred(ext, "commands.execute", &diff), None);
+        assert!(matches!(
+            routed(ext, "commands.execute", &diff),
+            Mirrored::No
+        ));
+        note_webview_message(ext, "remote/43");
+        frontend_gone("remote/42");
+        assert_eq!(
+            preferred(ext, "commands.execute", &diff).as_deref(),
+            Some("remote/43")
+        );
+        reset(ext);
     }
 
     #[test]
@@ -803,6 +851,7 @@ mod tests {
         // the served request itself.
         let ext = "test.traffic";
         reset(ext);
+        let _serial = serial();
         assert!(matches!(
             routed(ext, "webviewView.postMessage", &json!(["graph", { "rows": 1 }])),
             Mirrored::Frontends(targets) if targets.is_empty()

@@ -868,6 +868,29 @@ describe('horizontal pager', () => {
 		expect(ran).toContain('workbench.showSearch');
 		vi.useRealTimers();
 	});
+
+	it('the portrait tablet\'s ring walks the rail\'s uncapped set — editor\'s next is search, not scm', async () => {
+		// The rail shows the drawer's pages (search between editor and scm), so the swipe
+		// ring the finger walks reads the same list — on a phone this swipe lands on scm.
+		vi.useFakeTimers();
+		setCoarse(true);
+		setWidth(820, 1080);
+		const stop = initResponsive();
+		const { ran, sidebar } = pagedWorkbench();
+		expect(document.documentElement.dataset.device).toBe('tablet-portrait');
+		touch(sidebar, 'pointerdown', 300);
+		touch(sidebar, 'pointermove', 150);
+		touch(sidebar, 'pointerup', 140);
+		await vi.advanceTimersByTimeAsync(130 + 190 + 10);
+		expect(ran).toContain('workbench.toggleSidebar');
+		touch(sidebar, 'pointerdown', 300);
+		touch(sidebar, 'pointermove', 150);
+		touch(sidebar, 'pointerup', 140);
+		await vi.advanceTimersByTimeAsync(130 + 190 + 10);
+		expect(ran).toContain('workbench.showSearch');
+		stop();
+		vi.useRealTimers();
+	});
 });
 
 // The stay guard (backStack.ts, same direction): a browser back peels the in-app layers —

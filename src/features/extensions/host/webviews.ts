@@ -616,6 +616,9 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 		view.html = html;
 		if (view.frame) {
 			view.painted = html;
+			// Same as every other repaint: the reload drops the old document's listeners, so
+			// pushes queue until the new load settles instead of draining into the dying one.
+			view.loaded = false;
 			loadFrameDoc(view.frame, html, this.webviewTheme, `${parsed.extId}#${parsed.panelId}`, this.webviewAssetBase(parsed.extId));
 			extLog('info', 'host', `webview ${parsed.extId}#${parsed.panelId}: the registration answer painted the deferred first document`);
 		}

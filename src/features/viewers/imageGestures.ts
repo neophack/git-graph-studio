@@ -113,6 +113,10 @@ export class GestureRecognizer {
 			this.dragged = false;
 			this.samples = [{ ...point, t: e.timeStamp }];
 			window.clearTimeout(this.longTimer);
+			// A tap still waiting out its double-tap window dies here: a new gesture (a
+			// drag, a long press) must not fire it mid-way. `lastTap` stays — the lift's
+			// double-tap check reads it.
+			window.clearTimeout(this.tapTimer);
 			if (this.kind !== 'mouse') {
 				this.longTimer = window.setTimeout(() => {
 					if (this.mode !== 'press' || this.pointers.size !== 1) return;
@@ -189,7 +193,13 @@ export class GestureRecognizer {
 			if (this.pointers.size === 0) {
 				this.mode = 'idle';
 				this.handlers.end?.(0, 0, this.kind, cancelled);
+				return;
 			}
+			// A finger of three (or more) lifted: the remaining pair is a fresh baseline, or
+			// the next move would report the old pair's geometry as a one-shot jump.
+			const [a, b] = [...this.pointers.values()] as [Point, Point];
+			this.pinchDistance = Math.max(1, Math.hypot(b.x - a.x, b.y - a.y));
+			this.pinchCentre = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 			return;
 		}
 		if (this.pointers.size > 0) return;

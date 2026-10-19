@@ -157,6 +157,39 @@ describe('image gestures', () => {
 		touch('pointerup', 1, 110, 100);
 		expect(calls).toEqual(['pinchStart(150,100)', 'pinch(2,200,100,50,0)', 'panStart(100,100,touch)', 'pan(10,0,110,100)', 'end(touch,false)']);
 	});
+
+	it('a new press inside the double-tap window kills the pending tap instead of firing it mid-gesture', () => {
+		vi.useFakeTimers();
+		const { element, calls } = recognizer();
+		pointer(element, 'pointerdown', 10, 10, { pointerType: 'touch' });
+		pointer(element, 'pointerup', 10, 10, { pointerType: 'touch' });
+		// The second finger lands before the window lapsed: the first tap's timer dies
+		// with the press — it never fires underneath the drag that follows.
+		pointer(element, 'pointerdown', 200, 200, { pointerType: 'touch', pointerId: 2 });
+		vi.advanceTimersByTime(300);
+		expect(calls).toEqual([]);
+		pointer(element, 'pointermove', 260, 200, { pointerType: 'touch', pointerId: 2 });
+		pointer(element, 'pointerup', 260, 200, { pointerType: 'touch', pointerId: 2 });
+		expect(calls).toEqual(['panStart(200,200,touch)', 'pan(60,0,260,200)', 'end(touch,false)']);
+		vi.useRealTimers();
+	});
+
+	it('rebaselines the pinch when one of three fingers lifts — the next move is a step, not the old pair\'s jump', () => {
+		const { element, calls } = recognizer();
+		const touch = (type: string, id: number, x: number, y: number) => pointer(element, type, x, y, { pointerType: 'touch', pointerId: id, isPrimary: id === 1 });
+		touch('pointerdown', 1, 100, 100);
+		touch('pointerdown', 2, 150, 100); // the first pair's baseline: 50 px
+		touch('pointerdown', 3, 400, 100);
+		touch('pointerup', 1, 100, 100); // three → two: the remaining pair (250 px) is the fresh baseline
+		touch('pointermove', 2, 152, 100); // 248/250 ≈ 1.0 — a step. Without the rebaseline: 248/50 ≈ 5×.
+		touch('pointerup', 2, 152, 100);
+		touch('pointerup', 3, 400, 100);
+		const pinches = calls.filter((call) => call.startsWith('pinch('));
+		expect(pinches).toHaveLength(1);
+		const recorded = pinches[0]!;
+		expect(Number(recorded.slice('pinch('.length, recorded.indexOf(',')))).toBeLessThan(1.1);
+		expect(calls.at(-1)).toBe('end(touch,false)');
+	});
 });
 
 function size(element: HTMLElement, width: number, height: number): void {
