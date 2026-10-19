@@ -46,6 +46,22 @@ body {
 }
 button, input, textarea { font-family: inherit; font-size: inherit; color: inherit; }
 button { cursor: pointer; }
+/* Native selects follow the theme — and their popups: Chromium paints the dropdown's
+   rows with the option's own background and color, so without these the popup renders
+   the OS's white list under the page's light text (the CAN channel filter opened
+   white-on-white). */
+select {
+	background: var(--vscode-dropdown-background, #313131);
+	color: var(--vscode-dropdown-foreground, #cccccc);
+	border: 1px solid var(--vscode-dropdown-border, #3c3c3c);
+	border-radius: 2px;
+	font-family: inherit; font-size: 12px;
+	padding: 1px 4px;
+}
+select option, select optgroup {
+	background: var(--vscode-dropdown-background, #313131);
+	color: var(--vscode-dropdown-foreground, #cccccc);
+}
 :focus { outline: none; }
 :focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 
@@ -1373,7 +1389,10 @@ body.resizing iframe { pointer-events: none; }
    summary and channel table left, bus charts and the periodic analysis right, the
    per-identifier table full-width below - CANoe's Statistics and Graphics windows.
    The status bar carries the live parse chip; the panes fill in asynchronously. */
-.can-view { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.can-view { display: flex; flex-direction: column; flex: 1; min-height: 0; position: relative; }
+/* The two-line row wrappers: wide they are layout-transparent (the grids see the five /
+   seven columns they carry), narrow they become the card's grey meta line. */
+.can-ch-meta, .can-msg-meta { display: contents; }
 .can-toolbar-title { display: flex; align-items: center; gap: 6px; font-weight: 600; white-space: nowrap; }
 .can-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .can-dash-top { display: flex; flex: 1 1 0; min-height: 0; }
@@ -1475,8 +1494,8 @@ body.resizing iframe { pointer-events: none; }
  * the fixed columns keep their alignment, since every width before Data is pixels. */
 .can-raw-grid { display: grid; align-items: center; gap: 4px 8px; grid-template-columns: 64px 96px 20px 96px 28px 96px 24px max-content; }
 .can-raw-viewport { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.can-raw-scroll { flex: 1; min-height: 0; overflow-x: auto; overflow-y: hidden; overflow-anchor: none; position: relative; font-family: var(--vscode-editor-font-family, Consolas, monospace); font-size: var(--vscode-editor-font-size, 13px); font-variant-numeric: tabular-nums; }
-.can-raw-row { position: absolute; left: 0; width: max-content; min-width: 100%; height: 20px; line-height: 20px; padding: 0 12px; box-sizing: border-box; }
+.can-raw-scroll { flex: 1; min-height: 0; overflow-x: auto; overflow-y: hidden; overflow-anchor: none; position: relative; font-family: var(--vscode-editor-font-family, Consolas, monospace); font-size: var(--vscode-editor-font-size, 13px); font-variant-numeric: tabular-nums; touch-action: pan-x; }
+.can-raw-row { position: absolute; left: 0; width: max-content; min-width: 100%; height: var(--can-raw-h, 20px); line-height: var(--can-raw-h, 20px); padding: 0 12px; box-sizing: border-box; }
 .can-raw-row:nth-child(even) { background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 3%, transparent); }
 .can-raw-row:hover { background: color-mix(in srgb, var(--vscode-focusBorder, #0078d4) 12%, transparent); }
 .can-row-error { background: color-mix(in srgb, var(--vscode-errorForeground, #f48771) 8%, transparent); }
@@ -1500,6 +1519,25 @@ body.resizing iframe { pointer-events: none; }
 /* Filter bar, analysis panel and charts of the CAN statistics view. */
 .can-toolbar .can-filter { flex: 0 1 240px; min-width: 120px; }
 .can-toolbar .can-channel, .can-toolbar .can-dir, .can-toolbar .can-type { flex: none; }
+/* The quick-filter chips: the selects' most common states as one-tap toggles, sitting in
+   the space the identifier box gave back. A checked chip holds its select's value;
+   the ⊘ at the group's end clears the whole filter. The group clips, never wraps —
+   the selects behind it stay reachable at any width. */
+.can-quick { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.can-quick .can-chip {
+	flex: none; height: 22px; padding: 0 9px; border-radius: 11px; font-size: 11px;
+	background: transparent; color: var(--vscode-descriptionForeground, #999);
+	border: 1px solid var(--vscode-panel-border, #2b2b2b); cursor: pointer;
+}
+.can-quick .can-chip:hover { border-color: var(--vscode-focusBorder, #0078d4); color: var(--vscode-foreground); }
+.can-quick .can-chip.can-chip-on {
+	background: color-mix(in srgb, var(--vscode-focusBorder, #0078d4) 28%, transparent);
+	border-color: var(--vscode-focusBorder, #0078d4);
+	color: var(--vscode-foreground);
+}
+.can-quick .can-chip .codicon { font-size: 14px; }
+.can-quick .can-chip-clear { width: 24px; padding: 0; justify-content: center; }
+.can-quick .can-chip-clear[disabled] { opacity: 0.4; pointer-events: none; }
 /* The raw view's filter-empty note, centred over the viewport it stands in for. */
 .can-raw-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--vscode-descriptionForeground, #999); font-style: italic; pointer-events: none; }
 .can-raw-empty[hidden] { display: none; }
@@ -1546,6 +1584,311 @@ body.resizing iframe { pointer-events: none; }
 .can-chart-tip-row .can-swatch { flex: none; }
 .can-chart-tip-row b { margin-left: auto; padding-left: 14px; font-weight: 600; }
 .can-chart-tip-note { color: var(--vscode-errorForeground, #f48771); }
+
+/* ---------- The CAN pages' responsive form (module 13, 2026-10-19) ----------
+ * Under 600 CSS px of the view's own width (canLayout.ts spells `data-compact` on the
+ * root) the dashboard and the raw trace take the narrow form, in the mobile design
+ * language of git-graph-rs's mobile.css: flat fills and hairlines instead of borders,
+ * capsule controls, a 44px app bar over a filter row, touch-target rows, pressed states
+ * replacing hover, 16px text inputs (iOS zooms smaller ones on focus), and bottom action
+ * sheets. Every colour derives from the theme's variables, so dark, light and high
+ * contrast themes all hold. The wide layout above is untouched — every rule
+ * here keys on [data-compact].
+ *
+ * The toolbar (2026-10-19's redesign, the owner's direction: 顶部不超过两行按钮，排布紧凑)
+ * is TWO compact rows at every width — the command row (title/path, the live chip, the
+ * actions at the right) over the filter row (the identifier box, the channel, direction
+ * and type selects). No third row ever appears at any width: the title truncates, the
+ * filter takes whatever remains, the narrow form folds the actions into the ⋯ sheet. */
+
+.can-toolbar { display: flex; flex-direction: column; align-items: stretch; padding: 0; gap: 0; }
+.can-raw-view .can-toolbar { gap: 0; }
+.can-bar { display: flex; align-items: center; gap: 6px; min-height: 34px; padding: 3px 10px; }
+.can-bar-main .can-toolbar-title, .can-bar-main .can-path {
+	flex: 1 1 0; min-width: 0;
+	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.can-bar-main > .button, .can-bar-main .can-live { flex: none; }
+/* The identifier box holds its own width — the quick chips and the selects share the
+   row's rest; it shrinks first under pressure. */
+.can-bar-filters .can-filter { flex: 0 2 200px; min-width: 96px; }
+.can-bar-filters .can-channel, .can-bar-filters .can-dir, .can-bar-filters .can-type { flex: none; }
+/* The ⋯ exists only on the narrow form; wide, every action is a visible button. */
+.can-bar-main .can-more { display: none; }
+
+/* The narrow form's tokens — mobile.css's palette, over the editor's theme variables. */
+.can-view[data-compact] {
+	--m-fg: var(--vscode-editor-foreground, var(--vscode-foreground, #cccccc));
+	--m-fg-2: var(--vscode-descriptionForeground, rgba(128,128,128,0.9));
+	--m-bg: var(--vscode-editor-background, #1e1e1e);
+	--m-surface: rgba(128,128,128,0.09);
+	--m-fill: rgba(128,128,128,0.14);
+	--m-pressed: rgba(128,128,128,0.2);
+	--m-sep: rgba(128,128,128,0.24);
+	--m-accent: var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff));
+	--m-accent-fill: var(--vscode-button-background, #0e639c);
+	--m-accent-on: var(--vscode-button-foreground, #fff);
+	--m-sheet: var(--vscode-editorWidget-background, var(--vscode-editor-background, #252526));
+	--m-radius: 12px;
+	-webkit-tap-highlight-color: transparent;
+	-webkit-touch-callout: none;
+}
+@supports (color: color-mix(in srgb, red, blue)) {
+	.can-view[data-compact] {
+		--m-surface: color-mix(in srgb, var(--m-fg) 6%, var(--m-bg));
+		--m-fill: color-mix(in srgb, var(--m-fg) 10%, transparent);
+		--m-pressed: color-mix(in srgb, var(--m-fg) 14%, transparent);
+		--m-sep: color-mix(in srgb, var(--m-fg) 14%, transparent);
+	}
+}
+/* 16px inputs: iOS zooms the view on focusing anything smaller. */
+.can-view[data-compact] input, .can-view[data-compact] select, .can-view[data-compact] textarea { font-size: 16px; }
+
+/* The narrow form's two rows: the app bar (title/path, the live chip, ⋯) over the filter
+ * row — the same two rows at phone heights, the actions folded into the ⋯ sheet. */
+.can-view[data-compact] .can-toolbar { border-bottom: 0.5px solid var(--m-sep); }
+.can-view[data-compact] .can-bar {
+	min-height: 44px; gap: 8px;
+	padding: 4px max(12px, env(safe-area-inset-right)) 4px max(12px, env(safe-area-inset-left));
+}
+.can-view[data-compact] .can-bar-main .can-toolbar-title,
+.can-view[data-compact] .can-bar-main .can-path {
+	font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--m-fg, inherit);
+}
+.can-view[data-compact] .can-bar-main .can-live { font-size: 12px; }
+.can-view[data-compact] .can-bar-main .can-more {
+	display: inline-flex; align-items: center; justify-content: center;
+	flex: none; width: 44px; height: 44px; padding: 0; margin: 0;
+	border: none; border-radius: 50%;
+	background: var(--m-fill); color: var(--m-fg, inherit);
+}
+.can-view[data-compact] .can-bar-main .can-more:active { background: var(--m-pressed); }
+.can-view[data-compact] .can-bar-main .can-more .codicon { font-size: 20px; }
+/* The statistics view keeps its Convert as the app bar's icon button; the raw trace's
+ * rides the ⋯ sheet with the rest of its actions. */
+.can-view[data-compact] .can-bar-main .can-convert {
+	flex: none; width: 44px; height: 44px; padding: 0;
+	border: none; border-radius: 50%;
+	background: var(--m-fill); color: var(--m-fg, inherit);
+}
+.can-view[data-compact] .can-bar-main .can-convert:active { background: var(--m-pressed); }
+.can-view[data-compact] .can-bar-main .can-convert .can-btn-label { display: none; }
+.can-raw-view[data-compact] .can-bar-main .can-convert,
+.can-view[data-compact] .can-bar-main .can-find-open,
+.can-view[data-compact] .can-bar-main .can-text,
+.can-view[data-compact] .can-bar-main .can-analyze,
+.can-view[data-compact] .can-bar-filters .can-quick,
+.can-view[data-compact] .can-bar-filters .can-dir,
+.can-view[data-compact] .can-bar-filters .can-type { display: none; }
+.can-view[data-compact] .can-bar-filters .can-filter,
+.can-view[data-compact] .can-bar-filters .can-channel {
+	height: 36px; box-sizing: border-box; min-width: 0;
+	padding: 0 14px; border: none; border-radius: 18px;
+	background: var(--m-fill); color: var(--m-fg, inherit);
+}
+.can-view[data-compact] .can-bar-filters .can-filter { flex: 1 1 0; }
+
+/* The body is one scrolling column of cards (momentum is native here). */
+.can-view[data-compact] .can-body {
+	flex: 1 1 auto; min-height: 0; display: block;
+	overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+}
+.can-view[data-compact] .can-dash-top { display: block; }
+.can-view[data-compact] .can-pane { flex: none; overflow: visible; padding: 0 0 4px; gap: 0; }
+.can-view[data-compact] .can-sash { display: none; }
+.can-view[data-compact] .can-section {
+	border: none; border-radius: var(--m-radius); overflow: hidden;
+	background: var(--m-surface); margin: 8px 12px 0;
+}
+.can-view[data-compact] .can-pane-messages .can-section:last-child { margin-bottom: 12px; }
+.can-view[data-compact] .can-section-head {
+	padding: 10px 14px 2px; background: none; border: none;
+	font-size: 13px; font-weight: 600; text-transform: none; letter-spacing: 0;
+	color: var(--m-fg-2, var(--vscode-descriptionForeground, #999));
+}
+.can-view[data-compact] .can-section-body { padding: 6px 14px 12px; }
+.can-view[data-compact] .can-section-body.can-section-flush { padding: 0; }
+.can-view[data-compact] .can-loading, .can-view[data-compact] .can-error { padding: 28px 16px; font-size: 14px; }
+
+/* The measurement summary: a two-column settings-style grid. */
+.can-view[data-compact] .can-summary {
+	display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px;
+	padding: 4px 0; border: none; border-radius: 0; background: none;
+}
+.can-view[data-compact] .can-summary-cell { gap: 1px; }
+.can-view[data-compact] .can-summary-label { font-size: 11px; }
+.can-view[data-compact] .can-summary-value { font-size: 15px; }
+
+/* The tables become two-line cards: no headers, hairlines between the rows. */
+.can-view[data-compact] .can-channels.can-table,
+.can-view[data-compact] .can-messages.can-table { border: none; border-radius: 0; overflow: visible; }
+.can-view[data-compact] .can-table-head { display: none; }
+.can-view[data-compact] .can-table-row {
+	border-bottom: none; background: none;
+	box-shadow: inset 0 -0.5px 0 var(--m-sep);
+}
+.can-view[data-compact] .can-table-row:last-child { box-shadow: none; }
+.can-view[data-compact] .can-ch-grid {
+	grid-template-columns: auto 1fr auto auto;
+	grid-template-areas:
+		"ch . load peak"
+		"meta meta meta meta"
+		"rates rates rates rates";
+	gap: 3px 8px; padding: 10px 14px;
+}
+.can-view[data-compact] .can-ch-grid > .can-left { grid-area: ch; font-size: 15px; font-weight: 600; }
+.can-view[data-compact] .can-ch-grid > .can-load { grid-area: load; font-size: 15px; }
+.can-view[data-compact] .can-ch-grid > :last-child {
+	grid-area: peak; font-size: 12px; font-weight: 400;
+	color: var(--m-fg-2, var(--vscode-descriptionForeground, #999));
+	/* The peak reads as the load's secondary companion, not a duplicate: a hairline and
+	 * extra air keep the two figures apart. */
+	padding-left: 10px;
+	border-left: 0.5px solid var(--m-sep);
+}
+.can-view[data-compact] .can-ch-grid > .can-ch-meta {
+	display: flex; flex-wrap: wrap; gap: 2px 10px; grid-area: meta;
+	font-size: 12px; color: var(--m-fg-2, var(--vscode-descriptionForeground, #999));
+}
+.can-view[data-compact] .can-ch-grid > .can-rates { grid-area: rates; justify-content: flex-start; margin-top: 2px; }
+.can-view[data-compact] .can-rates select {
+	height: 34px; padding: 0 26px 0 12px; border: none; border-radius: 17px;
+	background: var(--m-fill); color: var(--m-fg, inherit); font-size: 14px;
+}
+.can-view[data-compact] .can-msg-grid {
+	grid-template-columns: minmax(0, 1fr) auto;
+	grid-template-areas:
+		"id share"
+		"meta meta";
+	gap: 3px 8px; padding: 9px 14px;
+}
+.can-view[data-compact] .can-msg-grid > .can-left { grid-area: id; font-size: 15px; font-weight: 600; }
+.can-view[data-compact] .can-msg-grid > .can-num { grid-area: share; font-size: 12px; color: var(--m-fg-2, var(--vscode-descriptionForeground, #999)); }
+.can-view[data-compact] .can-msg-grid > .can-msg-meta {
+	display: flex; flex-wrap: wrap; gap: 2px 10px; grid-area: meta;
+	font-size: 12px; color: var(--m-fg-2, var(--vscode-descriptionForeground, #999));
+}
+.can-view[data-compact] .can-msg-row:active { background: var(--m-pressed); }
+.can-view[data-compact] .can-msg-row.can-selected { background: color-mix(in srgb, var(--vscode-list-activeSelectionBackground, #04395e) 60%, transparent); }
+.can-view[data-compact] .can-empty { padding: 20px 16px; font-size: 14px; }
+
+/* The sort the wide column headers own: the Messages head's sheet button (wide: hidden). */
+.can-sort-menu { display: none; }
+.can-view[data-compact] .can-section-head .can-sort-menu {
+	display: inline-flex; align-items: center; justify-content: center;
+	width: 36px; height: 36px; margin-left: auto; padding: 0;
+	border: none; border-radius: 50%; background: var(--m-fill); color: var(--m-fg, inherit);
+}
+.can-view[data-compact] .can-section-head .can-sort-menu:active { background: var(--m-pressed); }
+
+/* The charts keep their viewBox scaling; the legends and tooltips grow for a finger. */
+.can-view[data-compact] .can-legend { gap: 6px 14px; padding: 4px 2px 8px; }
+.can-view[data-compact] .can-legend-chip { font-size: 12px; }
+.can-view[data-compact] .can-chart-title { font-size: 13px; padding: 8px 2px 0; }
+.can-view[data-compact] .can-chart-block { gap: 2px; }
+.can-view[data-compact] .can-chart-tip {
+	font-size: 13px; line-height: 18px; padding: 8px 12px; border-radius: 10px;
+	max-width: min(280px, calc(100% - 8px));
+}
+
+/* The analysis panel: the same card, its head wrapping, its close a real target. */
+.can-view[data-compact] .can-analysis .can-section-head { flex-wrap: wrap; row-gap: 6px; }
+.can-view[data-compact] .can-analysis-missed { font-size: 12px; }
+.can-view[data-compact] .can-analysis-close {
+	min-width: 44px; height: 36px; margin-left: auto; border-radius: 18px;
+	background: var(--m-fill); color: var(--m-fg, inherit); font-size: 14px;
+}
+.can-view[data-compact] .can-analysis .can-summary { margin-bottom: 4px; }
+
+/* The status bar keeps its post, above the safe area, wrapping what it carries. */
+.can-view[data-compact] .can-status {
+	gap: 6px 14px; flex-wrap: wrap; font-size: 12px;
+	padding: 6px max(14px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
+	border-top: 0.5px solid var(--m-sep);
+}
+.can-view[data-compact] .can-summary-line { white-space: normal; overflow: visible; text-overflow: clip; color: var(--m-fg-2, var(--vscode-descriptionForeground, #999)); }
+
+/* The raw trace: taller rows under a finger, the column set pared to what a narrow
+ * screen carries — the log position and the plain-CAN badge hide, the payload keeps its
+ * native sideways scroll (never clipped, never wrapped). */
+.can-raw-view[data-compact] { --can-raw-h: 22px; }
+.can-raw-view[data-compact][data-pointer='coarse'] { --can-raw-h: 30px; }
+.can-view[data-compact].can-raw-view .can-raw-scroll { font-size: 12px; }
+.can-view[data-compact].can-raw-view .can-raw-row { padding: 0 8px; }
+/* The narrow column set: time (8 digits), channel, the id (an extended id and its x
+ * marker), the direction letter, the badge (a plain CAN badge hides), the DLC, and the
+ * payload at max-content — what does not fit scrolls sideways, never wraps or clips.
+ * The badge column is pixels like the rest of them: the row is min-width: 100%, and an
+ * auto track would swallow a short frame's free space, stretching the badge to the
+ * viewport's edge (the header row, always 100%, stretched it to its own). The DLC track
+ * carries its own three-letter header, so it is 20px, not the two digits' 14px. */
+.can-view[data-compact].can-raw-view .can-raw-grid { grid-template-columns: 64px 14px 84px 20px 84px 20px max-content; gap: 3px 5px; }
+/* The payload continues past the right edge: a fade hints the sideways scroll the way a
+ * phone list does, so the cut bytes read as "more", not as lost data. */
+.can-view[data-compact].can-raw-view .can-raw-viewport::after {
+	content: ""; position: absolute; top: 0; right: 0; bottom: 0; width: 18px;
+	background: linear-gradient(90deg, transparent, var(--m-bg, #1e1e1e));
+	pointer-events: none; z-index: 5;
+}
+.can-view[data-compact].can-raw-view .can-raw-no { display: none; }
+.can-view[data-compact].can-raw-view .can-badge-can { display: none; }
+.can-view[data-compact].can-raw-view .can-raw-head { padding: 6px 8px; }
+.can-view[data-compact].can-raw-view .can-raw-row:active { background: var(--m-pressed); }
+
+/* The find bar: the full width of the viewport, over its top. */
+.can-view[data-compact].can-raw-view .cm-find-widget { left: 0; right: 0; width: auto; max-width: none; border-radius: 0 0 10px 10px; }
+.can-view[data-compact].can-raw-view .cm-find-row { flex-wrap: nowrap; }
+.can-view[data-compact].can-raw-view .cm-find-input { flex: 1 1 auto; min-width: 0; }
+
+/* ---------- The bottom action sheet (canLayout.ts) ----------
+ * mobile.css's context-menu pattern: a scrim over the view, a rounded sheet sliding up
+ * from the bottom edge (inset 8px, the safe area honoured), 50px rows with hairlines. */
+.can-sheet-scrim {
+	position: absolute; inset: 0; z-index: 40;
+	display: flex; flex-direction: column; justify-content: flex-end;
+	padding: 0 max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+	background: rgba(0, 0, 0, 0.42);
+	animation: can-sheet-scrim-in 180ms ease-out;
+}
+.can-sheet-scrim[hidden] { display: none; }
+.can-sheet {
+	display: flex; flex-direction: column; max-height: 80%;
+	border-radius: 14px; background: var(--m-sheet, var(--vscode-editorWidget-background, #252526));
+	box-shadow: 0 12px 40px rgba(0, 0, 0, 0.32), 0 0 0 0.5px var(--m-sep, rgba(128, 128, 128, 0.24));
+	padding-bottom: 6px;
+	transform-origin: bottom center;
+	animation: can-sheet-up 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.can-sheet-grabber { flex: none; width: 36px; height: 4px; border-radius: 2px; background: var(--m-fill, rgba(128, 128, 128, 0.14)); margin: 8px auto 2px; }
+.can-sheet-title {
+	padding: 8px 18px 4px; font-size: 13px; font-weight: 600;
+	text-transform: uppercase; letter-spacing: 0.04em;
+	color: var(--m-fg-2, var(--vscode-descriptionForeground, #999));
+}
+.can-sheet-body { overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.can-sheet-row {
+	display: flex; align-items: center; gap: 12px;
+	min-height: 50px; padding: 8px 18px; box-sizing: border-box;
+	font-size: 16px; color: var(--m-fg, inherit);
+}
+.can-sheet-row + .can-sheet-row { box-shadow: inset 0 0.5px 0 var(--m-sep, rgba(128, 128, 128, 0.24)); }
+.can-sheet-row.can-sheet-action { cursor: pointer; }
+.can-sheet-row.can-sheet-action:active { background: var(--m-pressed, rgba(128, 128, 128, 0.2)); }
+.can-sheet-icon { display: inline-flex; align-items: center; justify-content: center; width: 22px; flex: none; color: inherit; opacity: 0.85; }
+.can-sheet-icon .codicon { font-size: 18px; }
+.can-sheet-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.can-sheet-check { flex: none; color: var(--m-accent, var(--vscode-textLink-foreground, #3794ff)); visibility: hidden; }
+.can-sheet-check .codicon { font-size: 16px; }
+.can-sheet-check:not(:empty) { visibility: visible; }
+.can-sheet-divider { height: 9px; background: var(--m-sheet, var(--vscode-editorWidget-background, #252526)); box-shadow: inset 0 0.5px 0 var(--m-sep, rgba(128, 128, 128, 0.24)); }
+.can-sheet-control .can-sheet-label { flex: 0 0 auto; font-size: 14px; color: var(--m-fg-2, var(--vscode-descriptionForeground, #999)); }
+.can-sheet-control select {
+	margin-left: auto; height: 36px; padding: 0 10px;
+	border: none; border-radius: 10px;
+	background: var(--m-fill, rgba(128, 128, 128, 0.14)); color: var(--m-fg, inherit);
+}
+@keyframes can-sheet-scrim-in { from { background: rgba(0, 0, 0, 0); } to { background: rgba(0, 0, 0, 0.42); } }
+@keyframes can-sheet-up { from { transform: translateY(60px); opacity: 0.6; } to { transform: none; opacity: 1; } }
 
 /* ---------- Code Analysis (module 17) ---------- */
 

@@ -10,6 +10,15 @@
 // filter narrows the whole log, not just the frames already on screen. Rows keep numbering
 // in log order whatever the filter removed.
 //
+// The view answers the space it gets (canLayout.ts): wide, the toolbar is the desktop
+// row and the rows are 20px; narrow (the phone's editor page, a thin desktop column), the
+// same two rows take phone heights — the command bar (the file, the live chip, ⋯) over
+// the filter row, with the direction/type selects and the find/text/statistics/convert
+// actions in the ⋯ bottom sheet — the rows grow to a finger's height under a coarse pointer, and a drag
+// over the viewport scrolls with momentum (`attachTouchScroll`; the viewport carries
+// `data-owns-gestures`, so the phone's page pager yields). The data column still scrolls
+// sideways natively — a payload is never clipped or wrapped.
+//
 // The rest of the chrome stays out of the way: one live chip in the toolbar (frame count,
 // percentage and speed while the walk runs) and two actions — "Statistics" opens the
 // analysis as its own tab (the caller owns that flow), "Convert" exports the log to the
@@ -20,16 +29,21 @@ import type { CanFrameLine } from '../../platform/ipc/can';
 export type { CanFrameLine };
 
 import { convertCanLog, idFilterRanges, idHex } from './canLogView';
+import { CanActionSheet, CanLayout, attachTouchScroll, canCoarsePointer, canMoreButton } from './canLayout';
 import { attachPageKeys, attachWheel, type Disposable } from '../../scroll/input';
 import { ScrollModel } from '../../scroll/model';
 import { Scrollbar } from '../../scroll/scrollbar';
 import { basename, el, icon } from '../../platform/ui/index';
+import { t } from '../../platform/i18n';
 
 /** The raw view's filter, one field per toolbar control — CANoe's Trace-window set. Sent
  *  on every poll and fetch; `null` while every control sits on its "all" default, so the
  *  unfiltered browse skips the backend's match index entirely. */
 /** Fixed row height keeps the scroll math allocation-free (shell.css `.can-raw-row`). */
 const ROW_HEIGHT = 20;
+/** The narrow form's row height under a coarse pointer — a finger's target; a narrow
+ *  desktop window (a fine pointer) keeps the precise rows. */
+const ROW_HEIGHT_TOUCH = 30;
 /** Rows kept rendered above and below the viewport, so small scrolls don't flash empty. */
 const OVERSCAN = 10;
 /** Rows per backend fetch (viewport + overscan), bounded so one response stays small. */
@@ -84,11 +98,23 @@ export class CanRawView {
 	private readonly progress: HTMLElement;
 	private readonly progressFill: HTMLElement;
 	private readonly banner: HTMLElement;
-	/** The filter toolbar: identifier box plus the channel, direction and type selects. */
+	/** The toolbar's two rows — the sheet's controls come home to their own row. */
+	private readonly mainBar: HTMLElement;
+	private readonly filtersBar: HTMLElement;
 	private readonly idBox: HTMLInputElement;
 	private readonly channelSelect: HTMLSelectElement;
 	private readonly dirSelect: HTMLSelectElement;
 	private readonly kindSelect: HTMLSelectElement;
+	/** The quick-filter chips (the selects' common one-tap states) and the ⊘ that clears
+	 *  the whole filter — the group living in the space the identifier box gave back. */
+	private readonly quickBar: HTMLElement;
+	private readonly clearChip: HTMLButtonElement;
+	private readonly quickChips: { chip: HTMLButtonElement; select: HTMLSelectElement; value: string }[] = [];
+	/** The toolbar's actions — the ⋯ sheet's rows drive these buttons themselves. */
+	private readonly findButton: HTMLButtonElement;
+	private readonly textButton: HTMLButtonElement;
+	private readonly analyzeButton: HTMLButtonElement;
+	private readonly convertButton: HTMLButtonElement;
 	/** "No frames match the filter" across the viewport when a filter leaves nothing. */
 	private readonly emptyHint: HTMLElement;
 	private doc: CanOpenResult | null = null;
@@ -142,16 +168,24 @@ export class CanRawView {
 	/** The wheel and the page keys over the scroller (scroll/input.ts), disposed with the view. */
 	private readonly wheel: Disposable;
 	private readonly pageKeys: Disposable;
+	/** A finger's drag over the viewport (canLayout.ts) — the touch half the wheel serves. */
+	private readonly touchScroll: Disposable;
+	/** The wide/narrow watch: the app-bar toolbar, the sheet's membership and the row
+	 *  heights follow it. */
+	readonly form: CanLayout;
+	/** The narrow form's ⋯ sheet: the direction and type selects (their own live nodes)
+	 *  over the find/text/statistics/convert actions. */
+	private readonly sheet: CanActionSheet;
 
 	constructor(private path: string, options: CanRawViewOptions = {}) {
-		const analyzeButton = el('button', 'button secondary can-analyze', [icon('pulse'), ' Statistics']) as HTMLButtonElement;
-		analyzeButton.title = 'Analyse this log (opens in a new tab; runs in the background)';
-		analyzeButton.addEventListener('click', () => options.onAnalyze?.());
-		const convertButton = el('button', 'button secondary can-convert', [icon('save-as'), ' Convert…']) as HTMLButtonElement;
-		convertButton.title = 'Convert this log to the other format (Save As)';
-		convertButton.addEventListener('click', () => {
-			convertButton.disabled = true;
-			void convertCanLog(this.path, null, (text) => this.setLive(text)).finally(() => (convertButton.disabled = false));
+		this.analyzeButton = el('button', 'button secondary can-analyze', [icon('pulse'), ' Statistics']) as HTMLButtonElement;
+		this.analyzeButton.title = 'Analyse this log (opens in a new tab; runs in the background)';
+		this.analyzeButton.addEventListener('click', () => options.onAnalyze?.());
+		this.convertButton = el('button', 'button secondary can-convert', [icon('save-as'), ' Convert…']) as HTMLButtonElement;
+		this.convertButton.title = 'Convert this log to the other format (Save As)';
+		this.convertButton.addEventListener('click', () => {
+			this.convertButton.disabled = true;
+			void convertCanLog(this.path, null, (text) => this.setLive(text)).finally(() => (this.convertButton.disabled = false));
 		});
 		this.liveDot = el('span', 'can-live-dot');
 		this.liveText = el('span', 'can-live-text', ['Opening…']);
@@ -161,9 +195,9 @@ export class CanRawView {
 		// A `.blf` is binary: the form its button swaps to is the hex editor; an `.asc` is
 		// text and really does switch to the text editor.
 		const binaryLog = /\.blf$/i.test(path);
-		const textButton = el('button', 'button secondary can-text', [icon(binaryLog ? 'file-binary' : 'edit'), binaryLog ? ' Hex' : ' Text']) as HTMLButtonElement;
-		textButton.title = binaryLog ? 'View and edit this file as bytes (hex editor)' : 'View and edit this log as plain text';
-		textButton.addEventListener('click', () => options.onEditText?.());
+		this.textButton = el('button', 'button secondary can-text', [icon(binaryLog ? 'file-binary' : 'edit'), binaryLog ? ' Hex' : ' Text']) as HTMLButtonElement;
+		this.textButton.title = binaryLog ? 'View and edit this file as bytes (hex editor)' : 'View and edit this log as plain text';
+		this.textButton.addEventListener('click', () => options.onEditText?.());
 		// CANoe's Trace-window filter set: identifiers, channel, direction, frame type. All
 		// four sit on "all" defaults, and only a non-default state makes a spec — the
 		// unfiltered browse stays the backend's fast path.
@@ -187,25 +221,56 @@ export class CanRawView {
 		this.kindSelect.setAttribute('aria-label', 'Frame type filter');
 		this.kindSelect.append(selectOption('all', 'All types'), selectOption('can', 'CAN'), selectOption('canfd', 'CAN FD'), selectOption('error', 'Error'), selectOption('remote', 'Remote'));
 		this.kindSelect.addEventListener('change', () => this.onFilterChange());
+		this.clearChip = el('button', 'can-chip can-chip-clear', [icon('clear-all')]) as HTMLButtonElement;
+		this.clearChip.type = 'button';
+		this.clearChip.title = t('can.quick.clear');
+		this.clearChip.setAttribute('aria-label', t('can.quick.clear'));
+		this.clearChip.addEventListener('click', () => {
+			this.idBox.value = '';
+			this.channelSelect.value = '';
+			this.dirSelect.value = 'all';
+			this.kindSelect.value = 'all';
+			this.onFilterChange();
+		});
+		this.quickBar = el('div', 'can-quick', [
+			this.quickChip('Tx', t('can.quick.tx'), this.dirSelect, 'tx'),
+			this.quickChip('Rx', t('can.quick.rx'), this.dirSelect, 'rx'),
+			this.quickChip('Err', t('can.quick.err'), this.kindSelect, 'error'),
+			this.quickChip('FD', t('can.quick.fd'), this.kindSelect, 'canfd'),
+			this.quickChip('Rmt', t('can.quick.rmt'), this.kindSelect, 'remote'),
+			this.clearChip
+		]);
 		const pathChip = el('span', 'can-path', [this.path]);
 		pathChip.title = this.path;
 		// The find bar's toolbar entry — Ctrl+F anywhere in the view opens it too.
-		const findButton = el('button', 'button secondary can-find-open', [icon('search')]) as HTMLButtonElement;
-		findButton.title = 'Find (Ctrl+F)';
-		findButton.addEventListener('click', () => this.openFind());
-		const toolbar = el('div', 'hex-toolbar can-toolbar', [
+		this.findButton = el('button', 'button secondary can-find-open', [icon('search')]) as HTMLButtonElement;
+		this.findButton.title = 'Find (Ctrl+F)';
+		this.findButton.addEventListener('click', () => this.openFind());
+		// The toolbar is two compact rows at every width (the 2026-10-19 redesign): the
+		// command row (the file, the live chip, then Find / Text / Statistics / Convert at
+		// the right — ⋯ alone on the narrow form, the actions adopted by its sheet) over
+		// the filter row (the identifier box, the quick-filter chips, the channel,
+		// direction and type selects).
+		// No third row ever appears; the path truncates, the filter takes what remains,
+		// and every control stays a single compact height.
+		const moreButton = canMoreButton(() => this.openMoreSheet(binaryLog));
+		this.mainBar = el('div', 'can-bar can-bar-main', [
 			pathChip,
+			this.live,
+			moreButton,
+			this.findButton,
+			this.textButton,
+			this.analyzeButton,
+			this.convertButton
+		]);
+		this.filtersBar = el('div', 'can-bar can-bar-filters', [
 			this.idBox,
+			this.quickBar,
 			this.channelSelect,
 			this.dirSelect,
-			this.kindSelect,
-			el('span', 'hex-toolbar-sep'),
-			findButton,
-			textButton,
-			analyzeButton,
-			convertButton,
-			this.live
+			this.kindSelect
 		]);
+		const toolbar = el('div', 'hex-toolbar can-toolbar', [this.mainBar, this.filtersBar]);
 		const heads = ['No.', 'Time', 'Ch', 'ID', 'Dir', 'Type', 'DLC', 'Data'];
 		const headClasses = ['can-raw-no', 'can-raw-time', 'can-raw-ch', 'can-raw-id', 'can-raw-dir', 'can-raw-type-h', 'can-raw-dlc', ''];
 		const header = el('div', 'can-raw-head can-raw-grid', heads.map((t, i) => el('span', headClasses[i], [t])));
@@ -252,14 +317,55 @@ export class CanRawView {
 				this.openFind();
 			}
 		});
+		this.sheet = new CanActionSheet(this.root);
+		this.form = new CanLayout(this.root);
+		this.form.onChange((compact) => this.applyForm(compact));
 		this.scroll = new ScrollModel(ROW_HEIGHT);
 		this.scroll.onChange(() => this.refresh());
 		this.scrollbar = new Scrollbar(viewport, this.scroll);
 		this.wheel = attachWheel(this.scroller, this.scroll);
 		this.pageKeys = attachPageKeys(this.scroller, this.scroll);
+		this.touchScroll = attachTouchScroll(this.scroller, this.scroll);
+		// The trace owns its drags: a finger over it scrolls the frames (and the data
+		// column pans sideways), so the phone's page pager steps aside (swipeNav's list).
+		viewport.setAttribute('data-owns-gestures', '');
 		this.sizer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => this.layout());
 		this.sizer?.observe(this.scroller);
+		// A view mounted already narrow (the phone's editor page) never hears a flip: the
+		// watch settled inside its own constructor, before this listener existed.
+		this.applyForm(this.form.isCompact);
+		this.syncQuickChips();
 		void this.load();
+	}
+
+	/** The form flipped: the toolbar's wide controls come home or fold into the ⋯ sheet's
+	 *  care, and the rows take the height the pointer calls for. The grid's area map
+	 *  places whatever is present, so membership is the only thing moved. */
+	private applyForm(compact: boolean): void {
+		this.sheet.close();
+		if (!compact) {
+			// Every control the sheet may have adopted comes home to its own row.
+			this.filtersBar.append(this.dirSelect, this.kindSelect);
+			this.mainBar.append(this.findButton, this.textButton, this.analyzeButton, this.convertButton);
+		}
+		const height = compact && canCoarsePointer() ? ROW_HEIGHT_TOUCH : ROW_HEIGHT;
+		this.scroll.setRowHeight(height);
+		this.layout();
+	}
+
+	/** The ⋯ sheet: the two selects the narrow filter row cannot carry (their own nodes,
+	 *  state and listeners intact) over the toolbar's actions, each action row driving the
+	 *  very button it stands in for. */
+	private openMoreSheet(binaryLog: boolean): void {
+		this.sheet.open(t('can.more'), [
+			{ control: this.dirSelect, label: t('can.sheet.direction') },
+			{ control: this.kindSelect, label: t('can.sheet.kind') },
+			{ divider: true },
+			{ action: () => this.openFind(), label: t('can.sheet.find'), iconName: 'search' },
+			{ action: () => this.textButton.click(), label: binaryLog ? t('can.sheet.hex') : t('can.sheet.text'), iconName: binaryLog ? 'file-binary' : 'edit' },
+			{ action: () => this.analyzeButton.click(), label: t('can.sheet.analyze'), iconName: 'pulse' },
+			{ action: () => this.convertButton.click(), label: t('can.convert'), iconName: 'save-as' }
+		]);
 	}
 
 	private setLive(text: string): void {
@@ -367,6 +473,7 @@ export class CanRawView {
 		}
 		this.syncChannels(count.channels ?? []);
 		this.updateEmptyHint();
+		this.syncQuickChips();
 	}
 
 	/** The channel list follows the walk — channels join the select as their first frames
@@ -383,6 +490,33 @@ export class CanRawView {
 	 *  still-empty view is the parse's business, reported by the live chip. */
 	private updateEmptyHint(): void {
 		this.emptyHint.hidden = !(this.filter !== null && this.rowCount === 0 && !this.failed);
+	}
+
+	/** One quick-filter chip: a toggle over one value of a select — clicking sets the
+	 *  value (or falls back to the select's all-state when it held it already) and
+	 *  re-filters. The checked look follows the select, however the value got set. */
+	private quickChip(label: string, title: string, select: HTMLSelectElement, value: string): HTMLButtonElement {
+		const chip = el('button', 'can-chip', [label]) as HTMLButtonElement;
+		chip.type = 'button';
+		chip.title = title;
+		chip.setAttribute('aria-label', title);
+		this.quickChips.push({ chip, select, value });
+		chip.addEventListener('click', () => {
+			select.value = select.value === value ? 'all' : value;
+			this.onFilterChange();
+		});
+		return chip;
+	}
+
+	/** The chips' checked marks and the clear's enablement follow the filter controls —
+	 *  every filter change flows through onFilterChange, which keeps them honest. */
+	private syncQuickChips(): void {
+		for (const { chip, select, value } of this.quickChips) {
+			const on = select.value === value;
+			chip.classList.toggle('can-chip-on', on);
+			chip.setAttribute('aria-pressed', String(on));
+		}
+		this.clearChip.disabled = this.filter === null && this.idBox.value.trim() === '';
 	}
 
 	/** A filter control changed: rebuild the spec, drop the rows of the old row space and
@@ -407,6 +541,7 @@ export class CanRawView {
 		this.scroll.setTop(0);
 		this.scroll.setRowCount(0);
 		this.updateEmptyHint();
+		this.syncQuickChips();
 		// The find's hit positions address the old row space; the open bar rescans the new
 		// one on its own, the count shows the scan pending.
 		this.resetFindState();
@@ -708,6 +843,9 @@ export class CanRawView {
 		this.disposed = true;
 		this.wheel.dispose();
 		this.pageKeys.dispose();
+		this.touchScroll.dispose();
+		this.form.dispose();
+		this.sheet.dispose();
 		this.scrollbar.dispose();
 		this.sizer?.disconnect();
 		if (this.timer !== null) clearTimeout(this.timer);

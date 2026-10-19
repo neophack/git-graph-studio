@@ -3,12 +3,20 @@
 // (`can_log_stats`) and this view renders the result asynchronously, so even a
 // multi-gigabyte trace only paints once the numbers are in.
 //
-// The layout is a resizable dashboard: the left column carries the measurement summary
-// and the channel table, the right column the bus charts (per-channel load and frame
-// rate over time, the payload-length distribution, and the periodic analysis of a clicked
-// identifier), and the messages table spans the full width below. Two sashes divide the
+// The layout answers the space the view itself gets (canLayout.ts's width watch): wide,
+// it is a resizable dashboard — the left column carries the measurement summary and the
+// channel table, the right column the bus charts (per-channel load and frame rate over
+// time, the payload-length distribution, and the periodic analysis of a clicked
+// identifier), and the messages table spans the full width below; two sashes divide the
 // panes - drag to move, double-click to reset - and the shares persist across sessions.
-// The status bar is the one live region: a pulsing chip and a progress bar report the
+// Narrow (under 600 CSS px: the phone's editor page, a thin desktop column), the same
+// content becomes one scrolling column in the mobile design language (git-graph-rs's
+// mobile.css): the toolbar's two rows at phone heights — the command bar over the filter
+// row — the sections as flat inset cards, the
+// channel and identifier tables as two-line rows (the counts one grey meta line), the
+// charts at the compact viewBox so a phone's width keeps them legible, and the sort the
+// wide column headers own riding a ⋯-style bottom sheet from the Messages head. The
+// status bar is the one live region in both: a pulsing chip and a progress bar report the
 // backend walk while it runs, the summary line lands only when the numbers are in.
 //
 // The bus load is CANoe's arithmetic: a frame's arbitration-phase bits at the channel's
@@ -25,7 +33,8 @@ export type { CanChannelStats, CanIdStats, CanFrameFilter, CanIntervals, CanLogC
 import { canIntervals, canLogStats, convertCanLog as convertCanLogCmd } from '../../platform/ipc/can';
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 
-import { cycleSeriesChart, formatAxisSeconds, histogramChart, multiLineChart, seriesStyle, stackedBars, type ChartSeries } from './canChart';
+import { cycleSeriesChart, formatAxisSeconds, histogramChart, multiLineChart, seriesStyle, stackedBars, CAN_CHART_VBW_COMPACT, type ChartSeries } from './canChart';
+import { CanActionSheet, CanLayout, type CanSheetItem } from './canLayout';
 import { t, tf } from '../../platform/i18n';
 import { load as loadState, save as saveState } from '../../platform/state';
 import { basename, el, formatBytes, icon, quickPick } from '../../platform/ui/index';
@@ -215,6 +224,11 @@ export class CanLogView {
 	 *  cached so a rate or filter change re-renders the panel without re-walking the log. */
 	private selected: { channel: number; id: number; extended: boolean } | null = null;
 	private intervals: CanIntervals | null = null;
+	/** The wide/narrow watch: `data-compact` on the root, the chart viewBoxes following. */
+	readonly form: CanLayout;
+	/** The narrow form's sheets — the messages table's sort (the wide form sorts by its
+	 *  column headers, which the two-line rows do not carry). */
+	private readonly sheet: CanActionSheet;
 
 	constructor(private path: string) {
 		this.filterBox = el('input', 'hex-search can-filter') as HTMLInputElement;
@@ -226,15 +240,22 @@ export class CanLogView {
 		this.channelSelect.title = t('can.channel');
 		this.channelSelect.setAttribute('aria-label', t('can.channel'));
 		this.channelSelect.addEventListener('change', () => this.render());
-		this.convertButton = el('button', 'button secondary can-convert', [icon('save-as'), ` ${t('can.convert')}`]) as HTMLButtonElement;
+		this.convertButton = el('button', 'button secondary can-convert', [icon('save-as'), el('span', 'can-btn-label', [` ${t('can.convert')}`])]) as HTMLButtonElement;
 		this.convertButton.title = t('can.convert.title');
 		this.convertButton.addEventListener('click', () => void this.convert());
+		// The toolbar is two compact rows at every width (the 2026-10-19 redesign): the
+		// command row (the title, Convert — an icon alone on the narrow form) over the
+		// filter row (the identifier box, the channel select). No third row ever appears;
+		// nothing overflows — the title truncates, the filter takes what remains.
 		const toolbar = el('div', 'hex-toolbar can-toolbar', [
-			el('span', 'can-toolbar-title', [icon('pulse'), ` ${t('can.stats.title')} — ${basename(path)}`]),
-			this.filterBox,
-			this.channelSelect,
-			el('span', 'hex-toolbar-sep'),
-			this.convertButton
+			el('div', 'can-bar can-bar-main', [
+				el('span', 'can-toolbar-title', [icon('pulse'), ` ${t('can.stats.title')} — ${basename(path)}`]),
+				this.convertButton
+			]),
+			el('div', 'can-bar can-bar-filters', [
+				this.filterBox,
+				this.channelSelect
+			])
 		]);
 		// The dashboard skeleton: the panes and sashes are laid out once; every render
 		// only fills the section bodies, so an open analysis panel or a drag share survives.
@@ -255,8 +276,14 @@ export class CanLogView {
 			this.section('can-section-payload', 'layers', t('can.section.payload'), this.payloadBody),
 			this.analysisHost
 		]);
+		// The narrow form's table rows are two-line cards without column headers; the sort
+		// the wide headers own rides this head button's sheet instead (CSS hides it wide).
+		const sortButton = el('button', 'button secondary can-sort-menu', [icon('sort-precedence')]) as HTMLButtonElement;
+		sortButton.title = t('can.sort.title');
+		sortButton.setAttribute('aria-label', t('can.sort.title'));
+		sortButton.addEventListener('click', () => this.openSortSheet());
 		this.paneMessages = el('div', 'can-pane can-pane-messages', [
-			this.section('can-section-messages', 'table', t('can.section.messages'), this.messagesBody)
+			this.section('can-section-messages', 'table', t('can.section.messages'), this.messagesBody, sortButton)
 		]);
 		this.paneTop = el('div', 'can-dash-top', [this.paneLeft, paneSash('vertical', (sash, delta) => this.dragLeft(sash, delta), () => this.saveLayout(), () => this.resetLayout()), this.paneRight]);
 		const hSash = paneSash('horizontal', (sash, delta) => this.dragTop(sash, delta), () => this.saveLayout(), () => this.resetLayout());
@@ -269,6 +296,13 @@ export class CanLogView {
 		this.progressFill = el('i');
 		this.progress = el('div', 'can-progress', [this.progressFill]);
 		this.root = el('div', 'can-view', [toolbar, body, this.progress, status]);
+		this.sheet = new CanActionSheet(this.root);
+		this.form = new CanLayout(this.root);
+		this.form.onChange(() => {
+			this.sheet.close();
+			// The chart viewBoxes follow the form; the tables' card layouts are CSS's.
+			if (this.stats) this.render();
+		});
 		this.layout = loadState<CanStatsLayout>(CAN_STATS_LAYOUT_KEY, { ...DEFAULT_CAN_STATS_LAYOUT });
 		this.applyLayout();
 		for (const paneBody of [this.overviewBody, this.channelsBody, this.loadBody, this.rateBody, this.payloadBody, this.messagesBody]) {
@@ -278,9 +312,40 @@ export class CanLogView {
 	}
 
 	/** A dashboard section: the compact head (icon, title, optional meta) over the body. */
-	private section(cls: string, iconName: string, title: string, body: HTMLElement): HTMLElement {
-		const head = el('div', 'can-section-head', [icon(iconName), el('span', 'can-section-title', [title])]);
+	private section(cls: string, iconName: string, title: string, body: HTMLElement, extra?: HTMLElement): HTMLElement {
+		const head = el('div', 'can-section-head', [icon(iconName), el('span', 'can-section-title', [title]), ...(extra ? [extra] : [])]);
 		return el('div', `can-section ${cls}`, [head, body]);
+	}
+
+	/** The narrow form's sort sheet: the keys the wide column headers own, plus the
+	 *  direction — the current key checked, the direction row naming where it points. */
+	private openSortSheet(): void {
+		const labels: Record<SortKey, string> = {
+			count: t('can.msg.count'),
+			id: t('can.msg.id'),
+			bytes: t('can.msg.bytes'),
+			cycle: t('can.msg.cycle'),
+			jitter: t('can.msg.jitter')
+		};
+		const items: CanSheetItem[] = (Object.keys(labels) as SortKey[]).map((key) => ({
+			action: () => {
+				this.sortKey = key;
+				this.sortAsc = false;
+				if (this.stats) this.renderMessages(this.filtered()!);
+			},
+			label: labels[key],
+			iconName: key === 'count' ? 'pulse' : key === 'id' ? 'symbol-numeric' : key === 'bytes' ? 'layers' : 'watch',
+			checked: this.sortKey === key
+		}));
+		items.push({ divider: true }, {
+			action: () => {
+				this.sortAsc = !this.sortAsc;
+				if (this.stats) this.renderMessages(this.filtered()!);
+			},
+			label: this.sortAsc ? t('can.sort.asc') : t('can.sort.desc'),
+			iconName: this.sortAsc ? 'arrow-up' : 'arrow-down'
+		});
+		this.sheet.open(t('can.sort.title'), items);
 	}
 
 	/* ---------- The panes' shares ---------- */
@@ -438,13 +503,17 @@ export class CanLogView {
 			const load = busLoad(c.arbBits, c.dataBits, duration, rates.arb, rates.data);
 			const buckets = profiles.get(c.channel)?.buckets ?? [];
 			const peak = Math.max(0, ...buckets.map((b) => busLoad(b.arbBits, b.dataBits, b.durS, rates.arb, rates.data)));
+			// The five count cells ride one wrapper: wide it is `display: contents` (the grid
+			// sees the five columns), narrow the card's grey meta line under the channel name.
 			const cells = [
 				el('span', 'can-left', [`${t('can.channel')} ${c.channel}`]),
-				el('span', 'can-num', [c.frames.toLocaleString()]),
-				el('span', `can-num${c.errorFrames ? ' can-warn' : ''}`, [c.errorFrames.toLocaleString()]),
-				el('span', 'can-num', [formatBytes(c.payloadBytes, { gb: true })]),
-				el('span', 'can-num', [duration.toFixed(3) + ' s']),
-				el('span', 'can-num', [duration > 0 ? (c.frames / duration).toFixed(1) + ' fr/s' : '—']),
+				el('span', 'can-ch-meta', [
+					el('span', 'can-num', [c.frames.toLocaleString()]),
+					el('span', `can-num${c.errorFrames ? ' can-warn' : ''}`, [c.errorFrames.toLocaleString()]),
+					el('span', 'can-num', [formatBytes(c.payloadBytes, { gb: true })]),
+					el('span', 'can-num', [duration.toFixed(3) + ' s']),
+					el('span', 'can-num', [duration > 0 ? (c.frames / duration).toFixed(1) + ' fr/s' : '—'])
+				]),
 				el('span', 'can-rates', [
 					this.rateSelect(c.channel, 'arb', CAN_BITRATES, rates.arb, t('can.rate.arb.title')),
 					this.rateSelect(c.channel, 'data', CAN_DATA_BITRATES, rates.data, t('can.rate.data.title'))
@@ -493,6 +562,9 @@ export class CanLogView {
 	private renderCharts(view: NonNullable<ReturnType<CanLogView['filtered']>>): void {
 		const profiles = new Map((this.stats?.loadProfiles ?? []).map((p) => [p.channel, p]));
 		const dists = new Map((this.stats?.payloadDist ?? []).map((d) => [d.channel, d]));
+		// The narrow form draws at the compact viewBox — the phone's width renders the
+		// strokes and labels at full density instead of half-size.
+		const vbw = this.form.isCompact ? CAN_CHART_VBW_COMPACT : undefined;
 		const seriesOf = (y: (b: LoadBucket, rates: { arb: number; data: number }) => number): ChartSeries[] => view.channels.map((c, i) => ({
 			name: `${t('can.channel')} ${c.channel}`,
 			cls: seriesStyle(i),
@@ -501,17 +573,17 @@ export class CanLogView {
 			points: (profiles.get(c.channel)?.buckets ?? []).map((b) => ({ x: b.tS, xEnd: b.tS + b.durS, y: y(b, this.ratesOf(c.channel)) }))
 		}));
 		this.loadBody.replaceChildren(
-			multiLineChart(seriesOf((b, r) => busLoad(b.arbBits, b.dataBits, b.durS, r.arb, r.data)), { xUnit: 's', yUnit: '%', height: 200, fmtX: formatAxisSeconds })
+			multiLineChart(seriesOf((b, r) => busLoad(b.arbBits, b.dataBits, b.durS, r.arb, r.data)), { xUnit: 's', yUnit: '%', height: 200, fmtX: formatAxisSeconds, vbw })
 		);
 		this.rateBody.replaceChildren(
-			multiLineChart(seriesOf((b) => (b.durS > 0 ? b.frames / b.durS : 0)), { xUnit: 's', yUnit: 'fr/s', height: 160, fmtX: formatAxisSeconds })
+			multiLineChart(seriesOf((b) => (b.durS > 0 ? b.frames / b.durS : 0)), { xUnit: 's', yUnit: 'fr/s', height: 160, fmtX: formatAxisSeconds, vbw })
 		);
 		const payloadSeries: ChartSeries[] = view.channels.map((c, i) => ({
 			name: `${t('can.channel')} ${c.channel}`,
 			cls: seriesStyle(i),
 			points: (dists.get(c.channel)?.counts ?? PAYLOAD_LABELS.map(() => 0)).map((y) => ({ x: 0, y }))
 		}));
-		this.payloadBody.replaceChildren(stackedBars([...PAYLOAD_LABELS], payloadSeries, { height: 170 }));
+		this.payloadBody.replaceChildren(stackedBars([...PAYLOAD_LABELS], payloadSeries, { height: 170, vbw }));
 	}
 
 	/** A column-header sort button: clicking it sorts by that key, clicking again flips. */
@@ -554,15 +626,19 @@ export class CanLogView {
 		]);
 		const rows = messages.map((m) => {
 			const share = view.totalFrames ? (m.count / view.totalFrames) * 100 : 0;
+			// The seven detail cells ride one wrapper like the channel rows': wide it is
+			// `display: contents`, narrow the card's grey second line under the identifier.
 			const row = el('div', 'can-table-row can-msg-grid can-mono can-msg-row', [
 				el('span', 'can-left', [idHex(m.id, m.extended) + (m.extended ? ' x' : '')]),
-				el('span', 'can-num', [String(m.channel)]),
-				el('span', 'can-left', [m.fd ? 'CAN FD' : 'CAN']),
-				el('span', 'can-num', [m.count.toLocaleString()]),
-				el('span', 'can-num', [`${m.tx.toLocaleString()} / ${m.rx.toLocaleString()}`]),
-				el('span', 'can-num', [formatBytes(m.payloadBytes, { gb: true })]),
-				el('span', 'can-num', [`${formatCycle(m.minCycleS)} / ${formatCycle(m.avgCycleS)} / ${formatCycle(m.maxCycleS)}`]),
-				el('span', 'can-num', [formatCycle(m.stdCycleS)]),
+				el('span', 'can-msg-meta', [
+					el('span', 'can-num', [String(m.channel)]),
+					el('span', 'can-left', [m.fd ? 'CAN FD' : 'CAN']),
+					el('span', 'can-num', [m.count.toLocaleString()]),
+					el('span', 'can-num', [`${m.tx.toLocaleString()} / ${m.rx.toLocaleString()}`]),
+					el('span', 'can-num', [formatBytes(m.payloadBytes, { gb: true })]),
+					el('span', 'can-num', [`${formatCycle(m.minCycleS)} / ${formatCycle(m.avgCycleS)} / ${formatCycle(m.maxCycleS)}`]),
+					el('span', 'can-num', [formatCycle(m.stdCycleS)])
+				]),
 				el('span', 'can-num', [share.toFixed(share < 1 ? 2 : 1) + ' %'])
 			]);
 			row.title = t('can.msg.clickHint');
@@ -642,11 +718,11 @@ export class CanLogView {
 				el('div', 'can-chart-block', [
 					el('div', 'can-chart-title', [t('can.chart.cycle')]),
 					// The backend's cycles are seconds; the charts show CANoe's milliseconds.
-					cycleSeriesChart(intervals.points.map((p) => ({ x: p.tS, y: p.cycleS * 1000, missed: p.missed })), intervals.medianCycleS * 1000, 's', 'ms')
+					cycleSeriesChart(intervals.points.map((p) => ({ x: p.tS, y: p.cycleS * 1000, missed: p.missed })), intervals.medianCycleS * 1000, 's', 'ms', this.form.isCompact ? CAN_CHART_VBW_COMPACT : undefined),
 				]),
 				el('div', 'can-chart-block', [
 					el('div', 'can-chart-title', [t('can.chart.histogram')]),
-					histogramChart(intervals.histogram.map((b) => ({ fromS: b.fromS * 1000, toS: b.toS * 1000, count: b.count })), intervals.medianCycleS * 1000, 'ms')
+					histogramChart(intervals.histogram.map((b) => ({ fromS: b.fromS * 1000, toS: b.toS * 1000, count: b.count })), intervals.medianCycleS * 1000, 'ms', this.form.isCompact ? CAN_CHART_VBW_COMPACT : undefined)
 				])
 			])
 		]);

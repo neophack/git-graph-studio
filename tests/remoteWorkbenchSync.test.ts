@@ -844,14 +844,18 @@ describe('the sync core over a shared bus', () => {
  * becoming-active handlers the real document events would, `roster()` the roster-change
  * handlers a heartbeat or a WINDOWS word would, and `designate` picks the responder of a
  * state request. */
-function fakePresence(count = 2): SyncPresence & { count: number; became(): void; roster(): void; designate: (requester: string) => boolean } {
+function fakePresence(count = 2): SyncPresence & { count: number; live: boolean; became(): void; roster(): void; designate: (requester: string) => boolean } {
 	const becameHandlers = new Set<() => void>();
 	const rosterHandlers = new Set<() => void>();
 	const presence = {
 		count,
+		/** Any live peer on the roster (§7.0.1): its socket is up, whether its page is
+		 *  active or not. Closes cross on this; the default tracks the active count. */
+		live: count >= 2,
 		designate: (): boolean => true,
 		syncAllowed: (): boolean => presence.count >= 2,
 		othersActive: (): boolean => presence.count >= 2,
+		othersLive: (): boolean => presence.live,
 		isDesignatedResponder: (requester: string): boolean => presence.designate(requester),
 		onBecameActive: (handler: () => void): (() => void) => {
 			becameHandlers.add(handler);
@@ -933,6 +937,15 @@ describe('the presence gate (§7.0, K11)', () => {
  * browser's storage, so even a page refresh carries it — and crosses the moment the gate
  * opens again. Without it, the side that missed the close kept the tab and every catch-up
  * handed it back: 远程关闭的文件，刷新后又都出来了. */
+const deferredRecord = (): { files: string[]; tabs: string[] } => {
+	const raw = localStorage.getItem('ggstudio.' + DEFERRED_CLOSES_KEY);
+	const parsed = raw === null ? null : (JSON.parse(raw) as { files: Record<string, unknown>; tabs: Record<string, unknown> });
+	return {
+		files: Object.keys(parsed?.files ?? {}),
+		tabs: Object.keys(parsed?.tabs ?? {})
+	};
+};
+
 describe('closes under a shut gate survive it (K11 vs E7)', () => {
 	beforeEach(() => {
 		localStorage.removeItem('ggstudio.' + DEFERRED_CLOSES_KEY);
@@ -940,15 +953,6 @@ describe('closes under a shut gate survive it (K11 vs E7)', () => {
 	afterEach(() => {
 		localStorage.removeItem('ggstudio.' + DEFERRED_CLOSES_KEY);
 	});
-
-	const deferredRecord = (): { files: string[]; tabs: string[] } => {
-		const raw = localStorage.getItem('ggstudio.' + DEFERRED_CLOSES_KEY);
-		const parsed = raw === null ? null : (JSON.parse(raw) as { files: Record<string, unknown>; tabs: Record<string, unknown> });
-		return {
-			files: Object.keys(parsed?.files ?? {}),
-			tabs: Object.keys(parsed?.tabs ?? {})
-		};
-	};
 
 	it('a close that formed under the shut gate crosses when the gate reopens — and the catch-up never resurrects it', async () => {
 		const channel = bus();
@@ -962,10 +966,14 @@ describe('closes under a shut gate survive it (K11 vs E7)', () => {
 		await pc.editors.openFile(README);
 		expect(phone.tabs()).toEqual([NOTES, README]);
 		channel.sent.length = 0;
-		// The PC window hides (close-to-hide, §17): one active frontend, the gate shuts —
-		// the phone's closes cross nothing (K11's promise), but are recorded.
+		// The PC is unreachable (its app exited, its roster entry swept — a merely hidden
+		// PC stays live and now takes the closes at once, 2026-10-19): one active frontend
+		// and no live peer, the gate shuts — the phone's closes cross nothing (K11's
+		// promise), but are recorded.
 		pcPresence.count = 1;
 		phonePresence.count = 1;
+		pcPresence.live = false;
+		phonePresence.live = false;
 		phone.close(NOTES);
 		phone.close(README);
 		expect(channel.sent).toEqual([]);
@@ -998,10 +1006,14 @@ describe('closes under a shut gate survive it (K11 vs E7)', () => {
 		await pc.editors.openFile(NOTES);
 		await pc.editors.openFile(README);
 		expect(phone1.tabs()).toEqual([NOTES, README]);
-		// The PC hides; the phone closes both — nothing crosses; the page then dies before
-		// the PC ever returns (the user refreshed later).
+		// The PC is unreachable (its app exited, its roster entry swept — a merely hidden
+		// PC stays live and now takes the closes at once, 2026-10-19); the phone closes
+		// both — nothing crosses; the page then dies before the PC ever returns (the user
+		// refreshed later).
 		pcPresence.count = 1;
 		phone1Presence.count = 1;
+		pcPresence.live = false;
+		phone1Presence.live = false;
 		phone1.close(NOTES);
 		phone1.close(README);
 		expect(channel.sent.filter((m) => m.k === 'close')).toEqual([]);
@@ -1044,6 +1056,10 @@ describe('closes under a shut gate survive it (K11 vs E7)', () => {
 		channel.sent.length = 0;
 		pcPresence.count = 1;
 		phonePresence.count = 1;
+		// The PC is unreachable (gone, not hidden — 2026-10-19: a live peer takes the
+		// closes at once): the phone's close is recorded, to flush when it returns.
+		pcPresence.live = false;
+		phonePresence.live = false;
 		phone.close(NOTES);
 		expect(deferredRecord().files.length).toBe(1);
 		// The PC returns and the user there reopens the file: the flush delivers the phone's
@@ -1057,6 +1073,93 @@ describe('closes under a shut gate survive it (K11 vs E7)', () => {
 		await until(() => phone.tabs().includes(NOTES));
 		expect(pc.tabs()).toEqual([NOTES]);
 		expect(deferredRecord().files.length).toBe(0);
+	});
+});
+
+/* ---------- Closes cross to a live but sleeping frontend (2026-10-19) ----------
+ *
+ * The PC's closes sat behind the K11 gate while the phone page was merely INACTIVE — the
+ * screen-off, browser-backgrounded state a phone rests in between glances — and crossed
+ * only on the phone's next sign of activity: the user's wake, or a heartbeat away. The
+ * owner watched a tab the PC had closed linger on a phone page in their hand
+ * (pc端关闭页面后，remote页面要等很久才关闭). A close is convergence, not disturbance:
+ * the daemon holds what a sleeping page cannot take now and replays it on return, and a
+ * hidden page applies socket deliveries in real time — so a close crosses whenever any
+ * other frontend is LIVE, and only a truly lone frontend stays silent (K11's promise). */
+describe('closes cross to a live but inactive frontend', () => {
+	beforeEach(() => {
+		localStorage.removeItem('ggstudio.' + DEFERRED_CLOSES_KEY);
+	});
+	afterEach(() => {
+		localStorage.removeItem('ggstudio.' + DEFERRED_CLOSES_KEY);
+	});
+
+	it('the PC closes while the phone page sleeps — the close crosses at once and the phone applies it; opens and switches stay home', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const phone = fakeWorkbench();
+		const pcPresence = fakePresence(2);
+		const phonePresence = fakePresence(2);
+		attachWorkbenchSync(pc, channel.deps, 'main', { presence: pcPresence });
+		attachWorkbenchSync(phone, channel.deps, 'remote/1', { presence: phonePresence });
+		await pc.editors.openFile(NOTES);
+		expect(phone.tabs()).toEqual([NOTES]);
+		channel.sent.length = 0;
+		// The phone's page sleeps (screen off, socket up): one ACTIVE frontend, so K11
+		// keeps the disturbance vocabulary home — but the peer is LIVE.
+		pcPresence.count = 1;
+		phonePresence.count = 1;
+		await pc.editors.openFile(README);
+		pc.setActive(README);
+		expect(channel.sent).toEqual([]);
+		pc.close(NOTES);
+		expect(channel.sent.filter((m) => m.k === 'close')).toEqual([{ by: 'main', k: 'close', path: NOTES }]);
+		expect(channel.sent.filter((m) => m.k === 'open' || m.k === 'active')).toEqual([]);
+		await until(() => phone.tabs().length === 0);
+	});
+
+	it('the crossed close is recorded sent — a stale answerer neither opens the tab back nor drags the active tab to it', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const pcPresence = fakePresence(2);
+		pcPresence.count = 1; // the gate is shut; the phone is live
+		attachWorkbenchSync(pc, channel.deps, 'main', { presence: pcPresence });
+		await pc.editors.openFile(NOTES);
+		await pc.editors.openFile(README);
+		channel.sent.length = 0;
+		pc.close(NOTES);
+		expect(channel.sent.some((m) => m.k === 'close')).toBe(true);
+		expect(deferredRecord().files).toContain('c:/repo/notes.txt');
+		// The PC rejoins and an answerer that never applied the close (its delivery was
+		// delayed past the resume window) offers NOTES again — as the snapshot's union AND
+		// as the tab to follow. The sent close's record refuses both; README still lands.
+		pcPresence.count = 2;
+		pcPresence.became();
+		await until(() => channel.sent.some((m) => m.k === 'stateRequest'));
+		channel.deps.send({ by: 'remote/1', k: 'stateSnapshot', to: 'main', files: [NOTES, README], tabs: [], extTabs: [], active: { kind: 'file', path: NOTES } });
+		await until(() => pc.tabs().includes(README));
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(pc.tabs()).toEqual([README]);
+	});
+
+	it('a close recorded while truly alone crosses the moment any other frontend is live — active or not', async () => {
+		const channel = bus();
+		const phone = fakeWorkbench();
+		const presence = fakePresence(1);
+		presence.live = false;
+		attachWorkbenchSync(phone, channel.deps, 'remote/1', { presence });
+		await phone.editors.openFile(NOTES);
+		channel.sent.length = 0;
+		phone.close(NOTES);
+		// Alone on the window: nothing crosses (K11's promise), the close is recorded.
+		expect(channel.sent).toEqual([]);
+		expect(deferredRecord().files.length).toBe(1);
+		// The roster gains a live-but-sleeping PC: the recorded close crosses now.
+		presence.live = true;
+		presence.roster();
+		await until(() => channel.sent.some((m) => m.k === 'close' && m.path === NOTES));
+		expect(channel.sent.filter((m) => m.k === 'close')).toEqual([{ by: 'remote/1', k: 'close', path: NOTES }]);
+		expect(deferredRecord().files.length).toBe(1); // now marked sent, never re-crossed
 	});
 });
 

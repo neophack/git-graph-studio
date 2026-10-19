@@ -4,4 +4,5 @@
 
 export * from './canLogView';
 export * from './canRawView';
+export * from './canLayout';
 export * from './canChart';

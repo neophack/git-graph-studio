@@ -1064,9 +1064,21 @@ page shows the integration's state (`claude_mcp_status`).
 
 CANoe's Statistics window and graphics window in one view: `.blf` / `.asc` traces parsed in
 the backend, rendered asynchronously — per-channel counts, bus load, per-identifier cycle
-times, frame-loss blame, raw frame browsing and SVG charts.
+times, frame-loss blame, raw frame browsing and SVG charts. Both pages carry a two-row
+compact toolbar at every width — the command row over the filter row, never a third
+(2026-10-19, the owner's direction: 顶部不超过两行按钮，排布紧凑，适配不同屏幕尺寸): wide the
+desktop dashboard and its sashes with every action visible, under 600 CSS
+px of the view's own width the narrow form — the toolbar's two rows at phone heights, flat
+inset cards, two-line rows, the charts at the compact viewBox, a coarse pointer's taller rows,
+a finger's drag with momentum, and the bottom action sheets the ⋯ overflow and the messages
+sort open.
 
-- Frontend: `src/features/can/canLogView.ts`, `src/features/can/canRawView.ts`, `src/features/can/canChart.ts`
+- Frontend: `src/features/can/canLogView.ts`, `src/features/can/canRawView.ts`,
+  `src/features/can/canChart.ts` (the SVG charts; `vbw` draws the narrow form's denser
+  board, the measure cursor answers a finger's press), `src/features/can/canLayout.ts`
+  (the responsive layer: the width watch that spells `data-compact`/`data-pointer` on the
+  root, the coarse-pointer fact, `attachTouchScroll` — a finger's drag feeding the row
+  model with momentum — and `CanActionSheet`, the bottom sheet)
 - Backend: `src-tauri/crates/ggs-can/src/lib.rs` (parsing, statistics, blf↔asc conversion)
 
 ### 14. Performance Lab

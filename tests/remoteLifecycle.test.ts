@@ -93,9 +93,13 @@ describe('Presence', () => {
 		remote.start();
 		channel.deps.send({ by: 'main', k: 'presence', active: false });
 		expect(remote.syncAllowed()).toBe(false);
+		// The PC is live all the same (2026-10-19): its socket is up, so the closes cross
+		// to it even while its hidden page counts as inactive.
+		expect(remote.othersLive()).toBe(true);
+		remote.stop();
 	});
 
-	it('a frontend whose last sign of life outlived the TTL stops counting', () => {
+	it('a frontend whose last sign of life outlived the TTL stops counting — and stops being live', () => {
 		vi.useFakeTimers();
 		const channel = bus();
 		const remote = new Presence('remote/1', channel.deps);
@@ -105,6 +109,7 @@ describe('Presence', () => {
 		// Past the TTL and past a sweep: the entry is gone.
 		vi.advanceTimersByTime(PRESENCE_TTL_MS + PRESENCE_EVERY_MS);
 		expect(remote.syncAllowed()).toBe(false);
+		expect(remote.othersLive()).toBe(false);
 		remote.stop();
 	});
 

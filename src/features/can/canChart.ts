@@ -2,7 +2,10 @@
 // the DOM: a time-series line for the interval/jitter plot (with a dashed reference line
 // at the configured cycle and red markers where the frame-loss check blames a gap) and a
 // bar chart for the cycle-time distribution. Everything scales through one viewBox, so the
-// charts follow the panel width without a redraw.
+// charts follow the panel width without a redraw — and the builders take a narrower
+// viewBox (`vbw`, 400 on the phone form) so the same CSS width renders the plot at twice
+// the density: strokes, dots and the 10-unit tick labels all stay finger-legible where
+// the 800-unit board would shrink them to half-size.
 //
 // Every chart carries an ECharts-style indicator: moving the mouse over the plot snaps
 // the crosshair to the nearest sample (it steps from sample to sample, ECharts'
@@ -11,7 +14,9 @@
 // value, the range and count a histogram bin tallies. Bar charts light the hovered
 // column and label its bin on the axis. Bucket timelines (the load and rate profiles)
 // resolve the bucket that COVERS the snap rather than merely the nearest sample, so the
-// number the tooltip names is the window the indicator sits in.
+// number the tooltip names is the window the indicator sits in. A finger reads the same
+// values: the press shows the readout under it, the drag walks it, and the lift lingers
+// a moment before it fades — there is no hover to carry it on a phone.
 //
 // The dashboard's bus-level charts are multi-series — one line per channel — so the file
 // also carries the palette mapping (`seriesStyle`) and the stacked category bars the
@@ -27,6 +32,10 @@ const PAD = { left: 56, right: 12, top: 12, bottom: 24 };
 /** The viewBox width every chart draws at — the hover layer maps the pointer's CSS pixels
  *  back through the rendered width into these units. */
 const VBW = 800;
+
+/** The narrow form's viewBox: the phone's ~400 CSS px render the plot at full density
+ *  instead of half-size. */
+export const CAN_CHART_VBW_COMPACT = 400;
 
 /** The chart palette: one class per series, mapped onto the theme's chart colours in
  *  `shell.css` (six of them — a bus with more channels cycles, which the legend still
@@ -175,21 +184,26 @@ function axisPointerLabel(cx: number, text: string, plot: { left: number; right:
  *  drawn into the SVG, the tooltip floated as HTML (text renders crisp there and never
  *  scales with the viewBox) — and leaving the chart, or hovering its margins, clears it.
  *  The tooltip anchors to the readout's own x (`anchorX`, ECharts' snap) a hand's width
- *  right, flipping to its left before it would overflow the chart's right edge. */
-function installHover(svg: SVGElement, wrap: HTMLElement, plot: { left: number; right: number; top: number; bottom: number }, resolve: (vx: number) => HoverState | null): void {
+ *  right, flipping to its left before it would overflow the chart's right edge.
+ *
+ *  A finger reads the same values: `pointerdown` over the plot shows the readout under
+ *  the finger, the drag follows it, and the lift keeps it readable for a moment before it
+ *  fades — a touch has no hover to carry it, so the chart answers the press itself. */
+function installHover(svg: SVGElement, wrap: HTMLElement, plot: { left: number; right: number; top: number; bottom: number }, vbw: number, resolve: (vx: number) => HoverState | null): void {
 	let overlay: SVGElement[] = [];
 	let tip: HTMLElement | null = null;
+	let hideTimer = 0;
 	const hide = (): void => {
 		for (const node of overlay) node.remove();
 		overlay = [];
 		tip?.remove();
 		tip = null;
 	};
-	svg.addEventListener('mousemove', (event: MouseEvent) => {
+	const show = (clientX: number, clientY: number): void => {
 		hide();
 		const rect = svg.getBoundingClientRect();
 		if (rect.width <= 0) return;
-		const vx = ((event.clientX - rect.left) / rect.width) * VBW;
+		const vx = ((clientX - rect.left) / rect.width) * vbw;
 		if (vx < plot.left || vx > plot.right) return;
 		const state = resolve(vx);
 		if (!state) return;
@@ -217,21 +231,44 @@ function installHover(svg: SVGElement, wrap: HTMLElement, plot: { left: number; 
 			...(state.note ? [el('div', 'can-chart-tip-note', [state.note])] : [])
 		]);
 		const wrapRect = wrap.getBoundingClientRect();
-		const pointerX = event.clientX - wrapRect.left;
-		const anchorCss = state.anchorX !== undefined ? (state.anchorX / VBW) * rect.width : pointerX;
+		const pointerX = clientX - wrapRect.left;
+		const anchorCss = state.anchorX !== undefined ? (state.anchorX / vbw) * rect.width : pointerX;
 		const w = tip.offsetWidth;
 		tip.style.left = `${Math.max(0, anchorCss + 14 + w + 8 > wrapRect.width ? anchorCss - w - 14 : anchorCss + 14)}px`;
-		tip.style.top = `${Math.max(0, Math.min(event.clientY - wrapRect.top - 12, wrapRect.height - tip.offsetHeight - 4))}px`;
+		tip.style.top = `${Math.max(0, Math.min(clientY - wrapRect.top - 12, wrapRect.height - tip.offsetHeight - 4))}px`;
 		wrap.append(tip);
-	});
+	};
+	svg.addEventListener('mousemove', (event: MouseEvent) => show(event.clientX, event.clientY));
 	svg.addEventListener('mouseleave', hide);
+	// The touch readout: press to read, drag to walk the samples, lift to linger briefly.
+	svg.addEventListener('pointerdown', (event: PointerEvent) => {
+		if (event.pointerType === 'mouse') return;
+		window.clearTimeout(hideTimer);
+		show(event.clientX, event.clientY);
+	});
+	svg.addEventListener('pointermove', (event: PointerEvent) => {
+		if (event.pointerType === 'mouse' || event.buttons === 0) return;
+		window.clearTimeout(hideTimer);
+		show(event.clientX, event.clientY);
+	});
+	const linger = (event: PointerEvent): void => {
+		if (event.pointerType === 'mouse') return;
+		window.clearTimeout(hideTimer);
+		hideTimer = window.setTimeout(hide, 1600);
+	};
+	svg.addEventListener('pointerup', linger);
+	svg.addEventListener('pointercancel', (event: PointerEvent) => {
+		if (event.pointerType === 'mouse') return;
+		window.clearTimeout(hideTimer);
+		hide();
+	});
 }
 
 /** A time-series of cycle intervals: the line the message actually ran at, a dashed line
  *  at `ref` (the median cycle, i.e. what it is configured at) and a red marker on every
  *  point the frame-loss check blames. `xUnit`/`yUnit` label the axes (ms for the cycles). */
-export function cycleSeriesChart(points: SeriesPoint[], ref: number, xUnit: string, yUnit: string): HTMLElement {
-	const width = VBW;
+export function cycleSeriesChart(points: SeriesPoint[], ref: number, xUnit: string, yUnit: string, vbw = VBW): HTMLElement {
+	const width = vbw;
 	const height = 240;
 	const yMax = niceCeil(Math.max(1e-9, ...points.map((p) => p.y), ref) * 1.1);
 	const xMax = Math.max(1e-9, ...points.map((p) => p.x));
@@ -259,7 +296,7 @@ export function cycleSeriesChart(points: SeriesPoint[], ref: number, xUnit: stri
 	// ECharts-style: the indicator snaps to the nearest interval sample — the crosshair,
 	// the axis label, the dot and the tooltip's head all read that one sample, its cycle,
 	// and the frame-loss blame when it carries one.
-	installHover(svg, wrap, { left: x0, right: x1, top: y1, bottom: y0 }, (vx) => {
+	installHover(svg, wrap, { left: x0, right: x1, top: y1, bottom: y0 }, vbw, (vx) => {
 		const hit = sampleAt(points, ((vx - x0) / Math.max(1e-9, x1 - x0)) * xMax);
 		if (!hit) return null;
 		const head = `${fmtNum(hit.x)} ${xUnit}`;
@@ -278,8 +315,8 @@ export function cycleSeriesChart(points: SeriesPoint[], ref: number, xUnit: stri
 
 /** The cycle-time distribution: one bar per bin, the median marked by a dashed line.
  *  `xUnit` labels the cycle axis; the y axis is a frame count and carries no unit. */
-export function histogramChart(bins: { fromS: number; toS: number; count: number }[], median: number, xUnit: string): HTMLElement {
-	const width = VBW;
+export function histogramChart(bins: { fromS: number; toS: number; count: number }[], median: number, xUnit: string, vbw = VBW): HTMLElement {
+	const width = vbw;
 	const height = 200;
 	const xMax = Math.max(1e-9, ...bins.map((b) => b.toS));
 	const yMax = niceCeil(Math.max(1, ...bins.map((b) => b.count)) * 1.1);
@@ -301,7 +338,7 @@ export function histogramChart(bins: { fromS: number; toS: number; count: number
 	const wrap = el('div', 'can-chart-wrap', [svg]);
 	// The cursor lights the column it is over — zero-count bins included, their range
 	// still reads back with a count of 0 — and the axis label names the bin on the axis.
-	installHover(svg, wrap, { left: x0, right: x1, top: y1, bottom: y0 }, (vx) => {
+	installHover(svg, wrap, { left: x0, right: x1, top: y1, bottom: y0 }, vbw, (vx) => {
 		const i = Math.floor((vx - x0) / bw);
 		if (i < 0 || i >= bins.length) return null;
 		const b = bins[i]!;
@@ -336,8 +373,9 @@ function legend(series: ChartSeries[]): HTMLElement {
  *  (`ref`, the median cycle on the analysis chart) and a legend of chips. `fmtX` labels
  *  the x ticks (the timelines pass `formatAxisSeconds`); `height` defaults to the compact
  *  pane height. */
-export function multiLineChart(series: ChartSeries[], opts: { xUnit: string; yUnit: string; height?: number; ref?: number; fmtX?: (v: number) => string }): HTMLElement {
-	const width = VBW;
+export function multiLineChart(series: ChartSeries[], opts: { xUnit: string; yUnit: string; height?: number; ref?: number; fmtX?: (v: number) => string; vbw?: number }): HTMLElement {
+	const vbw = opts.vbw ?? VBW;
+	const width = vbw;
 	const height = opts.height ?? 220;
 	const ref = opts.ref ?? 0;
 	const yMax = niceCeil(Math.max(1e-9, ...series.flatMap((s) => s.points.map((p) => p.y)), ref) * 1.1);
@@ -365,7 +403,7 @@ export function multiLineChart(series: ChartSeries[], opts: { xUnit: string; yUn
 	// channel's dot sits on its covering bucket — clamped into the bucket's window when
 	// the channel is sparser than the snap — or on its own nearest sample.
 	const snaps = series.flatMap((s) => s.points.map((p) => p.x));
-	installHover(svg, wrap, { left: x0, right: x1, top: y1, bottom: y0 }, (vx) => {
+	installHover(svg, wrap, { left: x0, right: x1, top: y1, bottom: y0 }, vbw, (vx) => {
 		if (!snaps.length) return null;
 		const cursorX = ((vx - x0) / Math.max(1e-9, x1 - x0)) * xMax;
 		const snapX = snaps.reduce((best, x) => (Math.abs(x - cursorX) < Math.abs(best - cursorX) ? x : best), snaps[0]!);
@@ -388,8 +426,9 @@ export function multiLineChart(series: ChartSeries[], opts: { xUnit: string; yUn
 /** A stacked category chart — the payload-length distribution: one bar per label (the
  *  length bins), stacked one segment per series (the channels) in their palette colours.
  *  The y axis is a frame count and carries no unit. */
-export function stackedBars(labels: string[], series: ChartSeries[], opts: { height?: number } = {}): HTMLElement {
-	const width = VBW;
+export function stackedBars(labels: string[], series: ChartSeries[], opts: { height?: number; vbw?: number } = {}): HTMLElement {
+	const vbw = opts.vbw ?? VBW;
+	const width = vbw;
 	const height = opts.height ?? 180;
 	const xUnit = 'B';
 	const totals = labels.map((_, i) => series.reduce((a, s) => a + (s.points[i]?.y ?? 0), 0));
@@ -417,13 +456,13 @@ export function stackedBars(labels: string[], series: ChartSeries[], opts: { hei
 			stacked += h;
 		}
 		// One x tick every k labels, where k keeps them from colliding at the viewBox width.
-		const every = Math.max(1, Math.ceil(labels.length / 16));
+		const every = Math.max(1, Math.ceil(labels.length / (vbw >= 600 ? 16 : 8)));
 		if (i % every === 0) svg.append(svgText(x0 + i * bw + bw / 2, y0 + 16, label, 'middle', 'can-chart-tick'));
 	}
 	const wrap = el('div', 'can-chart-wrap', [legend(series), svg]);
 	// The cursor lights the length bin it is over, the axis label names the bin on the
 	// axis, and the tooltip reads each channel's share of it.
-	installHover(svg, wrap, { left: x0, right: x1, top: y1, bottom: y0 }, (vx) => {
+	installHover(svg, wrap, { left: x0, right: x1, top: y1, bottom: y0 }, vbw, (vx) => {
 		const i = Math.floor((vx - x0) / bw);
 		if (i < 0 || i >= labels.length) return null;
 		const head = `${labels[i]} ${xUnit}`;

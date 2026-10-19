@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { EditorGroup } from '../src/features/editor';
 import { isCanLog } from '../src/platform/fileIcons';
-import { busLoad, formatCycle, idHex, parseIdFilter, progressText, type CanIntervals, type CanLogStats, type CanProgress } from '../src/features/can';
+import { busLoad, CanLogView, formatCycle, idHex, parseIdFilter, progressText, setCanPointerOverride, type CanIntervals, type CanLogStats, type CanProgress } from '../src/features/can';
 import { CanRawView, type CanFrameLine } from '../src/features/can';
 import { backend, Channel, dialog } from './tauriMock';
 import { click, texts } from './helpers';
@@ -378,6 +378,45 @@ describe('CAN log views', () => {
 		await waitForReady(() => view.scroll.rowCount === FILTER_LINES.length);
 		expect(backend.callsTo('can_log_frames').at(-1)!.filter).toBeNull();
 		expect(view.root.querySelector('.can-raw-empty')!.hidden).toBe(true);
+		view.dispose();
+	});
+
+	it('the quick-filter chips drive the selects they mirror, and the clear chip resets everything', async () => {
+		mockFilteredDoc();
+		const view = new CanRawView('/tmp/chips.asc');
+		document.body.append(view.root);
+		view.scroll.setViewport(400);
+		await waitForReady(() => view.scroll.rowCount === FILTER_LINES.length);
+		const chips = Array.from(view.root.querySelectorAll<HTMLButtonElement>('.can-quick .can-chip:not(.can-chip-clear)'));
+		expect(chips.map((chip) => chip.textContent)).toEqual(['Tx', 'Rx', 'Err', 'FD', 'Rmt']);
+		const clear = view.root.querySelector<HTMLButtonElement>('.can-chip-clear')!;
+		// Nothing filtered yet: the clear stands down.
+		expect(clear.disabled).toBe(true);
+
+		// The FD chip: the FD frame, the chip checked, the type select following it.
+		const kind = view.root.querySelector<HTMLSelectElement>('.can-type')!;
+		chips[3]!.click();
+		await waitForReady(() => view.scroll.rowCount === 1);
+		expect(texts('.can-raw-rows .can-raw-type')).toEqual(['CAN FD BRS']);
+		expect(kind.value).toBe('canfd');
+		expect(chips[3]!.classList.contains('can-chip-on')).toBe(true);
+		expect(clear.disabled).toBe(false);
+
+		// A chip already on turns itself off; the mark follows a select set by hand too.
+		chips[3]!.click();
+		await waitForReady(() => view.scroll.rowCount === FILTER_LINES.length);
+		expect(kind.value).toBe('all');
+		kind.value = 'error';
+		kind.dispatchEvent(new Event('change'));
+		expect(chips[2]!.classList.contains('can-chip-on')).toBe(true);
+
+		// The clear chip: every control home on its default, no filter crosses the bridge.
+		clear.click();
+		await waitForReady(() => view.scroll.rowCount === FILTER_LINES.length);
+		expect(backend.callsTo('can_log_count').at(-1)!.filter).toBeNull();
+		expect(chips.every((chip) => !chip.classList.contains('can-chip-on'))).toBe(true);
+		expect(view.root.querySelector<HTMLInputElement>('.can-filter')!.value).toBe('');
+		expect(clear.disabled).toBe(true);
 		view.dispose();
 	});
 
@@ -1080,5 +1119,125 @@ describe('CAN log views', () => {
 		expect(tickTexts(histogram!)).toContain('500');
 		expect(Array.from(histogram!.querySelectorAll('text')).every((t) => t.getAttribute('x') !== '4')).toBe(true);
 		expect(tickTexts(histogram!).some((t) => t !== null && t.endsWith('ms'))).toBe(true);
+	});
+});
+
+describe('CAN responsive form (the phone / narrow layout, canLayout.ts)', () => {
+	/** Forces the view's own width and settles the form watch — a scripted layout has no
+	 *  resize event to ride. */
+	const setWidth = (view: { root: HTMLElement; form: { check(): void } }, width: number): void => {
+		view.root.getBoundingClientRect = () => ({ left: 0, top: 0, right: width, bottom: 700, width, height: 700, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+		view.form.check();
+	};
+
+	/** A touch pointer event (imageViewer's helper shape, the CAN suite's own copy). */
+	const finger = (target: Element, type: string, x: number, y: number): void => {
+		target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: 7, pointerType: 'touch', isPrimary: true }));
+	};
+
+	it('the statistics dashboard takes the narrow form: meta-wrapped rows, compact charts, the sort sheet', async () => {
+		mockStats();
+		const view = new CanLogView('C:\logs\phone.blf');
+		document.body.append(view.root);
+		try {
+			await waitForReady(() => view.root.querySelector('.can-summary') !== null);
+			// Wide first (jsdom lays nothing out): the board draws at the wide viewBox.
+			expect(view.root.hasAttribute('data-compact')).toBe(false);
+			expect(view.root.querySelector('.can-section-load svg.can-chart')!.getAttribute('viewBox')).toBe('0 0 800 200');
+			setWidth(view, 390);
+			expect(view.root.hasAttribute('data-compact')).toBe(true);
+			// The channel and identifier rows carry their counts on one wrapped meta line —
+			// the two-line cards the narrow tables draw.
+			expect(view.root.querySelectorAll('.can-ch-grid .can-ch-meta .can-num').length).toBe(10);
+			expect(view.root.querySelectorAll('.can-msg-grid .can-msg-meta span').length).toBe(21);
+			// The charts redraw at the compact viewBox: a phone's width keeps them legible.
+			expect(view.root.querySelector('.can-section-load svg.can-chart')!.getAttribute('viewBox')).toBe('0 0 400 200');
+			// The sort the wide column headers own rides the Messages head's sheet: pick
+			// Identifier (descending: channel, then id — 0x200 first), then the direction row
+			// flips it ascending.
+			const idsOf = (): string[] => Array.from(view.root.querySelectorAll('.can-messages .can-table-row')).map((r) => r.querySelector('.can-left')!.textContent!);
+			expect(idsOf()).toEqual(['0x100', '0x18FF0001 x', '0x200']);
+			click(view.root.querySelector('.can-sort-menu')!);
+			expect(view.root.querySelector<HTMLElement>('.can-sheet-scrim')!.hidden).toBe(false);
+			click(Array.from(view.root.querySelectorAll('.can-sheet .can-sheet-action')).find((r) => r.textContent!.includes('Identifier'))!);
+			expect(idsOf()).toEqual(['0x200', '0x18FF0001 x', '0x100']);
+			click(view.root.querySelector('.can-sort-menu')!);
+			click(Array.from(view.root.querySelectorAll('.can-sheet .can-sheet-action')).find((r) => r.textContent!.includes('Descending'))!);
+			expect(idsOf()).toEqual(['0x100', '0x18FF0001 x', '0x200']);
+			// Back wide: the sort menu stands down and the charts return to the wide board.
+			setWidth(view, 1200);
+			expect(view.root.hasAttribute('data-compact')).toBe(false);
+			expect(view.root.querySelector('.can-section-load svg.can-chart')!.getAttribute('viewBox')).toBe('0 0 800 200');
+		} finally {
+			// The vm pool shares one jsdom per worker: nothing may outlive the test.
+			view.root.remove();
+		}
+	});
+
+	it('the raw trace takes the narrow form: the ⋯ sheet adopts the filters, the rows grow, a drag scrolls', async () => {
+		setCanPointerOverride('coarse');
+		try {
+			let analyzed = 0;
+			mockFilteredDoc();
+			const view = new CanRawView('/tmp/phone.asc', { onAnalyze: () => analyzed++ });
+			document.body.append(view.root);
+			view.scroll.setViewport(400);
+			await waitForReady(() => view.scroll.rowCount === FILTER_LINES.length);
+			setWidth(view, 390);
+			expect(view.root.hasAttribute('data-compact')).toBe(true);
+			expect(view.root.getAttribute('data-pointer')).toBe('coarse');
+			// A finger's rows: the model and the CSS share the taller height.
+			expect(view.scroll.rowHeight).toBe(30);
+			// The viewport owns its gestures — the phone's page pager steps aside.
+			expect(view.root.querySelector('.can-raw-viewport')!.hasAttribute('data-owns-gestures')).toBe(true);
+			// ⋯ opens the sheet: the direction and type selects move in as themselves (the
+			// very node, its state and listeners intact) and the toolbar stops carrying them.
+			const dirInToolbar = view.root.querySelector<HTMLElement>('.can-toolbar .can-dir')!;
+			expect(dirInToolbar).not.toBeNull();
+			click(view.root.querySelector('.can-more')!);
+			const sheet = view.root.querySelector<HTMLElement>('.can-sheet-scrim')!;
+			expect(sheet.hidden).toBe(false);
+			expect(sheet.querySelector('select.can-dir')).toBe(dirInToolbar);
+			expect(view.root.querySelector('.can-toolbar .can-dir')).toBeNull();
+			// The Statistics action drives the toolbar's own button.
+			click(Array.from(sheet.querySelectorAll('.can-sheet-action')).find((r) => r.textContent!.includes('Statistics'))!);
+			expect(analyzed).toBe(1);
+			// A finger's drag over the viewport scrolls the frames: 60 px up at 30 px rows.
+			const scroller = view.root.querySelector('.can-raw-scroll')!;
+			finger(scroller, 'pointerdown', 100, 300);
+			finger(scroller, 'pointermove', 100, 240);
+			finger(scroller, 'pointerup', 100, 240);
+			expect(view.scroll.top).toBeGreaterThan(0);
+			// Back wide: the controls come home and the rows return to the precise height.
+			setWidth(view, 1200);
+			expect(view.root.hasAttribute('data-compact')).toBe(false);
+			expect(view.scroll.rowHeight).toBe(20);
+			expect(view.root.querySelector('.can-toolbar .can-dir')).not.toBeNull();
+			view.dispose();
+		} finally {
+			setCanPointerOverride(null);
+		}
+	});
+
+	it('a finger reads a chart: the press shows the values under it, the lift lingers', async () => {
+		mockStats();
+		const view = new CanLogView('C:\logs\touchchart.blf');
+		document.body.append(view.root);
+		try {
+			await waitForReady(() => view.root.querySelector('.can-section-load svg.can-chart') !== null);
+			setWidth(view, 390);
+			const svg = view.root.querySelector('.can-section-load svg.can-chart')! as SVGElement;
+			// The compact board maps a pointer through its own 400-unit rect.
+			svg.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 200, right: 400, bottom: 200 }) as DOMRect;
+			finger(svg, 'pointerdown', 200, 100);
+			expect(view.root.querySelector('.can-section-load .can-chart-tip')).not.toBeNull();
+			expect(view.root.querySelector('.can-section-load .can-chart-cross')).not.toBeNull();
+			expect(view.root.querySelector('.can-section-load .can-chart-axislabel-text')).not.toBeNull();
+			// The lift keeps the readout a moment for a touch has no hover to carry it.
+			finger(svg, 'pointerup', 200, 100);
+			expect(view.root.querySelector('.can-section-load .can-chart-tip')).not.toBeNull();
+		} finally {
+			view.root.remove();
+		}
 	});
 });

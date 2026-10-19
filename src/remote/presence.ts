@@ -122,6 +122,17 @@ export class Presence {
 		return false;
 	}
 
+	/** Any OTHER frontend is live — a roster entry within its TTL, whether active or not:
+	 *  its socket is up (or was, within the heartbeat's reach), and the daemon holds what
+	 *  such a page cannot take now and replays it on return. Closes cross on this word
+	 *  (2026-10-19: the PC's closes must not wait for a sleeping phone's wake); opens and
+	 *  active switches stay gated on `syncAllowed` — they disturb, a close converges. */
+	othersLive(): boolean {
+		const now = Date.now();
+		for (const entry of this.roster.values()) if (now - entry.at <= PRESENCE_TTL_MS) return true;
+		return false;
+	}
+
 	/** The active frontends this side sees, itself included. */
 	activeCount(): number {
 		let count = this.selfActive ? 1 : 0;

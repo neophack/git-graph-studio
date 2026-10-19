@@ -17,7 +17,11 @@
 // window closed with one remote working, sends nothing at all), and a frontend becoming
 // active first CATCHES UP (K14): it asks for a snapshot of the open tabs, merges by union
 // (background opens, never a close, unsaved buffers survive) and takes the recently active
-// side's tab as its own. What is NOT synced anymore (K7): sidebar view switches and side
+// side's tab as its own. One relaxation (2026-10-19): a CLOSE crosses whenever any other
+// frontend is live at all — active or not, the sleeping phone's socket is up and the daemon
+// replays what it holds — because a close converges where an open disturbs, and a phone
+// resting screen-off must not hold the PC's closed tab hostage until its user wakes it.
+// What is NOT synced anymore (K7): sidebar view switches and side
 // bar hides — each frontend's layout is its own (G8, the `view` / `sidebar` messages are
 // gone).
 //
@@ -108,6 +112,11 @@ export interface SyncPresence {
 	/** Any OTHER frontend is active right now — the catch-up's precondition (§7.0.3: no
 	 *  other active frontend, skip). */
 	othersActive(): boolean;
+	/** Any OTHER frontend is live right now — seen within the heartbeat's reach, whether
+	 *  active or not (its socket is up; the daemon holds what a sleeping page cannot take
+	 *  now and replays it on return). Closes cross on this word; optional: a presence
+	 *  without it keeps every intent behind the active gate. */
+	othersLive?(): boolean;
 	/** This frontend is the one to answer `requester`'s state request (§7.0.3). */
 	isDesignatedResponder(requester: string): boolean;
 	/** This frontend just became active — the catch-up's trigger. */
@@ -410,6 +419,16 @@ export function attachWorkbenchSync(
 	let detachListener: (() => void) | null = null;
 
 	const canSend = (): boolean => live && !quiet && (presence ? presence.syncAllowed() : true);
+	/** Whether a CLOSE may cross right now. Closes are convergence, not disturbance: they
+	 *  cross whenever any other frontend is live at all — a phone resting screen-off is
+	 *  exactly when a PC close must not wait for its wake (2026-10-19:
+	 *  pc端关闭页面后，remote页面要等很久才关闭; the daemon holds what the sleeping page
+	 *  cannot take now and replays it on return, and a hidden page applies socket
+	 *  deliveries in real time) — while opens and switches wait for the active gate (K11)
+	 *  and the catch-up's union repairs those. A frontend alone on the window still sends
+	 *  nothing. */
+	const canSendClose = (): boolean =>
+		live && !quiet && (presence ? presence.syncAllowed() || (presence.othersLive?.() ?? false) : true);
 	const announce = (message: WorkbenchSyncMessage): void => {
 		if (canSend()) deps.send(message);
 	};
@@ -419,7 +438,7 @@ export function attachWorkbenchSync(
 	 *  from another frontend proved it open. Sent entries stay recorded (the merge guard
 	 *  reads them) but never re-cross: the other side's genuine re-open must win. */
 	const tryFlushDeferred = (): void => {
-		if (!canSend()) return;
+		if (!canSendClose()) return;
 		let sent = false;
 		for (const [key, entry] of Object.entries(deferred.files)) {
 			if (entry.sent) continue;
@@ -674,17 +693,24 @@ export function attachWorkbenchSync(
 			for (const [id, input] of synced) if (!announcedTabs.has(id)) deps.send({ by, k: 'openTab', input });
 			for (const id of tabCloses) deps.send({ by, k: 'closeTab', id });
 		} else if (live && !quiet) {
-			// The gate is shut (K11): nothing crosses, but the closes are this user's intent —
-			// record them for the moment it opens. A local re-open meanwhile clears its entry
-			// below (the newer intent reversed it).
+			// The gate is shut (K11): opens and switches stay home — the next catch-up's
+			// union repairs them. The closes cross whenever any other frontend is live at
+			// all (canSendClose): a phone resting screen-off must not hold the PC's closed
+			// tab hostage until its user wakes it. A crossing close is still recorded —
+			// marked SENT, so it never re-crosses, while the record keeps guarding the
+			// merges (a later catch-up neither opens the tab back nor has it pushed around
+			// nor follows it as the active tab, E7); the user's own re-open clears it.
+			const crossing = presence?.othersLive?.() ?? false;
 			let recorded = false;
 			const at = Date.now();
 			for (const [key, spelling] of fileCloses) {
-				deferred.files[key] = { spelling, at, sent: false };
+				if (crossing) deps.send({ by, k: 'close', path: spelling });
+				deferred.files[key] = { spelling, at, sent: crossing };
 				recorded = true;
 			}
 			for (const id of tabCloses) {
-				deferred.tabs[id] = { spelling: id, at, sent: false };
+				if (crossing) deps.send({ by, k: 'closeTab', id });
+				deferred.tabs[id] = { spelling: id, at, sent: crossing };
 				recorded = true;
 			}
 			if (recorded) saveDeferredCloses(deferred);
