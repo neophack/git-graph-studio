@@ -27,13 +27,18 @@ const CLAIM_PX = 12;
 const COMMIT_PX = 64;
 /** A fast fling commits without the distance (px/ms toward the swipe direction). */
 const FLING_PX_PER_MS = 0.55;
+/** The velocity is read over this trailing window: a finger that rested before lifting
+ *  carries no fling, whatever its last move sample said (the recognizers' own rule). */
+const VELOCITY_WINDOW_MS = 90;
 /** The rubber band's far end where the ring has no neighbour. */
 const BAND_PX = 96;
 /** The commit's two phases (ms); reduced motion collapses both to a jump. */
 const EXIT_MS = 130;
 const ENTER_MS = 190;
-/** A click within this window after a claimed drag is the drag's own, not a tap. */
-const CLICK_SWALLOW_MS = 600;
+/** A click within this window after a claimed drag is the drag's own, not a tap — the
+ *  commit's two phases run ~320 ms, a beat past that, and nothing more: a tap on the
+ *  destination page is the user's, not the swipe's echo. */
+const CLICK_SWALLOW_MS = 400;
 
 function reducedMotion(): boolean {
 	return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -155,7 +160,9 @@ export function installSwipeNav(workbench: HTMLElement): void {
 		// Claimed: the drag is the pager's. The events stop here so a row underneath never
 		// also reveals its actions (the capture pass runs before the row's own listeners).
 		event.stopPropagation();
-		if (e.timeStamp > lastT) velocity = (e.clientX - lastX) / (e.timeStamp - lastT);
+		if (e.timeStamp > lastT)
+			// The trailing speed, smoothed — one noisy sample must not fling the page.
+			velocity = velocity * 0.7 + ((e.clientX - lastX) / (e.timeStamp - lastT)) * 0.3;
 		lastX = e.clientX;
 		lastT = e.timeStamp;
 		const direction: 1 | -1 = dx < 0 ? 1 : -1;
@@ -168,7 +175,10 @@ export function installSwipeNav(workbench: HTMLElement): void {
 		setSwipe(0, 0, 0);
 		workbench.classList.add('ggs-swipe-anim');
 		window.setTimeout(() => {
-			if (!tracking) settle();
+			// A new gesture that is tracking but has not claimed (a tap) never touches the
+			// styles: the settle must run for it too, or the anim class and the inline
+			// transition outlive the animation until some claimed drag clears them.
+			if (!tracking || !claimed) settle();
 		}, ms);
 	};
 	const commit = (direction: 1 | -1): void => {
@@ -212,7 +222,9 @@ export function installSwipeNav(workbench: HTMLElement): void {
 		// The browser took the gesture over (a scroll it claimed): the page returns, never
 		// commits on a cancel. A fling commits by speed alone — the velocity's sign is the
 		// swipe's own (dx<0 ↔ direction 1), so the product against −direction is positive
-		// only while the finger still travels the way it started.
+		// only while the finger still travels the way it started, and a finger that rested
+		// before lifting carries no fling at all.
+		if (event.timeStamp - lastT > VELOCITY_WINDOW_MS) velocity = 0;
 		const committed = !cancelled && Boolean(neighbour(direction)) && (Math.abs(follow) >= Math.max(COMMIT_PX, width() * 0.14) || -velocity * direction > FLING_PX_PER_MS);
 		if (committed) commit(direction);
 		else snapBack();

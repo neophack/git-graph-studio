@@ -99,6 +99,29 @@ describe('Presence', () => {
 		remote.stop();
 	});
 
+	it('the sync channel’s operation messages never feed the table (the shared wire)', () => {
+		// Presence and the workbench sync share `studio://workbench-sync`, so every open,
+		// close and activation reaches this table too — and none of it carries an
+		// `active` boolean. Feeding one in would write `active: undefined` over the
+		// sender's entry, drop it from every count until its next heartbeat (the gate
+		// silently shutting on the phone's own opens) and re-arm the catch-up.
+		const channel = bus();
+		const remote = new Presence('remote/1', channel.deps);
+		remote.start();
+		channel.deps.send({ by: 'main', k: 'presence', active: true });
+		expect(remote.syncAllowed()).toBe(true);
+		const foreign = (message: Record<string, unknown>): void =>
+			channel.deps.send(message as unknown as PresenceMessage);
+		foreign({ by: 'main', k: 'open', path: '/repo/src/main.ts' });
+		foreign({ by: 'main', k: 'active', path: '/repo/src/main.ts' });
+		foreign({ by: 'main', k: 'close', path: '/repo/src/main.ts' });
+		foreign({ by: 'main', k: 'openTab', input: { kind: 'hex', path: '/repo/a.bin' } });
+		foreign({ by: 'main', k: 'stateSnapshot', to: 'remote/1', files: [], tabs: [], extTabs: [], active: null });
+		expect(remote.syncAllowed()).toBe(true);
+		expect(remote.othersActive()).toBe(true);
+		remote.stop();
+	});
+
 	it('a frontend whose last sign of life outlived the TTL stops counting — and stops being live', () => {
 		vi.useFakeTimers();
 		const channel = bus();

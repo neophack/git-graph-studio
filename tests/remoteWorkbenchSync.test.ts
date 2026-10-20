@@ -1161,9 +1161,52 @@ describe('closes cross to a live but inactive frontend', () => {
 		expect(channel.sent.filter((m) => m.k === 'close')).toEqual([{ by: 'remote/1', k: 'close', path: NOTES }]);
 		expect(deferredRecord().files.length).toBe(1); // now marked sent, never re-crossed
 	});
+
+	it('the other side’s open of a recorded close’s file wins — the close neither crosses ahead of it nor after', async () => {
+		const channel = bus();
+		const phone = fakeWorkbench();
+		const presence = fakePresence(1);
+		presence.live = false;
+		attachWorkbenchSync(phone, channel.deps, 'remote/1', { presence });
+		await phone.editors.openFile(NOTES);
+		channel.sent.length = 0;
+		phone.close(NOTES);
+		expect(deferredRecord().files.length).toBe(1); // alone: recorded, unsent
+		// The PC — still live on the roster — opens the very file: its user is acting on
+		// it right now. The recorded close must not cross ahead of the open (undoing
+		// their act on both sides), and the open landing retires the record: nothing
+		// re-crosses it later either.
+		presence.live = true;
+		channel.deps.send({ by: 'main', k: 'open', path: NOTES });
+		await until(() => phone.tabs().includes(NOTES));
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(channel.sent.filter((m) => m.k === 'close')).toEqual([]);
+		expect(deferredRecord().files.length).toBe(0);
+	});
 });
 
 describe('the catch-up (§7.0.3, K14)', () => {
+	it('a hidden frontend leaves the catch-up to its wake — the roster trigger is an active frontend’s', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const presence = fakePresence(1);
+		attachWorkbenchSync(pc, channel.deps, 'main', { presence, startImmediately: false }).start();
+		// Started alone: the ask is due the moment a peer appears (§7.0.3's starter rule).
+		expect(channel.sent.filter((m) => m.k === 'stateRequest')).toEqual([]);
+		// The page hides FIRST (the window minimized), then the peer arrives. Asking now
+		// would rebuild the workbench while nobody looks and spend the on-wake ask.
+		let active = false;
+		presence.isActive = (): boolean => active;
+		presence.count = 2;
+		presence.roster();
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(channel.sent.filter((m) => m.k === 'stateRequest')).toEqual([]);
+		// The user wakes the page: the on-wake catch-up runs.
+		active = true;
+		presence.became();
+		await until(() => channel.sent.some((m) => m.k === 'stateRequest'));
+	});
+
 	it('a frontend becoming active asks, the designated other answers, and the joiner follows it', async () => {
 		const channel = bus();
 		const pc = fakeWorkbench();

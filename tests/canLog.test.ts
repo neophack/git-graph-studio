@@ -1159,6 +1159,13 @@ describe('CAN responsive form (the phone / narrow layout, canLayout.ts)', () => 
 			expect(idsOf()).toEqual(['0x100', '0x18FF0001 x', '0x200']);
 			click(view.root.querySelector('.can-sort-menu')!);
 			expect(view.root.querySelector<HTMLElement>('.can-sheet-scrim')!.hidden).toBe(false);
+			// The open takes the focus into the sheet (the ⋯ button left it outside the
+			// scrim's Escape path): the first row holds it, and an Escape bubbling from it
+			// closes the sheet.
+			expect((document.activeElement as Element | null)?.classList.contains('can-sheet-action')).toBe(true);
+			document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+			expect(view.root.querySelector<HTMLElement>('.can-sheet-scrim')!.hidden).toBe(true);
+			click(view.root.querySelector('.can-sort-menu')!);
 			click(Array.from(view.root.querySelectorAll('.can-sheet .can-sheet-action')).find((r) => r.textContent!.includes('Identifier'))!);
 			expect(idsOf()).toEqual(['0x200', '0x18FF0001 x', '0x100']);
 			click(view.root.querySelector('.can-sort-menu')!);
@@ -1213,6 +1220,37 @@ describe('CAN responsive form (the phone / narrow layout, canLayout.ts)', () => 
 			expect(view.root.hasAttribute('data-compact')).toBe(false);
 			expect(view.scroll.rowHeight).toBe(20);
 			expect(view.root.querySelector('.can-toolbar .can-dir')).not.toBeNull();
+			view.dispose();
+		} finally {
+			setCanPointerOverride(null);
+		}
+	});
+
+	it('a second finger neither hijacks nor ends the first one’s scroll drag', async () => {
+		setCanPointerOverride('coarse');
+		try {
+			mockFilteredDoc();
+			const view = new CanRawView('/tmp/twofingers.asc', { onAnalyze: () => undefined });
+			document.body.append(view.root);
+			view.scroll.setViewport(400);
+			await waitForReady(() => view.scroll.rowCount === FILTER_LINES.length);
+			setWidth(view, 390);
+			const scroller = view.root.querySelector('.can-raw-scroll')!;
+			const drag = (type: string, id: number, y: number): void => {
+				scroller.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, clientX: 100, clientY: y, pointerId: id, pointerType: 'touch', isPrimary: id === 7 }));
+			};
+			const before = view.scroll.top;
+			drag('pointerdown', 7, 300);
+			drag('pointermove', 7, 280); // the first finger: 20 px
+			drag('pointerdown', 8, 320); // a second finger lands
+			// Its wild move must not re-anchor the drag (the old jump) — and the model only
+			// ever sees the first finger's steps: 20 px, then 60 px.
+			drag('pointermove', 8, 100);
+			drag('pointermove', 7, 220);
+			drag('pointerup', 7, 220);
+			drag('pointerup', 8, 100); // the second finger's lift ends nothing further
+			// The model's top is in rows: 80 px of the one finger's travel over its row height.
+			expect(view.scroll.top - before).toBeCloseTo(80 / view.scroll.rowHeight, 6);
 			view.dispose();
 		} finally {
 			setCanPointerOverride(null);

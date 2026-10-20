@@ -53,8 +53,9 @@ export function registerPresence(instance: Presence | null): void {
  *  120 s recovery ring, so the TTL tolerates one missed heartbeat without flapping. */
 export const PRESENCE_EVERY_MS = 60_000;
 export const PRESENCE_TTL_MS = 150_000;
-/** How often stale entries are swept — half the TTL, so an inactive frontend stops
- *  counting within ~75 s of its last sign of life. */
+/** How often stale entries are swept from the table — memory cleanup only: every gate
+ *  re-checks `at` against the TTL at read time, so an inactive frontend stops counting
+ *  at its TTL whatever this sweep's interval is. */
 const SWEEP_EVERY_MS = 30_000;
 
 /** The messages this module owns on the sync channel. The snapshot itself is
@@ -243,7 +244,13 @@ export class Presence {
 
 	private receive(message: PresenceMessage): void {
 		if (!message || message.by === this.by) return;
-		if (message.k === 'stateRequest') return; // workbenchSync answers these
+		// The wire is the workbench sync's shared channel, so the sync's own operation
+		// messages (open, close, active, stateSnapshot, …) arrive here too — and none of
+		// them carries an `active` boolean. Feeding one into the table would write
+		// `active: undefined` over the sender's entry and drop it from every count until
+		// its next heartbeat: only a `presence` announcement feeds the table (a
+		// `stateRequest` is workbenchSync's to answer, and the rest are its to apply).
+		if (message.k !== 'presence') return;
 		const entry = this.roster.get(message.by);
 		const now = Date.now();
 		const wasActive = entry?.active ?? false;

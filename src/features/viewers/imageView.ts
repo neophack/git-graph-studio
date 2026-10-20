@@ -178,6 +178,9 @@ export class ImageView {
 	private dragging = false;
 	/** The gallery swipe's horizontal offset, while one is in flight or settling. */
 	private swipe: number | null = null;
+	/** The swipe committed to a navigation and its exit animation is mid-flight: the
+	 *  next gesture waits it out instead of killing the pending navigation. */
+	private swipeCommitted = false;
 	/** A mouse drag over an image with nothing to pan: ignored, not banded. */
 	private panIgnored = false;
 	private pinchAt: Point | null = null;
@@ -859,6 +862,14 @@ export class ImageView {
 		}
 		// At Fit, a finger's horizontal drag is the gallery swipe.
 		if (kind !== 'mouse' && limits.x < 1 && this.siblings.length > 1 && this.t.scale <= this.currentFit() * 1.01) {
+			// A committed navigation's exit animation is mid-flight: the gesture waits it
+			// out — clearing the timer here would drop the very navigation the last flick
+			// chose, and resetting the offset would snap the leaving image back to centre
+			// (a fast flick-flick run through a folder drops every other image otherwise).
+			if (this.swipeCommitted) {
+				this.panIgnored = true;
+				return;
+			}
 			window.clearTimeout(this.swipeTimer);
 			this.swipe = 0;
 			this.canvas.classList.remove('animating');
@@ -886,6 +897,9 @@ export class ImageView {
 
 	private pinch(factor: number, cx: number, cy: number, dx: number, dy: number): void {
 		if (!this.loaded) return;
+		// A committed navigation's exit animation is mid-flight: the pinch waits it out
+		// (its onNavigate is pending) rather than visually cancelling it.
+		if (this.swipeCommitted) return;
 		if (this.swipe !== null) {
 			// A second finger landed mid-swipe: the swipe yields to the pinch.
 			this.swipe = null;
@@ -897,7 +911,12 @@ export class ImageView {
 		// The pinch may overshoot the range a little — it springs back on release.
 		const next = Math.min(max * 1.5, Math.max(Math.min(min, fit) * 0.5, this.t.scale * factor));
 		this.mode = 'free';
-		const zoomed = zoomAround(this.t, next, cx - view.width / 2, cy - view.height / 2);
+		// The zoom anchors at the centroid the step started FROM and the delta then
+		// carries the result to the fingers' new midpoint: the content under the
+		// midpoint tracks it exactly. Anchoring at the new midpoint first (then adding
+		// the delta) leaves the image drifting (1 − factor)·Δ per step — the content
+		// swims under a pinch that moves.
+		const zoomed = zoomAround(this.t, next, cx - dx - view.width / 2, cy - dy - view.height / 2);
 		this.t = { ...zoomed, x: zoomed.x + dx, y: zoomed.y + dy };
 		this.pinchAt = { x: cx, y: cy };
 		this.render();
@@ -956,8 +975,15 @@ export class ImageView {
 		if (!cancelled && target && (Math.abs(offset) > width * 0.2 || flung)) {
 			// The image leaves in the swipe's direction; the next one opens behind it.
 			this.swipe = -direction * width * 1.05;
+			this.swipeCommitted = true;
 			this.render(true);
-			this.swipeTimer = window.setTimeout(() => this.options.onNavigate?.(target), ANIMATION_MS);
+			this.swipeTimer = window.setTimeout(() => {
+				// The navigation (the host opens the sibling and closes this tab) may be
+				// refused — the tab went, the open failed: the flag is back off, so a
+				// later gesture is never locked out of the gallery.
+				this.swipeCommitted = false;
+				this.options.onNavigate?.(target);
+			}, ANIMATION_MS);
 			return;
 		}
 		this.swipe = 0;

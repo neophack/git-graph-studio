@@ -312,6 +312,7 @@ export const openMethods: ThisType<EditorGroup> = {
 		void loadCanViews().then(({ CanLogView }) => {
 			if (!this.open.includes(editor)) return;
 			editor.canlog = new CanLogView(path);
+			editor.onClose = () => editor.canlog?.dispose();
 			editor.pane.replaceChildren(editor.canlog.root);
 		});
 	},

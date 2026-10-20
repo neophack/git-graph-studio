@@ -436,18 +436,22 @@ export function attachWorkbenchSync(
 	let deferred = loadDeferredCloses();
 	/** Deliver every not-yet-crossed recorded close — the gate just opened, or a message
 	 *  from another frontend proved it open. Sent entries stay recorded (the merge guard
-	 *  reads them) but never re-cross: the other side's genuine re-open must win. */
-	const tryFlushDeferred = (): void => {
+	 *  reads them) but never re-cross: the other side's genuine re-open must win. A
+	 *  message's OWN file or tab (`keepFile`/`keepTab`, the open or activation it
+	 *  carries) is held back: its close crossing ahead of the apply would close the very
+	 *  tab the other side's user is opening or switching to — their act is the newer
+	 *  fact and wins, the entry goes when the apply lands (E7's other half). */
+	const tryFlushDeferred = (keepFile?: string, keepTab?: string): void => {
 		if (!canSendClose()) return;
 		let sent = false;
 		for (const [key, entry] of Object.entries(deferred.files)) {
-			if (entry.sent) continue;
+			if (entry.sent || key === keepFile) continue;
 			deps.send({ by, k: 'close', path: entry.spelling });
 			deferred.files[key] = { ...entry, sent: true };
 			sent = true;
 		}
 		for (const [id, entry] of Object.entries(deferred.tabs)) {
-			if (entry.sent) continue;
+			if (entry.sent || id === keepTab) continue;
 			deps.send({ by, k: 'closeTab', id: entry.spelling });
 			deferred.tabs[id] = { ...entry, sent: true };
 			sent = true;
@@ -869,13 +873,9 @@ export function attachWorkbenchSync(
 			}
 			// The answerer still claiming a recorded close is stale about it: the close
 			// that never crossed does so now (sent ones already had their chance — a repeat
-			// would undo the other side's genuine re-open).
-			for (const entry of Object.values(deferred.files)) {
-				if (!entry.sent) announce({ by, k: 'close', path: entry.spelling });
-			}
-			for (const entry of Object.values(deferred.tabs)) {
-				if (!entry.sent) announce({ by, k: 'closeTab', id: entry.spelling });
-			}
+			// would undo the other side's genuine re-open). The flush marks what it sends,
+			// so a later trigger never re-crosses these.
+			tryFlushDeferred();
 			// The active tab LAST, after the union's background opens: the editor's
 			// openIntent lets only the newest open take the focus, so this one wins it. The
 			// follow runs as one remote apply (beginApply): the page hold keeps this
@@ -946,7 +946,10 @@ export function attachWorkbenchSync(
 	presence?.onRosterChange?.(() => {
 		tryFlushDeferred();
 		if (presence.othersActive()) {
-			if (!awaitingSnapshot && catchUpDue) catchUp();
+			// The ask is an ACTIVE frontend's (§7.0.3): a hidden one neither asks nor
+			// follows — asking would rebuild its workbench while nobody looks and spend
+			// the on-wake catch-up. Its due stays armed; becoming active runs it.
+			if (!awaitingSnapshot && catchUpDue && presence.isActive()) catchUp();
 		} else {
 			catchUpDue = true;
 		}
@@ -955,6 +958,28 @@ export function attachWorkbenchSync(
 	/** One crossed message, applied: the receive handler's body, kept whole so the
 	 *  remote-open gate can call back into it after its async canonical re-check. */
 	const applyMessage = (message: WorkbenchSyncMessage): void => {
+		// An open or activation that really applies retires the close this side recorded
+		// for its file or tab: the other side's user is acting on it right now, and their
+		// act wins over the recorded close — the guard never refuses the other side's
+		// user (E7). The entry goes even if this open itself fails to land, for the peer
+		// demonstrably holds the file either way; a close that never crossed stays
+		// unrecorded rather than closing a tab someone is using.
+		if (message.k === 'open' || message.k === 'active') {
+			const key = keyOf(message.path);
+			if (deferred.files[key] !== undefined) {
+				delete deferred.files[key];
+				saveDeferredCloses(deferred);
+			}
+		} else if (message.k === 'openTab') {
+			const id = inputId(message.input);
+			if (deferred.tabs[id] !== undefined) {
+				delete deferred.tabs[id];
+				saveDeferredCloses(deferred);
+			}
+		} else if (message.k === 'activeTab' && deferred.tabs[message.id] !== undefined) {
+			delete deferred.tabs[message.id];
+			saveDeferredCloses(deferred);
+		}
 		switch (message.k) {
 			case 'open': {
 				const key = keyOf(message.path);
@@ -1037,8 +1062,13 @@ export function attachWorkbenchSync(
 				if (!message || message.by === by) return;
 				// A message from another frontend proves the gate is open: a recorded close
 				// that has been waiting for exactly this moment crosses before anything of
-				// this message's own doing can.
-				tryFlushDeferred();
+				// this message's own doing can — EXCEPT about the file or tab the message
+				// itself carries (its open or activation is the other side's user acting
+				// right now; the recorded close must not cross ahead of it and undo their
+				// act, so the flush holds that entry back and the apply below drops it).
+				const openKey = message.k === 'open' || message.k === 'active' ? keyOf(message.path) : undefined;
+				const openTabId = message.k === 'openTab' ? inputId(message.input) : message.k === 'activeTab' ? message.id : undefined;
+				tryFlushDeferred(openKey, openTabId);
 				// The catch-up protocol rides ahead of the operations: the designated
 				// responder answers a request, the joiner merges the snapshot addressed to
 				// it. Both are presence-shaped, not operations — the open-boundary gate

@@ -91,6 +91,9 @@ export class CanLayout {
  *  pan-x`, the data column's own overflow); mouse and wheel are untouched. */
 export function attachTouchScroll(element: HTMLElement, model: ScrollModel): Disposable {
 	let dragging = false;
+	/** The finger that owns the drag: a second finger's moves must not re-anchor it (one
+	 *  large dy from the new finger's position is a visible jump) nor end it early. */
+	let pointerId: number | null = null;
 	let lastY = 0;
 	let lastT = 0;
 	let velocity = 0; // px/ms, finger-positive down
@@ -110,14 +113,18 @@ export function attachTouchScroll(element: HTMLElement, model: ScrollModel): Dis
 	};
 	const down = (event: PointerEvent): void => {
 		if (event.pointerType === 'mouse') return;
+		// The FIRST finger owns the drag: a second one landing neither takes it over (its
+		// position would re-anchor the scroll) nor ends it early at its own lift.
+		if (dragging) return;
 		stopCoast();
+		pointerId = event.pointerId;
 		dragging = true;
 		lastY = event.clientY;
 		lastT = event.timeStamp;
 		velocity = 0;
 	};
 	const move = (event: PointerEvent): void => {
-		if (!dragging) return;
+		if (!dragging || event.pointerId !== pointerId) return;
 		const dt = event.timeStamp - lastT;
 		const dy = event.clientY - lastY;
 		model.applyWheel({ kind: 'pixels', x: 0, y: -dy }, 1);
@@ -128,8 +135,9 @@ export function attachTouchScroll(element: HTMLElement, model: ScrollModel): Dis
 		lastT = event.timeStamp;
 	};
 	const up = (event: PointerEvent): void => {
-		if (!dragging) return;
+		if (!dragging || event.pointerId !== pointerId) return;
 		dragging = false;
+		pointerId = null;
 		// A finger that rested before lifting (the velocity window went stale) does not coast.
 		if (event.timeStamp - lastT > 90) velocity = 0;
 		if (Math.abs(velocity) > 0.05) coast();
@@ -172,6 +180,7 @@ export class CanActionSheet {
 		this.title = el('div', 'can-sheet-title');
 		this.body = el('div', 'can-sheet-body');
 		this.panel = el('div', 'can-sheet', [el('div', 'can-sheet-grabber'), this.title, this.body]);
+		this.panel.tabIndex = -1;
 		this.scrim = el('div', 'can-sheet-scrim', [this.panel]);
 		this.scrim.addEventListener('pointerdown', (event) => {
 			if (event.target === this.scrim) this.close();
@@ -220,6 +229,11 @@ export class CanActionSheet {
 		this.body.replaceChildren(...rows);
 		this.scrim.hidden = false;
 		this.open_ = true;
+		// The keyboard's Escape closes only if the event's path crosses the scrim — and a
+		// sheet opened from the ⋯ button leaves the focus on the button, outside it. The
+		// first row takes the focus (the panel itself when the sheet is controls only).
+		const first = this.body.querySelector<HTMLElement>('.can-sheet-action');
+		(first ?? this.panel).focus({ preventScroll: true });
 	}
 
 	close(): void {

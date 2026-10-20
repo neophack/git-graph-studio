@@ -93,7 +93,11 @@ describe('image geometry', () => {
 });
 
 function pointer(target: Element, type: string, x: number, y: number, init: PointerEventInit = {}): PointerEvent {
-	const event = new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, ...init });
+	// A pointer's last button releasing reports no buttons held; a chorded release (one
+	// button of several lifting) reports the survivor — the real semantics the
+	// recognizer's chord handling reads.
+	const released = type === 'pointerup' || type === 'pointercancel';
+	const event = new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: released ? 0 : 1, ...init });
 	target.dispatchEvent(event);
 	return event;
 }
@@ -172,6 +176,21 @@ describe('image gestures', () => {
 		pointer(element, 'pointerup', 260, 200, { pointerType: 'touch', pointerId: 2 });
 		expect(calls).toEqual(['panStart(200,200,touch)', 'pan(60,0,260,200)', 'end(touch,false)']);
 		vi.useRealTimers();
+	});
+
+	it('a chorded mouse press and release neither resets nor ends the drag in flight', () => {
+		// One mouse, several buttons: every button shares the one pointer id, so a
+		// chorded press must not restart the gesture (mode press, samples wiped) and a
+		// mid-chord release must not end it short (or fire a phantom tap).
+		const { element, calls } = recognizer();
+		pointer(element, 'pointerdown', 10, 10);
+		pointer(element, 'pointermove', 40, 10); // the left button's drag
+		pointer(element, 'pointerdown', 40, 10, { button: 1, buttons: 5 }); // the middle joins
+		pointer(element, 'pointermove', 50, 10);
+		pointer(element, 'pointerup', 50, 10, { button: 1, buttons: 1 }); // the middle lifts, the left holds
+		pointer(element, 'pointermove', 60, 10);
+		pointer(element, 'pointerup', 60, 10, { buttons: 0 }); // the last button: the gesture ends
+		expect(calls).toEqual(['panStart(10,10,mouse)', 'pan(30,0,40,10)', 'pan(10,0,50,10)', 'pan(10,0,60,10)', 'end(mouse,false)']);
 	});
 
 	it('rebaselines the pinch when one of three fingers lifts — the next move is a step, not the old pair\'s jump', () => {
@@ -382,6 +401,43 @@ describe('image viewer', () => {
 		await new Promise((resolve) => setTimeout(resolve, 260));
 		await flush(8);
 		expect(editors.map((e) => e.input.path)).toEqual([`${REPO}\\two.png`]);
+	});
+
+	it('a gesture landing inside the commit animation never drops the navigation the flick chose', async () => {
+		backend.on('list_dir', () => [
+			{ name: 'one.png', path: `${REPO}\\one.png`, isDir: false, size: 10 },
+			{ name: 'two.png', path: `${REPO}\\two.png`, isDir: false, size: 10 }
+		]);
+		const { stage, editors } = await openImage('one.png');
+		await flush();
+		pointer(stage, 'pointerdown', 600, 300, { pointerType: 'touch' });
+		pointer(stage, 'pointermove', 300, 300, { pointerType: 'touch' });
+		pointer(stage, 'pointerup', 300, 300, { pointerType: 'touch' }); // committed: the exit runs 200 ms
+		// The next flick starts before the exit finishes: it must wait, not kill the
+		// pending navigation and snap the leaving image back (a fast flick-flick run
+		// through a folder dropped every other image).
+		pointer(stage, 'pointerdown', 600, 300, { pointerType: 'touch' });
+		pointer(stage, 'pointermove', 500, 300, { pointerType: 'touch' });
+		pointer(stage, 'pointerup', 500, 300, { pointerType: 'touch' });
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		await flush(8);
+		expect(editors.map((e) => e.input.path)).toEqual([`${REPO}\\two.png`]);
+	});
+
+	it('the pinch tracks the fingers’ midpoint: the content under it stays under it', async () => {
+		const { stage, view } = await openImage();
+		const touch = (type: string, id: number, x: number, y: number) => pointer(stage, type, x, y, { pointerType: 'touch', pointerId: id, isPrimary: id === 1 });
+		const under = (x: number, y: number) => screenToImage({ width: VIEW.width, height: VIEW.height }, NATURAL, view.state, x, y)!;
+		touch('pointerdown', 1, 300, 300);
+		touch('pointerdown', 2, 500, 300);
+		const before = under(400, 300); // the pair's midpoint
+		// The pair zooms AND travels at once — the midpoint moves with it.
+		touch('pointermove', 2, 700, 350);
+		const after = under(500, 325); // the midpoint's new place
+		expect(after.x).toBeCloseTo(before.x, 5);
+		expect(after.y).toBeCloseTo(before.y, 5);
+		touch('pointerup', 2, 700, 350);
+		touch('pointerup', 1, 300, 300);
 	});
 
 	it('offers the whole action set on the context menu', async () => {

@@ -416,6 +416,13 @@ pub fn frontend_gone(frontend: &str) {
             frontends.remove(frontend);
             !frontends.is_empty()
         });
+        // The calls in flight naming the departed frontend go with it: until the
+        // daemon-side handler unwinds (a backend command can wait on a host request the
+        // departed session never answers, so the guard may live long), `caller` would
+        // answer that session for every unattributed request — each one addressed to a
+        // frontend that no longer exists. The guard's own drop removes by seq and
+        // tolerates the entry already gone.
+        routes.calls.retain(|(_, name)| name != frontend);
         // The click attribution dies with its session: a follow-up document open inside the
         // freshness window must not address a frontend that no longer exists — its request
         // would wait for an answer nobody can give.
@@ -731,6 +738,29 @@ mod tests {
             preferred(ext, "commands.execute", &diff).as_deref(),
             Some("remote/43")
         );
+        reset(ext);
+    }
+
+    #[test]
+    fn a_gone_session_stays_no_ones_caller() {
+        // The session ended with a call of its own still in flight (a backend command
+        // parked on the input box its page never answers): the call entry dies with it,
+        // or every later unattributed request addresses the departed session and waits
+        // for an answer nobody can give. Another frontend's call survives, and the
+        // parked guard's own drop tolerates its entry already gone.
+        let ext = "neophack.git-graph-rs";
+        reset(ext);
+        let _serial = serial();
+        let parked = call_begin(ext, "remote/9");
+        frontend_gone("remote/9");
+        assert_eq!(preferred(ext, "window.showInputBox", &json!([])), None);
+        let desktop = call_begin(ext, "main");
+        assert_eq!(
+            preferred(ext, "window.showInputBox", &json!([])).as_deref(),
+            Some("main")
+        );
+        drop(desktop);
+        drop(parked);
         reset(ext);
     }
 

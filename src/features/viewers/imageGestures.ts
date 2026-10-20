@@ -96,6 +96,10 @@ export class GestureRecognizer {
 		// Only the primary button drags with a mouse (the middle button pans too); the right
 		// button belongs to the context menu.
 		if (e.pointerType === 'mouse' && e.button !== 0 && e.button !== 1) return;
+		// A chorded press (a second button while one is held) reuses the mouse's one
+		// pointer id: it must not reset the gesture in flight — the first button's drag
+		// or pinch carries on.
+		if (e.pointerType === 'mouse' && this.pointers.has(e.pointerId)) return;
 		const point = this.local(e);
 		try {
 			this.element.setPointerCapture(e.pointerId);
@@ -173,6 +177,11 @@ export class GestureRecognizer {
 
 	private up(e: PointerEvent, cancelled: boolean): void {
 		if (!this.pointers.has(e.pointerId)) return;
+		// A chorded release (one button of several lifts while another stays held) does
+		// not end the mouse's gesture: the pointer leaves only with its last button
+		// (`buttons` 0) — a mid-chord release would freeze the drag short or fire a
+		// phantom tap. A cancel always ends.
+		if (!cancelled && e.pointerType === 'mouse' && e.buttons !== 0) return;
 		this.pointers.delete(e.pointerId);
 		try {
 			this.element.releasePointerCapture(e.pointerId);

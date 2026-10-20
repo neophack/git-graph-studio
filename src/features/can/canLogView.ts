@@ -735,6 +735,16 @@ export class CanLogView {
 		this.analysisHost.replaceChildren(panel);
 	}
 
+	/* ---------- Lifecycle ---------- */
+
+	/** The tab is closing: the form's ResizeObserver pins the whole pane's DOM for the
+	 *  page's life until it is disconnected, and the sheet's scrim goes with it. */
+	dispose(): void {
+		this.form.dispose();
+		this.sheet.dispose();
+		this.root.remove();
+	}
+
 	/* ---------- Conversion (Save As) ---------- */
 
 	/** Converts the whole log through the shared flow (target picked, save dialog,
