@@ -167,7 +167,11 @@ guarantees the window is never a blank dark rectangle.
   WsSymbol, ExtInfo, CanLogStats... — live there once), `src/platform/fileIcons.ts` / `src/platform/extAssets.ts` (the file-icon mapping and
   extension-asset data URLs every view decorates with), `src/platform/lazy.ts` (async-chunk
   loaders), `src/platform/coalesce.ts` (single-flight coalescing for refresh-shaped work —
-  the SCM and Explorer refreshes: one run in flight, one queued), `src/platform/state.ts`
+  the SCM and Explorer refreshes: one run in flight, one queued), `src/platform/windowDrag.ts`
+  (the native window move's gate: a title-bar mousedown plus each `tauri://move` mark the
+  drag, a 250 ms quiet decay ends it, and the workbench's scheduled refreshes defer for as
+  long as the mark lives — git processes never start against the OS's move loop),
+  `src/platform/state.ts`
   (localStorage persistence), `src/workbench/shell.css`
 - Backend: `src-tauri/src/lib.rs` / `main.rs` (crate inventory and app entry),
   `src-tauri/src/cmd_app.rs` (the app-instance domain: File → New Window's

@@ -630,7 +630,20 @@ async fn a_password_change_kicks_the_tunneled_session() {
 async fn an_offline_link_after_a_disconnect_shows_the_page() {
     let both = start().await;
     let base = format!("/u/{}/", both.uuid);
-    let (status, _h, _b) = http(both.hub_addr, "GET", &format!("{base}login"), &[], "").await;
+    // `start()` waits for the DAEMON's Online, but the Hub's tunnel table settles a
+    // scheduler turn behind it, and a page GET inside that gap draws the corner's 503 —
+    // the same settling window `hub_login_settled` rides out (under CI load the first
+    // GET landed there, 2026-10-22). Ride the window out before holding the page to 200.
+    let mut status = 0;
+    for _ in 0..100 {
+        let (answer, _head, _body) =
+            http(both.hub_addr, "GET", &format!("{base}login"), &[], "").await;
+        status = answer;
+        if status == 200 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(status, 200);
     both.daemon.hub.disconnect().unwrap();
     // The tunnel unwinds; the link then answers the not-online page.

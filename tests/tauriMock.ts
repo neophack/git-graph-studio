@@ -26,7 +26,7 @@ export const backend = {
 	revealed: [] as string[],
 	clipboard: [] as string[],
 	clipboardText: '',
-	window: { minimized: 0, toggled: 0, closed: 0, maximized: false, resizeHandlers: [] as (() => void)[] },
+	window: { minimized: 0, toggled: 0, closed: 0, maximized: false, resizeHandlers: [] as (() => void)[], moveHandlers: [] as (() => void)[] },
 	dropHandlers: [] as ((event: { payload: { type: string; paths?: string[]; position?: { x: number; y: number } } }) => void)[],
 
 	on(command: string, handler: Handler): void {
@@ -50,7 +50,7 @@ export const backend = {
 		this.opened.length = 0;
 		this.revealed.length = 0;
 		this.clipboard.length = 0;
-		this.window = { minimized: 0, toggled: 0, closed: 0, maximized: false, resizeHandlers: [] };
+		this.window = { minimized: 0, toggled: 0, closed: 0, maximized: false, resizeHandlers: [], moveHandlers: [] };
 		this.dropHandlers.length = 0;
 	}
 };
@@ -176,6 +176,7 @@ export const windowApi = {
 		close: async () => { backend.window.closed++; },
 		isMaximized: async () => backend.window.maximized,
 		onResized: async (handler: () => void) => { backend.window.resizeHandlers.push(handler); return () => undefined; },
+		onMoved: async (handler: () => void) => { backend.window.moveHandlers.push(handler); return () => undefined; },
 		onCloseRequested: async () => () => undefined
 	})
 };

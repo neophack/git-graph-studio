@@ -10,6 +10,7 @@ import { tf } from '../platform/i18n';
 import { hook } from '../platform/hooks';
 import { SETTINGS_EVENT, THEME_EVENT } from '../platform/settings';
 import * as state from '../platform/state';
+import { isWindowDragging } from '../platform/windowDrag';
 import { basename, notify } from '../platform/ui/index';
 import { FsChange, OpenedPaths, REFRESH_ECHO_MS, joinRepo, whenIdle } from './workbench';
 
@@ -422,13 +423,15 @@ export const lifecycleMethods: ThisType<Workbench> = {
 
 	runScheduledRefresh(): void {
 		if (!this.repoPath) return;
-		// While a sash drag is in progress, defer: refreshes mid-drag make the tree and
-		// the editors churn under the pointer for no benefit. It re-fires after mouseup.
-		// Hidden skips the deferral — the churn is invisible, and the deferral would
-		// re-enter the microtask scheduler (scheduleRefresh's hidden path) in a cycle
-		// that never yields to the event loop: a wedged queue, a dead window. A drag
-		// whose mouseup was lost to the hiding window is exactly when the class sticks.
-		if (!document.hidden && document.body.classList.contains('resizing')) {
+		// While a sash drag or a native window move is in progress, defer: refreshes
+		// mid-drag make the tree and the editors churn under the pointer for no benefit,
+		// and the window move loop competes with the git processes for CPU. It re-fires
+		// after mouseup / the drag's quiet decay. Hidden skips the deferral — the churn is
+		// invisible, and the deferral would re-enter the microtask scheduler
+		// (scheduleRefresh's hidden path) in a cycle that never yields to the event loop:
+		// a wedged queue, a dead window. A drag whose mouseup was lost to the hiding
+		// window is exactly when the class sticks.
+		if (!document.hidden && (document.body.classList.contains('resizing') || isWindowDragging())) {
 			this.scheduleRefresh(200);
 			return;
 		}

@@ -13,6 +13,7 @@
 				"src/platform/state.ts",
 				"src/platform/lazy.ts",
 				"src/platform/coalesce.ts",
+				"src/platform/windowDrag.ts",
 				"src/platform/markdown.ts",
 				"src/platform/fileIcons.ts",
 				"src/platform/extAssets.ts",

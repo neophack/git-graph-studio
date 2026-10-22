@@ -16,6 +16,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import { closeContextMenu, el, icon, isMenuOpen, showMenuBelow, type MenuEntry } from '../platform/ui/index';
 import { onLocaleChange, t, tf } from '../platform/i18n';
+import { noteTitleBarMouseDown, noteWindowMoved } from '../platform/windowDrag';
 
 export interface MenuDefinition {
 	label: string;
@@ -30,6 +31,7 @@ export interface WindowControls {
 	close(): Promise<void>;
 	isMaximized(): Promise<boolean>;
 	onResized(handler: () => void): Promise<() => void>;
+	onMoved(handler: () => void): Promise<() => void>;
 }
 
 function tauriWindowControls(): WindowControls {
@@ -39,7 +41,8 @@ function tauriWindowControls(): WindowControls {
 		toggleMaximize: () => window.toggleMaximize(),
 		close: () => window.close(),
 		isMaximized: () => window.isMaximized(),
-		onResized: (handler) => window.onResized(handler)
+		onResized: (handler) => window.onResized(handler),
+		onMoved: (handler) => window.onMoved(handler)
 	};
 }
 
@@ -108,6 +111,14 @@ export class TitleBar {
 		container.append(left, center, right);
 		void this.updateMaximized();
 		void this.controls.onResized(() => void this.updateMaximized());
+		// The drag gate: a left mousedown anywhere on the bar may start the native move,
+		// and each `tauri://move` keeps the mark alive while the window actually moves —
+		// the workbench defers its git refreshes for as long as either keeps firing
+		// (platform/windowDrag.ts).
+		container.addEventListener('mousedown', (event) => {
+			if (event.button === 0) noteTitleBarMouseDown();
+		});
+		void this.controls.onMoved(() => noteWindowMoved());
 		// The bar is built once: a language switch relabels its static tooltips and the
 		// command center in place (the menus relabel through their own SETTINGS_EVENT pass).
 		onLocaleChange(() => {

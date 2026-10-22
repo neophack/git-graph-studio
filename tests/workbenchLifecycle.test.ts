@@ -11,7 +11,7 @@ import { ExtensionHost } from '../src/features/extensions';
 import * as state from '../src/platform/state';
 import { FS_CHANGED_EVENT, OPEN_PATHS_EVENT, Workbench } from '../src/workbench';
 import { backend, windowApi } from './tauriMock';
-import { click, DefaultingHandlers, flush, key, notificationButton, texts, workbenchShell } from './helpers';
+import { click, DefaultingHandlers, flush, key, notificationButton, texts, until, workbenchShell } from './helpers';
 
 const REPO_A = 'C:\\repo-a';
 const REPO_B = 'C:\\repo-b';
@@ -96,7 +96,11 @@ describe('the boot sequence', () => {
 		expect(backend.callsTo('boot_context').length).toBe(1);
 		expect(backend.callsTo('initial_file').length + backend.callsTo('initial_actions').length + backend.callsTo('initial_repo').length).toBe(0);
 		// ...and the backend's heavy services (the symbol/analysis index builds, the watcher)
-		// start only once the first frame with the folder has painted.
+		// start only once the first frame with the folder has painted. The paint is jsdom's
+		// ~16.7 ms frame timer, later than the beforeEach's zero-delay flush rounds can wait
+		// out — on a loaded CI runner the tick landed past them and the count read 0
+		// (2026-10-22) — so wait the frame out on the wall clock, then hold the count at one.
+		await until(() => backend.callsTo('post_first_paint').length === 1);
 		expect(backend.callsTo('post_first_paint').length).toBe(1);
 	});
 
