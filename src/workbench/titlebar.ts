@@ -2,6 +2,15 @@
 // left, the command center (search box) in the middle, and the minimize / maximize / close
 // window controls on the right. The bar is the window's drag region (Tauri handles the drag
 // and the double-click-to-maximize); the menus are the shell's own dropdowns.
+//
+// The region is `data-tauri-drag-region="deep"` on the bar alone: Tauri's drag script walks
+// the mousedown target's ancestors, and a bare attribute answers a direct hit on that exact
+// element alone — the three sections below fill the whole bar (height: 100%), so bare
+// attributes left only the logo strip and two narrow flanks beside the command center as
+// grab handles. `deep` takes every empty spot; the role="button" / role="menuitem" elements
+// still block the walk, so the menus, the command center, the navigation arrows and the
+// window controls stay clickable (the remote mirror's replay guards the same walk —
+// src/remote/mirror/replay.ts).
 
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
@@ -56,17 +65,15 @@ export class TitleBar {
 
 	constructor(container: HTMLElement, private readonly controls: WindowControls = tauriWindowControls()) {
 		this.container = container;
-		container.setAttribute('data-tauri-drag-region', '');
+		container.setAttribute('data-tauri-drag-region', 'deep');
 		container.setAttribute('role', 'banner');
 
 		const logo = el('img', 'titlebar-logo');
 		logo.src = import.meta.env.BASE_URL + 'icons/icon.png';
 		logo.alt = '';
-		logo.setAttribute('data-tauri-drag-region', '');
 		this.menubar = el('div', 'menubar');
 		this.menubar.setAttribute('role', 'menubar');
 		const left = el('div', 'titlebar-left', [logo, this.menubar]);
-		left.setAttribute('data-tauri-drag-region', '');
 
 		this.commandCenterLabel = el('span', 'label', ['Git Graph Studio']);
 		this.commandCenter = el('div', 'command-center', [icon('search'), this.commandCenterLabel]);
@@ -85,7 +92,6 @@ export class TitleBar {
 		this.backButton.classList.add('disabled');
 		this.forwardButton.classList.add('disabled');
 		const center = el('div', 'titlebar-center', [this.backButton, this.forwardButton, this.commandCenter]);
-		center.setAttribute('data-tauri-drag-region', '');
 
 		const control = (name: string, title: string, run: () => void) => {
 			const button = el('div', `window-control ${name}`, [icon(`chrome-${name}`)]);

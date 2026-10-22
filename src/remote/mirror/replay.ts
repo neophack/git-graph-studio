@@ -11,6 +11,26 @@ import type { DomRecorder } from './recorder';
 
 const FOCUSABLE = 'input, textarea, select, button, a[href], [tabindex], [contenteditable]:not([contenteditable="false"])';
 
+/** The elements Tauri's drag script treats as clickable — a mousedown on one without the
+ *  drag-region attribute blocks the window drag (scripts/drag.js's isClickableElement). */
+const DRAG_BLOCKING = 'a, button, input, select, textarea, label, summary, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="radio"], [role="switch"], [role="option"], [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"])';
+
+/** Tauri's own drag-region walk: would a mousedown on `el` start dragging the PC's window?
+ *  A bare region answers a direct hit on itself alone, a `deep` region any non-interactive
+ *  descendant, and an interactive element without the attribute blocks (the replayed events
+ *  reach Tauri's document listener, so this walk must agree with its script exactly). */
+function startsWindowDrag(el: Element): boolean {
+	for (let up: Element | null = el; up; up = up.parentElement) {
+		const attr = up.getAttribute('data-tauri-drag-region');
+		if (up.matches(DRAG_BLOCKING) && attr === null) return false;
+		if (attr === null) continue;
+		if (attr === 'false') return false;
+		if (attr === 'deep') return true;
+		return up === el;
+	}
+	return false;
+}
+
 interface ViewerInput {
 	down: Element | null;
 	hover: Element | null;
@@ -231,7 +251,7 @@ export class InputReplayer {
 		if (!at) return;
 		const { el, win, x, y } = at;
 		// The title bar's drag region moves the PC's window — nothing a viewer may do.
-		if (el.closest('[data-tauri-drag-region]') === el && ev !== 'hover') return;
+		if (ev !== 'hover' && startsWindowDrag(el)) return;
 		const button = Math.max(0, Math.min(2, b));
 		const pressed = BUTTONS[button] ?? 1;
 		switch (ev) {

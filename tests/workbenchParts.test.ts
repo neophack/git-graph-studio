@@ -108,7 +108,13 @@ describe('title bar', () => {
 			{ label: 'Help', entries: () => [{ label: 'About', run: () => { ran = 'about'; } }] }
 		]);
 		expect(texts('.menubar-item')).toEqual(['File', 'Help']);
-		expect(document.getElementById('titlebar')!.hasAttribute('data-tauri-drag-region')).toBe(true);
+		// The whole empty bar must drag: Tauri walks the mousedown target's ancestors and a
+		// bare attribute answers a direct hit alone — the sections fill the entire bar, so
+		// only `deep` on the container (and no bare attribute on a section to short-circuit
+		// the walk) makes every empty spot a grab handle while the buttons stay clickable.
+		expect(document.getElementById('titlebar')!.getAttribute('data-tauri-drag-region')).toBe('deep');
+		expect(document.querySelector('.titlebar-left')!.hasAttribute('data-tauri-drag-region')).toBe(false);
+		expect(document.querySelector('.titlebar-center')!.hasAttribute('data-tauri-drag-region')).toBe(false);
 
 		const [file, help] = Array.from(document.querySelectorAll<HTMLElement>('.menubar-item'));
 		file!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
