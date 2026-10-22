@@ -38,6 +38,9 @@ pub mod cmd_providers;
 pub mod cmd_scm;
 pub mod cmd_search;
 pub mod cmd_symbols;
+/// The symbol and analysis indexes' on-demand lifetime: the idle sweeper that releases
+/// them (and trims the heap) once no query uses them.
+pub mod index_lease;
 /// The frame host's child processes (`nodeShims.ts` maps them onto the Node API): one real
 /// process surface a sandboxed frame cannot have on its own.
 pub mod ext_child;
@@ -330,6 +333,28 @@ mod desktop {
                     let _ = handle.emit("studio://git-output", line);
                 });
                 stamp("setup entered");
+                // The indexes load on first use; this sweeper hands their memory (and
+                // the stale walked file lists') back once they sit idle.
+                {
+                    use tauri::Manager;
+                    crate::index_lease::start(
+                        app.handle().clone(),
+                        crate::index_lease::Leased {
+                            symbols: app
+                                .state::<std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>()
+                                .inner()
+                                .clone(),
+                            analysis: app
+                                .state::<std::sync::Arc<ggs_analysis::index::AnalysisIndex>>()
+                                .inner()
+                                .clone(),
+                            file_list: app
+                                .state::<std::sync::Arc<ggs_fs::FileListCache>>()
+                                .inner()
+                                .clone(),
+                        },
+                    );
+                }
                 // The Dock icon's right-click menu ("New Window", macOS only): AppKit
                 // asks the application delegate for it, so the selectors are injected
                 // into tao's delegate class here, on the main thread, at every boot.

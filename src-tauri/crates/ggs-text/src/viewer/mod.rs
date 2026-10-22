@@ -146,7 +146,11 @@ impl ViewerState {
         handle
     }
 
-    pub fn with_doc<T>(&self, doc_id: u64, f: impl FnOnce(&mut ViewerDoc) -> T) -> Result<T, String> {
+    pub fn with_doc<T>(
+        &self,
+        doc_id: u64,
+        f: impl FnOnce(&mut ViewerDoc) -> T,
+    ) -> Result<T, String> {
         let handle = self
             .doc_handle(doc_id)
             .ok_or_else(|| format!("No open document {doc_id}"))?;
@@ -331,7 +335,8 @@ pub enum Staged {
         doc: ViewerDoc,
         from_byte: u64,
         total_bytes: u64,
-    },}
+    },
+}
 
 /// Open a file in two stages: read `HEAD_BYTES` (extended to the next newline so the head
 /// ends on a whole line), decode and rope it, and — when the file runs past that — hand
@@ -657,9 +662,26 @@ type PrewarmSlot = Arc<(Mutex<Option<Result<Staged, String>>>, Condvar)>;
 struct Prewarmed {
     path: String,
     slot: PrewarmSlot,
+    at: std::time::Instant,
 }
 
 static PREWARMED: Mutex<Option<Prewarmed>> = Mutex::new(None);
+
+/// Drop a prewarmed document nobody claimed within `age` — the page opened the launch file
+/// some other way (the indexed viewer, a restored session), and the rope would otherwise
+/// stay resident for the life of the process. Answers whether one was dropped.
+pub fn drop_stale_prewarm(age: std::time::Duration) -> bool {
+    let stale = {
+        let mut guard = PREWARMED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match guard.as_ref() {
+            Some(prewarmed) if prewarmed.at.elapsed() >= age => guard.take(),
+            _ => None,
+        }
+    };
+    stale.is_some()
+}
 
 /// Start opening `path` on a background thread. A binary file is not worth a document (the
 /// hex viewer reads windows on demand), and a minified one (few enormous lines that defeat
@@ -681,6 +703,7 @@ pub fn prewarm(path: String) {
         *guard = Some(Prewarmed {
             path: path.clone(),
             slot: Arc::clone(&slot),
+            at: std::time::Instant::now(),
         });
     }
     let load = path;
@@ -1455,6 +1478,15 @@ mod tests {
         prewarm(path.clone());
         assert!(take_prewarmed(&blob).is_none());
         assert!(take_prewarmed(&path).is_some());
+        // An unclaimed prewarm leaves once it is older than the sweeper's age, never before.
+        // (One test owns the process-wide slot, so the drop is checked here, not beside it.)
+        prewarm(path.clone());
+        assert!(!drop_stale_prewarm(std::time::Duration::from_secs(3600)));
+        assert!(drop_stale_prewarm(std::time::Duration::ZERO));
+        assert!(
+            take_prewarmed(&path).is_none(),
+            "the dropped rope serves nothing"
+        );
     }
 
     #[test]

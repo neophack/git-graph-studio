@@ -110,7 +110,8 @@
 			"rust": [
 				"src-tauri/crates/ggs-index/",
 				"src-tauri/src/cmd_search.rs",
-				"src-tauri/src/cmd_symbols.rs"
+				"src-tauri/src/cmd_symbols.rs",
+				"src-tauri/src/index_lease.rs"
 			],
 			"tests": [
 				"tests/searchView.test.ts",

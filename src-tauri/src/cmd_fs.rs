@@ -662,12 +662,7 @@ pub async fn list_files(
     let root = repo
         .or_else(|| roots.inner().first())
         .ok_or_else(|| "No folder is open".to_string())?;
-    Ok(cached_file_list(
-        cache.inner(),
-        &root,
-        TTL,
-        walk_files,
-    ))
+    Ok(cached_file_list(cache.inner(), &root, TTL, walk_files).as_ref().clone())
 }
 
 /* ---------- Hot exit: backups of unsaved buffers ---------- */

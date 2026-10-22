@@ -1,8 +1,11 @@
 //! The Code Analysis command adapters (module 17): the `#[tauri::command]` half over
-//! ggs-analysis's per-root `AnalysisIndex`. The index builds in the background on a
-//! folder open, the explicit rebuild takes every core, watcher batches update single
-//! files, and every report command streams its rows over a channel through the ggs-base
-//! push seam — the search view's rhythm (plan §3.4).
+//! ggs-analysis's per-root `AnalysisIndex`. Nothing builds on a folder open: the first
+//! analysis command builds the index (every core, progress on the
+//! `studio://analysis-index` event the sidebar shows), later ones reuse it, and the
+//! composition root's sweeper (`index_lease`) releases it once it sits idle. Watcher
+//! batches update a resident index file by file, and every report command streams its
+//! rows over a channel through the ggs-base push seam — the search view's rhythm (plan
+//! §3.4).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -28,15 +31,18 @@ fn resolve_root(roots: &WorkspaceRoots, repo: Option<String>) -> Result<String, 
         .ok_or_else(|| "No folder is open".to_owned())
 }
 
-fn analysis_of(
-    roots: &WorkspaceRoots,
+/// The root's analysis, built now when none is resident — off the async runtime, since a
+/// first build of a large tree takes a while.
+async fn analysis_of(
+    app: &tauri::AppHandle,
     analysis_index: &Arc<ggs_analysis::index::AnalysisIndex>,
-    repo: Option<String>,
+    root: String,
 ) -> Result<Arc<Mutex<AnalysisData>>, String> {
-    let root = resolve_root(roots, repo)?;
-    analysis_index
-        .analysis(&root)
-        .ok_or_else(|| "The code analysis index is still building".to_owned())
+    let index = Arc::clone(analysis_index);
+    let sink = crate::events::TauriEvents(app.clone());
+    tauri::async_runtime::spawn_blocking(move || index.ensure_blocking(Some(&sink), &root))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// The index state of the open folder: what the Analysis sidebar shows.
@@ -50,7 +56,7 @@ pub async fn analysis_status(
     Ok(analysis_index.status(&root))
 }
 
-/// Rebuild the analysis from scratch (also what a first open does in the background).
+/// Rebuild the analysis from scratch (the sidebar's button).
 /// Streams `progress` batches over the channel, then one `done`.
 #[tauri::command]
 pub async fn analysis_rebuild(
@@ -77,12 +83,14 @@ pub async fn analysis_rebuild(
 /// answer to a folder pick (empty or absent: the whole workspace).
 #[tauri::command]
 pub async fn analysis_module_graph(
+    app: tauri::AppHandle,
     roots: State<'_, WorkspaceRoots>,
     analysis_index: State<'_, std::sync::Arc<ggs_analysis::index::AnalysisIndex>>,
     repo: Option<String>,
     folders: Option<Vec<String>>,
 ) -> Result<ModuleGraph, String> {
-    let data = analysis_of(roots.inner(), analysis_index.inner(), repo)?;
+    let root = resolve_root(roots.inner(), repo)?;
+    let data = analysis_of(&app, analysis_index.inner(), root).await?;
     let data = data.lock().unwrap();
     Ok(modules::module_graph(
         &data,
@@ -98,6 +106,7 @@ pub async fn analysis_module_graph(
 /// to a folder pick (empty or absent: the whole workspace).
 #[tauri::command]
 pub async fn analysis_module_diagram(
+    app: tauri::AppHandle,
     roots: State<'_, WorkspaceRoots>,
     analysis_index: State<'_, std::sync::Arc<ggs_analysis::index::AnalysisIndex>>,
     repo: Option<String>,
@@ -105,7 +114,8 @@ pub async fn analysis_module_diagram(
     filter: Option<String>,
     folders: Option<Vec<String>>,
 ) -> Result<ModuleDiagram, String> {
-    let data = analysis_of(roots.inner(), analysis_index.inner(), repo)?;
+    let root = resolve_root(roots.inner(), repo)?;
+    let data = analysis_of(&app, analysis_index.inner(), root).await?;
     let data = data.lock().unwrap();
     let scope = modules::normalize_scope(&folders.unwrap_or_default());
     Ok(ggs_analysis::diagram::module_diagram(
@@ -117,11 +127,12 @@ pub async fn analysis_module_diagram(
 }
 
 /// Every function and method with its measured shape, streamed in batches. The hotspot
-/// column blends the symbol index's occurrence counts in when it has landed; the
-/// big-code-analysis columns (cognitive complexity, Halstead, LLOC, MI) enrich each
+/// column blends the symbol index's occurrence counts in (the index is made resident for
+/// it, like any symbol query); the big-code-analysis columns (cognitive complexity, Halstead, LLOC, MI) enrich each
 /// batch outside the analysis lock — a re-read per report, the security scan's rhythm.
 #[tauri::command]
 pub async fn analysis_metrics(
+    app: tauri::AppHandle,
     roots: State<'_, WorkspaceRoots>,
     analysis_index: State<'_, std::sync::Arc<ggs_analysis::index::AnalysisIndex>>,
     symbol_index: State<'_, std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>,
@@ -129,15 +140,14 @@ pub async fn analysis_metrics(
     on_event: Channel<MetricsEvent>,
 ) -> Result<(), String> {
     let root = resolve_root(roots.inner(), repo)?;
-    let data = analysis_index
-        .inner()
-        .analysis(&root)
-        .ok_or_else(|| "The code analysis index is still building".to_owned())?;
+    let data = analysis_of(&app, analysis_index.inner(), root.clone()).await?;
     let index = std::sync::Arc::clone(analysis_index.inner());
+    // Without the counts the hotspot column reads zero, still a report: a failed symbol
+    // load does not fail the page.
+    let _ = crate::cmd_symbols::ensure_symbols(&app, symbol_index.inner(), root.clone()).await;
     let refs: HashMap<String, usize> = symbol_index
         .inner()
-        .symbols_with_refs(&root)
-        .map(|(_, counts)| counts)
+        .occurrence_counts(&root)
         .unwrap_or_default();
     tauri::async_runtime::spawn_blocking(move || {
         let mut sink = crate::events::ChannelSink(on_event);
@@ -150,6 +160,7 @@ pub async fn analysis_metrics(
 /// Declarations no call site in the workspace spells, streamed in batches.
 #[tauri::command]
 pub async fn analysis_dead_code(
+    app: tauri::AppHandle,
     roots: State<'_, WorkspaceRoots>,
     analysis_index: State<'_, std::sync::Arc<ggs_analysis::index::AnalysisIndex>>,
     include_exported: Option<bool>,
@@ -157,10 +168,7 @@ pub async fn analysis_dead_code(
     on_event: Channel<DeadCodeEvent>,
 ) -> Result<(), String> {
     let root = resolve_root(roots.inner(), repo)?;
-    let data = analysis_index
-        .inner()
-        .analysis(&root)
-        .ok_or_else(|| "The code analysis index is still building".to_owned())?;
+    let data = analysis_of(&app, analysis_index.inner(), root).await?;
     let index = std::sync::Arc::clone(analysis_index.inner());
     let include_exported = include_exported.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
@@ -176,16 +184,14 @@ pub async fn analysis_dead_code(
 /// run, not the index's hot path.
 #[tauri::command]
 pub async fn analysis_security(
+    app: tauri::AppHandle,
     roots: State<'_, WorkspaceRoots>,
     analysis_index: State<'_, std::sync::Arc<ggs_analysis::index::AnalysisIndex>>,
     repo: Option<String>,
     on_event: Channel<SecurityEvent>,
 ) -> Result<(), String> {
     let root = resolve_root(roots.inner(), repo)?;
-    let data = analysis_index
-        .inner()
-        .analysis(&root)
-        .ok_or_else(|| "The code analysis index is still building".to_owned())?;
+    let data = analysis_of(&app, analysis_index.inner(), root.clone()).await?;
     let index = std::sync::Arc::clone(analysis_index.inner());
     tauri::async_runtime::spawn_blocking(move || {
         let mut sink = crate::events::ChannelSink(on_event);
@@ -198,11 +204,13 @@ pub async fn analysis_security(
 /// The workspace's import graph with its cycles, in one answer.
 #[tauri::command]
 pub async fn analysis_import_graph(
+    app: tauri::AppHandle,
     roots: State<'_, WorkspaceRoots>,
     analysis_index: State<'_, std::sync::Arc<ggs_analysis::index::AnalysisIndex>>,
     repo: Option<String>,
 ) -> Result<ImportGraph, String> {
-    let data = analysis_of(roots.inner(), analysis_index.inner(), repo)?;
+    let root = resolve_root(roots.inner(), repo)?;
+    let data = analysis_of(&app, analysis_index.inner(), root).await?;
     let data = data.lock().unwrap();
     Ok(ggs_analysis::imports::import_graph(&data))
 }

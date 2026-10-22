@@ -95,6 +95,18 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
 /// (a bare `*.rs` matches anywhere, like VS Code's search). Patterns keep their spaces -
 /// `my docs/**` is one pattern.
 pub fn filter_paths(files: Vec<String>, include: &str, exclude: &str) -> Vec<String> {
+    let selects = selector(include, exclude);
+    files.into_iter().filter(|file| selects(file)).collect()
+}
+
+/// [`filter_paths`] over a borrowed list (the shared cached walk): only the selected
+/// paths are copied out.
+pub fn select_paths(files: &[String], include: &str, exclude: &str) -> Vec<String> {
+    let selects = selector(include, exclude);
+    files.iter().filter(|file| selects(file)).cloned().collect()
+}
+
+fn selector(include: &str, exclude: &str) -> impl Fn(&str) -> bool {
     let split = |s: &str| -> Vec<String> {
         s.split(',')
             .map(|part| part.trim().to_owned())
@@ -103,13 +115,10 @@ pub fn filter_paths(files: Vec<String>, include: &str, exclude: &str) -> Vec<Str
     };
     let includes = split(include);
     let excludes = split(exclude);
-    files
-        .into_iter()
-        .filter(|file| {
-            (includes.is_empty() || includes.iter().any(|p| pattern_selects(p, file)))
-                && !excludes.iter().any(|p| pattern_selects(p, file))
-        })
-        .collect()
+    move |file: &str| {
+        (includes.is_empty() || includes.iter().any(|p| pattern_selects(p, file)))
+            && !excludes.iter().any(|p| pattern_selects(p, file))
+    }
 }
 
 /// Does `pattern` select `file`? Besides the file's own path, a pattern matching any

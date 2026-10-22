@@ -4,8 +4,6 @@
 //! Extracted from lib.rs's composition root (the restructure's P4-1); the
 //! composition root registers the commands.
 
-use std::sync::Arc;
-
 use ggs_base::workspace::{find_repo_root, WorkspaceRoots};
 
 use crate::state::{FolderSwitch, LaunchState, StartupAction};
@@ -67,12 +65,10 @@ async fn open_folder_impl(folders: &FolderSwitch<'_>, path: &str) -> Result<Open
         let files = ggs_fs::walk_files(&prefetch_root);
         cache.store(&prefetch_root, files);
     });
-    // The heavy background services (the symbol/analysis index builds and the file
-    // watcher) record themselves here but start only with `post_first_paint`, once the
-    // shell has painted its first frame with this folder: the index resume and the
-    // watcher's recursive scan used to share the CPU with that frame and the graph
-    // view's boot. They are not needed for the frame itself - Go-to-Definition, the
-    // analysis pages and external-change refreshes pick them up whenever they land.
+    // The file watcher records itself here but starts only with `post_first_paint`, once
+    // the shell has painted its first frame with this folder: its recursive scan must not
+    // share the CPU with that frame and the graph view's boot. The symbol and analysis
+    // indexes are not opened at all - they load on the first query that needs them.
     folders.deferred.record(vec![root.clone()]);
     Ok(opened)
 }
@@ -139,7 +135,7 @@ use crate::test_git_helpers::ScratchGit;
         assert_eq!(opened.root, root);
         assert_eq!(state.roots.list(), vec![root.clone()]);
         // The subfolder never reaches DeferredServices: the resolved root does, so
-        // `post_first_paint` starts the watcher and the index builds on the right tree.
+        // `post_first_paint` starts the watcher on the right tree.
         assert_eq!(state.deferred.take(), vec![root]);
     }
 
@@ -215,9 +211,11 @@ use crate::test_git_helpers::ScratchGit;
     }
 }
 
-/// One open root's background services: the symbol index build, the analysis index build
-/// and the file watcher, all off the calling thread. Shared by `post_first_paint` so the
-/// folder and workspace open paths start identical services.
+/// One open root's background service: the file watcher, off the calling thread. Shared
+/// by `post_first_paint` so the folder and workspace open paths start identical services.
+/// The symbol and analysis indexes are NOT built here: a large tree's indexes are the
+/// heaviest memory the app holds, so they load on the first query that needs them (the
+/// command adapters' `ensure_*`) and `index_lease` releases them once idle.
 fn start_root_services(app: &tauri::AppHandle, root: &str) {
     use tauri::Manager;
     let symbol_index = app
@@ -228,21 +226,6 @@ fn start_root_services(app: &tauri::AppHandle, root: &str) {
         .state::<std::sync::Arc<ggs_analysis::index::AnalysisIndex>>()
         .inner()
         .clone();
-    // The symbol database resumes from ~/.ggs/index/ and repairs against the disk
-    // (ggs-index); Go-to-Definition and Find References pick it up when it lands,
-    // falling back to the in-memory index until then.
-    {
-        let index_root = root.to_owned();
-        let sink = Arc::new(crate::events::TauriEvents(app.clone()));
-        symbol_index.start_build(Some(sink), &index_root);
-    }
-    // The Code Analysis index builds the same way, behind the symbol index (its parse
-    // is the heavier half; the analysis pages pick it up when it lands).
-    {
-        let analysis_root = root.to_owned();
-        let sink = Arc::new(crate::events::TauriEvents(app.clone()));
-        analysis_index.start_build(Some(sink), &analysis_root);
-    }
     // External changes reach the webview through the watcher; a refused watch (an exotic
     // filesystem, too many watches) just means the command-driven refreshes carry on alone.
     let app = app.clone();
@@ -273,8 +256,8 @@ fn start_root_services(app: &tauri::AppHandle, root: &str) {
 }
 
 /// The shell's first frame with the newly opened folder has painted: start the background
-/// services `open_folder` / `open_workspace` recorded, so their index resumes and watch
-/// scans never shared the CPU with that frame and the graph view's boot. Idempotent - a
+/// service `open_folder` / `open_workspace` recorded (the file watcher), so its watch
+/// scan never shares the CPU with that frame and the graph view's boot. Idempotent - a
 /// no-op when nothing waits (every folder open is followed by one call, later ones only
 /// after a reopen, when a fresh set was recorded).
 #[tauri::command]
@@ -370,7 +353,7 @@ pub async fn open_workspace(
     crate::remote_host::notify_folders(&root_paths);
 
     // The Quick Open prefetch stays on the open path (cheap, and the first Ctrl+P can come
-    // at any moment); the index builds and the watchers wait for the first painted frame,
+    // at any moment); the watchers wait for the first painted frame,
     // exactly as in `open_folder` - see `post_first_paint`.
     for root in &roots {
         let prefetch_root = root.root.clone();

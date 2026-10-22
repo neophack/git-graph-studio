@@ -14,9 +14,8 @@ use ggs_fs::{cached_file_list, walk_files};
 use ggs_index::compare::{compare_roots, DirDiffEntry};
 use ggs_index::hexdiff::{hex_of, HexDiff};
 use ggs_index::replace::{replace_root, ReplaceOutcome};
-use ggs_index::scan::{build_matcher, filter_paths, FileMatches};
+use ggs_index::scan::{build_matcher, select_paths, FileMatches};
 use ggs_index::search::{search_files, SearchEvent, FILE_LIST_TTL};
-use ggs_index::symbols::cache::cached_symbols;
 use ggs_index::symbols::index::references_for;
 use ggs_index::symbols::WorkspaceSymbol;
 
@@ -56,8 +55,8 @@ pub async fn search_workspace(
         .or_else(|| roots.inner().first())
         .ok_or_else(|| "No folder is open".to_string())?;
     let matcher = build_matcher(&query, is_regex, case_sensitive, word_only.unwrap_or(false))?;
-    let files = filter_paths(
-        cached_file_list(cache.inner(), &root, FILE_LIST_TTL, walk_files),
+    let files = select_paths(
+        &cached_file_list(cache.inner(), &root, FILE_LIST_TTL, walk_files),
         include.as_deref().unwrap_or(""),
         exclude.as_deref().unwrap_or(""),
     );
@@ -113,8 +112,8 @@ pub async fn replace_in_files(
     let root = repo
         .or_else(|| roots.inner().first())
         .ok_or_else(|| "No folder is open".to_string())?;
-    let files = filter_paths(
-        cached_file_list(cache.inner(), &root, FILE_LIST_TTL, walk_files),
+    let files = select_paths(
+        &cached_file_list(cache.inner(), &root, FILE_LIST_TTL, walk_files),
         include.as_deref().unwrap_or(""),
         exclude.as_deref().unwrap_or(""),
     );
@@ -149,13 +148,12 @@ pub async fn compare_dirs(
 
 /// Every workspace symbol whose name contains the (case-insensitive) query; an empty query
 /// returns the first `limit` symbols, so the frontend can list "all" for the call tree.
-/// The persistent index answers when it has landed; the in-memory rebuild stays the
-/// fallback for the window before it does.
+/// The persistent index answers, made resident on demand (cmd_symbols' `ensure_symbols`).
 #[tauri::command]
 pub async fn workspace_symbols(
+    app: tauri::AppHandle,
     roots: State<'_, WorkspaceRoots>,
     symbol_index: State<'_, std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>,
-    symbol_cache: State<'_, std::sync::Arc<ggs_index::symbols::cache::SymbolCache>>,
     query: String,
     limit: Option<usize>,
     repo: Option<String>,
@@ -163,27 +161,21 @@ pub async fn workspace_symbols(
     let root = repo
         .or_else(|| roots.inner().first())
         .ok_or_else(|| "No folder is open".to_string())?;
-    let all = symbol_index
+    crate::cmd_symbols::ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
+    // Filtered inside the store: only the hits are copied out, never the whole index.
+    Ok(symbol_index
         .inner()
-        .all_symbols(&root)
-        .unwrap_or_else(|| cached_symbols(&root, symbol_cache.inner()));
-    let needle = query.to_lowercase();
-    let mut hits: Vec<WorkspaceSymbol> = all
-        .into_iter()
-        .filter(|s| needle.is_empty() || s.name.to_lowercase().contains(&needle))
-        .collect();
-    if let Some(limit) = limit {
-        hits.truncate(limit);
-    }
-    Ok(hits)
+        .matching(&root, &query.to_lowercase(), limit.unwrap_or(usize::MAX))
+        .unwrap_or_default())
 }
 
 /// Every occurrence of `name` as a whole word in the workspace's code files - the raw material
 /// of Find References and the call tree, which filter and rank it frontend-side. The
-/// persistent index's occurrence list narrows the scan to the files that contain the word,
-/// when one has landed.
+/// persistent index's occurrence list (made resident on demand) narrows the scan to the
+/// files that contain the word.
 #[tauri::command]
 pub async fn find_references(
+    app: tauri::AppHandle,
     roots: State<'_, WorkspaceRoots>,
     symbol_index: State<'_, std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>,
     name: String,
@@ -192,6 +184,7 @@ pub async fn find_references(
         .inner()
         .first()
         .ok_or_else(|| "No folder is open".to_string())?;
+    crate::cmd_symbols::ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
     references_for(symbol_index.inner(), &root, &name)
 }
 

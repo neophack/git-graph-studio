@@ -1,6 +1,10 @@
 //! The per-root analysis index (module 17's state half): one `AnalysisIndex` owns the
-//! built analyses; a folder open builds in the background (half the cores), the explicit
-//! rebuild takes them all, watcher batches update single files, and the streaming report
+//! built analyses. Nothing builds on a folder open (a large tree's analysis is the
+//! heaviest thing the app holds): the first analysis command builds it on demand
+//! (`ensure_blocking`, every core — the user is waiting), the explicit rebuild does the
+//! same, watcher batches update a resident analysis file by file, and `release_idle`
+//! drops one nobody has used for a while, so the memory goes back once the analysis is
+//! done. The streaming report
 //! runners (`run_metrics` / `run_dead_code` / `run_security`) push their rows in batches
 //! with a cancellation generation — the search view's rhythm (plan §3.4): a first batch
 //! lands fast, and a newer run retires the older one. Progress reaches the frontend
@@ -10,6 +14,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -113,10 +118,14 @@ pub enum SecurityEvent {
 }
 
 /// The per-root analyses plus their build state. The generation counter cancels a running
-/// build or report the way the symbol index's does.
+/// build or report the way the symbol index's does; `last_used` is what `release_idle`
+/// ages an analysis by, and `ensure` serializes the on-demand builds so two commands
+/// arriving together share one build instead of cancelling each other's.
 pub struct AnalysisIndex {
     analyses: Mutex<HashMap<String, Arc<Mutex<AnalysisData>>>>,
     progress: Mutex<HashMap<String, AnalysisStatus>>,
+    last_used: Mutex<HashMap<String, Instant>>,
+    ensure: Mutex<()>,
     generation: AtomicU64,
 }
 
@@ -131,6 +140,8 @@ impl AnalysisIndex {
         AnalysisIndex {
             analyses: Mutex::new(HashMap::new()),
             progress: Mutex::new(HashMap::new()),
+            last_used: Mutex::new(HashMap::new()),
+            ensure: Mutex::new(()),
             generation: AtomicU64::new(0),
         }
     }
@@ -167,22 +178,92 @@ impl AnalysisIndex {
             .unwrap()
             .insert(root.to_owned(), Arc::new(Mutex::new(data)));
         self.note(root, stats);
+        self.touch(root);
+    }
+
+    /// Mark a root's analysis as used now: `release_idle` measures from here.
+    fn touch(&self, root: &str) {
+        self.last_used
+            .lock()
+            .unwrap()
+            .insert(root.to_owned(), Instant::now());
     }
 
     /// Drop a root's analysis (the folder closed).
     pub fn remove(&self, root: &str) {
-        self.analyses.lock().unwrap().remove(root);
+        let dropped = self.analyses.lock().unwrap().remove(root);
         self.progress.lock().unwrap().remove(root);
+        self.last_used.lock().unwrap().remove(root);
+        drop(dropped);
     }
 
-    /// Kick off the background build of a root (a folder open). Fire and forget —
-    /// progress reaches the frontend through the [`ANALYSIS_INDEX_EVENT`] event.
-    pub fn start_build(self: &Arc<Self>, sink: Option<Arc<dyn ggs_base::sink::EventSink>>, root: &str) {
-        let index = Arc::clone(self);
-        let root = root.to_owned();
-        std::thread::spawn(move || {
-            let _ = index.build_on_blocking(sink.as_deref(), &root, None, index_threads(true));
-        });
+    /// Drop every root's analysis (a folder switch: the old folder's analysis must not
+    /// stay resident behind the new one).
+    pub fn clear(&self) {
+        let dropped: Vec<_> = self.analyses.lock().unwrap().drain().collect();
+        self.progress.lock().unwrap().clear();
+        self.last_used.lock().unwrap().clear();
+        drop(dropped);
+    }
+
+    /// The analysis of a root, built now when none is resident — what every analysis
+    /// command answers from. Concurrent callers wait for the one build in flight; a
+    /// cancelled build (a folder switch) answers an error.
+    pub fn ensure_blocking(
+        &self,
+        sink: Option<&dyn ggs_base::sink::EventSink>,
+        root: &str,
+    ) -> Result<Arc<Mutex<AnalysisData>>, String> {
+        if let Some(data) = self.analysis(root) {
+            return Ok(data);
+        }
+        let _building = self
+            .ensure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(data) = self.analysis(root) {
+            return Ok(data);
+        }
+        self.build_on_blocking(sink, root, None, index_threads(false))?;
+        self.analysis(root)
+            .ok_or_else(|| "The code analysis was cancelled".to_owned())
+    }
+
+    /// Drop every analysis no one has used for `idle`, answering the released roots (their
+    /// status is `Empty` again). One still held — a report streaming its rows — counts as
+    /// used now, so a long report is never pulled from under itself and its idle time
+    /// starts when it finishes. The analyses drop after the locks are released: tearing
+    /// down a large one takes a while, and other roots' queries must not wait it out.
+    pub fn release_idle(&self, idle: Duration) -> Vec<String> {
+        let now = Instant::now();
+        let mut dropped = Vec::new();
+        let mut released = Vec::new();
+        {
+            let mut analyses = self.analyses.lock().unwrap();
+            let mut last_used = self.last_used.lock().unwrap();
+            let roots: Vec<String> = analyses.keys().cloned().collect();
+            for root in roots {
+                let in_use = analyses
+                    .get(&root)
+                    .is_some_and(|data| Arc::strong_count(data) > 1);
+                let last = *last_used.entry(root.clone()).or_insert(now);
+                if in_use {
+                    last_used.insert(root.clone(), now);
+                } else if now.duration_since(last) >= idle {
+                    dropped.extend(analyses.remove(&root));
+                    last_used.remove(&root);
+                    released.push(root);
+                }
+            }
+        }
+        {
+            let mut progress = self.progress.lock().unwrap();
+            for root in &released {
+                progress.remove(root);
+            }
+        }
+        drop(dropped);
+        released
     }
 
     /// An explicit rebuild (the sidebar's button, `analysis_rebuild`, the MCP start): the
@@ -306,9 +387,11 @@ impl AnalysisIndex {
         });
     }
 
-    /// The analysis of a root, when one has landed.
+    /// The analysis of a root, when one is resident (counts as a use).
     pub fn analysis(&self, root: &str) -> Option<Arc<Mutex<AnalysisData>>> {
-        self.data(root)
+        let data = self.data(root)?;
+        self.touch(root);
+        Some(data)
     }
 
     /// Claim the next run generation for a streaming report: a newer report (or a build,
@@ -518,6 +601,93 @@ mod tests {
         assert_eq!(modules.modules.len(), 1);
 
         index.remove(&root);
+        assert_eq!(index.status(&root).state, AnalysisState::Empty);
+    }
+
+    #[test]
+    fn ensure_builds_on_demand_and_reuses_the_resident_analysis() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "a.rs",
+            "fn helper() -> u32 { 7 }\nfn user() { helper(); }\n",
+        );
+        let index = AnalysisIndex::new();
+        let root = dir.path().display().to_string();
+        assert_eq!(index.status(&root).state, AnalysisState::Empty);
+        assert!(
+            index.analysis(&root).is_none(),
+            "nothing is built before a use"
+        );
+
+        let first = index.ensure_blocking(None, &root).unwrap();
+        assert_eq!(index.status(&root).state, AnalysisState::Ready);
+        let second = index.ensure_blocking(None, &root).unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "a resident analysis is not rebuilt"
+        );
+    }
+
+    #[test]
+    fn concurrent_ensures_share_one_build() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..200 {
+            write(
+                dir.path(),
+                &format!("f{i:03}.rs"),
+                "fn f() -> u32 { g() }\nfn g() -> u32 { 0 }\n",
+            );
+        }
+        let index = Arc::new(AnalysisIndex::new());
+        let root = dir.path().display().to_string();
+        let callers: Vec<_> = (0..4)
+            .map(|_| {
+                let index = Arc::clone(&index);
+                let root = root.clone();
+                std::thread::spawn(move || index.ensure_blocking(None, &root))
+            })
+            .collect();
+        let built: Vec<_> = callers
+            .into_iter()
+            .map(|caller| {
+                caller
+                    .join()
+                    .unwrap()
+                    .expect("no caller is cancelled by another")
+            })
+            .collect();
+        assert!(built.windows(2).all(|pair| Arc::ptr_eq(&pair[0], &pair[1])));
+    }
+
+    #[test]
+    fn release_idle_drops_an_unused_analysis_but_never_one_in_use() {
+        let (_dir, index, root) = seeded();
+        // Held by a running report: not released, however long it has been idle.
+        let held = index.analysis(&root).unwrap();
+        assert!(index.release_idle(Duration::ZERO).is_empty());
+        assert!(index.analysis(&root).is_some());
+        drop(held);
+
+        // Used just now: a long idle window keeps it.
+        assert!(index.release_idle(Duration::from_secs(3600)).is_empty());
+
+        // Idle past the window: released, status back to Empty, memory gone.
+        let weak = Arc::downgrade(&index.analysis(&root).unwrap());
+        assert_eq!(index.release_idle(Duration::ZERO), vec![root.clone()]);
+        assert!(weak.upgrade().is_none(), "the analysis data was dropped");
+        assert_eq!(index.status(&root).state, AnalysisState::Empty);
+
+        // The next use builds it again.
+        index.ensure_blocking(None, &root).unwrap();
+        assert_eq!(index.status(&root).state, AnalysisState::Ready);
+    }
+
+    #[test]
+    fn clear_drops_every_root() {
+        let (_dir, index, root) = seeded();
+        index.clear();
+        assert!(index.analysis(&root).is_none());
         assert_eq!(index.status(&root).state, AnalysisState::Empty);
     }
 

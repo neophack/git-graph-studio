@@ -10,7 +10,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -676,17 +676,21 @@ pub fn walk_files(root: &str) -> Vec<String> {
     files
 }
 
+/// One root's walk: when it was taken, and the shared list.
+type WalkedList = (Instant, Arc<Vec<String>>);
+
 /// The Quick Open file list cache, one slot per open root (a multi-root workspace keeps
 /// several), each stamped so a repeat open within the TTL is served without touching the
 /// filesystem.
 #[derive(Default)]
 pub struct FileListCache {
-    inner: Mutex<std::collections::HashMap<String, (Instant, Vec<String>)>>,
+    inner: Mutex<std::collections::HashMap<String, WalkedList>>,
 }
 
 impl FileListCache {
     pub fn invalidate(&self) {
-        self.inner.lock().unwrap().clear();
+        let dropped: Vec<_> = self.inner.lock().unwrap().drain().collect();
+        drop(dropped);
     }
 
     /// Store a freshly walked list, as the open-folder prefetch does from its own thread.
@@ -694,32 +698,52 @@ impl FileListCache {
         self.inner
             .lock()
             .unwrap()
-            .insert(root.to_owned(), (Instant::now(), files));
+            .insert(root.to_owned(), (Instant::now(), Arc::new(files)));
+    }
+
+    /// Drop the lists walked longer ago than `age`, answering how many went. Every reader
+    /// asks with a freshness window of seconds, so a list older than the longest window is
+    /// never served again — on a large tree it is the biggest thing a quiet window holds.
+    pub fn release_older_than(&self, age: Duration) -> usize {
+        let mut dropped = Vec::new();
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let stale: Vec<String> = inner
+                .iter()
+                .filter(|(_, (at, _))| at.elapsed() >= age)
+                .map(|(root, _)| root.clone())
+                .collect();
+            for root in stale {
+                dropped.extend(inner.remove(&root));
+            }
+        }
+        dropped.len()
     }
 }
 
 /// Serve `root`'s file list from the cache when it is fresh enough, otherwise walk (via
-/// `walk`) and store the result.
+/// `walk`) and store the result. The list is shared, not copied: a Quick Open keystroke
+/// used to deep-copy the whole walked tree just to score it.
 pub fn cached_file_list(
     cache: &FileListCache,
     root: &str,
     ttl: Duration,
     walk: fn(&str) -> Vec<String>,
-) -> Vec<String> {
+) -> Arc<Vec<String>> {
     {
         let cached = cache.inner.lock().unwrap();
         if let Some((at, files)) = cached.get(root) {
             if at.elapsed() < ttl {
-                return files.clone();
+                return Arc::clone(files);
             }
         }
     }
-    let files = walk(root);
+    let files = Arc::new(walk(root));
     cache
         .inner
         .lock()
         .unwrap()
-        .insert(root.to_owned(), (Instant::now(), files.clone()));
+        .insert(root.to_owned(), (Instant::now(), Arc::clone(&files)));
     files
 }
 
@@ -949,30 +973,51 @@ mod file_list_tests {
         let cache = FileListCache::default();
 
         assert_eq!(
-            cached_file_list(&cache, &root, Duration::from_secs(60), walk_files),
+            *cached_file_list(&cache, &root, Duration::from_secs(60), walk_files),
             ["a.txt"]
         );
 
         // A new file lands after the walk: within the TTL the stale cached list is served…
         fs::write(dir.path().join("b.txt"), b"").unwrap();
         assert_eq!(
-            cached_file_list(&cache, &root, Duration::from_secs(60), walk_files),
+            *cached_file_list(&cache, &root, Duration::from_secs(60), walk_files),
             ["a.txt"]
         );
 
         // …and after an Explorer mutation drops the cache, the next open sees it.
         cache.invalidate();
         assert_eq!(
-            cached_file_list(&cache, &root, Duration::from_secs(60), walk_files),
+            *cached_file_list(&cache, &root, Duration::from_secs(60), walk_files),
             ["a.txt", "b.txt"]
         );
 
         // A different folder never shares the cache entry.
         let empty: fn(&str) -> Vec<String> = |_| vec![];
         assert_eq!(
-            cached_file_list(&cache, "Z:/nowhere", Duration::from_secs(60), empty),
+            *cached_file_list(&cache, "Z:/nowhere", Duration::from_secs(60), empty),
             Vec::<String>::new()
         );
+    }
+
+    #[test]
+    fn a_cached_list_is_shared_not_copied_and_a_stale_one_is_released() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"").unwrap();
+        let root = dir.path().display().to_string();
+        let cache = FileListCache::default();
+        let first = cached_file_list(&cache, &root, Duration::from_secs(60), walk_files);
+        let second = cached_file_list(&cache, &root, Duration::from_secs(60), walk_files);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "a hit hands out the same list"
+        );
+
+        // Younger than the age: kept. Older: released, and the cache no longer holds it.
+        assert_eq!(cache.release_older_than(Duration::from_secs(3600)), 0);
+        let weak = Arc::downgrade(&first);
+        drop((first, second));
+        assert_eq!(cache.release_older_than(Duration::ZERO), 1);
+        assert!(weak.upgrade().is_none(), "the walked list left memory");
     }
 }
 

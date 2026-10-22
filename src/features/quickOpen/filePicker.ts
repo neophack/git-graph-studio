@@ -73,9 +73,17 @@ export class FilePickSource implements QuickPickSource {
 	 *  alone, and its rows are relative to it, so the other roots' files would never appear. */
 	constructor(private readonly loadFiles: () => Promise<string[]>, private readonly options: { backend?: boolean } = {}) {}
 
-	/** True until the first file list has landed (the picker says it is still reading files). */
+	/** True until the first file list has landed (the picker says it is still reading files).
+	 *  A backend-scored source waits on a list of its own only while the fallback loads. */
 	get pending(): boolean {
-		return !this.loaded;
+		return !this.loaded && (this.options.backend === false || this.loading !== null);
+	}
+
+	/** Load the list ahead of the first query — only for the TS scan's sources: when the
+	 *  backend scores, the page never holds the tree (on a large one the pre-lowered
+	 *  entries alone were hundreds of megabytes of page heap, kept for the session). */
+	prefetch(): void {
+		if (this.options.backend === false) void this.refresh();
 	}
 
 	/** Adopt a freshly walked file list; the pre-lowered entries are rebuilt only when the list
@@ -107,9 +115,10 @@ export class FilePickSource implements QuickPickSource {
 	 *  scan. The TS scan below is the fallback: no folder open, or a stubbed backend. */
 	async query(query: string, onPartial: (items: QuickPickItem[]) => void, isCancelled: () => boolean): Promise<QuickPickItem[]> {
 		const trimmed = query.trim();
-		// The first query starts the list load at once (the picker's "Reading…" status follows
-		// it) whether the backend or the TS scan ends up answering; later queries reuse it.
-		if (!this.loaded && !this.loading) void this.refresh();
+		// A TS-scanned source starts the list load at the first query (the picker's
+		// "Reading…" status follows it); a backend-scored one loads it only below, once the
+		// backend has failed to answer.
+		if (this.options.backend === false && !this.loaded && !this.loading) void this.refresh();
 		try {
 			const hits = this.options.backend === false ? null : await fuzzyFiles(trimmed, PICK_LIMIT);
 			if (Array.isArray(hits)) {

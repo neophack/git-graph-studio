@@ -255,7 +255,10 @@ no-clobber copy — not a transfer) stay.
 ### 4. Quick Open
 
 VS Code's anythingQuickAccess model: the walked file list pre-lowered once, queries scanned
-in event-loop-yielding chunks.
+in event-loop-yielding chunks. A single-folder window never pulls the list into the page
+(2026-10-22, the memory pass): the backend scores it over its cached walk — shared as one
+`Arc` list, never copied per keystroke — and only a multi-root workspace, or a backend that
+fails to answer, loads the pre-lowered entries the TS scan runs over.
 
 - Frontend: `src/features/quickOpen/filePicker.ts`, `src/features/quickOpen/fuzzy.ts` (the fuzzyScorer port)
 - Backend: the `ggs-index` crate's `fuzzy` module (server-side scoring — a keystroke ships
@@ -266,8 +269,11 @@ in event-loop-yielding chunks.
 Workspace-wide search & replace with streaming results, and Source Insight-style symbol
 navigation (Go-to-Definition, Find References, Call Tree, Quick Open's `@` / `#` symbol
 modes, the Context Window) over the persistent workspace symbol index: interned names,
-per-file fingerprints and per-name occurrence lists under `~/.ggs/index/`, resumed on open,
-updated file-by-file by the watcher.
+per-file fingerprints and per-name occurrence lists under `~/.ggs/index/`, updated
+file-by-file by the watcher. **Nothing is indexed on open** (2026-10-22, the owner's
+direction: 打开大的项目会导致内存占用极高，我不要打开时候就分析项目，而是使用某个分析功能就开始分析，
+分析完后要释放内存): the first symbol query resumes (or builds) the index, and it leaves
+memory once idle — module 17's Code Analysis index follows the same lifetime.
 
 - Frontend: `src/features/search/searchView.ts`, `src/features/search/callTree.ts`, `src/features/search/contextView.ts` (the Context
   Window panel page - the definition of the symbol under the cursor),
@@ -283,8 +289,19 @@ updated file-by-file by the watcher.
   rebuild, the reference scan) and `symbols::cache` (the in-memory fallback) — behind the
   `src-tauri/src/cmd_search.rs` / `cmd_symbols.rs` command adapters (the
   `#[tauri::command]` halves; progress crosses the ggs-base push seams, cancellation is
-  the generation counter). Every walk reuses the Quick Open walk so the exclusion policy
-  is one list.
+  the generation counter; every query runs `cmd_symbols::ensure_symbols` first — the
+  on-demand resume, concurrent callers sharing one build), and
+  `src-tauri/src/index_lease.rs` (the indexes' on-demand lifetime: the sweeper that
+  releases the symbol index after 5 idle minutes and the Code Analysis index after one —
+  a store still held by a running report counts as in use — announces the `Empty` status
+  on the index events, and trims the heap so the memory goes back to the OS; the same
+  look drops walked file lists older than 30 s — every reader's freshness window is 5 s,
+  so an older list is never served again — and a launch file's prewarmed rope the page
+  never claimed within a minute; a folder switch drops every resident index outright,
+  `FolderSwitch::reset`). The symbol queries filter inside the store (`lookup`,
+  `matching`, `occurrence_counts`) and copy out only their hits — Go-to-Definition used to
+  materialize the whole index per lookup. Every walk reuses the Quick Open walk so the
+  exclusion policy is one list.
 
 ### 6. Editor Suite
 
@@ -1256,7 +1273,9 @@ viewport (pan, zoom, states) around it.
   gitdiagram's viewport around it — pan/zoom, the zoom toolbar, the delegated
   selection states)
 - Backend: the `ggs-analysis` crate (`src-tauri/crates/ggs-analysis/`) — `lib.rs` the
-  engine and the per-symbol call graph, `index.rs` the per-root `AnalysisIndex` and the
+  engine and the per-symbol call graph, `index.rs` the per-root `AnalysisIndex` (built
+  by the first analysis command, never on a folder open — `ensure_blocking` — and
+  released once idle, `release_idle`, through module 5's `index_lease.rs`) and the
   streaming report runners, `metrics.rs`, `deadcode.rs`, `security.rs`, `modules.rs` the
   Module Analysis aggregation, `diagram.rs` the Module Analysis drawing — the
   architecture-only curation, gitdiagram's caps, tone

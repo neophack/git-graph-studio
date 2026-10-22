@@ -388,7 +388,7 @@ export class Workbench {
 				return listFiles().catch(() => [] as string[]);
 			}, { backend: !multiRoot });
 		}
-		void this.filePicks.refresh();
+		this.filePicks.prefetch();
 		return this.filePicks;
 	}
 

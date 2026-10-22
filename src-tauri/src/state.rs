@@ -115,8 +115,8 @@ impl Watchers {
     }
 }
 
-/// The open folders whose background services (the symbol/analysis index builds and the
-/// file watcher) are recorded by `open_folder` / `open_workspace` but only started by
+/// The open folders whose background service (the file watcher — the symbol and analysis
+/// indexes load on first use instead) is recorded by `open_folder` / `open_workspace` but only started by
 /// `post_first_paint`, once the shell calls it after its first frame with the new
 /// folder has painted — so none of them competes with that frame for the CPU.
 /// A plain struct (not raw state inline) so the record/take lifecycle — replace on
@@ -212,15 +212,19 @@ impl FolderSwitch<'_> {
     }
 
     /// The reset every folder switch runs: the caches go stale, the running search and
-    /// the index builds cancel, the old folder's watches end (a refused start_watcher,
-    /// or a reopen racing the install, must not leave the old folder emitting
-    /// `studio://fs-changed`), and any pending deferred roots drop.
+    /// the index builds cancel, the resident indexes leave memory (the old folder's would
+    /// otherwise stay behind the new one for the life of the process), the old folder's
+    /// watches end (a refused start_watcher, or a reopen racing the install, must not
+    /// leave the old folder emitting `studio://fs-changed`), and any pending deferred
+    /// roots drop.
     pub fn reset(&self) {
         self.file_list_cache.invalidate();
         self.symbol_cache.invalidate();
         self.search.cancel();
         self.symbol_index.cancel();
         self.analysis_index.cancel();
+        self.symbol_index.clear();
+        self.analysis_index.clear();
         self.watchers.clear();
         self.deferred.clear();
     }

@@ -257,14 +257,16 @@ describe('the report pages', () => {
 		expect(row.textContent).toContain('cfg.py:3');
 	});
 
-	it('a failing report shows the building hint instead of throwing', async () => {
+	it('a failing report shows the retry hint instead of throwing', async () => {
 		await modules();
+		// The index builds inside the command now; what can still fail is a build cancelled
+		// under it (a folder switch).
 		backend.on('analysis_metrics', () => {
-			throw new Error('The code analysis index is still building');
+			throw new Error('The code analysis was cancelled');
 		});
 		createAnalysisPage('metrics', host());
 		await flush(8);
-		expect(texts('.an-title')[0]).toContain('building');
+		expect(texts('.an-title')[0]).toContain('try again');
 	});
 });
 

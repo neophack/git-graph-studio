@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { FilePickSource } from '../src/features/quickOpen';
 import { flush } from './helpers';
+import { backend } from './tauriMock';
 
 function source(files: string[]): FilePickSource {
 	return new FilePickSource(() => Promise.resolve(files));
@@ -25,6 +26,18 @@ describe('FilePickSource', () => {
 
 		const rootHits = await picks.query('README', () => undefined, () => false);
 		expect(rootHits[0]!.description, 'a root file shows no folder description').toBeUndefined();
+	});
+
+	it('a backend-scored source never pulls the file list into the page', async () => {
+		backend.on('fuzzy_files', () => [{ path: 'src/main.ts', label: 'main.ts', ranges: [] }]);
+		const load = vi.fn(() => Promise.resolve(['src/main.ts']));
+		const picks = new FilePickSource(load);
+		picks.prefetch();
+		expect(picks.status(), 'the backend answers; nothing is being read').toBeNull();
+		const hits = await picks.query('main', () => undefined, () => false);
+		expect(hits.map((item) => item.value)).toEqual(['file:src/main.ts']);
+		expect(load, 'the whole tree stays in the backend').not.toHaveBeenCalled();
+		backend.reset();
 	});
 
 	it('loads on first query and keeps the index across queries', async () => {
@@ -100,7 +113,7 @@ describe('FilePickSource', () => {
 		let resolveLoad: ((files: string[]) => void) | null = null;
 		const picks = new FilePickSource(() => new Promise((resolve) => {
 			resolveLoad = resolve;
-		}));
+		}), { backend: false });
 		const pending = picks.query('a', () => undefined, () => false);
 		expect(picks.status()).toBe('Reading the file list…');
 		resolveLoad!(['a.txt']);

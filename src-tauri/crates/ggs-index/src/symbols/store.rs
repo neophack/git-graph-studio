@@ -171,31 +171,64 @@ impl SymbolStore {
 
     /// Every declaration, path-then-line sorted — the same shape the in-memory index served.
     pub fn all_symbols(&self) -> Vec<WorkspaceSymbol> {
-        let mut all = Vec::new();
+        let mut all = Vec::with_capacity(self.files.iter().map(|f| f.symbols.len()).sum());
         for file in &self.files {
             for symbol in &file.symbols {
-                all.push(WorkspaceSymbol {
-                    kind: kind_name(symbol.kind).to_owned(),
-                    name: self.names[symbol.name_id as usize].clone(),
-                    path: file.path.clone(),
-                    line: symbol.line as usize,
-                    column: symbol.column as usize,
-                    end_line: symbol.end_line as usize,
-                    container: (symbol.container_id != NO_CONTAINER)
-                        .then(|| self.names[symbol.container_id as usize].clone()),
-                });
+                all.push(self.materialize(file, symbol));
             }
         }
         all
     }
 
+    fn materialize(&self, file: &FileEntry, symbol: &StoredSymbol) -> WorkspaceSymbol {
+        WorkspaceSymbol {
+            kind: kind_name(symbol.kind).to_owned(),
+            name: self.names[symbol.name_id as usize].clone(),
+            path: file.path.clone(),
+            line: symbol.line as usize,
+            column: symbol.column as usize,
+            end_line: symbol.end_line as usize,
+            container: (symbol.container_id != NO_CONTAINER)
+                .then(|| self.names[symbol.container_id as usize].clone()),
+        }
+    }
+
+    /// The declarations whose name `keep` selects, in path-then-line order, at most
+    /// `limit`: the name table is asked once per distinct name and only the hits are
+    /// copied out — a lookup used to materialize the whole index (every name, path and
+    /// kind as fresh strings) just to keep a handful.
+    fn symbols_named(&self, keep: impl Fn(&str) -> bool, limit: usize) -> Vec<WorkspaceSymbol> {
+        let wanted: Vec<bool> = self.names.iter().map(|name| keep(name)).collect();
+        let mut hits = Vec::new();
+        if limit == 0 || !wanted.contains(&true) {
+            return hits;
+        }
+        for file in &self.files {
+            for symbol in &file.symbols {
+                if wanted[symbol.name_id as usize] {
+                    hits.push(self.materialize(file, symbol));
+                    if hits.len() >= limit {
+                        return hits;
+                    }
+                }
+            }
+        }
+        hits
+    }
+
     /// Every declaration of exactly `name` (same spelling, any case — the extractor records
     /// declarations as written, and Go-to-Definition wants all of them).
     pub fn lookup(&self, name: &str) -> Vec<WorkspaceSymbol> {
-        self.all_symbols()
-            .into_iter()
-            .filter(|s| s.name == name)
-            .collect()
+        self.symbols_named(|candidate| candidate == name, usize::MAX)
+    }
+
+    /// The declarations whose name contains `needle_lower` (already lowercased; empty
+    /// matches every name), at most `limit` — the workspace symbol search.
+    pub fn matching(&self, needle_lower: &str, limit: usize) -> Vec<WorkspaceSymbol> {
+        if needle_lower.is_empty() {
+            return self.symbols_named(|_| true, limit);
+        }
+        self.symbols_named(|name| name.to_lowercase().contains(needle_lower), limit)
     }
 
     /// How many files contain each trusted name: the Symbol Database page's "n refs"

@@ -1,8 +1,10 @@
 //! The per-root symbol databases: the persistent index served to the workbench. One
-//! `SymbolIndex` owns the stores; a folder open resumes the saved index from
-//! `~/.ggs/index/` and repairs it against the disk, watcher batches update single files,
-//! and the queries (`symbol_lookup`, `symbol_references`) answer from the database — with
-//! the in-memory path (`cache`) still there as the fallback when no index has landed yet.
+//! `SymbolIndex` owns the stores. Nothing loads on a folder open: the first symbol query
+//! (`ensure_blocking` — Go-to-Definition, Find References, the workspace symbols, the
+//! Symbol Database) resumes the saved index from `~/.ggs/index/` and repairs it against
+//! the disk, or builds it when none was saved; watcher batches update a resident store
+//! file by file (and persist it), and `release_idle` drops a store nobody has queried for
+//! a while — the disk copy stays current, so the next query only resumes it.
 //! Progress reaches the frontend through the push seams: a `BatchSink` for the explicit
 //! rebuild, the `studio://symbol-index` event (`EventSink`) for the background builds.
 
@@ -10,6 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -73,11 +76,15 @@ pub enum SymbolIndexEvent {
 
 /// The per-root symbol databases plus their build state. The generation counter cancels a
 /// running build the way the text search's does: a folder switch or a newer build bumps it,
-/// and the old build stops at its next batch boundary.
+/// and the old build stops at its next batch boundary. `last_used` is what `release_idle`
+/// ages a store by; `ensure` serializes the on-demand builds so queries arriving together
+/// share one build.
 pub struct SymbolIndex {
     home: PathBuf,
     stores: Mutex<HashMap<String, Arc<Mutex<SymbolStore>>>>,
     progress: Mutex<HashMap<String, IndexStatus>>,
+    last_used: Mutex<HashMap<String, Instant>>,
+    ensure: Mutex<()>,
     generation: AtomicU64,
 }
 
@@ -97,6 +104,8 @@ impl SymbolIndex {
             home,
             stores: Mutex::new(HashMap::new()),
             progress: Mutex::new(HashMap::new()),
+            last_used: Mutex::new(HashMap::new()),
+            ensure: Mutex::new(()),
             generation: AtomicU64::new(0),
         }
     }
@@ -122,8 +131,24 @@ impl SymbolIndex {
             .insert(root.to_owned(), status);
     }
 
+    /// A query's way to the store: counts as a use for `release_idle`.
     fn store(&self, root: &str) -> Option<Arc<Mutex<SymbolStore>>> {
+        let store = self.resident(root)?;
+        self.touch(root);
+        Some(store)
+    }
+
+    /// The store without marking a use — the watcher's updates are not a reason to keep a
+    /// store resident.
+    fn resident(&self, root: &str) -> Option<Arc<Mutex<SymbolStore>>> {
         self.stores.lock().unwrap().get(root).cloned()
+    }
+
+    fn touch(&self, root: &str) {
+        self.last_used
+            .lock()
+            .unwrap()
+            .insert(root.to_owned(), Instant::now());
     }
 
     /// Install a finished store and mark the root ready.
@@ -134,12 +159,78 @@ impl SymbolIndex {
             .unwrap()
             .insert(root.to_owned(), Arc::new(Mutex::new(store)));
         self.note(root, ready_status(&stats));
+        self.touch(root);
     }
 
     /// Drop a root's index (the folder closed).
     pub fn remove(&self, root: &str) {
-        self.stores.lock().unwrap().remove(root);
+        let dropped = self.stores.lock().unwrap().remove(root);
         self.progress.lock().unwrap().remove(root);
+        self.last_used.lock().unwrap().remove(root);
+        drop(dropped);
+    }
+
+    /// Drop every root's store (a folder switch: the old folder's index must not stay
+    /// resident behind the new one; its disk copy is current).
+    pub fn clear(&self) {
+        let dropped: Vec<_> = self.stores.lock().unwrap().drain().collect();
+        self.progress.lock().unwrap().clear();
+        self.last_used.lock().unwrap().clear();
+        drop(dropped);
+    }
+
+    /// Make the root's index resident: resume (or build) it now when it is not — what
+    /// every symbol query runs first. Concurrent callers wait for the one build in
+    /// flight; a cancelled build (a folder switch) answers an error.
+    pub fn ensure_blocking(&self, sink: Option<&dyn EventSink>, root: &str) -> Result<(), String> {
+        if self.store(root).is_some() {
+            return Ok(());
+        }
+        let _building = self
+            .ensure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.store(root).is_some() {
+            return Ok(());
+        }
+        self.build_on_blocking(sink, root, None, Self::index_threads(false))
+            .map(|_| ())
+    }
+
+    /// Drop every store no query has touched for `idle`, answering the released roots
+    /// (their status is `Empty` again). A store still held (a query or a watcher batch in
+    /// flight) counts as used now. The stores drop after the locks are released, so the
+    /// teardown of a large one never stalls another root's query.
+    pub fn release_idle(&self, idle: Duration) -> Vec<String> {
+        let now = Instant::now();
+        let mut dropped = Vec::new();
+        let mut released = Vec::new();
+        {
+            let mut stores = self.stores.lock().unwrap();
+            let mut last_used = self.last_used.lock().unwrap();
+            let roots: Vec<String> = stores.keys().cloned().collect();
+            for root in roots {
+                let in_use = stores
+                    .get(&root)
+                    .is_some_and(|store| Arc::strong_count(store) > 1);
+                let last = *last_used.entry(root.clone()).or_insert(now);
+                if in_use {
+                    last_used.insert(root.clone(), now);
+                } else if now.duration_since(last) >= idle {
+                    dropped.extend(stores.remove(&root));
+                    last_used.remove(&root);
+                    released.push(root);
+                }
+            }
+        }
+        {
+            let mut progress = self.progress.lock().unwrap();
+            for root in &released {
+                progress.remove(root);
+            }
+        }
+        drop(dropped);
+        released
     }
 
     /// The index of a root with its per-name occurrence counts, when one has landed — the
@@ -160,12 +251,38 @@ impl SymbolIndex {
         Some((symbols, counts))
     }
 
+    /// The per-name occurrence counts alone — the metrics report's hotspot column, which
+    /// has no use for the materialized symbols `symbols_with_refs` also copies out.
+    pub fn occurrence_counts(&self, root: &str) -> Option<HashMap<String, usize>> {
+        let store = self.store(root)?;
+        let guard = store.lock().unwrap();
+        let counts = guard
+            .occurrence_counts()
+            .iter()
+            .map(|(name, &count)| ((*name).to_owned(), count))
+            .collect();
+        Some(counts)
+    }
+
     /// The whole index of a root, when one has landed — the fast path `workspace_symbols`
     /// serves from. Cloned out (a query must not hold the build's lock).
     pub fn all_symbols(&self, root: &str) -> Option<Vec<WorkspaceSymbol>> {
         let store = self.store(root)?;
         let symbols = store.lock().unwrap().all_symbols();
         Some(symbols)
+    }
+
+    /// The declarations whose name contains `needle_lower` (lowercased; empty is every
+    /// name), at most `limit` — only the hits are copied out of the store.
+    pub fn matching(
+        &self,
+        root: &str,
+        needle_lower: &str,
+        limit: usize,
+    ) -> Option<Vec<WorkspaceSymbol>> {
+        let store = self.store(root)?;
+        let hits = store.lock().unwrap().matching(needle_lower, limit);
+        Some(hits)
     }
 
     /// Every declaration of exactly `name`.
@@ -215,17 +332,6 @@ impl SymbolIndex {
         let store = self.store(root)?;
         let guard = store.lock().unwrap();
         guard.file_symbols(path)
-    }
-
-    /// Kick off the background build of a root (a folder open): resume from the saved index
-    /// when there is one, full build otherwise. Fire and forget — progress reaches the
-    /// frontend through the [`SYMBOL_INDEX_EVENT`] event.
-    pub fn start_build(self: &Arc<Self>, sink: Option<Arc<dyn EventSink>>, root: &str) {
-        let index = Arc::clone(self);
-        let root = root.to_owned();
-        std::thread::spawn(move || {
-            let _ = index.build_on_blocking(sink.as_deref(), &root, None, Self::index_threads(true));
-        });
     }
 
     /// An explicit rebuild (the status item's click, `symbols_rebuild`): the user is
@@ -301,10 +407,11 @@ impl SymbolIndex {
             Some(mut store) => match store.refresh_against_disk(&report, &is_cancelled) {
                 Ok(0) => Ok(store),
                 Ok(_) => {
-                    if !is_current() {
-                        return Err("cancelled".to_owned());
+                    if is_current() {
+                        Ok(store)
+                    } else {
+                        Err("cancelled".to_owned())
                     }
-                    Ok(store)
                 }
                 Err(_) => SymbolStore::build(root, threads, &report, &is_cancelled)
                     .ok_or_else(|| "cancelled".to_owned()),
@@ -317,6 +424,16 @@ impl SymbolIndex {
         let store = match built {
             Ok(store) => store,
             Err(error) => {
+                // The progress report left "Building N/M" on the note; put back what
+                // stands — the resident store's READY state, or nothing.
+                let standing = self
+                    .resident(root)
+                    .map(|store| ready_status(&store.lock().unwrap().stats()))
+                    .unwrap_or_else(IndexStatus::empty);
+                self.note(root, standing);
+                if let Some(sink) = sink {
+                    emit_status(sink);
+                }
                 if let Some(channel) = &channel {
                     let _ = channel.lock().unwrap().send(SymbolIndexEvent::Done {
                         files: 0,
@@ -362,7 +479,7 @@ impl SymbolIndex {
         let index = Arc::clone(self);
         let root = root.to_owned();
         std::thread::spawn(move || {
-            let Some(store) = index.store(&root) else {
+            let Some(store) = index.resident(&root) else {
                 return;
             };
             {
@@ -537,6 +654,57 @@ mod tests {
             Some(vec!["a.rs".to_owned(), "b.rs".to_owned()])
         );
         assert_eq!(index.status("Z:\\nowhere").state, IndexState::Empty);
+    }
+
+    #[test]
+    fn matching_filters_inside_the_store_in_index_order_and_honours_the_limit() {
+        let (_root_dir, _home, index, root) = seeded_index();
+        let names =
+            |hits: Vec<WorkspaceSymbol>| hits.into_iter().map(|s| s.name).collect::<Vec<_>>();
+        // The same rows, in the same order, as filtering the whole index would give.
+        let all = index.all_symbols(&root).unwrap();
+        assert_eq!(
+            names(index.matching(&root, "", usize::MAX).unwrap()),
+            names(all)
+        );
+        assert_eq!(
+            names(index.matching(&root, "alp", usize::MAX).unwrap()),
+            ["alpha"]
+        );
+        assert_eq!(names(index.matching(&root, "a", 1).unwrap()).len(), 1);
+        assert!(index.matching(&root, "zzz", usize::MAX).unwrap().is_empty());
+        assert_eq!(index.lookup(&root, "beta").unwrap().len(), 1);
+        assert!(
+            index.lookup(&root, "bet").unwrap().is_empty(),
+            "lookup is exact"
+        );
+    }
+
+    #[test]
+    fn ensure_loads_on_demand_and_release_idle_drops_the_store_until_the_next_query() {
+        let (_root_dir, home, index, root) = seeded_index();
+        // A fresh index over the same home: nothing resident until a query ensures it.
+        let fresh = SymbolIndex::with_home(home.path().to_owned());
+        assert_eq!(fresh.status(&root).state, IndexState::Empty);
+        assert!(fresh.lookup(&root, "alpha").is_none());
+        fresh.ensure_blocking(None, &root).unwrap();
+        assert_eq!(fresh.lookup(&root, "alpha").unwrap().len(), 1);
+
+        // Queried just now: a long idle window keeps it; a zero window releases it.
+        assert!(index.release_idle(Duration::from_secs(3600)).is_empty());
+        assert_eq!(index.release_idle(Duration::ZERO), vec![root.clone()]);
+        assert_eq!(index.status(&root).state, IndexState::Empty);
+        assert!(
+            index.lookup(&root, "alpha").is_none(),
+            "the store left memory"
+        );
+
+        // The disk copy stayed current: the next ensure resumes it.
+        index.ensure_blocking(None, &root).unwrap();
+        assert_eq!(index.lookup(&root, "beta").unwrap().len(), 1);
+
+        index.clear();
+        assert_eq!(index.status(&root).state, IndexState::Empty);
     }
 
     #[test]
