@@ -68,6 +68,8 @@ export class EditorArea {
 	private readonly overlays: ExtOverlay[] = [];
 	/** A pending overlay-placement frame id (0 = none). */
 	private overlaySyncPending = 0;
+	/** The group tree's mutation watch; observing only while `overlays` is non-empty. */
+	private readonly overlayObserver: MutationObserver;
 	/** Assigned in the constructor; until then a group's first `update()` (fired by the
 	 *  render-welcome wiring) must not touch the tree, hence the tolerant `leaves`. */
 	private root!: Node;
@@ -123,9 +125,13 @@ export class EditorArea {
 		// flexGrow, a tab moved between groups) can move or resize a placeholder: the hosts
 		// follow on the next frame. Resizes that change no DOM inside the tree — a window
 		// resize, a sidebar toggle — arrive through the per-placeholder observers and this
-		// window listener.
-		new MutationObserver(() => this.scheduleOverlaySync())
-			.observe(this.groupsRoot, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'class', 'style'] });
+		// window listener. The observer watches only while an overlay exists (see
+		// `attachExtOverlay`), and a text editor's own DOM churn never counts: CodeMirror
+		// rewrites lines, cursors and selection layers on every keystroke and scroll, and
+		// each burst used to schedule a timer, a frame and a forced layout read per overlay.
+		this.overlayObserver = new MutationObserver((records) => {
+			if (records.some((record) => !(record.target as Element).closest?.('.cm-editor'))) this.scheduleOverlaySync();
+		});
 		let goneCheck: number | null = null;
 		const onResize = () => {
 			// A device-class switch (the remote layout host) detaches the whole workbench
@@ -955,6 +961,9 @@ export class EditorArea {
 			entry.resize = new ResizeObserver(() => this.scheduleOverlaySync());
 			entry.resize.observe(placeholder);
 		}
+		if (this.overlays.length === 0) {
+			this.overlayObserver.observe(this.groupsRoot, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'class', 'style'] });
+		}
 		this.overlays.push(entry);
 		this.placeOverlay(entry);
 		return {
@@ -962,6 +971,7 @@ export class EditorArea {
 			dispose: () => {
 				const index = this.overlays.indexOf(entry);
 				if (index !== -1) this.overlays.splice(index, 1);
+				if (this.overlays.length === 0) this.overlayObserver.disconnect();
 				entry.resize?.disconnect();
 				host.remove();
 			}
@@ -989,7 +999,7 @@ export class EditorArea {
 	/** Re-place every overlay on the next frame: mutations and resizes arrive in bursts (a
 	 *  layout rebuild, a sash drag), and one placement per frame reads layout once. */
 	private scheduleOverlaySync(): void {
-		if (this.overlaySyncPending) return;
+		if (this.overlaySyncPending || this.overlays.length === 0) return;
 		let done = false;
 		const run = () => {
 			if (done) return;

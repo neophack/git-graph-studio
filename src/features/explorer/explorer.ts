@@ -10,6 +10,7 @@ import { fileIcon, fileIconColor } from '../../platform/fileIcons';
 import type { StatusMap } from '../../platform/ipc/scm';
 import { contextUri, menuSection, resourceContext } from '../extensions';
 import { tf } from '../../platform/i18n';
+import { coalesced } from '../../platform/coalesce';
 import { transferMenuEntries } from './transfer';
 import { actionButton, basename, confirmDialog, el, icon, joinPath, liveSidebarTitle, notify, relativeTo, showContextMenu, toPosix, type MenuEntry } from '../../platform/ui/index';
 
@@ -166,7 +167,15 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 	/** Re-read every expanded level (files changed on disk). The old rows stay on screen
 	 *  until each level's fresh listing arrives (renderLevel swaps them in), so refreshing
 	 *  never blanks the tree - clearing up front made it flash on every refresh. */
-	async refresh(): Promise<void> {
+	refresh(): Promise<void> {
+		return this.refreshFlight();
+	}
+
+	/** One re-read in flight at most, one queued behind it (a build's watcher batches used
+	 *  to re-list every expanded level concurrently, once per batch). */
+	private readonly refreshFlight = coalesced(() => this.refreshNow());
+
+	private async refreshNow(): Promise<void> {
 		if (!this.rootPath) return;
 		const scrollTop = this.body.scrollTop;
 		this.cancelInlineInputs();

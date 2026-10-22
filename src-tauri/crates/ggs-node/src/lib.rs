@@ -53,6 +53,10 @@ fn promise_timeout() -> Duration {
         .map(Duration::from_secs)
         .unwrap_or(PROMISE_TIMEOUT)
 }
+/// The longest [`settle`] blocks between pumping passes without a wake or a due timer: a
+/// bound on a missed wake, never the pace of a healthy wait.
+const SETTLE_WAKE_CAP: Duration = Duration::from_millis(20);
+
 /// The no-timer idle wait: bounded so a missed wake cannot idle a request forever.
 const IDLE_TICK: Duration = Duration::from_secs(30);
 /// The JS thread's native stack. Boa's parser, compiler and several builtins recurse in
@@ -200,6 +204,30 @@ impl Pump {
     pub(crate) fn send_job(&self, job: Job) {
         let _ = self.queue.lock().unwrap().send(job);
         self.wake();
+    }
+
+    /// Put a job back on the queue WITHOUT the wake: [`deliver_child_jobs`] hands the run
+    /// loop's own jobs back while a request holds the thread, and the loop drains the queue
+    /// before it ever waits — a wake there would only wake [`settle`]'s wait at once, every
+    /// pass, turning the blocked wait back into a spin for as long as a request queues.
+    pub(crate) fn requeue(&self, job: Job) {
+        let _ = self.queue.lock().unwrap().send(job);
+    }
+
+    /// Block until the next wake (a job, a child or socket arrival, an addon completion)
+    /// or `timeout`, consuming the signal. [`settle`]'s wait between its pumping passes.
+    pub(crate) fn wait_for_wake(&self, timeout: Duration) {
+        let (flag, condvar) = &*self.wake;
+        let Ok(mut guard) = flag.lock() else {
+            return;
+        };
+        if !*guard {
+            guard = match condvar.wait_timeout(guard, timeout) {
+                Ok((next, _)) => next,
+                Err(_) => return,
+            };
+        }
+        *guard = false;
     }
 
     pub(crate) fn wake(&self) {
@@ -1474,8 +1502,9 @@ fn deliver_child_jobs(context: &mut Context) {
     }
     if !backlog.is_empty() {
         with_state(|state| {
+            let pump = state.pump();
             for job in backlog {
-                state.pump().send_job(job);
+                pump.requeue(job);
             }
         });
     }
@@ -1558,10 +1587,27 @@ pub(crate) fn settle(context: &mut Context, value: JsValue) -> Result<JsValue, S
                 // A long request (an activation, a big engine read) may allocate far more
                 // out of the heap than the run loop's idle pass ever sees.
                 collect_on_external_pressure();
-                if trace {
-                    eprintln!("[settle] sleeping");
+                // Settled by this pass's own jobs: answer now, not after a wait.
+                if !matches!(
+                    promise.state(),
+                    boa_engine::builtins::promise::PromiseState::Pending
+                ) {
+                    continue;
                 }
-                std::thread::sleep(Duration::from_millis(2));
+                if trace {
+                    eprintln!("[settle] waiting");
+                }
+                // Block until something can move the promise: every asynchronous source
+                // (a child or socket arrival, an addon's threadsafe completion) wakes the
+                // run loop's signal, and the timers have their deadline. This was a 2 ms
+                // sleep — every pending engine read or extension command spun the JS
+                // thread through the whole pumping pass 500 times a second for as long as
+                // it waited. The cap only bounds a missed wake.
+                let pump = with_state(|state| state.pump());
+                let next_timer = with_state(|state| state.next_deadline())
+                    .map(|at| at.saturating_duration_since(Instant::now()));
+                let wait = next_timer.map_or(SETTLE_WAKE_CAP, |due| due.min(SETTLE_WAKE_CAP));
+                pump.wait_for_wake(wait);
             }
             boa_engine::builtins::promise::PromiseState::Fulfilled(value) => return Ok(value),
             boa_engine::builtins::promise::PromiseState::Rejected(reason) => {

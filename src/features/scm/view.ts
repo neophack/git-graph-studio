@@ -12,6 +12,7 @@ import type { BranchInfo, RemoteInfo, ScmChange, StashInfo, StatusMap } from '..
 import { scmBranches, scmRemotes, scmStashes, scmStatus } from '../../platform/ipc/scm';
 import { repoHead, repoSubmodules } from '../../platform/ipc/revision';
 import * as state from '../../platform/state';
+import { coalesced } from '../../platform/coalesce';
 import { actionButton, basename, el, icon, liveSidebarTitle, notify, quickPick, showMenuBelow, toPosix, type MenuEntry, type QuickPickItem } from '../../platform/ui/index';
 
 export type ScmGroup = 'merge' | 'staged' | 'changes';
@@ -290,7 +291,15 @@ export class SourceControlView {
 		return this.changes.length;
 	}
 
-	async refresh(): Promise<void> {
+	/** Re-read the status, the head and the submodules, then re-render. Coalesced: a call
+	 *  while one runs queues a single trailing run instead of a second concurrent one. */
+	refresh(): Promise<void> {
+		return this.refreshFlight();
+	}
+
+	private readonly refreshFlight = coalesced(() => this.refreshNow());
+
+	private async refreshNow(): Promise<void> {
 		if (!this.repoPath || !this.isRepo) return;
 		const generation = this.generation;
 		let changes: ScmChange[];

@@ -166,8 +166,9 @@ guarantees the window is never a blank dark rectangle.
   the backend's registration; the shared result shapes — StatusMap, FileContents,
   WsSymbol, ExtInfo, CanLogStats... — live there once), `src/platform/fileIcons.ts` / `src/platform/extAssets.ts` (the file-icon mapping and
   extension-asset data URLs every view decorates with), `src/platform/lazy.ts` (async-chunk
-  loaders), `src/platform/state.ts` (localStorage
-  persistence), `src/workbench/shell.css`
+  loaders), `src/platform/coalesce.ts` (single-flight coalescing for refresh-shaped work —
+  the SCM and Explorer refreshes: one run in flight, one queued), `src/platform/state.ts`
+  (localStorage persistence), `src/workbench/shell.css`
 - Backend: `src-tauri/src/lib.rs` / `main.rs` (crate inventory and app entry),
   `src-tauri/src/cmd_app.rs` (the app-instance domain: File → New Window's
   `app_new_instance` spawns a sibling process — the multi-open entry every platform
