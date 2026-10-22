@@ -253,6 +253,36 @@ describe('the keyboard routing', () => {
 		key(input, 'z', { ctrlKey: true });
 		expect(ran).toEqual(['undo']);
 	});
+
+	it('Ctrl+C and Ctrl+X stay the browser\'s own copy and cut, editor open or not', async () => {
+		const executed: string[] = [];
+		const original = document.execCommand;
+		document.execCommand = ((command: string) => { executed.push(command); return true; }) as typeof document.execCommand;
+		try {
+			// Text selected in a report, a preview or the Output view, no editor open: the
+			// workbench used to claim the key for the disabled `editor.copy` and swallow it.
+			const report = document.createElement('div');
+			report.className = 'an-list';
+			report.textContent = 'src/main.ts:12';
+			document.body.appendChild(report);
+			expect(key(report, 'c', { ctrlKey: true }).defaultPrevented).toBe(false);
+			expect(key(report, 'C', { metaKey: true, shiftKey: true }).defaultPrevented).toBe(false);
+
+			// With an editor open the native event still does the copying, never a second
+			// execCommand on top of a view's own clipboard write.
+			await workbench.editors.openFile(`${REPO_A}\\a.txt`);
+			await flush(8);
+			expect(key(document, 'c', { ctrlKey: true }).defaultPrevented).toBe(false);
+			expect(key(document, 'x', { ctrlKey: true }).defaultPrevented).toBe(false);
+			expect(executed).toEqual([]);
+
+			// The Edit menu's Copy still runs the command.
+			await commands.execute('editor.copy');
+			expect(executed).toEqual(['copy']);
+		} finally {
+			document.execCommand = original;
+		}
+	});
 });
 
 describe('dispose', () => {

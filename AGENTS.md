@@ -758,6 +758,16 @@ page shows the integration's state (`claude_mcp_status`).
   and the host-event router); `inert.ts` the degraded namespaces (lm/chat/tasks/tests/debug/
   scm/notebooks/authentication/l10n/comments) with the inert/unsupported vocabulary;
   `mementos.ts` / `webviews.ts` / `treeViews.ts` / `documents.ts` the frame-side object halves;
+  `tabs.ts` the Tabs API (`window.tabGroups`, 2026-10-22, for vscode-git-graph-rs 1.0.27's
+  in-place replacement of the Git Graph tabs an extension-host restart leaves behind): the
+  editor area's real groups and tabs — seeded from the activation context, kept current by
+  the host's coalesced `tabsChanged` pushes (`pushes.ts`; a backend-hosted extension sees
+  the desktop window's tabs alone), stable Tab/TabGroup objects, webview tabs in VS Code's
+  `mainThreadWebview-<viewType>` spelling, and `close` a real tab close (`tabs.close`, routed
+  to the desktop window by `ggs-ext`'s `routing`); a restarted process numbers its panels
+  past the host's surviving ones (`webviewPanelBase`), and the previous process's panels —
+  an older `webviewGenerations` entry — close right after the new process's first panel
+  opens, with no `webviewDisposed` crossing into the new process;
   `bridge.ts` / `shimLog.ts` / `util.ts` / `configuration.ts` the shared vocabulary; unsupported
   surfaces degrade to inert registrations instead of
   throwing — an activation must survive whatever a foreign package registers — and every

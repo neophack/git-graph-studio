@@ -372,21 +372,11 @@ export function buildWindow(s: ShimState) {
 				return [];
 			},
 			activeTerminal: undefined,
-			/** The Tabs API (`window.tabGroups`, VS Code 1.68): one group whose tab list the
-			 *  frame cannot see — the shape a tab-aware feature reads is complete, and the
-			 *  events register and never fire. */
-			tabGroups: {
-				all: [{ isActive: true, viewColumn: 1, activeTab: undefined, tabs: [] as unknown[] }],
-				get activeTabGroup() {
-					return this.all[0];
-				},
-				onDidChangeTabs: silentEvent(),
-				onDidChangeTabGroups: silentEvent(),
-				close: async (_tabOrGroup: unknown, _preserveFocus?: boolean) => {
-					unsupported('window.tabGroups.close');
-					return false;
-				}
-			},
+			/** The Tabs API (`window.tabGroups`, VS Code 1.67): the editor area's real groups
+			 *  and tabs, kept current by the host's pushes (tabs.ts) — an extension that replaces
+			 *  its tabs left behind by an extension-host restart (Git Graph, 2026-10-22) finds
+			 *  them here, and `close` closes them. */
+			tabGroups: s.tabGroups.api(),
 			createOutputChannel: (name: string, options?: string | { log?: boolean }) => {
 				// The `{ log: true }` form (LogOutputChannel): the level-named methods a logging
 				// extension binds at activation (`channel.info.bind(channel)`, cspell's logger

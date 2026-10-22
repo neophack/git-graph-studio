@@ -495,7 +495,18 @@ if (!ext || ext.format === 'bundled') return Promise.resolve();
 			});
 		if (storage) this.storageRoots.set(extId, [storage.global, storage.log, ...(storage.workspace ? [storage.workspace] : [])]);
 		const env = await cachedNodeEnv();
+		// Every env answer is a new activation of the extension (a process's `host.env`, a
+		// frame's init): the panels still on record were the previous process's. They keep
+		// their tabs — the fresh process may replace them in place through `tabGroups` (Git
+		// Graph does) — so its own panels are numbered past them, never onto their ids.
+		this.webviewGenerations.set(extId, (this.webviewGenerations.get(extId) ?? 0) + 1);
+		let webviewPanelBase = 0;
+		for (const view of this.webviews.values()) {
+			if (view.extId === extId) webviewPanelBase = Math.max(webviewPanelBase, view.panelId);
+		}
 		return {
+			tabs: this.tabGroupsSnapshot(),
+			webviewPanelBase,
 			settings: state.extSettings(extId),
 			defaults,
 			// The extension's view of the display language follows the workbench locale.

@@ -22,9 +22,9 @@ import { el, icon, type MenuEntry, type MenuItem } from '../../platform/ui/index
 
 /** The menu locations Studio surfaces. `git.pullpush` is VS Code's SCM sync menu — where
  * a Gerrit `refs/for/` push goes — rendered inside the Source Control "..."
- * menu's Pull, Push submenu. Others (commandPalette, …) only hide or relocate entries in
+ * menu's Pull, Push submenu. `webview/context` is a webview page's right-click menu. Others (commandPalette, …) only hide or relocate entries in
  * VS Code itself, so they are ignored. */
-export const SUPPORTED_MENU_LOCATIONS = ['explorer/context', 'editor/context', 'editor/title', 'editor/title/context', 'scm/title', 'scm/resourceState/context', 'git.pullpush', 'view/title', 'view/item/context'] as const;
+export const SUPPORTED_MENU_LOCATIONS = ['explorer/context', 'editor/context', 'editor/title', 'editor/title/context', 'scm/title', 'scm/resourceState/context', 'git.pullpush', 'view/title', 'view/item/context', 'webview/context'] as const;
 export type MenuLocation = (typeof SUPPORTED_MENU_LOCATIONS)[number];
 
 interface DeclaredCommand {

@@ -456,12 +456,21 @@ export const hostRequestsMethods: ThisType<ExtensionHost> = {
 				// A webview panel needs its extension's frame alive (events route back into it);
 				// an extension page has none and gets the clear error instead.
 				if (!this.frames.has(extId)) throw new Error('webview panels need a running extension frame');
-				const [framePanelId, , title, column, preserveFocus] = args as [number | null, string, string, unknown, boolean | undefined];
+				const [framePanelId, viewType, title, column, preserveFocus] = args as [number | null, string, string, unknown, boolean | undefined];
 				const panelId = framePanelId ?? this.nextWebviewPanelId++;
-				// A backend restart resets its panel sequence (a live backend's ids only
-				// grow), so a create reusing this extension's live panel id means every
-				// panel of the previous process is dead: close them, or their tabs strand
-				// as blank shells no setHtml can reach anymore.
+				const generation = this.webviewGenerations.get(extId) ?? 0;
+				// The panels an extension-host restart left behind (an older generation —
+				// their process is gone, no setHtml reaches them anymore): the fresh
+				// process's first panel takes over from them. They close AFTER the new tab
+				// opens (below), VS Code's order — the replacement lands beside the dead tab
+				// and slides into its place as it goes; an extension replacing its own dead
+				// tabs through `tabGroups` (Git Graph's watcher) finds them already closed,
+				// which its close tolerates. A copy's panels are the desktop window's to settle.
+				const orphans = this.sharesWebviews(extId) ? [] : [...this.webviews.values()].filter((view) => view.extId === extId && (view.generation ?? 0) < generation);
+				// A create reusing a live panel id (a shim numbering from 1 again, not past
+				// the host's `webviewPanelBase`) cannot wait for that: the record must leave
+				// the key before the new panel takes it, and every panel of the previous
+				// process is dead with it.
 				if (framePanelId !== null && this.webviews.has(this.webviewKey(extId, framePanelId))) {
 					const stale = [...this.webviews.values()].filter((view) => view.extId === extId);
 					extLog('warn', 'host', `webview ${extId}#${panelId}: created reusing a live panel id — the backend restarted; closing ${stale.length} dead panel(s) of the previous process`);
@@ -486,9 +495,14 @@ export const hostRequestsMethods: ThisType<ExtensionHost> = {
 						this.closeWebview(view.extId, view.panelId);
 					}
 				}
-			this.webviews.set(this.webviewKey(extId, panelId), { panelId, extId, title, html: '', frame: null, pending: [], loaded: false, painted: null, loadGrace: null, firstPaintTimer: null });
+			this.webviews.set(this.webviewKey(extId, panelId), { panelId, extId, title, viewType: typeof viewType === 'string' ? viewType : undefined, generation, html: '', frame: null, pending: [], loaded: false, painted: null, loadGrace: null, firstPaintTimer: null });
 			extLog('info', 'host', `webview ${extId}#${panelId}: created ("${title}")`);
 			this.onOpenWebview?.(panelId, title, extId, ExtensionHost.placementOf(column), preserveFocus !== true);
+				for (const view of orphans) {
+					if (this.webviews.get(this.webviewKey(view.extId, view.panelId)) !== view) continue; // already closed
+					extLog('info', 'host', `webview ${extId}#${view.panelId}: left behind by an extension-host restart — closing it for the new panel #${panelId}`);
+					this.closeWebview(view.extId, view.panelId);
+				}
 				return Promise.resolve(panelId);
 			}
 			case 'webview.setTitle': {
@@ -560,10 +574,40 @@ export const hostRequestsMethods: ThisType<ExtensionHost> = {
 				this.gateWebviewMessage(view, message, `${extId}#${panelId}`);
 				return Promise.resolve(undefined);
 			}
+			case 'tabs.close': {
+				// `window.tabGroups.close(tabs)`: the tabs by id, through the editor area's own
+				// close (a dirty editor keeps its save prompt). True when any tab closed — a tab
+				// already gone (the orphan cleanup above beat the extension to it) is no error.
+				const ids = Array.isArray(args[0]) ? (args[0] as unknown[]).filter((id): id is string => typeof id === 'string') : [];
+				let closed = false;
+				for (const id of ids) {
+					if (this.onCloseTab?.(id) === true) closed = true;
+				}
+				return Promise.resolve(closed);
+			}
 			case 'webview.reveal': {
 				const panelId = args[0] as number;
-				if (this.webviews.has(this.webviewKey(extId, panelId))) this.onRevealWebviewTab?.(this.webviewTabId(extId, panelId));
-				else extLog('warn', 'host', `webview ${extId}#${panelId}: reveal with no panel record — nothing to show`);
+				const view = this.webviews.get(this.webviewKey(extId, panelId));
+				if (view) {
+					// The hook answers whether a tab held the id: a panel record without its
+					// tab (a tab close whose disposer never reached this record, a teardown
+					// race) must not spend the reveal silently — the panel lives, so the
+					// reveal re-opens its tab from the record it kept.
+					if (this.onRevealWebviewTab?.(this.webviewTabId(extId, panelId)) === false) {
+						extLog('info', 'host', `webview ${extId}#${panelId}: reveal found no tab — re-opening the panel's tab`);
+						this.onOpenWebview?.(panelId, view.title, extId, undefined, true);
+					}
+				} else {
+					// The extension is revealing a panel this host has no record of: the
+					// webviewDisposed that should have settled its panel object was lost
+					// (a close crossing the restart boundary) and its session→panel binding
+					// will hold the dead panel forever — every later click of that history
+					// row would reveal into the void. Settle the panel object now; the
+					// extension's dispose pass clears the binding, and its next open of the
+					// session creates a fresh panel instead of revealing nothing.
+					extLog('info', extId, `webview ${extId}#${panelId}: reveal with no panel record — settling the extension's stale panel object`);
+					this.frames.get(extId)?.send?.({ type: '__studioExtEvent', event: 'webviewDisposed', panelId });
+				}
 				return Promise.resolve(undefined);
 			}
 			case 'webview.dispose': {

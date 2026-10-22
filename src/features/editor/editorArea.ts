@@ -161,6 +161,13 @@ export class EditorArea {
 		return this.leaves().map((leaf) => leaf.box.group);
 	}
 
+	/** Every group's tab strip in visual order — a group's position is its VS Code column
+	 *  (`groupForPlacement` reads a numeric placement the same way). */
+	tabSummary(): { active: boolean; activeId: string | null; tabs: { id: string; label: string; dirty: boolean; input: import('./inputs').EditorInput }[] }[] {
+		const active = this.activeGroup;
+		return this.groups().map((group) => ({ active: group === active, ...group.tabSummary() }));
+	}
+
 	groupAt(index: number): EditorGroup {
 		const groups = this.groups();
 		return groups[Math.min(index, groups.length - 1)]!;

@@ -157,7 +157,9 @@ function ensureActivated(): Promise<void> {
 			storage: env?.storage,
 			extensions: env?.extensions,
 			logLevel: env?.logLevel,
-			platform: process.platform
+			platform: process.platform,
+			tabs: env?.tabs,
+			webviewPanelBase: env?.webviewPanelBase
 		};
 		context_ = context;
 		const api = createVscodeApi(context, bridge);

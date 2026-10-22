@@ -925,6 +925,75 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		expect(sent.filter((m) => (m as { type?: string }).type === '__studioExtEvent' && (m as { event?: string }).event === 'webviewDisposed')).toHaveLength(1);
 	});
 
+	it('a webview\'s right-click shows the workbench menu: Cut / Copy / Paste and the webview/context entries', async () => {
+		// VS Code's webview context menu (claude-code's chat: Mark Session as Unread, Rename
+		// Session Tab, Add Session Tab to Group, all `when: webviewId == '<viewType>'`) —
+		// never the browser's own menu.
+		const { host, sent } = hostWithFrame();
+		const dispatched: [string, unknown[] | undefined][] = [];
+		applyContributions('acme.demo', {
+			commands: [{ command: 'acme.rename', title: 'Acme: Rename Session Tab' }, { command: 'acme.other', title: 'Acme: Other Panel Only' }],
+			menus: { 'webview/context': [{ command: 'acme.rename', when: "webviewId == 'chat.view'" }, { command: 'acme.other', when: "webviewId == 'other.view'" }] }
+		}, {}, (command, args) => dispatched.push([command, args]), () => true);
+		try {
+			await host['serve']('webview.create', [1, 'chat.view', 'Claude Code'], 'acme.demo', {} as never);
+			await host['serve']('webview.setHtml', [1, '<html><head></head><body>hi</body></html>'], 'acme.demo', {} as never);
+			const pane = document.body.appendChild(document.createElement('div'));
+			const dispose = host.mountWebview('acme.demo', 1, pane);
+			const frame = pane.querySelector('iframe')!;
+			// The composed boot claims every unclaimed right-click and reports it.
+			expect(frame.getAttribute('srcdoc')).toContain("kind: 'contextmenu'");
+			const posted: unknown[] = [];
+			frame.contentWindow!.postMessage = ((message: unknown) => { posted.push(message); }) as typeof window.postMessage;
+			const rightClick = (report: Record<string, unknown>) => window.dispatchEvent(new MessageEvent('message', {
+				source: frame.contentWindow as MessageEventSource,
+				data: { __ggsWebview: true, kind: 'contextmenu', x: 10, y: 20, context: {}, ...report }
+			}));
+			const labels = () => [...document.querySelectorAll('.context-menu .item .label')].map((label) => label.textContent);
+			const item = (label: string) => [...document.querySelectorAll<HTMLElement>('.context-menu .item')].find((row) => row.querySelector('.label')?.textContent === label)!;
+
+			// Selected text in an editable field: everything enabled, the matching entry listed.
+			rightClick({ selection: 'picked', editable: true, context: { webviewSection: 'tab' } });
+			expect(labels()).toEqual(['Cut', 'Copy', 'Paste', 'Acme: Rename Session Tab']);
+			expect(item('Cut').classList.contains('disabled')).toBe(false);
+			item('Copy').click();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(backend.clipboard).toContain('picked');
+
+			// A cut writes the clipboard, then deletes the selection inside the page.
+			rightClick({ selection: 'gone', editable: true });
+			item('Cut').click();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(backend.clipboard).toContain('gone');
+			expect(posted).toContainEqual({ __ggsWebviewHost: true, type: 'edit', action: 'delete' });
+
+			// A paste reads the clipboard through the plugin and types it in the page.
+			backend.clipboardText = 'from clipboard';
+			rightClick({ selection: '', editable: true });
+			item('Paste').click();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(posted).toContainEqual({ __ggsWebviewHost: true, type: 'edit', action: 'insertText', text: 'from clipboard' });
+
+			// Plain page text: Cut and Paste disabled; the contribution runs with VS Code's
+			// argument — the data-vscode-context plus `webview`.
+			rightClick({ selection: '', editable: false, context: { webviewSection: 'tab' } });
+			expect(item('Cut').classList.contains('disabled')).toBe(true);
+			expect(item('Copy').classList.contains('disabled')).toBe(true);
+			expect(item('Paste').classList.contains('disabled')).toBe(true);
+			item('Acme: Rename Session Tab').click();
+			expect(dispatched).toEqual([['acme.rename', [{ webviewSection: 'tab', webview: 'chat.view' }]]]);
+
+			// preventDefaultContextMenuItems drops the defaults, as in VS Code.
+			rightClick({ context: { preventDefaultContextMenuItems: true } });
+			expect(labels()).toEqual(['Acme: Rename Session Tab']);
+			document.querySelector<HTMLElement>('.context-menu')?.remove();
+			expect(sent.filter((m) => (m as { event?: string }).event === 'webviewMessage')).toHaveLength(0); // a menu report is not a page message
+			dispose();
+		} finally {
+			removeContributions('acme.demo');
+		}
+	});
+
 	it('a composed webview pins _VSCODE_FILE_ROOT before the page\'s own scripts run', async () => {
 		// claude-code's webview bundles monaco-vscode-api, whose language-worker loading
 		// resolves module ids against `globalThis._VSCODE_FILE_ROOT`; unset (ggs's composed
@@ -1229,6 +1298,70 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		expect(frames[0]!.getAttribute('srcdoc')).toContain('<body>fresh</body>');
 	});
 
+	it('an extension-host restart: the new process\'s panel opens first, the dead tab closes after, no dispose reaches the new process', async () => {
+		// Git Graph's in-place replacement (vscode-git-graph-rs 1.0.27): the restarted
+		// process sees the dead tab through `tabGroups`, opens a fresh panel, then closes it.
+		const { host, sent } = hostWithFrame();
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		const order: string[] = [];
+		host.onOpenWebview = (panelId, title) => {
+			order.push(`open ${panelId}`);
+			void group.openExtPage({ kind: 'extpage', id: host['webviewTabId']('acme.demo', panelId), title, extId: 'acme.demo', pageId: 'webview' }, (pane) => host.mountWebview('acme.demo', panelId, pane));
+		};
+		host.onCloseWebviewTab = (tabId) => {
+			order.push(`close ${tabId}`);
+			if (group.closeById(tabId)) host['webviewClosed']('acme.demo', Number(tabId.split(':').at(-1)));
+		};
+		host.onCloseTab = (tabId) => group.closeById(tabId);
+		host.tabGroupsSource = () => { const strip = group.tabSummary(); return [{ active: true, activeId: strip.activeId, tabs: strip.tabs.map((tab) => ({ id: tab.id, label: tab.label, dirty: tab.dirty, input: tab.input.kind === 'extpage' ? { kind: 'webview' as const, extId: tab.input.extId } : null })) }]; };
+		const disposed = () => sent.filter((m) => (m as { event?: string }).event === 'webviewDisposed').map((m) => (m as { panelId?: number }).panelId);
+
+		// The first process's activation, and its panel.
+		host.webviewGenerations.set('acme.demo', 1);
+		await host['serve']('webview.create', [1, 'git-graph-rs', 'Git Graph'], 'acme.demo', {} as never);
+		await flush();
+		// The Tabs API sees it with VS Code's viewType spelling.
+		expect(host.tabGroupsSnapshot()).toEqual([{ viewColumn: 1, active: true, activeId: 'webview:acme.demo:1', tabs: [
+			{ id: 'webview:acme.demo:1', label: 'Git Graph', dirty: false, input: { kind: 'webview', viewType: 'mainThreadWebview-git-graph-rs', extId: 'acme.demo', panelId: 1 } }
+		] }]);
+
+		// The backend restarts: the new activation is a new generation, and the new process
+		// numbers past the survivor (`webviewPanelBase`) — its replacement is panel #2.
+		host.webviewGenerations.set('acme.demo', 2);
+		order.length = 0;
+		await host['serve']('webview.create', [2, 'git-graph-rs', 'Git Graph'], 'acme.demo', {} as never);
+		await flush();
+		expect(order).toEqual(['open 2', 'close webview:acme.demo:1']);
+		expect(group.openEditorIds()).toEqual(['webview:acme.demo:2']);
+		// The dead panel belonged to the dead process: no dispose crosses into the new one.
+		expect(disposed()).toEqual([]);
+		// The extension's own close of the dead tab (its watcher, after the host's) is no error.
+		await expect(host['serve']('tabs.close', [['webview:acme.demo:1'], true], 'acme.demo', {} as never)).resolves.toBe(false);
+		// A live panel's tab closed by the Tabs API is the real close — its dispose crosses.
+		await expect(host['serve']('tabs.close', [['webview:acme.demo:2'], true], 'acme.demo', {} as never)).resolves.toBe(true);
+		await flush();
+		expect(group.openEditorIds()).toEqual([]);
+	});
+
+	it('the tab layout pushes into every frame once per change, as the Tabs API snapshot', async () => {
+		const { host, sent } = hostWithFrame();
+		let tabs = [{ active: true, activeId: 'file:/w/a.ts' as string | null, tabs: [{ id: 'file:/w/a.ts', label: 'a.ts', dirty: false, input: { kind: 'file' as const, path: '/w/a.ts' } }] }];
+		host.tabGroupsSource = () => tabs;
+		const pushes = () => sent.filter((m) => (m as { event?: string }).event === 'tabsChanged');
+		host.noteTabsChanged();
+		host.noteTabsChanged(); // one burst, one push
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		expect(pushes()).toEqual([{ type: '__studioExtEvent', event: 'tabsChanged', tabs: [{ viewColumn: 1, active: true, activeId: 'file:/w/a.ts', tabs: [{ id: 'file:/w/a.ts', label: 'a.ts', dirty: false, input: { kind: 'text', path: '/w/a.ts' } }] }] }]);
+		// A re-render that moved nothing pushes nothing.
+		host.noteTabsChanged();
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		expect(pushes()).toHaveLength(1);
+		tabs = [{ active: true, activeId: null, tabs: [] }];
+		host.noteTabsChanged();
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		expect(pushes()).toHaveLength(2);
+	});
+
 	it('a re-opened session replaces its own tab; other sessions keep theirs', async () => {
 		const { host, sent } = hostWithFrame();
 		const group = new EditorGroup(document.getElementById('editorGroup')!);
@@ -1315,6 +1448,50 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		expect(await host.executeCommand('ggs.sessionTabs.close', ['nobody'])).toBe(0);
 	});
 
+	it('a reveal of a live panel whose tab is gone re-opens the tab; a reveal of an unknown panel settles the extension\'s stale panel object', async () => {
+		const { host, sent } = hostWithFrame();
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		const opened: number[] = [];
+		// The stand-in tab never mounts the panel (mount-less, like the workbench between
+		// the open and the pane's attach): closing it exercises the host's record state
+		// directly, which is what the reveal branches read.
+		host.onOpenWebview = (panelId, title) => {
+			opened.push(panelId);
+			void group.openExtPage({ kind: 'extpage', id: host['webviewTabId']('acme.demo', panelId), title, extId: 'acme.demo', pageId: 'webview' }, () => undefined);
+		};
+		host.onRevealWebviewTab = (tabId) => {
+			if (!group.hasEditor(tabId)) return false;
+			group.activateById(tabId);
+			return true;
+		};
+		const TAB = 'webview:acme.demo:7';
+		const disposed = () => sent.filter((m) => (m as { event?: string }).event === 'webviewDisposed').map((m) => (m as { panelId?: number }).panelId);
+
+		await host['serve']('webview.create', [7, 'chat.view', 'Chat'], 'acme.demo', {} as never);
+		expect(opened).toEqual([7]);
+		expect(group.activeInput?.id).toBe(TAB);
+
+		// The panel record lives but its tab is gone (a close whose disposer never reached
+		// the record): the reveal must not spend itself silently — the tab re-opens from
+		// the record and comes forward.
+		group.closeById(TAB);
+		expect(group.hasEditor(TAB)).toBe(false);
+		await host['serve']('webview.reveal', [7], 'acme.demo', {} as never);
+		expect(opened).toEqual([7, 7]);
+		expect(group.activeInput?.id).toBe(TAB);
+		expect(disposed()).toEqual([]); // the record is alive — nothing tells the extension it is gone
+
+		// The record itself is gone while the extension still holds the panel object (its
+		// webviewDisposed was lost across a restart boundary): the reveal settles the
+		// stale object — the extension's dispose pass clears its session→panel binding,
+		// so the row's next click creates a fresh panel instead of revealing into the
+		// void forever.
+		host['webviewClosed']('acme.demo', 7);
+		await host['serve']('webview.reveal', [7], 'acme.demo', {} as never);
+		expect(opened).toEqual([7, 7]); // no record to re-open from
+		expect(disposed()).toEqual([7, 7]); // the close's own push, then the reveal's healing push
+	});
+
 	it('ggs.claudeChat types a prompt into the session’s Claude Code tab — or a new one — and sends it from there', async () => {
 		const { host } = hostWithFrame();
 		host['declaredCommandIds'].set('acme.demo', ['claude-vscode.editor.open']);
@@ -1323,7 +1500,7 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		host.onOpenWebview = (panelId, title) => {
 			void group.openExtPage({ kind: 'extpage', id: host['webviewTabId']('acme.demo', panelId), title, extId: 'acme.demo', pageId: 'webview' }, (pane) => host.mountWebview('acme.demo', panelId, pane));
 		};
-		host.onRevealWebviewTab = (tabId) => revealed.push(tabId);
+		host.onRevealWebviewTab = (tabId) => { revealed.push(tabId); return true; };
 		const fromPanel = (source: Window | null, request: Record<string, unknown>) => window.dispatchEvent(new MessageEvent('message', {
 			source: source as MessageEventSource,
 			data: { __ggsWebview: true, kind: 'message', message: { type: 'request', request } }
@@ -3887,6 +4064,78 @@ describe('VS Code API fidelity: value types, configuration, edits, diagnostics (
 		);
 		return { api, requests, handlers };
 	}
+
+	it('window.tabGroups reports the host\'s tabs: stable objects, real change events, the panel\'s column, a real close', async () => {
+		// The layout the activation context carries: a file beside one of this extension's
+		// webview panels (VS Code's `mainThreadWebview-` viewType spelling).
+		const text = { id: 'file:/w/a.ts', label: 'a.ts', dirty: false, input: { kind: 'text' as const, path: '/w/a.ts' } };
+		const graph = { id: 'webview:acme.demo:4', label: 'Git Graph', dirty: false, input: { kind: 'webview' as const, viewType: 'mainThreadWebview-git-graph-rs', extId: 'acme.demo', panelId: 4 } };
+		const { api, requests } = shim({ tabs: [{ viewColumn: 1, active: true, activeId: graph.id, tabs: [text, graph] }], webviewPanelBase: 4 }, { 'tabs.close': () => true });
+		const groups = api.window.tabGroups;
+		expect(groups.all).toHaveLength(1);
+		const [first] = groups.all;
+		expect(groups.activeTabGroup).toBe(first);
+		expect(first.viewColumn).toBe(1);
+		const graphTab = first.activeTab!;
+		expect(graphTab.label).toBe('Git Graph');
+		expect(graphTab.isActive).toBe(true);
+		// The input classes extensions test with instanceof, carrying VS Code's fields.
+		expect(graphTab.input).toBeInstanceOf(api.TabInputWebview);
+		expect((graphTab.input as { viewType: string }).viewType).toBe('mainThreadWebview-git-graph-rs');
+		expect(first.tabs[0]!.input).toBeInstanceOf(api.TabInputText);
+		expect((first.tabs[0]!.input as { uri: { fsPath: string } }).uri.fsPath).toBe('/w/a.ts');
+
+		// The panel numbering continues past the host's live panels (an extension-host
+		// restart's survivors): the first new panel is #5, never the dead tab's #4.
+		const panel = api.window.createWebviewPanel('git-graph-rs', 'Git Graph', 1, {});
+		expect(requests.find((r) => r.method === 'webview.create')!.args[0]).toBe(5);
+
+		// A push: the new panel's tab opens in a second group. The surviving tab is the same
+		// object (Git Graph remembers its live tab and compares with ===), the events carry
+		// the delta, and the new panel's viewColumn is its group's.
+		const fresh = { id: 'webview:acme.demo:5', label: 'Git Graph', dirty: false, input: { kind: 'webview' as const, viewType: 'mainThreadWebview-git-graph-rs', extId: 'acme.demo', panelId: 5 } };
+		const tabEvents: { opened: readonly unknown[]; closed: readonly unknown[]; changed: readonly unknown[] }[] = [];
+		const groupEvents: { opened: readonly unknown[] }[] = [];
+		groups.onDidChangeTabs((event) => tabEvents.push(event));
+		groups.onDidChangeTabGroups((event) => groupEvents.push(event));
+		api.handleHostEvent({ event: 'tabsChanged', tabs: [
+			{ viewColumn: 1, active: false, activeId: graph.id, tabs: [text, graph] },
+			{ viewColumn: 2, active: true, activeId: fresh.id, tabs: [fresh] }
+		] });
+		expect(groups.all[0]).toBe(first);
+		expect(groups.all[0]!.activeTab).toBe(graphTab);
+		expect(groups.activeTabGroup).toBe(groups.all[1]);
+		expect(tabEvents).toHaveLength(1);
+		expect(tabEvents[0]!.opened).toEqual([groups.all[1]!.tabs[0]]);
+		expect(tabEvents[0]!.closed).toEqual([]);
+		expect(groupEvents).toHaveLength(1);
+		expect(panel.viewColumn).toBe(2);
+		// The same layout again moves nothing and fires nothing.
+		api.handleHostEvent({ event: 'tabsChanged', tabs: [
+			{ viewColumn: 1, active: false, activeId: graph.id, tabs: [text, graph] },
+			{ viewColumn: 2, active: true, activeId: fresh.id, tabs: [fresh] }
+		] });
+		expect(tabEvents).toHaveLength(1);
+
+		// close() reaches the host by tab id and answers its verdict.
+		await expect(groups.close(graphTab, true)).resolves.toBe(true);
+		expect(requests.at(-1)).toMatchObject({ method: 'tabs.close', args: [['webview:acme.demo:4'], true] });
+		api.handleHostEvent({ event: 'tabsChanged', tabs: [
+			{ viewColumn: 1, active: false, activeId: text.id, tabs: [text] },
+			{ viewColumn: 2, active: true, activeId: fresh.id, tabs: [fresh] }
+		] });
+		expect(tabEvents.at(-1)!.closed).toEqual([graphTab]);
+		// A whole group closes all of its tabs.
+		await groups.close(groups.all[1]!);
+		expect(requests.at(-1)).toMatchObject({ method: 'tabs.close', args: [['webview:acme.demo:5'], false] });
+	});
+
+	it('window.tabGroups without a host layout is the one empty group of a fresh window', () => {
+		const { api } = shim();
+		expect(api.window.tabGroups.all).toHaveLength(1);
+		expect(api.window.tabGroups.activeTabGroup.tabs).toEqual([]);
+		expect(api.window.tabGroups.activeTabGroup.activeTab).toBeUndefined();
+	});
 
 	it('Range and Selection take both constructor spellings and answer the Position/Range methods', () => {
 		const range = new Range(3, 4, 1, 2);

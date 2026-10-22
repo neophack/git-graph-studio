@@ -15,6 +15,7 @@ import { changedSettingKeys, ConfigurationChangeEvent, configurationChangeEvent 
 import { DocumentState, documentKey, documentView } from './documents';
 import { Memento } from './mementos';
 import { WebviewPanel, WebviewView } from './webviews';
+import { TabGroupsModel } from './tabs';
 import { TreeDataProvider, TreeViewRegistration } from './treeViews';
 import { guarded, shimLog } from './shimLog';
 import { unsupported } from './inert';
@@ -30,6 +31,7 @@ export interface ShimState {
 	globalState: Memento;
 	workspaceState: Memento;
 	webviewSeq: number;
+	tabGroups: TabGroupsModel;
 	statusSeq: number;
 	untitledSeq: number;
 	workspaceFoldersChanged: EventEmitter<{ added: unknown[]; removed: unknown[] }>;
@@ -107,7 +109,12 @@ export function createShimState(ctx: HostContext, bridge: HostBridge): ShimState
 	s.webviewViewProviders = new Map<string, { resolveWebviewView: (view: unknown, context: unknown, token: unknown) => unknown }>();
 	s.globalState = new Memento(s.ctx, s.bridge, 'global');
 	s.workspaceState = new Memento(s.ctx, s.bridge, 'workspace');
-	s.webviewSeq = 0;
+	// Panel ids continue after the host's highest live one for this extension: a restart
+	// leaves the previous process's tabs open, and a fresh sequence starting at 1 would
+	// hand a new panel the dead one's id — and its tab.
+	s.webviewSeq = typeof ctx.webviewPanelBase === 'number' && Number.isFinite(ctx.webviewPanelBase) ? Math.max(0, Math.floor(ctx.webviewPanelBase)) : 0;
+	/** `window.tabGroups`: the editor area's layout, seeded from the activation context. */
+	s.tabGroups = new TabGroupsModel(bridge, ctx.tabs);
 	s.statusSeq = 0;
 	s.untitledSeq = 0;
 	s.workspaceFoldersChanged = new EventEmitter<{ added: unknown[]; removed: unknown[] }>();
@@ -408,6 +415,20 @@ export function createShimState(ctx: HostContext, bridge: HostBridge): ShimState
 		}
 		if (event.event === 'webviewViewState' && event.panelId !== undefined) {
 			s.webviewPanels.get(event.panelId)?.setActive(event.active === true);
+			return;
+		}
+		if (event.event === 'tabsChanged' && Array.isArray(event.tabs)) {
+			// A panel's `viewColumn` is its tab's group: set before the change event fires,
+			// so a listener matching `panel.viewColumn` against `tabGroups.all` sees both
+			// sides of the same layout.
+			for (const group of event.tabs) {
+				for (const tab of group.tabs) {
+					if (tab.input?.kind !== 'webview' || tab.input.extId !== s.ctx.extensionId) continue;
+					const panel = s.webviewPanels.get(tab.input.panelId);
+					if (panel) panel.viewColumn = group.viewColumn;
+				}
+			}
+			s.tabGroups.apply(event.tabs);
 			return;
 		}
 		if (event.event === 'webviewViewMessage' && event.viewId !== undefined) {

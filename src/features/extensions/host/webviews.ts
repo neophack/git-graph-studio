@@ -1,4 +1,4 @@
-import type { WebviewDelivery } from './sharedTypes';
+import type { WebviewContextMenuReport, WebviewDelivery } from './sharedTypes';
 // The webview surfaces: panels and sidebar views, mirror copies, the per-frontend
 // instances (a remote's own phone-sized page of Git Graph, 2026-10-18), html composition
 // (with the srcdoc history shield), load watchdogs, session bookkeeping and asset roots.
@@ -9,6 +9,9 @@ import type { ExtensionHost } from './extensionHost';
 import { extLog, extLogOnce } from '../extLog';
 import { extWebviewHosted } from '../../../platform/ipc/extProcess';
 import { hook } from '../../../platform/hooks';
+import { showContextMenu, type MenuEntry } from '../../../platform/ui/index';
+import { menuItems } from '../contributions';
+import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 export const WEBVIEW_OPEN_PENDING_MS = 15_000;
 
@@ -82,6 +85,46 @@ function webviewBoot(nonce: string | null, fileRoot: string): string {
 			document.documentElement.classList.remove('vscode-dark', 'vscode-light');
 			document.documentElement.classList.add(data.kind === 'vscode-light' ? 'vscode-light' : 'vscode-dark');
 		}
+		if (data.type === 'edit') {
+			// The workbench menu's Cut / Paste land back where the right-click was: the
+			// menu's click moved the focus out of this document, so the field (and a
+			// contenteditable's range) the menu opened on is restored first.
+			if (menuTarget && typeof menuTarget.focus === 'function') menuTarget.focus();
+			if (menuRange) {
+				var restore = window.getSelection();
+				if (restore) { restore.removeAllRanges(); restore.addRange(menuRange); }
+			}
+			if (data.action === 'delete') document.execCommand('delete', false);
+			else if (data.action === 'insertText') document.execCommand('insertText', false, String(data.text));
+		}
+	});
+	// VS Code's webview context menu: a right-click the page did not claim itself
+	// (preventDefault) crosses to the workbench, which shows Cut / Copy / Paste and the
+	// extensions' webview/context entries instead of the browser's own menu. The
+	// data-vscode-context attributes from the target up merge into the menu's context,
+	// the innermost key winning, as VS Code's own webview host does.
+	var menuTarget = null;
+	var menuRange = null;
+	window.addEventListener('contextmenu', function (event) {
+		if (event.defaultPrevented) return;
+		event.preventDefault();
+		var context = {};
+		for (var node = event.target; node && node.nodeType === 1; node = node.parentElement) {
+			var raw = node.getAttribute('data-vscode-context');
+			if (!raw) continue;
+			try {
+				var parsed = JSON.parse(raw);
+				for (var key in parsed) if (!(key in context)) context[key] = parsed[key];
+			} catch (e) {}
+		}
+		var active = document.activeElement;
+		var field = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA') && typeof active.selectionStart === 'number' ? active : null;
+		var selection = window.getSelection();
+		var text = field ? field.value.slice(field.selectionStart, field.selectionEnd) : (selection ? String(selection) : '');
+		var editable = field ? !field.readOnly && !field.disabled : !!(event.target && event.target.isContentEditable);
+		menuTarget = field || (editable ? active : null);
+		menuRange = !field && selection && selection.rangeCount > 0 ? selection.getRangeAt(0).cloneRange() : null;
+		parent.postMessage({ __ggsWebview: true, kind: 'contextmenu', x: event.clientX, y: event.clientY, context: context, selection: text, editable: editable }, '*');
 	});
 })();
 </script>`;}
@@ -430,6 +473,9 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 		if (view.firstPaintTimer !== null) clearTimeout(view.firstPaintTimer);
 		view.frame = null;
 		extLog('info', 'host', `webview ${extId}#${panelId}: closed`);
+		// A panel left behind by an extension-host restart has no object in the live
+		// process: its dispose would name nobody's panel (or, with a reused id, the new one's).
+		if ((view.generation ?? 0) < (this.webviewGenerations.get(view.extId) ?? 0)) return;
 		this.frames.get(view.extId)?.send?.({ type: '__studioExtEvent', event: 'webviewDisposed', panelId });
 	},
 
@@ -493,6 +539,28 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 		extLog('info', 'host', `webview ${owner}: the coalescing window paints the latest document (${record.html.length} chars)`);
 		loadFrameDoc(record.frame, record.html, this.webviewTheme, owner, this.webviewAssetBase(record.extId));
 		return true;
+	},
+
+	showWebviewContextMenu(frame: HTMLIFrameElement, webviewId: string, report: WebviewContextMenuReport): void {
+		const context = report.context !== null && typeof report.context === 'object' ? (report.context as Record<string, unknown>) : {};
+		const text = typeof report.selection === 'string' ? report.selection : '';
+		const editable = report.editable === true;
+		const edit = (message: { action: 'delete' } | { action: 'insertText'; text: string }) => frame.contentWindow?.postMessage({ __ggsWebviewHost: true, type: 'edit', ...message }, '*');
+		// The clipboard goes through the plugin: the click that runs the item happened in the
+		// workbench, and a browser grants the frame's own execCommand('copy'/'paste') no
+		// clipboard access from it.
+		const defaults: MenuEntry[] = context.preventDefaultContextMenuItems === true ? [] : [
+			{ label: 'Cut', keybinding: 'Ctrl+X', disabled: !editable || text === '', run: () => void writeText(text).then(() => edit({ action: 'delete' }), () => undefined) },
+			{ label: 'Copy', keybinding: 'Ctrl+C', disabled: text === '', run: () => void writeText(text).catch(() => undefined) },
+			{ label: 'Paste', keybinding: 'Ctrl+V', disabled: !editable, run: () => void readText().then((clip) => { if (clip) edit({ action: 'insertText', text: clip }); }, () => undefined) }
+		];
+		// VS Code's context keys (`webviewId`, plus every data-vscode-context key) and its
+		// command argument (the context with `webview`).
+		const contributed = menuItems('webview/context', [{ ...context, webview: webviewId }], { ...context, webviewId });
+		const entries: MenuEntry[] = defaults.length > 0 && contributed.length > 0 ? [...defaults, 'separator', ...contributed] : [...defaults, ...contributed];
+		if (entries.length === 0) return;
+		const rect = frame.getBoundingClientRect();
+		showContextMenu(rect.left + (Number(report.x) || 0), rect.top + (Number(report.y) || 0), entries);
 	},
 
 	webviewViewFor(source: MessageEventSource | null): { viewId: string; extId: string } | null {

@@ -176,6 +176,11 @@ export class EditorGroup {
 		return this.open.map((e) => ({ id: e.id, input: e.input }));
 	}
 
+	/** The tab strip as the extension host's Tabs API reports it (`window.tabGroups`). */
+	tabSummary(): { activeId: string | null; tabs: { id: string; label: string; dirty: boolean; input: EditorInput }[] } {
+		return { activeId: this.active?.id ?? null, tabs: this.open.map((e) => ({ id: e.id, label: e.label, dirty: e.dirty, input: e.input })) };
+	}
+
 	openFilePaths(): string[] {
 		return this.open.flatMap((e) => (e.input.kind === 'file' ? [e.input.path] : []));
 	}

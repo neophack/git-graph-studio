@@ -155,6 +155,40 @@ export interface WebviewDelivery {
 export interface WebviewHandle extends WebviewDelivery {
 	panelId: number;
 	title: string;
+	/** The panel's `viewType` (`createWebviewPanel`'s first argument) — VS Code's
+	 *  `webviewId` context key, which `webview/context` menu entries match on. */
+	viewType?: string;
+	/** The extension activation that created the panel (`ExtensionHost.webviewGenerations`):
+	 *  older than the extension's current one, the panel's process is gone. */
+	generation?: number;
+}
+
+/** One editor tab as the workbench hands it to the Tabs API (`window.tabGroups`): the
+ *  editor input reduced to what the API reports — a file, a diff's two files, or an
+ *  extension's webview panel (the host adds the panel's viewType). */
+export interface EditorTabSummary {
+	id: string;
+	label: string;
+	dirty: boolean;
+	input: { kind: 'file'; path: string } | { kind: 'diff'; original: string; modified: string } | { kind: 'webview'; extId: string } | null;
+}
+
+/** One editor group's strip, in the editor area's visual order. */
+export interface EditorGroupSummary {
+	active: boolean;
+	activeId: string | null;
+	tabs: EditorTabSummary[];
+}
+
+/** A right-click a webview page did not claim itself, as its composed boot reports it:
+ *  the frame-local point, the merged `data-vscode-context`, the selected text and whether
+ *  the target takes text. */
+export interface WebviewContextMenuReport {
+	x?: unknown;
+	y?: unknown;
+	context?: unknown;
+	selection?: unknown;
+	editable?: unknown;
 }
 
 export type WebviewViewRecord = WebviewDelivery;

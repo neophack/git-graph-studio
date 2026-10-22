@@ -1,6 +1,6 @@
 // Frame/RPC plumbing: the per-extension sandbox frames, the real-Node remote handles, the message router and the frame-RPC call path.
 
-import type { FrameHandle, PageFrameHandle, WebviewHandle } from './sharedTypes';
+import type { FrameHandle, PageFrameHandle, WebviewContextMenuReport, WebviewHandle } from './sharedTypes';
 import type { ExtensionHost } from './extensionHost';
 
 import { extProcessInvoke, extProcessPushEvent, extProcessRegistrations, extProcessRun, extProcessStart } from '../../../platform/ipc/extProcess';
@@ -239,6 +239,20 @@ export const framesMethods: ThisType<ExtensionHost> = {
 		// the owning extension's frame.
 			if ((data as { __ggsWebview?: boolean }).__ggsWebview === true) {
 					const message = data as { kind?: string; message?: unknown };
+					if (message.kind === 'contextmenu') {
+						// The page's unclaimed right-click: the workbench's webview menu, keyed by
+						// the panel's viewType or the view's id (VS Code's `webviewId`).
+						const report = data as WebviewContextMenuReport;
+						const panel = this.webviewFor(event.source);
+						if (panel?.frame) {
+							this.showWebviewContextMenu(panel.frame, panel.viewType ?? '', report);
+							return;
+						}
+						const section = this.webviewViewFor(event.source);
+						const frame = section ? this.webviewViews.get(section.viewId)?.frame : null;
+						if (section && frame) this.showWebviewContextMenu(frame, section.viewId, report);
+						return;
+					}
 					if (message.kind !== 'message') return;
 					const view = this.webviewFor(event.source);
 				if (view) {

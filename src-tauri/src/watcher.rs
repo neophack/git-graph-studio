@@ -46,19 +46,27 @@ pub(crate) fn fold_path(batch: &mut FsChange, root: &Path, path: &Path) {
     let Ok(relative) = path.strip_prefix(root) else {
         return;
     };
-    let mut parts = relative
+    let all: Vec<String> = relative
         .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned());
-    let Some(first) = parts.next() else { return };
-    if first == ".git" {
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if all.is_empty() {
+        return;
+    }
+    // A `.git` at ANY depth is a repository's own directory — the root's, or a nested
+    // repository's / submodule's the SCM view also runs `git status` in. Its paths are never
+    // working-tree paths: listing `sub/repo/.git/index.lock` made every nested-repo status
+    // refresh trigger the next one, four `git status` a second forever (2026-10-22: the
+    // Output view never stopped scrolling and the event storm stalled the window's drag).
+    if let Some(at) = all.iter().position(|part| part == ".git") {
         // Only the entries that mean the repository's state moved count: HEAD and the refs
         // (a commit, checkout, fetch, merge in progress), the config. `index` / `index.lock`
         // are rewritten by every `git status` the app itself runs - reacting to them made a
         // refresh trigger the next refresh, forever - and `objects/`, `logs/`, hooks and the
         // like are noise to every view.
-        let head = parts.next().unwrap_or_default();
+        let head = all.get(at + 1).map(String::as_str).unwrap_or_default();
         let significant = matches!(
-            head.as_str(),
+            head,
             "HEAD"
                 | "ORIG_HEAD"
                 | "FETCH_HEAD"
@@ -79,7 +87,6 @@ pub(crate) fn fold_path(batch: &mut FsChange, root: &Path, path: &Path) {
         }
         return;
     }
-    let all: Vec<String> = std::iter::once(first).chain(parts).collect();
     if all.iter().any(|part| NOISE_DIRS.contains(&part.as_str())) {
         return;
     }
@@ -266,6 +273,40 @@ mod tests {
             fold_path(&mut change, root, &under(root, &format!(".git/{signal}")));
             assert!(change.git_changed, "{signal}");
         }
+    }
+
+    #[test]
+    fn a_nested_repositorys_git_dir_is_never_a_working_tree_path() {
+        // A nested repository (or a submodule with its own `.git` directory) the SCM view
+        // runs `git status` in: its index.lock churn was listed as a changed file, and every
+        // refresh triggered the next one.
+        let root = &std::env::temp_dir().join("repo");
+        let mut quiet = FsChange::default();
+        for noise in [
+            "sub/fixture-sub/.git",
+            "sub/fixture-sub/.git/index",
+            "sub/fixture-sub/.git/index.lock",
+            "sub/fixture-sub/.git/objects/ab/cdef",
+            ".git",
+        ] {
+            fold_path(&mut quiet, root, &under(root, noise));
+        }
+        assert!(quiet.paths.is_empty(), "{:?}", quiet.paths);
+        assert!(!quiet.git_changed);
+        assert!(!quiet.truncated);
+
+        // Its state moving still counts as a git change — the sub-repository rows refresh.
+        let mut change = FsChange::default();
+        fold_path(
+            &mut change,
+            root,
+            &under(root, "sub/fixture-sub/.git/refs/heads/main"),
+        );
+        assert!(change.git_changed);
+        assert!(change.paths.is_empty());
+        // A working file beside it is still listed.
+        fold_path(&mut change, root, &under(root, "sub/fixture-sub/src/a.rs"));
+        assert_eq!(change.paths, ["sub/fixture-sub/src/a.rs"]);
     }
 
     #[test]

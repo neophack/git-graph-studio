@@ -91,6 +91,24 @@ export interface WorkbenchMounts {
 
 /** The desktop frame's mount points — the ids index.html (and remote.html's interim
  *  skeleton) carry. */
+/** An editor tab's input as the extensions' `window.tabGroups` reports it: a file, a diff's
+ *  two files (a repository-relative side joined to its repository), or an extension's
+ *  webview panel; every other tab kind has no VS Code input shape and reports none. */
+function tabApiInput(input: ReturnType<EditorArea['tabSummary']>[number]['tabs'][number]['input']): { kind: 'file'; path: string } | { kind: 'diff'; original: string; modified: string } | { kind: 'webview'; extId: string } | null {
+	switch (input.kind) {
+		case 'file':
+			return { kind: 'file', path: input.path };
+		case 'diff': {
+			const sidePath = (side: { path: string; local?: boolean }) => (side.local === true || !input.repo ? side.path : `${input.repo.replace(/[\\/]+$/, '')}/${side.path}`);
+			return { kind: 'diff', original: sidePath(input.left), modified: sidePath(input.right) };
+		}
+		case 'extpage':
+			return input.pageId === 'webview' ? { kind: 'webview', extId: input.extId } : null;
+		default:
+			return null;
+	}
+}
+
 function desktopMounts(): WorkbenchMounts {
 	return {
 		titlebar: document.getElementById('titlebar')!,
@@ -224,6 +242,12 @@ export class Workbench {
 		this.extensionHost.onOpenWebview = (panelId, title, extId, placement, focus) => this.openWebviewPanel(panelId, title, extId, placement, focus);
 		this.extensionHost.onCloseWebviewTab = (tabId) => this.editors.closeById(tabId);
 		this.extensionHost.onRevealWebviewTab = (tabId) => this.editors.revealById(tabId);
+		// `window.tabGroups`: the frames read the editor area's strips and close tabs by id.
+		this.extensionHost.tabGroupsSource = () => this.editors.tabSummary().map((group) => ({
+			...group,
+			tabs: group.tabs.map((tab) => ({ id: tab.id, label: tab.label, dirty: tab.dirty, input: tabApiInput(tab.input) }))
+		}));
+		this.extensionHost.onCloseTab = (tabId) => this.editors.closeById(tabId);
 		this.extensionHost.onRenameWebviewTab = (tabId, title) => this.editors.renameById(tabId, title);
 		this.extensionHost.onStatusBarItems = (items) => this.statusBar.setExtensionItems(items);
 		this.statusBar.onExtensionCommand = (command, args) => void this.extensionHost.executeCommand(command, args ?? []);
@@ -793,8 +817,14 @@ export class Workbench {
 		const inEditor = target !== null && target.closest('.cm-editor, input, textarea') !== null;
 		const command = commands.forKeyEvent(event);
 		if (!command) return;
+		// Ctrl+C / Ctrl+X are the browser's own wherever they land: the native copy reaches
+		// CodeMirror, an input, a view's own copy handler, or whatever text is selected
+		// anywhere else (a preview, the Output view, a report). Claiming the key ran
+		// `editor.copy`, enabled only while a text editor is open — with none open the key
+		// was swallowed and nothing reached the clipboard.
+		if ((command.id === 'editor.copy' || command.id === 'editor.cut') && isNativeClipboardKey(event)) return;
 		// Text editing keys stay with the focused editor / input.
-		if (inEditor && ['editor.undo', 'editor.redo', 'editor.cut', 'editor.copy', 'editor.paste', 'editor.selectAll', 'editor.find', 'editor.replace'].includes(command.id)) return;
+		if (inEditor && ['editor.undo', 'editor.redo', 'editor.paste', 'editor.selectAll', 'editor.find', 'editor.replace'].includes(command.id)) return;
 		event.preventDefault();
 		void commands.execute(command.id);
 	}
@@ -966,6 +996,13 @@ export function joinRepo(root: string, relative: string): string {
 export interface SymbolSources {
 	fileSymbols(): Promise<{ name: string; kind: string; line: number }[]>;
 	workspaceSymbols(): Promise<{ name: string; kind: string; path: string; line: number }[]>;
+}
+
+/** Ctrl/Cmd+C or +X without Alt: a key the browser itself turns into copy / cut. A user
+ *  binding that moved `editor.copy` elsewhere still runs through the registry. */
+export function isNativeClipboardKey(event: KeyboardEvent): boolean {
+	const key = event.key.toLowerCase();
+	return (event.ctrlKey || event.metaKey) && !event.altKey && (key === 'c' || key === 'x');
 }
 
 function quickOpenItems(files: FilePickSource, lineInfo: () => { line: number; column: number; lines: number } | null, symbols: SymbolSources): QuickPickSource {

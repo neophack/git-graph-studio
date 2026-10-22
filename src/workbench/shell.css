@@ -46,6 +46,16 @@ body {
 }
 button, input, textarea { font-family: inherit; font-size: inherit; color: inherit; }
 button { cursor: pointer; }
+/* Readable content opts back into selection, so Ctrl+C copies it: the chrome stays
+   unselectable like VS Code's, while the text a user quotes — previews, reports, detail
+   pages, histories, hovers, the large-file rows — selects. Buttons and drag-to-pan
+   surfaces inside them keep the chrome's behaviour (a drag there pans, never selects). */
+.markdown-preview-body, .ext-detail-page, .an-list, .context-body, .call-tree,
+.file-history-list, .fc-detail, .selftest-groups, .settings-row-text, .providers-test-result,
+.cm-tooltip, .fast-row, .can-view:not([data-pointer="coarse"]) :is(.can-summary, .can-table, .can-raw-viewport) {
+	user-select: text; -webkit-user-select: text;
+}
+button, .an-diagram { user-select: none; -webkit-user-select: none; }
 /* Native selects follow the theme — and their popups: Chromium paints the dropdown's
    rows with the option's own background and color, so without these the popup renders
    the OS's white list under the page's light text (the CAN channel filter opened

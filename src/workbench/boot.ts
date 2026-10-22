@@ -290,6 +290,8 @@ export const bootMethods: ThisType<Workbench> = {
 
 		this.editors.onActiveChange = (editor) => {
 			this.scheduleSnapshot();
+			// A focus move between groups changes `tabGroups`' active group without a tab change.
+			this.extensionHost.noteTabsChanged();
 			this.statusBar.setEditor(editor);
 			this.followContextSymbol(editor);
 			if (editor?.kind === 'file' && editor.path && state.layout.sidebarVisible && this.activeView === 'explorer') {
@@ -302,7 +304,12 @@ export const bootMethods: ThisType<Workbench> = {
 		};
 		this.editors.onNavigationChange = () => this.titleBar.setNavigation(this.editors.canGoBack(), this.editors.canGoForward());
 		// The session snapshot (tabs, active tab, expanded folders) follows every change, coalesced.
-		this.editors.onTabsChange = () => this.scheduleSnapshot();
+		// The session snapshot follows every change, coalesced — and so does every extension's
+		// `window.tabGroups` (the push dedupes a re-render that moved nothing).
+		this.editors.onTabsChange = () => {
+			this.scheduleSnapshot();
+			this.extensionHost.noteTabsChanged();
+		};
 		this.explorer.onExpandedChange = () => this.scheduleSnapshot();
 		this.editors.onFileSaved = (path) => {
 			this.scheduleRefresh(0);

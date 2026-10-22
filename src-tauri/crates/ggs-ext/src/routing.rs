@@ -179,6 +179,13 @@ fn is_webview(method: &str) -> bool {
     method.starts_with("webview.") || method.starts_with("webviewView.")
 }
 
+/// Whether a host request is the Tabs API's (`window.tabGroups.close`): the tab layout a
+/// backend sees is the desktop window's alone (only `main` pushes it), so the tab ids it
+/// names are that window's tabs.
+fn is_tabs(method: &str) -> bool {
+    method.starts_with("tabs.")
+}
+
 /// A panel id as [`ExtRoutes::panels`] keys it.
 fn panel_key(id: &Value) -> Option<String> {
     match id {
@@ -269,7 +276,7 @@ fn opens_document(method: &str, args: &Value) -> bool {
 /// its caller first, falling back to the click attribution (a phone tap's input box fires
 /// with no call of its own in flight). `None` leaves it to the default policy.
 pub fn preferred(ext_id: &str, method: &str, args: &Value) -> Option<String> {
-    if is_webview(method) {
+    if is_webview(method) || is_tabs(method) {
         return Some(WEBVIEW_HOME.into());
     }
     let attributed = recent_message(ext_id);
@@ -596,6 +603,23 @@ mod tests {
         drop(desktop);
         assert_eq!(preferred(ext, "notify", &json!([])), None);
         assert_eq!(caller(ext), None);
+    }
+
+    #[test]
+    fn a_tab_close_lands_in_the_desktop_window_whoever_calls() {
+        // `tabGroups.close` names the desktop window's tab ids (the only layout a backend
+        // is shown): a remote session's call in flight must not carry it to its own page.
+        let ext = "test.tabs-close";
+        let remote = call_begin(ext, "remote/4");
+        assert_eq!(
+            preferred(ext, "tabs.close", &json!([["webview:x:1"], true])).as_deref(),
+            Some(WEBVIEW_HOME)
+        );
+        drop(remote);
+        assert_eq!(
+            preferred(ext, "tabs.close", &json!([["webview:x:1"], true])).as_deref(),
+            Some(WEBVIEW_HOME)
+        );
     }
 
     #[test]

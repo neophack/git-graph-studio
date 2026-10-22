@@ -1,5 +1,5 @@
 import { EXT_HOST_LOG_OWNER } from './sharedTypes';
-import { WebviewDelivery, WebviewHandle, WebviewViewRecord } from './sharedTypes';
+import { EditorGroupSummary, WebviewContextMenuReport, WebviewDelivery, WebviewHandle, WebviewViewRecord } from './sharedTypes';
 import { ExtStatusBarItem } from './sharedTypes';
 import { FormatterSelector } from './sharedTypes';
 import { PageDiffRequest, PageFrameHandle, PageTheme } from './sharedTypes';
@@ -150,9 +150,28 @@ export class ExtensionHost {
 
 	onCloseWebviewTab: ((tabId: string) => void) | null = null;
 
-	onRevealWebviewTab: ((tabId: string) => void) | null = null;
+	/** Workbench hook: focus a webview panel's tab (`panel.reveal()`); answers whether a
+	 *  tab held the id, so a reveal of a record whose tab is gone can re-open it. */
+	onRevealWebviewTab: ((tabId: string) => boolean) | null = null;
 
 	onRenameWebviewTab: ((tabId: string, title: string) => void) | null = null;
+
+	/** Workbench hook: the editor area's tab strips, in visual order — what the frames'
+	 *  `window.tabGroups` reports (pushes.ts turns it into the wire snapshot). */
+	tabGroupsSource: (() => EditorGroupSummary[]) | null = null;
+
+	/** Workbench hook: close one tab by id (`tabGroups.close`); answers whether a tab held it. */
+	onCloseTab: ((tabId: string) => boolean) | null = null;
+
+	/** Per extension, which activation its live process is: bumped by every `extensionEnv`
+	 *  (a process's `host.env`, a frame's init). A webview record of an older generation
+	 *  belongs to a process that is gone — an extension-host restart left its tab behind. */
+	readonly webviewGenerations = new Map<string, number>();
+
+	/** The last tab layout pushed into the frames (JSON), and the coalescing timer. */
+	lastPushedTabs = '';
+
+	tabsPushTimer: number | null = null;
 
 	onRevealWebviewView: ((viewId: string) => void) | null = null;
 
@@ -428,6 +447,8 @@ export class ExtensionHost {
 
 	declare webviewViewFor: (source: MessageEventSource | null) => { viewId: string; extId: string } | null ;
 
+	declare showWebviewContextMenu: (frame: HTMLIFrameElement, webviewId: string, report: WebviewContextMenuReport) => void ;
+
 	declare releaseWebview: (extId: string, panelId: number) => void ;
 
 	declare closeWebview: (extId: string, panelId: number) => void ;
@@ -551,6 +572,10 @@ export class ExtensionHost {
 	declare treeInteraction: (viewId: string, method: 'treeView.select' | 'treeView.expand' | 'treeView.checkbox', args: unknown[]) => void ;
 
 	declare noteViewVisible: (viewId: string, visible: boolean) => void ;
+
+	declare noteTabsChanged: () => void ;
+
+	declare tabGroupsSnapshot: () => import('../../../hosts/vscodeApi/bridge').TabGroupsSnapshot ;
 
 	declare noteActiveEditor: (editor: { kind: string; path?: string; languageName?: string; line: number; column: number; selected?: number } | null) => void ;
 

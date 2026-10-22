@@ -111,14 +111,44 @@ export interface HostContext {
 	storage?: { global: string; workspace?: string | null; log: string };
 	/** The installed extensions as `extensions.all` / `getExtension` report them. */
 	extensions?: { id: string; extensionPath: string; packageJSON: Record<string, unknown>; isActive: boolean }[];
+	/** The editor area's tab layout at activation (`window.tabGroups`); later changes
+	 *  arrive as `tabsChanged` events. Absent from an older bridge: one empty group. */
+	tabs?: TabGroupsSnapshot;
+	/** The highest panel id the host still holds for this extension: this process numbers
+	 *  its webview panels after it, so a panel left behind by the previous process (an
+	 *  extension-host restart) never shares an id — or a tab — with a new one. */
+	webviewPanelBase?: number;
 }
+
+/** One editor tab as the host reports it to `window.tabGroups`. The input carries what
+ *  VS Code's `TabInput*` classes expose: a file's path, a diff's two paths, or a webview
+ *  panel's `viewType` (VS Code's `mainThreadWebview-<viewType>` spelling) with the owning
+ *  extension and panel id, so an extension maps its own tabs back to its panels. */
+export interface TabSnapshot {
+	id: string;
+	label: string;
+	dirty: boolean;
+	input: { kind: 'text'; path: string } | { kind: 'diff'; original: string; modified: string } | { kind: 'webview'; viewType: string; extId: string; panelId: number } | null;
+}
+
+/** One editor group: VS Code's `TabGroup` (its column is its 1-based position). */
+export interface TabGroupSnapshot {
+	viewColumn: number;
+	active: boolean;
+	activeId: string | null;
+	tabs: TabSnapshot[];
+}
+
+export type TabGroupsSnapshot = TabGroupSnapshot[];
 
 /** An event the host pushed into the frame: a configuration change for this extension, a
  *  message from one of its webview panels, a panel going away, the active editor changing
  *  (with its document text when the document changed), a document being saved, a message
  *  from one of its webview views (sidebar), a view's visibility, or a theme change. */
 export interface HostEvent {
-	event: 'configChanged' | 'webviewMessage' | 'webviewDisposed' | 'activeEditorChanged' | 'documentSaved' | 'webviewViewMessage' | 'webviewViewVisible' | 'themeChanged' | 'fsChanged' | 'documentChanged' | 'documentClosed' | 'workspaceFoldersChanged' | 'webviewViewState' | 'claudeTap';
+	event: 'configChanged' | 'webviewMessage' | 'webviewDisposed' | 'activeEditorChanged' | 'documentSaved' | 'webviewViewMessage' | 'webviewViewVisible' | 'themeChanged' | 'fsChanged' | 'documentChanged' | 'documentClosed' | 'workspaceFoldersChanged' | 'webviewViewState' | 'claudeTap' | 'tabsChanged';
+	/** The editor area's tab layout after a change (tabsChanged). */
+	tabs?: TabGroupsSnapshot;
 	/** A document edit (documentChanged): the document's whole new text. */
 	text?: string;
 	/** The open folders after a change (workspaceFoldersChanged). */

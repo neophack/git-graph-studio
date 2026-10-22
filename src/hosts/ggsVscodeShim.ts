@@ -60,7 +60,10 @@ shim.__ggsVscodeShimInstall = function (args: InstallArgs): InstalledVscode {
 		storage: env.storage,
 		extensions: env.extensions,
 		logLevel: env.logLevel,
-		platform: env.platform
+		platform: env.platform,
+		// The tab layout `window.tabGroups` starts from, and where this process's panel ids begin.
+		tabs: env.tabs,
+		webviewPanelBase: env.webviewPanelBase
 	};
 	const handlers = new Map<string, (...callArgs: unknown[]) => unknown>();
 	const docProviders = new Map<string, { provideTextDocumentContent?: (uri: unknown) => unknown }>();
