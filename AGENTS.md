@@ -2320,7 +2320,10 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   a relay (`hub/connect`), and prints the links (`print-link`; flags `--password` /
   `--port` / `--scheme` / `--server` / `--join-key` answer the prompts non-interactively,
   an empty answer keeping the current value, `--server ""` skipping the relay without
-  asking). The same port is the Remote Access page's Service-section field; the status's
+  asking). The same port is the Remote Access page's Service-section field, and port and
+  protocol both are the tray pair page's LAN card (the web sets it too — `pair/listener`: the
+  ticket alone before any password exists, the unlock after; the patch is
+  `Config::listener_patch`, applied through the admin API's own `apply_config`); the status's
   `listenError` names a bind failure, every link builder names only the hosts the
   effective bind accepts on (`tls::link_hosts`), and the extension pushes only the
   `ggsRemote.*` settings the user set (a change event: the keys it changed) — a declared

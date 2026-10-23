@@ -55,7 +55,7 @@ h2 { font-size: 13px; font-weight: 600; margin: 12px 0 6px; }
 .card > h2:first-child, .card > .row > h1 { margin-top: 0; }
 label { display: block; margin: 8px 0 2px; color: var(--muted); font-size: 12px; }
 label.check { display: flex; gap: 6px; align-items: center; color: var(--fg); font-size: 13px; }
-input[type=password], input[type=text] { width: 100%; font: inherit; padding: 4px 8px; min-height: 28px; border-radius: 2px; border: 1px solid var(--input-line); background: var(--input-bg); color: var(--fg); }
+input[type=password], input[type=text], input[type=number], select { width: 100%; font: inherit; padding: 4px 8px; min-height: 28px; border-radius: 2px; border: 1px solid var(--input-line); background: var(--input-bg); color: var(--fg); }
 input::placeholder { color: var(--muted); opacity: 1; }
 input:focus-visible { outline: 1px solid var(--focus); border-color: var(--focus); }
 button, .button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; font: inherit; min-height: 28px; padding: 2px 14px; border-radius: 2px; border: 1px solid var(--line); background: transparent; color: var(--fg); cursor: pointer; text-decoration: none; }
@@ -75,6 +75,7 @@ form button { margin-top: 10px; }
 /* The compact inline form row: inputs share the line with the button, wrapping under. */
 .pw-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .pw-row input { flex: 1 1 150px; width: auto; min-width: 0; }
+.lan-row input, .lan-row select { flex: 0 1 140px; }
 .pw-row button { margin-top: 0; flex-shrink: 0; }
 .windows { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); margin-top: 8px; }
 .window { background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
@@ -107,7 +108,7 @@ details summary { cursor: pointer; min-height: 26px; display: flex; align-items:
 details summary:hover { background: var(--hover); }
 /* Touch screens and narrow windows get taller controls and full-width form buttons. */
 @media (pointer: coarse) {
-	input[type=password], input[type=text], button, .button { min-height: 34px; }
+	input[type=password], input[type=text], input[type=number], select, button, .button { min-height: 34px; }
 }
 @media (max-width: 600px) {
 	.card { padding: 10px 12px 12px; border-radius: 3px; }

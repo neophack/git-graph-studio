@@ -86,6 +86,15 @@ const STRINGS = {
 		'relay.online': 'Online — {base}',
 		'relay.rejected': 'Refused ({reason})',
 		'relay.replaced': 'Another copy of this PC’s key is connected; retry from this PC.',
+		lanTitle: 'LAN listener',
+		lanPort: 'LAN port',
+		lanScheme: 'Protocol',
+		lanHttp: 'HTTP (this PC only)',
+		lanHint: 'Devices on this network reach the PC on this port. Changing it signs nothing out, but open LAN pages reconnect and the links change with it. Plain HTTP listens on this PC alone (127.0.0.1) — for a reverse proxy or tunnel that ends TLS, or the relay; phones on the LAN need HTTPS. Also from a terminal: ggs config --port <n> --scheme http|https.',
+		'lan.listening': 'Listening on port {port}.',
+		'lan.binding': 'Starting on port {port}…',
+		'lan.error': 'Cannot listen: {msg}',
+		'lan.badPort': 'The port must be a whole number from 1 to 65535.',
 		warning: 'Anyone with the password can do on this PC whatever you can — including running commands in a terminal. Share it only with people you trust.'
 	},
 	'zh-cn': {
@@ -173,6 +182,15 @@ const STRINGS = {
 		'relay.online': '在线 — {base}',
 		'relay.rejected': '被拒绝（{reason}）',
 		'relay.replaced': '此 PC 的密钥在别处连接，请在本 PC 重试。',
+		lanTitle: '局域网监听',
+		lanPort: '局域网端口',
+		lanScheme: '协议',
+		lanHttp: 'HTTP（仅本机）',
+		lanHint: '同一网络的设备通过此端口访问这台 PC。修改不会注销设备，但已打开的局域网页面会重新连接，链接随之改变。HTTP 只在本机（127.0.0.1）监听——用于终结 TLS 的反向代理、隧道或中继；局域网内的手机需要 HTTPS。也可在终端设置：ggs config --port <端口> --scheme http|https。',
+		'lan.listening': '正在端口 {port} 监听。',
+		'lan.binding': '正在端口 {port} 启动…',
+		'lan.error': '无法监听：{msg}',
+		'lan.badPort': '端口必须是 1–65535 之间的整数。',
 		warning: '知道密码的人可以在这台 PC 上做你能做的一切——包括在终端里执行命令。只把密码告诉可信的人。'
 	}
 };

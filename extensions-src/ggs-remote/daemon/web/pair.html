@@ -48,6 +48,22 @@
 		<button id="relay-disconnect" data-i18n="relayDisconnect" hidden></button>
 		<p class="muted" data-i18n="relayHint"></p>
 	</section>
+	<section class="card" id="lan" hidden>
+		<h2 data-i18n="lanTitle"></h2>
+		<p class="muted" id="lan-state"></p>
+		<form id="lan-form">
+			<div class="pw-row lan-row">
+				<input type="number" id="lan-port" min="1" max="65535" step="1" required placeholder="47615" data-i18n-aria="lanPort">
+				<select id="lan-scheme" data-i18n-aria="lanScheme">
+					<option value="https">HTTPS</option>
+					<option value="http" data-i18n="lanHttp"></option>
+				</select>
+				<button class="primary" data-i18n="save"></button>
+			</div>
+			<p class="error" id="lan-error"></p>
+		</form>
+		<p class="muted" data-i18n="lanHint"></p>
+	</section>
 	<section class="card" id="ca" hidden>
 		<h2 data-i18n="caTitle"></h2>
 		<p><span data-i18n="caText"></span> <code id="fingerprint"></code></p>

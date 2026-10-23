@@ -41,6 +41,9 @@ async function render() {
 	// The server card lives on the password screens themselves: a server saved before any
 	// password exists is held and connects the moment one lands.
 	renderRelay(status.hub ?? {});
+	// The LAN card moves the address every signed-in device is on: before a password it
+	// rides the ticket (like the first password), after one the unlock.
+	renderLan(status, !status.passwordSet || status.unlocked);
 	if (!status.unlocked) return;
 	// While the relay is online its link is the one QR shown (the LAN codes hide,
 	// 2026-10-12) — the intro says so; otherwise the LAN scan line stands.
@@ -77,6 +80,50 @@ async function render() {
 		document.getElementById('unlock-error').textContent = t('relocked');
 	}, 5 * 60 * 1000);
 }
+
+function renderLan(status, visible) {
+	show('lan', visible);
+	if (!visible) return;
+	const port = document.getElementById('lan-port');
+	const scheme = document.getElementById('lan-scheme');
+	const configured = status.config ?? {};
+	if (document.activeElement !== port) port.value = String(configured.port ?? status.port ?? '');
+	if (document.activeElement !== scheme) scheme.value = configured.tls?.mode === 'none' ? 'http' : 'https';
+	const line = status.listenError
+		? t('lan.error', { msg: status.listenError })
+		: status.listening
+			? t('lan.listening', { port: status.port })
+			: t('lan.binding', { port: status.port });
+	const state = document.getElementById('lan-state');
+	state.textContent = line;
+	state.className = status.listenError ? 'error' : 'muted';
+}
+
+document.getElementById('lan-form').addEventListener('submit', async (event) => {
+	event.preventDefault();
+	const error = document.getElementById('lan-error');
+	const port = Number(document.getElementById('lan-port').value);
+	if (!Number.isInteger(port) || port < 1 || port > 65535) {
+		error.textContent = t('lan.badPort');
+		return;
+	}
+	const response = await postJson('pair/listener', {
+		ticket,
+		unlock,
+		port,
+		scheme: document.getElementById('lan-scheme').value
+	});
+	if (response.ok) {
+		error.textContent = t('saved');
+		render();
+		// The listener rebinds asynchronously; look again once it has.
+		if (response.data?.rebind) setTimeout(render, 2500);
+	} else {
+		const message = String(response.data?.error ?? response.status);
+		alert(message);
+		error.textContent = message;
+	}
+});
 
 function relayState(hub) {
 	switch (hub.state) {
