@@ -352,6 +352,88 @@ command line — an SSH session on a fresh machine sets the access password and 
 relay server and prints the phone links, without opening a window:
 
 ```sh
-ggs-config                      # interactive: password, relay, links
+ggs-config                      # interactive: password, LAN port and protocol, relay, links
 ggs-config --password pw --server https://hub.example.com
+ggs-config --port 8090 --scheme http --server ""   # fixed LAN port, no relay, no prompts
 ```
+
+Every flag answers its prompt; an absent flag asks, an empty answer keeps the current
+value (`--server ""` skips the relay). The flags:
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--password <pw>` | The access password (8+ characters). Empty keeps the current one. |
+| `--port <n>` | The fixed LAN port, 1–65535 (default 47615). A port another program holds is reported; the setting is saved and retried. |
+| `--scheme https\|http` | `https` (default) serves TLS itself, with the self-signed certificate the devices trust once (a custom certificate stays). `http` means TLS ends in front of the PC: the daemon then listens on **127.0.0.1 only**, for a reverse proxy, a tunnel or the relay. |
+| `--server <url>` / `--join-key <key>` | The optional relay server (`ggs-remote-hub`) and its server password. |
+
+The browser must always reach the PC over **HTTPS**: the session cookie is `Secure`, and
+WebKit browsers (Safari on iPhone, iPad and Mac) drop it on plain HTTP, so sign-in would
+never stick. Phones on the LAN need `https`; `http` is only for a front that ends TLS.
+
+The same port and protocol can be set on the **Remote Access** page in the app (the
+Service section's port field) and on the tray's pairing page (the **LAN listener** card).
+All three write the daemon's config, `~/.ggs/remote/config.json` (`$GGS_HOME/remote/` when
+`GGS_HOME` is set), which can also be written before the daemon first starts — missing keys
+take their defaults:
+
+```json
+{ "port": 50000, "bind": "0.0.0.0", "tls": { "mode": "self-signed" } }
+```
+
+`tls.mode` is `self-signed` or `custom` for HTTPS, `none` for HTTP; set
+`"trustProxy": true` when a reverse proxy on the same host fronts an HTTP daemon.
+
+### Running in Docker
+
+There is no official runtime image; this is a starting point to adapt (untested). Inside a
+container the daemon runs in the foreground (no tray, no systemd), and the windows a
+remote device opens are real Git Graph Studio processes that need a display, so the
+container runs Xvfb.
+
+```dockerfile
+FROM ubuntu:22.04
+COPY git-graph-studio_*_amd64.deb /tmp/ggs.deb
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates git xvfb xauth /tmp/ggs.deb \
+ && rm -rf /var/lib/apt/lists/* /tmp/ggs.deb \
+ && useradd -m ggs
+USER ggs
+ENV GGS_HOME=/home/ggs/.ggs
+COPY --chown=ggs entrypoint.sh /entrypoint.sh
+ENTRYPOINT ["bash", "/entrypoint.sh"]
+```
+
+`entrypoint.sh`:
+
+```bash
+set -e
+: "${GGS_PORT:=47615}" "${GGS_SCHEME:=https}"
+# Installs the daemon from the VSIX the deb carries, then sets the password, the LAN port
+# and protocol and the optional relay. An empty GGS_PASSWORD keeps the stored password,
+# so a restart never resets it.
+ggs config --password "${GGS_PASSWORD:-}" --port "$GGS_PORT" --scheme "$GGS_SCHEME" \
+  --server "${GGS_HUB:-}" --join-key "${GGS_JOIN_KEY:-}"
+# ggs config starts the daemon detached; run it as the container's foreground process.
+"$GGS_HOME/remote/bin/ggs-remote" stop || true
+exec xvfb-run -a "$GGS_HOME/remote/bin/ggs-remote" run --no-tray
+```
+
+```sh
+docker run -d --network host -v ggs-data:/home/ggs/.ggs \
+  -e GGS_PASSWORD='your-password' -e GGS_PORT=50000 -e GGS_SCHEME=https ggs-image
+```
+
+- **Use `--network host` on Linux.** With Docker's bridge network the daemon sees only the
+  container's own address (172.17.x): the links it prints and the self-signed certificate
+  name an address phones cannot reach. On the host network they name the host's real LAN
+  address.
+- **HTTP inside a container** listens on the container's loopback, which `-p` port
+  publishing cannot reach. Use it only with `--network host` and a reverse proxy on the
+  host that ends TLS (proxying to `127.0.0.1:<port>`, `"trustProxy": true`), or with the
+  relay alone (`GGS_HUB`) — its tunnel is outbound, no port needs publishing.
+- **Keep `~/.ggs` on a volume**: it holds the password, the certificate authority the
+  devices trust and the relay link's identity. Without it every rebuild means a new
+  certificate to trust and a new relay link.
+- `--password` crosses the command line, visible briefly in the container's process list;
+  where that matters, pipe it instead: `printf %s "$pw" | "$GGS_HOME/remote/bin/ggs-remote" set-password`.

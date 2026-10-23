@@ -42,6 +42,11 @@ never stick. The default self-signed TLS (or a TLS front proxy) avoids this on e
 ggs-remote status | stop | start | pair | print-link | set-password | autostart on|off
 ```
 
+`ggs config --port <n> --scheme https|http` (from the app's own command line) sets the
+fixed LAN port and protocol; the Remote Access page's Service section and the pairing
+page's LAN listener card set the same two. The main repository's README covers the flags,
+`config.json` and running in Docker.
+
 The binary lives in `~/.ggs/remote/bin/`; its log is `~/.ggs/logs/remote.log`. On Linux the
 tray needs a StatusNotifier host (KDE, or GNOME with the AppIndicator extension); without one
 the service runs headless and is managed from the Remote Access page or the command line.
