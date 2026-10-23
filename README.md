@@ -400,19 +400,29 @@ RUN apt-get update \
  && useradd -m ggs
 USER ggs
 ENV GGS_HOME=/home/ggs/.ggs
+# The LAN listener's port and protocol are set at build time, by pre-writing the daemon's
+# config (the file above; missing keys take their defaults). `http` means tls.mode
+# `none`, `https` the self-signed CA. Choose both with --build-arg.
+ARG GGS_PORT=50000
+ARG GGS_SCHEME=https
+RUN mkdir -p "$GGS_HOME/remote" \
+ && printf '{"port": %s, "bind": "0.0.0.0", "tls": {"mode": "%s"}}\n' "$GGS_PORT" \
+      "$( [ "$GGS_SCHEME" = http ] && echo none || echo self-signed )" \
+      > "$GGS_HOME/remote/config.json"
 COPY --chown=ggs entrypoint.sh /entrypoint.sh
 ENTRYPOINT ["bash", "/entrypoint.sh"]
 ```
 
-`entrypoint.sh`:
+`entrypoint.sh` — the password and the relay are the only values it sets; they must not
+be baked into an image:
 
 ```bash
 set -e
-: "${GGS_PORT:=47615}" "${GGS_SCHEME:=https}"
-# Installs the daemon from the VSIX the deb carries, then sets the password, the LAN port
-# and protocol and the optional relay. An empty GGS_PASSWORD keeps the stored password,
-# so a restart never resets it.
-ggs config --password "${GGS_PASSWORD:-}" --port "$GGS_PORT" --scheme "$GGS_SCHEME" \
+# Installs the daemon from the VSIX the deb carries, then sets the password and the
+# optional relay. The LAN port and protocol came from the config written at build time;
+# the empty answers keep them and keep the pass non-interactive. An empty GGS_PASSWORD
+# keeps the stored password, so a restart never resets it.
+ggs config --password "${GGS_PASSWORD:-}" --port "" --scheme "" \
   --server "${GGS_HUB:-}" --join-key "${GGS_JOIN_KEY:-}"
 # ggs config starts the daemon detached; run it as the container's foreground process.
 "$GGS_HOME/remote/bin/ggs-remote" stop || true
@@ -420,8 +430,9 @@ exec xvfb-run -a "$GGS_HOME/remote/bin/ggs-remote" run --no-tray
 ```
 
 ```sh
+docker build --build-arg GGS_PORT=50000 --build-arg GGS_SCHEME=https -t ggs-image .
 docker run -d --network host -v ggs-data:/home/ggs/.ggs \
-  -e GGS_PASSWORD='your-password' -e GGS_PORT=50000 -e GGS_SCHEME=https ggs-image
+  -e GGS_PASSWORD='your-password' ggs-image
 ```
 
 - **Use `--network host` on Linux.** With Docker's bridge network the daemon sees only the
@@ -435,5 +446,9 @@ docker run -d --network host -v ggs-data:/home/ggs/.ggs \
 - **Keep `~/.ggs` on a volume**: it holds the password, the certificate authority the
   devices trust and the relay link's identity. Without it every rebuild means a new
   certificate to trust and a new relay link.
+- **The build-time port and protocol apply on the first start** (Docker seeds an empty
+  named volume from the image, so the baked `config.json` lands there). A volume that
+  already exists keeps its own config — a rebuilt image alone will not move it; change the
+  running deployment from the Remote Access page or `docker exec … ggs config --port … --scheme …`.
 - `--password` crosses the command line, visible briefly in the container's process list;
   where that matters, pipe it instead: `printf %s "$pw" | "$GGS_HOME/remote/bin/ggs-remote" set-password`.
