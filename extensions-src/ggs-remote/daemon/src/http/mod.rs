@@ -77,6 +77,7 @@ pub fn loopback_router(daemon: Arc<Daemon>) -> Router {
         .route("/pair/password", post(api::pair_password))
         .route("/pair/hub/connect", post(api::pair_hub_connect))
         .route("/pair/hub/disconnect", post(api::pair_hub_disconnect))
+        .route("/pair/listener", post(api::pair_listener))
         .route("/pair/qr", get(api::pair_qr))
         .route("/lang.js", get(pages::lang_js))
         .route("/static/{file}", get(pages::static_file))

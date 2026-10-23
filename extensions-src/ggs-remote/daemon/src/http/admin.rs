@@ -45,17 +45,28 @@ pub fn qr_links(hub_base: Option<&str>, lan: &[String]) -> Vec<String> {
 /// page and the extension page show them after the password unlock).
 pub fn status_json(daemon: &Daemon, open: bool) -> serde_json::Value {
     let config = daemon.config();
-    let port = daemon.public_port.load(Ordering::Relaxed);
+    let listening = daemon.listening.load(Ordering::Relaxed);
+    // While the listener is down (a port change still binding, or a custom port another
+    // program holds) the configured port is the one the links will answer on — the last
+    // bound port is already released — and the tray's error says why.
+    let port = if listening {
+        daemon.public_port.load(Ordering::Relaxed)
+    } else {
+        config.port
+    };
+    let listen_error = match &*daemon.tray.borrow() {
+        crate::state::TrayState::Error(message) if !listening => Some(message.clone()),
+        _ => None,
+    };
     let scheme = if config.tls.mode == crate::config::TlsMode::None {
         "http"
     } else {
         "https"
     };
     let addresses = crate::tls::lan_addresses();
-    let links: Vec<String> = addresses
+    let links: Vec<String> = crate::tls::link_hosts(&config.effective_bind())
         .iter()
-        .map(|a| crate::tls::link_for(scheme, a, port))
-        .chain(crate::tls::hostname_local().map(|h| crate::tls::link_for(scheme, &h, port)))
+        .map(|host| crate::tls::link_for(scheme, host, port))
         .collect();
     let epoch = daemon.auth.epoch();
     let devices = daemon.sessions.lock().unwrap().devices(epoch, None);
@@ -79,7 +90,8 @@ pub fn status_json(daemon: &Daemon, open: bool) -> serde_json::Value {
         "running": true,
         "version": env!("CARGO_PKG_VERSION"),
         "paused": config.paused,
-        "listening": daemon.listening.load(Ordering::Relaxed),
+        "listening": listening,
+        "listenError": listen_error,
         "passwordSet": daemon.auth.is_set(),
         "port": port,
         "bind": config.bind,
@@ -243,43 +255,43 @@ pub async fn qr(
     super::api::qr_response(q.get("text").map(String::as_str).unwrap_or(""))
 }
 
+/// Apply a config patch: validate, persist, then the side effects — the autostart
+/// registration and the listener rebind. The admin API and the pair page's LAN card share it.
+pub fn apply_config(
+    daemon: &Daemon,
+    patch: &serde_json::Value,
+) -> Result<(bool, crate::config::Config), String> {
+    let (rebind, autostart_changed, next) = {
+        let mut config = daemon.config.lock().unwrap();
+        let mut next = config.clone();
+        let rebind = next.apply_patch(patch)?;
+        next.save(&daemon.paths).map_err(|e| e.to_string())?;
+        let autostart_changed = next.autostart != config.autostart;
+        *config = next.clone();
+        (rebind, autostart_changed, next)
+    };
+    if autostart_changed {
+        if let Err(e) = crate::autostart::apply(next.autostart) {
+            crate::warn!("autostart: {e}");
+        }
+    }
+    if rebind {
+        daemon.rebind.notify_one();
+    }
+    Ok((rebind, next))
+}
+
 pub async fn config(
     State(daemon): State<Arc<Daemon>>,
     headers: HeaderMap,
     Json(patch): Json<serde_json::Value>,
 ) -> Response {
     admin_only!(daemon, headers);
-    let result = {
-        let mut config = daemon.config.lock().unwrap();
-        let mut next = config.clone();
-        match next.apply_patch(&patch) {
-            Ok(rebind) => {
-                if let Err(e) = next.save(&daemon.paths) {
-                    Err(e.to_string())
-                } else {
-                    let autostart_changed = next.autostart != config.autostart;
-                    *config = next.clone();
-                    Ok((rebind, autostart_changed, next))
-                }
-            }
-            Err(e) => Err(e),
-        }
-    };
-    match result {
-        Ok((rebind, autostart_changed, next)) => {
-            if autostart_changed {
-                if let Err(e) = crate::autostart::apply(next.autostart) {
-                    crate::warn!("autostart: {e}");
-                }
-            }
-            if rebind {
-                daemon.rebind.notify_one();
-            }
-            json_response(
-                StatusCode::OK,
-                serde_json::json!({ "ok": true, "rebind": rebind, "config": next }),
-            )
-        }
+    match apply_config(&daemon, &patch) {
+        Ok((rebind, next)) => json_response(
+            StatusCode::OK,
+            serde_json::json!({ "ok": true, "rebind": rebind, "config": next }),
+        ),
         Err(e) => error(StatusCode::BAD_REQUEST, &e),
     }
 }

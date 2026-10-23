@@ -89,10 +89,9 @@ pub fn first_link(daemon: &Daemon) -> Option<String> {
         "https"
     };
     let port = daemon.public_port.load(Ordering::Relaxed);
-    let host = crate::tls::lan_addresses()
+    let host = crate::tls::link_hosts(&config.effective_bind())
         .into_iter()
-        .next()
-        .or_else(crate::tls::hostname_local)?;
+        .next()?;
     Some(crate::tls::link_for(scheme, &host, port))
 }
 

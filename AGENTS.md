@@ -2312,10 +2312,19 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   extracted once into the root's `bin-incoming` staging dir, never the running `bin`),
   installs and starts it (`install --ggs-exe`), sets the access password through the
   loopback admin API (the value on a stdin pipe, never an argv a process listing could
-  show; the prompt does not echo), optionally connects
+  show; the prompt does not echo), sets the LAN listener's fixed port and protocol
+  (2026-10-23, the owner's direction: 局域网模式要支持自定义端口 / ggs config 可以设置固定端口 /
+  可以设置使用 http 还是 https — one `admin/config` patch, then a wait for the rebind
+  that reports a port another program holds; `http` is the daemon's `tls: none`, which
+  listens on loopback only, for a reverse proxy, a tunnel or the relay), optionally connects
   a relay (`hub/connect`), and prints the links (`print-link`; flags `--password` /
-  `--server` / `--join-key` answer the prompts non-interactively, `--server ""` skipping
-  the relay without asking). Reached as the `ggs-config` binary the installer carries
+  `--port` / `--scheme` / `--server` / `--join-key` answer the prompts non-interactively,
+  an empty answer keeping the current value, `--server ""` skipping the relay without
+  asking). The same port is the Remote Access page's Service-section field; the status's
+  `listenError` names a bind failure, every link builder names only the hosts the
+  effective bind accepts on (`tls::link_hosts`), and the extension pushes only the
+  `ggsRemote.*` settings the user set (a change event: the keys it changed) — a declared
+  default never resets a port fixed from the CLI or the page. Reached as the `ggs-config` binary the installer carries
   beside `ggs` (`src-tauri/crates/ggs-config/src/main.rs`) and as the `ggs config` subcommand
   (lib.rs's run dispatches either spelling). This one module is the sanctioned exception
   to the module's naming seam (below): it names the daemon it drives.

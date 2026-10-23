@@ -2368,3 +2368,192 @@ async fn sandbox_launch_runs_a_command_under_the_real_runtime() {
     assert!(plan.root.join("home").is_dir(), "the relocated home exists");
     assert!(plan.root.join("workspace").is_dir());
 }
+
+/// Polls the admin status until `done` holds (5 s at most) and answers the last status.
+async fn status_until(h: &Harness, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+    let mut status = serde_json::Value::Null;
+    for _ in 0..250 {
+        let response = admin(h, "GET", "/admin/status", "").await;
+        status = serde_json::from_str(&response.body).unwrap_or_default();
+        if done(&status) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    status
+}
+
+#[tokio::test]
+async fn a_custom_lan_port_rebinds_and_a_taken_one_is_reported() {
+    let h = start().await;
+    let old = h.public;
+    // A port the OS hands out, released at once for the daemon to take.
+    let free = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let patched = admin(&h, "PUT", "/admin/config", &format!(r#"{{"port":{free}}}"#)).await;
+    assert_eq!(patched.status, 200, "{}", patched.body);
+    assert!(
+        patched.body.contains(r#""rebind":true"#),
+        "{}",
+        patched.body
+    );
+    let status = status_until(&h, |s| s["listening"] == true && s["port"] == free).await;
+    assert_eq!(status["port"], free, "{status}");
+    assert!(status["listenError"].is_null(), "{status}");
+    // The new port serves (no password yet: the notice page), the old one is released.
+    assert_eq!(http(free, "GET", "/login", &[], None).await.status, 503);
+    let mut released = false;
+    for _ in 0..150 {
+        if tokio::net::TcpStream::connect(("127.0.0.1", old))
+            .await
+            .is_err()
+        {
+            released = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(released, "the old port {old} still accepts");
+
+    // A port another program holds: the listener is down, the status names the configured
+    // port and why — never the last port that was bound.
+    let blocker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let taken = blocker.local_addr().unwrap().port();
+    let patched = admin(
+        &h,
+        "PUT",
+        "/admin/config",
+        &format!(r#"{{"port":{taken}}}"#),
+    )
+    .await;
+    assert_eq!(patched.status, 200, "{}", patched.body);
+    let status = status_until(&h, |s| {
+        s["listening"] == false && s["listenError"].is_string()
+    })
+    .await;
+    assert_eq!(status["port"], taken, "{status}");
+    assert!(
+        status["listenError"]
+            .as_str()
+            .unwrap_or("")
+            .contains(&taken.to_string()),
+        "{status}"
+    );
+
+    // Picking a free port again heals at once (the rebind wakes the 30 s retry).
+    let patched = admin(&h, "PUT", "/admin/config", &format!(r#"{{"port":{free}}}"#)).await;
+    assert_eq!(patched.status, 200, "{}", patched.body);
+    let status = status_until(&h, |s| s["listening"] == true && s["port"] == free).await;
+    assert!(status["listenError"].is_null(), "{status}");
+    drop(blocker);
+
+    // Out of range never reaches the listener.
+    let zero = admin(&h, "PUT", "/admin/config", r#"{"port":0}"#).await;
+    assert_eq!(zero.status, 400);
+    let big = admin(&h, "PUT", "/admin/config", r#"{"port":70000}"#).await;
+    assert_eq!(big.status, 400);
+}
+
+async fn pair_post(h: &Harness, path: &str, body: serde_json::Value) -> HttpResponse {
+    http(
+        h.loopback,
+        "POST",
+        path,
+        &[("Content-Type", "application/json")],
+        Some(&body.to_string()),
+    )
+    .await
+}
+
+/// The pair page's LAN card (2026-10-23): the ticket alone sets the port before any
+/// password exists; once one does, the unlock is needed too. The protocol maps onto the
+/// TLS mode, and plain http's links name loopback only.
+#[tokio::test]
+async fn the_pair_page_sets_the_lan_port_and_protocol() {
+    let h = start().await;
+    let issued = admin(&h, "POST", "/admin/pair-ticket", "{}").await;
+    let issued: serde_json::Value = serde_json::from_str(&issued.body).unwrap();
+    let ticket = issued["ticket"].as_str().unwrap().to_owned();
+
+    let forged = pair_post(
+        &h,
+        "/pair/listener",
+        serde_json::json!({ "ticket": "forged", "port": 1234 }),
+    )
+    .await;
+    assert_eq!(forged.status, 403);
+
+    // No password yet: the ticket is the local proof.
+    let free = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let set = pair_post(
+        &h,
+        "/pair/listener",
+        serde_json::json!({ "ticket": ticket, "port": free }),
+    )
+    .await;
+    assert_eq!(set.status, 200, "{}", set.body);
+    assert!(set.body.contains(r#""rebind":true"#), "{}", set.body);
+    let status = status_until(&h, |s| s["listening"] == true && s["port"] == free).await;
+    assert_eq!(status["port"], free, "{status}");
+    assert_eq!(h.daemon.config().port, free);
+
+    // A password exists: without the unlock the card is refused.
+    set_password(&h).await;
+    let locked = pair_post(
+        &h,
+        "/pair/listener",
+        serde_json::json!({ "ticket": ticket, "scheme": "https" }),
+    )
+    .await;
+    assert_eq!(locked.status, 403, "{}", locked.body);
+    let ok = pair_post(
+        &h,
+        "/pair/unlock",
+        serde_json::json!({ "ticket": ticket, "password": PASSWORD }),
+    )
+    .await;
+    let unlock = serde_json::from_str::<serde_json::Value>(&ok.body).unwrap()["unlock"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Unlocked: a bad protocol is refused, the same protocol changes nothing.
+    let bad = pair_post(
+        &h,
+        "/pair/listener",
+        serde_json::json!({ "ticket": ticket, "unlock": unlock, "scheme": "ftp" }),
+    )
+    .await;
+    assert_eq!(bad.status, 400, "{}", bad.body);
+    let same = pair_post(
+        &h,
+        "/pair/listener",
+        serde_json::json!({ "ticket": ticket, "unlock": unlock, "scheme": "http" }),
+    )
+    .await;
+    assert_eq!(same.status, 200, "{}", same.body);
+    assert!(same.body.contains(r#""rebind":false"#), "{}", same.body);
+
+    // The links of the (loopback-bound, plain http) listener name loopback alone.
+    let open = http(
+        h.loopback,
+        "GET",
+        &format!("/pair/state?t={ticket}&u={unlock}"),
+        &[],
+        None,
+    )
+    .await;
+    let open: serde_json::Value = serde_json::from_str(&open.body).unwrap();
+    assert_eq!(
+        open["lanLinks"],
+        serde_json::json!([format!("http://127.0.0.1:{free}/")]),
+        "{open}"
+    );
+}

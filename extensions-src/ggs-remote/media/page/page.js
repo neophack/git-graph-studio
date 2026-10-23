@@ -207,6 +207,39 @@
 		return el('label', { class: 'check' }, box, ' ', label);
 	}
 
+	/** The LAN listener's port: a change rebinds at once (the daemon reports a taken port in
+	 *  the status line above); the relay link does not depend on it. */
+	function portForm(config) {
+		const label = L('LAN port', '局域网端口');
+		const input = el('input', { type: 'number', min: '1', max: '65535', step: '1', required: true, value: String(config.port || ''), placeholder: '47615', 'aria-label': label });
+		const error = el('p', { class: 'error' });
+		const form = el('form', { class: 'pw-row port-row' }, input, el('button', { class: 'primary' }, L('Apply', '应用')), error);
+		form.addEventListener('submit', async (event) => {
+			event.preventDefault();
+			error.textContent = '';
+			const port = Number(input.value);
+			if (!Number.isInteger(port) || port < 1 || port > 65535) {
+				error.textContent = L('The port must be a whole number from 1 to 65535.', '端口必须是 1–65535 之间的整数。');
+				return;
+			}
+			if (port === config.port) return;
+			try {
+				await request('config', { patch: { port } });
+				render();
+				refreshSoon();
+			} catch (e) {
+				error.textContent = String(e.message || e);
+			}
+		});
+		return el(
+			'div',
+			{},
+			el('label', {}, label),
+			form,
+			el('p', { class: 'muted' }, L('Devices on this network reach the PC on this port. Changing it signs nothing out, but open LAN pages reconnect and the LAN links and QR codes change with it. Also settable from a terminal: ggs config --port <n>.', '同一网络的设备通过此端口访问这台 PC。修改不会注销设备，但已打开的局域网页面会重新连接，局域网链接和二维码随之改变。也可在终端设置：ggs config --port <端口>。'))
+		);
+	}
+
 	function hubStateLine(hub) {
 		const state = hub && hub.state;
 		return (
@@ -313,6 +346,7 @@
 				status.paused ? L('Paused', '已暂停') : status.listening ? L('Listening', '监听中') : L('Not listening', '未监听'),
 				` · ${L('port', '端口')} ${status.port} · ${L('remote sessions', '远程会话')} ${status.sessions} · ${L('windows', '窗口')} ${status.instances}`
 			),
+			status.listenError ? el('p', { class: 'error' }, `${L('Cannot listen', '无法监听')}: ${status.listenError}`) : null,
 			el('p', { class: 'muted' }, L('Anyone with the password can do on this PC whatever you can — including running commands in a terminal. Share it only with people you trust.', '知道密码的人可以在这台 PC 上做你能做的一切——包括在终端里执行命令。只把密码告诉可信的人。'))
 		);
 		const parts = [head];
@@ -386,6 +420,7 @@
 			section(
 				L('Service', '服务'),
 				toggle(L('Pause remote access', '暂停远程访问'), status.paused, (on) => request('pause', { paused: on }).then(() => render())),
+				portForm(config),
 				toggle(L('Start at login', '开机启动'), config.autostart, (on) => request('config', { patch: { autostart: on } })),
 				toggle(L('Windows opened remotely also show on this desktop', '远程打开的窗口也在桌面显示'), config.spawnVisible, (on) => request('config', { patch: { spawnVisible: on } })),
 				toggle(L('Folder input on the window page', '窗口页显示路径输入框'), config.folderInput, (on) => request('config', { patch: { folderInput: on } })),

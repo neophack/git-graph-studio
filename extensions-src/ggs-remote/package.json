@@ -27,7 +27,7 @@
 		"configuration": {
 			"title": "GGS Remote",
 			"properties": {
-				"ggsRemote.port": { "type": "number", "default": 47615, "description": "The port of this PC's remote access link." },
+				"ggsRemote.port": { "type": "number", "default": 47615, "minimum": 1, "maximum": 65535, "description": "The fixed LAN port of this PC's remote access link (also on the Remote Access page, or `ggs config --port`)." },
 				"ggsRemote.bind": { "type": "string", "default": "0.0.0.0", "description": "The address the link listens on (127.0.0.1 behind a tunnel or reverse proxy)." },
 				"ggsRemote.tlsMode": { "type": "string", "enum": ["self-signed", "custom", "none"], "default": "self-signed", "description": "self-signed: a local CA the devices trust once; custom: your own certificate; none: plain HTTP on loopback only (a tunnel ends TLS)." },
 				"ggsRemote.tlsCertPath": { "type": "string", "default": "", "description": "custom TLS: the certificate chain (PEM), e.g. from `tailscale cert`." },

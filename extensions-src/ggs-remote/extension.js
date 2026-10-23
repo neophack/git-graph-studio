@@ -24,10 +24,24 @@ const SETTING_KEYS = {
 	mdns: 'mdns'
 };
 
-function configPatch() {
+const TLS_KEYS = ['tlsMode', 'tlsCertPath', 'tlsKeyPath'];
+
+/** A setting the user set in some scope — not merely its declared default. */
+function explicitlySet(config, key) {
+	const seen = config.inspect(key);
+	return Boolean(seen) && [seen.globalValue, seen.workspaceValue, seen.workspaceFolderValue].some((value) => value !== undefined);
+}
+
+// The daemon's own config is authoritative for every setting the user never set: a LAN port
+// fixed from `ggs config` or from the page must not be reset to the declared default by an
+// unrelated settings change. A change event pushes exactly the keys it changed (a key reset
+// to its default pushes the default); otherwise only the explicitly set ones go.
+function configPatch(event) {
 	const config = vscode.workspace.getConfiguration('ggsRemote');
+	const wanted = (key) => (event ? event.affectsConfiguration(`ggsRemote.${key}`) : explicitlySet(config, key));
 	const patch = {};
 	for (const key of Object.keys(SETTING_KEYS)) {
+		if (!(key === 'tlsMode' ? TLS_KEYS.some(wanted) : wanted(key))) continue;
 		const value = config.get(key);
 		if (value === undefined) continue;
 		if (key === 'tlsMode') {
@@ -37,6 +51,21 @@ function configPatch() {
 		} else patch[SETTING_KEYS[key]] = value;
 	}
 	return patch;
+}
+
+async function pushConfig(event) {
+	const patch = configPatch(event);
+	if (Object.keys(patch).length) await admin.config(patch);
+}
+
+// A page-made change lands in the matching setting too, so the Settings dialog shows it and
+// the next push of that key carries the same value.
+async function mirrorSettings(patch) {
+	const config = vscode.workspace.getConfiguration('ggsRemote');
+	for (const [setting, key] of Object.entries(SETTING_KEYS)) {
+		if (setting === 'tlsMode' || !(key in patch)) continue;
+		if (config.get(setting) !== patch[key]) await config.update(setting, patch[key], vscode.ConfigurationTarget.Global);
+	}
 }
 
 async function ensureService() {
@@ -49,7 +78,7 @@ async function ensureService() {
 		// configuration-change push; a daemon this activation installed or upgraded is
 		// freshly started, and takes the config here.
 		if (!result || result.outcome !== 'current') {
-			await admin.config(configPatch()).catch(() => undefined);
+			await pushConfig().catch(() => undefined);
 			await applyHubConfig().catch(() => undefined);
 		}
 		return result;
@@ -141,8 +170,11 @@ async function answer(message) {
 			return admin.devices();
 		case 'pause':
 			return message.paused ? admin.pause() : admin.resume();
-		case 'config':
-			return admin.config(message.patch);
+		case 'config': {
+			const result = await admin.config(message.patch);
+			await mirrorSettings(message.patch);
+			return result;
+		}
 		case 'pair':
 			await openPairPage();
 			return null;
@@ -237,7 +269,7 @@ async function activate(context) {
 	});
 	context.subscriptions.push(
 		vscode.workspace.onDidChangeConfiguration((event) => {
-			if (event.affectsConfiguration('ggsRemote')) void admin.config(configPatch()).catch((error) => vscode.window.showErrorMessage(`GGS Remote: ${error.message || error}`));
+			if (event.affectsConfiguration('ggsRemote')) void pushConfig(event).catch((error) => vscode.window.showErrorMessage(`GGS Remote: ${error.message || error}`));
 		})
 	);
 	await ensureService();

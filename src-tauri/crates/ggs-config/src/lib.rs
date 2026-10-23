@@ -10,7 +10,8 @@
 //! installed running copy, an installed extension's, or the one packed inside the bundled
 //! `ggs-remote.vsix` beside the app), installs and starts it, sets the access password
 //! through the loopback admin API (the password crosses a stdin pipe, never an argv a
-//! process listing could show), optionally connects a relay server, and prints the links.
+//! process listing could show), sets the LAN listener's port and protocol, optionally
+//! connects a relay server, and prints the links.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -252,6 +253,53 @@ fn prompt_password(line: &str) -> String {
     }
 }
 
+/// A `--port` answer: empty keeps the current port.
+fn parse_port(text: &str) -> Result<Option<u16>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    match text.parse::<u16>() {
+        Ok(port) if port != 0 => Ok(Some(port)),
+        _ => Err(format!(
+            "port must be a whole number from 1 to 65535, not `{text}`"
+        )),
+    }
+}
+
+/// A `--scheme` answer — `http` or `https`; empty keeps the current one.
+fn parse_scheme(text: &str) -> Result<Option<&'static str>, String> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "" => Ok(None),
+        "http" => Ok(Some("http")),
+        "https" => Ok(Some("https")),
+        other => Err(format!("protocol must be http or https, not `{other}`")),
+    }
+}
+
+/// The daemon's `tls` config for a protocol choice: http is the daemon's `none` mode; https
+/// keeps a mode that already is https (a custom certificate stays), and turns `none` into
+/// the self-signed CA. The certificate paths ride along — the patch replaces the object.
+fn tls_for(current: &serde_json::Value, scheme: &str) -> serde_json::Value {
+    let mut tls = if current.is_object() {
+        current.clone()
+    } else {
+        serde_json::json!({})
+    };
+    let mode = tls["mode"].as_str().unwrap_or("self-signed");
+    tls["mode"] = match (scheme, mode) {
+        ("http", _) => "none".into(),
+        (_, "none") => "self-signed".into(),
+        (_, mode) => mode.into(),
+    };
+    tls
+}
+
+fn daemon_status(daemon: &Path) -> Result<serde_json::Value, String> {
+    let body = daemon_cli(daemon, &["admin", "GET", "/admin/status"], None)?;
+    serde_json::from_str(&body).map_err(|e| format!("daemon status: {e}"))
+}
+
 /// The whole configuration pass. Exits the process itself (the caller is a one-shot CLI
 /// entry — `ggs config`, the `ggs-config` binary).
 pub fn run(args: &[String]) -> i32 {
@@ -304,7 +352,71 @@ fn configure(args: &[String]) -> Result<(), String> {
         println!("  password: unchanged");
     }
 
-    // 3. A relay server (optional): with one, the phone works from any network. An
+    // 3. The LAN listener: its port and protocol (empty answers keep the current ones). Plain
+    //    HTTP only ever listens on loopback — the password never crosses a network in clear,
+    //    and a browser grants the remote app's Service Worker and WebCrypto only to HTTPS —
+    //    so http is for a reverse proxy or tunnel that ends TLS, or the relay alone.
+    let status = daemon_status(&daemon)?;
+    let current_port = status["config"]["port"].as_u64().unwrap_or(0);
+    let current_tls = status["config"]["tls"].clone();
+    let current_scheme = if current_tls["mode"] == "none" {
+        "http"
+    } else {
+        "https"
+    };
+    let port = match flag_present(args, "--port") {
+        Some(given) => parse_port(&given)?,
+        None => parse_port(&prompt(&format!("LAN port (empty keeps {current_port}): ")))?,
+    };
+    let scheme = match flag_present(args, "--scheme") {
+        Some(given) => parse_scheme(&given)?,
+        None => parse_scheme(&prompt(&format!(
+            "LAN protocol, http or https (empty keeps {current_scheme}): "
+        )))?,
+    };
+    let mut patch = serde_json::Map::new();
+    if let Some(port) = port.filter(|&p| u64::from(p) != current_port) {
+        patch.insert("port".into(), port.into());
+    }
+    if let Some(scheme) = scheme.filter(|&s| s != current_scheme) {
+        patch.insert("tls".into(), tls_for(&current_tls, scheme));
+    }
+    if patch.is_empty() {
+        println!("  LAN: unchanged ({current_scheme}, port {current_port})");
+    } else {
+        daemon_cli(
+            &daemon,
+            &["admin", "PUT", "/admin/config", "-"],
+            Some(&serde_json::Value::Object(patch).to_string()),
+        )?;
+        // The listener rebinds asynchronously (the old one drains first, still answering
+        // "listening" on the old port); a port another program holds is reported, not
+        // fatal — the setting is saved and the daemon retries it.
+        let wanted = port.map_or(current_port, u64::from);
+        let mut status = serde_json::Value::Null;
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            status = daemon_status(&daemon)?;
+            if (status["listening"] == true && status["port"] == wanted)
+                || status["listenError"].is_string()
+            {
+                break;
+            }
+        }
+        let scheme = scheme.unwrap_or(current_scheme);
+        let port = status["port"].as_u64().unwrap_or(current_port);
+        match status["listenError"].as_str() {
+            Some(error) => {
+                println!("  LAN: {scheme}, port {port} saved — cannot listen yet: {error}")
+            }
+            None => println!("  LAN: {scheme}, port {port}"),
+        }
+    }
+    if scheme.unwrap_or(current_scheme) == "http" {
+        println!("  note: plain http listens on 127.0.0.1 only (for a reverse proxy, a tunnel or the relay)");
+    }
+
+    // 4. A relay server (optional): with one, the phone works from any network. An
     //    explicit `--server ""` skips without asking; an absent flag asks.
     let server = match flag_present(args, "--server") {
         Some(given) => given,
@@ -322,7 +434,7 @@ fn configure(args: &[String]) -> Result<(), String> {
         println!("  relay: connecting to {server}");
     }
 
-    // 4. The links: the daemon knows its LAN addresses and its relay link.
+    // 5. The links: the daemon knows its LAN addresses and its relay link.
     println!();
     println!("Remote access is ready — open one of these on the phone:");
     let links = daemon_cli(&daemon, &["print-link"], None)?;
@@ -353,6 +465,34 @@ mod tests {
             .contains(&dir.as_str()),
             "{dir}"
         );
+    }
+
+    #[test]
+    fn port_and_scheme_answers_parse() {
+        assert_eq!(parse_port(""), Ok(None));
+        assert_eq!(parse_port(" 50000 "), Ok(Some(50000)));
+        assert!(parse_port("0").is_err());
+        assert!(parse_port("70000").is_err());
+        assert!(parse_port("abc").is_err());
+        assert_eq!(parse_scheme(""), Ok(None));
+        assert_eq!(parse_scheme("HTTP"), Ok(Some("http")));
+        assert_eq!(parse_scheme("https"), Ok(Some("https")));
+        assert!(parse_scheme("ftp").is_err());
+    }
+
+    #[test]
+    fn the_protocol_maps_onto_the_tls_mode() {
+        let custom =
+            serde_json::json!({ "mode": "custom", "certPath": "c.pem", "keyPath": "k.pem" });
+        // https keeps a custom certificate, http drops to none with the paths kept.
+        assert_eq!(tls_for(&custom, "https"), custom);
+        let http = tls_for(&custom, "http");
+        assert_eq!(http["mode"], "none");
+        assert_eq!(http["certPath"], "c.pem");
+        // https from plain http is the self-signed CA.
+        let none = serde_json::json!({ "mode": "none", "certPath": null, "keyPath": null });
+        assert_eq!(tls_for(&none, "https")["mode"], "self-signed");
+        assert_eq!(tls_for(&serde_json::Value::Null, "http")["mode"], "none");
     }
 
     #[test]

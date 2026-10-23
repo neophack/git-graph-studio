@@ -504,6 +504,49 @@ pub async fn pair_hub_disconnect(
     }
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct PairListener {
+    ticket: String,
+    unlock: String,
+    port: Option<u16>,
+    scheme: Option<String>,
+}
+
+/// The pair page's LAN card: the listener's fixed port and its protocol. Before any
+/// password exists the ticket alone suffices (the rule of the very first password — local,
+/// nothing protected yet); once one does, the unlock too: this card moves the address
+/// every signed-in device is on.
+pub async fn pair_listener(
+    State(daemon): State<Arc<Daemon>>,
+    headers: HeaderMap,
+    body: Option<Json<PairListener>>,
+) -> Response {
+    let Some(Json(body)) = body else {
+        return error(StatusCode::BAD_REQUEST, "bad-request");
+    };
+    if !json_request_ok(&headers) || !ticket_ok(&daemon, &body.ticket) {
+        return error(StatusCode::FORBIDDEN, "ticket");
+    }
+    if daemon.auth.is_set() && !unlocked(&daemon, Some(&body.unlock)) {
+        return error(StatusCode::FORBIDDEN, "locked");
+    }
+    let patch = match daemon
+        .config()
+        .listener_patch(body.port, body.scheme.as_deref())
+    {
+        Ok(patch) => patch,
+        Err(e) => return error(StatusCode::BAD_REQUEST, &e),
+    };
+    match super::admin::apply_config(&daemon, &patch) {
+        Ok((rebind, _)) => json_response(
+            StatusCode::OK,
+            serde_json::json!({ "ok": true, "rebind": rebind }),
+        ),
+        Err(e) => error(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
 pub async fn pair_qr(
     State(daemon): State<Arc<Daemon>>,
     Query(query): Query<HashMap<String, String>>,

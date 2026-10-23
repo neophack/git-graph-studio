@@ -154,6 +154,45 @@ impl Config {
         self.bind.clone()
     }
 
+    /// The LAN listener's port and protocol as an admin-config patch (the pair page's card;
+    /// `ggs config` builds the same one): only what differs from now. `http` is the `none`
+    /// mode — loopback only, see `effective_bind`; `https` keeps a mode that already is
+    /// https (a custom certificate stays) and turns `none` into the self-signed CA.
+    pub fn listener_patch(
+        &self,
+        port: Option<u16>,
+        scheme: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        let mut patch = serde_json::Map::new();
+        if let Some(port) = port {
+            if port == 0 {
+                return Err("port must be 1-65535".into());
+            }
+            if port != self.port {
+                patch.insert("port".into(), port.into());
+            }
+        }
+        if let Some(scheme) = scheme {
+            let mode = match (scheme, self.tls.mode) {
+                ("http", _) => TlsMode::None,
+                ("https", TlsMode::None) => TlsMode::SelfSigned,
+                ("https", mode) => mode,
+                (other, _) => return Err(format!("protocol must be http or https, not {other}")),
+            };
+            if mode != self.tls.mode {
+                let tls = TlsConfig {
+                    mode,
+                    ..self.tls.clone()
+                };
+                patch.insert(
+                    "tls".into(),
+                    serde_json::to_value(tls).map_err(|e| e.to_string())?,
+                );
+            }
+        }
+        Ok(serde_json::Value::Object(patch))
+    }
+
     /// Apply a partial update from the admin API (`PUT /admin/config`); answers whether the
     /// listener must be rebound.
     pub fn apply_patch(&mut self, patch: &serde_json::Value) -> Result<bool, String> {
@@ -205,6 +244,40 @@ mod tests {
         assert_eq!(config.effective_bind(), "127.0.0.1");
         config.bind = "127.0.0.1".into();
         assert_eq!(config.effective_bind(), "127.0.0.1");
+    }
+
+    #[test]
+    fn listener_patch_carries_only_what_changes() {
+        let mut config = Config::default();
+        assert_eq!(
+            config.listener_patch(Some(DEFAULT_PORT), Some("https")),
+            Ok(serde_json::json!({}))
+        );
+        assert_eq!(
+            config.listener_patch(Some(50000), None),
+            Ok(serde_json::json!({ "port": 50000 }))
+        );
+        let http = config.listener_patch(None, Some("http")).unwrap();
+        assert_eq!(http["tls"]["mode"], "none");
+        assert!(config.listener_patch(Some(0), None).is_err());
+        assert!(config.listener_patch(None, Some("ftp")).is_err());
+        // https keeps a custom certificate; from plain http it is the self-signed CA.
+        config.tls = TlsConfig {
+            mode: TlsMode::Custom,
+            cert_path: Some("c.pem".into()),
+            key_path: Some("k.pem".into()),
+        };
+        assert_eq!(
+            config.listener_patch(None, Some("https")),
+            Ok(serde_json::json!({}))
+        );
+        let http = config.listener_patch(None, Some("http")).unwrap();
+        assert_eq!(http["tls"]["certPath"], "c.pem");
+        config.tls.mode = TlsMode::None;
+        let https = config.listener_patch(None, Some("https")).unwrap();
+        assert_eq!(https["tls"]["mode"], "self-signed");
+        // The patch applies cleanly and rebinds.
+        assert_eq!(config.apply_patch(&https), Ok(true));
     }
 
     #[test]

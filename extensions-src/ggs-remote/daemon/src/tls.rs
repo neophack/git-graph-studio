@@ -118,6 +118,29 @@ pub fn hostname_local() -> Option<String> {
     hostname().map(|h| format!("{h}.local"))
 }
 
+/// The hosts a link may name for a listener on `bind` (the effective bind): a loopback
+/// listener — plain HTTP is loopback-only (§16) — answers 127.0.0.1 alone, a wildcard one
+/// every LAN address plus the mDNS name, a specific address just itself. A LAN address in
+/// the link of a listener that never accepts on it is a link that cannot work.
+pub fn link_hosts(bind: &str) -> Vec<String> {
+    if crate::config::is_loopback(bind) {
+        return vec!["127.0.0.1".into()];
+    }
+    let wildcard = bind
+        .parse::<IpAddr>()
+        .map(|ip| ip.is_unspecified())
+        .unwrap_or(false);
+    if !wildcard {
+        return vec![bind.to_owned()];
+    }
+    let mut hosts = lan_addresses();
+    hosts.extend(hostname_local());
+    if hosts.is_empty() {
+        hosts.push("127.0.0.1".into());
+    }
+    hosts
+}
+
 pub fn link_for(scheme: &str, host: &str, port: u16) -> String {
     let default = (scheme == "https" && port == 443) || (scheme == "http" && port == 80);
     if default {
@@ -348,6 +371,16 @@ pub fn qr_svg(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_hosts_follow_the_bind() {
+        assert_eq!(link_hosts("127.0.0.1"), vec!["127.0.0.1".to_owned()]);
+        assert_eq!(link_hosts("localhost"), vec!["127.0.0.1".to_owned()]);
+        assert_eq!(link_hosts("192.168.7.9"), vec!["192.168.7.9".to_owned()]);
+        let wildcard = link_hosts("0.0.0.0");
+        assert!(!wildcard.is_empty());
+        assert!(wildcard.iter().all(|h| h != "0.0.0.0"), "{wildcard:?}");
+    }
 
     #[test]
     fn civil_dates() {

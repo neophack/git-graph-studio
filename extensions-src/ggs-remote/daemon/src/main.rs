@@ -279,20 +279,9 @@ fn print_link(paths: &Paths) -> Result<(), String> {
     } else {
         "https"
     };
-    let mut any = false;
-    for addr in ggs_remote::tls::lan_addresses() {
-        println!("{}", ggs_remote::tls::link_for(scheme, &addr, config.port));
-        any = true;
-    }
-    if let Some(host) = ggs_remote::tls::hostname_local() {
+    // The links name only the hosts the listener accepts on (plain HTTP is loopback-only).
+    for host in ggs_remote::tls::link_hosts(&config.effective_bind()) {
         println!("{}", ggs_remote::tls::link_for(scheme, &host, config.port));
-        any = true;
-    }
-    if !any {
-        println!(
-            "{}",
-            ggs_remote::tls::link_for(scheme, "127.0.0.1", config.port)
-        );
     }
     Ok(())
 }
