@@ -15,6 +15,9 @@ export interface ProviderProfile {
 	smallModel: string | null;
 	hasKey: boolean;
 	keyHint: string | null;
+	/** The compatibility relay switch as it applies (the preset's default when unset):
+	 *  Claude Code's mid-conversation system entries folded into the user turn. */
+	foldSystem: boolean;
 }
 
 export interface ProviderPreset {
@@ -26,6 +29,8 @@ export interface ProviderPreset {
 	/** Whether a profile of this shape is usable without an API key — the chat pane's
 	 *  set-key gate keys on it (a custom or NewAPI gateway may be keyless). */
 	requiresKey: boolean;
+	/** The compatibility relay switch's default for a new profile of this shape. */
+	foldSystem: boolean;
 }
 
 export interface ProviderList {
@@ -48,6 +53,7 @@ export interface ProviderDraft {
 	model: string;
 	smallModel: string;
 	apiKey: string | null;
+	foldSystem: boolean;
 }
 
 /** What a cc-switch (or live Claude) configuration on this machine would contribute. */
@@ -92,7 +98,8 @@ export const providerSave = (draft: ProviderDraft) =>
 			baseUrl: draft.baseUrl,
 			model: draft.model,
 			smallModel: draft.smallModel,
-			apiKey: draft.apiKey
+			apiKey: draft.apiKey,
+			foldSystem: draft.foldSystem
 		}
 	});
 export const providerDelete = (id: string) => invoke<ProviderList | null>('provider_delete', { id });

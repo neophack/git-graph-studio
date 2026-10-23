@@ -560,6 +560,8 @@ export const en = {
 	'providers.smallModel': 'Background model',
 	'providers.apiKey': 'API Key',
 	'providers.apiKey.placeholder': 'The provider\'s API key (sk-…)',
+	'providers.foldSystem': 'Fold mid-conversation system messages (needed by NewAPI gateways)',
+	'providers.foldSystem.hint': 'Claude Code 2.1.154+ sends system messages in the middle of the conversation; gateways in front of Qwen-class chat templates reject them with "System message must be at the beginning". When on, they are folded into the user turn as <system-reminder> blocks.',
 	'providers.apiKey.keep': 'kept — {0}; type to replace',
 	'providers.save': 'Save',
 	'providers.cancel': 'Cancel',

@@ -9,7 +9,10 @@
 //! Allowed dependencies: ggs-base, ggs-shellenv, ggs-git (the shell env resolves Git
 //! for Windows' bash through `ggs_git::locate`, the same locator the terminal uses).
 //! No tauri. Process-unique globals, listed: `STORE_LOCK` (one store write at a time)
-//! and `INSTANCE_ACTIVE` (this window's provider choice — one window per process).
+//! and `INSTANCE_ACTIVE` (this window's provider choice — one window per process);
+//! `compat`'s `RELAY` (the third-party compatibility relay — one listener per process).
+
+pub mod compat;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -113,6 +116,38 @@ pub struct ProviderProfile {
     /// unsealing anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     api_key_hint: Option<String>,
+    /// The compatibility relay switch (`compat`, 2026-10-23): fold Claude Code's
+    /// mid-conversation `role: "system"` entries into the user turn before the request
+    /// reaches the endpoint. Unset follows the preset's default
+    /// ([`ProviderProfile::folds_system`]) — on for a NewAPI gateway, off elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fold_system: Option<bool>,
+}
+
+impl ProviderProfile {
+    /// Whether this profile's requests ride the compatibility relay: the explicit
+    /// switch when the user set one, else the preset's default; never the official
+    /// service (it accepts the request as Claude Code sends it).
+    pub fn folds_system(&self) -> bool {
+        self.preset != "official"
+            && self
+                .fold_system
+                .unwrap_or_else(|| preset_folds_system(&self.preset))
+    }
+}
+
+/// The relay switch's default per preset: a NewAPI gateway forwards the stray system
+/// role into its upstream's chat template (Qwen's answers "System message must be at
+/// the beginning"); the other endpoints take the request as sent.
+fn preset_folds_system(preset: &str) -> bool {
+    preset == "newapi"
+}
+
+/// Whether the window's active provider asks for the compatibility relay — the
+/// composition root's spawn-env adapter reads it to decide where `ANTHROPIC_BASE_URL`
+/// points.
+pub fn active_folds_system(store: &ProviderStore, instance: Option<&str>) -> bool {
+    resolve_active(store, instance).is_some_and(ProviderProfile::folds_system)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -141,6 +176,9 @@ pub struct ProviderInput {
     pub small_model: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// The compatibility relay switch; absent keeps the preset's default.
+    #[serde(default)]
+    pub fold_system: Option<bool>,
 }
 
 /// One built-in shape the Add flow offers. The label is the English fallback; the UI
@@ -164,6 +202,9 @@ pub struct ProviderPreset {
     /// Whether a profile of this shape is usable without an API key.
     #[serde(default)]
     pub requires_key: bool,
+    /// The compatibility relay switch's default for a new profile of this shape.
+    #[serde(default)]
+    pub fold_system: bool,
 }
 
 /// The Anthropic-compatible endpoints the bridge knows out of the box.
@@ -176,6 +217,7 @@ pub fn presets() -> Vec<ProviderPreset> {
             base_url: None,
             models: vec![],
             requires_key: false,
+            fold_system: false,
         },
         ProviderPreset {
             id: "deepseek".to_owned(),
@@ -190,6 +232,7 @@ pub fn presets() -> Vec<ProviderPreset> {
             // both routing to flash at flash pricing.
             models: vec!["deepseek-v4-pro", "deepseek-flash"],
             requires_key: true,
+            fold_system: false,
         },
         ProviderPreset {
             id: "glm".to_owned(),
@@ -203,6 +246,7 @@ pub fn presets() -> Vec<ProviderPreset> {
             // so configs saved on them keep working.
             models: vec!["glm-5.3", "glm-5.3-flash", "glm-5.3-flashx"],
             requires_key: true,
+            fold_system: false,
         },
         ProviderPreset {
             id: "kimi".to_owned(),
@@ -220,6 +264,7 @@ pub fn presets() -> Vec<ProviderPreset> {
             // .ai twin remain valid manual entries.
             models: vec!["kimi-k3", "kimi-for-coding", "kimi-for-coding-highspeed"],
             requires_key: true,
+            fold_system: false,
         },
         ProviderPreset {
             id: "newapi".to_owned(),
@@ -229,6 +274,7 @@ pub fn presets() -> Vec<ProviderPreset> {
             base_url: None,
             models: vec![],
             requires_key: false,
+            fold_system: true,
         },
         ProviderPreset {
             id: "custom".to_owned(),
@@ -237,6 +283,7 @@ pub fn presets() -> Vec<ProviderPreset> {
             base_url: None,
             models: vec![],
             requires_key: false,
+            fold_system: false,
         },
     ]
 }
@@ -265,6 +312,7 @@ fn seeded_store() -> ProviderStore {
             small_model: preset.models.get(1).map(|m| m.to_string()),
             api_key_enc: None,
             api_key_hint: None,
+            fold_system: None,
         });
     }
     store
@@ -436,6 +484,7 @@ fn normalize_profile(
             small_model: None,
             api_key_enc: None,
             api_key_hint: None,
+            fold_system: None,
         });
     }
     let base_url = clean_option(&input.base_url).ok_or_else(|| {
@@ -456,6 +505,7 @@ fn normalize_profile(
         small_model: clean_option(&input.small_model),
         api_key_enc: None,
         api_key_hint: None,
+        fold_system: input.fold_system,
     })
 }
 
@@ -1038,6 +1088,7 @@ pub fn import_ccswitch_entries(
             model: entry.candidate.model.clone(),
             small_model: None,
             api_key: entry.api_key,
+            fold_system: None,
         };
         apply_save(home, store, &input)?;
         if entry.candidate.current {
@@ -1291,6 +1342,8 @@ pub struct ProviderView {
     pub small_model: Option<String>,
     pub has_key: bool,
     pub key_hint: Option<String>,
+    /// The compatibility relay switch as it applies (the preset's default when unset).
+    pub fold_system: bool,
 }
 
 impl From<&ProviderProfile> for ProviderView {
@@ -1304,6 +1357,7 @@ impl From<&ProviderProfile> for ProviderView {
             small_model: profile.small_model.clone(),
             has_key: profile.api_key_enc.is_some(),
             key_hint: profile.api_key_hint.clone(),
+            fold_system: profile.folds_system(),
         }
     }
 }
@@ -1972,6 +2026,7 @@ mod tests {
             small_model: None,
             api_key_enc: None,
             api_key_hint: None,
+            fold_system: None,
         }
     }
 
@@ -1985,6 +2040,7 @@ mod tests {
             small_model: Some("deepseek-flash".to_owned()),
             api_key_enc: None,
             api_key_hint: None,
+            fold_system: None,
         }
     }
 
@@ -2682,6 +2738,7 @@ mod tests {
             model: Some("deepseek-flash".to_owned()),
             small_model: None,
             api_key: Some("sk-first-key".to_owned()),
+            fold_system: None,
         };
         apply_save(&home, &mut store, &input).unwrap();
         let saved = store
@@ -2752,6 +2809,7 @@ mod tests {
             model: Some("x".to_owned()),
             small_model: Some("y".to_owned()),
             api_key: Some("k".to_owned()),
+            fold_system: None,
         };
         apply_save(&home, &mut store, &official).unwrap();
         let profile = store.profiles.iter().find(|p| p.id == "official").unwrap();
@@ -2771,6 +2829,65 @@ mod tests {
         bad_id.id = "../escape".to_owned();
         bad_id.base_url = Some("https://ok.example".to_owned());
         assert!(apply_save(&home, &mut store, &bad_id).is_err());
+    }
+
+    /// The compatibility relay switch: a NewAPI gateway folds by default, every other
+    /// third-party preset does not, an explicit choice wins either way and survives the
+    /// store's round trip, and the official service never folds.
+    #[test]
+    fn the_fold_system_switch_defaults_to_newapi_and_keeps_the_users_choice() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let mut store = seeded_store();
+        let gateway = ProviderInput {
+            id: "gw".to_owned(),
+            preset: "newapi".to_owned(),
+            label: "Gateway".to_owned(),
+            base_url: Some("http://172.24.204.251:4000".to_owned()),
+            model: Some("qwen3.8-27b".to_owned()),
+            small_model: None,
+            api_key: None,
+            fold_system: None,
+        };
+        apply_save(&home, &mut store, &gateway).unwrap();
+        let folds = |store: &ProviderStore, id: &str| {
+            store
+                .profiles
+                .iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .folds_system()
+        };
+        assert!(folds(&store, "gw"));
+        assert!(!folds(&store, "deepseek"));
+        assert!(!folds(&store, "official"));
+        assert!(presets()
+            .iter()
+            .all(|p| p.fold_system == (p.id == "newapi")));
+
+        let mut off = gateway.clone();
+        off.fold_system = Some(false);
+        apply_save(&home, &mut store, &off).unwrap();
+        let mut custom_on = gateway.clone();
+        custom_on.id = "c".to_owned();
+        custom_on.preset = "custom".to_owned();
+        custom_on.fold_system = Some(true);
+        apply_save(&home, &mut store, &custom_on).unwrap();
+        let reread: ProviderStore =
+            serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
+        assert!(!folds(&reread, "gw"));
+        assert!(folds(&reread, "c"));
+        assert!(active_folds_system(&reread, Some("c")));
+        assert!(!active_folds_system(&reread, Some("gw")));
+        assert!(!active_folds_system(&reread, Some("official")));
+        let view = list_answer(&reread, Some("c"));
+        assert!(
+            view.profiles
+                .iter()
+                .find(|p| p.id == "c")
+                .unwrap()
+                .fold_system
+        );
     }
 
     /// The IPC boundary never carries a secret: a store whose profiles hold sealed
@@ -2811,6 +2928,7 @@ mod tests {
             model: None,
             small_model: None,
             api_key: None,
+            fold_system: None,
         };
         assert!(apply_save(&home, &mut store, &input).is_err());
     }
@@ -2923,6 +3041,7 @@ mod tests {
             model: Some("glm-4.6".to_owned()),
             small_model: Some("glm-4.5-air".to_owned()),
             api_key: Some("密钥-secret-Δ".to_owned()),
+            fold_system: None,
         };
         apply_save(&home, &mut store, &input).unwrap();
         write_store(&home, &store).unwrap();

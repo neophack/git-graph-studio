@@ -607,7 +607,8 @@ export function mountProviderPaneGate(extId: string, pane: HTMLElement): () => v
 					baseUrl: profile.baseUrl ?? '',
 					model: profile.model ?? '',
 					smallModel: profile.smallModel ?? '',
-					apiKey: typed
+					apiKey: typed,
+					foldSystem: profile.foldSystem ?? false
 				});
 				// A failed save already toasted; the gate stays for a retry. A good one
 				// announces the store — the gate re-renders into the usage strip itself.

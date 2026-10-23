@@ -2341,6 +2341,7 @@ body.resizing iframe { pointer-events: none; }
 .providers-form .span2 { grid-column: 1 / -1; }
 .providers-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .providers-field label { font-size: 11px; color: var(--vscode-descriptionForeground); }
+.providers-check { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
 .providers-form .input { width: 100%; box-sizing: border-box; }
 /* A model field's input + its dropdown button (the pick list rides the chevron). */
 .providers-combo { display: flex; gap: 4px; align-items: center; }

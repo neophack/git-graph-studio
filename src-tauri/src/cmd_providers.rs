@@ -40,10 +40,28 @@ pub fn backend_env(ext_id: &str) -> Vec<(String, String)> {
     let Ok(home) = ggs_home() else {
         return Vec::new();
     };
-    let instance = read_store(&home)
-        .ok()
-        .and_then(|store| effective_choice(&store));
+    let store = read_store(&home).ok();
+    let instance = store.as_ref().and_then(effective_choice);
     let mut env = ggs_providers::backend_env_for(ext_id, &home, instance.as_deref());
+    // A profile with the compatibility switch on (2026-10-23; a NewAPI gateway's
+    // default) is reached through the relay: Claude Code 2.1.154+ puts `role: "system"`
+    // entries mid-`messages[]`, which the chat templates behind NewAPI reject ("System
+    // message must be at the beginning"); the relay folds them into the user turn. A
+    // relay that cannot start leaves the direct URL in place.
+    let folds = store
+        .as_ref()
+        .is_some_and(|store| ggs_providers::active_folds_system(store, instance.as_deref()));
+    for (key, value) in env.iter_mut() {
+        if folds && key == "ANTHROPIC_BASE_URL" {
+            match ggs_providers::compat::local_base_url(value) {
+                Ok(local) => *value = local,
+                Err(error) => {
+                    eprintln!("[providers] compatibility relay: {error}");
+                    ggs_ext::log_extensions(&format!("compatibility relay: {error}"));
+                }
+            }
+        }
+    }
     if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         let dir = Path::new(&dir).to_string_lossy().into_owned();
         for (key, value) in env.iter_mut() {

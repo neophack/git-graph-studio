@@ -146,7 +146,8 @@ class ProvidersPage {
 			baseUrl: profile.baseUrl ?? '',
 			model: profile.model ?? '',
 			smallModel: profile.smallModel ?? '',
-			apiKey: null
+			apiKey: null,
+			foldSystem: profile.foldSystem ?? false
 		};
 		this.render();
 	}
@@ -374,6 +375,20 @@ const notes = (['providers.note.state', 'providers.note.key', 'providers.note.re
 			});
 			keyRow.appendChild(key);
 			form.appendChild(keyRow);
+
+			// The compatibility relay switch: Claude Code's mid-conversation system entries
+			// folded into the user turn — what a NewAPI gateway in front of a Qwen-class
+			// chat template needs (on by default for that preset only).
+			const foldRow = el('label', 'providers-check span2');
+			const fold = el('input') as HTMLInputElement;
+			fold.type = 'checkbox';
+			fold.checked = draft.foldSystem;
+			fold.addEventListener('change', () => {
+				draft.foldSystem = fold.checked;
+			});
+			foldRow.title = t('providers.foldSystem.hint');
+			foldRow.append(fold, el('span', '', [t('providers.foldSystem')]));
+			form.appendChild(foldRow);
 		}
 
 		const buttons = el('div', 'providers-form-actions span2 tail');

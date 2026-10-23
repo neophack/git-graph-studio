@@ -157,7 +157,8 @@ export function draftFromPreset(preset: ProviderPreset, takenIds: Set<string>): 
 		baseUrl: preset.baseUrl ?? '',
 		model: preset.models[0] ?? '',
 		smallModel: preset.models[1] ?? preset.models[0] ?? '',
-		apiKey: null
+		apiKey: null,
+		foldSystem: preset.foldSystem ?? false
 	};
 }
 

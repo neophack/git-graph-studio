@@ -561,6 +561,8 @@ export const zhCn: typeof en = {
 	'providers.smallModel': '后台模型',
 	'providers.apiKey': 'API 密钥',
 	'providers.apiKey.placeholder': '供应商的 API 密钥（sk-…）',
+	'providers.foldSystem': '折叠对话中间的 system 消息（NewAPI 网关需要）',
+	'providers.foldSystem.hint': 'Claude Code 2.1.154 起会在对话中间发送 system 消息，Qwen 类聊天模板背后的网关会以“System message must be at the beginning”拒绝。开启后这些消息会以 <system-reminder> 块并入用户消息。',
 	'providers.apiKey.keep': '已保留 — {0}；输入新值可替换',
 	'providers.save': '保存',
 	'providers.cancel': '取消',

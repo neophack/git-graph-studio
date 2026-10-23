@@ -44,6 +44,7 @@ function providerListAnswer(): Record<string, unknown> {
 			{ id: 'official', label: 'Official Claude', official: true, baseUrl: null, models: [], requiresKey: false },
 			{ id: 'deepseek', label: 'DeepSeek', official: false, baseUrl: 'https://api.deepseek.com/anthropic', models: ['deepseek-v4-pro', 'deepseek-flash'], requiresKey: true },
 			{ id: 'glm', label: 'Zhipu GLM', official: false, baseUrl: 'https://open.bigmodel.cn/api/anthropic', models: ['glm-5.3', 'glm-5.3-flash', 'glm-5.3-flashx'], requiresKey: true },
+			{ id: 'newapi', label: 'NewAPI Gateway', official: false, baseUrl: null, models: [], requiresKey: false, foldSystem: true },
 			{ id: 'custom', label: 'Custom (Anthropic-compatible)', official: false, baseUrl: null, models: [], requiresKey: false }
 		],
 		bridgedExtIds: ['Anthropic.claude-code']
@@ -141,7 +142,7 @@ describe('the Model Providers page', () => {
 				id: 'deepseek', preset: 'deepseek', label: 'DeepSeek (team)',
 				baseUrl: 'https://api.deepseek.com/anthropic',
 				model: 'deepseek-flash', smallModel: 'deepseek-flash',
-				apiKey: null
+				apiKey: null, foldSystem: false
 			}
 		}]);
 
@@ -174,6 +175,35 @@ describe('the Model Providers page', () => {
 		const profile = backend.callsTo('provider_save')[0]!.profile as Record<string, unknown>;
 		expect(profile['id']).toBe('deepseek-2'); // the taken id got its suffix
 		expect(profile['apiKey']).toBe('sk-brand-new');
+	});
+
+	it('offers the system-message fold switch: on for a NewAPI gateway, off elsewhere, saved as set', async () => {
+		backend.on('provider_save', () => providerListAnswer());
+		mountProvidersPage(host());
+		await flush();
+		const foldBox = (): HTMLInputElement => document.querySelector<HTMLInputElement>('.providers-check input[type="checkbox"]')!;
+		// An existing DeepSeek profile: the switch is off and saves off.
+		click(actionByTitle('Edit', rows()[1]!));
+		await flush();
+		expect(foldBox().checked).toBe(false);
+		// A NewAPI gateway: the preset's default turns it on.
+		const select = document.querySelector<HTMLSelectElement>('.providers-form select')!;
+		select.value = 'newapi';
+		select.dispatchEvent(new Event('change'));
+		await flush();
+		expect(foldBox().checked).toBe(true);
+		const [, baseUrl] = formInputs();
+		type(baseUrl, 'http://172.24.204.251:4000');
+		click(document.querySelector('.providers-form-actions .button.primary')!);
+		await flush();
+		expect(backend.callsTo('provider_save')[0]!.profile).toMatchObject({ preset: 'newapi', foldSystem: true });
+		// Unticked, it travels as false.
+		click(actionByTitle('Edit', rows()[1]!));
+		await flush();
+		foldBox().click();
+		click(document.querySelector('.providers-form-actions .button.primary')!);
+		await flush();
+		expect(backend.callsTo('provider_save')[1]!.profile).toMatchObject({ preset: 'deepseek', foldSystem: true });
 	});
 
 	it('activates a profile through the backend and follows the switch', async () => {

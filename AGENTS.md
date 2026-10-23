@@ -853,7 +853,17 @@ page shows the integration's state (`claude_mcp_status`).
   tokens only) and the
   spawn-time environment `ext_process` injects into the bridged backend through its
   registered spawn-env sources — the composition root's wiring, so the two modules do
-  not name each other),
+  not name each other; and `compat.rs`, the third-party compatibility relay
+  (2026-10-23: Claude Code 2.1.154+ puts `role: "system"` entries mid-`messages[]`,
+  which strict gateways and the Qwen chat templates behind NewAPI reject with
+  `System message must be at the beginning` — a per-profile switch, the Model
+  Providers form's checkbox (`foldSystem`; unset follows the preset: on for a NewAPI
+  gateway, off for every other preset, never the official service): with it on,
+  `cmd_providers::backend_env` points the profile's `ANTHROPIC_BASE_URL` at a
+  loopback relay, one listener
+  per process with an unguessable route token per upstream, that folds those entries
+  into the adjacent user turn as `<system-reminder>` blocks — after any `tool_result`
+  blocks — and streams every other byte, SSE included, through verbatim),
   `src-tauri/crates/ggs-text/src/grammar.rs` (the TextMate-grammar loader: `.tmLanguage` plists and
   `.json` grammars converted to Sublime syntax and added to the rope viewer's syntect set), the `ggs-ext` crate's `process` module behind `src-tauri/src/ext_process.rs` (the process extension host: eager
   start at boot and install, lazy start on first command as the fallback, `initialize`
