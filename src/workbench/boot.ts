@@ -3,7 +3,7 @@
 import type { Workbench } from './workbench';
 
 import { listen } from '../platform/ipc/core';
-import { appNewInstance, bootContext, type BootContext, openDevtools } from '../platform/ipc/app';
+import { appNewInstance, bootContext, type BootContext, openDevtools, windowCloseAck } from '../platform/ipc/app';
 import { backupList, backupRead, type BackupEntry } from '../platform/ipc/fs';
 import { type SymbolIndexStatus } from '../platform/ipc/symbols';
 import { type RemoteHostStatus, remoteHostHideMain, remoteHostStatus } from '../platform/ipc/remote';
@@ -361,6 +361,13 @@ export const bootMethods: ThisType<Workbench> = {
 		window.addEventListener('focus', this.onWindowFocusBound);
 		window.addEventListener('blur', this.onWindowBlurBound);
 		void getCurrentWindow().onCloseRequested(async (event) => {
+			// The close watchdog's ack (window.rs), and it travels before anything below
+			// awaits: Tauri hands the whole close decision to the page (it prevents the
+			// native close the moment this listener exists, and the wrapper performs the
+			// destroy itself), so a dead webview leaves the X button inert — the backend
+			// destroys or hides the window when a request goes unacked. A live page acks
+			// in the same tick the event arrives.
+			void windowCloseAck().catch(() => undefined);
 			// The PC window lifecycle (docs/remote-client-plan.md §17): while ANY remote
 			// session is connected — its own workbench, not only a PC-screen replica viewer —
 			// or the instance is a remote host, closing only HIDES the window. The

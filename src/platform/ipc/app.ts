@@ -37,6 +37,13 @@ export interface BootContext {
 }
 
 export const bootStage = (stage: string, pageMs: number) => invoke<void>('boot_stage', { stage, pageMs });
+/** The page's answer to the backend's liveness probe (window.rs's sweep): proof the page is
+ *  alive, which stands the reload decision down. */
+export const webviewBeat = () => invoke<void>('webview_beat');
+/** The close handler's first word (boot.ts), before any await: proof the page is alive and
+ *  handling the request, so the backend's close watchdog leaves the window to it — a dead
+ *  page cannot ack, and Rust then performs the close itself. */
+export const windowCloseAck = () => invoke<void>('window_close_ack');
 export const bootContext = () => invoke<BootContext>('boot_context');
 export const postFirstPaint = () => invoke<void>('post_first_paint');
 export const openDevtools = () => invoke<void>('open_devtools');

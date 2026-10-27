@@ -457,6 +457,10 @@ mod desktop {
                 }
                 // Remote Access (module 19): register with a local daemon when one runs.
                 remote_host::start(app.handle(), remote_host_only);
+                // The main window's liveness watcher (window.rs): probes the page on a
+                // period and reloads it when nothing answers — a dead WebView2 renderer
+                // is a gray window forever otherwise.
+                crate::window::start_liveness_sweep(app.handle().clone());
                 Ok(())
             })
             .on_page_load(|webview, payload| {
@@ -517,6 +521,8 @@ mod desktop {
                 super::boot::close_folder,
                 super::window::boot_stage,
                 super::window::open_devtools,
+                super::window::window_close_ack,
+                super::window::webview_beat,
                 cmd_app::app_new_instance,
                 cmd_fs::list_dir,
                 cmd_fs::list_dir_page,
@@ -735,6 +741,22 @@ mod desktop {
                 // The desktop window closing while remote sessions are attached keeps the
                 // instance up for them (the Relay is a window too); the daemon is told the
                 // window is no longer visible.
+                //
+                // The main window's close is the page's to perform (Tauri prevents the
+                // native close the moment a `tauri://close-requested` listener exists, and
+                // the JS wrapper drives the destroy), so a dead webview leaves the X button
+                // inert — the gray-window hang. The watchdog in window.rs performs the
+                // close itself unless the page acks within its grace.
+                if let tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::CloseRequested { .. },
+                    ..
+                } = &event
+                {
+                    if label == "main" {
+                        crate::window::note_close_requested(app.clone());
+                    }
+                }
                 if let tauri::RunEvent::WindowEvent {
                     label,
                     event: tauri::WindowEvent::Destroyed,

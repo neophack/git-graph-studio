@@ -5,7 +5,7 @@
 
 import '@vscode/codicons/dist/codicon.css';
 import './workbench/shell.css';
-import { bootStage } from './platform/ipc/app';
+import { bootStage, webviewBeat } from './platform/ipc/app';
 import { initSettings, loadSettingsFile } from './platform/settings';
 import { installDesktopRemoteHooks } from './remote/desktopHooks';
 import { tauriBridgePresent } from './remote/assetUrl';
@@ -15,6 +15,20 @@ import { tauriBridgePresent } from './remote/assetUrl';
 // their own context menu already call preventDefault() on their own 'contextmenu' handler;
 // this is the catch-all for everywhere else. Devtools stay reachable from the Help menu.
 document.addEventListener('contextmenu', (event) => event.preventDefault());
+
+// The backend's liveness probe hook (window.rs's sweep): the Rust side evals a probe here
+// every ~20 s and the page answers through `webview_beat` — two consecutive silent probes
+// mean the renderer died or the JS thread is hung, and the backend reloads the window (a
+// crashed WebView2 renderer is a gray rectangle forever; wry does not watch for it). Named
+// on `window` because the probe script reaches for it by name, and installed before the
+// workbench loads so the earliest probes already land. The probe script itself falls back
+// to Tauri's injected IPC bridge, so pages without this hook answer too.
+declare global {
+	interface Window {
+		__ggsAliveProbe?: () => void;
+	}
+}
+window.__ggsAliveProbe = () => { void webviewBeat().catch(() => undefined); };
 
 // Tauri injects the IPC bridge before any page script runs; its absence means a plain
 // browser opened the dev server's root - the workbench is the desktop window's content

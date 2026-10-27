@@ -188,7 +188,27 @@ guarantees the window is never a blank dark rectangle.
   seeds the launch context exactly like a `ggs <path>` argv launch; one that arrives
   later crosses as the `studio://open-paths` event, which workbench.ts routes — a
   folder takes over an empty window and wins a new instance otherwise, a file opens
-  like a drop)
+  like a drop), `src-tauri/src/window.rs` (the main window's platform chrome: devtools,
+  boot stamps, the asset-revalidation hook, WebKitGTK's DMABUF compat — and, since
+  2026-10-27, the **webview liveness watcher**, the fix for the long-running gray
+  window that could not be closed: the WebView2 renderer dies (memory exhaustion in
+  long sessions) and wry 0.57 never subscribes `ProcessFailed`, so nothing notices;
+  and Tauri hands the whole close to the page (`prevent_close` the moment a
+  `tauri://close-requested` listener exists, the JS wrapper performs the destroy), so
+  a dead page's X button is inert forever. The watcher's sweep thread evals a probe
+  into the main window every 20 s — the page answers via `webview_beat` (main.ts's
+  `__ggsAliveProbe` hook, with Tauri's injected IPC bridge as the fallback any page
+  answers through) — and two consecutive silent probes (~40–80 s) reload the window,
+  the only recovery a crashed renderer allows (§17's never-reload invariant covers
+  show/hide; a page that answers nothing has no state left to keep); devtools paused
+  on a breakpoint and hidden macOS windows (App Nap) are never judged, and five
+  reloads without a single beat stand the sweep down. The close watchdog keys off the
+  run loop's `CloseRequested`: boot.ts's handler acks first thing via
+  `window_close_ack` (before any await), and an unacked request — 4 s — means the page
+  cannot run the handler at all, so Rust performs the close itself: hidden when
+  remote sessions still ride the instance, destroyed otherwise. Verified live by
+  killing the renderer child of a dev run: the sweep reloaded the page back, and a
+  WM_CLOSE against the dead page destroyed the window and exited cleanly)
 
 ### 2. Command System
 

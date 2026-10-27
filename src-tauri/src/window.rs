@@ -2,6 +2,10 @@
 //! revalidation hook, WebKitGTK's DMABUF compat, and the keep-awake probe helper.
 //! Extracted from lib.rs's composition root (P4-1).
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 /// Process-start stamp, so boot timings from the frontend are printed against the same clock.
 static BOOT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
@@ -112,6 +116,220 @@ pub fn boot_stage(stage: String, page_ms: f64) {
         .append(true)
         .open(std::env::temp_dir().join("git-graph-studio-boot.log"))
         .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()));
+}
+
+/// The main window's liveness watcher (2026-10-27, the gray-window hang): two failure
+/// modes together leave the desktop window a gray rectangle the only way out of which is
+/// killing the process.
+///
+///  * The WebView2 renderer process dies — long-running sessions, memory exhaustion —
+///    and wry (0.57) never subscribes `ICoreWebView2::ProcessFailed`: nothing notices,
+///    nothing recovers, the page is gray forever.
+///  * The close is entirely the page's to perform: Tauri's manager prevents the native
+///    close the moment a `tauri://close-requested` JS listener exists
+///    (`if window.has_js_listener(..) { api.prevent_close(); }` — tauri 2.12's
+///    manager/window.rs) and the JS wrapper then drives the destroy itself. A dead page
+///    can run neither half, so the X button does nothing, ever.
+///
+/// The watcher answers both. The sweep thread probes the page on a period — the page
+/// answers through the `webview_beat` command — and two consecutive silent probes reload
+/// the window (the only recovery a crashed renderer allows; §17's never-reload invariant
+/// covers show/hide, and a page that answers nothing has no state left to keep). And
+/// every close request must be acked (`window_close_ack`, the handler's first statement
+/// in boot.ts, before any await) within a short grace; an unacked request means the page
+/// cannot run the handler at all, and Rust performs the close itself — hiding the window
+/// when remote sessions still ride the instance (the page policy's own move), destroying
+/// it otherwise.
+const PROBE_PERIOD: Duration = Duration::from_secs(20);
+/// One probe's deadline: a period plus slack — a healthy page answers in milliseconds, so
+/// an expired probe means the page could not run the answer, not that it was slow.
+const PROBE_DEADLINE: Duration = Duration::from_secs(21);
+/// The grace an unacked close request waits before Rust performs the close itself.
+const CLOSE_GRACE: Duration = Duration::from_secs(4);
+/// Reloads with no answered probe in between before the sweep stands down: a page that
+/// dies before its first beat would otherwise be reloaded forever.
+const MAX_RELOAD_STRIKES: u32 = 5;
+/// The probe script, eval'd into the main window's page: the workbench's own hook
+/// (`__ggsAliveProbe`, main.ts) when present, Tauri's injected IPC bridge on any other
+/// page this webview shows (the dev harness), and nothing to execute at all where the
+/// renderer itself is gone — which is exactly the silence the sweep judges.
+const PROBE_JS: &str = "window.__ggsAliveProbe?window.__ggsAliveProbe():window.__TAURI_INTERNALS__&&window.__TAURI_INTERNALS__.invoke('webview_beat')";
+
+/// What one sweep tick decided to do.
+#[derive(Debug, PartialEq, Eq)]
+enum TickAction {
+    /// The in-flight probe still has time on its deadline; nothing to do.
+    Wait,
+    /// No probe is in flight (or the previous one just expired): eval one into the page.
+    Probe,
+    /// Two consecutive probes went unanswered: the page is dead or hung — reload it.
+    Reload,
+}
+
+/// The liveness state machine the sweep thread drives. Pure bookkeeping — the actions are
+/// the caller's to perform, so the tests drive this with a synthetic clock.
+#[derive(Default)]
+struct Liveness {
+    probe_issued: Option<Instant>,
+    misses: u32,
+    reload_strikes: u32,
+    exhausted: bool,
+}
+
+impl Liveness {
+    fn tick(&mut self, now: Instant) -> TickAction {
+        if self.exhausted {
+            return TickAction::Wait;
+        }
+        if let Some(issued) = self.probe_issued {
+            if now.duration_since(issued) < PROBE_DEADLINE {
+                return TickAction::Wait;
+            }
+            self.misses += 1;
+            self.probe_issued = None;
+            // Two consecutive misses, not one: a single silent probe is also what a
+            // machine that slept through its deadline looks like on wake, and the probe
+            // issued after the wake is answered by the very same healthy page.
+            if self.misses >= 2 {
+                self.misses = 0;
+                self.reload_strikes += 1;
+                self.exhausted = self.reload_strikes >= MAX_RELOAD_STRIKES;
+                return TickAction::Reload;
+            }
+        }
+        self.probe_issued = Some(now);
+        TickAction::Probe
+    }
+
+    /// The page proved itself alive: the in-flight probe is answered, and the misses and
+    /// the reload strikes all start over.
+    fn beat(&mut self) {
+        self.probe_issued = None;
+        self.misses = 0;
+        self.reload_strikes = 0;
+    }
+
+    /// The sweep cannot judge the page this tick — devtools paused on a breakpoint, a
+    /// hidden window on macOS (App Nap stalls injected tasks exactly like page timers).
+    /// The clock starts over rather than charging the silence to the page.
+    fn hold(&mut self) {
+        self.probe_issued = None;
+        self.misses = 0;
+    }
+}
+
+/// The close-request bookkeeping behind the atomics: generations of requests, each
+/// satisfied by an ack that proves the page alive (the handlers for queued close events
+/// run back to back, so one ack covers every request already delivered, and none
+/// delivered after it).
+fn ack_next(acked: u64, requested: u64) -> u64 {
+    acked.max(requested)
+}
+fn ack_covers(acked: u64, generation: u64) -> bool {
+    acked >= generation
+}
+
+static LIVENESS: Mutex<Liveness> = Mutex::new(Liveness {
+    probe_issued: None,
+    misses: 0,
+    reload_strikes: 0,
+    exhausted: false,
+});
+static CLOSE_REQUESTED: AtomicU64 = AtomicU64::new(0);
+static CLOSE_ACKED: AtomicU64 = AtomicU64::new(0);
+
+fn with_liveness<R>(apply: impl FnOnce(&mut Liveness) -> R) -> R {
+    let mut guard = LIVENESS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    apply(&mut guard)
+}
+
+/// The run loop's word that the main window's close was requested: starts the grace
+/// watchdog that performs the close the page cannot (see the section comment above).
+pub fn note_close_requested(app: tauri::AppHandle) {
+    let generation = CLOSE_REQUESTED.fetch_add(1, Ordering::Relaxed) + 1;
+    std::thread::Builder::new()
+        .name("ggs-close-watchdog".to_owned())
+        .spawn(move || {
+            std::thread::sleep(CLOSE_GRACE);
+            if ack_covers(CLOSE_ACKED.load(Ordering::Relaxed), generation) {
+                return;
+            }
+            use tauri::Manager;
+            let Some(window) = app.get_webview_window("main") else {
+                return;
+            };
+            // The page policy's own move when remote sessions ride the instance
+            // (boot.ts's handler): hide, keep the instance alive — the sweep reloads the
+            // hidden dead page back to life on platforms that probe hidden windows.
+            if crate::remote_host::session_count() > 0 || crate::remote_host::remote_host_only() {
+                eprintln!(
+                    "[webview] a close request went unacked for {CLOSE_GRACE:?} — the page is dead or hung; hiding the window for its remote sessions"
+                );
+                let _ = crate::remote_host::remote_host_hide_main(app.clone());
+                return;
+            }
+            eprintln!(
+                "[webview] a close request went unacked for {CLOSE_GRACE:?} — the page is dead or hung; destroying the window"
+            );
+            let _ = window.destroy();
+        })
+        .expect("the close watchdog thread starts");
+}
+
+/// The close handler's first word from the page (boot.ts), before any await: proof the
+/// page is alive and handling the request, which stands the watchdog down.
+#[tauri::command]
+pub fn window_close_ack() {
+    let acked = ack_next(
+        CLOSE_ACKED.load(Ordering::Relaxed),
+        CLOSE_REQUESTED.load(Ordering::Relaxed),
+    );
+    CLOSE_ACKED.store(acked, Ordering::Relaxed);
+}
+
+/// The page's answer to a liveness probe (or any other proof of life it cares to send).
+#[tauri::command]
+pub fn webview_beat() {
+    with_liveness(|state| state.beat());
+}
+
+/// The sweep thread, started once from the composition root's setup. One probe per
+/// period into the main window's page; the reload decision is the state machine's.
+pub fn start_liveness_sweep(app: tauri::AppHandle) {
+    std::thread::Builder::new()
+        .name("ggs-webview-liveness".to_owned())
+        .spawn(move || loop {
+            std::thread::sleep(PROBE_PERIOD);
+            use tauri::Manager;
+            let Some(window) = app.get_webview_window("main") else {
+                continue;
+            };
+            // Devtools paused on a breakpoint freezes the page's scripts on purpose; a
+            // hidden window on macOS is napped (WKWebView suspends it) and App Nap
+            // stalls injected tasks exactly like the page timers window.rs documents
+            // elsewhere. Silence proves nothing in either case.
+            if window.is_devtools_open()
+                || (cfg!(target_os = "macos") && !window.is_visible().unwrap_or(true))
+            {
+                with_liveness(|state| state.hold());
+                continue;
+            }
+            match with_liveness(|state| state.tick(Instant::now())) {
+                TickAction::Wait => {}
+                TickAction::Probe => {
+                    let _ = window.eval(PROBE_JS);
+                }
+                TickAction::Reload => {
+                    eprintln!(
+                        "[webview] the main window's page answered no liveness probe — reloading it (a dead renderer stays gray otherwise)"
+                    );
+                    let _ = window.reload();
+                }
+            }
+        })
+        .expect("the webview liveness sweep thread starts");
 }
 
 /// Lets the webview keep the app's assets between launches. Tauri serves every asset
@@ -233,6 +451,86 @@ mod webkit_compat_tests {
         assert!(!should_disable_dmabuf("auto", false));
         assert!(should_disable_dmabuf("disable", false));
         assert!(!should_disable_dmabuf("keep", true));
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::{ack_covers, ack_next, Liveness, TickAction, MAX_RELOAD_STRIKES};
+    use std::time::{Duration, Instant};
+
+    /// The synthetic clock: `at(n)` is n seconds past the sweep's epoch.
+    fn at(seconds: u64) -> Instant {
+        Instant::now() + Duration::from_secs(seconds)
+    }
+
+    #[test]
+    fn a_probe_waits_out_its_deadline() {
+        let mut state = Liveness::default();
+        assert_eq!(state.tick(at(0)), TickAction::Probe);
+        assert_eq!(state.tick(at(19)), TickAction::Wait);
+    }
+
+    #[test]
+    fn two_silent_probes_reload_but_one_does_not() {
+        let mut state = Liveness::default();
+        assert_eq!(state.tick(at(0)), TickAction::Probe);
+        // The first expiry only re-probes: one silent probe is also what a machine that
+        // slept through its deadline looks like on wake, and the re-probe is answered.
+        assert_eq!(state.tick(at(21)), TickAction::Probe);
+        assert_eq!(state.tick(at(42)), TickAction::Reload);
+    }
+
+    #[test]
+    fn a_late_beat_resets_the_misses() {
+        let mut state = Liveness::default();
+        state.tick(at(0));
+        state.tick(at(21)); // miss 1, re-probe issued
+        state.beat();
+        // The next tick starts a fresh probe, not a reload.
+        assert_eq!(state.tick(at(42)), TickAction::Probe);
+        assert_eq!(state.tick(at(63)), TickAction::Probe);
+    }
+
+    #[test]
+    fn the_sweep_stands_down_after_reload_strikes_without_a_single_beat() {
+        let mut state = Liveness::default();
+        for round in 0..MAX_RELOAD_STRIKES {
+            let base = u64::from(round) * 60;
+            state.tick(at(base));
+            state.tick(at(base + 21));
+            assert_eq!(state.tick(at(base + 42)), TickAction::Reload);
+        }
+        assert_eq!(state.tick(at(600)), TickAction::Wait);
+    }
+
+    #[test]
+    fn a_beat_between_reloads_resets_the_strikes() {
+        let mut state = Liveness::default();
+        for _ in 0..(MAX_RELOAD_STRIKES + 1) {
+            state.tick(at(0));
+            state.tick(at(21));
+            assert_eq!(state.tick(at(42)), TickAction::Reload);
+            state.beat(); // the reloaded page answered its first probe
+        }
+        // Never exhausted: every reload was followed by proof the new page lives.
+        assert_eq!(state.tick(at(1200)), TickAction::Probe);
+    }
+
+    #[test]
+    fn an_ack_covers_every_request_delivered_before_it_and_none_after() {
+        let mut acked = 0;
+        let first = 1u64;
+        assert!(!ack_covers(acked, first));
+        acked = ack_next(acked, first);
+        assert!(ack_covers(acked, first));
+        // A second click queued behind the first: the handlers run back to back, so the
+        // single ack (the page is alive) satisfies both.
+        let second = 2u64;
+        assert!(!ack_covers(acked, second));
+        acked = ack_next(acked, second);
+        assert!(ack_covers(acked, second));
+        assert!(ack_covers(acked, first)); // the older generation stays satisfied
     }
 }
 

@@ -49,6 +49,8 @@ export const SCENARIO_ROOT = 'C:\\repo';
 export function commonHandlers(): [string, Handler][] {
 	return [
 		['boot_stage', () => null],
+		['webview_beat', () => null],
+		['window_close_ack', () => null],
 		['analysis_status', () => ({ state: 'ready', done: 3, total: 3, files: 3, symbols: 8, calls: 5 })],
 		['analysis_module_graph', () => ({ modules: [], edges: [], fileEdges: [], totalCalls: 0, totalFileEdges: 0 })],
 		['mcp_tools', () => [{ name: 'symbol_lookup', description: 'look up a symbol' }]],

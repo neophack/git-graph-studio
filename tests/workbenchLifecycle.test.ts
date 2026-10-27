@@ -41,6 +41,8 @@ beforeEach(async () => {
 		['open_single_file', () => null],
 		['close_folder', () => null],
 		['boot_stage', () => null],
+		['webview_beat', () => null],
+		['window_close_ack', () => null],
 		['list_dir', () => []],
 		['list_files', () => ['a.txt', 'b.txt']],
 		['read_file', ({ path }) => ({ contents: `contents of ${String(path)}\n`, binary: false, size: 12 })],
@@ -225,6 +227,29 @@ describe('the session snapshot across a folder switch', () => {
 
 		expect(prevented).toBe(false); // "Don't Save" lets the close through
 		expect(state.workspaceSnapshot(REPO_A)!.openFiles).toEqual([`${REPO_A}\\a.txt`]);
+	});
+
+	it('the close handler acks the backend watchdog before anything it awaits', async () => {
+		// A dead webview cannot run the handler at all — and Tauri hands the whole close
+		// decision to the page (it prevents the native close the moment the listener
+		// exists), which is how a gray window could never be closed. The ack is the
+		// page's first word: it crosses before `keepRunningHidden`'s own awaits, so the
+		// backend's watchdog (window.rs) leaves the window to a live page and performs
+		// the close itself only when no ack can come.
+		expect(closeHandlers).toHaveLength(1);
+		const acksBefore = backend.callsTo('window_close_ack').length;
+		let acksWhenStatusQueried = -1;
+		backend.handlers.set('remote_host_status', () => {
+			acksWhenStatusQueried = backend.callsTo('window_close_ack').length;
+			return { connected: false, remoteHostOnly: false, remoteSessions: 0, folders: [] };
+		});
+		const closing = closeHandlers[0]!({ preventDefault: () => undefined });
+		await flush(2);
+
+		// The status round trip is the handler's first await; by the time the backend
+		// answers it, the ack is already on the wire.
+		expect(acksWhenStatusQueried).toBe(acksBefore + 1);
+		await closing;
 	});
 });
 
