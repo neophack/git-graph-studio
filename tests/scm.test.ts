@@ -457,6 +457,30 @@ describe('source control view', () => {
 		await flush();
 		expect(backend.callsTo('scm_sync')).toEqual([{ rebase: false }]);
 	});
+	it('keeps the change list scrolled where the user left it across a refresh', async () => {
+		const many = Array.from({ length: 60 }, (_, i) => change(`dir/file${i}.ts`, { unstaged: 'modified' }));
+		const { view } = setup(many);
+		view.setRepo(REPO);
+		await view.refresh();
+
+		// The user drags the list down. jsdom stores scrollTop with no layout, so model the
+		// platform's real rule explicitly: a detached element has no scrolling box and reads
+		// 0 (Chromium/WebKit) — a render that reads the old list's offset only after wiping
+		// the pane captures 0 and the list jumps to the top.
+		const list = document.querySelector<HTMLElement>('.scm-list')!;
+		let offset = 440;
+		Object.defineProperty(list, 'scrollTop', {
+			configurable: true,
+			get: () => (list.isConnected ? offset : 0),
+			set: (value: number) => { offset = value; }
+		});
+
+		await view.refresh();
+
+		const rebuilt = document.querySelector<HTMLElement>('.scm-list')!;
+		expect(rebuilt).not.toBe(list);
+		expect(rebuilt.scrollTop).toBe(440);
+	});
 	it('discards only the non-conflicted paths during a merge (git restore aborts on unmerged ones)', async () => {
 		const { view } = setup([
 			change('src/clash.ts', { staged: 'modified', unstaged: 'modified', conflicted: true }),

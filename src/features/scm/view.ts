@@ -463,10 +463,15 @@ export class SourceControlView {
 	declare placeholder: () => string ;
 
 	render(): void {
-		// A refresh re-renders under the user's hands; the commit box keeps its focus and caret.
+		// A refresh re-renders under the user's hands; the commit box keeps its focus and
+		// caret, and the change list keeps its scroll offset. Both must be captured BEFORE
+		// the wipe: a detached element has no scrolling box, so the old list's scrollTop
+		// reads 0 in a real browser once innerHTML has cleared the pane (jsdom keeps the
+		// stored value — tests/scm.test.ts models the platform rule explicitly).
 		const previous = this.content.querySelector<HTMLTextAreaElement>('textarea');
 		const hadFocus = previous !== null && document.activeElement === previous;
 		const caret = previous === null ? null : { start: previous.selectionStart, end: previous.selectionEnd };
+		const previousScroll = this.list?.scrollTop ?? 0;
 		this.content.innerHTML = '';
 		if (!this.repoPath) {
 			this.content.appendChild(el('div', 'welcome-view', [el('p', '', ['Open a folder containing a Git repository to see its changes here.'])]));
@@ -512,8 +517,8 @@ export class SourceControlView {
 			body.appendChild(el('div', 'scm-input', [el('div', 'error', [this.error])]));
 		}
 		// The change list: a scroll container over a spacer of the full height, with only the
-		// rows near the viewport drawn (renderWindow).
-		const previousScroll = this.list?.scrollTop ?? 0;
+		// rows near the viewport drawn (renderWindow). The scroll offset was captured at the
+		// top of render() — reading it here, after the wipe, would answer 0.
 		this.list = el('div', 'scm-list scm-group');
 		this.listInner = el('div', 'scm-rows');
 		this.list.appendChild(this.listInner);
