@@ -10,8 +10,8 @@
 //! installed running copy, an installed extension's, or the one packed inside the bundled
 //! `ggs-remote.vsix` beside the app), installs and starts it, sets the access password
 //! through the loopback admin API (the password crosses a stdin pipe, never an argv a
-//! process listing could show), sets the LAN listener's port and protocol, optionally
-//! connects a relay server, and prints the links.
+//! process listing could show), sets the LAN listener's port, protocol and bind address,
+//! optionally connects a relay server, and prints the links.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -106,28 +106,24 @@ fn bundled_vsix_candidates() -> Vec<PathBuf> {
 /// The daemon binary to drive, and where it came from: the running copy the daemon
 /// installed for itself, an installed extension's package, or the bundled VSIX (whose
 /// daemon this extracts once into the remote root — its own `install` copies it to the
-/// running location from there).
+/// running location from there). The installed extension's directory rides along even
+/// when the running copy is the one driven: `ggs-remote install --extension-dir`
+/// re-records it, so a headless box — where no window's activation ever refreshes the
+/// path — keeps the daemon's retirement check (§14.2: gone for a day means uninstalled)
+/// pointed at a directory that exists.
 fn find_daemon() -> Result<(PathBuf, Option<PathBuf>), String> {
     // 1. The installed running copy — `~/.ggs/remote/bin/ggs-remote(.exe)`.
     if let Some(root) = remote_root() {
         let installed = root.join("bin").join(DAEMON_EXE);
         if installed.is_file() {
-            return Ok((installed, None));
+            return Ok((installed, installed_extension_dir()));
         }
     }
     // 2. An installed extension's package: `~/.ggs/extensions/<id>/bin/<platform>/<exe>`.
-    if let Some(home) = extensions_home() {
-        if let Ok(entries) = std::fs::read_dir(&home) {
-            for entry in entries.flatten() {
-                let bin = entry
-                    .path()
-                    .join("bin")
-                    .join(platform_dir())
-                    .join(DAEMON_EXE);
-                if bin.is_file() {
-                    return Ok((bin, Some(entry.path())));
-                }
-            }
+    if let Some(dir) = installed_extension_dir() {
+        let bin = dir.join("bin").join(platform_dir()).join(DAEMON_EXE);
+        if bin.is_file() {
+            return Ok((bin, Some(dir)));
         }
     }
     // 3. The bundled VSIX: extract its daemon into a staging directory of the remote
@@ -143,6 +139,26 @@ fn find_daemon() -> Result<(PathBuf, Option<PathBuf>), String> {
          with a build that bundles the GGS Remote extension"
             .into(),
     )
+}
+
+/// The newest installed extension's package directory (version-sorted, the way the store
+/// lays them out — and only one that actually packs the daemon binary), when one is
+/// installed.
+fn installed_extension_dir() -> Option<PathBuf> {
+    let home = extensions_home()?;
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&home)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.join("bin")
+                .join(platform_dir())
+                .join(DAEMON_EXE)
+                .is_file()
+        })
+        .collect();
+    dirs.sort();
+    dirs.pop()
 }
 
 /// Pull `extension/bin/<platform>-<arch>/<exe>` out of the VSIX (a zip) into
@@ -277,6 +293,26 @@ fn parse_scheme(text: &str) -> Result<Option<&'static str>, String> {
     }
 }
 
+/// A `--bind` answer — `localhost` or an IP address (the daemon's own fallback for an
+/// unparseable bind is the wildcard address, so refuse garbage here); empty keeps the
+/// current one. The flag never prompts (2026-10-24): port and protocol are the two values
+/// a human answers; the bind is set once — `0.0.0.0` in a container, loopback in front of
+/// a reverse proxy — and a watchdog re-running `ggs config` must not hang on a new
+/// question.
+fn parse_bind(text: &str) -> Result<Option<String>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if text == "localhost" || text.parse::<std::net::IpAddr>().is_ok() {
+        Ok(Some(text.to_owned()))
+    } else {
+        Err(format!(
+            "bind must be an IP address (or localhost), not `{text}`"
+        ))
+    }
+}
+
 /// The daemon's `tls` config for a protocol choice: http is the daemon's `none` mode; https
 /// keeps a mode that already is https (a custom certificate stays), and turns `none` into
 /// the self-signed CA. The certificate paths ride along — the patch replaces the object.
@@ -352,13 +388,19 @@ fn configure(args: &[String]) -> Result<(), String> {
         println!("  password: unchanged");
     }
 
-    // 3. The LAN listener: its port and protocol (empty answers keep the current ones). Plain
-    //    HTTP only ever listens on loopback — the password never crosses a network in clear,
-    //    and a browser grants the remote app's Service Worker and WebCrypto only to HTTPS —
-    //    so http is for a reverse proxy or tunnel that ends TLS, or the relay alone.
+    // 3. The LAN listener: its port, protocol and bind address (empty answers keep the
+    //    current ones). The bind is honoured in every mode (2026-10-24, the owner's
+    //    direction: 直接 http 可以绑定 0.0.0.0 — a container publishes the port, no forwarder
+    //    beside the daemon); keep loopback where TLS ends in front of the daemon, and
+    //    prefer https wherever the network itself is not trusted — plain http crosses it
+    //    in the clear.
     let status = daemon_status(&daemon)?;
     let current_port = status["config"]["port"].as_u64().unwrap_or(0);
     let current_tls = status["config"]["tls"].clone();
+    let current_bind = status["config"]["bind"]
+        .as_str()
+        .unwrap_or("0.0.0.0")
+        .to_owned();
     let current_scheme = if current_tls["mode"] == "none" {
         "http"
     } else {
@@ -374,6 +416,12 @@ fn configure(args: &[String]) -> Result<(), String> {
             "LAN protocol, http or https (empty keeps {current_scheme}): "
         )))?,
     };
+    let bind = match flag_present(args, "--bind") {
+        Some(given) => parse_bind(&given)?,
+        // No prompt: a watchdog re-running this command must not hang on a question
+        // the operator answered once.
+        None => None,
+    };
     let mut patch = serde_json::Map::new();
     if let Some(port) = port.filter(|&p| u64::from(p) != current_port) {
         patch.insert("port".into(), port.into());
@@ -381,8 +429,11 @@ fn configure(args: &[String]) -> Result<(), String> {
     if let Some(scheme) = scheme.filter(|&s| s != current_scheme) {
         patch.insert("tls".into(), tls_for(&current_tls, scheme));
     }
+    if let Some(bind) = bind.clone().filter(|b| *b != current_bind) {
+        patch.insert("bind".into(), bind.into());
+    }
     if patch.is_empty() {
-        println!("  LAN: unchanged ({current_scheme}, port {current_port})");
+        println!("  LAN: unchanged ({current_scheme}, port {current_port}, bind {current_bind})");
     } else {
         daemon_cli(
             &daemon,
@@ -405,15 +456,20 @@ fn configure(args: &[String]) -> Result<(), String> {
         }
         let scheme = scheme.unwrap_or(current_scheme);
         let port = status["port"].as_u64().unwrap_or(current_port);
+        let bind = bind.as_deref().unwrap_or(&current_bind);
         match status["listenError"].as_str() {
             Some(error) => {
-                println!("  LAN: {scheme}, port {port} saved — cannot listen yet: {error}")
+                println!("  LAN: {scheme}, port {port}, bind {bind} saved — cannot listen yet: {error}")
             }
-            None => println!("  LAN: {scheme}, port {port}"),
+            None => println!("  LAN: {scheme}, port {port}, bind {bind}"),
         }
     }
     if scheme.unwrap_or(current_scheme) == "http" {
-        println!("  note: plain http listens on 127.0.0.1 only (for a reverse proxy, a tunnel or the relay)");
+        let bind = bind.as_deref().unwrap_or(&current_bind);
+        println!(
+            "  note: plain http crosses the network unencrypted; the listener binds {bind} \
+             (https keeps the password off the wire)"
+        );
     }
 
     // 4. A relay server (optional): with one, the phone works from any network. An
@@ -478,6 +534,19 @@ mod tests {
         assert_eq!(parse_scheme("HTTP"), Ok(Some("http")));
         assert_eq!(parse_scheme("https"), Ok(Some("https")));
         assert!(parse_scheme("ftp").is_err());
+    }
+
+    #[test]
+    fn bind_answers_parse() {
+        assert_eq!(parse_bind(""), Ok(None));
+        assert_eq!(parse_bind(" 0.0.0.0 "), Ok(Some("0.0.0.0".to_owned())));
+        assert_eq!(parse_bind("127.0.0.1"), Ok(Some("127.0.0.1".to_owned())));
+        assert_eq!(parse_bind("localhost"), Ok(Some("localhost".to_owned())));
+        assert_eq!(parse_bind("::1"), Ok(Some("::1".to_owned())));
+        // The daemon's own fallback for an unparseable bind is the wildcard address —
+        // garbage must be refused here, never silently become 0.0.0.0.
+        assert!(parse_bind("ggs.local").is_err());
+        assert!(parse_bind("8090").is_err());
     }
 
     #[test]

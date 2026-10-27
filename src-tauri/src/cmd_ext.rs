@@ -192,6 +192,52 @@ pub fn install_missing_bundled(app: &tauri::AppHandle) -> Vec<Result<String, Str
     install_missing_bundled_in(&dir, &packages)
 }
 
+/// The same first-launch install for a command-line run that opens no window (2026-10-24,
+/// the owner's direction: 安装后就运行 remote,不需要启动一次界面 — until now the bundled
+/// Remote Access package only reached the store through the GUI boot pass, so a headless
+/// box had to open a desktop once, Xvfb and all). No app handle exists this early: the
+/// store is `~/.ggs/extensions` and the bundled roots resolve beside this executable the
+/// same way the config CLI finds the VSIX. The migration from the pre-`.ggs` location
+/// stays with the app handle — the window's boot pass performs it; here a legacy tree, if
+/// one exists, simply leaves the fresh install beside it.
+pub fn install_missing_bundled_headless() -> Vec<Result<String, String>> {
+    let Ok(dir) = extensions_home_dir() else {
+        return Vec::new();
+    };
+    install_missing_bundled_at(&dir, &bundled_roots_beside_exe())
+}
+
+fn install_missing_bundled_at(dir: &Path, roots: &[PathBuf]) -> Vec<Result<String, String>> {
+    install_missing_bundled_in(dir, &bundled_vsix_packages_in(roots))
+}
+
+/// The bundled roots without an app handle: the installer's `extensions/` resource
+/// directory beside this executable (the deb and the Windows install root; macOS the
+/// bundle's `Resources`), then the dev-tree layouts `bundled_roots` also tries.
+fn bundled_roots_beside_exe() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.join("extensions"));
+            if cfg!(target_os = "macos") {
+                if let Some(resources) = dir.parent().map(|p| p.join("Resources")) {
+                    roots.push(resources.join("extensions"));
+                }
+            }
+        }
+    }
+    // 'tauri dev' runs cargo from src-tauri/; the bat and CI from the repository root.
+    for base in [
+        "target/studio/bundled",
+        "target/studio/bundled/app-resources/extensions",
+        "../target/studio/bundled",
+        "../target/studio/bundled/app-resources/extensions",
+    ] {
+        roots.push(PathBuf::from(base));
+    }
+    roots
+}
+
 /// The uninstall every caller runs: this app's own backend for the extension dies first — its
 /// exe lives inside the directory being removed, and on Windows a running binary cannot be
 /// deleted — then the install goes.

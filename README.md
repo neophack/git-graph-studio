@@ -349,27 +349,36 @@ extension packages a build carries — remain under their own licenses; see
 
 After installing, `ggs-config` (or `ggs config`) configures Remote Access from any
 command line — an SSH session on a fresh machine sets the access password and optional
-relay server and prints the phone links, without opening a window:
+relay server and prints the phone links, without opening a window. The `ggs config`
+spelling also installs the bundled extension packages first (the `ggs-remote` VSIX
+included), so a fresh machine — or a container — never needs one desktop launch before
+Remote Access exists; the daemon installs, starts and registers its login autostart in
+that same command:
 
 ```sh
 ggs-config                      # interactive: password, LAN port and protocol, relay, links
 ggs-config --password pw --server https://hub.example.com
-ggs-config --port 8090 --scheme http --server ""   # fixed LAN port, no relay, no prompts
+ggs-config --port 8090 --scheme http --bind 0.0.0.0 --server ""   # LAN cleartext, no relay
 ```
 
 Every flag answers its prompt; an absent flag asks, an empty answer keeps the current
-value (`--server ""` skips the relay). The flags:
+value (`--server ""` skips the relay). `--bind` is the exception — it never asks; an
+absent flag keeps the current address, so a script or watchdog re-running the command
+never hangs on a new question. The flags:
 
 | Flag | Meaning |
 | ---- | ------- |
 | `--password <pw>` | The access password (8+ characters). Empty keeps the current one. |
 | `--port <n>` | The fixed LAN port, 1–65535 (default 47615). A port another program holds is reported; the setting is saved and retried. |
-| `--scheme https\|http` | `https` (default) serves TLS itself, with the self-signed certificate the devices trust once (a custom certificate stays). `http` means TLS ends in front of the PC: the daemon then listens on **127.0.0.1 only**, for a reverse proxy, a tunnel or the relay. |
+| `--scheme https\|http` | `https` (default) serves TLS itself, with the self-signed certificate the devices trust once (a custom certificate stays). `http` is the daemon without TLS — the listener binds whatever `bind` says (below): loopback in front of a reverse proxy or tunnel, or the wildcard address for direct cleartext LAN access. |
+| `--bind <addr>` | The listener's bind address (default `0.0.0.0`; `127.0.0.1` for a same-host proxy). Honoured in every mode, `http` included. |
 | `--server <url>` / `--join-key <key>` | The optional relay server (`ggs-remote-hub`) and its server password. |
 
-The browser must always reach the PC over **HTTPS**: the session cookie is `Secure`, and
-WebKit browsers (Safari on iPhone, iPad and Mac) drop it on plain HTTP, so sign-in would
-never stick. Phones on the LAN need `https`; `http` is only for a front that ends TLS.
+Prefer **HTTPS** wherever the network itself is not trusted: with `http` the password,
+the session and every file's bytes cross it in the clear. The session cookie follows the
+scheme the browser actually speaks (it is `Secure` on TLS, plain on a direct `http`
+listener), so sign-in works over plain HTTP too; the cost is the cleartext, not the
+login.
 
 The same port and protocol can be set on the **Remote Access** page in the app (the
 Service section's port field) and on the tray's pairing page (the **LAN listener** card).
@@ -381,15 +390,19 @@ take their defaults:
 { "port": 50000, "bind": "0.0.0.0", "tls": { "mode": "self-signed" } }
 ```
 
-`tls.mode` is `self-signed` or `custom` for HTTPS, `none` for HTTP; set
-`"trustProxy": true` when a reverse proxy on the same host fronts an HTTP daemon.
+`tls.mode` is `self-signed` or `custom` for HTTPS, `none` for HTTP; `bind` is honoured
+in every mode — `none` with `"bind": "0.0.0.0"` serves plain HTTP on every interface.
+Set `"trustProxy": true` when a reverse proxy on the same host fronts an HTTP daemon
+(loopback bind, TLS ended in front).
 
 ### Running in Docker
 
-There is no official runtime image; this is a starting point to adapt (untested). Inside a
-container the daemon runs in the foreground (no tray, no systemd), and the windows a
-remote device opens are real Git Graph Studio processes that need a display, so the
-container runs Xvfb.
+There is no official runtime image; this is a starting point to adapt (untested). No
+desktop launch is ever needed: `ggs config` installs the bundled `ggs-remote` VSIX,
+installs and starts the daemon and registers its login autostart, all headless. Xvfb is
+still there for the windows a remote device opens — those are real Git Graph Studio
+processes that need a display, so the virtual display must be up (and `DISPLAY`
+exported) before `ggs config` runs, for the daemon to inherit.
 
 ```dockerfile
 FROM ubuntu:22.04
@@ -418,37 +431,45 @@ be baked into an image:
 
 ```bash
 set -e
-# Installs the daemon from the VSIX the deb carries, then sets the password and the
-# optional relay. The LAN port and protocol came from the config written at build time;
-# the empty answers keep them and keep the pass non-interactive. An empty GGS_PASSWORD
-# keeps the stored password, so a restart never resets it.
+# The virtual display for the windows a remote device opens (real GGS processes) — up and
+# exported before ggs config, so the daemon it starts inherits it.
+Xvfb :99 -screen 0 1280x900x24 &
+export DISPLAY=:99
+# Installs the bundled VSIX, installs and starts the daemon, sets the password and the
+# optional relay. The LAN port, protocol and bind came from the config written at build
+# time; the empty answers keep them and keep the pass non-interactive. An empty
+# GGS_PASSWORD keeps the stored password, so a restart never resets it.
 ggs config --password "${GGS_PASSWORD:-}" --port "" --scheme "" \
   --server "${GGS_HUB:-}" --join-key "${GGS_JOIN_KEY:-}"
-# ggs config starts the daemon detached; run it as the container's foreground process.
-"$GGS_HOME/remote/bin/ggs-remote" stop || true
-exec xvfb-run -a "$GGS_HOME/remote/bin/ggs-remote" run --no-tray
+# ggs config leaves the daemon running detached; hold the container open and revive the
+# daemon if it ever dies (a supervisor unit or the restart policy can replace this loop).
+while sleep 20; do
+  "$GGS_HOME/remote/bin/ggs-remote" status >/dev/null 2>&1 \
+    || ggs config --password "" --port "" --scheme "" --server "" --join-key ""
+done
 ```
 
 ```sh
-docker build --build-arg GGS_PORT=50000 --build-arg GGS_SCHEME=https -t ggs-image .
-docker run -d --network host -v ggs-data:/home/ggs/.ggs \
+docker build --build-arg GGS_PORT=8090 --build-arg GGS_SCHEME=http -t ggs-image .
+docker run -d -p 8090:8090 -v ggs-data:/home/ggs/.ggs \
   -e GGS_PASSWORD='your-password' ggs-image
 ```
 
-- **Use `--network host` on Linux.** With Docker's bridge network the daemon sees only the
-  container's own address (172.17.x): the links it prints and the self-signed certificate
-  name an address phones cannot reach. On the host network they name the host's real LAN
-  address.
-- **HTTP inside a container** listens on the container's loopback, which `-p` port
-  publishing cannot reach. Use it only with `--network host` and a reverse proxy on the
-  host that ends TLS (proxying to `127.0.0.1:<port>`, `"trustProxy": true`), or with the
-  relay alone (`GGS_HUB`) — its tunnel is outbound, no port needs publishing.
+- **`http` publishes with `-p`**: `bind` is `0.0.0.0` in the baked config, so
+  `-p 8090:8090` reaches the daemon from outside — no forwarder beside it. The links the
+  daemon prints name the container's own addresses under bridge networking; open the
+  host's address instead (`http://<host>:8090/`). Everything crosses in the clear — keep
+  it to networks you trust, or front it with TLS.
+- **`https` wants `--network host` on Linux.** With Docker's bridge network the daemon
+  sees only the container's own address (172.17.x): the links it prints and the
+  self-signed certificate name an address phones cannot reach. On the host network they
+  name the host's real LAN address.
 - **Keep `~/.ggs` on a volume**: it holds the password, the certificate authority the
   devices trust and the relay link's identity. Without it every rebuild means a new
   certificate to trust and a new relay link.
 - **The build-time port and protocol apply on the first start** (Docker seeds an empty
   named volume from the image, so the baked `config.json` lands there). A volume that
   already exists keeps its own config — a rebuilt image alone will not move it; change the
-  running deployment from the Remote Access page or `docker exec … ggs config --port … --scheme …`.
+  running deployment from the Remote Access page or `docker exec … ggs config --port … --scheme … --bind …`.
 - `--password` crosses the command line, visible briefly in the container's process list;
   where that matters, pipe it instead: `printf %s "$pw" | "$GGS_HOME/remote/bin/ggs-remote" set-password`.

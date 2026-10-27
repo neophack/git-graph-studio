@@ -119,9 +119,9 @@ pub fn hostname_local() -> Option<String> {
 }
 
 /// The hosts a link may name for a listener on `bind` (the effective bind): a loopback
-/// listener — plain HTTP is loopback-only (§16) — answers 127.0.0.1 alone, a wildcard one
-/// every LAN address plus the mDNS name, a specific address just itself. A LAN address in
-/// the link of a listener that never accepts on it is a link that cannot work.
+/// listener answers 127.0.0.1 alone, a wildcard one every LAN address plus the mDNS name,
+/// a specific address just itself. A LAN address in the link of a listener that never
+/// accepts on it is a link that cannot work.
 pub fn link_hosts(bind: &str) -> Vec<String> {
     if crate::config::is_loopback(bind) {
         return vec!["127.0.0.1".into()];

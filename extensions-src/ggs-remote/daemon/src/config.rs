@@ -145,19 +145,18 @@ impl Config {
         write_private(&paths.config(), &json)
     }
 
-    /// HTTP without TLS is only allowed on loopback (§16 transport): a `none` mode with a
-    /// public bind address is narrowed to 127.0.0.1.
+    /// The address the public listener binds, whatever the TLS mode (2026-10-24, the
+    /// owner's direction: 直接 http 可以绑定 0.0.0.0 — a container publishes the port, or a
+    /// LAN accepts cleartext, without a forwarder beside the daemon). Keep the name: the
+    /// listeners and every link builder ask for what the listener will actually bind.
     pub fn effective_bind(&self) -> String {
-        if self.tls.mode == TlsMode::None && !is_loopback(&self.bind) {
-            return "127.0.0.1".into();
-        }
         self.bind.clone()
     }
 
     /// The LAN listener's port and protocol as an admin-config patch (the pair page's card;
     /// `ggs config` builds the same one): only what differs from now. `http` is the `none`
-    /// mode — loopback only, see `effective_bind`; `https` keeps a mode that already is
-    /// https (a custom certificate stays) and turns `none` into the self-signed CA.
+    /// mode; `https` keeps a mode that already is https (a custom certificate stays) and
+    /// turns `none` into the self-signed CA.
     pub fn listener_patch(
         &self,
         port: Option<u16>,
@@ -238,12 +237,21 @@ mod tests {
     }
 
     #[test]
-    fn plain_http_never_binds_publicly() {
+    fn plain_http_binds_what_the_config_says() {
+        // 2026-10-24, the owner's direction: 直接 http 可以绑定 0.0.0.0 — a container
+        // publishes the port without a forwarder. The bind is honoured verbatim in every
+        // mode; loopback stays loopback because the config says so, not because http is
+        // narrowed.
         let mut config = Config::default();
         config.tls.mode = TlsMode::None;
-        assert_eq!(config.effective_bind(), "127.0.0.1");
+        assert_eq!(config.effective_bind(), "0.0.0.0");
+        config.bind = "192.168.1.4".into();
+        assert_eq!(config.effective_bind(), "192.168.1.4");
         config.bind = "127.0.0.1".into();
         assert_eq!(config.effective_bind(), "127.0.0.1");
+        config.tls.mode = TlsMode::SelfSigned;
+        config.bind = "0.0.0.0".into();
+        assert_eq!(config.effective_bind(), "0.0.0.0");
     }
 
     #[test]

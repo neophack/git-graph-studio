@@ -2335,12 +2335,28 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   show; the prompt does not echo), sets the LAN listener's fixed port and protocol
   (2026-10-23, the owner's direction: 局域网模式要支持自定义端口 / ggs config 可以设置固定端口 /
   可以设置使用 http 还是 https — one `admin/config` patch, then a wait for the rebind
-  that reports a port another program holds; `http` is the daemon's `tls: none`, which
-  listens on loopback only, for a reverse proxy, a tunnel or the relay), optionally connects
+  that reports a port another program holds), optionally connects
   a relay (`hub/connect`), and prints the links (`print-link`; flags `--password` /
-  `--port` / `--scheme` / `--server` / `--join-key` answer the prompts non-interactively,
-  an empty answer keeping the current value, `--server ""` skipping the relay without
-  asking). The same port is the Remote Access page's Service-section field, and port and
+  `--port` / `--scheme` / `--bind` / `--server` / `--join-key` answer the prompts
+  non-interactively, an empty answer keeping the current value, `--server ""` skipping
+  the relay without asking; `--bind` never asks — an absent flag keeps the address, so a
+  watchdog re-running the command never hangs on a new question). 2026-10-24, the
+  owner's direction (安装后就运行 remote,不需要启动一次界面 / 开机自启 / 直接 http 可以绑定
+  0.0.0.0): the `ggs config` spelling first runs the bundled-extension install the GUI
+  boot pass performs, headless (`cmd_ext::install_missing_bundled_headless` — no
+  AppHandle, the store `~/.ggs/extensions`, the bundled roots resolved beside the
+  executable the same way this crate finds the VSIX), so a fresh machine or a container
+  never opens a desktop once for the `ggs-remote` VSIX to exist: the daemon installs,
+  starts and registers its login autostart inside the same command (the bare
+  `ggs-config` sidecar keeps the extract-from-VSIX path — it cannot reach the app-side
+  install); `find_daemon` carries the installed extension's directory alongside the
+  running copy too, so every `ggs config` re-records it and the daemon's retirement
+  check never goes stale on a box where no window's activation refreshes the path; and
+  `bind` is honoured in every TLS mode — the daemon's `effective_bind` no longer narrows
+  `tls: none` to 127.0.0.1 (a container's `-p` publishing and a cleartext LAN bind work
+  directly; the cookie's `Secure` already follows the browser's actual protocol, so
+  plain-HTTP sign-in sticks — the cost is the cleartext, stated where it lives). The
+  same port is the Remote Access page's Service-section field, and port and
   protocol both are the tray pair page's LAN card (the web sets it too — `pair/listener`: the
   ticket alone before any password exists, the unlock after; the patch is
   `Config::listener_patch`, applied through the admin API's own `apply_config`); the status's

@@ -2457,6 +2457,64 @@ async fn a_custom_lan_port_rebinds_and_a_taken_one_is_reported() {
     assert_eq!(big.status, 400);
 }
 
+/// Plain http binds what the config says (2026-10-24, the owner's direction: 直接 http
+/// 可以绑定 0.0.0.0 — a container publishes the port, no forwarder beside the daemon): a
+/// `bind` patch under `tls: none` rebinds onto the wildcard address and a LAN peer
+/// reaches it — the pre-2026-10-24 daemon narrowed the bind back to 127.0.0.1 and the
+/// connection would have been refused.
+#[tokio::test]
+async fn plain_http_binds_the_wildcard_address() {
+    let h = start().await;
+    // A port the OS hands out, released at once for the daemon to take (the patch
+    // validates the merged config, and the harness's port 0 would fail it).
+    let free = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let patched = admin(
+        &h,
+        "PUT",
+        "/admin/config",
+        &format!(r#"{{"bind":"0.0.0.0","port":{free}}}"#),
+    )
+    .await;
+    assert_eq!(patched.status, 200, "{}", patched.body);
+    assert!(
+        patched.body.contains(r#""rebind":true"#),
+        "{}",
+        patched.body
+    );
+    let status = status_until(&h, |s| s["listening"] == true && s["port"] == free).await;
+    assert!(status["listenError"].is_null(), "{status}");
+    assert_eq!(h.daemon.config().effective_bind(), "0.0.0.0");
+
+    // A LAN address of this very machine answers (skipped on a host with none — a
+    // container without another interface). Loopback still reaches it: a wildcard
+    // listener accepts both.
+    let Some(lan) = ggs_remote::tls::lan_addresses().into_iter().next() else {
+        return;
+    };
+    let mut stream = tokio::net::TcpStream::connect((lan.as_str(), free))
+        .await
+        .expect("the wildcard http listener must accept a LAN peer");
+    stream
+        .write_all(
+            format!("GET /login HTTP/1.1\r\nHost: {lan}\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    let text = String::from_utf8_lossy(&raw);
+    assert!(text.starts_with("HTTP/"), "{text}");
+    assert_eq!(
+        http(free, "GET", "/login", &[], None).await.status,
+        503,
+        "loopback still reaches the wildcard listener"
+    );
+}
+
 async fn pair_post(h: &Harness, path: &str, body: serde_json::Value) -> HttpResponse {
     http(
         h.loopback,
@@ -2470,7 +2528,7 @@ async fn pair_post(h: &Harness, path: &str, body: serde_json::Value) -> HttpResp
 
 /// The pair page's LAN card (2026-10-23): the ticket alone sets the port before any
 /// password exists; once one does, the unlock is needed too. The protocol maps onto the
-/// TLS mode, and plain http's links name loopback only.
+/// TLS mode, and the links follow the bind (this harness's listener is loopback-bound).
 #[tokio::test]
 async fn the_pair_page_sets_the_lan_port_and_protocol() {
     let h = start().await;

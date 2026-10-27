@@ -558,6 +558,7 @@ Strict-Transport-Security: max-age=31536000   （仅自带证书模式）
 - 外网访问：不内置穿透。支持两种部署：
   1. 隧道 / 反代终结 TLS：`tls.mode = "none"` + `bind = 127.0.0.1` + `trustProxy = true`，只信任 loopback 来源的 `X-Forwarded-For/Proto/Host`；`/ws` 的 Origin 校验改为对 `X-Forwarded-Host`。
   2. Tailscale：`tailscale cert` 产出的证书配置成 `custom` 模式，链接为 `https://<machine>.<tailnet>.ts.net:47615/`。
+  3. 明文直发（2026-10-24，owner 指令）：`tls.mode = "none"` + `bind = 0.0.0.0` —— 容器 `-p` 端口直发、内网明文访问；`bind` 在所有模式下生效，不再把 http 压回 loopback。cookie 的 `Secure` 跟随浏览器实际协议，登录可用；代价是明文过网，文档如实声明。
 
 - **防火墙**：Windows 首次绑定 `0.0.0.0` 会弹防火墙授权框，拒绝则局域网不可达且守护进程无感知。对策：守护进程记录最近一次非本机连接时间，配对页与插件页显示“最近外来访问：从未 / n 分钟前”；从未有外来访问时给出放行指引（Windows 允许 `ggs-remote.exe` 专用网络；macOS 系统防火墙）。不自动加规则（需管理员权限）。
 - **同一 PC 多个操作系统用户**：单例锁与配置在各用户的 `~/.ggs/` 下，但 LAN 端口只有一个——第二个用户的守护进程绑定失败时托盘显示“端口 47615 已被本机其他用户的 ggs-remote 占用”，该用户走 Hub 模式（uuid 各异，互不影响）。明确取舍，不做端口偏移（违反 R8 的“一个链接”）。
@@ -1278,7 +1279,7 @@ cargo build --manifest-path extensions-src/ggs-remote/daemon/Cargo.toml --releas
 
 ### 15.3 随安装包分发
 
-`scripts/prepare.mjs` 新增开关 `GGS_BUNDLE_GGS_REMOTE`（默认 1，本地源码，离线可打包）：调用 `extensions-src/ggs-remote/build.mjs --out target/studio/extensions/`，只构建当前平台。首启由 `cmd_ext::install_missing_bundled` 安装（与现有内置包机制相同）。
+`scripts/prepare.mjs` 新增开关 `GGS_BUNDLE_GGS_REMOTE`（默认 1，本地源码，离线可打包）：调用 `extensions-src/ggs-remote/build.mjs --out target/studio/extensions/`，只构建当前平台。首启由 `cmd_ext::install_missing_bundled` 安装（与现有内置包机制相同）；自 2026-10-24 起该安装不再依赖窗口 —— `ggs config` 子命令先跑同一安装（`install_missing_bundled_headless`，无 AppHandle，捆绑根按可执行文件旁解析），安装即装即跑：守护进程安装、启动、注册登录自启，全程无桌面（owner 指令：安装后就运行 remote，不需要启动一次界面）。
 
 ### 15.4 接缝检查（`scripts/check-seams.mjs`）新增规则
 
@@ -1311,7 +1312,7 @@ cargo build --manifest-path extensions-src/ggs-remote/daemon/Cargo.toml --releas
 | 身份验证 | Argon2id；弱口令表；首次设置仅本机；限速与锁定；登录失败日志 |
 | 会话 | 256 位随机令牌，只存哈希；HttpOnly/SameSite=Strict（https 下加 `Secure`，跟随浏览器协议）；滑动过期；epoch 失效；登出与踢下线 |
 | CSRF / CSWSH | Cookie 为 Strict；`/ws` 校验 `Origin` == 本站；HELLO 中带会话 csrf；所有改状态的 API 要求 `Content-Type: application/json`（阻止简单表单提交） |
-| 传输 | 默认 TLS 1.2/1.3；HTTP 模式只能绑定 loopback |
+| 传输 | 默认 TLS 1.2/1.3；`none` 模式按 `bind` 监听（2026-10-24 起，owner 指令：直接 http 可以绑定 0.0.0.0 —— 容器 `-p` 直发、明文局域网；反代场景仍写 loopback）。明文的代价如实声明：密码、会话与文件字节明文过网，cookie 的 `Secure` 跟随浏览器实际协议（直连 http 不加），登录可用、内容裸奔 |
 | 访问控制 | 实例资源只读 `remote/` 前缀；插件文件复用 `serve_ext_asset` 的目录约束；下载需一次性票据，`FetchFile` 路径约束与 `ext_fs` 同一策略（打开的文件夹 + 插件目录）；资源令牌与会话绑定；配对/插件页二维码须密码解锁（R19） |
 | 输入校验 | 帧长度上限、分片总长上限（256 MB）、在途调用上限、MSGPACK 深度上限；HTTP 体上限 |
 | 路径穿越 | `/w/:inst/v/:ver/*path` 与 `/ggs/*path` 规范化后拒绝 `..`、绝对路径、反斜杠、NUL |

@@ -279,7 +279,7 @@ fn print_link(paths: &Paths) -> Result<(), String> {
     } else {
         "https"
     };
-    // The links name only the hosts the listener accepts on (plain HTTP is loopback-only).
+    // The links name only the hosts the listener accepts on.
     for host in ggs_remote::tls::link_hosts(&config.effective_bind()) {
         println!("{}", ggs_remote::tls::link_for(scheme, &host, config.port));
     }

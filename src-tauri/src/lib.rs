@@ -192,6 +192,21 @@ mod desktop {
         // `ggs config` / `ggs-config` (either spelling, module 19): the one-command
         // Remote Access setup — password, relay, links — from a command line, no window.
         if args.get(1).map(String::as_str) == Some("config") {
+            // The bundled-extension install the GUI boot pass performs, run headless
+            // first (2026-10-24, the owner's direction: 安装后就运行 remote,不需要启动一次
+            // 界面): until now the bundled Remote Access VSIX only reached the store
+            // through a window's first launch, so a headless box — a container — had to
+            // open a desktop once, Xvfb and all. Here the package is installed before the
+            // daemon is looked for, so `find_daemon` finds the extension's own binary and
+            // records its directory (the daemon then retires only if the extension is
+            // truly gone). An install failure never blocks the configuration — an
+            // already-installed daemon configures as before.
+            for line in cmd_ext::install_missing_bundled_headless() {
+                match line {
+                    Ok(line) => println!("{line}"),
+                    Err(error) => eprintln!("ggs-config: bundled extension install: {error}"),
+                }
+            }
             std::process::exit(ggs_config::run(&args[2..]));
         }
         // `git-graph-studio --measure <folder>` runs the performance probes headless and prints

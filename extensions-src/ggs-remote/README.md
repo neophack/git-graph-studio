@@ -29,12 +29,13 @@ a terminal. Share it only with people you trust; **Sign Out All Devices** ends e
 GGS Remote serves the local network only. To reach the PC from elsewhere, put it behind a
 tunnel or a reverse proxy that terminates TLS (`ggsRemote.tlsMode: none`, bind `127.0.0.1`),
 use Tailscale with your own certificate (`ggsRemote.tlsMode: custom`), or run the
-self-hosted relay (`ggs-remote-hub`).
+self-hosted relay (`ggs-remote-hub`). Plain HTTP may also bind the wildcard address
+(`bind 0.0.0.0` — a container publishing its port, or a trusted LAN accepting cleartext);
+the session cookie follows the scheme the browser speaks, so sign-in works, but the
+password, the session and every file's bytes cross the network unencrypted.
 
-Whatever fronts the PC, the browser must reach it over **HTTPS**: the session cookie is
-always `Secure`, and WebKit browsers (Safari on iPhone, iPad and Mac) drop `Secure` cookies
-on plain HTTP even for `localhost` and LAN addresses — the sign-in would seem to succeed but
-never stick. The default self-signed TLS (or a TLS front proxy) avoids this on every browser.
+Prefer **HTTPS** wherever the network itself is not trusted; the default self-signed TLS
+costs one certificate install per device and keeps everything off the wire.
 
 ## Command line
 
@@ -42,9 +43,12 @@ never stick. The default self-signed TLS (or a TLS front proxy) avoids this on e
 ggs-remote status | stop | start | pair | print-link | set-password | autostart on|off
 ```
 
-`ggs config --port <n> --scheme https|http` (from the app's own command line) sets the
-fixed LAN port and protocol; the Remote Access page's Service section and the pairing
-page's LAN listener card set the same two. The main repository's README covers the flags,
+`ggs config --port <n> --scheme https|http --bind <addr>` (from the app's own command
+line) sets the fixed LAN port, protocol and bind address; the Remote Access page's
+Service section and the pairing page's LAN listener card set the port and protocol. The
+`ggs config` spelling also installs this extension from the bundled package first, so a
+fresh machine — or a container — gets the service installed, started and registered at
+login without ever opening a window. The main repository's README covers the flags,
 `config.json` and running in Docker.
 
 The binary lives in `~/.ggs/remote/bin/`; its log is `~/.ggs/logs/remote.log`. On Linux the
