@@ -146,6 +146,10 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 				if (editor.dirty) return; // the save failed and was reported
 			}
 		}
+		// The guard needs the view as it was when the read left: capturing it after the await
+		// compares it against itself and never fires, and edits typed during the read would be
+		// wiped by the redecode (reloadIfClean carries the same pattern, correctly).
+		const view = editor.view;
 		let file: FileContents;
 		try {
 			file = await readFileRaw(editor.input.path, encoding);
@@ -156,7 +160,6 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 		if (file.contents === null) return;
 		// The read was async: bail when the tab closed or its view was rebuilt meanwhile,
 		// so the redecode cannot wipe what is on screen now.
-		const view = editor.view;
 		if (!view || editor.view !== view || !this.open.includes(editor)) return;
 		editorState.cm?.replaceDocument(view, file.contents);
 		editor.dirty = false;

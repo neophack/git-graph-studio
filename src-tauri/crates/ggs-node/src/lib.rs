@@ -75,9 +75,21 @@ const HOST_REQUEST_BASE: u64 = 1_000_000_000;
 /// How long a `ggs.hostRequest` may wait for the workbench's answer.
 const HOST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The outstanding `ggs.hostRequest`s of this backend, id → the reply channel the blocked
-/// caller waits on. The reader thread routes response lines here.
-type PendingHostRequests = Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>;
+/// The outstanding `ggs.hostRequest`s of this backend, id → how the reader thread routes
+/// the answer back. The reader thread owns the removal.
+enum HostReply {
+    /// The synchronous half: the JS thread BLOCKS on the channel until the answer crosses
+    /// (or the 30 s cap) — fine for the fast host services (`host.env`,
+    /// `commands.registerBatch`), fatal for the interactive class, which is what
+    /// [`HostReply::Async`] exists for.
+    Sync(mpsc::Sender<Result<Value, String>>),
+    /// The interactive half (a message box, a quick pick — see [`host_request_async`]):
+    /// the reader queues `Job::HostAnswer`, and the JS thread settles the promise while
+    /// serving everything else that arrived meanwhile.
+    Async,
+}
+
+type PendingHostRequests = Mutex<HashMap<u64, HostReply>>;
 
 fn host_requests() -> &'static PendingHostRequests {
     static MAP: OnceLock<PendingHostRequests> = OnceLock::new();
@@ -96,7 +108,7 @@ fn next_host_request_id() -> u64 {
 pub(crate) fn host_request(emitter: &Emitter, method: &str, args: Value) -> Result<Value, String> {
     let id = next_host_request_id();
     let (tx, rx) = mpsc::channel();
-    host_requests().lock().unwrap().insert(id, tx);
+    host_requests().lock().unwrap().insert(id, HostReply::Sync(tx));
     emitter.request(
         id,
         "ggs.hostRequest",
@@ -111,6 +123,33 @@ pub(crate) fn host_request(emitter: &Emitter, method: &str, args: Value) -> Resu
     }
     let _ = host_requests().lock().unwrap().remove(&id);
     answer.map_err(|_| "the workbench did not answer the host request".to_owned())?
+}
+
+/// The interactive class of host request — a message box (`showInformationMessage`), a
+/// quick pick, an input box — asked WITHOUT holding the JS thread. The answer may take as
+/// long as the user takes; blocking for it (the synchronous [`host_request`] this
+/// replaces for the vscode shim's `request` surface) wedged the whole backend behind one
+/// unanswered toast, up to the 30 s cap per call — git-graph-rs's version toast standing
+/// open left every later command of the backend queued out. No timeout here: a message
+/// box legitimately outlives any cap, and the entry dies with the runtime.
+pub(crate) fn host_request_async(
+    emitter: &Emitter,
+    method: &str,
+    args: Value,
+    context: &mut Context,
+) -> boa_engine::object::builtins::JsPromise {
+    let id = next_host_request_id();
+    let (promise, resolvers) = boa_engine::object::builtins::JsPromise::new_pending(context);
+    with_state(|state| {
+        state.async_host_requests.insert(id, resolvers);
+    });
+    host_requests().lock().unwrap().insert(id, HostReply::Async);
+    emitter.request(
+        id,
+        "ggs.hostRequest",
+        json!({ "method": method, "args": args }),
+    );
+    promise
 }
 
 /// A timer waiting for its deadline; the callback and its arguments live on the JS thread
@@ -180,6 +219,13 @@ pub(crate) enum Job {
     /// command dispatched early waits for readiness exactly as a frame's does.
     ActivateFrame {
         params: Value,
+    },
+    /// An answer to an async host request (the interactive class): settles the promise
+    /// [`host_request_async`] handed out, on the JS thread, after everything already
+    /// queued has run.
+    HostAnswer {
+        id: u64,
+        result: Result<Value, String>,
     },
     Quit,
 }
@@ -283,6 +329,26 @@ pub(crate) struct State {
     /// The out-of-heap bytes (`alloc::large_live_bytes`) after the last collection the
     /// external pressure forced — the watermark [`collect_on_external_pressure`] paces from.
     external_baseline: usize,
+    /// The outstanding ASYNC host requests (the interactive class — a message box, a
+    /// quick pick), id → the promise settle halves. Boa values: JS-thread only, dying with
+    /// the state. [`host_request_async`] fills an entry; the run loop's
+    /// `Job::HostAnswer` arm settles it.
+    async_host_requests: HashMap<u64, boa_engine::builtins::promise::ResolvingFunctions>,
+    /// Commands parked on the USER — a handler whose promise awaits a message box or a
+    /// quick pick ([`run_command`] parks instead of holding the JS thread through
+    /// `settle`'s budget, the FIFO queue starving behind it). The run loop's pass
+    /// ([`poll_parked_commands`]) answers each when its promise moves.
+    parked_commands: Vec<ParkedCommand>,
+    /// Set by [`run_command`] when it parked this request's promise: the `Job::Request`
+    /// arm then leaves the reply to the park poll. Cleared before each request runs.
+    command_parked: bool,
+}
+
+/// One runCommand whose answer waits on the user: the handler's promise and the wire
+/// reply channel it will answer through, whenever the promise settles.
+struct ParkedCommand {
+    promise: boa_engine::object::builtins::JsPromise,
+    reply: mpsc::Sender<Result<Value, String>>,
 }
 
 thread_local! {
@@ -323,6 +389,9 @@ impl State {
             pending_activation: None,
             activation_wait_spent: false,
             external_baseline: 0,
+            async_host_requests: HashMap::new(),
+            parked_commands: Vec::new(),
+            command_parked: false,
         }
     }
 
@@ -529,17 +598,28 @@ pub fn serve_on<R: std::io::BufRead, W: std::io::Write + Send + 'static>(
         },
         move |id, answer| {
             // An answer to this backend's own `ggs.hostRequest`: wake the JS thread that
-            // blocked on it.
+            // blocked on it (the sync half), or queue the settle of the promise an async
+            // request handed out.
             if id >= HOST_REQUEST_BASE {
                 if std::env::var("GGS_TRACE_BOOT").is_ok() {
                     eprintln!("[host-request] answer for {id} routed");
                 }
-                if let Some(tx) = host_requests().lock().unwrap().remove(&id) {
-                    let _ = tx.send(answer);
-                } else if std::env::var("GGS_TRACE_BOOT").is_ok() {
-                    eprintln!("[host-request] answer for {id} had no waiter");
+                match host_requests().lock().unwrap().remove(&id) {
+                    Some(HostReply::Sync(tx)) => {
+                        let _ = tx.send(answer);
+                    }
+                    Some(HostReply::Async) => {
+                        responses_pump.send_job(Job::HostAnswer {
+                            id,
+                            result: answer,
+                        });
+                    }
+                    None => {
+                        if std::env::var("GGS_TRACE_BOOT").is_ok() {
+                            eprintln!("[host-request] answer for {id} had no waiter");
+                        }
+                    }
                 }
-                let _ = responses_pump;
             }
         },
     );
@@ -624,6 +704,12 @@ fn js_main(rx: mpsc::Receiver<Job>, wake: Arc<(Mutex<bool>, Condvar)>, entry: Pa
         contained(&mut context, "a native addon completion", |context| {
             napi_host::drain_threadsafe_calls(context);
         });
+        // 3½. Async-work completions (an `AsyncTask`'s `complete` half, pushed by the
+        //     runner thread once the addon's `execute` returned): same rule — settled
+        //     before the microtask drain that resolves the awaiting promise.
+        contained(&mut context, "an async work completion", |context| {
+            napi_host::drain_async_completions(context);
+        });
         // 4. Settled promise jobs (microtasks).
         contained(&mut context, "a promise job", |context| {
             let _ = context.run_jobs();
@@ -631,6 +717,10 @@ fn js_main(rx: mpsc::Receiver<Job>, wake: Arc<(Mutex<bool>, Condvar)>, entry: Pa
         // 4½. The parked activation promise (see `install_frame_program`): its settlement
         //     runs the registration flush; a rejection is logged. A pending one stays.
         contained(&mut context, "the activation poll", poll_activation);
+        // 4¾. Commands parked on the user (a message box, a quick pick): answered the
+        //     pass their promise moves; a pending one stays parked. Runs after the
+        //     microtask drain, so a box answered this pass settles this pass.
+        contained(&mut context, "the parked-command poll", poll_parked_commands);
         // 5. Idle housekeeping (the queue was drained above): a large module's parse tree,
         //    parked by the compiler so tearing it down — millions of frees — never delayed
         //    the module's first run. A no-op when nothing is parked.
@@ -818,7 +908,13 @@ fn execute_job(context: &mut Context, job: Job) -> bool {
             if let Some(emitter) = emitter {
                 with_state(|state| state.emitter = Some(emitter));
             }
-            let _ = reply.send(handle_request(context, &method, &params));
+            with_state(|state| state.command_parked = false);
+            let answer = handle_request(context, &method, &params, &reply);
+            // A command parked on the user keeps its reply: the park poll answers it when
+            // the handler's promise moves (a message box clicked, a quick pick chosen).
+            if !with_state(|state| state.command_parked) {
+                let _ = reply.send(answer);
+            }
             false
         }
         Job::ProcData {
@@ -850,6 +946,10 @@ fn execute_job(context: &mut Context, job: Job) -> bool {
             bytes,
         } => {
             native_event(context, id, event, &data, bytes);
+            false
+        }
+        Job::HostAnswer { id, result } => {
+            settle_host_answer(context, id, result);
             false
         }
     }
@@ -966,7 +1066,12 @@ fn find_vscode_shim() -> Option<PathBuf> {
 
 /* ---------- the protocol's three methods ---------- */
 
-fn handle_request(context: &mut Context, method: &str, params: &Value) -> Result<Value, String> {
+fn handle_request(
+    context: &mut Context,
+    method: &str,
+    params: &Value,
+    reply: &mpsc::Sender<Result<Value, String>>,
+) -> Result<Value, String> {
     match method {
         // The start handshake carries the app's open folders: they become `ggs.env`, the
         // package root moves to the extension path the host names, and the manifest's
@@ -1036,7 +1141,7 @@ fn handle_request(context: &mut Context, method: &str, params: &Value) -> Result
                 .unwrap_or_default()
                 .to_owned();
             let args = params.get("args").cloned().unwrap_or_else(|| json!([]));
-            run_command(context, &command, &args)
+            run_command(context, &command, &args, reply)
         }
         // A host push (theme, configuration, webview messages, watcher batches): the same
         // event objects a frame's `__studioExtEvent` carries, into the shim's emitters.
@@ -1060,7 +1165,7 @@ fn handle_request(context: &mut Context, method: &str, params: &Value) -> Result
         // command name and the params' `args` as the arguments.
         other => {
             let args = params.get("args").cloned().unwrap_or_else(|| json!([]));
-            run_command(context, other, &args)
+            run_command(context, other, &args, reply)
         }
     }
 }
@@ -1192,8 +1297,33 @@ fn install_frame_program(context: &mut Context, params: &Value) -> Result<(), St
 /// makes every command live the moment `registerCommand` returns. A rejection is logged
 /// like a failed activation (what it registered before throwing stays, as in VS Code); a
 /// settled promise leaves the slot.
-fn poll_activation(context: &mut Context) {
-    let Some(promise) = with_state(|state| state.pending_activation.take()) else {
+/// Answer the commands parked on the user ([`run_command`] parks a handler whose promise
+/// waits on a message box): each pass takes them all, answers the ones whose promise has
+/// moved, and re-parks the rest. VS Code's own semantics — an `executeCommand` whose
+/// handler shows a box pends until the user decides, and the host keeps serving.
+fn poll_parked_commands(context: &mut Context) {
+    let parked = with_state(|state| std::mem::take(&mut state.parked_commands));
+    for entry in parked {
+        match entry.promise.state() {
+            boa_engine::builtins::promise::PromiseState::Pending => {
+                with_state(|state| state.parked_commands.push(entry));
+            }
+            boa_engine::builtins::promise::PromiseState::Fulfilled(value) => {
+                let answer = js_to_json(context, value).unwrap_or(Value::Null);
+                let _ = entry.reply.send(Ok(answer));
+            }
+            boa_engine::builtins::promise::PromiseState::Rejected(reason) => {
+                let message = reason
+                    .to_string(context)
+                    .map(|text| text.to_std_string_escaped())
+                    .unwrap_or_else(|_| "the command rejected".to_owned());
+                let _ = entry.reply.send(Err(message));
+            }
+        }
+    }
+}
+
+fn poll_activation(context: &mut Context) {    let Some(promise) = with_state(|state| state.pending_activation.take()) else {
         return;
     };
     flush_registrations(context);
@@ -1340,7 +1470,12 @@ fn contributed_commands(package_root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn run_command(context: &mut Context, command: &str, args: &Value) -> Result<Value, String> {
+fn run_command(
+    context: &mut Context,
+    command: &str,
+    args: &Value,
+    reply: &mpsc::Sender<Result<Value, String>>,
+) -> Result<Value, String> {
     let args = args.as_array().cloned().unwrap_or_default();
 
     // 1. The launcher convention: the manifest's command opens the page it names.
@@ -1382,6 +1517,26 @@ fn run_command(context: &mut Context, command: &str, args: &Value) -> Result<Val
             }
             other => other?,
         };
+        // A handler whose answer is a PENDING promise may be waiting on the USER (a
+        // message box, a quick pick — the async host requests settle only when the user
+        // decides): parking it with the reply keeps the one JS thread serving instead of
+        // holding it through `settle`'s whole budget with every later request queued
+        // behind. A promise already moved, or a plain value, answers inline as before.
+        let adopted = result.as_object().and_then(|object| {
+            boa_engine::object::builtins::JsPromise::from_object(object.clone()).ok()
+        });
+        if let Some(promise) = adopted {
+            if promise.state() == boa_engine::builtins::promise::PromiseState::Pending {
+                with_state(|state| {
+                    state.parked_commands.push(ParkedCommand {
+                        promise,
+                        reply: reply.clone(),
+                    });
+                    state.command_parked = true;
+                });
+                return Ok(Value::Null); // the flag suppresses this placeholder answer
+            }
+        }
         let settled = settle(context, result)?;
         return js_to_json(context, settled);
     }
@@ -1497,6 +1652,9 @@ fn deliver_child_jobs(context: &mut Context) {
                 data,
                 bytes,
             } => native_event(context, id, event, &data, bytes),
+            // A message box's answer settling a promise this very settle loop waits on —
+            // the same reason the tsfn drain runs here.
+            Job::HostAnswer { id, result } => settle_host_answer(context, id, result),
             other => backlog.push(other),
         }
     }
@@ -1506,6 +1664,43 @@ fn deliver_child_jobs(context: &mut Context) {
             for job in backlog {
                 pump.requeue(job);
             }
+        });
+    }
+}
+
+/// Settle one async host request's promise with the workbench's answer — the shared body
+/// of the run loop's `Job::HostAnswer` arm and the settle-loop window
+/// ([`deliver_child_jobs`]), so a message box's answer moves its promise whichever half
+/// of the runtime is holding the thread.
+fn settle_host_answer(context: &mut Context, id: u64, result: Result<Value, String>) {
+    let resolvers = with_state(|state| state.async_host_requests.remove(&id));
+    let Some(resolvers) = resolvers else {
+        return;
+    };
+    // The same JSON-string wire the synchronous bridge answers with — the shim's caller
+    // parses it exactly once, whichever bridge served it.
+    let outcome = match result {
+        Ok(value) => resolvers
+            .resolve
+            .call(
+                &JsValue::undefined(),
+                &[text(
+                    serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned()),
+                )],
+                context,
+            )
+            .map(|_| ()),
+        Err(message) => resolvers
+            .reject
+            .call(&JsValue::undefined(), &[text(message)], context)
+            .map(|_| ()),
+    };
+    if let Err(error) = outcome {
+        with_state(|state| {
+            state.log(
+                "warn",
+                &format!("an async host request's settle threw: {error}"),
+            )
         });
     }
 }
@@ -1572,6 +1767,10 @@ pub(crate) fn settle(context: &mut Context, value: JsValue) -> Result<JsValue, S
                     eprintln!("[settle] draining tsfn");
                 }
                 napi_host::drain_threadsafe_calls(context);
+                // The async-work completions (napi-rs AsyncTask) settle through the same
+                // blocked-thread window: their `complete` resolves the promise this very
+                // settle loop is waiting on.
+                napi_host::drain_async_completions(context);
                 if trace {
                     eprintln!("[settle] draining child jobs");
                 }

@@ -1119,6 +1119,244 @@ ggs.onRequest((command, args) => {
     assert_eq!(answers[6].as_ref().unwrap()["unknown"], json!("nobody"));
 }
 
+/// The module bytecode cache's write half (restored 2026-10-28): the 2026-10-01
+/// panic-fallback restructure folded the module compile into a closure for the
+/// all-escaping retry and dropped the cache write the straight-line flow used to make,
+/// while the read path stayed — every bundle re-parsed and re-compiled on every backend
+/// start since (only the prelude and the vscode shim still cached). One activation
+/// writes the entry's compiled blob under the cache root the test points at, and a
+/// second activation of the same package answers the same command from it.
+#[test]
+fn a_module_compiles_once_and_caches_across_backend_starts() {
+    let root = std::env::temp_dir().join(format!("ggs-module-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::env::set_var("GGS_BYTECODE_CACHE", &root);
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[
+            (
+                "package.json",
+                r#"{"name":"cached","publisher":"acme","version":"1.0.0","main":"main.js"}"#,
+            ),
+            (
+                "main.js",
+                r#"
+let n = 0;
+for (let i = 0; i < 4; i++) n += i * 3; // the register-local shapes the walls guard
+ggs.onRequest((command) => ({ answer: command + ':' + n }));
+"#,
+            ),
+        ],
+    )
+    .join("main.js");
+    let requests = || vec![initialize(), run_command("probe", json!([]))];
+    let first = serve(entry.clone(), &requests());
+    let result = first[1].clone().expect("the first (compiling) start answers");
+    assert_eq!(result["answer"], "probe:18");
+    let blobs = std::fs::read_dir(&root)
+        .expect("the cache root lists")
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "gcbc"))
+        .count();
+    assert!(blobs >= 1, "the entry's compiled blob was written");
+    let second = serve(entry, &requests());
+    let result = second[1].clone().expect("the second start (cache hit) answers");
+    assert_eq!(result["answer"], "probe:18");
+    std::env::remove_var("GGS_BYTECODE_CACHE");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The interactive host requests (a `showInformationMessage`, a quick pick) must not hold
+/// the one JS thread: the shim's `request` surface rides `__ggsHostRequestAsync`, whose
+/// answer settles a promise from the run loop, so a message box left unanswered only
+/// pends ITS OWN caller — every other command keeps answering. Before the async native,
+/// the sync bridge blocked the JS thread on the box for the full host-request cap, and
+/// git-graph-rs's standing version toast queued every later command of the backend out.
+#[test]
+fn a_message_box_does_not_hold_the_js_thread() {
+    // The shim file the frame program evaluates; a checkout without a built shim skips.
+    let shim = std::env::var("GGS_VSCODE_SHIM")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("../target/studio/vscode-shim.cjs"));
+    if !shim.is_file() {
+        eprintln!("skipping: no vscode-shim.cjs built");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let entry = make_package(
+        tmp.path(),
+        &[
+            (
+                "package.json",
+                r#"{"name":"boxed","publisher":"acme","version":"1.0.0","main":"main.js"}"#,
+            ),
+            (
+                "main.js",
+                r#"
+const vscode = require('vscode');
+ggs.onRequest((command) => {
+    if (command === 'box') {
+        return vscode.window.showInformationMessage('stuck?', 'Yes', 'No').then((pick) => ('picked:' + pick));
+    }
+    if (command === 'ping') return 'pong';
+    return null;
+});
+"#,
+            ),
+        ],
+    )
+    .join("main.js");
+
+    let (requests_tx, requests_rx) = std::sync::mpsc::channel::<String>();
+    let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        ggs_node::serve_on(
+            entry,
+            ChannelReader::from(requests_rx),
+            ChannelWriter(output_tx),
+        );
+    });
+    let read_line = |timeout: std::time::Duration| -> Option<String> {
+        output_rx.recv_timeout(timeout).ok()
+    };
+    // The held notify ask's id, read by the answerer and asserted by the test.
+    let mut notify_id: Option<u64> = None;
+    // Answer every host ask EXCEPT the notify one, which the test holds open.
+    fn answer_host(
+        line: &str,
+        notify_id: &mut Option<u64>,
+        requests_tx: &std::sync::mpsc::Sender<String>,
+    ) -> bool {
+        let Ok(wire) = serde_json::from_str::<Value>(line) else { return false };
+        if wire.get("method").and_then(Value::as_str) != Some("ggs.hostRequest") {
+            return false;
+        }
+        let id = wire["id"].as_u64().unwrap_or_default();
+        let inner = wire["params"]["method"].as_str().unwrap_or_default();
+        if inner == "notify" {
+            if notify_id.is_none() {
+                *notify_id = Some(id);
+            }
+            return true; // held: the box stays open
+        }
+        let answer = if inner == "host.env" {
+            json!({ "settings": {}, "language": "en", "state": { "global": {}, "workspace": {} } })
+        } else {
+            Value::Null
+        };
+        requests_tx
+            .send(ggs_proto::response(id, Ok(answer)))
+            .unwrap();
+        true
+    }
+
+    let mut next_id = 1u64;
+    let send = |id: u64, method: &str, params: Value| {
+        requests_tx
+            .send(ggs_proto::request(id, method, params))
+            .unwrap();
+    };
+
+    send(
+        next_id,
+        "initialize",
+        json!({
+            "protocolVersion": "ggs-ext/1",
+            "extensionId": "acme.boxed",
+            "extensionPath": tmp.path().join("pkg").display().to_string(),
+            "workspaceFolders": [],
+        }),
+    );
+    loop {
+        let Some(line) = read_line(std::time::Duration::from_secs(60)) else {
+            panic!("the backend fell silent before the handshake");
+        };
+        if answer_host(&line, &mut notify_id, &requests_tx) {
+            continue;
+        }
+        if serde_json::from_str::<Value>(&line).ok().and_then(|w| w["id"].as_u64()) == Some(next_id) {
+            break;
+        }
+    }
+
+    // The message box: its notify host ask is held unanswered, and the box command's own
+    // answer must NOT have crossed (it awaits the pick).
+    next_id += 1;
+    send(
+        next_id,
+        "runCommand",
+        json!({ "command": "box", "args": [] }),
+    );
+    let mut box_answer = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && notify_id.is_none() {
+        if let Some(line) = read_line(std::time::Duration::from_secs(1)) {
+            if answer_host(&line, &mut notify_id, &requests_tx) {
+                continue;
+            }
+            if serde_json::from_str::<Value>(&line).ok().and_then(|w| w["id"].as_u64()) == Some(next_id) {
+                box_answer = Some(line);
+                break;
+            }
+        }
+    }
+    assert!(notify_id.is_some(), "the message box crossed as a host ask");
+    assert!(box_answer.is_none(), "the box command did not finish while its box was open");
+
+    // The proof: with the box still unanswered, ANOTHER command answers promptly — the JS
+    // thread never stopped serving.
+    next_id += 1;
+    send(
+        next_id,
+        "runCommand",
+        json!({ "command": "ping", "args": [] }),
+    );
+    let mut ping_answer = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && ping_answer.is_none() {
+        let Some(line) = read_line(std::time::Duration::from_secs(1)) else {
+            continue;
+        };
+        if answer_host(&line, &mut notify_id, &requests_tx) {
+            continue;
+        }
+        if serde_json::from_str::<Value>(&line).ok().and_then(|w| w["id"].as_u64()) == Some(next_id) {
+            ping_answer = Some(line);
+        }
+    }
+    let ping = ping_answer.unwrap_or_else(|| panic!("ping answered while the box was open — the JS thread is not held"));
+    assert!(
+        serde_json::from_str::<Value>(&ping).unwrap()["result"] == "pong",
+        "ping's answer: {ping}"
+    );
+
+    // And the held box, answered late, settles its own caller with the chosen item — the
+    // promise the async request handed out resolved from the run loop.
+    requests_tx
+        .send(ggs_proto::response(notify_id.unwrap(), Ok(json!("Yes"))))
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut late = None;
+    while std::time::Instant::now() < deadline && late.is_none() {
+        let Some(line) = read_line(std::time::Duration::from_secs(1)) else {
+            continue;
+        };
+        if answer_host(&line, &mut notify_id, &requests_tx) {
+            continue;
+        }
+        if serde_json::from_str::<Value>(&line).ok().and_then(|w| w["id"].as_u64()) == Some(2) {
+            late = Some(line);
+        }
+    }
+    let late = late.unwrap_or_else(|| panic!("the box command finished once its box was answered"));
+    assert!(
+        serde_json::from_str::<Value>(&late).unwrap()["result"] == "picked:Yes",
+        "the late answer carried the chosen item: {late}"
+    );
+}
+
 #[test]
 fn os_network_interfaces_list_the_lans_addresses() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1268,9 +1506,12 @@ fn a_napi_addon_loads_and_answers_under_ggs_node() {
     let main = format!(
         r#"
 const addon = require({engine});
+// The engine's open export: `openRepository` before 1.1.0, `open` since (the 1.1.0
+// binding is napi-rs AsyncTask-based — its settle rides the host's async-work drain).
+const openRepository = addon.openRepository || addon.open;
 ggs.onRequest((command) => {{
     if (command === 'version') return {{ version: addon.engineVersion() }};
-    if (command === 'open') return addon.openRepository({repo}).then((root) => ({{ root }}));
+    if (command === 'open') return openRepository({repo}).then((root) => ({{ root }}));
     if (command === 'request') {{
         // The dev fixture's generic dispatch surface; a marketplace engine build carries
         // named exports only, and the async settle is `open`'s and `reject`'s to prove.
@@ -1279,8 +1520,10 @@ ggs.onRequest((command) => {{
             .then((answer) => ({{ answer }}));
     }}
     if (command === 'reject') {{
-        return addon.openRepository({missing}).then(
-            () => ({{ rejected: false }}),
+        // The two engines' failure shapes: 1.0 rejected the promise, 1.1 resolves the
+        // error envelope `{{\"error\":{{...}}}}` (the request seam never rejects).
+        return openRepository({missing}).then(
+            (answer) => ({{ rejected: String(answer).includes('error'), message: String(answer) }}),
             (error) => ({{ rejected: true, message: String(error && error.message) }}));
     }}
     return null;

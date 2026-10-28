@@ -300,7 +300,9 @@ try {
 	const output = (await workbench.evaluate('window.__probeOutput')) ?? [];
 	for (const line of output) log(`[extension] ${line}`);
 	check('the extension log reached the Output channel (the live setting change applied)', output.length > 0, `${output.length} lines`);
-	check('the view loaded its commits', output.some((line) => /Loaded \d+ commits/.test(line)));
+	// 1.0.27 logged "Loaded N commits"; 1.1.0 words it "Loaded the view of <path> (N
+	// commits) in N ms" — both count as the view having loaded its commits.
+	check('the view loaded its commits', output.some((line) => /Loaded (\d+ commits|the view of .*?\(\d+ commits\))/.test(line)));
 	const fallbacks = output.filter((line) => /could not answer .*falling back/i.test(line));
 	check('no read fell back from the Rust engine to the git CLI', fallbacks.length === 0, fallbacks.slice(0, 3).join(' | '));
 

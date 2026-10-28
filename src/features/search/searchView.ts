@@ -544,6 +544,22 @@ export class SearchView {
 	}
 
 	async replaceAll(): Promise<void> {
+		// The dialog's counts describe `this.results`, but the replacement runs `this.query`:
+		// a query edited within the typing pause (its search still on the debounce timer) or a
+		// search still streaming would have the dialog confirm one count while the backend
+		// replaces another set entirely. The pending search is flushed first, so what the user
+		// confirms is exactly what gets replaced.
+		if (this.debounceTimer !== null || this.searching) {
+			if (this.debounceTimer !== null) {
+				window.clearTimeout(this.debounceTimer);
+				this.debounceTimer = null;
+			}
+			await this.runSearch();
+			// `runSearch`'s await can resolve before the `done` event's dispatch lands (an IPC
+			// event queues behind the invoke answer): drain the queued ticks — bounded, so a
+			// backend that never finishes cannot wedge the button.
+			for (let i = 0; this.searching && i < 100; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+		}
 		if (this.query === '' || this.results.length === 0) return;
 		const count = this.results.reduce((sum, f) => sum + f.matches.length, 0);
 		// VS Code's confirmation and report, word for word.

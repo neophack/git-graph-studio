@@ -930,7 +930,18 @@ page shows the integration's state (`claude_mcp_status`).
   keeps one slot below its mark, a settled deferred is freed, and every export runs
   under `catch_unwind` because a panic may not unwind out of `extern "C"`; before
   2026-10-04 the arena only grew, rooting every argument and result an addon touched
-  for the process's life) — and the dispatch: launcher → `ggs.onRequest` →
+  for the process's life; 2026-10-27, the async-work family serves napi-rs 3's
+  `AsyncTask` — the seam git-graph-rs 1.1.0's engine binding rides: `execute` on a
+  host-spawned runner thread, the `complete` half queued for the owning JS thread and
+  delivered beside the threadsafe calls (`drain_async_completions`, in the run loop
+  and the blocked request's settle loop; before it, every async export of the 1.1.0
+  engine failed at `napi_create_async_work` and the extension found no repositories),
+  `napi_delete_async_work` legal from inside `complete` — the runner copies what it
+  needs at spawn and never touches the work again; and `napi_get_cb_info` pads the
+  caller's argv buffer with `undefined` to its full size, Node's own behaviour (v8
+  answers `undefined` past the argument count) that napi-rs 3's unconditional
+  `cb.get_arg(i)` depends on: an omitted trailing `Option<T>` reads `undefined`, never
+  the buffer's null placeholder) — and the dispatch: launcher → `ggs.onRequest` →
   `exports.dispatch`; stdout is the protocol, package code writes through `ggs.log`
   only. The run loop's crash-proofing (2026-10-04): the JS thread runs on a 64 MiB
   stack reservation with the native stack guard armed; every step that runs package
@@ -1007,7 +1018,17 @@ page shows the integration's state (`claude_mcp_status`).
   `Script::from_compiled` runs the rebuilt tree without parsing; ggs-node's `require`
   keys the blob by the source's SHA-256 under `~/.ggs/cache/bytecode/` (claude-code:
   parse 257 ms + compile 65 ms become one 29 MB read at 57 ms — cold activation
-  0.79 s, warm 0.41 s; any decode failure falls back to a normal compile);
+  0.79 s, warm 0.41 s; any decode failure falls back to a normal compile; 2026-10-28,
+  the WRITE the 2026-10-01 panic-fallback restructure dropped is restored inside
+  `compile_and_run` — since then only the prelude and the vscode shim ever cached, and
+  every bundle re-parsed on every backend start; git-graph-rs 1.1.0: first command
+  502 ms cold → 386 ms warm, the write itself 27 ms). The INTERACTIVE host requests —
+  a message box, a quick pick, an input box — ride `__ggsHostRequestAsync` (same day):
+  the shim's `request` surface gets a promise the reader's `Job::HostAnswer` settles,
+  and a runCommand whose handler still pends on the user is PARKED with its reply
+  (`poll_parked_commands`, the run loop's pass) instead of holding the JS thread
+  through `settle`'s budget — before, one standing toast (git-graph-rs's version box)
+  queued every later command of the backend behind its 30 s block;
   node_runtime
   runs with the AST optimizer off (its one constant-folding pass is a full extra tree
   walk for what a minifier already folded) and installs `node_runtime/alloc.rs` as the

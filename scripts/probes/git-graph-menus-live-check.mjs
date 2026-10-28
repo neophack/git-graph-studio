@@ -231,6 +231,11 @@ async function paletteRows(query) {
 /** Type a palette query and click the first row matching the pattern — polling in-page until
  *  the row appears (the palette's filtering settles asynchronously), the way a user waits. */
 async function paletteClick(query, pattern, tries = 20) {
+	// The toast baseline must be read BEFORE the click: the click runs inside the
+	// evaluate below, and a fast command's toast can land on screen before that evaluate
+	// returns — a baseline taken after it already contains the answer, and the "new toast"
+	// match never fires (the instant end-all-reviews command raced exactly that window).
+	const before = new Set(await workbench.evaluate(`[...document.querySelectorAll('#notifications .notification .message')].map((m) => m.textContent.trim())`) ?? []);
 	const rows = await workbench.evaluate(`(async () => {
 		const open = document.querySelector('#overlays .quick-input input');
 		open?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
@@ -253,7 +258,7 @@ async function paletteClick(query, pattern, tries = 20) {
 		}
 		return [...document.querySelectorAll('#overlays .quick-input .row')].map((r) => r.textContent.trim());
 	})()`);
-	return { rows: rows ?? [], clicked: (rows ?? []).some((text) => pattern.test(text)) };
+	return { rows: rows ?? [], clicked: (rows ?? []).some((text) => pattern.test(text)), before };
 }
 
 /** Switch the sidebar to a view by running its workbench command from the palette. */
@@ -502,8 +507,11 @@ try {
 	check('the Source Control view opens (again)', await showView(/Source Control|源代码管理/, '>源代码管理') || await showView(/Source Control/, '>Source Control'));
 	if ((await openMoreMenu()) === 'open') {
 		const headBefore = git('rev-parse', 'HEAD').trim();
+		// The toast baseline before the click, for the same fast-command reason as
+		// paletteClick's.
+		const amendBefore = new Set(await workbench.evaluate(`[...document.querySelectorAll('#notifications .notification .message')].map((m) => m.textContent.trim())`) ?? []);
 		const amendedItem = await clickMenuItem(T.amend);
-		const amendToast = amendedItem ? await toastMatching(/amend|修正/i) : '';
+		const amendToast = amendedItem ? await toastMatching(/amend|修正/i, 30000, amendBefore) : '';
 		const headAfter = git('rev-parse', 'HEAD').trim();
 		check('the Amend menu entry amends the last commit', headBefore !== headAfter, `${headBefore.slice(0, 8)} → ${headAfter.slice(0, 8)}`);
 		check('the amend reports its result', amendToast !== '', amendToast);
@@ -519,22 +527,22 @@ try {
 
 	// Version: a modal toast carrying the version.
 	const versionRun = await paletteClick('>Git Graph RS', T.version);
-	const versionToast = versionRun.clicked ? await toastMatching(/1\.0\.\d+|Git Graph|git-graph/i) : '';
+	const versionToast = versionRun.clicked ? await toastMatching(/1\.\d+\.\d+|Git Graph|git-graph/i, 30000, versionRun.before) : '';
 	check('Get Version Information answers with the version toast', versionToast !== '', versionToast.slice(0, 160));
 
 	// Clear avatar cache.
 	const avatarRun = await paletteClick('>Git Graph RS', T.clearAvatars);
-	const avatarToast = avatarRun.clicked ? await toastMatching(/avatar|头像/i) : '';
+	const avatarToast = avatarRun.clicked ? await toastMatching(/avatar|头像/i, 30000, avatarRun.before) : '';
 	check('Clear Avatar Cache answers', avatarToast !== '', avatarToast.slice(0, 160));
 
 	// Reset to remote: this repository has no upstream — the command must say so.
 	const resetRun = await paletteClick('>Git Graph RS', T.reset);
-	const resetToast = resetRun.clicked ? await toastMatching(/upstream|上游/i) : '';
+	const resetToast = resetRun.clicked ? await toastMatching(/upstream|上游/i, 30000, resetRun.before) : '';
 	check('Reset Current Branch to Remote reports the missing upstream', resetToast !== '', resetToast.slice(0, 160));
 
 	// The Gerrit hook fetch: no remote configured — its failure must surface.
 	const hookRun = await paletteClick('>Git Graph RS', T.gerritHook);
-	const hookToast = hookRun.clicked ? await toastMatching(/commit-msg|钩子/i) : '';
+	const hookToast = hookRun.clicked ? await toastMatching(/commit-msg|钩子/i, 30000, hookRun.before) : '';
 	check('Fetch commit-msg Hook (Gerrit) reports its failure', hookToast !== '', hookToast.slice(0, 160));
 
 	// Search Commits: the extension's own input box, the beta commit as a pick, the view on it.
@@ -589,7 +597,7 @@ try {
 
 	// End all code reviews: always answers.
 	const endAllRun = await paletteClick('>Git Graph RS', T.endAllReviews);
-	const endAllToast = endAllRun.clicked ? await toastMatching(/code review|代码评审/i) : '';
+	const endAllToast = endAllRun.clicked ? await toastMatching(/code review|代码评审/i, 30000, endAllRun.before) : '';
 	check('End All Code Reviews answers', endAllToast !== '', `${endAllRun.clicked ? 'clicked' : 'row not found'} ${endAllToast.slice(0, 160)}`);
 
 	// The specific/resume variants: no reviews in progress — their error must surface.
@@ -598,7 +606,7 @@ try {
 		['Resume a specific Code Review', T.resumeReview, /review|评审/i]
 	]) {
 		const run = await paletteClick('>Git Graph RS', pattern);
-		const toast = run.clicked ? await toastMatching(error) : '';
+		const toast = run.clicked ? await toastMatching(error, 30000, run.before) : '';
 		check(`${name} reports no reviews in progress`, toast !== '', `${run.clicked ? 'clicked' : 'row not found'} ${toast.slice(0, 160)}`);
 	}
 

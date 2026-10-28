@@ -15,6 +15,9 @@ import { probeVscodeNamespace } from './vscodeNamespaceProbe';
 
 interface ShimGlobal {
 	__ggsHostRequest: (method: string, argsJson: string) => string | null;
+	/** The interactive class served without holding the JS thread (see `request` below);
+	 *  absent on an older sidecar, where the sync bridge stands in. */
+	__ggsHostRequestAsync?: (method: string, argsJson: string) => Promise<string | null>;
 	ggs: { onRequest: (handler: (command: string, args: unknown[]) => void) => void };
 	vscode?: unknown;
 	__ggsVscodeShimInstall?: (args: InstallArgs) => InstalledVscode;
@@ -118,7 +121,15 @@ shim.__ggsVscodeShimInstall = function (args: InstallArgs): InstalledVscode {
 		return handler(...(rehydrateUris(wireArgs) as unknown[]));
 	};
 	const bridge: HostBridge = {
-		request: (method, requestArgs) => Promise.resolve(hostRequest(method, requestArgs as unknown[])),
+		// The vscode API's requests ride the async native when the sidecar serves it: a
+		// message box or a quick pick may outlive any patience, and the sync bridge would
+		// hold the one JS thread until its 30 s cap — one standing toast queued every
+		// later command of the backend behind it. The install-time `host.env` read keeps
+		// the sync bridge (it must answer before the context exists).
+		request: (method, requestArgs) => shim.__ggsHostRequestAsync
+			? shim.__ggsHostRequestAsync(method, JSON.stringify(requestArgs ?? [])).then(
+				(raw) => (raw === null || raw === undefined ? null : JSON.parse(raw)))
+			: Promise.resolve(hostRequest(method, requestArgs as unknown[])),
 		registerCommandHandler: (id, handler) => {
 			handlers.set(id, handler);
 			shim.ggs.onRequest(dispatchHostCall);

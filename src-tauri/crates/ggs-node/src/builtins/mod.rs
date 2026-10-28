@@ -183,6 +183,11 @@ pub fn register_natives(context: &mut Context) -> JsResult<()> {
             NativeFunction::from_fn_ptr(core::ggs_host_request),
         ),
         (
+            "__ggsHostRequestAsync",
+            2,
+            NativeFunction::from_fn_ptr(core::ggs_host_request_async),
+        ),
+        (
             "__ggsChildProcessSpawn",
             3,
             NativeFunction::from_fn_ptr(child::proc_spawn),

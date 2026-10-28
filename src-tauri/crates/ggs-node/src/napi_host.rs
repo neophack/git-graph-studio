@@ -9,12 +9,15 @@
 //! (`napi_create_function` + `napi_set_named_property`), calls (`napi_get_cb_info`, the
 //! value constructors and readers, the property set), errors (the pending-exception
 //! model), promises (the async functions settle through `napi_create_promise` /
-//! `napi_resolve_deferred`), and threadsafe functions — the async completion path, whose
+//! `napi_resolve_deferred`), threadsafe functions — the async completion path, whose
 //! calls arrive from the addon's worker threads and are drained on the JS thread
 //! (`drain_threadsafe_calls`, hooked into the run loop, woken through the shared
-//! condvar). The rest of the N-API catalogue answers as honest stubs — `napi-sys`
-//! tolerates a missing symbol by stubbing it, and a stubbed call returns
-//! `napi_generic_failure`, which napi-rs surfaces as an error, never a crash.
+//! condvar) — and async work (`napi_create_async_work` & co., napi-rs's `AsyncTask`
+//! seam): `execute` runs on a host-spawned runner thread, `complete` is delivered on
+//! the JS thread beside the threadsafe calls (`drain_async_completions`). The rest of
+//! the N-API catalogue answers as honest stubs — `napi-sys` tolerates a missing symbol
+//! by stubbing it, and a stubbed call returns `napi_generic_failure`, which napi-rs
+//! surfaces as an error, never a crash.
 //!
 //! Every entry except the threadsafe-function call/ref/release trio runs on the JS
 //! thread (registration from `require`, callbacks from Boa, the tsfn drain); the trio is
@@ -1171,12 +1174,22 @@ napi_fn!(napi_define_properties(env: *mut c_void, object: *mut c_void, count: us
 });
 
 napi_fn!(napi_get_cb_info(env: *mut c_void, info: *mut c_void, argc: *mut usize, argv: *mut *mut c_void, this_arg: *mut *mut c_void, data: *mut *mut c_void) -> u32 {
-    let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
+    let Some(slot) = env_mut(env) else { return NAPI_INVALID_ARG };
     let Some(info) = (info as *const CallbackInfo).as_ref() else { return NAPI_INVALID_ARG };
     let provided = if argc.is_null() { 0 } else { *argc };
     if !argv.is_null() {
-        for (at, handle) in info.argv.iter().take(provided).enumerate() {
-            *argv.add(at) = *handle;
+        // Node fills EVERY slot of the caller's buffer: v8's FunctionCallbackInfo[i]
+        // answers `undefined` past the argument count, and Node hands that to the addon.
+        // napi-rs 3 reads its declared arguments unconditionally (`cb.get_arg(i)`), so a
+        // call that omits a trailing `Option<T>` must still read `undefined` there, never
+        // the buffer's null placeholder — the 1.1.0 engine's `request(repo, json, id?)`
+        // hit exactly that.
+        let undefined = slot.handle(JsValue::undefined());
+        for at in 0..provided {
+            *argv.add(at) = match info.argv.get(at) {
+                Some(handle) => *handle,
+                None => undefined,
+            };
         }
     }
     if !argc.is_null() {
@@ -1621,6 +1634,259 @@ napi_fn!(napi_unref_threadsafe_function(_env: *mut c_void, _func: *mut c_void) -
     NAPI_OK
 });
 
+/* ----- async work: the Node-API 1 task seam (napi-rs's AsyncTask) ----- */
+
+// The status a cancelled work's `complete` is called with. It follows napi-sys 3's
+// numbering (11) — the crate every addon this host loads resolves its `napi_*` symbols
+// through, and the spelling its `complete` callbacks compare against — where Node's own
+// header counts 10. Only addon code ever reads the value, so the addon's spelling is
+// the one that must cross.
+const NAPI_CANCELLED: u32 = 11;
+
+type AsyncExecute = unsafe extern "C" fn(*mut c_void, *mut c_void);
+type AsyncComplete = unsafe extern "C" fn(*mut c_void, u32, *mut c_void);
+
+// One async work: the host's lifecycle bookkeeping beside the addon's task data. The
+// runner thread copies `execute`/`complete`/`data` into itself at spawn time (queue runs
+// on the JS thread, where the struct is safe to read) and, once `execute` has returned,
+// never touches the struct again — `napi_delete_async_work` is legitimately called from
+// INSIDE `complete` (napi-rs's task runtime does exactly that), which runs on the JS
+// thread after the runner has moved on, so freeing there must be sound.
+struct AsyncWork {
+    /// 0 created, 1 queued, 2 running, 3 done, 4 cancelled.
+    state: std::sync::atomic::AtomicU8,
+    execute: Option<AsyncExecute>,
+    complete: Option<AsyncComplete>,
+    data: *mut c_void,
+    owner: ThreadId,
+    wake: Option<Wake>,
+}
+
+// The `complete` halves waiting for their owning JS thread — an addon's async task
+// finishing on a worker (its `execute`), the promise-settling completion to run where
+// the environment lives. Drained beside the threadsafe calls (see
+// [`drain_async_completions`]).
+static ASYNC_COMPLETIONS: Mutex<Vec<(ThreadId, AsyncComplete, u32, SendPtr)>> =
+    Mutex::new(Vec::new());
+
+napi_fn!(napi_create_async_work(
+    env: *mut c_void,
+    _async_resource_name: *mut c_void,
+    _async_resource: *mut c_void,
+    execute: Option<AsyncExecute>,
+    complete: Option<AsyncComplete>,
+    data: *mut c_void,
+    result: *mut *mut c_void
+) -> u32 {
+    let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
+    if result.is_null() || execute.is_none() || complete.is_none() {
+        return NAPI_INVALID_ARG;
+    }
+    let work = Box::into_raw(Box::new(AsyncWork {
+        state: std::sync::atomic::AtomicU8::new(0),
+        execute,
+        complete,
+        data,
+        owner: std::thread::current().id(),
+        wake: THREAD_WAKE.with(|slot| slot.borrow().clone()),
+    }));
+    *result = work as *mut c_void;
+    NAPI_OK
+});
+
+napi_fn!(napi_queue_async_work(env: *mut c_void, work: *mut c_void) -> u32 {
+    let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
+    if work.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let work_ptr = SendPtr(work);
+    // Created → Queued: only the JS thread queues, so a plain CAS failure means the
+    // addon queued one work twice — Node refuses that, and so does this host.
+    let state_ptr = SendPtr(std::ptr::addr_of_mut!(
+        (*(work_ptr.0 as *mut AsyncWork)).state
+    ) as *mut c_void);
+    unsafe {
+        if (*(state_ptr.0 as *mut std::sync::atomic::AtomicU8))
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return NAPI_GENERIC_FAILURE;
+        }
+    }
+    // Copy everything the runner needs while still on the JS thread; after `execute`
+    // returns the runner only pushes the completion and wakes.
+    let execute = unsafe { (*(work_ptr.0 as *mut AsyncWork)).execute };
+    let complete = unsafe { (*(work_ptr.0 as *mut AsyncWork)).complete };
+    let data = SendPtr(unsafe { (*(work_ptr.0 as *mut AsyncWork)).data });
+    let owner = unsafe { (*(work_ptr.0 as *mut AsyncWork)).owner };
+    let owner_wake = unsafe { (*(work_ptr.0 as *mut AsyncWork)).wake.clone() };
+    let env_ptr = SendPtr(ENV.with(|slot| slot.get()) as *mut c_void);
+    spawn_async_runner::spawn(spawn_async_runner::Runner {
+        state_ptr,
+        execute,
+        complete,
+        data,
+        owner,
+        owner_wake,
+        env_ptr,
+    });
+    NAPI_OK
+});
+
+/// The runner half of a queued async work — everything the thread needs, spelled as one
+/// owned struct so the capture set is explicit (raw pointers wrapped in [`SendPtr`]).
+mod spawn_async_runner {
+    use super::{wake, AsyncComplete, AsyncExecute, SendPtr, ThreadId, ASYNC_COMPLETIONS};
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    pub(super) struct Runner {
+        pub(super) state_ptr: SendPtr,
+        pub(super) execute: Option<AsyncExecute>,
+        pub(super) complete: Option<AsyncComplete>,
+        pub(super) data: SendPtr,
+        pub(super) owner: ThreadId,
+        pub(super) owner_wake: Option<Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>>,
+        pub(super) env_ptr: SendPtr,
+    }
+
+    pub(super) fn spawn(runner: Runner) {
+        std::thread::spawn(move || run(runner));
+    }
+
+    fn run(runner: Runner) {
+        let state =
+            unsafe { &*(runner.state_ptr.0 as *mut std::sync::atomic::AtomicU8) };
+        // Queued → Running: `napi_cancel_async_work` may no longer win past this point.
+        if state
+            .compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return; // cancelled between queue and start; the canceller delivers complete
+        }
+        let Some(execute) = runner.execute else { return };
+        // The addon's `execute` must not touch the environment (Node's own contract); a
+        // panic inside it leaves the task's box in an unknown state, so the completion is
+        // withheld rather than run against freed memory — the promise stays pending, the
+        // backend keeps serving.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            unsafe { execute(runner.env_ptr.0, runner.data.0) };
+        }))
+        .is_err();
+        if panicked {
+            eprintln!("[ggs-node] an async work's execute panicked; its completion is withheld");
+            state.store(3, Ordering::SeqCst);
+            return;
+        }
+        state.store(3, Ordering::SeqCst);
+        let Some(complete) = runner.complete else { return };
+        ASYNC_COMPLETIONS
+            .lock()
+            .unwrap()
+            .push((runner.owner, complete, super::NAPI_OK, runner.data));
+        if let Some(handle) = runner.owner_wake.as_ref() {
+            wake(handle);
+        }
+    }
+}
+
+napi_fn!(napi_cancel_async_work(env: *mut c_void, work: *mut c_void) -> u32 {
+    let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
+    let Some(work) = (work as *mut AsyncWork).as_ref() else {
+        return NAPI_INVALID_ARG;
+    };
+    // Only a queued-not-yet-started work cancels (queue spawns its runner at once, so
+    // the window is honest but small); anything else — running, finished, never queued —
+    // is what Node answers with a failure too.
+    if work
+        .state
+        .compare_exchange(1, 4, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return NAPI_GENERIC_FAILURE;
+    }
+    if let Some(complete) = work.complete {
+        ASYNC_COMPLETIONS.lock().unwrap().push((
+            std::thread::current().id(),
+            complete,
+            NAPI_CANCELLED,
+            SendPtr(work.data),
+        ));
+        if let Some(handle) = work.wake.as_ref() {
+            wake(handle);
+        }
+    }
+    NAPI_OK
+});
+
+napi_fn!(napi_delete_async_work(env: *mut c_void, work: *mut c_void) -> u32 {
+    let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
+    if work.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let state = unsafe { (*(work as *mut AsyncWork)).state.load(Ordering::SeqCst) };
+    // A queued or running work is not the addon's to free (Node refuses the same call);
+    // created, done and cancelled are.
+    if state == 1 || state == 2 {
+        return NAPI_GENERIC_FAILURE;
+    }
+    unsafe { drop(Box::from_raw(work as *mut AsyncWork)); }
+    NAPI_OK
+});
+
+// An async context is resource bookkeeping for async hooks — diagnostics this host keeps
+// none of. A dummy context pointer and a no-op destroy keep an addon that allocates one
+// working, the way the uv event loop stubs below do.
+//
+napi_fn!(napi_async_init(env: *mut c_void, _binding: *mut c_void, _resource_name: *mut c_void, result: *mut *mut c_void) -> u32 {
+    let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
+    if result.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    *result = std::ptr::dangling_mut::<c_void>();
+    NAPI_OK
+});
+
+napi_fn!(napi_async_destroy(env: *mut c_void, _context: *mut c_void) -> u32 {
+    let Some(_) = env_mut(env) else { return NAPI_INVALID_ARG };
+    NAPI_OK
+});
+
+/// Deliver this thread's queued async-work completions, on the JS thread — called beside
+/// [`drain_threadsafe_calls`] (the run loop's steps, and the settle loop a blocked
+/// request drives): each completion runs the addon's `complete` callback, which settles
+/// the promise the work's task handed out, so it must precede the microtask drain.
+pub(crate) fn drain_async_completions(context: &mut Context) {
+    let owner = std::thread::current().id();
+    let batch: Vec<(AsyncComplete, u32, SendPtr)> = {
+        let mut queue = ASYNC_COMPLETIONS.lock().unwrap();
+        let (mine, others) = std::mem::take(&mut *queue)
+            .into_iter()
+            .partition(|(thread, _, _, _)| *thread == owner);
+        *queue = others;
+        mine.into_iter().map(|(_, complete, status, data)| (complete, status, data)).collect()
+    };
+    if batch.is_empty() {
+        return;
+    }
+    install(context as *mut Context);
+    for (complete, status, data) in batch {
+        let env = unsafe { any_env() as *mut NapiEnv as *mut c_void };
+        // Each completion is its own scope, as each is in Node; a `complete` that throws
+        // has nowhere for the exception to go (the promise's rejection is its own
+        // business), so it is reported and cleared like a tsfn delivery's.
+        let mark = unsafe { any_env().mark() };
+        unsafe { complete(env, status, data.0) };
+        unsafe { any_env().release_to(mark) };
+        if let Some(pending) = unsafe { any_env().pending.take() } {
+            eprintln!(
+                "[ggs-node] an async-work completion threw: {}",
+                pending.display()
+            );
+        }
+    }
+}
+
 // `napi-sys` binds this beside the N-API catalogue; napi-rs's runtime probes it. A host
 // without libuv answers a dummy loop and a no-op run — the threadsafe queue above is the
 // event loop here.
@@ -1721,12 +1987,6 @@ napi_stub!(
     napi_make_callback,
     napi_open_callback_scope,
     napi_close_callback_scope,
-    napi_create_async_work,
-    napi_delete_async_work,
-    napi_queue_async_work,
-    napi_cancel_async_work,
-    napi_async_init,
-    napi_async_destroy,
     napi_make_callback_external_buffers,
     napi_fatal_exception,
     napi_module_register,
@@ -1753,6 +2013,70 @@ mod tests {
     fn env_over(context: &mut Context) -> *mut c_void {
         install(context as *mut Context);
         ENV.with(|slot| slot.get()) as *mut c_void
+    }
+
+    /// An async work runs its `execute` on the runner thread and its `complete` on the
+    /// owning JS thread's drain — the seam napi-rs's `AsyncTask` rides (git-graph-rs
+    /// 1.1.0's engine binding): before the family was served, the addon's every async
+    /// export failed at `napi_create_async_work` and the extension found no repositories.
+    #[test]
+    fn an_async_work_completes_on_the_owning_thread() {
+        use std::sync::atomic::AtomicBool;
+        static EXECUTED: AtomicBool = AtomicBool::new(false);
+        static COMPLETED: AtomicBool = AtomicBool::new(false);
+        unsafe extern "C" fn execute(_env: *mut c_void, _data: *mut c_void) {
+            EXECUTED.store(true, Ordering::SeqCst);
+        }
+        unsafe extern "C" fn complete(_env: *mut c_void, status: u32, _data: *mut c_void) {
+            assert_eq!(status, NAPI_OK);
+            COMPLETED.store(true, Ordering::SeqCst);
+        }
+        let mut context = Context::default();
+        let env = env_over(&mut context);
+        let mut work = std::ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                napi_create_async_work(
+                    env,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    Some(execute),
+                    Some(complete),
+                    std::ptr::null_mut(),
+                    &mut work,
+                )
+            },
+            NAPI_OK
+        );
+        assert_eq!(unsafe { napi_queue_async_work(env, work) }, NAPI_OK);
+        // A second queue of the same work is refused, as Node refuses it.
+        assert_eq!(
+            unsafe { napi_queue_async_work(env, work) },
+            NAPI_GENERIC_FAILURE
+        );
+        // The runner is a thread of its own: wait for `execute`, then drain the
+        // completion HERE, the way the run loop does between jobs.
+        for _ in 0..500 {
+            if EXECUTED.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(EXECUTED.load(Ordering::SeqCst), "the runner executed");
+        for _ in 0..500 {
+            drain_async_completions(&mut context);
+            if COMPLETED.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            COMPLETED.load(Ordering::SeqCst),
+            "the completion was delivered on the owning thread"
+        );
+        // Done work is the addon's to free — napi-rs deletes from inside `complete`.
+        assert_eq!(unsafe { napi_delete_async_work(env, work) }, NAPI_OK);
+        release_thread_env();
     }
 
     fn number(env: *mut c_void, value: f64) -> *mut c_void {

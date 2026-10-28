@@ -602,6 +602,34 @@ fn evaluate_module(path: &Path, source: &str, context: &mut Context) -> JsResult
                 context,
             )?;
         }
+        // The bytecode cache write — restored 2026-10-28: the 444494b restructure folded
+        // the compile into this closure for the panic fallback and dropped the write the
+        // straight-line flow used to make, while the read path above stayed — every
+        // bundle has re-parsed and re-compiled on every backend start since. The stored
+        // tree is the one the walls above settled on (a wall-tripped source caches its
+        // all-escaping tree — what the read path must load), the write best-effort:
+        // tmp + rename, a full disk or a read-only home degrades to compiling again next
+        // start. A panic before this point writes nothing, and the fallback recompile
+        // below stores its own tree — never the poisoned one.
+        if let Ok(compiled) = script.codeblock(context) {
+            if let Some(cache_path) = bytecode_cache_path(&cache_key) {
+                let mirror_started = std::time::Instant::now();
+                let blob = bincode::serialize(&boa_engine::vm::bytecode_cache::to_mirror(&compiled));
+                if phase_trace {
+                    eprintln!(
+                        "[perf] {} cache write: mirror+serialize {} ms",
+                        path.display(),
+                        mirror_started.elapsed().as_millis()
+                    );
+                }
+                if let Ok(blob) = blob {
+                    let tmp = cache_path.with_extension("tmp");
+                    if std::fs::write(&tmp, &blob).is_ok() {
+                        let _ = std::fs::rename(&tmp, &cache_path);
+                    }
+                }
+            }
+        }
         script.evaluate(context)
     };
     let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

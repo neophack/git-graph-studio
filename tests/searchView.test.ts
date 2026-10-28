@@ -263,6 +263,37 @@ describe('Search view', () => {
 		expect(replace).toHaveBeenCalledWith({ query: 'x', replacement: 'y', isRegex: false, caseSensitive: false, wordOnly: false, include: '', exclude: '' });
 		expect(notifications().some((n) => n === "Replaced 1 occurrence across 1 file with 'y'.")).toBe(true);
 	});
+	it('a replace-all mid-debounce flushes the pending search first: the confirmation counts the query that will replace', async () => {
+		const answers: Record<string, FileMatches[]> = {
+			x: [{ path: 'a.txt', matches: [{ line: 1, column: 1, length: 1, text: 'x' }] }],
+			yy: [{ path: 'b.txt', matches: [{ line: 2, column: 1, length: 2, text: 'yy' }] }]
+		};
+		backend.on('search_workspace', async (args) => {
+			const channel = args.onEvent as Channel<SearchEvent>;
+			const files = answers[args.query as string] ?? [];
+			if (files.length > 0) channel.send({ kind: 'batch', files });
+			channel.send({ kind: 'done', scanned: 1, truncated: false, cancelled: false });
+			return null;
+		});
+		const replace = vi.fn(async () => ({ files: 1, replacements: 1 }));
+		backend.on('replace_in_files', replace);
+		const view = new SearchView(document.createElement('div'));
+		const query = view.container.querySelector('.search-row.query-row input') as HTMLInputElement;
+		type(query, 'x');
+		await view.runSearch(); // the list holds 'x''s one match in a.txt
+		type(query, 'yy'); // edited: the typed search sits on the debounce timer
+		type(view.container.querySelectorAll('.search-row input')[1] as HTMLInputElement, 'z');
+		const replacing = view.replaceAll();
+		await flush();
+		// The pending 'yy' search ran before the dialog, so the dialog counts b.txt — never
+		// 'x''s stale a.txt count with 'yy' as the query that actually replaces.
+		expect(texts('.search-file-head .label', view.container)).toEqual(['b.txt']);
+		expect(notifications().at(-1)).toBe("Replace 1 occurrence across 1 file with 'z'?");
+		click(notificationButton('Replace'));
+		await replacing;
+		expect(replace).toHaveBeenCalledWith({ query: 'yy', replacement: 'z', isRegex: false, caseSensitive: false, wordOnly: false, include: '', exclude: '' });
+	});
+
 	it('focuses the query box', () => {
 		const host = document.createElement('div');
 		document.body.appendChild(host);

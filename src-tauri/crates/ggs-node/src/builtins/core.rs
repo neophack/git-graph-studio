@@ -485,6 +485,29 @@ pub(super) fn ggs_host_request(
     }
 }
 
+/// The interactive host request — `(method, argsJson) -> Promise<resultJson>` — for the
+/// message-box class (`showInformationMessage`, quick picks): the JS thread must keep
+/// serving while the user decides, so the answer settles a promise (the run loop's
+/// `Job::HostAnswer` arm) instead of blocking. The result/rejection crosses as the same
+/// JSON-string shape [`ggs_host_request`] answers with.
+pub(super) fn ggs_host_request_async(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let method = string_arg(args, 0, context);
+    let args_json = string_arg(args, 1, context);
+    let emitter = with_state(|state| state.emitter.clone());
+    let Some(emitter) = emitter else {
+        return Err(JsError::from_native(
+            JsNativeError::error().with_message("no host is attached to this backend yet"),
+        ));
+    };
+    let parsed: Value = serde_json::from_str(&args_json).unwrap_or(Value::Null);
+    let promise = crate::host_request_async(&emitter, &method, parsed, context);
+    Ok(promise.into())
+}
+
 pub(super) fn on_request(
     _this: &JsValue,
     args: &[JsValue],

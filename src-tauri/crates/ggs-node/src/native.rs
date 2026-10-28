@@ -98,8 +98,9 @@ mod tests {
 
     /// The whole chain in one Boa context: the addon loads, its `napi_register_module_v1`
     /// runs against the N-API bridge, and the engine's own exports answer — the sync
-    /// `engineVersion` and an async `request` whose promise settles through the
-    /// threadsafe-function drain.
+    /// `engineVersion` and an async `request` whose promise settles through the addon
+    /// completion drains (a threadsafe function pre-1.1.0; an AsyncTask's async-work
+    /// completion since — both are drained here, the way the run loop drains them).
     #[test]
     fn the_engine_registers_and_serves_over_napi() {
         let Some(engine) = engine_fixture() else {
@@ -130,9 +131,9 @@ mod tests {
             version.starts_with("1."),
             "the engine's own export answered: {version}"
         );
-        // The async export settles through the threadsafe-function drain: the worker's
-        // call queues, the drain delivers it, the deferred resolves, run_jobs settles the
-        // promise chain.
+        // The async export settles through the addon completion drains: the worker's
+        // arrival queues, the drain delivers it, the deferred resolves, run_jobs settles
+        // the promise chain.
         let request = exports
             .get(crate::key("request"), &mut context)
             .expect("request is exported");
@@ -174,6 +175,7 @@ mod tests {
         let _ = context.run_jobs();
         for _ in 0..50 {
             napi_host::drain_threadsafe_calls(&mut context);
+            napi_host::drain_async_completions(&mut context);
             let _ = context.run_jobs();
             let answer = context
                 .eval(boa_engine::Source::from_bytes(
@@ -192,7 +194,7 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        panic!("the async request never settled through the threadsafe drain");
+        panic!("the async request never settled through the completion drains");
     }
 
     /// `(answer) => { globalThis.__ggsAnswer = answer; }` as a native callable.

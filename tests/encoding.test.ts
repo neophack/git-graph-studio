@@ -4,6 +4,7 @@
 // dirty so the next save converts it.
 
 import { describe, expect, it } from 'vitest';
+import { EditorView } from '@codemirror/view';
 
 import { EditorGroup } from '../src/features/editor';
 import { backend } from './tauriMock';
@@ -65,6 +66,24 @@ describe('encodings in the editor', () => {
 		await group.save();
 		await flush();
 		expect(writes.at(-1)).toMatchObject({ eol: 'lf', encoding: 'gb18030' });
+		expect(group.hasDirtyEditors()).toBe(false);
+	});
+
+	it('a reopen whose read outlives a view rebuild bails instead of redecoding into the rebuilt surface', async () => {
+		const { group } = setup();
+		await group.openFile(FILE);
+		const editor = group.activeEditor!;
+		let release!: (value: unknown) => void;
+		backend.on('read_file', () => new Promise((resolve) => { release = resolve; }));
+		const reopening = group.reopenWithEncoding('windows-1252');
+		await flush();
+		// The read is still in flight when the editor's surface rebuilds (a mode swap
+		// remounts the EditorView). The landing redecode must bail on the stale view,
+		// never replace the document of the view that took its place.
+		editor.view = new EditorView();
+		release({ contents: 'OTHER\n', binary: false, size: 6, encoding: 'windows-1252', eol: 'lf' });
+		await reopening;
+		expect(editor.view.state.doc.toString()).toBe('');
 		expect(group.hasDirtyEditors()).toBe(false);
 	});
 });
