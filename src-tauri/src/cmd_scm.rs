@@ -256,11 +256,14 @@ pub(crate) fn commit_index(
         // original message, which is what an amend without a new message means.
         return git.run(&["commit", "--amend", "--no-edit"]);
     }
-    let mut args = vec!["commit", "-m", message];
+    // The message rides git's stdin (`-F -`), never the command line: Windows caps a
+    // spawn's command line at 32 767 characters, and a long message pasted into the box
+    // used to fail the spawn itself with error 206 before git ever ran.
+    let mut args: Vec<&str> = vec!["commit", "-F", "-"];
     if amend {
         args.push("--amend");
     }
-    git.run(&args)
+    git.run_input(&args, message.as_bytes())
 }
 
 #[tauri::command]
@@ -584,6 +587,22 @@ mod tests {
         assert_eq!(subject(&git, "HEAD"), "first words");
         commit_index(&git, "reworded", true).unwrap();
         assert_eq!(subject(&git, "HEAD"), "reworded");
+    }
+
+    #[test]
+    fn a_message_longer_than_the_windows_command_line_still_commits() {
+        let scratch = Scratch::new("commit-long-message");
+        let git = scratch.repo("repo");
+        commit(&git, "a.txt", "1\n", "base");
+        write(&git, "a.txt", "2\n");
+        git.run(&["add", "--", "a.txt"]).unwrap();
+        // 32 767 characters is Windows' whole-command-line ceiling; past it, a message
+        // riding `-m` failed the spawn itself with error 206 before git ever ran. The
+        // message rides git's stdin (`-F -`) now.
+        let message = "m".repeat(40_000);
+        commit_index(&git, &message, false).unwrap();
+        let body = git.output(&["log", "-1", "--format=%B"]).unwrap();
+        assert_eq!(body.trim_end(), message);
     }
 
     #[test]

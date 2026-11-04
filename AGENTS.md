@@ -418,7 +418,16 @@ commit-msg hook, `refs/for/` push).
   (`ggs_bash::pref::find_git_exe`), and `git::backend_env` — registered at the composition
   root onto `ext_process`'s spawn-env sources — prepends the located install's directory to
   every extension backend's PATH, so the Git Graph view's own `findGit` (standard roots,
-  then PATH) finds the same git the app runs and its write operations work)
+  then PATH) finds the same git the app runs and its write operations work; and 2026-11-03,
+  the Windows error-206 recovery — a spawn failing with ERROR_FILENAME_EXCED_RANGE
+  ("文件名或扩展名太长", a CreateProcess length limit: the command line, the inherited
+  environment block, or a working-directory path past MAX_PATH — never a missing git)
+  retries as `git -C <repo>` from the repository's root, then with the accumulated `PATH`
+  slimmed to git's own directory and the system roots, then with a curated minimal
+  environment, every git invocation in the app riding the ladder; and unbounded text never
+  rides the command line at all — the commit message and the gerrit amend's message cross
+  on stdin (`commit -F -`, `run_input`), so a message pasted past Windows' 32 767-character
+  command-line ceiling commits instead of failing the spawn)
 
 ### 10. Git Graph Engine (the git-graph-rs plugin)
 

@@ -204,11 +204,7 @@ fn bytes_at(
     } else {
         format!("{revision}:{path}")
     };
-    let output = git
-        .command()
-        .args(["cat-file", "blob", &spec])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let output = git.raw_output(&["cat-file", "blob", &spec])?;
     if !output.status.success() {
         return Err(format!("git cat-file failed for {spec}"));
     }

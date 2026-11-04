@@ -3,13 +3,70 @@
 //! Everything that reads or mutates a repository shells out to `git` — exactly as the
 //! extension's own CLI backend does. This is the one place git is spawned from, so the
 //! process setup (working directory, no console window on Windows, no interactive
-//! credential prompts that would hang a GUI app) is shared by every caller.
+//! credential prompts that would hang a GUI app) is shared by every caller — and a
+//! Windows spawn that fails with error 206 (a CreateProcess length limit, never a
+//! missing git) retries through the recovery ladder below instead of surfacing as
+//! "Could not run git".
 
 use std::collections::VecDeque;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
+
+/// ERROR_FILENAME_EXCED_RANGE — CreateProcess's answer when the command line, the
+/// environment block or the working-directory path exceeds its length ceiling. On a
+/// Chinese Windows it prints as the "文件名或扩展名太长 (os error 206)" every git
+/// invocation on an affected machine fails with, whatever git's own availability.
+#[cfg(windows)]
+const ERROR_FILENAME_EXCED_RANGE: i32 = 206;
+
+/// The variables the curated recovery environment carries, besides the slim `PATH`
+/// ([`slim_path`]) and the setup every spawn here applies: Windows' own machinery, the
+/// user's home and locale, and the proxy and SSH settings git itself reads. Windows
+/// matches environment names case-insensitively, so the spellings need no twins.
+#[cfg(windows)]
+const MINIMAL_ENV: &[&str] = &[
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "ComSpec",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "OS",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_IDENTIFIER",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "USERPROFILE",
+    "USERNAME",
+    "USERDOMAIN",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "GNUPGHOME",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "all_proxy",
+    "SSH_AUTH_SOCK",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+];
 
 /// Every git invocation is recorded here for the "Git" output channel of the panel, the way
 /// VS Code's Git extension logs its commands: the command line, its duration and exit, and what
@@ -85,9 +142,15 @@ impl Git {
     }
 
     pub fn command(&self) -> Command {
-        let mut command = Command::new(executable());
+        self.base_command(&self.repo)
+    }
+
+    /// The common spawn setup — environment overrides, pipes, the no-console flag —
+    /// over a `Command` whose working directory the caller already placed. The
+    /// error-206 recovery shapes rebuild the environment from scratch and reapply this,
+    /// so the ladder's spawns keep every guarantee the ordinary one carries.
+    fn apply_common_setup(&self, command: &mut Command) {
         command
-            .current_dir(&self.repo)
             // A credential or host-key prompt would block forever behind a windowed app.
             .env("GIT_TERMINAL_PROMPT", "0")
             // Every command the app runs must finish without an editor; git special-cases ":"
@@ -106,6 +169,14 @@ impl Git {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             command.creation_flags(CREATE_NO_WINDOW);
         }
+    }
+
+    /// A git invocation against `cwd` — [`Git::command`] with the working directory as
+    /// the one knob the recovery ladder varies.
+    fn base_command(&self, cwd: &Path) -> Command {
+        let mut command = Command::new(executable());
+        command.current_dir(cwd);
+        self.apply_common_setup(&mut command);
         command
     }
 
@@ -115,19 +186,172 @@ impl Git {
         self.output(args).map(|_| ())
     }
 
-    /// Run a command and return its stdout.
-    pub fn output(&self, args: &[&str]) -> Result<String, String> {
-        let started = Instant::now();
-        let output = self
-            .command()
-            .args(args)
-            .output()
-            .map_err(|e| format!("Could not run git (is it on the PATH?): {e}"))?;
-        self.log(args, &output, started);
-        collect(output)
+    /// Run a mutating command feeding `input` on git's stdin — the `-F -` shape every
+    /// unbounded text argument (the commit message) rides: Windows caps a spawn's
+    /// command line at 32 767 characters, so a long message passed as `-m` fails the
+    /// spawn with error 206 before git ever runs. The command must consume its stdin
+    /// before producing more than a pipe of output (git's `-F -` reads the message to
+    /// EOF first), or the write and the capture deadlock against each other.
+    pub fn run_input(&self, args: &[&str], input: &[u8]) -> Result<(), String> {
+        self.output_input(args, input).map(|_| ())
     }
 
-    fn log(&self, args: &[&str], output: &std::process::Output, started: Instant) {
+    /// Run a command and return its stdout.
+    pub fn output(&self, args: &[&str]) -> Result<String, String> {
+        self.output_inner(args, None)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Run a command fed on stdin and return its stdout.
+    pub fn output_input(&self, args: &[&str], input: &[u8]) -> Result<String, String> {
+        self.output_inner(args, Some(input))
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Run a command and return its stdout as raw bytes — for content that must not pass
+    /// through UTF-8 (`cat-file` of a binary blob, the byte-level comparison views).
+    pub fn output_bytes(&self, args: &[&str]) -> Result<Vec<u8>, String> {
+        self.output_inner(args, None)
+    }
+
+    /// Run a command and hand back the whole `Output` — for the callers that read the
+    /// status and both streams themselves. It spawns through the same recovery ladder
+    /// as every other invocation here.
+    pub fn raw_output(&self, args: &[&str]) -> Result<Output, String> {
+        let started = Instant::now();
+        let (output, ran) = self.run_capture(args, None).map_err(|e| spawn_error(&e))?;
+        self.log(&ran, &output, started);
+        Ok(output)
+    }
+
+    fn output_inner(&self, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>, String> {
+        let started = Instant::now();
+        let (output, ran) = self.run_capture(args, input).map_err(|e| spawn_error(&e))?;
+        self.log(&ran, &output, started);
+        collect_bytes(output)
+    }
+
+    /// One captured git spawn. A Windows failure with error 206 (see
+    /// [`ERROR_FILENAME_EXCED_RANGE`]) is not git being missing — it is a CreateProcess
+    /// length limit (the command line, the inherited environment block, or the
+    /// working-directory path) — and the [`capture_windows_206`] ladder retries what it
+    /// can recover. Arguments too long to survive any shape (a commit message on the
+    /// command line) are the callers' to keep off it: [`Git::run_input`].
+    fn run_capture(
+        &self,
+        args: &[&str],
+        input: Option<&[u8]>,
+    ) -> std::io::Result<(Output, Vec<String>)> {
+        match self.capture_with(self.command(), args, input) {
+            Ok(output) => Ok((output, args.iter().map(|a| a.to_string()).collect())),
+            Err(e) => {
+                #[cfg(windows)]
+                {
+                    if e.raw_os_error() == Some(ERROR_FILENAME_EXCED_RANGE) {
+                        if let Some(recovered) = self.capture_windows_206(args, input) {
+                            return Ok(recovered);
+                        }
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Spawn `command` with `args` (and `input` on its stdin, piped) and collect the
+    /// result; a spawn failure propagates before anything is written.
+    fn capture_with(
+        &self,
+        mut command: Command,
+        args: &[&str],
+        input: Option<&[u8]>,
+    ) -> std::io::Result<Output> {
+        if input.is_some() {
+            command.stdin(Stdio::piped());
+        }
+        command.args(args);
+        let mut child = command.spawn()?;
+        if let Some(bytes) = input {
+            if let Some(mut pipe) = child.stdin.take() {
+                pipe.write_all(bytes)?;
+            }
+        }
+        child.wait_with_output()
+    }
+
+    /// The error-206 recovery ladder (Windows): the same git call with the repository
+    /// passed as `-C` from a short working directory — a repository nested deeper than
+    /// MAX_PATH keeps answering — then, should the inherited environment be what
+    /// overflowed, with the accumulated `PATH` slimmed and finally with a curated
+    /// minimal environment. The first shape that works wins; `None` when none does.
+    #[cfg(windows)]
+    fn capture_windows_206(
+        &self,
+        args: &[&str],
+        input: Option<&[u8]>,
+    ) -> Option<(Output, Vec<String>)> {
+        let mut full: Vec<String> = vec!["-C".to_owned(), self.repo.to_string_lossy().into_owned()];
+        full.extend(args.iter().map(|a| a.to_string()));
+        let refs: Vec<&str> = full.iter().map(String::as_str).collect();
+        // The child's initial working directory only has to exist and be short: git's
+        // `-C` does its own chdir. The repository's root (`C:\`, `\\server\share\`) is
+        // the shortest directory that always does.
+        let short_dir = self
+            .repo
+            .ancestors()
+            .last()
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+        for shape in 0.. {
+            let Some(command) = self.command_206(shape, &short_dir) else {
+                break;
+            };
+            if let Ok(output) = self.capture_with(command, &refs, input) {
+                record(format!(
+                    "the spawn failed with Windows error 206 (文件名或扩展名太长); retried {} and it answered",
+                    match shape {
+                        0 => "with `git -C` from the repository's root",
+                        1 => "with a slimmed `PATH` as well",
+                        _ => "with a minimal environment as well",
+                    }
+                ));
+                return Some((output, full));
+            }
+        }
+        None
+    }
+
+    /// The recovery spawn shapes, in order: the inherited environment from the short
+    /// working directory; the inherited environment with `PATH` — whose accumulated
+    /// length is the usual overflow — replaced by [`slim_path`]; a curated minimal
+    /// environment. `None` past the last.
+    #[cfg(windows)]
+    fn command_206(&self, shape: usize, short_dir: &Path) -> Option<Command> {
+        let command = match shape {
+            0 => self.base_command(short_dir),
+            1 | 2 => {
+                let mut command = Command::new(executable());
+                command.current_dir(short_dir);
+                command.env_clear();
+                if shape == 1 {
+                    environment_without_path(&mut command);
+                } else {
+                    for name in MINIMAL_ENV {
+                        if let Some(value) = std::env::var_os(name) {
+                            command.env(name, value);
+                        }
+                    }
+                }
+                command.env("PATH", slim_path());
+                self.apply_common_setup(&mut command);
+                command
+            }
+            _ => return None,
+        };
+        Some(command)
+    }
+
+    fn log(&self, args: &[String], output: &Output, started: Instant) {
         let mut line = format!(
             "> git {} [{}ms]",
             args.iter()
@@ -162,19 +386,6 @@ impl Git {
         record(line);
     }
 
-    /// Run a command and return its stdout as raw bytes — for content that must not pass
-    /// through UTF-8 (`cat-file` of a binary blob, the byte-level comparison views).
-    pub fn output_bytes(&self, args: &[&str]) -> Result<Vec<u8>, String> {
-        let started = Instant::now();
-        let output = self
-            .command()
-            .args(args)
-            .output()
-            .map_err(|e| format!("Could not run git (is it on the PATH?): {e}"))?;
-        self.log(args, &output, started);
-        collect_bytes(output)
-    }
-
     /// The absolute `.git` directory (a worktree's is elsewhere than `<repo>/.git`).
     ///
     /// Answered from the file system when the layout is the common one - `<repo>/.git` is
@@ -205,6 +416,57 @@ impl Git {
             self.repo.join(dir)
         })
     }
+}
+
+/* ---------- The Windows error-206 recovery's environment shapes ---------- */
+
+/// The inherited environment minus `PATH` — whose accumulated length is the usual
+/// overflow — ready for the [`slim_path`] replacement the recovery slots in. Every
+/// other variable rides verbatim, so proxies, locale and the user's home survive.
+#[cfg(windows)]
+fn environment_without_path(command: &mut Command) {
+    for (key, value) in std::env::vars_os() {
+        if !key.eq_ignore_ascii_case("PATH") {
+            command.env(key, value);
+        }
+    }
+}
+
+/// The slim `PATH` the recovery spawns with: git's own directory first, then the
+/// system directories every child of git needs. The inherited `PATH` is left behind.
+#[cfg(windows)]
+fn slim_path() -> std::ffi::OsString {
+    let mut entries: Vec<PathBuf> = Path::new(executable())
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .into_iter()
+        .collect();
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        let root = PathBuf::from(root);
+        entries.push(root.join("System32"));
+        entries.push(root.join("System32").join("Wbem"));
+        entries.push(root);
+    }
+    std::env::join_paths(entries).unwrap_or_default()
+}
+
+/// The spawn-failure message: the PATH hint for an ordinary failure, and a targeted
+/// diagnosis when Windows error 206 survived the whole recovery ladder.
+fn spawn_error(error: &std::io::Error) -> String {
+    #[cfg(windows)]
+    {
+        if error.raw_os_error() == Some(ERROR_FILENAME_EXCED_RANGE) {
+            return format!(
+                "Could not run git: Windows error 206 — the command line, the environment \
+                 block or the repository's path exceeded a Windows length limit, and the \
+                 fallbacks (git -C from a short working directory, a slimmed environment) \
+                 did not help. A shorter repository path or a shorter machine PATH may. \
+                 ({error})"
+            );
+        }
+    }
+    format!("Could not run git (is it on the PATH?): {error}")
 }
 
 /* ---------- The extension backends' git (the spawn-env seam) ---------- */
@@ -246,10 +508,6 @@ fn path_with(current: &std::ffi::OsStr, dir: &Path) -> Option<std::ffi::OsString
         std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(current).filter(carried)),
     )
     .ok()
-}
-
-fn collect(output: std::process::Output) -> Result<String, String> {
-    collect_bytes(output).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn collect_bytes(output: std::process::Output) -> Result<Vec<u8>, String> {
@@ -341,6 +599,68 @@ mod spawn_env_tests {
         let git_dir = Path::new("/custom/Git/cmd");
         let extended = path_with(std::ffi::OsStr::new(""), git_dir).expect("the directory alone");
         assert_eq!(extended, std::env::join_paths([git_dir]).unwrap());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_206_tests {
+    use super::*;
+
+    fn scratch_repo(name: &str) -> Git {
+        let dir = tempfile::tempdir().unwrap();
+        // Keep the tempdir alive for the test's duration by keeping it — the runner
+        // only needs the directory to exist while git runs.
+        let repo = dir.keep().join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = Git::new(&repo);
+        git.run(&["init", "-q", "-b", "main"]).unwrap();
+        git
+    }
+
+    /// The recovery ladder's `-C` shape is a real, working git invocation: on a machine
+    /// where git answers, it resolves the repository exactly as the primary spawn does.
+    #[test]
+    fn the_minus_c_shape_runs_git_against_the_repository() {
+        let git = scratch_repo("repo");
+        let (output, ran) = git
+            .capture_windows_206(&["rev-parse", "--show-toplevel"], None)
+            .expect("the recovery ladder answers when git itself is healthy");
+        assert!(output.status.success());
+        assert_eq!(ran[0], "-C");
+        assert!(Path::new(&ran[1]).ends_with("repo"));
+        let printed = String::from_utf8_lossy(&output.stdout);
+        assert!(printed.trim().replace('\\', "/").ends_with("/repo"));
+    }
+
+    /// The slimmed-`PATH` shape runs git too: the absolute git plus the system roots is
+    /// a `PATH` a git child survives. (The `-C` argument rides along, as the ladder
+    /// itself would add it.)
+    #[test]
+    fn the_slimmed_path_shape_runs_git() {
+        let git = scratch_repo("repo");
+        let short_dir = git.repo.ancestors().last().unwrap().to_path_buf();
+        let command = git.command_206(1, &short_dir).expect("the shape exists");
+        let repo_arg = git.repo.to_string_lossy();
+        let args = ["-C", repo_arg.as_ref(), "rev-parse", "--show-toplevel"];
+        let output = git
+            .capture_with(command, &args, None)
+            .expect("git answers under the slimmed PATH");
+        assert!(output.status.success());
+        let printed = String::from_utf8_lossy(&output.stdout);
+        assert!(printed.trim().replace('\\', "/").ends_with("/repo"));
+    }
+
+    /// The slim `PATH` leads with git's own directory and keeps the system roots.
+    #[test]
+    fn the_slim_path_leads_with_gits_directory_and_keeps_system32() {
+        let entries: Vec<PathBuf> = std::env::split_paths(&slim_path()).collect();
+        if let Some(dir) = Path::new(executable())
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+        {
+            assert_eq!(entries.first(), Some(&dir.to_path_buf()));
+        }
+        assert!(entries.iter().any(|entry| entry.ends_with("System32")));
     }
 }
 

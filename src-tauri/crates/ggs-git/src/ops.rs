@@ -672,7 +672,9 @@ pub fn ensure_head_change_id(git: &Git) -> Result<(String, bool), String> {
         &nonce,
     );
     let amended = format!("{}\n\nChange-Id: {change_id}", message.trim_end());
-    git.run(&["commit", "--amend", "-m", &amended])?;
+    // The whole amended message rides stdin: the original can be any length a commit
+    // message is, and a command line caps at 32 767 characters on Windows.
+    git.run_input(&["commit", "--amend", "-F", "-"], amended.as_bytes())?;
     Ok((change_id, true))
 }
 
@@ -685,11 +687,7 @@ pub fn gerrit_push_ref(git: &Git, remote: &str) -> Result<Option<String>, String
     ensure_head_change_id(git)?;
     let target = format!("HEAD:refs/for/{branch}");
     // The change URL arrives on stderr (git's remote messages), so the combined text is scanned.
-    let output = git
-        .command()
-        .args(["push", remote, &target])
-        .output()
-        .map_err(|e| format!("Could not run git: {e}"))?;
+    let output = git.raw_output(&["push", remote, &target])?;
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
