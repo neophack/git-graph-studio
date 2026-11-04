@@ -4,9 +4,11 @@
 import { contextUri, resolvedMenuEntries } from '../extensions';
 import type { DiffRequest } from '../editor/types';
 import { fileIcon, fileIconColor } from '../../platform/fileIcons';
+import { readFile, writeFile, renamePath, deletePath } from '../../platform/ipc/fs';
 import type { ScmChange } from '../../platform/ipc/scm';
 import { t, tf, trText } from '../../platform/i18n';
-import { actionButton, basename, confirmDialog, el, icon, showContextMenu, swipeReveal, toPosix, type RevealAction } from '../../platform/ui/index';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import { actionButton, basename, confirmDialog, el, icon, notify, quickInput, showContextMenu, swipeReveal, toPosix, type MenuEntry, type RevealAction } from '../../platform/ui/index';
 import { LETTER_TITLE, ScmRow, SubRepoState, letterOf } from './view';
 import type { ScmGroup, SourceControlView } from './view';
 
@@ -135,25 +137,55 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 			const open = (): void => {
 				for (const f of this.targetsFor(key, file, ['merge', 'staged', 'changes'])) this.onOpenFile?.(this.absolute(f.path));
 			};
-			const entries = key === 'merge'
+			const openChanges = (groups: ScmGroup[]): void => {
+				for (const target of this.targetRows(key, file, groups)) this.openChange(target.file, target.key, letterOf(target.file, target.key));
+			};
+			// "Open Changes with Revision": the whole change against HEAD — the worktree file
+			// against HEAD, so a staged-then-edited file's both halves show in one diff.
+			// Untracked rows have no HEAD side and conflicts belong to the merge editor.
+			const openVsHead = (): void => {
+				for (const target of this.targetRows(key, file, ['staged', 'merge', 'changes'])) {
+					const letter = letterOf(target.file, target.key);
+					if (letter === 'U' || letter === '!') continue;
+					const path = toPosix(target.file.path);
+					const oldPath = target.file.oldPath ? toPosix(target.file.oldPath) : path;
+					this.onOpenDiff?.({
+						id: `scm:head:${path}`,
+						title: `${basename(path)} (Working Tree)`,
+						left: { revision: 'HEAD', path: oldPath, label: 'HEAD', exists: letter !== 'A' },
+						right: { revision: '*', path, label: 'Working Tree', exists: letter !== 'D' }
+					});
+				}
+			};
+			const absolute = (p: string): string => this.absolute(p);
+			const entries: MenuEntry[] = key === 'merge'
 				? [
 					{ label: 'Open in Merge Editor', run: open },
-					'separator' as const,
+					'separator',
+					...this.navCluster(key, file, absolute, true),
+					'separator',
 					{ label: 'Stage Changes (Mark Resolved)', run: () => void this.run('git_stage', { paths: this.targetsFor(key, file, ['merge', 'changes']).map((f) => f.path) }) }
 				]
 				: key === 'changes'
 				? [
 					{ label: 'Open File', run: open },
-					{ label: 'Open Changes', run: () => { for (const target of this.targetRows(key, file, ['staged', 'merge', 'changes'])) this.openChange(target.file, target.key, letterOf(target.file, target.key)); } },
-					'separator' as const,
+					{ label: 'Open Changes', run: () => openChanges(['staged', 'merge', 'changes']) },
+					...(file.untracked ? [] : ([{ label: 'Open Changes with Revision', run: openVsHead }] as MenuEntry[])),
+					'separator',
+					...this.navCluster(key, file, absolute, true),
+					'separator',
 					{ label: 'Stage Changes', run: () => void this.run('git_stage', { paths: this.targetsFor(key, file, ['merge', 'changes']).map((f) => f.path) }) },
-					{ label: 'Discard Changes', run: () => void this.discardFiles(this.targetsFor(key, file, ['changes'])) }
+					{ label: 'Discard Changes', run: () => void this.discardFiles(this.targetsFor(key, file, ['changes'])) },
+					...this.untrackedExtras(key, file, absolute, this.repoPath!)
 				]
 				: [
 					{ label: 'Open File', run: open },
-					{ label: 'Open Changes', run: () => { for (const target of this.targetRows(key, file, ['staged'])) this.openChange(target.file, target.key, letterOf(target.file, target.key)); } },
-					'separator' as const,
-					{ label: 'Unstage Changes', run: () => void this.run('git_unstage', { paths: this.targetsFor(key, file, ['staged']).map((f) => f.path) }) }
+					{ label: 'Open Changes', run: () => openChanges(['staged']) },
+					'separator',
+					...this.navCluster(key, file, absolute, true),
+					'separator',
+					{ label: 'Unstage Changes', run: () => void this.run('git_unstage', { paths: this.targetsFor(key, file, ['staged']).map((f) => f.path) }) },
+					...this.untrackedExtras(key, file, absolute, this.repoPath!)
 				];
 			// Every scm/resourceState/context contribution an installed extension's manifest
 			// declares: the right-clicked resource rides along as VS Code's own menu argument —
@@ -220,34 +252,154 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 		row.addEventListener('click', () => this.subOpenChange(sub, file, key, letter));
 		row.addEventListener('contextmenu', (event) => {
 			event.preventDefault();
+			const path = sub.repoPath;
+			const absolute = (p: string): string => this.subAbsolute(sub, p);
+			// A sub-repo row is single-file (the rows never join the selection), and the
+			// editor's history page follows the workspace root — a sub-repo's timeline has
+			// no page to land in, so the cluster carries it nowhere.
+			const nav = this.navCluster(key, file, absolute, false);
+			const untracked = this.untrackedExtras(key, file, absolute, path);
 			const entries = key === 'merge'
 				? [
-					{ label: 'Open in Merge Editor', run: () => this.onOpenFile?.(this.subAbsolute(sub, file.path)) },
+					{ label: 'Open in Merge Editor', run: () => this.onOpenFile?.(absolute(file.path)) },
+					'separator' as const,
+					...nav,
 					'separator' as const,
 					{ label: 'Stage Changes (Mark Resolved)', run: () => void this.subRun(sub, 'git_stage', { paths: [file.path] }) }
 				]
 				: key === 'changes'
 				? [
-					{ label: 'Open File', run: () => this.onOpenFile?.(this.subAbsolute(sub, file.path)) },
+					{ label: 'Open File', run: () => this.onOpenFile?.(absolute(file.path)) },
 					{ label: 'Open Changes', run: () => this.subOpenChange(sub, file, key, letter) },
+					...(file.untracked ? [] : ([{ label: 'Open Changes with Revision', run: () => {
+						const p = toPosix(file.path);
+						const oldPath = file.oldPath ? toPosix(file.oldPath) : p;
+						this.onOpenDiff?.({
+							id: `scm:${sub.repoPath}:head:${p}`,
+							title: `${basename(p)} (Working Tree)`,
+							repo: sub.repoPath,
+							left: { revision: 'HEAD', path: oldPath, label: 'HEAD', exists: letter !== 'A' },
+							right: { revision: '*', path: p, label: 'Working Tree', exists: letter !== 'D' }
+						});
+					} }] as MenuEntry[])),
+					'separator' as const,
+					...nav,
 					'separator' as const,
 					{ label: 'Stage Changes', run: () => void this.subRun(sub, 'git_stage', { paths: [file.path] }) },
-					{ label: 'Discard Changes', run: () => void this.subDiscard(sub, file) }
+					{ label: 'Discard Changes', run: () => void this.subDiscard(sub, file) },
+					...untracked
 				]
 				: [
-					{ label: 'Open File', run: () => this.onOpenFile?.(this.subAbsolute(sub, file.path)) },
+					{ label: 'Open File', run: () => this.onOpenFile?.(absolute(file.path)) },
 					{ label: 'Open Changes', run: () => this.subOpenChange(sub, file, key, letter) },
 					'separator' as const,
-					{ label: 'Unstage Changes', run: () => void this.subRun(sub, 'git_unstage', { paths: [file.path] }) }
+					...nav,
+					'separator' as const,
+					{ label: 'Unstage Changes', run: () => void this.subRun(sub, 'git_unstage', { paths: [file.path] }) },
+					...untracked
 				];
 			// Same extension contribution the main repository's rows offer (fileRow), scoped
 			// to this submodule's absolute path as the resource state's `resourceUri`.
 			for (const entry of resolvedMenuEntries('scm/resourceState/context')) {
-				entries.push('separator', { label: entry.label, run: () => this.onExtensionCommand?.(entry.command, [{ resourceUri: contextUri(this.subAbsolute(sub, file.path)) }]) });
+				entries.push('separator', { label: entry.label, run: () => this.onExtensionCommand?.(entry.command, [{ resourceUri: contextUri(absolute(file.path)) }]) });
 			}
 			showContextMenu(event.clientX, event.clientY, entries);
 		});
 		return row;
+	},
+
+	/** The navigation cluster every change row's menu carries — the file's history, its
+	 *  row in the workspace tree (an existing file only), and the paths on the clipboard.
+	 *  Copy speaks for the whole selection where one exists. */
+	navCluster(key: ScmGroup, file: ScmChange, absolute: (relative: string) => string, timeline: boolean): MenuEntry[] {
+		const entries: MenuEntry[] = [];
+		if (timeline) entries.push({ label: 'Open Timeline', run: () => this.onOpenHistory?.(absolute(file.path)) });
+		if (letterOf(file, key) !== 'D') entries.push({ label: 'Reveal in Explorer', run: () => this.onReveal?.(absolute(file.path)) });
+		entries.push(
+			{ label: 'Copy Path', run: () => void writeText(this.targetsFor(key, file, ['merge', 'staged', 'changes']).map((f) => absolute(f.path)).join('\n')) },
+			{ label: 'Copy Relative Path', run: () => void writeText(this.targetsFor(key, file, ['merge', 'staged', 'changes']).map((f) => toPosix(f.path)).join('\n')) }
+		);
+		return entries;
+	},
+
+	/** The untracked-only extras: the ignore file, and — one file at a time — the plain
+	 *  rename and delete a working-tree file keeps. Tracked paths never see them. */
+	untrackedExtras(key: ScmGroup, file: ScmChange, absolute: (relative: string) => string, root: string): MenuEntry[] {
+		const targets = this.targetsFor(key, file, ['merge', 'staged', 'changes']);
+		const untracked = targets.filter((f) => f.untracked);
+		if (untracked.length === 0) return [];
+		const entries: MenuEntry[] = [
+			'separator',
+			{ label: 'Add to .gitignore', run: () => void this.addToGitignore(root, untracked.map((f) => f.path)) }
+		];
+		const single = targets.length === 1 ? targets[0]! : null;
+		if (single?.untracked) {
+			entries.push(
+				{ label: 'Rename...', run: () => void this.renameChange(single, absolute) },
+				{ label: 'Delete File', run: () => void this.deleteChange(single, absolute) }
+			);
+		}
+		return entries;
+	},
+
+	/** "Add to .gitignore": the repository's ignore file gains one posix path per line —
+	 *  the file's own encoding and line endings kept, existing lines never duplicated,
+	 *  a missing file created. The write rides the workspace-confined fs seam. */
+	async addToGitignore(root: string, paths: string[]): Promise<void> {
+		const separator = root.includes('\\') ? '\\' : '/';
+		const file = root.replace(/[\\/]+$/, '') + separator + '.gitignore';
+		let current = '';
+		let eol: 'lf' | 'crlf' = 'lf';
+		try {
+			const read = await readFile(file);
+			if (read?.contents) current = read.contents;
+			eol = read?.eol === 'crlf' ? 'crlf' : 'lf';
+		} catch {
+			current = '';
+		}
+		const existing = current.split(/\r?\n/);
+		const newline = eol === 'crlf' ? '\r\n' : '\n';
+		const addition = paths.map((p) => toPosix(p)).filter((p) => !existing.includes(p));
+		if (addition.length === 0) return;
+		const body = current + (current !== '' && !current.endsWith('\n') ? newline : '') + addition.join(newline) + newline;
+		try {
+			await writeFile(file, body, undefined, eol);
+			await this.refresh();
+			this.onChanged?.();
+		} catch (error) {
+			notify('error', String(error instanceof Error ? error.message : error));
+		}
+	},
+
+	/** "Rename...": a working-tree rename of the untracked path (the folder's absolute
+	 *  prefix kept, the row refreshed out of the change list once the path moved). */
+	async renameChange(file: ScmChange, absolute: (relative: string) => string): Promise<void> {
+		const absolutePath = absolute(file.path);
+		const name = basename(toPosix(file.path));
+		const next = await quickInput({ title: 'Rename', placeholder: 'New name', value: name });
+		if (!next || next.trim() === '' || next.trim() === name) return;
+		try {
+			const dir = absolutePath.slice(0, Math.max(0, absolutePath.length - name.length));
+			await renamePath(absolutePath, dir + next.trim());
+			await this.refresh();
+			this.onChanged?.();
+		} catch (error) {
+			notify('error', String(error instanceof Error ? error.message : error));
+		}
+	},
+
+	/** "Delete File": the untracked path to the OS trash, after the same DELETE confirm
+	 *  a discard of the row asks. */
+	async deleteChange(file: ScmChange, absolute: (relative: string) => string): Promise<void> {
+		const label = basename(toPosix(file.path));
+		if (!(await confirmDialog(`Are you sure you want to DELETE ${label}?`, 'Delete File'))) return;
+		try {
+			await deletePath(absolute(file.path), false);
+			await this.refresh();
+			this.onChanged?.();
+		} catch (error) {
+			notify('error', String(error instanceof Error ? error.message : error));
+		}
 	},
 
 	openChange(file: ScmChange, key: ScmGroup, letter: string): void {

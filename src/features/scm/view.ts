@@ -229,6 +229,13 @@ export class SourceControlView {
 
 	onOpenFile: ((path: string) => void) | null = null;
 
+	/** "Open Timeline": a change row asks for the file's history tab (the editor's own
+	 *  file history, the absolute path it rides). */
+	onOpenHistory: ((path: string) => void) | null = null;
+
+	/** "Reveal in Explorer": a change row highlights in the workspace tree. */
+	onReveal: ((path: string) => void) | null = null;
+
 	onOpenDiff: ((diff: DiffRequest) => void) | null = null;
 
 	onExtensionCommand: ((command: string, args?: unknown[]) => void) | null = null;
@@ -612,6 +619,16 @@ export class SourceControlView {
 	declare discardChangesOf: (changes: ScmChange[], run: (command: string, args: Record<string, unknown>) => Promise<void>) => Promise<void> ;
 
 	declare discardFiles: (files: ScmChange[]) => Promise<void> ;
+
+	declare navCluster: (key: ScmGroup, file: ScmChange, absolute: (relative: string) => string, timeline: boolean) => MenuEntry[] ;
+
+	declare untrackedExtras: (key: ScmGroup, file: ScmChange, absolute: (relative: string) => string, root: string) => MenuEntry[] ;
+
+	declare addToGitignore: (root: string, paths: string[]) => Promise<void> ;
+
+	declare renameChange: (file: ScmChange, absolute: (relative: string) => string) => Promise<void> ;
+
+	declare deleteChange: (file: ScmChange, absolute: (relative: string) => string) => Promise<void> ;
 
 	declare discardAll: () => Promise<void> ;
 

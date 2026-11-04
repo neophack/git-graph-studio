@@ -265,6 +265,8 @@ export const bootMethods: ThisType<Workbench> = {
 		this.scm.onStatus = (status) => this.explorer.setStatus(status);
 		this.extensions.onChanged = () => this.scheduleRefresh(0);
 		this.scm.onOpenFile = (path) => void this.editors.openFile(path);
+		this.scm.onOpenHistory = (path) => void this.editors.openFileHistory(path);
+		this.scm.onReveal = (path) => void this.explorer.reveal(path);
 		// The change's diff is a user act (a row tap on the phone's Source Control page as
 		// much as a click on the PC's): its open crosses the wire for its reads, and a
 		// foreign page hold live at the landing would swallow the activation's own

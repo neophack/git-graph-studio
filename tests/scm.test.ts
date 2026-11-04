@@ -121,7 +121,11 @@ describe('source control view', () => {
 		expect(backend.callsTo('git_stage')).toEqual([{ paths: ['src/clash.ts'] }]);
 
 		rightClick(document.querySelector('.scm-group .row.git-conflict'));
-		expect(menuLabels()).toEqual(['Open in Merge Editor', 'Stage Changes (Mark Resolved)']);
+		expect(menuLabels()).toEqual([
+			'Open in Merge Editor',
+			'Open Timeline', 'Reveal in Explorer', 'Copy Path', 'Copy Relative Path',
+			'Stage Changes (Mark Resolved)'
+		]);
 	});
 
 	it('renders the groups, badges and decorations, and opens diffs / files on click', async () => {
@@ -339,7 +343,97 @@ describe('source control view', () => {
 		expect(view.viewMode).toBe('list');
 
 		rightClick(document.querySelector('.scm-group .row'));
-		expect(menuLabels()).toEqual(['Open File', 'Open Changes', 'Unstage Changes']);
+		expect(menuLabels()).toEqual([
+			'Open File', 'Open Changes',
+			'Open Timeline', 'Reveal in Explorer', 'Copy Path', 'Copy Relative Path',
+			'Unstage Changes'
+		]);
+	});
+
+	it('offers the row menu VS Code offers: the HEAD revision diff, the timeline, reveal, copy and the untracked extras', async () => {
+		const { view } = setup();
+		const history: string[] = [];
+		const revealed: string[] = [];
+		const diffs: string[] = [];
+		view.onOpenHistory = (p) => history.push(p);
+		view.onReveal = (p) => revealed.push(p);
+		view.onOpenDiff = (d) => diffs.push(`${d.title}|${d.left.revision}>${d.right.revision}`);
+		view.setRepo(REPO);
+		await view.refresh();
+		const row = (label: string) => Array.from(document.querySelectorAll<HTMLElement>('.scm-group .row'))
+			.find((r) => r.querySelector('.label')!.textContent === label)!;
+
+		// "Open Changes with Revision": the worktree file against HEAD, the staged and
+		// unstaged halves of the change in one diff. Untracked rows have no HEAD side —
+		// the entry is theirs to miss.
+		rightClick(row('README.md'));
+		expect(menuLabels()).toContain('Open Changes with Revision');
+		click(menuItem('Open Changes with Revision'));
+		expect(diffs).toEqual(['README.md (Working Tree)|HEAD>*']);
+		rightClick(row('new.txt'));
+		expect(menuLabels()).not.toContain('Open Changes with Revision');
+
+		// The timeline opens the file's history tab; a deleted file reveals nothing.
+		rightClick(row('README.md'));
+		click(menuItem('Open Timeline'));
+		expect(history).toEqual([`${REPO}\\README.md`]);
+		rightClick(row('gone.txt'));
+		expect(menuLabels()).not.toContain('Reveal in Explorer');
+		rightClick(row('README.md'));
+		click(menuItem('Reveal in Explorer'));
+		expect(revealed).toEqual([`${REPO}\\README.md`]);
+
+		// Both path spellings land on the clipboard — one file, or the whole selection.
+		backend.clipboard.length = 0;
+		rightClick(row('README.md'));
+		click(menuItem('Copy Path'));
+		expect(backend.clipboard).toEqual([`${REPO}\\README.md`]);
+		backend.clipboard.length = 0;
+		click(row('gone.txt'), { ctrlKey: true });
+		rightClick(row('README.md'));
+		click(menuItem('Copy Relative Path'));
+		expect(backend.clipboard).toEqual(['gone.txt\nREADME.md']);
+
+		// The untracked extras — ignore, rename, delete — belong to the untracked row
+		// alone, and the tracked ones never see them.
+		backend.on('read_file', () => { throw new Error('no ignore file yet'); });
+		rightClick(row('new.txt'));
+		expect(menuLabels()).toEqual([
+			'Open File', 'Open Changes',
+			'Open Timeline', 'Reveal in Explorer', 'Copy Path', 'Copy Relative Path',
+			'Stage Changes', 'Discard Changes',
+			'Add to .gitignore', 'Rename...', 'Delete File'
+		]);
+		rightClick(row('README.md'));
+		expect(menuLabels()).not.toContain('Add to .gitignore');
+
+		// A missing .gitignore is created; an existing one is appended to, its own
+		// lines and line endings kept, duplicates never repeated.
+		rightClick(row('new.txt'));
+		click(menuItem('Add to .gitignore'));
+		await flush();
+		expect(backend.callsTo('write_file')).toEqual([{ path: `${REPO}\\.gitignore`, contents: 'new.txt\n', encoding: undefined, eol: 'lf' }]);
+		backend.on('read_file', () => ({ contents: 'node_modules\r\n', binary: false, size: 13, eol: 'crlf' }));
+		rightClick(row('new.txt'));
+		click(menuItem('Add to .gitignore'));
+		await flush();
+		expect(backend.callsTo('write_file').at(-1)).toEqual({ path: `${REPO}\\.gitignore`, contents: 'node_modules\r\nnew.txt\r\n', encoding: undefined, eol: 'crlf' });
+
+		// The rename keeps the folder and asks nothing twice; the delete answers the
+		// DELETE confirm and sends the path to the trash.
+		rightClick(row('new.txt'));
+		click(menuItem('Rename...'));
+		const quick = document.querySelector<HTMLInputElement>('.quick-input input')!;
+		type(quick, 'renamed.txt');
+		key(quick, 'Enter');
+		await flush();
+		expect(backend.callsTo('rename_path')).toEqual([{ from: `${REPO}\\new.txt`, to: `${REPO}\\renamed.txt` }]);
+		rightClick(row('new.txt'));
+		click(menuItem('Delete File'));
+		expect(notifications().at(-1)).toContain('DELETE new.txt');
+		click(notificationButton('Delete File'));
+		await flush();
+		expect(backend.callsTo('delete_path')).toEqual([{ path: `${REPO}\\new.txt`, permanent: false }]);
 	});
 
 	it('renders scm/title navigation entries as header buttons, and nothing else inline', async () => {
@@ -397,7 +491,12 @@ describe('source control view', () => {
 		view.setRepo(REPO);
 		await view.refresh();
 		rightClick(document.querySelector('.scm-group .row'));
-		expect(menuLabels()).toEqual(['Open File', 'Open Changes', 'Unstage Changes', 'Show File History in Test']);
+		expect(menuLabels()).toEqual([
+			'Open File', 'Open Changes',
+			'Open Timeline', 'Reveal in Explorer', 'Copy Path', 'Copy Relative Path',
+			'Unstage Changes',
+			'Show File History in Test'
+		]);
 		click(menuItem('Show File History in Test'));
 		// VS Code's menu argument: a SourceControlResourceState whose `resourceUri` is a Uri.
 		expect(dispatched).toEqual([['test.filterByFile', [{ resourceUri: contextUri(REPO + '\\src\\main.ts') }]]]);
@@ -650,7 +749,14 @@ describe('submodule sections', () => {
 
 		const subSection = document.querySelector('.scm-repo')!;
 		rightClick(subSection.querySelector('.row'));
-		expect(menuLabels()).toEqual(['Open File', 'Open Changes', 'Stage Changes', 'Discard Changes']);
+		// The sub-repo row carries the same additions the main repository's row does,
+		// minus what cannot follow it: no timeline (the editor's history page rides the
+		// workspace root), the paths and the reveal absolute to the submodule.
+		expect(menuLabels()).toEqual([
+			'Open File', 'Open Changes', 'Open Changes with Revision',
+			'Reveal in Explorer', 'Copy Path', 'Copy Relative Path',
+			'Stage Changes', 'Discard Changes'
+		]);
 		click(menuItem('Stage Changes'));
 		await flush();
 		expect(backend.callsTo('git_stage')).toEqual([{ paths: ['lib.rs'], repo: SUB }]);
