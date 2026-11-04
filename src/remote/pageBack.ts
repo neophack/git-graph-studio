@@ -16,11 +16,12 @@ import { currentPage, goTo, onWorkbenchChange } from './pages';
 import { pushBack } from './backStack';
 
 /** Whether a page sits over the editor and a back target exists — only on a page-stack
- *  shell (the phone orientations, the portrait tablet); the wide forms keep their columns. */
+ *  shell (the phone orientations, the portrait tablet); the wide forms keep their columns.
+ *  The marker alone decides: a browser session and the desktop window's device mode
+ *  (deviceShell.ts) both wear these shells. */
 export function pageBackAvailable(): boolean {
 	if (typeof document === 'undefined') return false;
-	const root = document.documentElement;
-	if (!root.hasAttribute('data-remote-shell') || !root.hasAttribute('data-page-stack')) return false;
+	if (!document.documentElement.hasAttribute('data-page-stack')) return false;
 	return currentPage() !== 'editor';
 }
 

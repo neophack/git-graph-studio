@@ -1796,6 +1796,33 @@ is gone the same day** (§11's deletion list): `mirror/phoneShell.ts`, `hostStub
 phone-sized branch — the PC window keeps its desktop shell at every size (`fitFor` floors
 every viewer at the desktop minimum, the Rust fit no longer clears the window's
 `set_min_size`), and a phone always runs its own workbench rather than being mirrored.
+**The desktop window's device mode** (2026-11-03, the owner's direction: 桌面版也要支持设
+置切换手机平板模式，可以给小屏 windows 游戏机使用): the Device Mode setting
+(`workbench.deviceMode`: `auto` the default / `phone` / `tablet`, Settings → Appearance)
+wears the five layouts INSIDE the desktop window — `src/remote/deviceShell.ts`, wired from
+`main.ts` (the composition root the import rules let name remote/): `primeDeviceShell()`
+lands the device markers and the shell CSS before the workbench chunk (a forced form never
+flashes the desktop chrome), `installDeviceShell()` installs the full shell after the
+first frame, and a setting change applies live both ways. It is the browser session's
+layouts without the browser session: the window keeps its real Tauri seam and desktop
+hooks, and `data-remote-shell` — the session truths marker (paged listings, the transfer
+rows, no Reveal, the read-only edit lock) — is NEVER set. The phone-shaped behaviours key
+on `data-page-stack` alone instead (nav.ts's `phoneShell`, pageBack, quickInputBack — the
+features layer already spoke that marker: `editor/open.ts`, `scm/rowActions.ts`,
+`imageView`); the drawer's Settings row and the files page's ＋ sheet follow the marker
+(the desktop keeps its own settings dialog — the Device Mode row lives there — and no dead
+upload rows), and the window controls — which remote.css hides for a browser, where they
+are dead art — survive by seating into each form's own chrome (`deviceShell.css`: the app
+bar on the phone forms; the rail's foot on the portrait tablet; the title bar, which
+deviceShell.css un-hides as the landscape tablet's own top chrome, on the wide tablet; the
+title bar again when the mode goes away). Every form names a drag surface the same way
+Tauri's drag script (tauri 2.12's `window/scripts/drag.js`) reads it: the walk from the
+mousedown target stops at any clickable element without the attribute, and the phone app
+bar's middle is a full-width `<button>` (the page heading), so the bar AND its heading both
+carry `data-tauri-drag-region="deep"` (a clickable element carrying the attribute becomes a
+drag region itself; the heading's open-editors tap stays reachable through the Editor
+destination), the portrait tablet's navigation rail carries it, and the landscape tablet
+uses the title bar's native region — `tests/desktopDeviceMode.test.ts`.
 **The files page** (2026-10-16, P1, docs/remote-client-plan.md §6.1): the page-stack
 shells' Files destination is the MT-manager flat list — `src/remote/app/files/`
 (`filesPage.ts` mounts it INTO the explorer's sidebar view: on a page-stack shell the tree

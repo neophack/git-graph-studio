@@ -8,6 +8,7 @@ import './workbench/shell.css';
 import { bootStage, webviewBeat } from './platform/ipc/app';
 import { initSettings, loadSettingsFile } from './platform/settings';
 import { installDesktopRemoteHooks } from './remote/desktopHooks';
+import { installDeviceShell, primeDeviceShell } from './remote/deviceShell';
 import { tauriBridgePresent } from './remote/assetUrl';
 
 // The webview's own right-click menu is the host browser's chrome (back/refresh/save
@@ -48,8 +49,14 @@ if (!tauriBridgePresent()) {
 	// boot-default English until the next settings change.
 	loadSettingsFile()
 		.then(() => initSettings())
+		// The device mode's markers and shell CSS land before the workbench chunk, so a
+		// forced form's first paint is already that form (a no-op while the mode is Auto).
+		.then(() => primeDeviceShell())
 		.then(() => import('./workbench'))
 		.then(({ bootWorkbench }) => bootWorkbench())
+		// The phone/tablet layouts adopt the workbench's own elements — installed once the
+		// shell's first frame is up (a no-op while the mode is Auto).
+		.then(() => installDeviceShell())
 		.catch((error) => {
 			const splash = document.getElementById('boot-splash');
 			// Even on failure the user should see more than a black window.

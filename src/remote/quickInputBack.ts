@@ -17,8 +17,9 @@ let observer: MutationObserver | null = null;
 
 function pageStackShell(): boolean {
 	if (typeof document === 'undefined') return false;
-	const root = document.documentElement;
-	return root.hasAttribute('data-remote-shell') && root.hasAttribute('data-page-stack');
+	// The marker alone: a browser session and the desktop window's device mode
+	// (deviceShell.ts) both wear page-stack shells.
+	return document.documentElement.hasAttribute('data-page-stack');
 }
 
 /** Arm or drop the back entry for a quick input on screen. The overlays observer drives it

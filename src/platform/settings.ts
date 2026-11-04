@@ -38,6 +38,10 @@ export type TerminalShell = 'powershell' | 'ggsBash' | 'gitBash';
  *  smart copy/paste, always paste, or nothing. */
 export type TerminalRightClickBehavior = 'menu' | 'copyPaste' | 'paste' | 'nothing';
 export type WorkbenchDensity = 'comfortable' | 'compact';
+/** The window's device mode: the desktop workbench, or one of the remote app's touch
+ * layouts (module 19's deviceShell) worn in this window — the small-screen Windows
+ * handhelds' shape. `auto` keeps the desktop shell at every size. */
+export type DeviceMode = 'auto' | 'phone' | 'tablet';
 /** The extension host log's threshold (`extLog.ts`): what reaches the Output channel and
  *  `~/.ggs/logs/ext-host.log`. */
 export type ExtensionLogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error';
@@ -108,9 +112,13 @@ export interface AppSettings {
 	 *  stops; flip back and extensions re-ask). */
 	claudeTapAccess: 'ask' | 'deny';
 	/** Whether closing the PC window while remote sessions keep the instance running
-	 *  also raises the OS notification that says so (§17.2, K15) — the "don't tell me
-	 *  again" of that notice, as a setting. PC device-level; never crosses to a remote. */
+	 * also raises the OS notification that says so (§17.2, K15) — the "don't tell me
+	 * again" of that notice, as a setting. PC device-level; never crosses to a remote. */
 	remoteHideNotice: boolean;
+	/** The window's device mode (`deviceShell.ts` reads it): `auto` keeps the desktop
+	 * workbench; `phone` / `tablet` wear the remote app's touch layouts in this window —
+	 * the portrait/landscape spelling follows the window's aspect, live without a restart. */
+	deviceMode: DeviceMode;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -127,7 +135,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	searchSmartCase: true,
 	extensionLogLevel: 'info',
 	claudeTapAccess: 'ask',
-	remoteHideNotice: true
+	remoteHideNotice: true,
+	deviceMode: 'auto'
 };
 
 /** Any settings write persists the whole object, so a store from an older release pins the
@@ -213,6 +222,11 @@ export const SETTING_DEFS: SettingDef[] = [
 	{ key: 'density', category: 'appearance', kind: 'enum', options: [
 		{ value: 'comfortable', label: 'settings.density.comfortable' },
 		{ value: 'compact', label: 'settings.density.compact' }
+	] },
+	{ key: 'deviceMode', category: 'appearance', kind: 'enum', options: [
+		{ value: 'auto', label: 'settings.deviceMode.auto' },
+		{ value: 'phone', label: 'settings.deviceMode.phone' },
+		{ value: 'tablet', label: 'settings.deviceMode.tablet' }
 	] },
 	{ key: 'autoSave', category: 'editor', kind: 'enum', options: [
 		{ value: 'off', label: 'settings.autoSave.off' },

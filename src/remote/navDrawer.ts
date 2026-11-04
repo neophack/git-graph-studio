@@ -174,11 +174,15 @@ export function openDrawer(menus: () => MenuDefinition[]): void {
 		setDataSaver(next);
 		saverRow.querySelector('.switch')?.replaceWith(toggleSwitch(next));
 	}, { trailing: toggleSwitch(saver) });
-	// Settings opens the phone's own page (settingsPage.ts), never the desktop dialog the
-	// command would show: the 720 px two-pane window is unreadable at this width.
+	// Settings opens the phone's own page (settingsPage.ts) in the remote app's shell,
+	// never the desktop dialog the command would show: the 720 px two-pane window is
+	// unreadable at this width. The desktop window's device mode (deviceShell.ts, which
+	// never sets the remote-shell marker) keeps the desktop dialog — the Device Mode
+	// setting itself lives there.
 	const settingsRows = [...(env ? [saverRow] : []), row(codicon('settings-gear'), t('remote.drawer.settings'), () => {
 		closeDrawer();
-		openSettingsPage();
+		if (document.documentElement.hasAttribute('data-remote-shell')) openSettingsPage();
+		else void commands.execute('workbench.openSettings');
 	})];
 
 	const body = document.createElement('div');

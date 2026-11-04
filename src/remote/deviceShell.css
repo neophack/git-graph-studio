@@ -1,0 +1,23 @@
+/* The desktop window's device mode (deviceShell.ts): the overrides the desktop adds to the
+   remote app's phone and tablet layouts. Keyed on <html data-device-shell>, which only the
+   desktop device shell sets — a browser session never carries it. */
+
+/* The window controls survive: remote.css hides them for a browser session (dead art
+   there — the browser owns the window), but in this window they are the only
+   minimize / maximize / close the forced forms leave reachable, seated by deviceShell.ts
+   into whichever chrome the active layout shows. macOS keeps its traffic lights — body.mac
+   hides the cluster and nothing here may un-hide it. */
+:root[data-device-shell] body:not(.mac) .window-controls { display: flex !important; }
+
+/* The landscape tablet keeps the desktop title bar (the arrangement already places it
+   first; layouts.css hides it for a browser, where it is dead art): the native drag
+   region, the menus, the command center and the window controls' own home. */
+:root[data-device-shell] .ggs-layout[data-layout="tablet-landscape"] #titlebar { display: flex !important; }
+
+/* The seats: the phone's app bar (its own buttons are 44 px targets; the controls ride
+   after the trailing actions) and the portrait tablet's rail foot (a vertical stack under
+   the ‹). The landscape tablet needs none — the title bar's are native. */
+:root[data-device-shell] .ggs-appbar .window-controls { height: 100%; }
+:root[data-device-shell] .ggs-appbar .window-control { width: 40px; }
+:root[data-device-shell] .ggs-nav-rail .window-controls { flex-direction: column; width: 100%; height: auto; }
+:root[data-device-shell] .ggs-nav-rail .window-control { width: 100%; height: 40px; }

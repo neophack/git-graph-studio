@@ -173,11 +173,17 @@ export function installFilesPage(): void {
 	// floating one covered the rows' ⋮ — then onto the app bar ahead of its buttons):
 	// upload files, upload folder (by capability, §10.2 item 11 — iOS hides the row), new
 	// file, new folder — the app bar's ＋ and the no-app-bar form's toolbar ＋ share it.
+	// The upload rows are the remote app's own (the marker explorer's transfer rows gate
+	// on): the desktop window's device mode never sets it — a dead row is not an action.
 	const actionsEntries = (): MenuEntry[] => [
-		{ label: t('transfer.uploadHere'), run: () => void uploadInto(dir, false).then(() => list.refresh()) },
-		...(document.documentElement.hasAttribute('data-cap-ios')
-			? []
-			: [{ label: t('transfer.uploadFolderHere'), run: () => void uploadInto(dir, true).then(() => list.refresh()) }]),
+		...(document.documentElement.hasAttribute('data-remote-shell')
+			? [
+					{ label: t('transfer.uploadHere'), run: () => void uploadInto(dir, false).then(() => list.refresh()) },
+					...(document.documentElement.hasAttribute('data-cap-ios')
+						? []
+						: [{ label: t('transfer.uploadFolderHere'), run: () => void uploadInto(dir, true).then(() => list.refresh()) }])
+				]
+			: []),
 		{ label: t('remote.files.newFile'), run: () => void createNew(false) },
 		{ label: t('remote.files.newFolder'), run: () => void createNew(true) }
 	];

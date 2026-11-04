@@ -14,11 +14,12 @@ import { commands } from '../platform/commands';
 
 /** Whether this is a page-stack shell (docs/remote-client-plan.md §5.1–§5.3): the phone
  *  orientations and the portrait tablet, whose side bar and panel are full-screen pages
- *  laid over the editor. */
+ *  laid over the editor. The marker alone decides — a browser session and the desktop
+ *  window's device mode (deviceShell.ts) both wear these shells, and neither may name the
+ *  other's session markers. */
 export function phoneShell(): boolean {
 	if (typeof document === 'undefined') return false;
-	const root = document.documentElement;
-	return root.hasAttribute('data-remote-shell') && root.hasAttribute('data-page-stack');
+	return document.documentElement.hasAttribute('data-page-stack');
 }
 
 /** Whether the phone shell currently shows its full-screen side view. */
