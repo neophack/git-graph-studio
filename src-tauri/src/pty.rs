@@ -102,10 +102,11 @@ pub struct PtyState {
     sessions: HashMap<u32, PtySession>,
 }
 
-/// Spawn the shell in the open repository (the session's working directory). `shell`
-/// is the Terminal Shell setting's value (`"gitBash"` the default, `"ggsBash"` and
-/// `"powershell"` the alternatives); every new terminal re-reads it, so a Settings
-/// change reaches the next terminal without a restart.
+/// Spawn the shell in the open repository (the session's working directory), or in
+/// `cwd` when it names an existing folder — the Explorer's "Open in Integrated
+/// Terminal". `shell` is the Terminal Shell setting's value (`"gitBash"` the default,
+/// `"ggsBash"` and `"powershell"` the alternatives); every new terminal re-reads it, so
+/// a Settings change reaches the next terminal without a restart.
 #[tauri::command]
 pub fn pty_create(
     app: TauriAppHandle,
@@ -113,8 +114,9 @@ pub fn pty_create(
     cols: u16,
     rows: u16,
     shell: Option<String>,
+    cwd: Option<String>,
 ) -> Result<String, String> {
-    let cwd = app
+    let workspace = app
         .state::<ggs_base::workspace::WorkspaceRoots>()
         .first()
         .or_else(|| {
@@ -123,6 +125,7 @@ pub fn pty_create(
                 .map(|p| p.display().to_string())
         })
         .unwrap_or_else(|| ".".to_string());
+    let cwd = resolve_cwd(cwd.as_deref(), &workspace);
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -157,11 +160,10 @@ pub fn pty_create(
     let gen = GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tail = std::sync::Arc::new(Mutex::new(String::new()));
     let reader_tail = tail.clone();
+    let replaced;
     {
         let mut sessions = state.lock().unwrap();
-        if let Some(mut old) = sessions.sessions.remove(&id) {
-            let _ = old.child.kill();
-        }
+        replaced = sessions.sessions.remove(&id);
         sessions.sessions.insert(
             id,
             PtySession {
@@ -175,6 +177,9 @@ pub fn pty_create(
                 tail,
             },
         );
+    }
+    if let Some(mut old) = replaced {
+        std::thread::spawn(move || close_session(&mut old));
     }
     // Another frontend's terminal page adopts this session on the announcement (§8.6 #5).
     emit_sessions_changed(&app);
@@ -367,15 +372,56 @@ fn gather_batch(
     true
 }
 
-/// Kill the shell (the "trash" action). The reader thread notices the exit and emits it.
+/// The session's working directory: the requested folder when it exists (the Explorer's
+/// "Open in Integrated Terminal"), else the open workspace unchanged — the plain
+/// new-terminal behavior this command always had.
+fn resolve_cwd(requested: Option<&str>, workspace: &str) -> String {
+    match requested {
+        Some(folder) if std::fs::metadata(folder).map(|m| m.is_dir()).unwrap_or(false) => {
+            folder.to_string()
+        }
+        _ => workspace.to_string(),
+    }
+}
+
+/// How long a close waits for the polite exit to land before the hard kill.
+const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Close a session politely: an `exit` on the shell's stdin lets an interactive shell run
+/// its own exit path — Git Bash flushes `~/.bash_history`, PowerShell's PSReadLine flushes
+/// its history, GGS Bash flushes its own — where a bare kill loses all of it (the command
+/// history of every closed terminal, gone since the first build). A busy command leaves
+/// the `exit` queued behind it; [`CLOSE_GRACE`] bounds the wait and the kill ends it.
+/// The reader thread announces the exit to the frontends exactly as before.
+fn close_session(session: &mut PtySession) {
+    let _ = session.writer.write_all(b"exit\r");
+    let _ = session.writer.flush();
+    let deadline = std::time::Instant::now() + CLOSE_GRACE;
+    loop {
+        match session.child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) if std::time::Instant::now() >= deadline => break,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+    let _ = session.child.kill();
+}
+
+/// Kill the shell (the "trash" action): politely first — an interactive shell writes its
+/// command history on its own exit — then hard past the grace. The reader thread notices
+/// the exit and emits it.
 #[tauri::command]
 pub fn pty_kill(app: TauriAppHandle, id: u32) -> Result<(), String> {
-    let state = app.state::<Mutex<PtyState>>();
-    let mut guard = state.lock().unwrap();
-    if let Some(mut session) = guard.sessions.remove(&id) {
-        let _ = session.child.kill();
-        drop(guard);
+    let session = {
+        let state = app.state::<Mutex<PtyState>>();
+        let mut guard = state.lock().unwrap();
+        guard.sessions.remove(&id)
+    };
+    if let Some(mut session) = session {
         emit_sessions_changed(&app);
+        // Off the command: the close waits out the shell's own exit, and the caller —
+        // often a page already unloading — answers at once.
+        std::thread::spawn(move || close_session(&mut session));
     }
     Ok(())
 }
@@ -473,7 +519,7 @@ fn decode_pty_chunk(carry: &mut Vec<u8>, chunk: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_pty_chunk, gather_batch, push_tail, shell_command, size_changed, TAIL_BYTES};
+    use super::{close_session, decode_pty_chunk, gather_batch, push_tail, resolve_cwd, shell_command, size_changed, PtySession, TAIL_BYTES};
 
     #[test]
     fn a_same_size_resize_is_no_change_and_a_real_one_is() {
@@ -708,12 +754,68 @@ mod tests {
             }
         }
         let status = child.try_wait().unwrap();
-        assert!(
-            status.is_none(),
+        assert!(status.is_none(),
             "the shell exited: {status:?}; output: {output:?}"
         );
         assert!(!output.is_empty(), "no prompt arrived");
         let _ = child.kill();
+    }
+
+    #[test]
+    fn the_spawn_cwd_is_the_requested_folder_when_it_exists_and_the_workspace_otherwise() {
+        // "Open in Integrated Terminal" names the folder; a path the disk lost (a deleted
+        // directory, another machine's drive) falls back to the open workspace unchanged —
+        // the plain new-terminal behavior.
+        let workspace = tempfile::TempDir::new().unwrap();
+        let folder = tempfile::TempDir::new().unwrap();
+        let ws = workspace.path().to_str().unwrap().to_owned();
+        let folder = folder.path().to_str().unwrap().to_owned();
+        let file = folder.clone() + "/plain.txt";
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(resolve_cwd(Some(&folder), &ws), folder);
+        assert_eq!(resolve_cwd(None, &ws), ws);
+        assert_eq!(resolve_cwd(Some("Z:\\no-such-folder-ggs"), &ws), ws);
+        // A file is not a folder: the workspace stands in.
+        assert_eq!(resolve_cwd(Some(&file), &ws), ws);
+    }
+
+    #[test]
+    fn the_polite_close_lands_the_shell_dead_within_its_grace() {
+        // Every shell closes through close_session now: the `exit` lets an interactive
+        // shell run its own exit path (the command history's flush), the kill is the
+        // backstop. Either way the session's child is reaped and the function returns.
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = if cfg!(windows) {
+            let mut c = CommandBuilder::new("powershell.exe");
+            c.arg("-NoLogo");
+            c
+        } else {
+            CommandBuilder::new("sh")
+        };
+        command.cwd(std::env::temp_dir());
+        let child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let writer = pair.master.take_writer().unwrap();
+        let mut session = PtySession {
+            gen: 0,
+            name: "test".to_owned(),
+            cols: 80,
+            rows: 24,
+            writer,
+            child,
+            master: pair.master,
+            tail: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+        };
+        close_session(&mut session);
+        let status = session.child.try_wait().unwrap();
+        assert!(status.is_some(), "the shell outlived the close grace");
     }
 }
 

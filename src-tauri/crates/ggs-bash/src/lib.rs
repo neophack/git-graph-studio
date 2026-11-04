@@ -29,6 +29,7 @@ pub mod builtins;
 pub mod exec;
 pub mod expand;
 pub mod glob;
+pub mod history;
 pub mod lex;
 pub mod lineedit;
 pub mod localtime;
@@ -344,17 +345,28 @@ fn repl(mut shell: Shell, io: &Io) -> i32 {
             }
         }
     }
+    // The session's history starts where the last session's file left off (module
+    // history): Up-arrow recalls across terminals, the way a standalone Git Bash
+    // behaves. The save rides every exit of the loop — `exit`, EOF, a failure — so
+    // the next terminal inherits this one's lines.
+    let loaded = history::load(&mut shell);
+    let status = repl_loop(&mut shell, io);
+    history::save(&shell, loaded);
+    status
+}
+
+fn repl_loop(shell: &mut Shell, io: &Io) -> i32 {
     let mut pending = String::new();
     loop {
         shell.report_finished_jobs(io);
         let prompt = if pending.is_empty() {
-            prompt(&shell)
+            prompt(shell)
         } else {
             "> ".to_owned()
         };
         // The line editor (history, kill keys, Tab completion) on a raw-capable
         // terminal, plain buffered reads otherwise.
-        let line = match lineedit::read_line(&shell, &prompt, io) {
+        let line = match lineedit::read_line(shell, &prompt, io) {
             lineedit::ReadLine::Line(line) => line,
             lineedit::ReadLine::Eof => {
                 io.out_str(
@@ -404,7 +416,7 @@ fn repl(mut shell: Shell, io: &Io) -> i32 {
         {
             shell.history.push(trimmed.to_owned());
         }
-        let _ = run_with_status(&mut shell, &source, io);
+        let _ = run_with_status(shell, &source, io);
     }
 }
 

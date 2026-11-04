@@ -443,21 +443,15 @@ describe('the About box', () => {
 	});
 });
 
-describe('the integrated terminal\'s cd', () => {
-	it('quotes paths the way PowerShell and POSIX shells both read literally', async () => {
-		const { quoteShellPath } = await import('../src/workbench');
-		expect(quoteShellPath('C:\\repo\\src')).toBe('C:\\repo\\src');
-		expect(quoteShellPath('/home/me/repo')).toBe('/home/me/repo');
-		// A space needs quoting; single quotes stop PowerShell from expanding `$` and backticks.
-		expect(quoteShellPath('C:\\My Projects\\$repo`x')).toBe("'C:\\My Projects\\$repo`x'");
-		// A quote in the name: doubled for PowerShell, closed-escaped-reopened for POSIX.
-		expect(quoteShellPath("C:\\it's here")).toBe("'C:\\it''s here'");
-		expect(quoteShellPath("/home/it's here")).toBe("'/home/it'\\''s here'");
-		// The Explorer's "Open in Integrated Terminal" types exactly that.
-		const typed: string[] = [];
-		workbench.panel.runInTerminal = async (command) => { typed.push(command); };
+describe("the integrated terminal's open", () => {
+	it('opens the shell IN the folder — the cwd rides the spawn, no cd line is typed', async () => {
+		// The Explorer's "Open in Integrated Terminal" hands the folder to the spawn's
+		// working directory (pty_create's cwd), VS Code's own shape. The shell that
+		// starts at the workspace root is never asked to `cd` after the fact.
+		const folders: string[] = [];
+		workbench.panel.openTerminal = async (cwd?: string) => { folders.push(cwd ?? ''); };
 		workbench.explorer.onOpenInTerminal!('C:\\My Projects\\repo');
-		expect(typed).toEqual(["cd 'C:\\My Projects\\repo'"]);
+		expect(folders).toEqual(['C:\\My Projects\\repo']);
 	});
 });
 

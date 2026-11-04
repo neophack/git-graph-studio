@@ -326,7 +326,10 @@ export class TerminalView {
 		session.term.onResize(({ cols, rows }) => this.resize(session.id, cols, rows));
 	}
 
-	private async create(): Promise<void> {
+	/** One new shell. `cwd` spawns it IN the folder (the Explorer's "Open in Integrated
+	 *  Terminal"); without one the backend opens it at the workspace root, the plain
+	 *  new-terminal behavior. */
+	async create(cwd?: string): Promise<void> {
 		const { term, fit, element } = await this.makeTerm();
 		const id = this.nextId++;
 		const row = el('div', 'row');
@@ -350,7 +353,7 @@ export class TerminalView {
 		try {
 			// The Terminal Shell setting rides every creation, so a Settings change reaches
 			// the next terminal without a restart.
-			shellName = await ptyCreate(id, term.cols, term.rows, settings.terminalShell);
+			shellName = await ptyCreate(id, term.cols, term.rows, settings.terminalShell, cwd);
 		} catch (error) {
 			notify('error', String(error));
 			term.write(`\x1b[31m${String(error)}\x1b[0m\r\n`);

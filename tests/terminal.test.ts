@@ -116,6 +116,15 @@ describe('the terminal page mirrors the instance\'s terminals (§8.6 #5)', () =>
 		expect(view.sessionCount()).toBe(1);
 	});
 
+	it('a shell opened for a folder spawns IN it — the cwd rides pty_create, not a cd line', async () => {
+		// The Explorer's "Open in Integrated Terminal": the shell's own working directory
+		// is the folder, the way VS Code's terminal opens — no `cd` typed into a shell
+		// that started at the workspace root.
+		const view = new TerminalView();
+		await view.create('C:\\repo\\sub');
+		expect(backend.callsTo('pty_create')).toEqual([expect.objectContaining({ cwd: 'C:\\repo\\sub' })]);
+	});
+
 	it('a terminal opened at the PC appears on an open terminal page', async () => {
 		pty.sessions = [{ id: 5, name: 'git-bash' }];
 		const view = new TerminalView();

@@ -1061,17 +1061,6 @@ export function gotoLineItems(typed: string, info: { line: number; column: numbe
 	return [{ label, value: `line:${target}:${column ?? 1}` }];
 }
 
-/** Quote a path for a `cd` typed into the integrated shell. Single quotes are literal in
- *  PowerShell (the Windows shell the terminal spawns) and in POSIX shells alike - a double-
- *  quoted `$` or backtick would be expanded by PowerShell, and backslash-escaping it is a
- *  POSIX-only spelling. The quote itself is doubled for PowerShell, closed-escaped-reopened
- *  for POSIX; a Windows path (a backslash or a drive) tells the two apart. */
-export function quoteShellPath(path: string): string {
-	if (/^[\w./:\\-]+$/.test(path)) return path;
-	const windows = path.includes('\\') || /^[a-zA-Z]:/.test(path);
-	return `'${windows ? path.replaceAll("'", "''") : path.replaceAll("'", "'\\''")}'`;
-}
-
 /** The booted instance — the dev harness reaches the self-test suites through it
  *  (`registerSelfTestSuites` wants the live workbench; a second boot is not one). */
 export let currentWorkbench: Workbench | null = null;

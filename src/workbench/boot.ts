@@ -21,7 +21,7 @@ import { openSettingsPanel } from './settingsPanel';
 import { settings, updateSetting } from '../platform/settings';
 import * as state from '../platform/state';
 import { basename, notify } from '../platform/ui/index';
-import { FS_CHANGED_EVENT, FsChange, OPEN_PATHS_EVENT, OpenedPaths, joinRepo, quoteShellPath, whenIdle } from './workbench';
+import { FS_CHANGED_EVENT, FsChange, OPEN_PATHS_EVENT, OpenedPaths, joinRepo, whenIdle } from './workbench';
 
 /** The close decision's pure half (§17.2, G13): the window hides instead of the instance
  *  exiting while a `--remote-host` launch runs, or the daemon reports any remote session
@@ -240,7 +240,9 @@ export const bootMethods: ThisType<Workbench> = {
 		this.explorer.onOpenFolder = () => void this.pickFolder();
 		this.explorer.onPathRenamed = (from, to) => this.editors.pathRenamed(from, to);
 		this.explorer.onPathDeleted = (path) => this.editors.pathDeleted(path);
-		this.explorer.onOpenInTerminal = (folder) => void this.panel.runInTerminal(`cd ${quoteShellPath(folder)}`);
+		// The shell spawns IN the folder (pty_create's cwd), VS Code's own shape — no `cd`
+		// line typed into a shell that started at the root.
+		this.explorer.onOpenInTerminal = (folder) => void this.panel.openTerminal(folder);
 		// "Module Analysis" over the picked folder(s): a scoped Module Analysis tab,
 		// one per folder set (the blank-area pick on the root is the workspace page).
 		this.explorer.onModuleAnalysis = (folders) => void this.editors.openAnalysisPage('modules', folders);

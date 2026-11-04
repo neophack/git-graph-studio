@@ -229,6 +229,13 @@ export class Panel {
 		await this.terminal.run(command);
 	}
 
+	/** Reveal the terminal and open a new shell IN `cwd` — the spawn's working directory,
+	 *  not a `cd` typed into a shell that started elsewhere. */
+	async openTerminal(cwd?: string): Promise<void> {
+		this.show('terminal');
+		await this.terminal.create(cwd);
+	}
+
 	private toggleMaximized(): void {
 		this.maximized = !this.maximized;
 		this.element.classList.toggle('maximized', this.maximized);
