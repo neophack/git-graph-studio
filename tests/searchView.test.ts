@@ -4,7 +4,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { backend, Channel } from './tauriMock';
-import { click, flush, key, notifications, notificationButton, texts, type } from './helpers';
+import { click, flush, key, menuItem, menuLabels, notifications, notificationButton, rightClick, texts, type } from './helpers';
 import { SearchView, renderMatchLine, validateQuery, type FileMatches, type SearchEvent } from '../src/features/search';
 import { settings } from '../src/platform/settings';
 
@@ -26,6 +26,31 @@ function streams(batches: FileMatches[][], done: { scanned: number; truncated?: 
 async function frame(): Promise<void> {
 	await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
 	await flush();
+}
+
+/** A two-root workspace's search: the named files stream for the first root, the second root
+ *  scans empty. The results carry `root`, which the context menu's absolute paths reveal
+ *  through — a single-folder search's results carry none (the backend derives the root). */
+function rootedStream(files: FileMatches[]): void {
+	backend.on('search_workspace', async (args) => {
+		const channel = args.onEvent as Channel<SearchEvent>;
+		if (args.repo === 'C:\\other') {
+			channel.send({ kind: 'done', scanned: 0, truncated: false, cancelled: false });
+			return null;
+		}
+		if (files.length > 0) channel.send({ kind: 'batch', files });
+		channel.send({ kind: 'done', scanned: files.length, truncated: false, cancelled: false });
+		return null;
+	});
+}
+
+/** The search view over the two rooted roots, its query run. */
+async function rootedView(query: string): Promise<SearchView> {
+	const view = new SearchView(document.createElement('div'));
+	view.setRoots(['C:\\repo', 'C:\\other']);
+	type(view.container.querySelector('.search-row input') as HTMLInputElement, query);
+	await view.runSearch();
+	return view;
 }
 
 describe('Search view', () => {
@@ -242,6 +267,94 @@ describe('Search view', () => {
 		expect(group.classList.contains('collapsed')).toBe(true);
 		click(view.container.querySelector('[title="Expand All"]')!);
 		expect(group.classList.contains('collapsed')).toBe(false);
+	});
+
+	it("right-click offers VS Code's result menu: Copy / Copy Path / Copy All / Reveal — the file row without the line's Copy", async () => {
+		rootedStream([{ path: 'src/lib.rs', matches: [{ line: 3, column: 7, length: 2, text: 'alpha fn beta' }] }]);
+		const view = await rootedView('fn');
+
+		rightClick(view.container.querySelector('.search-match')!);
+		expect(menuLabels()).toEqual(['Copy', 'Copy Path', 'Copy All', 'Reveal in File Explorer']);
+		key(document, 'Escape');
+
+		rightClick(view.container.querySelector('.search-file-head')!);
+		expect(menuLabels()).toEqual(['Copy Path', 'Copy All', 'Reveal in File Explorer']);
+		key(document, 'Escape');
+	});
+
+	it('Copy copies the line text, Copy Path the absolute path, Copy All every result path', async () => {
+		rootedStream([
+			{ path: 'src/lib.rs', matches: [{ line: 3, column: 7, length: 2, text: 'alpha fn beta' }] },
+			{ path: 'src/main.rs', matches: [{ line: 1, column: 1, length: 2, text: 'fn main' }] }
+		]);
+		const view = await rootedView('fn');
+
+		rightClick(view.container.querySelector('.search-match')!);
+		click(menuItem('Copy Path'));
+		await flush();
+		expect(backend.clipboard).toEqual(['C:\\repo\\src\\lib.rs']);
+
+		rightClick(view.container.querySelector('.search-match')!);
+		click(menuItem('Copy All'));
+		await flush();
+		expect(backend.clipboard.at(-1)).toBe('C:\\repo\\src\\lib.rs\nC:\\repo\\src\\main.rs');
+
+		rightClick(view.container.querySelector('.search-match')!);
+		click(menuItem('Copy'));
+		await flush();
+		expect(backend.clipboard.at(-1)).toBe('alpha fn beta');
+	});
+
+	it('Reveal in File Explorer is desktop-only and reveals the absolute path', async () => {
+		rootedStream([{ path: 'src/lib.rs', matches: [{ line: 3, column: 7, length: 2, text: 'alpha fn beta' }] }]);
+		const view = await rootedView('fn');
+
+		rightClick(view.container.querySelector('.search-match')!);
+		expect(menuLabels()).toContain('Reveal in File Explorer');
+		click(menuItem('Reveal in File Explorer'));
+		await flush();
+		expect(backend.revealed).toEqual(['C:\\repo\\src\\lib.rs']);
+
+		// The remote workbench's marker (boot.ts sets it before main.ts loads): a browser page
+		// has no desktop File Explorer to reveal into — the row hides, the rest stands.
+		document.documentElement.setAttribute('data-remote-shell', '');
+		try {
+			rightClick(view.container.querySelector('.search-file-head')!);
+			expect(menuLabels()).not.toContain('Reveal in File Explorer');
+			expect(menuLabels()).toContain('Copy Path');
+		} finally {
+			document.documentElement.removeAttribute('data-remote-shell');
+		}
+		key(document, 'Escape');
+	});
+
+	it("a single-folder search carries its root: the results absolutize like a multi-root's", async () => {
+		const search = streams([[{ path: 'src/lib.rs', matches: [{ line: 3, column: 7, length: 2, text: 'alpha fn beta' }] }]]);
+		const view = new SearchView(document.createElement('div'));
+		view.setRoots(['C:\\repo']);
+		type(view.container.querySelector('.search-row input') as HTMLInputElement, 'fn');
+		await view.runSearch();
+
+		// One invocation, the folder itself passed as the repo: the backend derives the
+		// same root either way, and the menu gains the absolute paths to copy and reveal.
+		expect((search.mock.calls[0][0] as Record<string, unknown>).repo).toBe('C:\\repo');
+		rightClick(view.container.querySelector('.search-match')!);
+		expect(menuLabels()).toEqual(['Copy', 'Copy Path', 'Copy All', 'Reveal in File Explorer']);
+		click(menuItem('Copy Path'));
+		await flush();
+		expect(backend.clipboard.at(-1)).toBe('C:\\repo\\src\\lib.rs');
+		key(document, 'Escape');
+	});
+
+	it('a rootless search (no folder passed) keeps the derived-root fallback and hides Reveal', async () => {
+		streams([[{ path: 'src/lib.rs', matches: [{ line: 3, column: 7, length: 2, text: 'alpha fn beta' }] }]]);
+		const view = new SearchView(document.createElement('div'));
+		type(view.container.querySelector('.search-row input') as HTMLInputElement, 'fn');
+		await view.runSearch();
+
+		rightClick(view.container.querySelector('.search-match')!);
+		expect(menuLabels()).toEqual(['Copy', 'Copy Path', 'Copy All']);
+		key(document, 'Escape');
 	});
 
 	it('replaces all after a confirmation', async () => {

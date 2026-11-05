@@ -4,6 +4,11 @@
 // scans, the list grows as they land, and typing again cancels the search in flight. The result
 // tree is a plain DOM tree, like VS Code's search tree: one group per file (its header row
 // followed by its match rows) in normal document flow - every row in the DOM, no windowing.
+// Every row carries VS Code's result context menu: Copy (a match's line), Copy Path, Copy
+// All (every result file's path) and, on the desktop, Reveal in File Explorer.
+
+import { revealItemInDir } from '@tauri-apps/plugin-opener';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { Channel } from '../../platform/ipc/core';
 import { replaceInFiles, searchCancel, searchWorkspace, type SearchEvent } from '../../platform/ipc/search';
@@ -12,7 +17,7 @@ import * as state from '../../platform/state';
 import { queryHasUppercase } from '../../platform/find/findOptions';
 import { FindHistory, HistoryRecall, recallKey } from '../../platform/find/findHistory';
 import { settings } from '../../platform/settings';
-import { actionButton, basename, confirmDialog, dirname, el, icon, liveSidebarTitle, notify } from '../../platform/ui/index';
+import { actionButton, basename, confirmDialog, dirname, el, icon, liveSidebarTitle, notify, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 
 
 import type { FileMatches, SearchMatch } from '../../platform/ipc/search';
@@ -30,6 +35,13 @@ export const DEFAULT_OPTIONS: SearchOptions = { caseSensitive: false, wholeWord:
 
 /** How long after the last keystroke the as-you-type search fires, as in VS Code. */
 const TYPE_DEBOUNCE_MS = 300;
+
+/** The remote workbench's marker (boot.ts sets it before main.ts loads): a browser page has
+ *  no desktop File Explorer to reveal into — the same desktop-only row the Explorer's menu
+ *  carries. */
+function remoteShell(): boolean {
+	return typeof document !== 'undefined' && document.documentElement.hasAttribute('data-remote-shell');
+}
 
 /** One result row: the line's text with the match span highlighted. */
 export function renderMatchLine(match: SearchMatch): HTMLElement {
@@ -455,9 +467,10 @@ export class SearchView {
 		this.render();
 		const onEvent = new Channel<SearchEvent>();
 		let pendingRender: number | null = null;
-		// The roots of this search, in order: a single-folder workspace is one implicit root
-		// (the backend derives it), a multi-root workspace one entry per open folder.
-		const roots = this.roots.length > 1 ? this.roots : [undefined];
+		// The roots of this search, in order: one entry per open workspace folder (a
+		// single-folder workspace carries its one root, so result paths absolutize);
+		// empty only when no folder is open, and the backend then derives the root.
+		const roots = this.roots.length ? this.roots : [undefined];
 		let rootIndex = 0;
 		const searchRoot = async (): Promise<void> => {
 			if (id !== this.searchId) return;
@@ -575,7 +588,7 @@ export class SearchView {
 		try {
 			let files = 0;
 			let replacements = 0;
-			for (const root of this.roots.length > 1 ? this.roots : [undefined]) {
+			for (const root of this.roots.length ? this.roots : [undefined]) {
 				// The same matcher as the search (whole word included), so what was listed is
 				// exactly what gets replaced.
 				const outcome = await replaceInFiles({
@@ -656,6 +669,11 @@ export class SearchView {
 		]);
 		head.title = file.path;
 		head.addEventListener('click', () => this.setCollapsed(file, !this.collapsed.has(this.fileKey(file))));
+		head.addEventListener('contextmenu', (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			this.showResultMenu(event, file, null);
+		});
 		group.append(head);
 		for (const match of file.matches) group.appendChild(this.renderMatchRow(file, match));
 		this.groups.set(this.fileKey(file), group);
@@ -668,7 +686,41 @@ export class SearchView {
 		line.prepend(el('span', 'line-no', [String(match.line)]));
 		line.title = `${file.path}:${match.line}`;
 		line.addEventListener('click', () => this.onOpenMatch?.(file.path, match.line, match.column, file.root));
+		line.addEventListener('contextmenu', (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			this.showResultMenu(event, file, match);
+		});
 		return line;
+	}
+
+	/** VS Code's search-result context menu: Copy (the match's line text), Copy Path
+	 *  (Shift+Alt+C), Copy All (every result file's path, one per line), and "Reveal in File
+	 *  Explorer" — a desktop-only row (a browser page has no such place), shown only for a
+	 *  file whose absolute path the view can name: a multi-root search's results carry their
+	 *  root, a single-folder search's root is derived backend-side and never crosses here, and
+	 *  a relative path is nothing the OS's File Explorer could reveal. The file row's menu is
+	 *  the same without the line's Copy. */
+	private showResultMenu(event: MouseEvent, file: FileMatches, match: SearchMatch | null): void {
+		const absolute = this.absolutePath(file);
+		const entries: MenuEntry[] = [
+			...(match ? [{ label: 'Copy', run: () => void writeText(match.text) }] : []),
+			{ label: 'Copy Path', keybinding: 'Shift+Alt+C', run: () => void writeText(absolute) },
+			{ label: 'Copy All', run: () => void writeText(this.results.map((result) => this.absolutePath(result)).join('\n')) },
+			'separator',
+			...(remoteShell() || !file.root ? [] : [{ label: 'Reveal in File Explorer', run: () => void revealItemInDir(absolute).catch((error) => notify('error', String(error))) }])
+		];
+		showContextMenu(event.clientX, event.clientY, entries);
+	}
+
+	/** A result file's path spelled as absolutely as the view can: the search root joined in
+	 *  when the result carries one (a multi-root workspace's searches), the stored
+	 *  root-relative path otherwise. The stored path is forward-slashed; a Windows root joins
+	 *  in its own separator - the same spelling the workbench's `joinRepo` opens through. */
+	private absolutePath(file: FileMatches): string {
+		if (!file.root) return file.path;
+		const separator = file.root.includes('\\') ? '\\' : '/';
+		return file.root.replace(/[\\/]+$/, '') + separator + file.path.replaceAll('/', separator);
 	}
 
 	/** Fold or unfold one file: the group's `collapsed` class hides its match rows, and the

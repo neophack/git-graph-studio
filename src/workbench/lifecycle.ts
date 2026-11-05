@@ -194,7 +194,9 @@ export const lifecycleMethods: ThisType<Workbench> = {
 			void this.explorer.whenRendered().then(() => bootStage('folder shown', performance.now())).catch(() => undefined);
 		}
 		this.search.setEnabled(true);
-		this.search.setRoots(this.repoPaths.length > 1 ? this.repoPaths : []);
+		// One entry per open folder — single-root included, so the search view absolutizes
+		// result paths (copy path, reveal) instead of deriving nothing from an empty list.
+		this.search.setRoots(this.repoPaths);
 		this.editors.setRoot(root);
 		this.scm.setRepo(root, anyRepo);
 		this.statusBar.setRepo(anyRepo); // a plain folder shows no repository items
