@@ -99,7 +99,11 @@ export function installFilesPage(): void {
 		'separator',
 		{ label: t('remote.files.rename'), run: () => select.rename(entry.path) },
 		{ label: t('remote.files.delete'), run: () => void deleteOne(entry) },
-		{ label: t('remote.files.copyPath'), run: () => void copyPath(entry.path) },
+		// The desktop explorer's copy pair, one row each: absolute, and relative to the open
+		// folder. The relative label is the desktop menu's own literal — no string-table key —
+		// which the sheet's trText resolves (the zh-cn table carries '复制相对路径').
+		{ label: t('remote.files.copyPath'), run: () => void copyText(entry.path) },
+		{ label: 'Copy Relative Path', run: () => void copyText(relativeTo(workspaceRoot(), entry.path)) },
 		'separator',
 		{ label: t('remote.files.multiSelect'), run: () => select.longPress(entry.path) }
 	];
@@ -116,9 +120,12 @@ export function installFilesPage(): void {
 		await list.refresh();
 	}
 
-	async function copyPath(path: string): Promise<void> {
+	/** The row menu's two copy entries share the one clipboard write (the browser session's
+	 *  own navigator.clipboard — the pattern pathBar's chip long-press and the selection's
+	 *  bars use; the Tauri plugin shim is the workbench's seam, not this page's). */
+	async function copyText(text: string): Promise<void> {
 		try {
-			await navigator.clipboard.writeText(path);
+			await navigator.clipboard.writeText(text);
 			notify('info', t('remote.files.pathCopied'));
 		} catch {
 			notify('error', t('remote.files.copyFailed'));
@@ -147,7 +154,9 @@ export function installFilesPage(): void {
 		paths: () => list.visible().map((entry) => entry.path),
 		rerender: () => list.render(),
 		refresh: () => void list.refresh(),
-		entryOf: (path): DirEntryInfo | null => list.entries.find((entry) => entry.path === path) ?? null
+		entryOf: (path): DirEntryInfo | null => list.entries.find((entry) => entry.path === path) ?? null,
+		// The relative copy spells from the open folder — the desktop explorer's own base.
+		root: () => workspaceRoot()
 	});
 
 	const pathBar = createPathBar((next) => void show(next));

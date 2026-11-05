@@ -59,6 +59,16 @@ const selectionHook = {
 	toggle: (path: string) => select?.toggle(path)
 };
 
+/** jsdom ships no clipboard: the browser session's writeText, recorded. */
+function stubClipboard(): { written: string[] } {
+	const written: string[] = [];
+	Object.defineProperty(navigator, 'clipboard', {
+		configurable: true,
+		value: { writeText: (text: string) => { written.push(text); return Promise.resolve(); } }
+	});
+	return { written };
+}
+
 function mountList(dirs: Record<string, Entry[]>, letters: Record<string, string> = {}) {
 	serve(dirs);
 	const entered: string[] = [];
@@ -113,7 +123,8 @@ function selectOver(mounted: ReturnType<typeof mountList>, isDir: (path: string)
 		paths: () => [...mounted.root.querySelectorAll<HTMLElement>('.ggs-file-row')].map((node) => node.dataset.path!),
 		rerender: () => mounted.list.render(),
 		refresh: () => undefined,
-		entryOf: (path) => ({ name: path.slice(path.lastIndexOf('/') + 1), isDir: isDir(path) })
+		entryOf: (path) => ({ name: path.slice(path.lastIndexOf('/') + 1), isDir: isDir(path) }),
+		root: () => 'C:/repo'
 	});
 	return select;
 }
@@ -130,6 +141,7 @@ beforeEach(() => {
 afterEach(() => {
 	document.body.replaceChildren();
 	select = null;
+	delete (navigator as unknown as { clipboard?: unknown }).clipboard;
 });
 
 describe('the file list (§6.1)', () => {
@@ -397,6 +409,39 @@ describe('the multi-select (§6.1)', () => {
 		provideHook('transferWire', null);
 	});
 
+	it('the copy pair writes the selection one path a line — absolute, or relative to the workspace root', async () => {
+		// The desktop explorer's copy pair (Shift+Alt+C / Ctrl+K Ctrl+Shift+C) over the
+		// phone's selection: the marked paths joined one a line, the relative variant
+		// spelled from the open folder; one marked row alone copies that single path.
+		const { written } = stubClipboard();
+		const mounted = mountList({
+			'C:/repo': [
+				{ name: 'a.ts', isDir: false },
+				{ name: 'src', isDir: true },
+				{ name: 'b.md', isDir: false }
+			]
+		});
+		await mounted.list.show('C:/repo');
+		const select = selectOver(mounted);
+		const copyButton = (label: string) =>
+			[...select.actionBar.querySelectorAll('button')].find((button) => button.textContent === label)!;
+		await longPressSelect(row(mounted.root, 'a.ts'));
+		click(row(mounted.root, 'src'));
+		click(row(mounted.root, 'b.md'));
+		await click(copyButton('Copy Path'));
+		await click(copyButton('Copy Relative Path'));
+		expect(written).toEqual([
+			'C:/repo/a.ts\nC:/repo/src\nC:/repo/b.md',
+			'a.ts\nsrc\nb.md'
+		]);
+		// One marked row alone: that path, both spellings.
+		click([...select.countBar.querySelectorAll('button')].at(-1)!);
+		await longPressSelect(row(mounted.root, 'src'));
+		await click(copyButton('Copy Path'));
+		await click(copyButton('Copy Relative Path'));
+		expect(written.slice(2)).toEqual(['C:/repo/src', 'src']);
+	});
+
 	it('deletes after one confirm for the whole selection', async () => {
 		const deleted: { path: string; permanent: boolean }[] = [];
 		backend.on('delete_path', ({ path, permanent }: { path: string; permanent: boolean }) => {
@@ -441,7 +486,8 @@ describe('the multi-select (§6.1)', () => {
 				refreshed++;
 				void mounted.list.refresh();
 			},
-			entryOf: (path) => ({ name: path.slice(path.lastIndexOf('/') + 1), isDir: false })
+			entryOf: (path) => ({ name: path.slice(path.lastIndexOf('/') + 1), isDir: false }),
+			root: () => 'C:/repo'
 		});
 		await longPressSelect(row(mounted.root, 'a.ts'));
 		click(row(mounted.root, 'b.ts'));
@@ -599,6 +645,25 @@ describe('the installed page follows the workspace root', () => {
 		click(row(document.querySelector('.ggs-files-page') as HTMLElement, 'a.txt').querySelector('.ggs-file-more')!);
 		const next = document.querySelector('.ggs-action-sheet');
 		expect([...next!.querySelectorAll('button')].map((button) => button.textContent)).not.toContain('Open Preview');
+	});
+
+	// The desktop explorer's copy pair over the installed page's real row menu: the sheet
+	// offers Copy Path and Copy Relative Path, and the relative row writes the path spelled
+	// from the workspace root (the open folder, the desktop menu's own base).
+	it("the row menu's copy pair writes the path, the relative one from the workspace root", { timeout: 30_000 }, async () => {
+		const { written } = stubClipboard();
+		await bootWithoutRoots();
+		await currentWorkbench!.applyRoots(['C:/repo'], true, null);
+		await flush(8);
+		click(row(document.querySelector('.ggs-files-page') as HTMLElement, 'a.txt').querySelector('.ggs-file-more')!);
+		const sheet = document.querySelector('.ggs-action-sheet');
+		expect(sheet).not.toBeNull();
+		const labels = [...sheet!.querySelectorAll('button')].map((button) => button.textContent);
+		expect(labels).toContain('Copy Path');
+		expect(labels).toContain('Copy Relative Path');
+		click([...sheet!.querySelectorAll('button')].find((button) => button.textContent === 'Copy Relative Path')!);
+		await flush(2);
+		expect(written).toEqual(['a.txt']);
 	});
 });
 

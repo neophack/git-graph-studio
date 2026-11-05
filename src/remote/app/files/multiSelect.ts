@@ -2,11 +2,12 @@
 // with the pressed row; every row then carries a checkbox, the count bar replaces the
 // toolbar (已选 N 项 + 全选 + 取消), and the bottom action bar offers the selection's
 // verbs — download (a multi-selection packs ONE zip, §6.7), delete (a confirm, then the
-// paths go), rename (single selection only, an inline edit in the row) and copy path.
-// The list renders the marks: this module owns the STATE and the bars.
-import { el, notify, confirmDialog } from '../../../platform/ui';
+// paths go), rename (single selection only, an inline edit in the row) and the desktop
+// explorer's copy pair (Copy Path / Copy Relative Path, one path a line when several are
+// marked). The list renders the marks: this module owns the STATE and the bars.
+import { el, notify, confirmDialog, relativeTo } from '../../../platform/ui';
 import { deletePath, renamePath } from '../../../platform/ipc/fs';
-import { t, tf } from '../../../platform/i18n';
+import { t, tf, trText } from '../../../platform/i18n';
 import { downloadManyTo, downloadTo } from '../../../features/explorer';
 
 export interface MultiSelectHooks {
@@ -18,6 +19,9 @@ export interface MultiSelectHooks {
 	refresh(): void;
 	/** A single selection's entry, for rename. */
 	entryOf(path: string): { name: string; isDir: boolean } | null;
+	/** The workspace root the Copy Relative Path spell from (the desktop's own base — the
+	 *  open folder, not the repository root). */
+	root(): string;
 }
 
 export function createMultiSelect(hooks: MultiSelectHooks) {
@@ -50,7 +54,11 @@ export function createMultiSelect(hooks: MultiSelectHooks) {
 			barButton(t('remote.files.download'), () => void download()),
 			barButton(t('remote.files.delete'), () => void remove()),
 			barButton(t('remote.files.rename'), () => single && void rename(single)),
-			barButton(t('remote.files.copyPath'), () => void copyAll())
+			barButton(t('remote.files.copyPath'), () => void copyAll()),
+			// The sheet rows resolve labels through trText; these bare buttons spell it
+			// themselves — the literal is the desktop explorer's own menu label, and the
+			// zh-cn text table already carries its translation.
+			barButton(trText('Copy Relative Path'), () => void copyAll(true))
 		);
 		// Rename reads one selection only (§6.1): the button stays disabled otherwise.
 		(actionBar.children[2] as HTMLButtonElement).disabled = single === null;
@@ -132,8 +140,12 @@ export function createMultiSelect(hooks: MultiSelectHooks) {
 		});
 	}
 
-	async function copyAll(): Promise<void> {
-		const text = [...selected].join('\n');
+	/** The desktop explorer's copy pair (Shift+Alt+C / Ctrl+K Ctrl+Shift+C): the marked
+	 *  paths one a line — absolute as listed, or relative to the workspace root. One
+	 *  selection alone copies that single path. */
+	async function copyAll(relative = false): Promise<void> {
+		const root = hooks.root();
+		const text = [...selected].map((path) => (relative ? relativeTo(root, path) : path)).join('\n');
 		try {
 			await navigator.clipboard.writeText(text);
 			notify('info', t('remote.files.pathCopied'));
