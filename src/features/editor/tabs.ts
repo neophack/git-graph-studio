@@ -3,10 +3,11 @@ import { toggleBookmark } from './bookmarks';
 import { samePath, commandIconContent, contextUri, menuSection, resolvedMenuEntries, resourceContext, runMenuEntry } from '../extensions';
 import { extFileDataUrl } from '../../platform/extAssets';
 import { t, trText } from '../../platform/i18n';
-import { basename, el, icon, relativeTo, showContextMenu, showMenuBelow, type MenuEntry } from '../../platform/ui/index';
+import { basename, el, icon, notify, relativeTo, showContextMenu, showMenuBelow, type MenuEntry } from '../../platform/ui/index';
 import { fileIconColor, isCanLog } from '../../platform/fileIcons';
 import { hook } from '../../platform/hooks';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import type { EditorGroup } from './group';
 import { editorState } from './editorState';
 import type { Editor, NavEntry } from './inputs';
@@ -20,6 +21,12 @@ import { inputId } from './inputs';
 /** The tab being dragged between editor groups: filled on `dragstart`, consumed on drop. */
 export const tabDrag: { editor: Editor | null; groupId: number | null } = { editor: null, groupId: null };
 
+
+/** The desktop vs the browser shell: the remote workbench's marker (boot.ts sets it before
+ *  main.ts loads) — the same gate the Explorer's row menu applies to its desktop-only rows. */
+function remoteShell(): boolean {
+	return typeof document !== 'undefined' && document.documentElement.hasAttribute('data-remote-shell');
+}
 
 /** The tabs concern of EditorGroup — assigned onto the prototype by the module facade. */
 export const tabsMethods: ThisType<EditorGroup> = {
@@ -303,18 +310,27 @@ export const tabsMethods: ThisType<EditorGroup> = {
 			{ label: 'Close to the Right', disabled: this.open.indexOf(editor) === this.open.length - 1, run: () => void this.closeToTheRight(editor) },
 			{ label: 'Close Saved', run: () => void this.closeSaved() },
 			{ label: 'Close All', keybinding: 'Ctrl+K Ctrl+W', run: () => void this.closeAll() },
-			// VS Code's tab-menu lock toggle, labelled by the state — the discoverable exit
-			// beside the badge's click (the palette names the commands too). `trText` reuses
-			// the palette labels' own translations, so every surface says the same thing.
-			'separator',
-			{ label: trText(this.locked ? 'Unlock Editor Group' : 'Lock Editor Group'), run: () => this.onToggleGroupLock?.() }
+			// VS Code's 1_close_save group: Save rides a dirty tab's menu only, and the write
+			// goes through the group's own save lifecycle (dirty.ts).
+			...(editor.dirty ? [{ label: 'Save', keybinding: 'Ctrl+S', run: () => void this.save(editor) }] as MenuEntry[] : []),
+			'separator'
 		];
 		if (editor.input.kind === 'file') {
 			const path = editor.input.path;
-			entries.push('separator',
+			entries.push(
 				{ label: 'Copy Path', keybinding: 'Shift+Alt+C', run: () => void writeText(path) },
-				{ label: 'Copy Relative Path', keybinding: 'Ctrl+K Ctrl+Shift+C', run: () => void writeText(this.rootPath ? relativeTo(this.rootPath, path) : path) });
+				{ label: 'Copy Relative Path', keybinding: 'Ctrl+K Ctrl+Shift+C', run: () => void writeText(this.rootPath ? relativeTo(this.rootPath, path) : path) },
+				// VS Code's 2_files group: the PC's own File Explorer at the file. A browser
+				// page — the remote shell — has no such place, so the row hides there, the
+				// same gate the Explorer's row menu applies.
+				...(remoteShell() ? [] : [{ label: 'Reveal in File Explorer', run: () => void revealItemInDir(path).catch((e) => notify('error', String(e))) }] as MenuEntry[]));
 		}
+		// VS Code's tab-menu lock toggle, labelled by the state — the discoverable exit
+		// beside the badge's click (the palette names the commands too). `trText` reuses
+		// the palette labels' own translations, so every surface says the same thing. VS
+		// Code pins/locks below the copy group, so the toggle stands after it here.
+		entries.push('separator',
+			{ label: trText(this.locked ? 'Unlock Editor Group' : 'Lock Editor Group'), run: () => this.onToggleGroupLock?.() });
 		entries.push(...menuSection('editor/title/context', editor.input.kind === 'file' ? [contextUri(editor.input.path), [contextUri(editor.input.path)]] : undefined, editor.input.kind === 'file' ? resourceContext(editor.input.path) : undefined));
 		return entries;
 	},

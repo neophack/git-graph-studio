@@ -454,9 +454,36 @@ describe('editor group', () => {
 
 		const firstTab = document.querySelector('.tab')!; // a.txt
 		rightClick(firstTab);
-		expect(menuLabels()).toEqual(['Close', 'Close Others', 'Close to the Right', 'Close Saved', 'Close All', 'Lock Editor Group', 'Copy Path', 'Copy Relative Path']);
+		expect(menuLabels()).toEqual(['Close', 'Close Others', 'Close to the Right', 'Close Saved', 'Close All', 'Copy Path', 'Copy Relative Path', 'Reveal in File Explorer', 'Lock Editor Group']);
 		click(menuItem('Copy Relative Path'));
 		expect(backend.clipboard).toEqual(['a.txt']);
+
+		// Reveal opens the PC's own file manager at the file (desktop only).
+		rightClick(firstTab);
+		click(menuItem('Reveal in File Explorer'));
+		expect(backend.revealed).toEqual(['C:\\repo\\a.txt']);
+
+		// VS Code shows Save on a dirty tab's menu only, between Close All and the copies.
+		const view = group.activeView!;
+		view.dispatch({ changes: { from: 0, insert: 'x' } });
+		rightClick(document.querySelector('.tab.active')!);
+		expect(menuLabels()).toEqual(['Close', 'Close Others', 'Close to the Right', 'Close Saved', 'Close All', 'Save', 'Copy Path', 'Copy Relative Path', 'Reveal in File Explorer', 'Lock Editor Group']);
+		click(menuItem('Save'));
+		await flush();
+		expect(document.querySelector('.tab.active')!.classList.contains('dirty')).toBe(false);
+		expect(backend.callsTo('write_file').at(-1)).toMatchObject({ path: 'C:\\repo\\b.txt', contents: 'xb' });
+
+		// The remote shell is a browser page: no desktop file manager, so Reveal hides
+		// while the rest of the menu stands (the Explorer's row-menu gate).
+		document.documentElement.setAttribute('data-remote-shell', '');
+		try {
+			rightClick(document.querySelector('.tab.active')!);
+			expect(menuLabels()).not.toContain('Reveal in File Explorer');
+			expect(menuLabels()).toContain('Copy Path');
+			expect(menuLabels()).toContain('Copy Relative Path');
+		} finally {
+			document.documentElement.removeAttribute('data-remote-shell');
+		}
 
 		rightClick(firstTab);
 		click(menuItem('Close Others'));
