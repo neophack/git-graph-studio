@@ -128,7 +128,7 @@ describe('explorer', () => {
 
 		// Rename through the context menu.
 		rightClick(document.querySelector('.tree .row'));
-		expect(menuLabels()).toEqual(['Open to the Right', 'Open to the Left', 'Open Below', 'Open Above', 'Open in Hex Viewer', 'New File...', 'New Folder...', 'Reveal in File Explorer', 'Copy Path', 'Copy Relative Path', 'Rename...', 'Delete']);
+		expect(menuLabels()).toEqual(['Open to the Right', 'Open to the Left', 'Open Below', 'Open Above', 'Open in Hex Viewer', 'New File...', 'New Folder...', 'Reveal in File Explorer', 'Open in Integrated Terminal', 'Copy Path', 'Copy Relative Path', 'Select for Compare', 'Rename...', 'Delete']);
 		// "Open in Hex Viewer" hands the clicked file's path to the hex tab.
 		const hexed: string[] = [];
 		explorer.onOpenHex = (p) => hexed.push(p);
@@ -266,9 +266,11 @@ describe('explorer', () => {
 		expect(menuLabels()).toContain('Open in Integrated Terminal');
 		click(menuItem('Open in Integrated Terminal'));
 		expect(terminals).toEqual([`${ROOT}\\src`]);
-		// Files do not get the entry.
+		// A file row gets the entry too: the terminal opens at the file's containing folder.
 		rightClick(document.querySelectorAll('.tree .row')[1]);
-		expect(menuLabels()).not.toContain('Open in Integrated Terminal');
+		expect(menuLabels()).toContain('Open in Integrated Terminal');
+		click(menuItem('Open in Integrated Terminal'));
+		expect(terminals).toEqual([`${ROOT}\\src`, ROOT]);
 
 		// A refresh while an inline input is open must settle it as cancelled, not hang.
 		const creating = explorer.newFile();
@@ -315,6 +317,119 @@ describe('explorer', () => {
 		rightClick(rows[1]);
 		click(menuItem('Module Analysis'));
 		expect(scopes).toEqual([['src', 'lib']]);
+	});
+
+	it('a multi-selection copies every path and deletes every entry together', async () => {
+		const tree: Record<string, string[]> = { [ROOT]: ['a.txt', 'b.txt', 'c.txt'] };
+		fileSystem(tree);
+		backend.on('delete_path', ({ path }) => { tree[ROOT] = tree[ROOT]!.filter((n) => n !== String(path).split('\\').pop()); return null; });
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		const deleted: string[] = [];
+		explorer.onPathDeleted = (p) => deleted.push(p);
+		explorer.setRoot(ROOT);
+		await flush();
+		const rows = () => Array.from(document.querySelectorAll<HTMLElement>('.tree .row'));
+
+		// Ctrl+click a second file, then right-click inside the selection: the copy carries
+		// every selected path, one per line, in selection order (VS Code's behaviour).
+		rows()[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		rows()[1].dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+		rightClick(rows()[1]);
+		expect(texts('.tree .row.selected .label')).toEqual(['a.txt', 'b.txt']);
+		click(menuItem('Copy Path'));
+		await flush();
+		expect(backend.clipboard).toEqual([`${ROOT}\\a.txt\n${ROOT}\\b.txt`]);
+		rightClick(rows()[1]);
+		click(menuItem('Copy Relative Path'));
+		await flush();
+		expect(backend.clipboard.at(-1)).toBe('a.txt\nb.txt');
+
+		// Delete acts on the whole selection: one confirmation naming the count, each entry
+		// deleted through the same IPC path, one refresh at the end.
+		rightClick(rows()[1]);
+		click(menuItem('Delete'));
+		await flush();
+		expect(notifications().at(-1)).toContain('delete 2 entries');
+		expect(notifications().at(-1)).toContain('restore them from the Recycle Bin');
+		click(notificationButton('Move to Recycle Bin'));
+		await flush();
+		expect(backend.callsTo('delete_path')).toEqual([
+			{ path: `${ROOT}\\a.txt`, permanent: false },
+			{ path: `${ROOT}\\b.txt`, permanent: false }
+		]);
+		expect(deleted).toEqual([`${ROOT}\\a.txt`, `${ROOT}\\b.txt`]);
+		expect(texts('.tree .row .label')).toEqual(['c.txt']);
+
+		// Keyboard Delete over a fresh selection deletes the group too; Shift+Delete makes
+		// the whole group permanent, still one confirmation.
+		tree[ROOT] = ['d.txt', 'e.txt'];
+		await explorer.refresh();
+		rows()[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		rows()[1].dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+		document.querySelector<HTMLElement>('.pane-body')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', shiftKey: true, bubbles: true }));
+		await flush();
+		expect(notifications().at(-1)).toContain('permanently delete 2 entries');
+		click(notificationButton('Delete Permanently'));
+		await flush();
+		expect(backend.callsTo('delete_path').slice(-2)).toEqual([
+			{ path: `${ROOT}\\d.txt`, permanent: true },
+			{ path: `${ROOT}\\e.txt`, permanent: true }
+		]);
+		expect(deleted.slice(-2)).toEqual([`${ROOT}\\d.txt`, `${ROOT}\\e.txt`]);
+		expect(texts('.tree .row .label')).toEqual([]);
+	});
+
+	it('pairs entries for compare the VS Code way: Select for Compare, then Compare with Selected', async () => {
+		fileSystem({ [ROOT]: ['a.txt', 'b.txt', 'src/', 'other/'], [`${ROOT}\\src`]: [], [`${ROOT}\\other`]: [] });
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		const compares: Array<[string, string, boolean]> = [];
+		explorer.onCompare = (left, right, isDir) => compares.push([left, right, isDir]);
+		explorer.setRoot(ROOT);
+		await flush();
+		const rowFor = (name: string) =>
+			[...document.querySelectorAll<HTMLElement>('.tree .row')].find((row) => row.querySelector('.label')?.textContent === name)!;
+
+		// Every menu offers the pick, and picking announces nothing (VS Code stays quiet).
+		rightClick(rowFor('a.txt'));
+		expect(menuLabels()).toContain('Select for Compare');
+		expect(menuLabels()).not.toContain('Compare with Selected');
+		click(menuItem('Select for Compare'));
+		expect(notifications()).toEqual([]);
+
+		// The picked entry's own menu disables the pick and offers no pairing with itself.
+		rightClick(rowFor('a.txt'));
+		expect(menuItem('Select for Compare')!.classList.contains('disabled')).toBe(true);
+		expect(menuLabels()).not.toContain('Compare with Selected');
+
+		// Another entry of the same kind pairs: the picked entry is the left side, and
+		// opening the pair clears the pick.
+		rightClick(rowFor('b.txt'));
+		click(menuItem('Compare with Selected'));
+		expect(compares).toEqual([[`${ROOT}\\a.txt`, `${ROOT}\\b.txt`, false]]);
+		rightClick(rowFor('b.txt'));
+		expect(menuLabels()).not.toContain('Compare with Selected');
+
+		// A kind mismatch never pairs: the file stays picked and a folder's menu has no
+		// pairing row, but picking the folder instead moves the pick.
+		rightClick(rowFor('a.txt'));
+		click(menuItem('Select for Compare'));
+		rightClick(rowFor('src'));
+		expect(menuLabels()).not.toContain('Compare with Selected');
+		click(menuItem('Select for Compare'));
+		rightClick(rowFor('other'));
+		click(menuItem('Compare with Selected'));
+		expect(compares.at(-1)).toEqual([`${ROOT}\\src`, `${ROOT}\\other`, true]);
+
+		// The pick rides across refreshes, but a folder switch drops it.
+		rightClick(rowFor('a.txt'));
+		click(menuItem('Select for Compare'));
+		await explorer.refresh();
+		rightClick(rowFor('b.txt'));
+		expect(menuLabels()).toContain('Compare with Selected');
+		explorer.setRoot(ROOT);
+		await flush();
+		rightClick(rowFor('b.txt'));
+		expect(menuLabels()).not.toContain('Compare with Selected');
 	});
 });
 

@@ -54,6 +54,10 @@ export class Explorer {
 	/** Every selected path, in selection order (Ctrl+click adds, Shift+click replaces with the
 	 *  range from the anchor). Always contains the anchor; a plain click collapses it to one. */
 	private selection: string[] = [];
+	/** The entry picked through "Select for Compare", waiting for the "Compare with Selected"
+	 *  that pairs it with another entry of the same kind (VS Code's flow). It rides across
+	 *  selections and refreshes; a folder switch drops it. */
+	private compareWith: string | null = null;
 
 	/** The selected entry's absolute path, or null. */
 	get selectedPath(): string | null {
@@ -149,6 +153,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		}
 		this.selected = null;
 		this.selection = [];
+		this.compareWith = null; // the picked compare entry belonged to the old tree
 		this.collapsed = false;
 		if (rootPath === null) this.rootPaths = [];
 		else if (this.rootPaths.length <= 1) this.rootPaths = rootPath ? [rootPath] : [];
@@ -748,6 +753,13 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		const folder = isDir ? path : path.slice(0, path.length - basename(path).length - 1);
 		const isRoot = path === this.rootPath;
 		const pair = this.comparePair(path, isDir);
+		// A right-click into a live multi-selection acts on the whole of it (the copy paths
+		// below, and the delete); anywhere else the clicked entry is the whole story.
+		const group = this.selection.includes(path) && this.selection.length >= 2 ? [...this.selection] : [path];
+		// The entry picked through "Select for Compare" pairs with another entry of the same
+		// kind; opening the pair clears the pick, ready for the next one.
+		const withRow = this.compareWith !== null && this.compareWith !== path ? this.rowFor(this.compareWith) : null;
+		const canCompare = withRow !== null && (withRow.dataset['dir'] === '1') === isDir;
 		showContextMenu(event.clientX, event.clientY, [
 			...(pair ? [
 				{ label: isDir ? 'Compare Two Folders' : 'Compare Two Files', run: () => this.onCompare?.(pair[0], pair[1], isDir) },
@@ -780,12 +792,25 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 			// two folders of one machine is the system file manager's job.
 			...(remoteShell() ? transferMenuEntries(path, isDir) : []),
 			...(isDir ? [
-				{ label: 'Module Analysis', run: () => this.onModuleAnalysis?.(this.selectedFolders(path)) },
-				{ label: 'Open in Integrated Terminal', run: () => this.onOpenInTerminal?.(path) }
+				{ label: 'Module Analysis', run: () => this.onModuleAnalysis?.(this.selectedFolders(path)) }
 			] : []),
+			// A folder row opens the terminal in the folder; a file row in its containing one.
+			{ label: 'Open in Integrated Terminal', run: () => this.onOpenInTerminal?.(folder) },
 			'separator',
-			{ label: 'Copy Path', keybinding: 'Shift+Alt+C', run: () => void writeText(path) },
-			{ label: 'Copy Relative Path', keybinding: 'Ctrl+K Ctrl+Shift+C', run: () => void writeText(relativeTo(this.rootPath!, path)) },
+			// A multi-selection copies one path per line, in selection order (VS Code's
+			// behaviour); a lone entry copies alone.
+			{ label: 'Copy Path', keybinding: 'Shift+Alt+C', run: () => void writeText(group.join('\n')) },
+			{ label: 'Copy Relative Path', keybinding: 'Ctrl+K Ctrl+Shift+C', run: () => void writeText(group.map((p) => relativeTo(this.rootPath!, p)).join('\n')) },
+			'separator',
+			{ label: 'Select for Compare', disabled: this.compareWith === path, run: () => { this.compareWith = path; } },
+			...(canCompare ? [{
+				label: 'Compare with Selected',
+				run: () => {
+					const left = this.compareWith!;
+					this.compareWith = null;
+					this.onCompare?.(left, path, isDir);
+				}
+			}] as MenuEntry[] : []),
 			'separator',
 			{ label: 'Rename...', keybinding: 'F2', disabled: isRoot, run: () => void this.renameInline(path) },
 			{ label: 'Delete', keybinding: 'Delete', disabled: isRoot, run: () => void this.delete(path) },
@@ -881,16 +906,29 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 	}
 
 	/** VS Code's delete: to the Recycle Bin by default (Shift+Delete, or a Recycle Bin that
-	 *  refuses, deletes permanently), with VS Code's prompts. */
+	 *  refuses, deletes permanently), with VS Code's prompts. The menu and the keyboard hand
+	 *  in the clicked (or focused) entry, and a live multi-selection around it deletes as
+	 *  one: a single confirmation naming the count, each entry through the same machinery,
+	 *  one refresh when the last has landed. */
 	private async delete(path: string, permanent = false): Promise<void> {
-		if (path === this.rootPath) return;
-		const isDir = this.rowFor(path)?.dataset['dir'] === '1';
-		const name = basename(path);
-		const what = `'${name}'${isDir ? ' and its contents' : ''}`;
+		const targets = this.selection.length > 1 && this.selection.includes(path) ? [...this.selection] : [path];
+		const deletable = targets.filter((target) => target !== this.rootPath);
+		if (deletable.length === 0) return;
+		const isDir = deletable.length === 1 && this.rowFor(deletable[0]!)?.dataset['dir'] === '1';
+		const what = deletable.length === 1 ? `'${basename(deletable[0]!)}'${isDir ? ' and its contents' : ''}` : `${deletable.length} entries`;
 		const confirmed = permanent
 			? await confirmDialog(`Are you sure you want to permanently delete ${what}? This action is irreversible!`, 'Delete Permanently')
-			: await confirmDialog(`Are you sure you want to delete ${what}? You can restore this ${isDir ? 'folder' : 'file'} from the Recycle Bin.`, 'Move to Recycle Bin');
+			: await confirmDialog(`Are you sure you want to delete ${what}? You can restore ${deletable.length === 1 ? `this ${isDir ? 'folder' : 'file'}` : 'them'} from the Recycle Bin.`, 'Move to Recycle Bin');
 		if (!confirmed) return;
+		for (const target of deletable) await this.deleteConfirmed(target, permanent);
+		await this.refresh();
+	}
+
+	/** The confirmed half of one delete: the IPC call, the Recycle Bin refusal's
+	 *  permanent-delete offer, the expanded set's rekey, the workbench's notification. */
+	private async deleteConfirmed(path: string, permanent: boolean): Promise<void> {
+		const isDir = this.rowFor(path)?.dataset['dir'] === '1';
+		const what = `'${basename(path)}'${isDir ? ' and its contents' : ''}`;
 		try {
 			await deletePath(path, permanent);
 		} catch (error) {
@@ -911,7 +949,6 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		}
 		if (isDir) this.rekeyExpanded(path, null);
 		await this.onPathDeleted?.(path);
-		await this.refresh();
 	}
 
 	/** `except` is the entry being renamed: its own current name is not a collision. */
