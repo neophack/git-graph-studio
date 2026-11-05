@@ -620,9 +620,9 @@ export class SourceControlView {
 
 	declare discardFiles: (files: ScmChange[]) => Promise<void> ;
 
-	declare navCluster: (key: ScmGroup, file: ScmChange, absolute: (relative: string) => string, timeline: boolean) => MenuEntry[] ;
+	declare navCluster: (key: ScmGroup, file: ScmChange, absolute: (relative: string) => string, timeline: boolean, explicit?: ScmChange[]) => MenuEntry[] ;
 
-	declare untrackedExtras: (key: ScmGroup, file: ScmChange, absolute: (relative: string) => string, root: string) => MenuEntry[] ;
+	declare untrackedExtras: (key: ScmGroup, file: ScmChange, absolute: (relative: string) => string, root: string, explicit?: ScmChange[]) => MenuEntry[] ;
 
 	declare addToGitignore: (root: string, paths: string[]) => Promise<void> ;
 

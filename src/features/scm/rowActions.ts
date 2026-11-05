@@ -257,8 +257,11 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 			// A sub-repo row is single-file (the rows never join the selection), and the
 			// editor's history page follows the workspace root — a sub-repo's timeline has
 			// no page to land in, so the cluster carries it nowhere.
-			const nav = this.navCluster(key, file, absolute, false);
-			const untracked = this.untrackedExtras(key, file, absolute, path);
+			const nav = this.navCluster(key, file, absolute, false, [file]);
+			// Single-file on purpose: the sub-repo rows never join the selection, so the
+			// extras must not inherit whatever the main repository has picked (a shared
+			// relative path would collide with its selection ids).
+			const untracked = this.untrackedExtras(key, file, absolute, path, [file]);
 			const entries = key === 'merge'
 				? [
 					{ label: 'Open in Merge Editor', run: () => this.onOpenFile?.(absolute(file.path)) },
@@ -310,22 +313,28 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 
 	/** The navigation cluster every change row's menu carries — the file's history, its
 	 *  row in the workspace tree (an existing file only), and the paths on the clipboard.
-	 *  Copy speaks for the whole selection where one exists. */
-	navCluster(key: ScmGroup, file: ScmChange, absolute: (relative: string) => string, timeline: boolean): MenuEntry[] {
+	 *  Copy speaks for the whole selection where one exists; a caller may pass the targets
+	 *  explicitly (a sub-repo row never joins the main repository's selection, whose paths
+	 *  must not leak onto its clipboard). */
+	navCluster(key: ScmGroup, file: ScmChange, absolute: (relative: string) => string, timeline: boolean, explicit?: ScmChange[]): MenuEntry[] {
 		const entries: MenuEntry[] = [];
 		if (timeline) entries.push({ label: 'Open Timeline', run: () => this.onOpenHistory?.(absolute(file.path)) });
 		if (letterOf(file, key) !== 'D') entries.push({ label: 'Reveal in Explorer', run: () => this.onReveal?.(absolute(file.path)) });
+		const targets = explicit ?? this.targetsFor(key, file, ['merge', 'staged', 'changes']);
 		entries.push(
-			{ label: 'Copy Path', run: () => void writeText(this.targetsFor(key, file, ['merge', 'staged', 'changes']).map((f) => absolute(f.path)).join('\n')) },
-			{ label: 'Copy Relative Path', run: () => void writeText(this.targetsFor(key, file, ['merge', 'staged', 'changes']).map((f) => toPosix(f.path)).join('\n')) }
+			{ label: 'Copy Path', run: () => void writeText(targets.map((f) => absolute(f.path)).join('\n')) },
+			{ label: 'Copy Relative Path', run: () => void writeText(targets.map((f) => toPosix(f.path)).join('\n')) }
 		);
 		return entries;
 	},
 
 	/** The untracked-only extras: the ignore file, and — one file at a time — the plain
-	 *  rename and delete a working-tree file keeps. Tracked paths never see them. */
-	untrackedExtras(key: ScmGroup, file: ScmChange, absolute: (relative: string) => string, root: string): MenuEntry[] {
-		const targets = this.targetsFor(key, file, ['merge', 'staged', 'changes']);
+	 *  rename and delete a working-tree file keeps. Tracked paths never see them. The
+	 *  targets speak for the multi-selection where one exists; a caller may pass them
+	 *  explicitly (a sub-repo row never joins the main repository's selection, whose ids
+	 *  a same-path sub file would otherwise collide with). */
+	untrackedExtras(key: ScmGroup, file: ScmChange, absolute: (relative: string) => string, root: string, explicit?: ScmChange[]): MenuEntry[] {
+		const targets = explicit ?? this.targetsFor(key, file, ['merge', 'staged', 'changes']);
 		const untracked = targets.filter((f) => f.untracked);
 		if (untracked.length === 0) return [];
 		const entries: MenuEntry[] = [

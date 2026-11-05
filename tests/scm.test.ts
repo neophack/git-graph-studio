@@ -436,6 +436,55 @@ describe('source control view', () => {
 		expect(backend.callsTo('delete_path')).toEqual([{ path: `${REPO}\\new.txt`, permanent: false }]);
 	});
 
+	it('appends every selected untracked path in one write and refreshes the view out of the list', async () => {
+		const { view } = setup([
+			change('gone.txt', { unstaged: 'deleted' }),
+			change('logs/trace.log', { untracked: true }),
+			change('new.txt', { untracked: true }),
+			change('README.md', { unstaged: 'modified' })
+		]);
+		view.setRepo(REPO);
+		await view.refresh();
+		let refreshed = 0;
+		view.refresh = () => { refreshed++; return Promise.resolve(); };
+		const row = (label: string) => Array.from(document.querySelectorAll<HTMLElement>('.scm-group .row'))
+			.find((r) => r.querySelector('.label')!.textContent === label)!;
+		// Both untracked rows picked: the batch menu carries the ignore entry alone —
+		// rename and delete stay a single file's verbs.
+		click(row('trace.log'), { ctrlKey: true });
+		click(row('new.txt'), { ctrlKey: true });
+		backend.on('read_file', () => { throw new Error('no ignore file yet'); });
+		backend.on('write_file', () => null);
+		rightClick(row('trace.log'));
+		expect(menuLabels()).toEqual([
+			'Open File', 'Open Changes',
+			'Open Timeline', 'Reveal in Explorer', 'Copy Path', 'Copy Relative Path',
+			'Stage Changes', 'Discard Changes',
+			'Add to .gitignore'
+		]);
+		click(menuItem('Add to .gitignore'));
+		await flush();
+		// One append carries both paths in row order; the write is followed by the
+		// view's own refresh (the ignored rows leave the list at once).
+		expect(backend.callsTo('write_file')).toEqual([{ path: `${REPO}\\.gitignore`, contents: 'logs/trace.log\nnew.txt\n', encoding: undefined, eol: 'lf' }]);
+		expect(refreshed).toBe(1);
+	});
+
+	it('notifies when the .gitignore write fails instead of failing silently', async () => {
+		const { view } = setup();
+		view.setRepo(REPO);
+		await view.refresh();
+		const row = (label: string) => Array.from(document.querySelectorAll<HTMLElement>('.scm-group .row'))
+			.find((r) => r.querySelector('.label')!.textContent === label)!;
+		// A missing .gitignore reads as empty (the create path); the write itself failing
+		// — permissions, a read-only checkout — surfaces as an error notification.
+		backend.on('write_file', () => { throw new Error('access denied'); });
+		rightClick(row('new.txt'));
+		click(menuItem('Add to .gitignore'));
+		await flush();
+		expect(notifications().at(-1)).toContain('access denied');
+	});
+
 	it('renders scm/title navigation entries as header buttons, and nothing else inline', async () => {
 		const { view } = setup();
 		view.setRepo(REPO);
@@ -760,6 +809,67 @@ describe('submodule sections', () => {
 		click(menuItem('Stage Changes'));
 		await flush();
 		expect(backend.callsTo('git_stage')).toEqual([{ paths: ['lib.rs'], repo: SUB }]);
+	});
+
+	it('offers a submodule\'s untracked file the ignore extras, writing the sub-repo\'s own .gitignore', async () => {
+		const { view, setSubChanges } = setup();
+		setSubChanges([change('gen.rs', { untracked: true })]);
+		view.setRepo(REPO);
+		await view.refresh();
+		const subSection = document.querySelector('.scm-repo')!;
+		rightClick(subSection.querySelector('.row'));
+		expect(menuLabels()).toEqual([
+			'Open File', 'Open Changes',
+			'Reveal in Explorer', 'Copy Path', 'Copy Relative Path',
+			'Stage Changes', 'Discard Changes',
+			'Add to .gitignore', 'Rename...', 'Delete File'
+		]);
+		click(menuItem('Add to .gitignore'));
+		await flush();
+		// The write lands in the submodule's root, not the workspace's.
+		expect(backend.callsTo('write_file')).toEqual([{ path: `${SUB}\\.gitignore`, contents: 'gen.rs\n', encoding: undefined, eol: 'lf' }]);
+	});
+
+	it('keeps the main repository\'s selection out of a submodule row\'s ignore targets', async () => {
+		const { view } = setup();
+		// The main repository holds a same-path file: its selection id collides with the
+		// sub-repo row's, and the sub row's extras must not inherit the main picks — they
+		// would append the main repository's paths to the submodule's .gitignore.
+		backend.on('scm_status', (args) => (args['repo'] === SUB
+			? [change('lib.rs', { untracked: true })]
+			: [change('README.md', { unstaged: 'modified' }), change('lib.rs', { untracked: true }), change('scratch.txt', { untracked: true })]));
+		view.setRepo(REPO);
+		await view.refresh();
+		const mainRow = (label: string) => Array.from(document.querySelectorAll<HTMLElement>('.scm-rows .row'))
+			.find((r) => r.querySelector('.label')!.textContent === label)!;
+		click(mainRow('lib.rs'), { ctrlKey: true });
+		click(mainRow('scratch.txt'), { ctrlKey: true });
+		backend.on('read_file', () => { throw new Error('no ignore file yet'); });
+		backend.on('write_file', () => null);
+		rightClick(document.querySelector('.scm-repo .row'));
+		click(menuItem('Add to .gitignore'));
+		await flush();
+		// Only the sub-repo's own path lands in its ignore file — never the main picks.
+		expect(backend.callsTo('write_file')).toEqual([{ path: `${SUB}\\.gitignore`, contents: 'lib.rs\n', encoding: undefined, eol: 'lf' }]);
+	});
+
+	it('keeps the main repository\'s selection out of a submodule row\'s copied paths', async () => {
+		const { view } = setup();
+		// Same collision as the ignore targets above, on the nav cluster: the sub-repo
+		// row's Copy Path must speak for itself, never for the main repository's picks.
+		backend.on('scm_status', (args) => (args['repo'] === SUB
+			? [change('lib.rs', { unstaged: 'modified' })]
+			: [change('README.md', { unstaged: 'modified' }), change('lib.rs', { untracked: true }), change('scratch.txt', { untracked: true })]));
+		view.setRepo(REPO);
+		await view.refresh();
+		const mainRow = (label: string) => Array.from(document.querySelectorAll<HTMLElement>('.scm-rows .row'))
+			.find((r) => r.querySelector('.label')!.textContent === label)!;
+		click(mainRow('lib.rs'), { ctrlKey: true });
+		click(mainRow('scratch.txt'), { ctrlKey: true });
+		rightClick(document.querySelector('.scm-repo .row'));
+		click(menuItem('Copy Path'));
+		await flush();
+		expect(backend.clipboard).toEqual([`${SUB}\\lib.rs`]);
 	});
 
 	it('commits within a submodule, passing its own repo path', async () => {
