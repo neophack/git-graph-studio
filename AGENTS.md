@@ -263,7 +263,8 @@ no-clobber copy — not a transfer) stay.
 
 - Frontend: `src/features/explorer/explorer.ts` (the context menu adapts to the remote shell: the
   desktop-only Reveal hides; the transfer rows show on the remote shell alone), `src/features/explorer/transfer.ts` (the wire-only transfer layer, the `TransferSink` progress
-  surface the mirror page re-installs)
+  surface the mirror page re-installs), `src/features/explorer/explorer.css` (the tree's own
+  styles — the clipboard's cut-dim, the rows' hover/focus states)
 - Backend: `src-tauri/src/cmd_fs.rs` (tree, file contents of the working tree / index / any
   revision, new-rename-delete, the external-drop copy-in `copy_into` — a dragged entry
   never clobbers what exists: it lands beside it as a " (copy)" sibling; the shared
@@ -299,7 +300,8 @@ direction: 打开大的项目会导致内存占用极高，我不要打开时候
 分析完后要释放内存): the first symbol query resumes (or builds) the index, and it leaves
 memory once idle — module 17's Code Analysis index follows the same lifetime.
 
-- Frontend: `src/features/search/searchView.ts`, `src/features/search/callTree.ts`, `src/features/search/contextView.ts` (the Context
+- Frontend: `src/features/search/searchView.ts`, `src/features/search/searchView.css` (the
+  results' focus and the per-row replace styles), `src/features/search/callTree.ts`, `src/features/search/contextView.ts` (the Context
   Window panel page - the definition of the symbol under the cursor),
   `src/features/search/symbolDbView.ts` (the Symbol Database page - the index as a collapsible
   folder / file / symbol tree with reference counts, filter and rebuild)

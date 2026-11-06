@@ -15,7 +15,6 @@ import { resolveTerminalPath } from '../features/terminal/links';
 import { type AnalysisStatus } from '../features/analysis';
 import type { AnalysisToolId } from '../features/analysis';
 import { commands } from '../platform/commands';
-import { registerZhCnText } from '../platform/i18n';
 import { registerGitCommands } from '../features/scm';
 import { registerZhCnText, t, tf } from '../platform/i18n';
 import { hook } from '../platform/hooks';

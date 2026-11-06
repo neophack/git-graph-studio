@@ -10,7 +10,7 @@ import { EditorView } from '@codemirror/view';
 
 import { EditorGroup, expandSelection, joinLines, shrinkSelection, sortLines, transformSelection, trimTrailingWhitespace } from '../src/features/editor';
 import { backend } from './tauriMock';
-import { click, flush, menuItem, menuLabels, rightClick, texts } from './helpers';
+import { click, flush, menuItem, menuLabels, rightClick, texts, until } from './helpers';
 
 /** A bare view for the CodeMirror-level commands (the comments suite's pattern). Multiple
  *  selections stay multiple only under the facet the real editors enable — without it
@@ -273,12 +273,11 @@ describe('the text menu\'s clipboard group', () => {
 		rightClick(document.querySelector('.cm-content'));
 		click(menuItem('Compare with Clipboard'));
 		// The diff's first render waits one frame for the pane to be measurable, behind the
-		// lazy chunk imports — a wall-clock beat, then the usual flush.
-		await new Promise((resolve) => setTimeout(resolve, 40));
-		await flush();
+		// lazy chunk imports — poll it into view (a fixed beat starves under the full
+		// suite's load, the 2026-10-15 failure class).
+		await until(() => group.active!.merge !== undefined);
 		expect(texts('.tab .label')).toEqual(['a.ts', 'a.ts ↔ Clipboard']);
 		const diff = group.active!;
-		expect(diff.merge).toBeDefined();
 		expect(diff.merge!.a.state.doc.toString()).toBe('clip');
 		expect(diff.merge!.b.state.doc.toString()).toBe('edited saved\n');
 	});

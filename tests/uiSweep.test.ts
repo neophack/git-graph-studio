@@ -582,13 +582,14 @@ function uiSweepIts(): void {
 			type(search.querySelector<HTMLInputElement>('.query-row input')!, 'one');
 			await flush(8);
 			await clickAll(search, '.replace-row .action-btn', count);
-			// An invalid regex reports, an empty query clears.
-			await clickAll(search, '.search-toggles .action-btn:last-child', count);
+			// An invalid regex reports, an empty query clears (the regex toggle is the
+			// third — the preserve-case toggle VS Code appends last must not be hit).
+			await clickAll(search, '.search-toggles .action-btn:nth-child(3)', count);
 			type(search.querySelector<HTMLInputElement>('.query-row input')!, '(');
 			key(search.querySelector<HTMLInputElement>('.query-row input')!, 'Enter');
 			await flush(8);
 			expect(search.querySelector('.search-error')).not.toBeNull();
-			await clickAll(search, '.search-toggles .action-btn:last-child', count);
+			await clickAll(search, '.search-toggles .action-btn:nth-child(3)', count);
 			type(search.querySelector<HTMLInputElement>('.query-row input')!, '');
 			await flush(8);
 		});
