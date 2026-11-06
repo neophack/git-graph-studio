@@ -207,6 +207,32 @@ pub fn status(git: &Git) -> Result<Vec<ScmStatusChange>, String> {
     Ok(parse_status_z(&output))
 }
 
+/// `git add --update` — stage every change to tracked files (modifications and deletions,
+/// across the whole tree), never the untracked ones ("Stage All Tracked Changes").
+pub fn stage_all_tracked(git: &Git) -> Status {
+    git.run(&["add", "--update"])
+}
+
+/// Stage only the untracked files — `git ls-files --others --exclude-standard` listed
+/// NUL-separated (quotepath off, so non-ASCII names pass through unquoted), then
+/// `git add --all --` over them, one argument each; the tracked files' changes stay
+/// unstaged ("Stage All Untracked Changes").
+pub fn stage_all_untracked(git: &Git) -> Status {
+    let listing = git.output(&[
+        "-c",
+        "core.quotepath=false",
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+    ])?;
+    let paths: Vec<&str> = listing.split('\0').filter(|p| !p.is_empty()).collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
+    git.run(&[&["add", "--all", "--"], &paths[..]].concat())
+}
+
 /// One commit of a file's history, as the Timeline lists it (camelCase on the wire).
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -273,6 +299,22 @@ pub fn delete_branch(git: &Git, name: &str, force: bool) -> Status {
         .and_then(|_| git.run(&["branch", if force { "-D" } else { "-d" }, name]))
 }
 
+/// `git push <remote> --delete <branch>` — delete the branch on the remote. The local
+/// branch is untouched; whether its commits are lost is the remote's own GC's business,
+/// which is why the confirmation carries the irreversible wording.
+pub fn delete_remote_branch(git: &Git, remote: &str, branch: &str) -> Status {
+    check_ref("remote", remote)?;
+    check_ref("branch", branch)?;
+    git.run(&["push", remote, "--delete", branch])
+}
+
+/// `git push <remote> --delete <tag>` — delete the tag on the remote; the local tag stays.
+pub fn delete_remote_tag(git: &Git, remote: &str, tag: &str) -> Status {
+    check_ref("remote", remote)?;
+    check_ref("tagName", tag)?;
+    git.run(&["push", remote, "--delete", tag])
+}
+
 /// Whether `name`'s tip is reachable from HEAD (`git merge-base --is-ancestor`): the fact
 /// the delete confirmation words itself by. Exit 0 answers merged, exit 1 answers not —
 /// git's documented codes for exactly this query; anything else (an unknown ref, not a
@@ -309,6 +351,57 @@ pub fn merge(git: &Git, name: &str) -> Status {
 
 pub fn rebase(git: &Git, name: &str) -> Status {
     check_ref("obj", name).and_then(|_| git.run(&["rebase", name]))
+}
+
+/// Whether a stopped merge (`MERGE_HEAD` present) or a stopped rebase is pending — the fact
+/// the view's abort entries word themselves by, and the same probe VS Code's own Git
+/// extension answers its "Abort Merge" / "Abort Rebase" affordances with (camelCase on the
+/// wire).
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationState {
+    pub merge: bool,
+    pub rebase: bool,
+}
+
+pub fn operation_state(git: &Git) -> Result<OperationState, String> {
+    Ok(OperationState {
+        merge: merge_in_progress(git),
+        rebase: rebase_in_progress(git),
+    })
+}
+
+/// `git rev-parse -q --verify MERGE_HEAD` succeeding: a merge left its state in the index.
+pub fn merge_in_progress(git: &Git) -> bool {
+    git.output(&["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok()
+}
+
+/// The rebase's own state directories present in the git dir: `rebase-merge` (the merge
+/// backend every modern rebase runs, interactive or not) or `rebase-apply` (the old plain
+/// form, which `git am` also parks in).
+pub fn rebase_in_progress(git: &Git) -> bool {
+    git.git_dir()
+        .map(|dir| dir.join("rebase-merge").is_dir() || dir.join("rebase-apply").is_dir())
+        .unwrap_or(false)
+}
+
+/// `git merge --abort` — back out of a stopped merge, the working tree restored to its
+/// pre-merge state. Refuses with the plain answer when nothing is pending, instead of
+/// git's fatal that would read like a failure.
+pub fn abort_merge(git: &Git) -> Status {
+    if !merge_in_progress(git) {
+        return Err("There is no merge in progress to abort.".to_owned());
+    }
+    git.run(&["merge", "--abort"])
+}
+
+/// `git rebase --abort` — back out of a stopped rebase, the branch restored to where it
+/// stood before it started. The same idle guard as [`abort_merge`].
+pub fn abort_rebase(git: &Git) -> Status {
+    if !rebase_in_progress(git) {
+        return Err("There is no rebase in progress to abort.".to_owned());
+    }
+    git.run(&["rebase", "--abort"])
 }
 
 pub fn add_remote(git: &Git, name: &str, url: &str, fetch: bool) -> Status {
@@ -479,6 +572,13 @@ pub fn push_branch(git: &Git, remote: &str, branch: &str, force: bool) -> Status
     args.push(format!("refs/heads/{branch}:refs/heads/{branch}"));
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     git.run(&refs)
+}
+
+/// `git push <remote> --tags` — push every local tag to the remote ("Push Tags" after a
+/// run of local `git tag` writes; the remote's own tags are never touched unless a local
+/// one of the same name exists).
+pub fn push_tags(git: &Git, remote: &str) -> Status {
+    check_ref("remote", remote).and_then(|_| git.run(&["push", remote, "--tags"]))
 }
 
 pub fn fetch(git: &Git, remote: Option<&str>, prune: bool) -> Status {
@@ -1381,5 +1481,156 @@ mod tests {
 
         assert!(push_branch(&git, "origin", "--evil", false).is_err());
         assert!(push_branch(&git, "--evil", "main", false).is_err());
+    }
+
+    #[test]
+    fn delete_remote_branch_and_tag_push_the_deletions() {
+        let scratch = Scratch::new("scm-delete-remote");
+        let git = scratch.repo("repo");
+        let bare = scratch.bare("origin.git");
+        git.run(&["remote", "add", "origin", &bare.display().to_string()])
+            .unwrap();
+        let base = commit(&git, "a.txt", "one\n", "one");
+        git.run(&["push", "-q", "origin", "main"]).unwrap();
+        // A branch the bare's own HEAD does not point at: deleting the remote's current
+        // branch is denied by the remote itself, never a concern of this operation's.
+        git.run(&["branch", "topic"]).unwrap();
+        git.run(&["push", "-q", "origin", "topic"]).unwrap();
+        add_tag(&git, "v1", "", "release", false).unwrap();
+        git.run(&["push", "-q", "origin", "v1"]).unwrap();
+        let origin = scratch.git(&bare);
+
+        // The remote branch goes; the local one (and its commit) stay.
+        delete_remote_branch(&git, "origin", "topic").unwrap();
+        assert!(origin
+            .output(&["rev-parse", "--verify", "refs/heads/topic"])
+            .is_err());
+        assert_eq!(head(&git), base);
+        // The names are validated before git ever runs.
+        assert!(delete_remote_branch(&git, "origin", "--evil").is_err());
+        assert!(delete_remote_branch(&git, "--evil", "topic").is_err());
+        // An unknown tag is the remote's own complaint.
+        assert!(delete_remote_tag(&git, "origin", "no-such").is_err());
+
+        delete_remote_tag(&git, "origin", "v1").unwrap();
+        assert!(origin
+            .output(&["rev-parse", "--verify", "refs/tags/v1"])
+            .is_err());
+        assert_eq!(tags(&git).unwrap(), vec!["v1".to_owned()]);
+        assert!(delete_remote_tag(&git, "origin", "--evil").is_err());
+    }
+
+    #[test]
+    fn abort_merge_and_rebase_back_out_of_the_stopped_operations() {
+        let scratch = Scratch::new("scm-abort");
+        let git = scratch.repo("repo");
+        commit(&git, "c.txt", "base\n", "base");
+
+        // Nothing pending: the state says so and the aborts refuse with the plain answer.
+        let state = operation_state(&git).unwrap();
+        assert!(!state.merge && !state.rebase);
+        let error = abort_merge(&git).unwrap_err();
+        assert!(error.contains("no merge in progress"), "{error}");
+        let error = abort_rebase(&git).unwrap_err();
+        assert!(error.contains("no rebase in progress"), "{error}");
+
+        // A stopped merge is detected and aborted: the branch is back at its tip and the
+        // index holds no unmerged paths.
+        git.run(&["checkout", "-q", "-b", "side"]).unwrap();
+        commit(&git, "c.txt", "side\n", "side");
+        git.run(&["checkout", "-q", "main"]).unwrap();
+        commit(&git, "c.txt", "main\n", "main");
+        assert!(git.run(&["merge", "side"]).is_err());
+        assert!(operation_state(&git).unwrap().merge);
+        abort_merge(&git).unwrap();
+        assert!(!operation_state(&git).unwrap().merge);
+        assert_eq!(subject(&git, "HEAD"), "main");
+        assert!(git.output(&["ls-files", "-u"]).unwrap().trim().is_empty());
+
+        // A stopped rebase too: the branch is back where it stood before the rebase began.
+        git.run(&["checkout", "-q", "side"]).unwrap();
+        commit(&git, "d.txt", "d\n", "side two");
+        let side_tip = head(&git);
+        assert!(git.run(&["rebase", "main"]).is_err());
+        assert!(operation_state(&git).unwrap().rebase);
+        assert!(!operation_state(&git).unwrap().merge, "rebase is not a merge");
+        abort_rebase(&git).unwrap();
+        assert!(!operation_state(&git).unwrap().rebase);
+        assert_eq!(head(&git), side_tip);
+        assert!(git.output(&["ls-files", "-u"]).unwrap().trim().is_empty());
+    }
+
+    #[test]
+    fn push_tags_pushes_the_local_tags_to_the_chosen_remote() {
+        let scratch = Scratch::new("scm-push-tags");
+        let git = scratch.repo("repo");
+        let bare = scratch.bare("origin.git");
+        git.run(&["remote", "add", "origin", &bare.display().to_string()])
+            .unwrap();
+        commit(&git, "a.txt", "one\n", "one");
+        add_tag(&git, "light", "", "", false).unwrap();
+        add_tag(&git, "v1", "", "release one", false).unwrap();
+
+        push_tags(&git, "origin").unwrap();
+        let origin = scratch.git(&bare);
+        assert_eq!(
+            origin.output(&["tag", "--list"]).unwrap().lines().count(),
+            2
+        );
+        assert!(push_tags(&git, "--evil").is_err());
+
+        // Without a named remote the upstream's remote answers, once there is one.
+        let lonely = scratch.repo("lonely");
+        add_tag(&lonely, "v1", "", "", false).unwrap();
+        assert!(push_tags(&lonely, "origin").is_err(), "no remotes at all");
+        git.run(&["push", "-q", "-u", "origin", "main"]).unwrap();
+        push_tags(&git, "origin").unwrap();
+        assert_eq!(
+            origin.output(&["tag", "--list"]).unwrap().lines().count(),
+            2,
+            "an already-pushed tag set pushes idempotently"
+        );
+    }
+
+    #[test]
+    fn stage_all_tracked_and_untracked_stage_their_half_alone() {
+        let scratch = Scratch::new("scm-stage-halves");
+        let git = scratch.repo("repo");
+        commit(&git, "a.txt", "one\n", "one");
+        commit(&git, "b.txt", "b\n", "two");
+        write(&git, "a.txt", "two\n");
+        std::fs::remove_file(git.repo.join("b.txt")).unwrap();
+        write(&git, "c.txt", "new\n");
+
+        // Tracked only: the modification and the deletion are staged, the untracked file
+        // stays out of the index.
+        stage_all_tracked(&git).unwrap();
+        let cached = git.output(&["diff", "--cached", "--name-status"]).unwrap();
+        assert!(cached.contains("M\ta.txt"), "{cached}");
+        assert!(cached.contains("D\tb.txt"), "{cached}");
+        assert!(
+            git.output(&["ls-files", "--", "c.txt"]).unwrap().trim().is_empty(),
+            "the untracked file is not staged"
+        );
+
+        // Untracked only: the staged halves reset first, then only c.txt joins the index.
+        git.run(&["reset", "-q"]).unwrap();
+        stage_all_untracked(&git).unwrap();
+        let cached = git.output(&["diff", "--cached", "--name-status"]).unwrap();
+        assert_eq!(cached.trim(), "A\tc.txt");
+        let unstaged = git.output(&["diff", "--name-status"]).unwrap();
+        assert!(unstaged.contains("M\ta.txt"), "{unstaged}");
+        assert!(unstaged.contains("D\tb.txt"), "{unstaged}");
+
+        // A clean tree's untracked half has nothing to do: the staged new file is gone with
+        // the hard reset (it lived only in the index), so nothing is left to stage.
+        git.run(&["reset", "-q", "--hard"]).unwrap();
+        assert!(!git.repo.join("c.txt").exists(), "the staged new file is gone");
+        stage_all_untracked(&git).unwrap();
+        assert!(git
+            .output(&["diff", "--cached", "--name-only"])
+            .unwrap()
+            .trim()
+            .is_empty());
     }
 }

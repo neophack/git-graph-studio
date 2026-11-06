@@ -610,7 +610,7 @@ export class SourceControlView {
 
 	declare afterCommit: (command: string, args: Record<string, unknown>) => Promise<void> ;
 
-	declare commit: (options?: { amend?: boolean; all?: boolean; stagedOnly?: boolean }, followUp?: (() => Promise<void>) | null) => Promise<void> ;
+	declare commit: (options?: { amend?: boolean; all?: boolean; stagedOnly?: boolean; signoff?: boolean }, followUp?: (() => Promise<void>) | null) => Promise<void> ;
 
 	declare discard: (file: ScmChange) => Promise<void> ;
 
@@ -656,7 +656,7 @@ export class SourceControlView {
 
 	declare subOpenChange: (sub: SubRepoState, file: ScmChange, key: ScmGroup, letter: string) => void ;
 
-	declare subCommit: (sub: SubRepoState, options?: { amend?: boolean; all?: boolean; stagedOnly?: boolean }, followUp?: (() => Promise<void>) | null) => Promise<void> ;
+	declare subCommit: (sub: SubRepoState, options?: { amend?: boolean; all?: boolean; stagedOnly?: boolean; signoff?: boolean }, followUp?: (() => Promise<void>) | null) => Promise<void> ;
 
 	declare subDiscard: (sub: SubRepoState, file: ScmChange) => Promise<void> ;
 

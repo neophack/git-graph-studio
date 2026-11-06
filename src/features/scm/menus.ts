@@ -4,7 +4,7 @@
 import { invoke } from '../../platform/ipc/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { resolvedMenuEntries } from '../extensions';
-import { gerritInstallHook, gerritPushRef, scmAmendLastCommit, scmBranches, scmBranchMerged, scmCheckout, scmCherryPick, scmCreateBranch, scmFetch, scmPull, scmPush, scmPushBranch, scmRevertCommit, scmResetRef, scmRemotes, scmResetToRemote, scmSync, scmTags } from '../../platform/ipc/scm';
+import { gerritInstallHook, gerritPushRef, scmAbortMerge, scmAbortRebase, scmAmendLastCommit, scmBranches, scmBranchMerged, scmCheckout, scmCherryPick, scmCreateBranch, scmDeleteRemoteBranch, scmDeleteRemoteTag, scmFetch, scmOperationState, scmPull, scmPush, scmPushBranch, scmPushTags, scmRevertCommit, scmResetRef, scmRemotes, scmResetToRemote, scmSync, scmTags } from '../../platform/ipc/scm';
 import { repoHead } from '../../platform/ipc/revision';
 import * as state from '../../platform/state';
 import { t, tf } from '../../platform/i18n';
@@ -54,17 +54,19 @@ export const menusMethods: ThisType<SourceControlView> = {
 			cmd('git.checkout'),
 			cmd('git.fetch'),
 			'separator',
-			{ label: 'Commit', submenu: [cmd('git.commit'), cmd('git.commitStaged'), cmd('git.commitAll'), 'separator', cmd('git.commitAmend'), cmd('git.commitStagedAmend'), 'separator', cmd('git.undoCommit')] },
+			{ label: 'Commit', submenu: [cmd('git.commit'), cmd('git.commitStaged'), cmd('git.commitAll'), 'separator', cmd('git.commitAmend'), cmd('git.commitStagedAmend'), 'separator', cmd('git.commitSignedOff'), cmd('git.commitStagedSignedOff'), cmd('git.commitAllSignedOff'), cmd('git.commitAmendSignedOff'), cmd('git.commitStagedAmendSignedOff'), 'separator', cmd('git.undoCommit')] },
 			{ label: 'Changes', submenu: [
 				{ label: 'Stage All Changes', run: () => void this.run('git_stage_all') },
+				{ label: 'Stage All Tracked Changes', run: () => void this.run('git_stage_all_tracked') },
+				{ label: 'Stage All Untracked Changes', run: () => void this.run('git_stage_all_untracked') },
 				{ label: 'Unstage All Changes', run: () => void this.run('git_unstage_all') },
 				{ label: 'Discard All Changes', run: () => void this.discardAll() }
 			] },
 			{ label: 'Pull, Push', submenu: [cmd('git.sync'), cmd('git.syncRebase'), 'separator', cmd('git.pull'), cmd('git.pullRebase'), cmd('git.pullFrom'), 'separator', cmd('git.push'), cmd('git.pushTo'), cmd('git.pushForce'), 'separator', cmd('git.fetch'), cmd('git.fetchPrune'), cmd('git.fetchFrom'), ...(pullPushMenu.length > 0 ? ['separator' as const, ...pullPushMenu] : [])] },
-			{ label: 'Branch', submenu: [cmd('git.merge'), cmd('git.rebase'), cmd('git.cherryPick'), cmd('git.revertCommit'), cmd('git.resetToCommit'), 'separator', cmd('git.branch'), cmd('git.branchFrom'), cmd('git.renameBranch'), cmd('git.deleteBranch')] },
+			{ label: 'Branch', submenu: [cmd('git.merge'), cmd('git.rebase'), cmd('git.mergeAbort'), cmd('git.rebaseAbort'), cmd('git.cherryPick'), cmd('git.revertCommit'), cmd('git.resetToCommit'), 'separator', cmd('git.branch'), cmd('git.branchFrom'), cmd('git.renameBranch'), cmd('git.deleteBranch'), cmd('git.deleteRemoteBranch')] },
 			{ label: 'Remote', submenu: [cmd('git.addRemote'), cmd('git.removeRemote')] },
 			{ label: 'Stash', submenu: [cmd('git.stash'), cmd('git.stashIncludeUntracked'), 'separator', cmd('git.stashApply'), cmd('git.stashApplyLatest'), cmd('git.stashPop'), cmd('git.stashPopLatest'), cmd('git.stashDrop')] },
-			{ label: 'Tags', submenu: [cmd('git.createTag'), cmd('git.deleteTag')] },
+			{ label: 'Tags', submenu: [cmd('git.createTag'), cmd('git.deleteTag'), cmd('git.deleteRemoteTag'), cmd('git.pushTags')] },
 			'separator',
 			cmd('git.showOutput'),
 			...(graphTitleMenu.length > 0 ? ['separator' as const, ...graphTitleMenu] : [])
@@ -121,12 +123,17 @@ export const menusMethods: ThisType<SourceControlView> = {
 					{ label: 'Commit (Amend)', run: () => void this.subCommit(sub, { amend: true }) },
 					{ label: 'Commit Staged (Amend)', run: () => void this.subCommit(sub, { amend: true, stagedOnly: true }) },
 					'separator',
+					{ label: 'Commit (Signed Off)', run: () => void this.subCommit(sub, { signoff: true }) },
+					{ label: 'Commit Staged (Signed Off)', run: () => void this.subCommit(sub, { signoff: true, stagedOnly: true }) },
+					'separator',
 					{ label: 'Undo Last Commit', run: () => run(() => gitOp('scm_undo_last_commit', {})) }
 				]
 			},
 			{
 				label: 'Changes', submenu: [
 					{ label: 'Stage All Changes', run: () => void this.subRun(sub, 'git_stage_all') },
+					{ label: 'Stage All Tracked Changes', run: () => void this.subRun(sub, 'git_stage_all_tracked') },
+					{ label: 'Stage All Untracked Changes', run: () => void this.subRun(sub, 'git_stage_all_untracked') },
 					{ label: 'Unstage All Changes', run: () => void this.subRun(sub, 'git_unstage_all') },
 					{ label: 'Discard All Changes', run: () => void this.subDiscardAll(sub) }
 				]
@@ -194,6 +201,28 @@ export const menusMethods: ThisType<SourceControlView> = {
 						})()
 					},
 					{
+						label: 'Abort Merge', run: () => void (async () => {
+							const state = await scmOperationState(repo).catch(() => null);
+							if (state && !state.merge) {
+								notify('info', t('scm.abortMerge.none'));
+								return;
+							}
+							if (!(await confirmDialog(t('scm.abortMerge.confirm'), t('scm.abortMerge.action')))) return;
+							run(() => scmAbortMerge(repo));
+						})()
+					},
+					{
+						label: 'Abort Rebase', run: () => void (async () => {
+							const state = await scmOperationState(repo).catch(() => null);
+							if (state && !state.rebase) {
+								notify('info', t('scm.rebaseAbort.none'));
+								return;
+							}
+							if (!(await confirmDialog(t('scm.rebaseAbort.confirm'), t('scm.rebaseAbort.action')))) return;
+							run(() => scmAbortRebase(repo));
+						})()
+					},
+					{
 						label: 'Cherry-Pick...', run: () => void (async () => {
 							const target = await quickInput({ title: 'Cherry-Pick', placeholder: t('scm.cherryPick.placeholder'), validate: validateTarget });
 							if (!target) return;
@@ -248,29 +277,41 @@ export const menusMethods: ThisType<SourceControlView> = {
 							if (name && name.trim() !== branch.name) run(() => gitOp('scm_rename_branch', { oldName: branch.name, newName: name.trim() }));
 						})()
 					},
-					{
-						label: 'Delete Branch...', run: () => void (async () => {
-							const branch = await pickBranchIn(repo, 'Select a branch to delete', (b) => !b.remote && !b.current);
-							if (!branch) return;
-							// The merged fact words the confirmation, exactly as the palette's own
-							// Delete Branch does (gitCommands.ts): only the unmerged case offers
-							// the force delete, a merged one deletes through the safe `-d`.
-							let merged: boolean;
-							try {
-								merged = await scmBranchMerged(branch.name, repo);
-							} catch (error) {
-								notify('error', String(error instanceof Error ? error.message : error));
-								return;
-							}
-							if (!merged) {
-								if (!(await confirmDialog(tf('scm.deleteBranch.unmergedConfirm', branch.name), t('scm.deleteBranch.forceAction')))) return;
-								run(() => gitOp('scm_delete_branch', { branchName: branch.name, force: true }));
-								return;
-							}
-							if (!(await confirmDialog(`Delete the branch '${branch.name}'? Commits only reachable from it will be lost.`, 'Delete Branch'))) return;
-							run(() => gitOp('scm_delete_branch', { branchName: branch.name, force: false }));
-						})()
-					}
+						{
+							label: 'Delete Branch...', run: () => void (async () => {
+								const branch = await pickBranchIn(repo, 'Select a branch to delete', (b) => !b.remote && !b.current);
+								if (!branch) return;
+								// The merged fact words the confirmation, exactly as the palette's own
+								// Delete Branch does (gitCommands.ts): only the unmerged case offers
+								// the force delete, a merged one deletes through the safe `-d`.
+								let merged: boolean;
+								try {
+									merged = await scmBranchMerged(branch.name, repo);
+								} catch (error) {
+									notify('error', String(error instanceof Error ? error.message : error));
+									return;
+								}
+								if (!merged) {
+									if (!(await confirmDialog(tf('scm.deleteBranch.unmergedConfirm', branch.name), t('scm.deleteBranch.forceAction')))) return;
+									run(() => gitOp('scm_delete_branch', { branchName: branch.name, force: true }));
+									return;
+								}
+								if (!(await confirmDialog(`Delete the branch '${branch.name}'? Commits only reachable from it will be lost.`, 'Delete Branch'))) return;
+								run(() => gitOp('scm_delete_branch', { branchName: branch.name, force: false }));
+							})()
+						},
+						{
+							label: 'Delete Remote Branch...', run: () => void (async () => {
+								const remote = await pickRemoteIn(repo, 'Pick a remote to delete the branch from');
+								if (!remote) return;
+								const prefix = remote.name + '/';
+								const branch = await pickBranchIn(repo, `Pick a branch to delete from ${remote.name}`, (b) => b.remote && b.name.startsWith(prefix));
+								if (!branch) return;
+								const name = branch.name.slice(prefix.length);
+								if (!(await confirmDialog(tf('scm.deleteRemoteBranch.confirm', name, remote.name), t('scm.deleteRemoteBranch.action')))) return;
+								run(() => scmDeleteRemoteBranch(remote.name, name, repo));
+							})()
+						}
 				]
 			},
 			{
@@ -358,6 +399,31 @@ export const menusMethods: ThisType<SourceControlView> = {
 							}
 							const chosen = await quickPick(tags.map((t2) => ({ label: t2, icon: 'tag', value: t2 })), 'Select a tag to delete');
 							if (chosen) run(() => gitOp('scm_delete_tag', { tagName: chosen }));
+						})()
+					},
+					{
+						label: 'Delete Remote Tag...', run: () => void (async () => {
+							const tags = await scmTags(repo);
+							if (tags.length === 0) {
+								notify('info', 'The repository has no tags.');
+								return;
+							}
+							const tag = await quickPick(tags.map((t2) => ({ label: t2, icon: 'tag', value: t2 })), 'Select a tag to delete from the remote');
+							if (!tag) return;
+							const remote = await pickRemoteIn(repo, 'Pick a remote to delete the tag from');
+							if (!remote) return;
+							if (!(await confirmDialog(tf('scm.deleteRemoteTag.confirm', tag, remote.name), t('scm.deleteRemoteTag.action')))) return;
+							run(() => scmDeleteRemoteTag(remote.name, tag, repo));
+						})()
+					},
+					{
+						label: 'Push Tags', run: () => void (async () => {
+							const remote = await pickRemoteIn(repo, 'Pick a remote to push the tags to');
+							if (!remote) return;
+							run(async () => {
+								await scmPushTags(remote.name, repo);
+								notify('info', tf('scm.pushTags.done', remote.name));
+							});
 						})()
 					}
 				]

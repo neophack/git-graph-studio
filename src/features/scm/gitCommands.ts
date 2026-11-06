@@ -5,7 +5,7 @@
 // runs through the backend, and reports through notifications.
 
 import { invoke } from '../../platform/ipc/core';
-import { type BranchInfo, scmBranches, scmBranchMerged, scmCheckout, scmCherryPick, scmClone, scmCreateBranch, type RemoteInfo, scmFetch, scmPull, scmPush, scmPushBranch, scmRevertCommit, scmResetRef, type StashInfo, scmRemotes, scmStashes, scmSync, scmTags } from '../../platform/ipc/scm';
+import { scmAbortMerge, scmAbortRebase, type BranchInfo, scmBranches, scmBranchMerged, scmCheckout, scmCherryPick, scmClone, scmCreateBranch, scmDeleteRemoteBranch, scmDeleteRemoteTag, type RemoteInfo, scmFetch, scmOperationState, scmPull, scmPush, scmPushBranch, scmPushTags, scmRevertCommit, scmResetRef, type StashInfo, scmRemotes, scmStashes, scmSync, scmTags } from '../../platform/ipc/scm';
 import { repoHead } from '../../platform/ipc/revision';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
@@ -21,7 +21,7 @@ export interface GitCommandHost {
 	openFolder(path: string): Promise<void>;
 	showOutput(): void;
 	/** The staged/unstaged state the SCM view knows, for the commit commands. */
-	commit(options: { amend?: boolean; all?: boolean; stagedOnly?: boolean }): Promise<void>;
+	commit(options: { amend?: boolean; all?: boolean; stagedOnly?: boolean; signoff?: boolean }): Promise<void>;
 }
 
 /** Run one mutating backend command against the open repository; git's own complaint travels
@@ -239,6 +239,17 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 		if (!(await confirmDialog(`Delete the branch '${branch.name}'? Commits only reachable from it will be lost.`, 'Delete Branch'))) return;
 		await gitOp('scm_delete_branch', { branchName: branch.name, force: false });
 	});
+	add('git.deleteRemoteBranch', 'Delete Remote Branch...', async () => {
+		const remote = await pickRemote('Pick a remote to delete the branch from');
+		if (!remote) return;
+		const prefix = remote.name + '/';
+		const branch = await pickBranch(`Pick a branch to delete from ${remote.name}`, (b) => b.remote && b.name.startsWith(prefix));
+		if (!branch) return;
+		const name = branch.name.slice(prefix.length);
+		if (!(await confirmDialog(tf('scm.deleteRemoteBranch.confirm', name, remote.name), t('scm.deleteRemoteBranch.action')))) return;
+		await scmDeleteRemoteBranch(remote.name, name);
+		notify('info', tf('scm.deleteRemoteBranch.done', name, remote.name));
+	});
 	add('git.merge', 'Merge Branch...', async () => {
 		const branch = await pickBranch('Select a branch to merge from', (b) => !b.current);
 		if (branch) await gitOp('scm_merge', { name: branch.name });
@@ -246,6 +257,27 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 	add('git.rebase', 'Rebase Branch...', async () => {
 		const branch = await pickBranch('Select a branch to rebase onto', (b) => !b.current);
 		if (branch) await gitOp('scm_rebase', { name: branch.name });
+	});
+	// VS Code's abort entries: a stopped merge or rebase backs out with one command, the
+	// working tree returned to where the operation began. The in-progress probe keeps the
+	// idle case a plain info instead of git's fatal.
+	add('git.mergeAbort', 'Abort Merge', async () => {
+		const state = await scmOperationState().catch(() => null);
+		if (state && !state.merge) {
+			notify('info', t('scm.abortMerge.none'));
+			return;
+		}
+		if (!(await confirmDialog(t('scm.abortMerge.confirm'), t('scm.abortMerge.action')))) return;
+		await scmAbortMerge();
+	});
+	add('git.rebaseAbort', 'Abort Rebase', async () => {
+		const state = await scmOperationState().catch(() => null);
+		if (state && !state.rebase) {
+			notify('info', t('scm.rebaseAbort.none'));
+			return;
+		}
+		if (!(await confirmDialog(t('scm.rebaseAbort.confirm'), t('scm.rebaseAbort.action')))) return;
+		await scmAbortRebase();
 	});
 
 	/* Commits: cherry-pick, revert, reset (the palette's commit-rewriting trio) */
@@ -342,6 +374,30 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 		const chosen = await quickPick(tags.map((t) => ({ label: t, icon: 'tag', value: t })), 'Select a tag to delete');
 		if (chosen) await gitOp('scm_delete_tag', { tagName: chosen });
 	});
+	add('git.deleteRemoteTag', 'Delete Remote Tag...', async () => {
+		const tags = await scmTags();
+		if (tags.length === 0) {
+			notify('info', 'The repository has no tags.');
+			return;
+		}
+		const tag = await quickPick(tags.map((t) => ({ label: t, icon: 'tag', value: t })), 'Select a tag to delete from the remote');
+		if (!tag) return;
+		const remote = await pickRemote('Pick a remote to delete the tag from');
+		if (!remote) return;
+		if (!(await confirmDialog(tf('scm.deleteRemoteTag.confirm', tag, remote.name), t('scm.deleteRemoteTag.action')))) return;
+		await scmDeleteRemoteTag(remote.name, tag);
+		notify('info', tf('scm.deleteRemoteTag.done', tag, remote.name));
+	});
+	add('git.pushTags', 'Push Tags', async () => {
+		const remote = await pickRemote('Pick a remote to push the tags to');
+		if (!remote) return;
+		await scmPushTags(remote.name);
+		notify('info', tf('scm.pushTags.done', remote.name));
+	});
+
+	/* Staging halves (VS Code's "Stage All Tracked Changes" / "Stage All Untracked Changes") */
+	add('git.stageAllTracked', 'Stage All Tracked Changes', () => gitOp('git_stage_all_tracked', {}));
+	add('git.stageAllUntracked', 'Stage All Untracked Changes', () => gitOp('git_stage_all_untracked', {}));
 
 	/* Commits (the SCM view owns the message box; these route through it) */
 	commands.register({ id: 'git.commit', title: 'Commit', category, enabled: hasRepo, run: () => host.commit({}) });
@@ -349,6 +405,12 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 	commands.register({ id: 'git.commitAll', title: 'Commit All', category, enabled: hasRepo, run: () => host.commit({ all: true }) });
 	commands.register({ id: 'git.commitAmend', title: 'Commit (Amend)', category, enabled: hasRepo, run: () => host.commit({ amend: true }) });
 	commands.register({ id: 'git.commitStagedAmend', title: 'Commit Staged (Amend)', category, enabled: hasRepo, run: () => host.commit({ amend: true, stagedOnly: true }) });
+	// The Signed-off-by variants VS Code's palette offers beside the plain ones.
+	commands.register({ id: 'git.commitSignedOff', title: 'Commit (Signed Off)', category, enabled: hasRepo, run: () => host.commit({ signoff: true }) });
+	commands.register({ id: 'git.commitStagedSignedOff', title: 'Commit Staged (Signed Off)', category, enabled: hasRepo, run: () => host.commit({ signoff: true, stagedOnly: true }) });
+	commands.register({ id: 'git.commitAllSignedOff', title: 'Commit All (Signed Off)', category, enabled: hasRepo, run: () => host.commit({ signoff: true, all: true }) });
+	commands.register({ id: 'git.commitAmendSignedOff', title: 'Commit (Amend, Signed Off)', category, enabled: hasRepo, run: () => host.commit({ signoff: true, amend: true }) });
+	commands.register({ id: 'git.commitStagedAmendSignedOff', title: 'Commit Staged (Amend, Signed Off)', category, enabled: hasRepo, run: () => host.commit({ signoff: true, amend: true, stagedOnly: true }) });
 	add('git.undoCommit', 'Undo Last Commit', () => gitOp('scm_undo_last_commit', {}));
 
 	commands.register({ id: 'git.showOutput', title: 'Show Git Output', category, run: () => host.showOutput() });

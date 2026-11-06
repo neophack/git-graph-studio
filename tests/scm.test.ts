@@ -322,7 +322,7 @@ describe('source control view', () => {
 			'Push to Gerrit Ref for Current Branch (refs/for/...)'
 		]);
 		hover(menuItem('Branch'));
-		expect(menuLabels()).toEqual(['Merge Branch...', 'Rebase Branch...', 'Cherry-Pick...', 'Revert Commit...', 'Reset Current Branch to Commit...', 'Create Branch...', 'Create Branch From...', 'Rename Branch...', 'Delete Branch...']);
+		expect(menuLabels()).toEqual(['Merge Branch...', 'Rebase Branch...', 'Abort Merge', 'Abort Rebase', 'Cherry-Pick...', 'Revert Commit...', 'Reset Current Branch to Commit...', 'Create Branch...', 'Create Branch From...', 'Rename Branch...', 'Delete Branch...', 'Delete Remote Branch...']);
 		hover(menuItem('Stash'));
 		expect(menuLabels()).toEqual(['Stash', 'Stash (Include Untracked)', 'Apply Stash...', 'Apply Latest Stash', 'Pop Stash...', 'Pop Latest Stash', 'Drop Stash...']);
 		hover(menuItem('View & Sort'));
@@ -592,7 +592,7 @@ describe('source control view', () => {
 		expect(rerendered.value).toBe('Ship it');
 
 		click(document.querySelector('.commit-row .more')!);
-		expect(menuLabels()).toEqual(['Commit', 'Commit & Push', 'Commit & Sync', 'Commit Staged', 'Commit All', 'Commit (Amend)', 'Commit Staged (Amend)']);
+		expect(menuLabels()).toEqual(['Commit', 'Commit & Push', 'Commit & Sync', 'Commit Staged', 'Commit All', 'Commit (Amend)', 'Commit Staged (Amend)', 'Commit (Signed Off)', 'Commit Staged (Signed Off)']);
 		click(menuItem('Commit & Push'));
 		await flush();
 		expect(backend.callsTo('git_commit')).toEqual([{ message: 'Ship it', amend: false }]);
@@ -604,6 +604,23 @@ describe('source control view', () => {
 		click(menuItem('Commit & Sync'));
 		await flush();
 		expect(backend.callsTo('scm_sync')).toEqual([{ rebase: false }]);
+	});
+	it('commits with the Signed-off-by trailer through the more-commit menu', async () => {
+		const { view } = setup([change('a.txt', { staged: 'modified' })]);
+		view.setRepo(REPO);
+		await view.refresh();
+		type(document.querySelector<HTMLTextAreaElement>('textarea')!, 'Ship it');
+		click(document.querySelector('.commit-row .more')!);
+		click(menuItem('Commit (Signed Off)'));
+		await flush();
+		expect(backend.callsTo('git_commit').at(-1)).toEqual({ message: 'Ship it', amend: false, signoff: true });
+
+		// The plain commit keeps the two-flag shape (no signoff key on the wire).
+		type(document.querySelector<HTMLTextAreaElement>('textarea')!, 'Plain');
+		click(document.querySelector('.commit-row .more')!);
+		click(menuItem('Commit'));
+		await flush();
+		expect(backend.callsTo('git_commit').at(-1)).toEqual({ message: 'Plain', amend: false });
 	});
 	it('keeps the change list scrolled where the user left it across a refresh', async () => {
 		const many = Array.from({ length: 60 }, (_, i) => change(`dir/file${i}.ts`, { unstaged: 'modified' }));
@@ -972,16 +989,17 @@ describe('submodule sections', () => {
 describe('git commands', () => {
 	function setup() {
 		const registry = new CommandRegistry();
+		const commits: Record<string, unknown>[] = [];
 		const host: GitCommandHost = {
 			repoPath: () => REPO,
 			repoChanged: () => undefined,
 			openFolder: async () => undefined,
 			showOutput: () => undefined,
 			graphSettings: () => ({}),
-			commit: async () => undefined
+			commit: async (options) => { commits.push(options ?? {}); }
 		};
 		registerGitCommands(registry, host);
-		return { registry };
+		return { registry, commits };
 	}
 
 	it('checkouts branches and tags picked from one list, excluding the current branch', async () => {
@@ -1200,5 +1218,153 @@ describe('git commands', () => {
 		await executing;
 		await flush();
 		expect(backend.callsTo('scm_push_branch')).toEqual([{ remote: 'origin', branch: 'main', force: false }]);
+	});
+
+	it('delete remote branch picks the remote and its branch, confirming the irreversible deletion', async () => {
+		backend.on('scm_remotes', () => [{ name: 'origin', url: 'https://example.com/r.git' }]);
+		backend.on('scm_branches', () => [
+			{ name: 'main', remote: false, current: true, upstream: 'origin/main' },
+			{ name: 'origin/main', remote: true, current: false, upstream: null },
+			{ name: 'origin/feature', remote: true, current: false, upstream: null }
+		]);
+		backend.on('scm_delete_remote_branch', () => null);
+		const { registry } = setup();
+
+		const executing = registry.execute('git.deleteRemoteBranch');
+		await flush();
+		// One remote answers without its own pick; the second step lists the remote's own
+		// branches (the remote-tracking names as the view lists them).
+		const rows = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		expect(rows.map((r) => r.querySelector('.label')!.textContent)).toEqual(['origin/main', 'origin/feature']);
+		click(rows.find((r) => r.textContent!.includes('origin/feature'))!);
+		await flush();
+		expect(notifications().at(-1)).toContain('IRREVERSIBLE');
+		// Cancelling keeps the remote branch.
+		click(notificationButton('Cancel'));
+		await executing;
+		await flush();
+		expect(backend.callsTo('scm_delete_remote_branch')).toHaveLength(0);
+
+		const again = registry.execute('git.deleteRemoteBranch');
+		await flush();
+		const rows2 = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		click(rows2.find((r) => r.textContent!.includes('origin/feature'))!);
+		await flush();
+		click(notificationButton('Delete Remote Branch'));
+		await again;
+		await flush();
+		expect(backend.callsTo('scm_delete_remote_branch')).toEqual([{ remote: 'origin', branch: 'feature' }]);
+		expect(notifications().at(-1)).toContain("Deleted the remote branch 'feature'");
+	});
+
+	it('delete remote tag picks the tag and the remote, confirming the deletion', async () => {
+		backend.on('scm_tags', () => ['v1', 'v2']);
+		backend.on('scm_remotes', () => [
+			{ name: 'origin', url: 'https://example.com/r.git' },
+			{ name: 'mirror', url: 'https://example.com/m.git' }
+		]);
+		backend.on('scm_delete_remote_tag', () => null);
+		const { registry } = setup();
+
+		const executing = registry.execute('git.deleteRemoteTag');
+		await flush();
+		const rows = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		expect(rows.map((r) => r.querySelector('.label')!.textContent)).toEqual(['v1', 'v2']);
+		click(rows.find((r) => r.textContent!.includes('v2'))!);
+		await flush();
+		// Two remotes: the second pick chooses the one the tag is deleted from.
+		const remotes = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		expect(remotes.map((r) => r.querySelector('.label')!.textContent)).toEqual(['origin', 'mirror']);
+		click(remotes.find((r) => r.textContent!.includes('mirror'))!);
+		await flush();
+		expect(notifications().at(-1)).toContain('IRREVERSIBLE');
+		click(notificationButton('Delete Remote Tag'));
+		await executing;
+		await flush();
+		expect(backend.callsTo('scm_delete_remote_tag')).toEqual([{ remote: 'mirror', tagName: 'v2' }]);
+	});
+
+	it('abort merge guards on the in-progress state and confirms before aborting', async () => {
+		backend.on('scm_operation_state', () => ({ merge: false, rebase: false }));
+		const { registry } = setup();
+		await registry.execute('git.mergeAbort');
+		await flush();
+		expect(notifications().at(-1)).toContain('no merge in progress');
+		expect(backend.callsTo('scm_abort_merge')).toHaveLength(0);
+
+		backend.on('scm_operation_state', () => ({ merge: true, rebase: false }));
+		backend.on('scm_abort_merge', () => null);
+		const executing = registry.execute('git.mergeAbort');
+		await flush();
+		expect(notifications().at(-1)).toContain('pre-merge state');
+		click(notificationButton('Abort Merge'));
+		await executing;
+		await flush();
+		expect(backend.callsTo('scm_abort_merge')).toEqual([{}]);
+	});
+
+	it('abort rebase runs the same guard for a pending rebase', async () => {
+		backend.on('scm_operation_state', () => ({ merge: false, rebase: true }));
+		backend.on('scm_abort_rebase', () => null);
+		const { registry } = setup();
+		const executing = registry.execute('git.rebaseAbort');
+		await flush();
+		expect(notifications().at(-1)).toContain('pre-rebase state');
+		click(notificationButton('Abort Rebase'));
+		await executing;
+		await flush();
+		expect(backend.callsTo('scm_abort_rebase')).toEqual([{}]);
+
+		// An idle repository answers a plain info instead of aborting anything.
+		backend.on('scm_operation_state', () => ({ merge: false, rebase: false }));
+		await registry.execute('git.rebaseAbort');
+		await flush();
+		expect(notifications().at(-1)).toContain('no rebase in progress');
+		expect(backend.callsTo('scm_abort_rebase')).toHaveLength(1);
+	});
+
+	it('push tags picks the remote and pushes the local tags to it', async () => {
+		backend.on('scm_remotes', () => [
+			{ name: 'origin', url: 'https://example.com/r.git' },
+			{ name: 'mirror', url: 'https://example.com/m.git' }
+		]);
+		backend.on('scm_push_tags', () => null);
+		const { registry } = setup();
+
+		const executing = registry.execute('git.pushTags');
+		await flush();
+		const rows = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		expect(rows.map((r) => r.querySelector('.label')!.textContent)).toEqual(['origin', 'mirror']);
+		click(rows.find((r) => r.textContent!.includes('mirror'))!);
+		await executing;
+		await flush();
+		expect(backend.callsTo('scm_push_tags')).toEqual([{ remote: 'mirror' }]);
+		expect(notifications().at(-1)).toContain('Tags pushed to mirror');
+	});
+
+	it('the signed-off commit commands hand the option through to the view commit', async () => {
+		const { registry, commits } = setup();
+		await registry.execute('git.commitSignedOff');
+		await registry.execute('git.commitStagedSignedOff');
+		await registry.execute('git.commitAllSignedOff');
+		await registry.execute('git.commitAmendSignedOff');
+		await registry.execute('git.commitStagedAmendSignedOff');
+		expect(commits).toEqual([
+			{ signoff: true },
+			{ signoff: true, stagedOnly: true },
+			{ signoff: true, all: true },
+			{ signoff: true, amend: true },
+			{ signoff: true, amend: true, stagedOnly: true }
+		]);
+	});
+
+	it('stage all tracked / untracked changes reach their backend halves', async () => {
+		backend.on('git_stage_all_tracked', () => null);
+		backend.on('git_stage_all_untracked', () => null);
+		const { registry } = setup();
+		await registry.execute('git.stageAllTracked');
+		await registry.execute('git.stageAllUntracked');
+		expect(backend.callsTo('git_stage_all_tracked')).toEqual([{}]);
+		expect(backend.callsTo('git_stage_all_untracked')).toEqual([{}]);
 	});
 });

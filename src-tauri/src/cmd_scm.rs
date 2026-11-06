@@ -71,6 +71,26 @@ pub async fn scm_delete_branch(
 }
 
 #[tauri::command]
+pub async fn scm_delete_remote_branch(
+    roots: State<'_, WorkspaceRoots>,
+    remote: String,
+    branch: String,
+    repo: Option<String>,
+) -> Result<(), String> {
+    ops::delete_remote_branch(&git(&roots, repo)?, &remote, &branch)
+}
+
+#[tauri::command]
+pub async fn scm_delete_remote_tag(
+    roots: State<'_, WorkspaceRoots>,
+    remote: String,
+    tag_name: String,
+    repo: Option<String>,
+) -> Result<(), String> {
+    ops::delete_remote_tag(&git(&roots, repo)?, &remote, &tag_name)
+}
+
+#[tauri::command]
 pub async fn scm_merge(
     roots: State<'_, WorkspaceRoots>,
     name: String,
@@ -86,6 +106,32 @@ pub async fn scm_rebase(
     repo: Option<String>,
 ) -> Result<(), String> {
     ops::rebase(&git(&roots, repo)?, &name)
+}
+
+/// Whether a stopped merge or rebase is pending — the fact the view's abort entries
+/// word themselves by (and hide behind: the palette commands answer it before asking).
+#[tauri::command]
+pub async fn scm_operation_state(
+    roots: State<'_, WorkspaceRoots>,
+    repo: Option<String>,
+) -> Result<ops::OperationState, String> {
+    ops::operation_state(&git(&roots, repo)?)
+}
+
+#[tauri::command]
+pub async fn scm_abort_merge(
+    roots: State<'_, WorkspaceRoots>,
+    repo: Option<String>,
+) -> Result<(), String> {
+    ops::abort_merge(&git(&roots, repo)?)
+}
+
+#[tauri::command]
+pub async fn scm_abort_rebase(
+    roots: State<'_, WorkspaceRoots>,
+    repo: Option<String>,
+) -> Result<(), String> {
+    ops::abort_rebase(&git(&roots, repo)?)
 }
 
 #[tauri::command]
@@ -211,6 +257,26 @@ pub async fn git_stage_all(roots: State<'_, WorkspaceRoots>, repo: Option<String
     git(&roots, repo)?.run(&["add", "--all"])
 }
 
+/// Stage only the tracked files' changes ("Stage All Tracked Changes"): modifications and
+/// deletions across the whole tree, never the untracked ones.
+#[tauri::command]
+pub async fn git_stage_all_tracked(
+    roots: State<'_, WorkspaceRoots>,
+    repo: Option<String>,
+) -> Result<(), String> {
+    ops::stage_all_tracked(&git(&roots, repo)?)
+}
+
+/// Stage only the untracked files ("Stage All Untracked Changes"); the tracked files'
+/// changes stay unstaged.
+#[tauri::command]
+pub async fn git_stage_all_untracked(
+    roots: State<'_, WorkspaceRoots>,
+    repo: Option<String>,
+) -> Result<(), String> {
+    ops::stage_all_untracked(&git(&roots, repo)?)
+}
+
 pub(crate) fn unstage_paths(git: &ggs_git::runner::Git, paths: &[String]) -> Result<(), String> {
     let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
     // On an unborn HEAD `git reset HEAD` fails: the first commit does not exist yet, so the
@@ -244,17 +310,23 @@ pub async fn git_unstage_all(
     }
 }
 
-/// Commit the index (`amend` re-does the last commit). An empty message aborts with git's own
-/// complaint, shown by the view.
+/// Commit the index (`amend` re-does the last commit, `signoff` adds the
+/// `Signed-off-by:` trailer). An empty message aborts with git's own complaint, shown by
+/// the view.
 pub(crate) fn commit_index(
     git: &ggs_git::runner::Git,
     message: &str,
     amend: bool,
+    signoff: bool,
 ) -> Result<(), String> {
     if amend && message.is_empty() {
         // `--amend -m ""` aborts with git's empty-message complaint; `--no-edit` keeps the
         // original message, which is what an amend without a new message means.
-        return git.run(&["commit", "--amend", "--no-edit"]);
+        let mut args = vec!["commit", "--amend", "--no-edit"];
+        if signoff {
+            args.push("--signoff");
+        }
+        return git.run(&args);
     }
     // The message rides git's stdin (`-F -`), never the command line: Windows caps a
     // spawn's command line at 32 767 characters, and a long message pasted into the box
@@ -262,6 +334,9 @@ pub(crate) fn commit_index(
     let mut args: Vec<&str> = vec!["commit", "-F", "-"];
     if amend {
         args.push("--amend");
+    }
+    if signoff {
+        args.push("--signoff");
     }
     git.run_input(&args, message.as_bytes())
 }
@@ -271,9 +346,10 @@ pub async fn git_commit(
     roots: State<'_, WorkspaceRoots>,
     message: String,
     amend: bool,
+    signoff: Option<bool>,
     repo: Option<String>,
 ) -> Result<(), String> {
-    commit_index(&git(&roots, repo)?, &message, amend)
+    commit_index(&git(&roots, repo)?, &message, amend, signoff == Some(true))
 }
 
 /// Discard a path's unstaged changes (`git restore`), or delete an untracked file — the
@@ -501,6 +577,15 @@ pub async fn scm_push_branch(
     ops::push_branch(&git(&roots, repo)?, &remote, &branch, force)
 }
 
+#[tauri::command]
+pub async fn scm_push_tags(
+    roots: State<'_, WorkspaceRoots>,
+    remote: String,
+    repo: Option<String>,
+) -> Result<(), String> {
+    ops::push_tags(&git(&roots, repo)?, &remote)
+}
+
 /// Clone into `parent`; the new repository's path is returned for the app to open.
 #[tauri::command]
 pub fn scm_clone(url: String, parent: String, name: Option<String>) -> Result<String, String> {
@@ -632,10 +717,38 @@ mod tests {
         commit(&git, "a.txt", "1\n", "first words");
         write(&git, "a.txt", "2\n");
         git.run(&["add", "--", "a.txt"]).unwrap();
-        commit_index(&git, "", true).unwrap();
+        commit_index(&git, "", true, false).unwrap();
         assert_eq!(subject(&git, "HEAD"), "first words");
-        commit_index(&git, "reworded", true).unwrap();
+        commit_index(&git, "reworded", true, false).unwrap();
         assert_eq!(subject(&git, "HEAD"), "reworded");
+    }
+
+    #[test]
+    fn a_signed_off_commit_carries_the_trailer() {
+        let scratch = Scratch::new("commit-signoff");
+        let git = scratch.repo("repo");
+        commit(&git, "a.txt", "1\n", "base");
+        write(&git, "a.txt", "2\n");
+        git.run(&["add", "--", "a.txt"]).unwrap();
+        commit_index(&git, "signed work", false, true).unwrap();
+        let body = git.output(&["log", "-1", "--format=%B"]).unwrap();
+        assert!(body.starts_with("signed work"), "{body}");
+        assert!(body.contains("Signed-off-by:"), "{body}");
+
+        // An amend without a message keeps both the original message and the trailer.
+        commit_index(&git, "", true, true).unwrap();
+        let body = git.output(&["log", "-1", "--format=%B"]).unwrap();
+        assert!(body.contains("signed work"), "{body}");
+        assert!(body.contains("Signed-off-by:"), "{body}");
+
+        // The plain commit stays trailer-free.
+        write(&git, "a.txt", "3\n");
+        git.run(&["add", "--", "a.txt"]).unwrap();
+        commit_index(&git, "unsigned", false, false).unwrap();
+        assert!(!git
+            .output(&["log", "-1", "--format=%B"])
+            .unwrap()
+            .contains("Signed-off-by:"));
     }
 
     #[test]
@@ -649,7 +762,7 @@ mod tests {
         // riding `-m` failed the spawn itself with error 206 before git ever ran. The
         // message rides git's stdin (`-F -`) now.
         let message = "m".repeat(40_000);
-        commit_index(&git, &message, false).unwrap();
+        commit_index(&git, &message, false, false).unwrap();
         let body = git.output(&["log", "-1", "--format=%B"]).unwrap();
         assert_eq!(body.trim_end(), message);
     }

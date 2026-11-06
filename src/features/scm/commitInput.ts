@@ -54,13 +54,16 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 					{ label: 'Commit Staged', disabled: this.changes.every((c) => c.staged === null), run: () => void this.commit({ stagedOnly: true }) },
 					{ label: 'Commit All', run: () => void this.commit({ all: true }) },
 					'separator',
-					{ label: 'Commit (Amend)', run: () => void this.commit({ amend: true }) },
-					{ label: 'Commit Staged (Amend)', run: () => void this.commit({ amend: true, stagedOnly: true }) }
-				]);
-				event.stopPropagation();
-			});
-			box.append(input, el('div', 'commit-row', [commit, more]));
-		} else {
+				{ label: 'Commit (Amend)', run: () => void this.commit({ amend: true }) },
+				{ label: 'Commit Staged (Amend)', run: () => void this.commit({ amend: true, stagedOnly: true }) },
+				'separator',
+				{ label: 'Commit (Signed Off)', run: () => void this.commit({ signoff: true }) },
+				{ label: 'Commit Staged (Signed Off)', disabled: this.changes.every((c) => c.staged === null), run: () => void this.commit({ signoff: true, stagedOnly: true }) }
+			]);
+			event.stopPropagation();
+		});
+		box.append(input, el('div', 'commit-row', [commit, more]));
+	} else {
 			// A clean tree turns the button into the repository's server action; the chevron is
 			// gone - there is no commit to configure.
 			commit.innerHTML = '';
@@ -96,7 +99,7 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 		this.onChanged?.();
 	},
 
-	async commit(options: { amend?: boolean; all?: boolean; stagedOnly?: boolean } = {}, followUp: (() => Promise<void>) | null = null): Promise<void> {
+	async commit(options: { amend?: boolean; all?: boolean; stagedOnly?: boolean; signoff?: boolean } = {}, followUp: (() => Promise<void>) | null = null): Promise<void> {
 		const amend = options.amend === true;
 		const message = this.message.trim();
 		if (message === '' && !amend) {
@@ -124,8 +127,9 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 			}
 		}
 		try {
-			// An amend with an empty box keeps the last commit's message (the backend's --no-edit path).
-			await gitCommit(message, amend);
+			// An amend with an empty box keeps the last commit's message (the backend's --no-edit path);
+			// `signoff` adds the Signed-off-by trailer on either path.
+			await gitCommit(message, amend, options.signoff === true);
 		} catch (error) {
 			notify('error', String(error));
 			await this.refresh();
@@ -177,7 +181,10 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 					{ label: 'Commit All', run: () => void this.subCommit(sub, { all: true }) },
 					'separator',
 					{ label: 'Commit (Amend)', run: () => void this.subCommit(sub, { amend: true }) },
-					{ label: 'Commit Staged (Amend)', run: () => void this.subCommit(sub, { amend: true, stagedOnly: true }) }
+					{ label: 'Commit Staged (Amend)', run: () => void this.subCommit(sub, { amend: true, stagedOnly: true }) },
+					'separator',
+					{ label: 'Commit (Signed Off)', run: () => void this.subCommit(sub, { signoff: true }) },
+					{ label: 'Commit Staged (Signed Off)', disabled: sub.changes.every((c) => c.staged === null), run: () => void this.subCommit(sub, { signoff: true, stagedOnly: true }) }
 				]);
 				event.stopPropagation();
 			});
@@ -207,7 +214,7 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 		return box;
 	},
 
-	async subCommit(sub: SubRepoState, options: { amend?: boolean; all?: boolean; stagedOnly?: boolean } = {}, followUp: (() => Promise<void>) | null = null): Promise<void> {
+	async subCommit(sub: SubRepoState, options: { amend?: boolean; all?: boolean; stagedOnly?: boolean; signoff?: boolean } = {}, followUp: (() => Promise<void>) | null = null): Promise<void> {
 		const amend = options.amend === true;
 		const message = sub.message.trim();
 		if (message === '' && !amend) {
@@ -234,7 +241,7 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 			}
 		}
 		try {
-			await gitCommit(message, amend, sub.repoPath);
+			await gitCommit(message, amend, options.signoff === true, sub.repoPath);
 		} catch (error) {
 			notify('error', String(error));
 			await this.refresh();

@@ -75,7 +75,14 @@ export const scmBlame = (path: string) => invoke<BlameLine[]>('scm_blame', { pat
 export const gitInit = () => invoke<void>('git_init');
 export const gitStage = (paths: string[]) => invoke<void>('git_stage', { paths });
 export const gitStageAll = (repo?: string) => invoke<void>('git_stage_all', withRepo({}, repo));
-export const gitCommit = (message: string, amend: boolean, repo?: string) => invoke<void>('git_commit', withRepo({ message, amend }, repo));
+/** "Stage All Tracked Changes": modifications and deletions of tracked files, never the untracked ones. */
+export const gitStageAllTracked = (repo?: string) => invoke<void>('git_stage_all_tracked', withRepo({}, repo));
+/** "Stage All Untracked Changes": only the untracked files; the tracked changes stay unstaged. */
+export const gitStageAllUntracked = (repo?: string) => invoke<void>('git_stage_all_untracked', withRepo({}, repo));
+/** Commit the index; `signoff` adds the `Signed-off-by:` trailer (omitted from the wire when
+ *  false, so the recorded args stay the two-flag shape older recordings made). */
+export const gitCommit = (message: string, amend: boolean, signoff = false, repo?: string) =>
+  invoke<void>('git_commit', withRepo(signoff ? { message, amend, signoff } : { message, amend }, repo));
 export const scmPull = (remote: string | null, branch: string | null, rebase: boolean, repo?: string) => invoke<void>('scm_pull', withRepo({ remote, branch, rebase }, repo));
 export const scmPush = (remote: string | null, setUpstream: boolean, force: boolean, repo?: string) => invoke<void>('scm_push', withRepo({ remote, setUpstream, force }, repo));
 export const scmSync = (rebase: boolean, repo?: string) => invoke<void>('scm_sync', withRepo({ rebase }, repo));
@@ -101,6 +108,22 @@ export const scmBranchMerged = (branchName: string, repo?: string) => invoke<boo
 /** Push the local branch of the chosen name to the remote (`refs/heads/<b>:refs/heads/<b>`)
  *  — works from any checkout, the checked-out branch's upstream untouched. */
 export const scmPushBranch = (remote: string, branch: string, force: boolean, repo?: string) => invoke<void>('scm_push_branch', withRepo({ remote, branch, force }, repo));
+/** Delete a branch on the remote (`git push <remote> --delete <branch>`); the local branch stays. */
+export const scmDeleteRemoteBranch = (remote: string, branch: string, repo?: string) => invoke<void>('scm_delete_remote_branch', withRepo({ remote, branch }, repo));
+/** Delete a tag on the remote (`git push <remote> --delete <tag>`); the local tag stays. */
+export const scmDeleteRemoteTag = (remote: string, tagName: string, repo?: string) => invoke<void>('scm_delete_remote_tag', withRepo({ remote, tagName }, repo));
+/** Push every local tag to the remote (`git push <remote> --tags`). */
+export const scmPushTags = (remote: string, repo?: string) => invoke<void>('scm_push_tags', withRepo({ remote }, repo));
+/** Whether a stopped merge or a stopped rebase is pending — the abort commands' guard. */
+export const scmOperationState = (repo?: string) => invoke<ScmOperationState>('scm_operation_state', withRepo({}, repo));
+/** One shape of the in-progress-operation probe (camelCase on the wire). */
+export interface ScmOperationState {
+  merge: boolean;
+  rebase: boolean;
+}
+/** Back out of a stopped merge (`git merge --abort`) or a stopped rebase (`git rebase --abort`). */
+export const scmAbortMerge = (repo?: string) => invoke<void>('scm_abort_merge', withRepo({}, repo));
+export const scmAbortRebase = (repo?: string) => invoke<void>('scm_abort_rebase', withRepo({}, repo));
 /** The Output view's Git channel: the runner's captured output, and the clear that keeps
  *  it bounded. */
 export const gitOutputLog = () => invoke<string[]>('git_output_log');
