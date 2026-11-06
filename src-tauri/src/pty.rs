@@ -391,8 +391,12 @@ const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 /// its own exit path — Git Bash flushes `~/.bash_history`, PowerShell's PSReadLine flushes
 /// its history, GGS Bash flushes its own — where a bare kill loses all of it (the command
 /// history of every closed terminal, gone since the first build). A busy command leaves
-/// the `exit` queued behind it; [`CLOSE_GRACE`] bounds the wait and the kill ends it.
-/// The reader thread announces the exit to the frontends exactly as before.
+/// the `exit` queued behind it; [`CLOSE_GRACE`] bounds the wait, the kill ends it, and
+/// the wait past the kill reaps the child — the signal itself crosses asynchronously, so
+/// a `try_wait` can still answer "running" after the kill returned, and the contract the
+/// callers and the close test lean on ("the function returns with the child reaped")
+/// holds only past this wait. The reader thread announces the exit to the frontends
+/// exactly as before.
 fn close_session(session: &mut PtySession) {
     let _ = session.writer.write_all(b"exit\r");
     let _ = session.writer.flush();
@@ -405,6 +409,8 @@ fn close_session(session: &mut PtySession) {
         }
     }
     let _ = session.child.kill();
+    // A SIGKILLed child answers its wait at once; the reaping is the point.
+    let _ = session.child.wait();
 }
 
 /// Kill the shell (the "trash" action): politely first — an interactive shell writes its
