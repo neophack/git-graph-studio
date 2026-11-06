@@ -134,6 +134,11 @@ export const PATH_GATED: Record<
 	// every matching file under `repo` — without this entry the gate let a session name
 	// any absolute path as the tree to rewrite.
 	replace_in_files: REPO_ANCHORED,
+	// The search result's own single-match replace (the per-row button): `path` is the
+	// result's root-relative spelling the Rust side refuses in absolute form or with a
+	// `..` segment — the same rule `relativeAllowed` resolves by against the gated
+	// `repo` argument, so one shape serves both layers.
+	search_replace_one: REPO_AND_PATH,
 	// Search, symbols, analysis — everything that walks a tree.
 	search_workspace: { args: ['repo'] },
 	list_files: REPO_ANCHORED,
@@ -160,6 +165,11 @@ export const PATH_GATED: Record<
 	// ends stay inside the open folders — copying between two folders of one machine is
 	// the system file manager's job (the same reasoning that retired fs_import/fs_export).
 	copy_into: { args: ['sources', 'destDir'] },
+	// The Explorer clipboard's paste pair — the same shape as `copy_into`, whose engine
+	// they share (the no-clobber copy / the move beside it). Both ends stay inside the
+	// open folders, in Rust as here.
+	fs_paste_copy: { args: ['sources', 'destDir'] },
+	fs_paste_move: { args: ['sources', 'destDir'] },
 	// The git/scm write set.
 	git_commit: REPO_ANCHORED,
 	git_discard: REPO_AND_PATH,
@@ -172,7 +182,9 @@ export const PATH_GATED: Record<
 	scm_add_tag: REPO_ANCHORED,
 	scm_amend_last_commit: REPO_ANCHORED,
 	scm_apply_stash: REPO_ANCHORED,
+	scm_branch_merged: REPO_ANCHORED,
 	scm_branches: REPO_ANCHORED,
+	scm_cherry_pick: REPO_ANCHORED,
 	scm_checkout: REPO_ANCHORED,
 	scm_clone: { args: ['parent'], sameRootOnly: true },
 	scm_create_branch: REPO_ANCHORED,
@@ -185,11 +197,14 @@ export const PATH_GATED: Record<
 	scm_pop_stash: REPO_ANCHORED,
 	scm_pull: REPO_ANCHORED,
 	scm_push: REPO_ANCHORED,
+	scm_push_branch: REPO_ANCHORED,
 	scm_push_stash: REPO_ANCHORED,
 	scm_rebase: REPO_ANCHORED,
 	scm_remotes: REPO_ANCHORED,
 	scm_rename_branch: REPO_ANCHORED,
+	scm_reset_ref: REPO_ANCHORED,
 	scm_reset_to_remote: REPO_ANCHORED,
+	scm_revert_commit: REPO_ANCHORED,
 	scm_stashes: REPO_ANCHORED,
 	scm_status: REPO_ANCHORED,
 	scm_sync: REPO_ANCHORED,
