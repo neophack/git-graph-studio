@@ -393,12 +393,14 @@ const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 /// history of every closed terminal, gone since the first build). A busy command leaves
 /// the `exit` queued behind it; [`CLOSE_GRACE`] bounds the wait, the kill ends it, and a
 /// bounded poll past the kill reaps the child — the signal crosses asynchronously, so a
-/// `try_wait` the instant after the kill returned can still answer "running" (the close
-/// test's "the shell outlived the close grace" on a loaded macOS runner), and the
+/// `try_wait` the instant after the kill returned can still answer "running", and the
 /// contract "returns with the child reaped" holds once the poll has seen the exit. The
-/// poll is bounded, never a blocking wait: a blocking `wait` hung the macOS runner for
-/// 47 minutes on a SIGKILLed shell, and a wedged pty must not park a thread forever. The
-/// reader thread announces the exit to the frontends exactly as before.
+/// poll is bounded, never a blocking wait: the session's reader thread must keep
+/// draining the master for the shell to exit at all on macOS (its tty layer holds a
+/// slave's close until the output queue is empty — a shell nobody reads wedges inside
+/// its own exit, past SIGKILL, and a blocking wait parked the test thread for 47 minutes
+/// on CI), and a drain that died must not park this thread forever behind it. The reader
+/// thread announces the exit to the frontends exactly as before.
 fn close_session(session: &mut PtySession) {
     let _ = session.writer.write_all(b"exit\r");
     let _ = session.writer.flush();
@@ -819,6 +821,17 @@ mod tests {
         let child = pair.slave.spawn_command(command).unwrap();
         drop(pair.slave);
         let writer = pair.master.take_writer().unwrap();
+        // The master is drained for the shell's whole life, as the session's reader
+        // thread drains it in production: macOS's tty layer holds a slave's close until
+        // its output queue is empty, so a shell whose prompt and echoed `exit` nobody
+        // reads wedges inside its own exit — past the polite `exit`, past SIGHUP, past
+        // SIGKILL (already exiting, it has nothing left to deliver to) — and no wait
+        // ever reaps it. Linux discards the queue on close and never showed it.
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while !matches!(reader.read(&mut buf), Ok(0) | Err(_)) {}
+        });
         let mut session = PtySession {
             gen: 0,
             name: "test".to_owned(),
