@@ -151,6 +151,7 @@ export const en = {
 	'explorer.paste': 'Paste',
 	'explorer.duplicate': 'Duplicate',
 	'explorer.findInFolder': 'Find in Folder...',
+	'explorer.typeNavClear': 'Clear the typed filter',
 	'remote.editLock.unlock': 'Unlock to edit',
 	'remote.editLock.lock': 'Lock editing',
 	'scm.discardMany.confirm': 'Are you sure you want to discard changes in {0} files?\nThis is IRREVERSIBLE!\nYour current working set will be FOREVER LOST if you proceed.',

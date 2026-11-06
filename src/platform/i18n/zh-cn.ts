@@ -151,6 +151,7 @@ export const zhCn: typeof en = {
 	'explorer.paste': '粘贴',
 	'explorer.duplicate': '复制副本',
 	'explorer.findInFolder': '在文件夹中查找...',
+	'explorer.typeNavClear': '清除输入的筛选',
 	'remote.editLock.unlock': '解锁编辑',
 	'remote.editLock.lock': '锁定编辑',
 	'scm.discardMany.confirm': '确定要放弃 {0} 个文件中的更改吗？\n此操作不可撤销！\n继续操作将永久丢失当前工作区中的这些更改。',

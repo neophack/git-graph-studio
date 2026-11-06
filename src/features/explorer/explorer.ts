@@ -24,6 +24,10 @@ import './explorer.css';
  *  `data-remote-shell` marker boot.ts sets is what makes a build remote (openThreshold.ts). */
 const REMOTE_DIR_PAGE = 500;
 
+/** How long the typed label's buffer lives idle before the next key restarts it — VS Code's
+ *  type navigation keeps roughly a second of quiet between separate words. */
+const TYPE_NAV_RESET_MS = 1000;
+
 function remoteShell(): boolean {
 	return typeof document !== 'undefined' && document.documentElement.hasAttribute('data-remote-shell');
 }
@@ -125,6 +129,9 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 			if (this.rootPath) this.showMenu(event, this.rootPath, true);
 		});
 		this.body.addEventListener('keydown', (event) => this.onKey(event));
+		// Focus leaving the tree drops the type navigation (VS Code's typed label clears
+		// when the list loses focus).
+		this.body.addEventListener('blur', () => this.clearTypeFilter());
 		this.render();
 	}
 
@@ -201,6 +208,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		// Reconciliation keeps (or builds) rows without the clipboard's knowledge: the cut
 		// dim is re-painted over whatever rows now exist.
 		this.paintClipboard();
+		this.repaintTypeFilter();
 	}
 
 	/** An inline new/rename input the tree is about to drop must settle (as cancelled), or the
@@ -270,6 +278,8 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		this.header.appendChild(actions);
 		if (!this.collapsed && this.rootPath) {
 			this.rendered = this.rootPaths.length > 1 ? this.renderRoots() : this.renderLevel(this.tree, this.rootPath, 0);
+			// The rebuilt rows know nothing of a live type filter: repaint once they exist.
+			void this.rendered.then(() => this.repaintTypeFilter());
 		}
 	}
 
@@ -574,6 +584,86 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		void this.refresh();
 	}
 
+	/* ---------- Type navigation (VS Code's list type-to-navigate) ---------- */
+
+	/** The label characters typed while the tree holds the focus, and when the last one
+	 *  landed — idle past the reset window and the buffer starts over with the next key. */
+	private typeFilter = '';
+	private typeFilterAt = 0;
+	/** The chip that shows the buffer at the list's bottom-right (and clears it). */
+	private typeFilterChip: HTMLElement | null = null;
+
+	/** One typed character: it joins the buffer (or restarts it after the idle window), the
+	 *  match runs, and a buffer that matches nothing falls back to the new character alone —
+	 *  VS Code restarts the match rather than carrying a dead buffer — then clears. */
+	private typeNavigate(char: string): void {
+		const now = Date.now();
+		const next = now - this.typeFilterAt <= TYPE_NAV_RESET_MS ? this.typeFilter + char : char;
+		this.typeFilterAt = now;
+		if (this.applyTypeFilter(next)) return;
+		if (!this.applyTypeFilter(char)) this.clearTypeFilter();
+	}
+
+	/** Match the buffer against the rows' labels: matching rows highlight, the focus moves to
+	 *  the first match at or after the anchor (wrapping to the first one), and the chip shows
+	 *  the buffer. False when no row matches — the caller decides what the buffer becomes. */
+	private applyTypeFilter(filter: string): boolean {
+		const rows = Array.from(this.tree.querySelectorAll<HTMLElement>('.row[data-path]'));
+		const matches: number[] = [];
+		let anchor = 0;
+		for (const [index, row] of rows.entries()) {
+			if (row.dataset['path'] === this.selected) anchor = index;
+			if (row.querySelector('.label')?.textContent?.toLowerCase().includes(filter.toLowerCase())) matches.push(index);
+		}
+		if (matches.length === 0) return false;
+		this.typeFilter = filter;
+		const set = new Set(matches);
+		for (const [index, row] of rows.entries()) row.classList.toggle('filter-match', set.has(index));
+		const target = matches.find((index) => index >= anchor) ?? matches[0]!;
+		this.select(rows[target]!.dataset['path']!);
+		rows[target]!.scrollIntoView({ block: 'nearest' });
+		this.paintTypeFilterChip();
+		return true;
+	}
+
+	/** The highlights and the chip over the rows that exist right now, with no focus
+	 *  movement — a refresh or a re-render reconciles rows without the filter's knowledge. */
+	private repaintTypeFilter(): void {
+		if (this.typeFilter === '') return;
+		const filter = this.typeFilter.toLowerCase();
+		for (const row of this.tree.querySelectorAll<HTMLElement>('.row[data-path]')) {
+			row.classList.toggle('filter-match', row.querySelector('.label')?.textContent?.toLowerCase().includes(filter) === true);
+		}
+		this.paintTypeFilterChip();
+	}
+
+	private clearTypeFilter(): void {
+		this.typeFilter = '';
+		this.typeFilterAt = 0;
+		this.typeFilterChip?.remove();
+		this.typeFilterChip = null;
+		for (const row of this.tree.querySelectorAll<HTMLElement>('.row.filter-match')) row.classList.remove('filter-match');
+	}
+
+	private paintTypeFilterChip(): void {
+		if (!this.typeFilterChip) {
+			const chip = el('div', 'type-filter');
+			const clear = el('button', 'type-filter-clear', [icon('close')]);
+			clear.title = t('explorer.typeNavClear');
+			clear.setAttribute('aria-label', t('explorer.typeNavClear'));
+			// The pointerdown's blur must not fire before the click: focus stays in the tree.
+			clear.addEventListener('pointerdown', (event) => event.preventDefault());
+			clear.addEventListener('click', () => {
+				this.clearTypeFilter();
+				this.body.focus();
+			});
+			chip.append(el('span', 'type-filter-text'), clear);
+			this.body.appendChild(chip);
+			this.typeFilterChip = chip;
+		}
+		this.typeFilterChip.querySelector<HTMLElement>('.type-filter-text')!.textContent = this.typeFilter;
+	}
+
 	private select(path: string | null): void {
 		this.setSelection(path === null ? [] : [path], path);
 	}
@@ -752,6 +842,21 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		} else if (event.key === 'Delete' && current) {
 			event.preventDefault();
 			void this.delete(current.dataset['path']!, event.shiftKey);
+		} else if ((event.key === 'Home' || event.key === 'End') && !event.ctrlKey && !event.metaKey && !event.altKey) {
+			event.preventDefault();
+			const target = event.key === 'Home' ? rows[0]! : rows[rows.length - 1]!;
+			this.select(target.dataset['path']!);
+			target.scrollIntoView({ block: 'nearest' });
+		} else if (event.key.length === 1 && event.key !== ' ' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+			// VS Code's type navigation: printable characters (only while the tree holds the
+			// focus) navigate the tree by label. The key never reaches the global handler.
+			event.preventDefault();
+			event.stopPropagation();
+			this.typeNavigate(event.key);
+		} else if (event.key === 'Escape' && this.typeFilter !== '') {
+			event.preventDefault();
+			event.stopPropagation();
+			this.clearTypeFilter();
 		} else if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
 			// The tree's own clipboard keys (VS Code's explorer keys, only while the tree holds
 			// the focus): Copy / Cut clip the selection, Paste lands in the focused row's

@@ -869,4 +869,47 @@ describe('explorer clipboard', () => {
 		expect(menuLabels()).not.toContain('Find in Folder...');
 		key(document, 'Escape');
 	});
+
+	it('navigates by typed label characters (VS Code type navigation), Home/End and the chip clear', async () => {
+		fileSystem({ [ROOT]: ['src/', 'README.md'], [`${ROOT}\\src`]: ['main.ts'] });
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoot(ROOT);
+		await flush();
+		const body = document.querySelector<HTMLElement>('.pane-body')!;
+		body.focus();
+
+		// Home / End: the first and the last row.
+		key(body, 'Home');
+		expect(texts('.tree .row.selected .label')).toEqual(['src']);
+		key(body, 'End');
+		expect(texts('.tree .row.selected .label')).toEqual(['README.md']);
+
+		// Typing navigates by label: 'r' matches both rows, the match at or after the anchor
+		// (README) keeps the focus; every match highlights and the chip shows the buffer.
+		key(body, 'r');
+		expect(texts('.tree .row.filter-match .label')).toEqual(['src', 'README.md']);
+		expect(texts('.tree .row.selected .label')).toEqual(['README.md']);
+		key(body, 'e');
+		expect(texts('.tree .row.filter-match .label')).toEqual(['README.md']);
+		expect(document.querySelector('.type-filter .type-filter-text')!.textContent).toBe('re');
+
+		// The chip's clear button drops the highlight and the chip, the focus back in the tree.
+		click(document.querySelector('.type-filter .type-filter-clear'));
+		expect(document.querySelector('.type-filter')).toBeNull();
+		expect(document.querySelector('.row.filter-match')).toBeNull();
+
+		// A buffer that matches nothing restarts with the character alone, then clears —
+		// never a dead buffer. The next typed character starts a fresh match.
+		key(body, 'z');
+		expect(document.querySelector('.type-filter')).toBeNull();
+		key(body, 'm');
+		expect(document.querySelector('.type-filter .type-filter-text')!.textContent).toBe('m');
+		expect(texts('.tree .row.selected .label')).toEqual(['README.md']);
+
+		// Escape drops it all.
+		key(body, 'Escape');
+		expect(document.querySelector('.type-filter')).toBeNull();
+		expect(document.querySelector('.row.filter-match')).toBeNull();
+	});
+
 });

@@ -6,3 +6,48 @@
 .tree .row.cut-pending {
 	opacity: 0.55;
 }
+
+/* VS Code's type navigation: the rows whose label matches the typed buffer carry a subtle
+   highlight, and the buffer rides a small chip at the list's bottom-right (sticky, so it
+   stays readable while the tree scrolls), with a clear button beside it. */
+.tree .row.filter-match {
+	background: var(--vscode-list-filterMatchBackground, var(--vscode-list-hoverBackground));
+}
+
+.type-filter {
+	position: sticky;
+	bottom: 6px;
+	align-self: flex-end;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	margin: 0 8px 6px 0;
+	padding: 1px 2px 1px 8px;
+	background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+	border: 1px solid var(--vscode-widget-border, var(--vscode-editorWidget-border, transparent));
+	border-radius: 3px;
+	font-size: 12px;
+	z-index: 1;
+	box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+}
+
+.type-filter-text {
+	min-width: 12px;
+	font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.type-filter-clear {
+	display: flex;
+	align-items: center;
+	padding: 1px 3px;
+	background: transparent;
+	border: none;
+	color: var(--vscode-foreground);
+	cursor: pointer;
+	font-size: 14px;
+}
+
+.type-filter-clear:hover {
+	background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+	border-radius: 3px;
+}
