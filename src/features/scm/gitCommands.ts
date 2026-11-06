@@ -5,11 +5,12 @@
 // runs through the backend, and reports through notifications.
 
 import { invoke } from '../../platform/ipc/core';
-import { type BranchInfo, scmBranches, scmCheckout, scmClone, scmCreateBranch, type RemoteInfo, scmFetch, scmPull, scmPush, type StashInfo, scmRemotes, scmStashes, scmSync, scmTags } from '../../platform/ipc/scm';
+import { type BranchInfo, scmBranches, scmBranchMerged, scmCheckout, scmCherryPick, scmClone, scmCreateBranch, type RemoteInfo, scmFetch, scmPull, scmPush, scmPushBranch, scmRevertCommit, scmResetRef, type StashInfo, scmRemotes, scmStashes, scmSync, scmTags } from '../../platform/ipc/scm';
 import { repoHead } from '../../platform/ipc/revision';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
 import type { CommandRegistry } from '../../platform/commands';
+import { t, tf } from '../../platform/i18n';
 import { confirmDialog, notify, quickInput, quickPick, type QuickPickItem } from '../../platform/ui/index';
 
 /** What the commands need from the workbench. */
@@ -86,6 +87,22 @@ function validateRef(value: string): string | null {
 	return value.trim() === '' ? 'A name is required' : REF_NAME.test(value.trim()) ? null : `'${value}' is not a valid Git reference name`;
 }
 
+/** The commit-ish the cherry-pick / revert / reset / detached-checkout inputs take: a commit
+ *  hash (4-64 hex digits, the shape the backend's validator accepts) or a named ref. */
+const COMMIT_HASH = /^[0-9a-fA-F]{4,64}$/;
+
+export function validateTarget(value: string): string | null {
+	const trimmed = value.trim();
+	if (trimmed === '') return t('scm.target.required');
+	return COMMIT_HASH.test(trimmed) || REF_NAME.test(trimmed) ? null : t('scm.target.invalid');
+}
+
+export function validateCommitHash(value: string): string | null {
+	const trimmed = value.trim();
+	if (trimmed === '') return t('scm.checkoutDetached.required');
+	return COMMIT_HASH.test(trimmed) ? null : t('scm.checkoutDetached.invalid');
+}
+
 export function registerGitCommands(commands: CommandRegistry, host: GitCommandHost): void {
 	const category = 'Git';
 	const hasRepo = () => host.repoPath() !== null;
@@ -106,7 +123,15 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 	add('git.pushTo', 'Push to...', async () => {
 		const remote = await pickRemote('Pick a remote to publish the branch to');
 		if (!remote) return;
-		await scmPush(remote.name, true, false);
+		// The second step offers the remote's own branches (the names as the remote spells
+		// them); a free-typed name publishes under it, the same as VS Code's pick.
+		const prefix = remote.name + '/';
+		const remoteBranches = (await scmBranches()).filter((b) => b.remote && b.name.startsWith(prefix)).map((b) => b.name.slice(prefix.length));
+		const branch = remoteBranches.length > 0
+			? await quickPick(remoteBranches.map((b) => ({ label: b, icon: 'cloud', value: b })), tf('scm.pushTo.pickBranch', remote.name))
+			: await quickInput({ title: 'Push to...', placeholder: tf('scm.pushTo.pickBranch', remote.name), validate: validateRef });
+		if (!branch) return;
+		await scmPushBranch(remote.name, branch.trim(), false);
 	});
 	add('git.pushForce', 'Push (Force With Lease)', async () => {
 		if (!(await confirmDialog('Force-push the current branch to its upstream? Commits the remote has that this push does not contain become unreachable there.', 'Force Push'))) return;
@@ -163,8 +188,18 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 			notify('info', 'There are no branches or tags to checkout.');
 			return;
 		}
+		// VS Code's trailing affordance: checking a commit out directly, in a detached HEAD.
+		items.push({ label: t('scm.checkoutDetached.pick'), description: undefined, icon: 'git-commit', value: 'detached:' });
 		const chosen = await quickPick(items, 'Select a branch or tag to checkout');
-		if (chosen) await scmCheckout(chosen.replace(/^(branch|tag):/, ''));
+		if (!chosen) return;
+		if (chosen.startsWith('detached:')) {
+			if (!(await confirmDialog(t('scm.checkoutDetached.confirm'), t('scm.checkoutDetached.action')))) return;
+			const hash = await quickInput({ title: t('scm.checkoutDetached.pick'), placeholder: t('scm.checkoutDetached.placeholder'), validate: validateCommitHash });
+			if (!hash) return;
+			await scmCheckout(hash.trim());
+			return;
+		}
+		await scmCheckout(chosen.replace(/^(branch|tag):/, ''));
 	});
 	add('git.branch', 'Create Branch...', async () => {
 		const name = await quickInput({ placeholder: 'Branch name', title: 'Please provide a new branch name', validate: validateRef });
@@ -185,8 +220,24 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 	add('git.deleteBranch', 'Delete Branch...', async () => {
 		const branch = await pickBranch('Select a branch to delete', (b) => !b.remote && !b.current);
 		if (!branch) return;
+		// The merged fact words the confirmation: an unmerged branch's commits would be
+		// unreachable, so only that case offers the force delete with the irreversible
+		// wording; a merged one deletes with the ordinary confirm (git's safe `-d` still
+		// refuses if the state moved since the probe).
+		let merged: boolean;
+		try {
+			merged = await scmBranchMerged(branch.name);
+		} catch (error) {
+			notify('error', String(error instanceof Error ? error.message : error));
+			return;
+		}
+		if (!merged) {
+			if (!(await confirmDialog(tf('scm.deleteBranch.unmergedConfirm', branch.name), t('scm.deleteBranch.forceAction')))) return;
+			await gitOp('scm_delete_branch', { branchName: branch.name, force: true });
+			return;
+		}
 		if (!(await confirmDialog(`Delete the branch '${branch.name}'? Commits only reachable from it will be lost.`, 'Delete Branch'))) return;
-		await gitOp('scm_delete_branch', { branchName: branch.name, force: true });
+		await gitOp('scm_delete_branch', { branchName: branch.name, force: false });
 	});
 	add('git.merge', 'Merge Branch...', async () => {
 		const branch = await pickBranch('Select a branch to merge from', (b) => !b.current);
@@ -195,6 +246,36 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 	add('git.rebase', 'Rebase Branch...', async () => {
 		const branch = await pickBranch('Select a branch to rebase onto', (b) => !b.current);
 		if (branch) await gitOp('scm_rebase', { name: branch.name });
+	});
+
+	/* Commits: cherry-pick, revert, reset (the palette's commit-rewriting trio) */
+	add('git.cherryPick', 'Cherry-Pick...', async () => {
+		const target = await quickInput({ title: 'Cherry-Pick', placeholder: t('scm.cherryPick.placeholder'), validate: validateTarget });
+		if (!target) return;
+		const subject = await scmCherryPick(target.trim());
+		notify('info', tf('scm.cherryPick.done', subject));
+	});
+	add('git.revertCommit', 'Revert Commit...', async () => {
+		const target = await quickInput({ title: 'Revert Commit', placeholder: t('scm.revert.placeholder'), validate: validateTarget });
+		if (!target) return;
+		const subject = await scmRevertCommit(target.trim());
+		notify('info', tf('scm.revert.done', subject));
+	});
+	add('git.resetToCommit', 'Reset Current Branch to Commit...', async () => {
+		const target = await quickInput({ title: 'Reset Current Branch to Commit', placeholder: t('scm.reset.placeholder'), validate: validateTarget });
+		if (!target) return;
+		const ref = target.trim();
+		const mode = await quickPick([
+			{ label: 'Soft', description: t('scm.reset.soft'), icon: 'arrow-up', value: 'soft' },
+			{ label: 'Mixed', description: t('scm.reset.mixed'), icon: 'arrow-both', value: 'mixed' },
+			{ label: 'Hard', description: t('scm.reset.hard'), icon: 'discard', value: 'hard' }
+		], t('scm.reset.modePrompt'), tf('scm.reset.title', ref));
+		if (mode !== 'soft' && mode !== 'mixed' && mode !== 'hard') return;
+		// Hard discards every uncommitted change: the same irreversible warning the
+		// discard-all confirm carries, before git runs.
+		if (mode === 'hard' && !(await confirmDialog(tf('scm.reset.hardConfirm', ref), t('scm.reset.hardAction')))) return;
+		await scmResetRef(ref, mode);
+		notify('info', tf('scm.reset.done', ref, mode));
 	});
 
 	/* Remotes */

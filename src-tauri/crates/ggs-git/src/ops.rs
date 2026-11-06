@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::runner::is_safe_ref_name;
+use crate::runner::is_valid_commit_hash;
 use crate::runner::Git;
 
 type Status = Result<(), String>;
@@ -272,6 +273,34 @@ pub fn delete_branch(git: &Git, name: &str, force: bool) -> Status {
         .and_then(|_| git.run(&["branch", if force { "-D" } else { "-d" }, name]))
 }
 
+/// Whether `name`'s tip is reachable from HEAD (`git merge-base --is-ancestor`): the fact
+/// the delete confirmation words itself by. Exit 0 answers merged, exit 1 answers not —
+/// git's documented codes for exactly this query; anything else (an unknown ref, not a
+/// repository) is the error git printed.
+pub fn branch_merged(git: &Git, name: &str) -> Result<bool, String> {
+    check_ref("branchName", name)?;
+    let output = git.raw_output(&["merge-base", "--is-ancestor", name, "HEAD"])?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let text = text.trim();
+            if text.is_empty() {
+                Err(format!(
+                    "Could not tell whether \"{name}\" is merged into HEAD."
+                ))
+            } else {
+                Err(text.to_owned())
+            }
+        }
+    }
+}
+
 /// Merge `name` into the current branch, fast-forwarding when possible (the palette's choice:
 /// the "create a merge commit" variant is the Git Graph view's own dialog).
 pub fn merge(git: &Git, name: &str) -> Status {
@@ -436,6 +465,22 @@ pub fn sync(git: &Git, rebase: bool) -> Status {
     push(git, None, false, false)
 }
 
+/// `git push <remote> refs/heads/<branch>:refs/heads/<branch>` — publish the local branch of
+/// the chosen name to the remote (the "Push to..." second step): it works from any checkout,
+/// and the checked-out branch's own upstream is not touched.
+pub fn push_branch(git: &Git, remote: &str, branch: &str, force: bool) -> Status {
+    check_ref("remote", remote)?;
+    check_ref("branch", branch)?;
+    let mut args = vec!["push".to_owned()];
+    if force {
+        args.push("--force-with-lease".to_owned());
+    }
+    args.push(remote.to_owned());
+    args.push(format!("refs/heads/{branch}:refs/heads/{branch}"));
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    git.run(&refs)
+}
+
 pub fn fetch(git: &Git, remote: Option<&str>, prune: bool) -> Status {
     crate::runner::fetch(git, remote, prune, false)
 }
@@ -478,6 +523,12 @@ pub fn clone(
 /* ---------- Branches, remotes, stashes, tags (the simple forms the menu uses) ---------- */
 
 pub fn checkout(git: &Git, name: &str) -> Status {
+    // A commit hash (4-64 hex digits) checks out detached: plain `git checkout <hash>` is
+    // the detached form, and git resolves a refname first when one collides with the hash,
+    // so the same call stays correct for a branch whose name reads like a hash prefix.
+    if is_valid_commit_hash(name) {
+        return git.run(&["checkout", name]);
+    }
     check_ref("branch", name)?;
     // A remote-tracking branch is checked out as a new local branch of the same short name.
     let is_remote = git
@@ -527,6 +578,99 @@ pub fn reset_to_remote(git: &Git) -> Result<String, String> {
         .ok_or_else(|| "The current branch has no upstream to reset to.".to_owned())?;
     git.run(&["reset", "--soft", "@{upstream}"])?;
     Ok(upstream)
+}
+
+/* ---------- Commits: cherry-pick, revert, reset ---------- */
+
+/// The conflicted paths a stopped merge-shaped operation left in the index — `None` when
+/// there are none, so a failure without a conflict carries no hint.
+fn conflicted_paths(git: &Git) -> Option<String> {
+    let conflicted: Vec<String> = status(git)
+        .ok()?
+        .into_iter()
+        .filter(|change| change.conflicted)
+        .map(|change| change.path)
+        .collect();
+    if conflicted.is_empty() {
+        None
+    } else {
+        Some(conflicted.join(", "))
+    }
+}
+
+/// Run one of the merge-shaped operations that stops on a conflict, and name the conflicted
+/// paths in the failure when git left any: git's own complaint says nothing about which
+/// files to resolve, and the view's Merge Changes group is where the user goes next.
+fn conflict_aware_op(git: &Git, args: &[&str]) -> Status {
+    if let Err(error) = git.run(args) {
+        return Err(match conflicted_paths(git) {
+            Some(paths) => format!("{error}\nConflicted paths: {paths}"),
+            None => error,
+        });
+    }
+    Ok(())
+}
+
+/// The subject of HEAD — what the write notifications name as the result.
+fn head_subject(git: &Git) -> String {
+    git.output(&["log", "-1", "--format=%s"])
+        .map(|subject| subject.trim().to_owned())
+        .unwrap_or_default()
+}
+
+/// `git cherry-pick <ref>` — apply an existing commit's change as a new commit on top of
+/// HEAD. Returns the new HEAD's subject for the notification.
+pub fn cherry_pick(git: &Git, target: &str) -> Result<String, String> {
+    check_ref("target", target)?;
+    conflict_aware_op(git, &["cherry-pick", target])?;
+    Ok(head_subject(git))
+}
+
+/// `git revert --no-edit <ref>` — undo an existing commit with a new inverse commit.
+/// Returns the new HEAD's subject for the notification.
+pub fn revert_commit(git: &Git, target: &str) -> Result<String, String> {
+    check_ref("target", target)?;
+    conflict_aware_op(git, &["revert", "--no-edit", target])?;
+    Ok(head_subject(git))
+}
+
+/// The reset modes the picker offers — git's own three; every other spelling is rejected
+/// here rather than reaching git.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetMode {
+    /// Move HEAD only: the index and the working tree stay as they are.
+    Soft,
+    /// Move HEAD and the index; the working tree keeps its files.
+    Mixed,
+    /// Move everything: the working tree resets too, and uncommitted changes are gone.
+    Hard,
+}
+
+impl ResetMode {
+    pub fn parse(mode: &str) -> Result<ResetMode, String> {
+        match mode {
+            "soft" => Ok(ResetMode::Soft),
+            "mixed" => Ok(ResetMode::Mixed),
+            "hard" => Ok(ResetMode::Hard),
+            other => Err(format!(
+                "Invalid reset mode \"{other}\" was provided (expected soft, mixed or hard)."
+            )),
+        }
+    }
+
+    fn flag(self) -> &'static str {
+        match self {
+            ResetMode::Soft => "--soft",
+            ResetMode::Mixed => "--mixed",
+            ResetMode::Hard => "--hard",
+        }
+    }
+}
+
+/// `git reset --<mode> <ref>` — move the current branch to `target` at the chosen depth.
+pub fn reset_ref(git: &Git, target: &str, mode: ResetMode) -> Status {
+    check_ref("target", target)?;
+    git.run(&["reset", mode.flag(), target])
 }
 
 /* ---------- Gerrit ---------- */
@@ -1105,5 +1249,137 @@ mod tests {
             .unwrap()
             .trim()
             .is_empty());
+    }
+
+    #[test]
+    fn cherry_pick_revert_and_the_reset_modes_run() {
+        let scratch = Scratch::new("scm-rewrite");
+        let git = scratch.repo("repo");
+        let base = commit(&git, "a.txt", "one\n", "base");
+        git.run(&["checkout", "-q", "-b", "side"]).unwrap();
+        let picked = commit(&git, "picked.txt", "picked\n", "The picked change");
+        git.run(&["checkout", "-q", "main"]).unwrap();
+        assert!(!git.repo.join("picked.txt").exists());
+
+        // The cherry-pick lands the side commit's change as a NEW commit on main.
+        let picked_subject = cherry_pick(&git, &picked).unwrap();
+        assert_eq!(picked_subject, "The picked change");
+        assert_eq!(subject(&git, "HEAD"), "The picked change");
+        assert_ne!(rev(&git, "HEAD"), picked);
+        assert!(git.repo.join("picked.txt").exists());
+
+        // The revert undoes it with a new inverse commit; the file is gone again.
+        let reverted = revert_commit(&git, "HEAD").unwrap();
+        assert!(reverted.starts_with("Revert"), "{reverted}");
+        assert!(!git.repo.join("picked.txt").exists());
+        assert_eq!(rev(&git, "HEAD^^"), base);
+
+        // An unknown ref fails with git's own complaint and no conflict hint.
+        let error = cherry_pick(&git, "does-not-exist").unwrap_err();
+        assert!(!error.contains("Conflicted paths"), "{error}");
+        assert!(revert_commit(&git, "does-not-exist").is_err());
+
+        // The reset modes: two commits and a staged, dirty file against `base`.
+        commit(&git, "b.txt", "b\n", "second");
+        commit(&git, "c.txt", "c\n", "third");
+        write(&git, "a.txt", "dirty\n");
+        git.run(&["add", "--", "a.txt"]).unwrap();
+
+        // Soft keeps the index and the working tree whole (the file stays staged, b and c
+        // come back staged too).
+        reset_ref(&git, &base, ResetMode::parse("soft").unwrap()).unwrap();
+        assert_eq!(head(&git), base);
+        assert_eq!(std::fs::read_to_string(git.repo.join("a.txt")).unwrap(), "dirty\n");
+        assert!(git
+            .output(&["diff", "--name-only", "--cached"])
+            .unwrap()
+            .contains("a.txt"));
+
+        // Mixed resets the index but keeps the working tree's files.
+        reset_ref(&git, &base, ResetMode::parse("mixed").unwrap()).unwrap();
+        assert_eq!(std::fs::read_to_string(git.repo.join("a.txt")).unwrap(), "dirty\n");
+        assert!(git
+            .output(&["diff", "--name-only", "--cached"])
+            .unwrap()
+            .trim()
+            .is_empty());
+
+        // Hard resets the working tree too — the dirty state is gone.
+        reset_ref(&git, &base, ResetMode::parse("hard").unwrap()).unwrap();
+        assert_eq!(std::fs::read_to_string(git.repo.join("a.txt")).unwrap(), "one\n");
+
+        // An unknown mode never reaches git.
+        assert!(ResetMode::parse("weak").is_err());
+        assert!(ResetMode::parse("").is_err());
+    }
+
+    #[test]
+    fn a_conflicting_cherry_pick_names_the_conflicted_paths() {
+        let scratch = Scratch::new("scm-cherry-conflict");
+        let git = scratch.repo("repo");
+        commit(&git, "c.txt", "base\n", "base");
+        git.run(&["checkout", "-q", "-b", "side"]).unwrap();
+        let side_commit = commit(&git, "c.txt", "side\n", "side");
+        git.run(&["checkout", "-q", "main"]).unwrap();
+        commit(&git, "c.txt", "main\n", "main");
+
+        let error = cherry_pick(&git, &side_commit).unwrap_err();
+        assert!(error.contains("Conflicted paths"), "{error}");
+        assert!(error.contains("c.txt"), "{error}");
+        // The repository stays mid-cherry-pick for the user to resolve, exactly as git
+        // leaves it after a stopped cherry-pick.
+        assert!(!git.output(&["ls-files", "-u"]).unwrap().trim().is_empty());
+    }
+
+    #[test]
+    fn checkout_of_a_hash_detaches_and_branch_merged_answers_the_delete_guard() {
+        let scratch = Scratch::new("scm-detached");
+        let git = scratch.repo("repo");
+        let first = commit(&git, "a.txt", "one\n", "first");
+        commit(&git, "b.txt", "two\n", "second");
+
+        // The full hash checks out detached.
+        checkout(&git, &first).unwrap();
+        assert_eq!(scratch_current_branch(&git).as_deref(), None, "detached");
+        assert_eq!(head(&git), first);
+        // So does an abbreviated one.
+        checkout(&git, "main").unwrap();
+        checkout(&git, &first[..7]).unwrap();
+        assert_eq!(head(&git), first);
+        checkout(&git, "main").unwrap();
+
+        // The merged fact the delete guard words itself by.
+        git.run(&["branch", "topic", "main"]).unwrap();
+        assert!(branch_merged(&git, "topic").unwrap());
+        git.run(&["checkout", "-q", "topic"]).unwrap();
+        commit(&git, "c.txt", "three\n", "topic only");
+        git.run(&["checkout", "-q", "main"]).unwrap();
+        assert!(!branch_merged(&git, "topic").unwrap());
+        // An unknown ref is the error, never a wrong merged answer.
+        assert!(branch_merged(&git, "no-such-branch").is_err());
+    }
+
+    #[test]
+    fn push_branch_publishes_a_local_branch_by_name_from_any_checkout() {
+        let scratch = Scratch::new("scm-push-branch");
+        let git = scratch.repo("repo");
+        let bare = scratch.bare("origin.git");
+        git.run(&["remote", "add", "origin", &bare.display().to_string()])
+            .unwrap();
+        commit(&git, "a.txt", "one\n", "one");
+        git.run(&["checkout", "-q", "-b", "feature"]).unwrap();
+        commit(&git, "f.txt", "feature\n", "feature");
+
+        // `main` is pushed while `feature` is the checkout — the named branch's own tip,
+        // not the checked-out one's.
+        push_branch(&git, "origin", "main", false).unwrap();
+        assert_eq!(
+            scratch.git(&bare).output(&["rev-parse", "main"]).unwrap().trim(),
+            rev(&git, "main")
+        );
+        assert_ne!(rev(&git, "main"), head(&git));
+
+        assert!(push_branch(&git, "origin", "--evil", false).is_err());
+        assert!(push_branch(&git, "--evil", "main", false).is_err());
     }
 }

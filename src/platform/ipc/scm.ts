@@ -87,6 +87,20 @@ export const scmAmendLastCommit = (repo: string) => invoke<void>('scm_amend_last
 export const gerritInstallHook = (remote: string, repo: string) => invoke<boolean>('gerrit_install_hook', { remote, repo });
 export const scmResetToRemote = (repo: string) => invoke<string>('scm_reset_to_remote', { repo });
 export const gerritPushRef = (remote: string, repo: string) => invoke<string | null>('gerrit_push_ref', { remote, repo });
+/** Cherry-pick / revert an existing commit onto HEAD; the answer is the new HEAD's subject
+ *  (the write's success notification). A conflict fails with git's complaint plus the
+ *  conflicted paths. */
+export const scmCherryPick = (target: string, repo?: string) => invoke<string>('scm_cherry_pick', withRepo({ target }, repo));
+export const scmRevertCommit = (target: string, repo?: string) => invoke<string>('scm_revert_commit', withRepo({ target }, repo));
+/** Reset the current branch to `target` at `mode`'s depth — `soft` | `mixed` | `hard`
+ *  (anything else the backend rejects before git runs). */
+export const scmResetRef = (target: string, mode: 'soft' | 'mixed' | 'hard', repo?: string) => invoke<void>('scm_reset_ref', withRepo({ target, mode }, repo));
+/** Whether a branch's tip is reachable from HEAD (`git merge-base --is-ancestor`): the
+ *  delete confirmation's merged/unmerged fact. */
+export const scmBranchMerged = (branchName: string, repo?: string) => invoke<boolean>('scm_branch_merged', withRepo({ branchName }, repo));
+/** Push the local branch of the chosen name to the remote (`refs/heads/<b>:refs/heads/<b>`)
+ *  — works from any checkout, the checked-out branch's upstream untouched. */
+export const scmPushBranch = (remote: string, branch: string, force: boolean, repo?: string) => invoke<void>('scm_push_branch', withRepo({ remote, branch, force }, repo));
 /** The Output view's Git channel: the runner's captured output, and the clear that keeps
  *  it bounded. */
 export const gitOutputLog = () => invoke<string[]>('git_output_log');

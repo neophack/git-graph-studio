@@ -322,7 +322,7 @@ describe('source control view', () => {
 			'Push to Gerrit Ref for Current Branch (refs/for/...)'
 		]);
 		hover(menuItem('Branch'));
-		expect(menuLabels()).toEqual(['Merge Branch...', 'Rebase Branch...', 'Create Branch...', 'Create Branch From...', 'Rename Branch...', 'Delete Branch...']);
+		expect(menuLabels()).toEqual(['Merge Branch...', 'Rebase Branch...', 'Cherry-Pick...', 'Revert Commit...', 'Reset Current Branch to Commit...', 'Create Branch...', 'Create Branch From...', 'Rename Branch...', 'Delete Branch...']);
 		hover(menuItem('Stash'));
 		expect(menuLabels()).toEqual(['Stash', 'Stash (Include Untracked)', 'Apply Stash...', 'Apply Latest Stash', 'Pop Stash...', 'Pop Latest Stash', 'Drop Stash...']);
 		hover(menuItem('View & Sort'));
@@ -997,7 +997,7 @@ describe('git commands', () => {
 		const executing = registry.execute('git.checkout');
 		await flush();
 		const rows = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
-		expect(rows.map((r) => r.querySelector('.label')!.textContent)).toEqual(['feature', 'origin/main', 'v1.0.0']);
+		expect(rows.map((r) => r.querySelector('.label')!.textContent)).toEqual(['feature', 'origin/main', 'v1.0.0', 'Checkout a commit (detached)...']);
 		expect(rows[0]!.querySelector('.codicon-git-branch')).not.toBeNull();
 		expect(rows[1]!.querySelector('.codicon-cloud')).not.toBeNull();
 		expect(rows[2]!.querySelector('.codicon-tag')).not.toBeNull();
@@ -1016,5 +1016,189 @@ describe('git commands', () => {
 		await flush();
 		expect(notifications().at(-1)).toContain('no branches or tags');
 		expect(backend.callsTo('scm_checkout')).toHaveLength(0);
+	});
+
+	it('the picker\'s trailing affordance confirms the detached HEAD and takes a commit hash', async () => {
+		backend.on('scm_branches', () => [
+			{ name: 'main', remote: false, current: true, upstream: null },
+			{ name: 'dev', remote: false, current: false, upstream: null }
+		]);
+		backend.on('scm_tags', () => []);
+		backend.on('scm_checkout', () => null);
+		const { registry } = setup();
+
+		const executing = registry.execute('git.checkout');
+		await flush();
+		const rows = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		expect(rows.map((r) => r.querySelector('.label')!.textContent)).toEqual(['dev', 'Checkout a commit (detached)...']);
+		click(rows.find((r) => r.textContent!.includes('detached'))!);
+		await flush();
+		// The detached-HEAD explanation stands between the pick and the hash.
+		expect(notifications().at(-1)).toContain('detaches HEAD');
+		// A garbage input is refused before anything is invoked.
+		click(notificationButton('Checkout (Detached)'));
+		await flush();
+		const quick = document.querySelector<HTMLInputElement>('.quick-input input')!;
+		type(quick, 'not-a-hash!');
+		key(quick, 'Enter');
+		await flush();
+		expect(backend.callsTo('scm_checkout')).toHaveLength(0);
+		// A hash passes and checks out (the backend resolves it detached).
+		type(quick, 'abc1234def');
+		key(quick, 'Enter');
+		await executing;
+		await flush();
+		expect(backend.callsTo('scm_checkout')).toEqual([{ name: 'abc1234def' }]);
+	});
+
+	it('cherry-pick asks for a commit-ish and reports the new head subject', async () => {
+		backend.on('scm_cherry_pick', () => 'The picked change');
+		const { registry } = setup();
+
+		const executing = registry.execute('git.cherryPick');
+		await flush();
+		const quick = document.querySelector<HTMLInputElement>('.quick-input input')!;
+		// An invalid target is refused before anything is invoked.
+		type(quick, 'wip..');
+		key(quick, 'Enter');
+		await flush();
+		expect(backend.callsTo('scm_cherry_pick')).toHaveLength(0);
+		expect(document.querySelector('.quick-input .hint')!.textContent).toContain('commit hash');
+		type(quick, 'abc123');
+		key(quick, 'Enter');
+		await executing;
+		await flush();
+		expect(backend.callsTo('scm_cherry_pick')).toEqual([{ target: 'abc123' }]);
+		expect(notifications().at(-1)).toContain('Cherry-picked: The picked change');
+	});
+
+	it('revert commit asks the same way and reports the inverse commit', async () => {
+		backend.on('scm_revert_commit', () => 'Revert "base"');
+		const { registry } = setup();
+
+		const executing = registry.execute('git.revertCommit');
+		await flush();
+		const quick = document.querySelector<HTMLInputElement>('.quick-input input')!;
+		type(quick, 'HEAD');
+		key(quick, 'Enter');
+		await executing;
+		await flush();
+		expect(backend.callsTo('scm_revert_commit')).toEqual([{ target: 'HEAD' }]);
+		expect(notifications().at(-1)).toContain('Reverted: Revert "base"');
+	});
+
+	it('reset to commit picks the mode, and hard demands the second irreversible confirm', async () => {
+		backend.on('scm_reset_ref', () => null);
+		const { registry } = setup();
+
+		const executing = registry.execute('git.resetToCommit');
+		await flush();
+		let quick = document.querySelector<HTMLInputElement>('.quick-input input')!;
+		type(quick, 'abc1234');
+		key(quick, 'Enter');
+		await flush();
+		const rows = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		expect(rows.map((r) => r.querySelector('.label')!.textContent)).toEqual(['Soft', 'Mixed', 'Hard']);
+		click(rows[2]!);
+		await flush();
+		// Hard carries the same irreversible wording the discard-all confirm carries.
+		expect(notifications().at(-1)).toContain('IRREVERSIBLE');
+		click(notificationButton('Reset (Hard)'));
+		await executing;
+		await flush();
+		expect(backend.callsTo('scm_reset_ref')).toEqual([{ target: 'abc1234', mode: 'hard' }]);
+
+		// Soft runs straight from the pick, no second confirm.
+		const soft = registry.execute('git.resetToCommit');
+		await flush();
+		quick = document.querySelector<HTMLInputElement>('.quick-input input')!;
+		type(quick, 'abc1234');
+		key(quick, 'Enter');
+		await flush();
+		const modeRows = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		click(modeRows[0]!);
+		await soft;
+		await flush();
+		expect(backend.callsTo('scm_reset_ref')).toEqual([
+			{ target: 'abc1234', mode: 'hard' },
+			{ target: 'abc1234', mode: 'soft' }
+		]);
+	});
+
+	it('delete branch deletes a merged branch through the safe -d after the plain confirm', async () => {
+		backend.on('scm_branches', () => [
+			{ name: 'main', remote: false, current: true, upstream: null },
+			{ name: 'topic', remote: false, current: false, upstream: null }
+		]);
+		backend.on('scm_branch_merged', () => true);
+		backend.on('scm_delete_branch', () => null);
+		const { registry } = setup();
+
+		const executing = registry.execute('git.deleteBranch');
+		await flush();
+		const rows = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		click(rows.find((r) => r.textContent!.includes('topic'))!);
+		await flush();
+		expect(notifications().at(-1)).toContain("Delete the branch 'topic'");
+		click(notificationButton('Delete Branch'));
+		await executing;
+		await flush();
+		expect(backend.callsTo('scm_branch_merged')).toEqual([{ branchName: 'topic' }]);
+		expect(backend.callsTo('scm_delete_branch')).toEqual([{ branchName: 'topic', force: false }]);
+	});
+
+	it('delete branch offers the force delete with the irreversible wording for an unmerged branch', async () => {
+		backend.on('scm_branches', () => [
+			{ name: 'main', remote: false, current: true, upstream: null },
+			{ name: 'topic', remote: false, current: false, upstream: null }
+		]);
+		backend.on('scm_branch_merged', () => false);
+		backend.on('scm_delete_branch', () => null);
+		const { registry } = setup();
+
+		const executing = registry.execute('git.deleteBranch');
+		await flush();
+		const rows = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		click(rows.find((r) => r.textContent!.includes('topic'))!);
+		await flush();
+		expect(notifications().at(-1)).toContain('not fully merged');
+		expect(notifications().at(-1)).toContain('IRREVERSIBLE');
+		// Cancelling keeps the branch.
+		click(notificationButton('Cancel'));
+		await executing;
+		await flush();
+		expect(backend.callsTo('scm_delete_branch')).toHaveLength(0);
+
+		const again = registry.execute('git.deleteBranch');
+		await flush();
+		const rows2 = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		click(rows2.find((r) => r.textContent!.includes('topic'))!);
+		await flush();
+		click(notificationButton('Delete Anyway'));
+		await again;
+		await flush();
+		expect(backend.callsTo('scm_delete_branch')).toEqual([{ branchName: 'topic', force: true }]);
+	});
+
+	it('push to offers the remote\'s own branches and pushes the chosen one', async () => {
+		backend.on('scm_remotes', () => [{ name: 'origin', url: 'https://example.com/r.git' }]);
+		backend.on('scm_branches', () => [
+			{ name: 'main', remote: false, current: true, upstream: 'origin/main' },
+			{ name: 'origin/main', remote: true, current: false, upstream: null },
+			{ name: 'origin/feature', remote: true, current: false, upstream: null }
+		]);
+		backend.on('scm_push_branch', () => null);
+		const { registry } = setup();
+
+		const executing = registry.execute('git.pushTo');
+		await flush();
+		// One remote answers without its own pick; the second step lists the remote's
+		// branches under the names the remote spells them.
+		const rows = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		expect(rows.map((r) => r.querySelector('.label')!.textContent)).toEqual(['main', 'feature']);
+		click(rows[0]!);
+		await executing;
+		await flush();
+		expect(backend.callsTo('scm_push_branch')).toEqual([{ remote: 'origin', branch: 'main', force: false }]);
 	});
 });

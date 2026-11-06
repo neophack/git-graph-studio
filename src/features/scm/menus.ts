@@ -4,11 +4,13 @@
 import { invoke } from '../../platform/ipc/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { resolvedMenuEntries } from '../extensions';
-import { gerritInstallHook, gerritPushRef, scmAmendLastCommit, scmBranches, scmCheckout, scmCreateBranch, scmFetch, scmPull, scmPush, scmRemotes, scmResetToRemote, scmSync, scmTags } from '../../platform/ipc/scm';
+import { gerritInstallHook, gerritPushRef, scmAmendLastCommit, scmBranches, scmBranchMerged, scmCheckout, scmCherryPick, scmCreateBranch, scmFetch, scmPull, scmPush, scmPushBranch, scmRevertCommit, scmResetRef, scmRemotes, scmResetToRemote, scmSync, scmTags } from '../../platform/ipc/scm';
 import { repoHead } from '../../platform/ipc/revision';
 import * as state from '../../platform/state';
+import { t, tf } from '../../platform/i18n';
 import { confirmDialog, notify, quickInput, quickPick, type MenuEntry, type QuickPickItem } from '../../platform/ui/index';
 import { SubRepoState, pickBranchIn, pickRemoteIn, pickStashIn, validateSubRef } from './view';
+import { validateCommitHash, validateTarget } from './gitCommands';
 import type { ScmSort, ScmViewMode, SourceControlView } from './view';
 
 /** The menus concern of SourceControlView — assigned onto the prototype by the module facade. */
@@ -59,7 +61,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 				{ label: 'Discard All Changes', run: () => void this.discardAll() }
 			] },
 			{ label: 'Pull, Push', submenu: [cmd('git.sync'), cmd('git.syncRebase'), 'separator', cmd('git.pull'), cmd('git.pullRebase'), cmd('git.pullFrom'), 'separator', cmd('git.push'), cmd('git.pushTo'), cmd('git.pushForce'), 'separator', cmd('git.fetch'), cmd('git.fetchPrune'), cmd('git.fetchFrom'), ...(pullPushMenu.length > 0 ? ['separator' as const, ...pullPushMenu] : [])] },
-			{ label: 'Branch', submenu: [cmd('git.merge'), cmd('git.rebase'), 'separator', cmd('git.branch'), cmd('git.branchFrom'), cmd('git.renameBranch'), cmd('git.deleteBranch')] },
+			{ label: 'Branch', submenu: [cmd('git.merge'), cmd('git.rebase'), cmd('git.cherryPick'), cmd('git.revertCommit'), cmd('git.resetToCommit'), 'separator', cmd('git.branch'), cmd('git.branchFrom'), cmd('git.renameBranch'), cmd('git.deleteBranch')] },
 			{ label: 'Remote', submenu: [cmd('git.addRemote'), cmd('git.removeRemote')] },
 			{ label: 'Stash', submenu: [cmd('git.stash'), cmd('git.stashIncludeUntracked'), 'separator', cmd('git.stashApply'), cmd('git.stashApplyLatest'), cmd('git.stashPop'), cmd('git.stashPopLatest'), cmd('git.stashDrop')] },
 			{ label: 'Tags', submenu: [cmd('git.createTag'), cmd('git.deleteTag')] },
@@ -95,8 +97,17 @@ export const menusMethods: ThisType<SourceControlView> = {
 						notify('info', 'There are no branches or tags to checkout.');
 						return;
 					}
+					items.push({ label: t('scm.checkoutDetached.pick'), description: undefined, icon: 'git-commit', value: 'detached:' });
 					const chosen = await quickPick(items, 'Select a branch or tag to checkout');
-					if (chosen) run(() => scmCheckout(chosen.replace(/^(branch|tag):/, ''), repo));
+					if (!chosen) return;
+					if (chosen.startsWith('detached:')) {
+						if (!(await confirmDialog(t('scm.checkoutDetached.confirm'), t('scm.checkoutDetached.action')))) return;
+						const hash = await quickInput({ title: t('scm.checkoutDetached.pick'), placeholder: t('scm.checkoutDetached.placeholder'), validate: validateCommitHash });
+						if (!hash) return;
+						run(() => scmCheckout(hash.trim(), repo));
+						return;
+					}
+					run(() => scmCheckout(chosen.replace(/^(branch|tag):/, ''), repo));
 				})()
 			},
 			{ label: 'Fetch', run: () => run(() => scmFetch(null, false, repo)) },
@@ -142,7 +153,13 @@ export const menusMethods: ThisType<SourceControlView> = {
 						label: 'Push to...', run: () => void (async () => {
 							const remote = await pickRemoteIn(repo, 'Pick a remote to publish the branch to');
 							if (!remote) return;
-							run(() => scmPush(remote.name, true, false, repo));
+							const prefix = remote.name + '/';
+							const remoteBranches = (await scmBranches(repo)).filter((b) => b.remote && b.name.startsWith(prefix)).map((b) => b.name.slice(prefix.length));
+							const branch = remoteBranches.length > 0
+								? await quickPick(remoteBranches.map((b) => ({ label: b, icon: 'cloud', value: b })), tf('scm.pushTo.pickBranch', remote.name))
+								: await quickInput({ title: 'Push to...', placeholder: tf('scm.pushTo.pickBranch', remote.name), validate: validateSubRef });
+							if (!branch) return;
+							run(() => scmPushBranch(remote.name, branch.trim(), false, repo));
 						})()
 					},
 					{
@@ -176,6 +193,38 @@ export const menusMethods: ThisType<SourceControlView> = {
 							if (branch) run(() => gitOp('scm_rebase', { name: branch.name }));
 						})()
 					},
+					{
+						label: 'Cherry-Pick...', run: () => void (async () => {
+							const target = await quickInput({ title: 'Cherry-Pick', placeholder: t('scm.cherryPick.placeholder'), validate: validateTarget });
+							if (!target) return;
+							run(async () => notify('info', tf('scm.cherryPick.done', await scmCherryPick(target.trim(), repo))));
+						})()
+					},
+					{
+						label: 'Revert Commit...', run: () => void (async () => {
+							const target = await quickInput({ title: 'Revert Commit', placeholder: t('scm.revert.placeholder'), validate: validateTarget });
+							if (!target) return;
+							run(async () => notify('info', tf('scm.revert.done', await scmRevertCommit(target.trim(), repo))));
+						})()
+					},
+					{
+						label: 'Reset Current Branch to Commit...', run: () => void (async () => {
+							const target = await quickInput({ title: 'Reset Current Branch to Commit', placeholder: t('scm.reset.placeholder'), validate: validateTarget });
+							if (!target) return;
+							const ref = target.trim();
+							const mode = await quickPick([
+								{ label: 'Soft', description: t('scm.reset.soft'), icon: 'arrow-up', value: 'soft' },
+								{ label: 'Mixed', description: t('scm.reset.mixed'), icon: 'arrow-both', value: 'mixed' },
+								{ label: 'Hard', description: t('scm.reset.hard'), icon: 'discard', value: 'hard' }
+							], t('scm.reset.modePrompt'), tf('scm.reset.title', ref));
+							if (mode !== 'soft' && mode !== 'mixed' && mode !== 'hard') return;
+							if (mode === 'hard' && !(await confirmDialog(tf('scm.reset.hardConfirm', ref), t('scm.reset.hardAction')))) return;
+							run(async () => {
+								await scmResetRef(ref, mode, repo);
+								notify('info', tf('scm.reset.done', ref, mode));
+							});
+						})()
+					},
 					'separator',
 					{
 						label: 'Create Branch...', run: () => void (async () => {
@@ -203,8 +252,23 @@ export const menusMethods: ThisType<SourceControlView> = {
 						label: 'Delete Branch...', run: () => void (async () => {
 							const branch = await pickBranchIn(repo, 'Select a branch to delete', (b) => !b.remote && !b.current);
 							if (!branch) return;
+							// The merged fact words the confirmation, exactly as the palette's own
+							// Delete Branch does (gitCommands.ts): only the unmerged case offers
+							// the force delete, a merged one deletes through the safe `-d`.
+							let merged: boolean;
+							try {
+								merged = await scmBranchMerged(branch.name, repo);
+							} catch (error) {
+								notify('error', String(error instanceof Error ? error.message : error));
+								return;
+							}
+							if (!merged) {
+								if (!(await confirmDialog(tf('scm.deleteBranch.unmergedConfirm', branch.name), t('scm.deleteBranch.forceAction')))) return;
+								run(() => gitOp('scm_delete_branch', { branchName: branch.name, force: true }));
+								return;
+							}
 							if (!(await confirmDialog(`Delete the branch '${branch.name}'? Commits only reachable from it will be lost.`, 'Delete Branch'))) return;
-							run(() => gitOp('scm_delete_branch', { branchName: branch.name, force: true }));
+							run(() => gitOp('scm_delete_branch', { branchName: branch.name, force: false }));
 						})()
 					}
 				]

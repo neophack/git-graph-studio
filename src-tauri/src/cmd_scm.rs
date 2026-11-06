@@ -452,6 +452,55 @@ pub async fn scm_reset_to_remote(
     ops::reset_to_remote(&git(&roots, repo)?)
 }
 
+#[tauri::command]
+pub async fn scm_cherry_pick(
+    roots: State<'_, WorkspaceRoots>,
+    target: String,
+    repo: Option<String>,
+) -> Result<String, String> {
+    ops::cherry_pick(&git(&roots, repo)?, &target)
+}
+
+#[tauri::command]
+pub async fn scm_revert_commit(
+    roots: State<'_, WorkspaceRoots>,
+    target: String,
+    repo: Option<String>,
+) -> Result<String, String> {
+    ops::revert_commit(&git(&roots, repo)?, &target)
+}
+
+#[tauri::command]
+pub async fn scm_reset_ref(
+    roots: State<'_, WorkspaceRoots>,
+    target: String,
+    mode: String,
+    repo: Option<String>,
+) -> Result<(), String> {
+    let mode = ops::ResetMode::parse(&mode)?;
+    ops::reset_ref(&git(&roots, repo)?, &target, mode)
+}
+
+#[tauri::command]
+pub async fn scm_branch_merged(
+    roots: State<'_, WorkspaceRoots>,
+    branch_name: String,
+    repo: Option<String>,
+) -> Result<bool, String> {
+    ops::branch_merged(&git(&roots, repo)?, &branch_name)
+}
+
+#[tauri::command]
+pub async fn scm_push_branch(
+    roots: State<'_, WorkspaceRoots>,
+    remote: String,
+    branch: String,
+    force: bool,
+    repo: Option<String>,
+) -> Result<(), String> {
+    ops::push_branch(&git(&roots, repo)?, &remote, &branch, force)
+}
+
 /// Clone into `parent`; the new repository's path is returned for the app to open.
 #[tauri::command]
 pub fn scm_clone(url: String, parent: String, name: Option<String>) -> Result<String, String> {
