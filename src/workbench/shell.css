@@ -2388,3 +2388,26 @@ body.resizing iframe { pointer-events: none; }
 .providers-test-result { min-height: 15px; font-size: 11px; }
 .providers-test-ok { color: var(--vscode-charts-green, var(--vscode-descriptionForeground)); }
 .providers-test-bad { color: var(--vscode-errorForeground); }
+
+/* ============================================================
+   Zen Mode (body.zen) — view.zenMode / Ctrl+K Z (layout.ts).
+   The workbench's chrome folds away: title bar, activity bar,
+   side bar and its sash, panel and its sash, status bar and the
+   tab bars. The editor area and its breadcrumbs stay. The side
+   bar / panel themselves are `hidden` by enterZenMode (so the
+   exit restores their pre-zen visibility exactly); this section
+   only styles what the DOM state cannot express and everything
+   zen hides unconditionally. Escape-Escape exits.
+   Keep this section whole — the terminal's styles live in their
+   own region beside the panel's.
+   ============================================================ */
+body.zen #titlebar,
+body.zen #activitybar,
+body.zen #sidebar,
+body.zen #sidebarSash,
+body.zen #panel,
+body.zen #panelSash,
+body.zen #statusbar,
+body.zen .tabs-container {
+	display: none !important;
+}

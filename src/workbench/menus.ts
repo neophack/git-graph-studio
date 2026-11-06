@@ -62,6 +62,14 @@ export const menusMethods: ThisType<Workbench> = {
 					item('workbench.action.lockEditorGroup'), item('workbench.action.unlockEditorGroup'), item('workbench.action.reopenClosedEditor')
 				] } as MenuEntry]),
 				{ label: 'Appearance', submenu: [
+					{ label: t('view.fullScreen'), keybinding: 'F11', run: () => this.toggleFullScreen() },
+					'separator',
+					{ label: t('view.zoomIn'), keybinding: 'Ctrl+=', run: () => this.zoomWorkbench('in') },
+					{ label: t('view.zoomOut'), keybinding: 'Ctrl+-', run: () => this.zoomWorkbench('out') },
+					{ label: t('view.zoomReset'), keybinding: 'Ctrl+0', run: () => this.zoomWorkbench('reset') },
+					'separator',
+					{ label: t('view.zenMode'), checked: document.body.classList.contains('zen'), keybinding: 'Ctrl+K Z', run: () => this.toggleZenMode() },
+					'separator',
 					{ label: 'Primary Side Bar', checked: state.layout.sidebarVisible, keybinding: 'Ctrl+B', run: () => this.toggleSidebar() },
 					{ label: 'Panel', checked: this.panel.isVisible(), keybinding: 'Ctrl+J', run: () => this.panel.toggle() }
 				] },

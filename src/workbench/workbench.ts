@@ -507,6 +507,17 @@ export class Workbench {
 
 	declare toggleSidebar: () => void ;
 
+	// The window/view modes (layout.ts): the Appearance menu's commands and zen mode.
+	declare toggleFullScreen: () => void ;
+
+	declare zoomWorkbench: (direction: 'in' | 'out' | 'reset') => void ;
+
+	declare toggleZenMode: () => void ;
+
+	declare enterZenMode: () => void ;
+
+	declare exitZenMode: () => void ;
+
 	declare visibleExtensionViews: () => string ;
 
 	declare applyExtensionViews: () => void ;

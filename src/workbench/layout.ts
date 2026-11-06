@@ -2,6 +2,8 @@
 
 import type { Workbench } from './workbench';
 
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { mountProviderSwitcher } from '../features/providers';
 import { mountProviderPaneGate } from '../features/providers';
 import { commands } from '../platform/commands';
@@ -12,6 +14,24 @@ import { ExtensionTreeView } from '../features/extensions';
 import { evaluateWhen, extensionViewContributions } from '../features/extensions';
 import { extFileDataUrl } from '../platform/extAssets';
 import { ViewId } from './workbench';
+
+/* ---------- Zen mode ---------- */
+
+/** The pre-zen visibility the exit restores exactly; null while zen is off. Remembered from
+ *  the DOM state the toggles maintain (the side bar's `hidden`, the panel's element): zen is
+ *  a viewing state — the persisted layout is untouched, so the exit puts every piece of
+ *  chrome back as it stood and a close while zen never loses the user's bars. */
+let zenRestore: { sidebar: boolean; panel: boolean } | null = null;
+
+/** The last unclaimed Escape's timestamp — two within ~600 ms exit zen. */
+let zenEscapeAt = 0;
+
+let zenEscapeListener: ((event: KeyboardEvent) => void) | null = null;
+
+/** The zoom level the webview's setZoom drives (the real Tauri API; the browser shim and the
+ *  tests' mock carry no setZoom and the commands answer nothing there). Not persisted: zoom
+ *  is a viewing state like VS Code's window zoom, which also forgets on close. */
+let zoomLevel = 1;
 
 /** The layout concern of Workbench — assigned onto the prototype by the module facade (index.ts). */
 export const layoutMethods: ThisType<Workbench> = {
@@ -156,6 +176,75 @@ export const layoutMethods: ThisType<Workbench> = {
 			if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis' || id === 'extensions' || this.isExtensionView(id)) item.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
 		}
 		state.saveLayout();
+	},
+
+	/* ---------- The window/view modes (the Appearance menu) ---------- */
+
+	toggleFullScreen(): void {
+		const win = getCurrentWindow();
+		// The browser workbench's window shim (and the tests' mock) carries no setFullscreen:
+		// a browser tab keeps its own F11, so the command answers nothing there.
+		if (typeof win.setFullscreen !== 'function' || typeof win.isFullscreen !== 'function') return;
+		void win.isFullscreen()
+			.then((full) => win.setFullscreen(!full))
+			.catch(() => undefined);
+	},
+
+	zoomWorkbench(direction: 'in' | 'out' | 'reset'): void {
+		const webview = getCurrentWebview();
+		// Same absence guard as the fullscreen path — the browser shim has no setZoom.
+		if (typeof webview.setZoom !== 'function') return;
+		zoomLevel = direction === 'reset' ? 1 : Math.min(3, Math.max(0.5, zoomLevel + (direction === 'in' ? 0.1 : -0.1)));
+		void webview.setZoom(zoomLevel).catch(() => undefined);
+	},
+
+	toggleZenMode(): void {
+		if (document.body.classList.contains('zen')) this.exitZenMode();
+		else this.enterZenMode();
+	},
+
+	enterZenMode(): void {
+		if (document.body.classList.contains('zen')) return;
+		// The DOM visibility is the thing remembered — it is exactly what the exit restores.
+		zenRestore = { sidebar: !this.sidebar.hidden, panel: this.panel.isVisible() };
+		// The chrome folds through the DOM (`hidden`, the way applyLayout hides the bar at
+		// boot) and the body class styles the rest away — the persisted layout stays as it
+		// was, and exitZenMode restores the two remembered visibilities exactly.
+		document.body.classList.add('zen');
+		this.sidebar.hidden = true;
+		this.sidebarSash.hidden = true;
+		this.panel.hide();
+		// Escape-Escape is the keyboard's way out, beside the command. The listener rides the
+		// bubble phase, so an Escape a surface already claimed (the quick input closing
+		// itself) arrives defaultPrevented and never counts toward the double.
+		zenEscapeListener = (event: KeyboardEvent) => {
+			if (event.key !== 'Escape') {
+				zenEscapeAt = 0;
+				return;
+			}
+			if (event.defaultPrevented) return;
+			const now = Date.now();
+			if (zenEscapeAt > 0 && now - zenEscapeAt <= 600) this.exitZenMode();
+			else zenEscapeAt = now;
+		};
+		document.addEventListener('keydown', zenEscapeListener);
+	},
+
+	exitZenMode(): void {
+		if (!document.body.classList.contains('zen')) return;
+		document.body.classList.remove('zen');
+		const restore = zenRestore;
+		zenRestore = null;
+		if (zenEscapeListener) {
+			document.removeEventListener('keydown', zenEscapeListener);
+			zenEscapeListener = null;
+		}
+		zenEscapeAt = 0;
+		if (restore?.sidebar) {
+			this.sidebar.hidden = false;
+			this.sidebarSash.hidden = false;
+		}
+		if (restore?.panel) this.panel.show();
 	},
 
 

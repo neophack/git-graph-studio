@@ -250,6 +250,12 @@ export const en = {
 	'symbols.context.empty': 'Place the cursor on a symbol to see its definition here.',
 	'symbols.context.ambiguous': 'symbols share this name - pick one in the editor.',
 	'symbols.context.pin': 'Pin the context window to the current symbol',
+	// The Appearance menu's window/view modes.
+	'view.fullScreen': 'Full Screen',
+	'view.zoomIn': 'Zoom In',
+	'view.zoomOut': 'Zoom Out',
+	'view.zoomReset': 'Reset Zoom',
+	'view.zenMode': 'Zen Mode',
 	'menu.analysis': 'Analysis',
 	'analysis.title': 'Analysis',
 	'explorer.title': 'Explorer',

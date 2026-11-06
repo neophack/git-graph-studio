@@ -223,6 +223,14 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'git.initRepository', title: 'Initialize Repository', category: 'Git', enabled: () => this.repoPath !== null && !this.isRepo, run: () => void this.initializeRepository() });
 		register({ id: 'workbench.toggleSidebar', title: 'Toggle Primary Side Bar', category: 'View', keybinding: 'Ctrl+B', run: () => this.toggleSidebar() });
 		register({ id: 'workbench.togglePanel', title: 'Toggle Panel', category: 'View', keybinding: 'Ctrl+J', run: () => this.panel.toggle() });
+		// The window/view modes (the Appearance menu): the fullscreen toggle, the zoom ladder
+		// and zen mode. The layouts behind them live in layout.ts; where the webview/window
+		// API lacks the method (the browser shim, the tests' mock) they answer nothing.
+		register({ id: 'view.toggleFullScreen', title: 'Toggle Full Screen', category: 'View', keybinding: 'F11', run: () => this.toggleFullScreen() });
+		register({ id: 'view.zoomIn', title: 'Zoom In', category: 'View', keybinding: 'Ctrl+=', run: () => this.zoomWorkbench('in') });
+		register({ id: 'view.zoomOut', title: 'Zoom Out', category: 'View', keybinding: 'Ctrl+-', run: () => this.zoomWorkbench('out') });
+		register({ id: 'view.zoomReset', title: 'Reset Zoom', category: 'View', keybinding: 'Ctrl+0', run: () => this.zoomWorkbench('reset') });
+		register({ id: 'view.zenMode', title: 'Toggle Zen Mode', category: 'View', keybinding: 'Ctrl+K Z', run: () => this.toggleZenMode() });
 		register({ id: 'workbench.showOutput', title: 'Output', category: 'View', run: () => this.panel.show('output') });
 		register({ id: 'workbench.showContext', title: 'Context', category: 'View', run: () => this.panel.show('context') });
 		register({ id: 'workbench.showSymbolDatabase', title: 'Symbol Database', category: 'View', enabled: hasRepo, run: () => void this.editors.openSymbolDatabase() });
