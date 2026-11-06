@@ -98,7 +98,9 @@
 				// The terminal session sync (§8.6 #5): a stateful little table so the harness's
 				// terminal page mirrors creates and kills the way the real backend announces them.
 				'pty_list': function () { return window.__harness.ptys.map(function (id) { return { id: id, name: 'mockshell' }; }); },
-				'pty_tail': function () { return ''; },
+				// The adopt path replays this tail, so the ?terminal=1 mode seeds a line of
+				// printed links for the link layer to detect over a real xterm.
+				'pty_tail': function () { return window.__harness.ptyTail || ''; },
 				'pty_create': function (args) { window.__harness.ptys.push(args.id); return 'mockshell'; },
 				'pty_write': function (args) { window.__harness.typed.push(String(args.data)); return null; },
 				'pty_kill': function (args) {
@@ -107,6 +109,8 @@
 				},
 				'git_output_log': function () { return []; },
 				'ext_list': function () { return []; },
+				// The opener plugin (URL links): recorded, like the rest of the stand-ins.
+				'plugin:opener|open_url': function (args) { window.__harness.opened.push(String(args.url)); return null; },
 				// The boot round trip the workbench opens with (a null answer here crashes
 				// boot()'s context read — the plain-browser mode answers the plain launch).
 				'boot_context': function () { return { file: null, actions: [], repo: null, opened: null, openedFor: null }; },
@@ -117,7 +121,16 @@
 				'keybindings_read': function () { return null; }
 			};
 
-			window.__harness = { pulled: 0, checkedOut: [], oldText: oldText, typed: [], ptys: [] };
+			window.__harness = { pulled: 0, checkedOut: [], oldText: oldText, typed: [], ptys: [], ptyTail: '', opened: [] };
+
+			// The terminal-link mode (?terminal=1) seeds its shell BEFORE the workbench boots:
+			// a session already running in the fake backend's table makes the terminal page's
+			// first `shown()` ADOPT it (§8.6 #5) — and the adoption is the one path that
+			// replays `pty_tail`, which is how the link line reaches a real xterm's buffer.
+			if (new URLSearchParams(location.search).has('terminal')) {
+				window.__harness.ptys.push(7);
+				window.__harness.ptyTail = 'Build done. see https://example.com/docs/guide and C:\\repo\\src\\app.ts:12:5 plus ./rel/file.rs\r\n';
+			}
 
 			// Tauri injects its IPC bridge before any page script runs; if it is there we are
 			// running under `tauri dev` and must NOT replace it - the whole point of the harness
@@ -763,6 +776,150 @@
 				'</table>';
 			document.body.appendChild(panel);
 		}
+		</script>
+		<script type="module">
+			// The terminal-link mode (?terminal=1): real link detection over a real xterm — the
+			// one check jsdom cannot express, because it needs the browser's layout engine and
+			// mouse hit-testing. The head IIFE seeds a fake-backend session (id 7) whose
+			// `pty_tail` carries a printed URL and two file paths; the terminal page ADOPTS
+			// that session and replays the tail into the live buffer. From there the scenario
+			// drives a real mouse over the URL's cell (a Range over the row's text nodes gives
+			// the exact pixel), waits for the hover hint (real xterm -> our link provider ->
+			// the hint), ctrl+clicks it into the opener mock, plain-clicks it for nothing
+			// (selection stays free), ctrl+clicks the Windows path into an editor tab, and
+			// reports it all as rows like the scroll mode does.
+			if (new URLSearchParams(location.search).has('terminal')) {
+				if (sessionStorage.getItem('terminal-clean') !== location.search) {
+					sessionStorage.setItem('terminal-clean', location.search);
+					localStorage.clear();
+					location.reload();
+				}
+				const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+				// Unlike the scroll mode's boolean wait, this one returns the ready() value —
+				// the found row, the mounted hint element — so the checks can use it directly.
+				const waitFor = async (ready, ms = 15000) => {
+					const end = Date.now() + ms;
+					let value = ready();
+					while (!value && Date.now() < end) {
+						await sleep(100);
+						value = ready();
+					}
+					return value;
+				};
+				const report = [];
+				const check = (surface, name, ok, actual) => {
+					report.push({ surface, check: name, expected: 'yes', actual: String(actual), status: ok ? 'pass' : 'fail' });
+				};
+				// The pixel rect of one character inside a row: walk the text nodes, split the
+				// offset, and let the browser's own Range answer (jsdom cannot; a real page can).
+				const charRect = (container, index) => {
+					const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+					let at = 0, node;
+					while ((node = walker.nextNode())) {
+						const text = node.textContent || '';
+						if (at + text.length > index) {
+							const range = document.createRange();
+							range.setStart(node, index - at);
+							range.setEnd(node, index - at + 1);
+							return range.getBoundingClientRect();
+						}
+						at += text.length;
+					}
+					return null;
+				};
+				const fire = (element, type, rect, mods = {}) => {
+					element.dispatchEvent(new MouseEvent(type, {
+						bubbles: true, cancelable: true, view: window,
+						clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, ...mods
+					}));
+				};
+
+				await waitFor(() => document.querySelectorAll('#statusbar .status-item').length > 0, 30000);
+				// Open the terminal page: the panel tab click reveals it, `shown()` adopts the
+				// seeded session 7 and replays the seeded tail into the real xterm.
+				const tab = document.querySelector('.panel-title[data-view="terminal"]');
+				check('terminal links', 'the panel terminal tab exists', !!tab, tab);
+				tab.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+				const xtermReady = await waitFor(() => document.querySelector('.terminal-instance .xterm'), 30000);
+				check('terminal links', 'a real xterm mounted', !!xtermReady, !!xtermReady);
+				const URL_TEXT = 'https://example.com/docs/guide';
+				const PATH_TEXT = 'C:\\repo\\src\\app.ts:12:5';
+				const rowReady = await waitFor(() => {
+					const rows = document.querySelectorAll('.xterm-rows > div');
+					return Array.from(rows).find((row) => (row.textContent || '').includes(URL_TEXT)) || null;
+				}, 20000);
+				check('terminal links', 'the adopted tail (URL + paths) rendered in the buffer', !!rowReady, !!rowReady);
+
+				if (rowReady) {
+					const line = rowReady.textContent || '';
+					const urlAt = line.indexOf(URL_TEXT);
+					const urlRect = charRect(rowReady, urlAt + 8); // a character mid-URL
+					check('terminal links', 'the URL character has a real layout rect', !!urlRect && urlRect.width > 0, urlRect && [Math.round(urlRect.left), Math.round(urlRect.top)]);
+					if (urlRect) {
+						// HOVER: a real mousemove the LinkManager hit-tests through the provider.
+						fire(rowReady, 'mousemove', urlRect);
+						const hint = await waitFor(() => document.querySelector('.terminal-link-hint:not([hidden])'), 8000);
+						check('terminal links', 'hovering the URL shows the hint', !!hint, hint ? (hint.textContent || '').slice(0, 80) : 'none');
+						check('terminal links', 'the hint names the URL and the ctrl+click key',
+							!!hint && (hint.textContent || '').includes(URL_TEXT) && (hint.textContent || '').includes('Ctrl+Click'), !!hint);
+
+						// ACTIVATE: ctrl+click — mousedown + mouseup on the hovered link.
+						fire(rowReady, 'mousedown', urlRect, { ctrlKey: true });
+						fire(rowReady, 'mouseup', urlRect, { ctrlKey: true });
+						const opened = await waitFor(() => (window.__harness.opened || []).includes(URL_TEXT), 8000);
+						check('terminal links', 'ctrl+click opens the URL through the opener', opened, JSON.stringify(window.__harness.opened));
+
+						// PLAIN CLICK stays the selection's: nothing opens.
+						const before = (window.__harness.opened || []).length;
+						fire(rowReady, 'mousedown', urlRect);
+						fire(rowReady, 'mouseup', urlRect);
+						await sleep(600);
+						check('terminal links', 'a plain click opens nothing (selection stays free)', (window.__harness.opened || []).length === before, (window.__harness.opened || []).length);
+
+						// The file path: ctrl+click lands it in an editor tab at line 12 (the
+						// boot wiring resolves and the editor group opens it).
+						const pathAt = line.indexOf(PATH_TEXT);
+						const pathRect = pathAt >= 0 ? charRect(rowReady, pathAt + 4) : null;
+						if (pathRect && pathRect.width > 0) {
+							fire(rowReady, 'mousemove', pathRect, { ctrlKey: false });
+							await sleep(300);
+							fire(rowReady, 'mousedown', pathRect, { ctrlKey: true });
+							fire(rowReady, 'mouseup', pathRect, { ctrlKey: true });
+							const tabOpened = await waitFor(() => Array.from(document.querySelectorAll('.tab .label')).some((label) => (label.textContent || '').includes('app.ts')), 15000);
+							check('terminal links', 'ctrl+click on the printed path opens it in an editor tab', tabOpened,
+								JSON.stringify(Array.from(document.querySelectorAll('.tab .label')).map((label) => label.textContent)));
+						} else {
+							check('terminal links', 'the printed path has a layout rect', false, 'not found');
+						}
+
+						// Leaving the link hides the hint.
+						const away = charRect(rowReady, 0);
+						fire(rowReady, 'mousemove', away);
+						await sleep(400);
+						const hintGone = !document.querySelector('.terminal-link-hint:not([hidden])');
+						check('terminal links', 'moving off the link hides the hint', hintGone, hintGone);
+					}
+				}
+
+				for (const error of window.__pageErrors || []) {
+					report.push({ surface: 'page', check: 'page error', expected: 'none', actual: error, status: 'fail' });
+				}
+				window.__terminalReport = report;
+				const failed = report.filter((r) => r.status === 'fail').length;
+				console.table(report);
+				console.log('[terminal-harness] ' + (report.length - failed) + ' pass, ' + failed + ' fail');
+				const panel = document.createElement('div');
+				panel.id = 'terminal-report';
+				panel.style.cssText = 'position:fixed;left:8px;bottom:34px;z-index:9998;max-width:640px;max-height:60vh;overflow:auto;' +
+					'font:11px monospace;color:#eee;background:rgba(20,20,20,0.95);border:1px solid #555;padding:8px;';
+				panel.innerHTML = '<b>TERMINAL LINK HARNESS - ' + (failed === 0 ? 'ALL PASS' : failed + ' FAILING') + '</b>' +
+					'<table style="border-collapse:collapse;margin-top:4px">' +
+					report.map((r) => '<tr><td style="padding:1px 8px;color:' + (r.status === 'fail' ? '#f48771' : '#73c991') + '">' + r.status.toUpperCase() +
+						'</td><td style="padding:1px 8px">' + r.surface + '</td><td style="padding:1px 8px">' + r.check +
+						'</td><td style="padding:1px 8px;color:#aaa">' + r.actual + '</td></tr>').join('') +
+					'</table>';
+				document.body.appendChild(panel);
+			}
 		</script>
 		<script type="module">
 			// The full mode (?full=1): the harness's complete functional pass — every module's

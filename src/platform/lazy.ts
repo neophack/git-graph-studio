@@ -24,14 +24,15 @@ export const loadEditorExtensions = once(() => Promise.all([
 /** `@codemirror/merge`: the side-by-side and unified diff views. */
 export const loadMerge = once(() => import('@codemirror/merge'));
 
-/** xterm.js with its fit addon and stylesheet. */
+/** xterm.js with its fit and search addons and the stylesheet. */
 export const loadXterm = once(async () => {
-	const [{ Terminal }, { FitAddon }] = await Promise.all([
+	const [{ Terminal }, { FitAddon }, { SearchAddon }] = await Promise.all([
 		import('@xterm/xterm'),
 		import('@xterm/addon-fit'),
+		import('@xterm/addon-search'),
 		import('@xterm/xterm/css/xterm.css')
 	]);
-	return { Terminal, FitAddon };
+	return { Terminal, FitAddon, SearchAddon };
 });
 
 /** The CAN log views - the raw frame browser, the statistics tab and its charts - loaded

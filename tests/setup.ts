@@ -33,18 +33,45 @@ vi.mock('@xterm/xterm', () => ({
 		cols = 80;
 		rows = 24;
 		written: string[] = [];
+		/** The options object the view constructed with (the settings tests read it back). */
+		options: Record<string, unknown>;
 		/** Test hook: every terminal the view created, newest last. */
-		constructor() { ((globalThis as unknown as { __xterms?: unknown[] }).__xterms ??= []).push(this); }
+		constructor(...argumentsList: unknown[]) {
+			this.options = (argumentsList[0] ?? null) as Record<string, unknown>;
+			((globalThis as unknown as { __xterms?: unknown[] }).__xterms ??= []).push(this);
+		}
 		private dataHandlers: ((data: string) => void)[] = [];
 		private keyHandlers: (() => void)[] = [];
 		private resizeHandlers: ((size: { cols: number; rows: number }) => void)[] = [];
-		loadAddon(): void { /* no-op */ }
+		private selectionHandlers: (() => void)[] = [];
+		/** The addons the view loaded (the view's tests find the search addon here). */
+		addons: { findNext?: unknown; findPrevious?: unknown }[] = [];
+		/** The link providers the view registered (the links tests drive them directly). */
+		linkProviders: { provideLinks(y: number, callback: (links: unknown[] | undefined) => void): void }[] = [];
+		/** Test hook: the buffer lines the link provider reads (`getLine(y)` → row `y`). */
+		lines: string[] = [];
+		loadAddon(addon: { findNext?: unknown; findPrevious?: unknown }): void { this.addons.push(addon); }
 		open(element: HTMLElement): void { element.classList.add('xterm'); }
 		write(text: string): void { this.written.push(text); }
 		reset(): void { this.written.length = 0; }
+		/** The buffer spine the link layer reads: one line per row, 0-indexed. */
+		buffer = {
+			active: {
+				getLine: (y: number): { translateToString: (trimRight: boolean) => string } | undefined => {
+					const line = (this as unknown as { lines: string[] }).lines[y];
+					return line === undefined ? undefined : { translateToString: () => line };
+				}
+			}
+		};
+		/** The public link-provider seam: providers recorded for the tests to drive. */
+		registerLinkProvider(provider: { provideLinks(y: number, callback: (links: unknown[] | undefined) => void): void }): { dispose(): void } {
+			this.linkProviders.push(provider);
+			return { dispose: () => { const at = this.linkProviders.indexOf(provider); if (at !== -1) this.linkProviders.splice(at, 1); } };
+		}
 		onData(handler: (data: string) => void): void { this.dataHandlers.push(handler); }
 		onResize(handler: (size: { cols: number; rows: number }) => void): { dispose(): void } { this.resizeHandlers.push(handler); return { dispose: () => undefined }; }
 		onKey(handler: () => void): { dispose(): void } { this.keyHandlers.push(handler); return { dispose: () => undefined }; }
+		onSelectionChange(handler: () => void): { dispose(): void } { this.selectionHandlers.push(handler); return { dispose: () => undefined }; }
 		focus(): void { /* no-op */ }
 		dispose(): void { /* no-op */ }
 		/** The clipboard keys: the view's handler, a selection it can copy, and what it pasted. */
@@ -55,6 +82,8 @@ vi.mock('@xterm/xterm', () => ({
 		hasSelection(): boolean { return this.selection !== ''; }
 		getSelection(): string { return this.selection; }
 		paste(text: string): void { this.pasted.push(text); }
+		/** Test hook: the user made a selection (copyOnSelect listens here). */
+		triggerSelection(): void { for (const h of this.selectionHandlers) h(); }
 		/** The right-click menu's viewport actions: what Select All / Clear touched. */
 		selectAllCalled = 0;
 		cleared = 0;
@@ -73,6 +102,17 @@ vi.mock('@xterm/xterm', () => ({
 	}
 }));
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit(): void { /* no-op */ } } }));
+// The search addon: every find recorded (direction, query, options) for the find bar's tests.
+vi.mock('@xterm/addon-search', () => ({
+	SearchAddon: class {
+		/** Test hook: every findNext / findPrevious call, in order. */
+		calls: { direction: string; term: string; options?: unknown }[] = [];
+		findNext(term: string, options?: unknown): boolean { this.calls.push({ direction: 'next', term, options }); return true; }
+		findPrevious(term: string, options?: unknown): boolean { this.calls.push({ direction: 'previous', term, options }); return true; }
+		clearDecorations(): void { /* no-op */ }
+		dispose(): void { /* no-op */ }
+	}
+}));
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}));
 vi.mock('@vscode/codicons/dist/codicon.css', () => ({}));
 

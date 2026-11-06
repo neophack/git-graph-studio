@@ -98,6 +98,14 @@ export interface AppSettings {
 	/** The terminal surface's right-click behavior — read at click time, so a change
 	 *  reaches every open terminal without a restart. */
 	terminalRightClickBehavior: TerminalRightClickBehavior;
+	/** How many lines of output a terminal keeps above the viewport
+	 *  (`terminal.integrated.scrollback`). Applies to newly opened terminals. */
+	terminalScrollback: number;
+	/** `terminal.integrated.copyOnSelect`: the selection lands on the clipboard the moment
+	 *  it is made (then a plain right-click paste or Shift+Insert completes the flow). */
+	terminalCopyOnSelect: boolean;
+	/** The terminal's font size, in pixels. Applies to newly opened terminals. */
+	terminalFontSize: number;
 	/** Zed's `use_smartcase_search`: a query containing an uppercase letter matches case
 	 *  exactly, an all-lowercase query ignores case. The Match Case toggle shows the state
 	 *  the query's case picked — and can still override it — in every search field. */
@@ -131,6 +139,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	linuxDmabuf: 'auto',
 	terminalShell: 'gitBash',
 	terminalRightClickBehavior: 'menu',
+	terminalScrollback: 5000,
+	terminalCopyOnSelect: false,
+	terminalFontSize: 14,
 	density: 'comfortable',
 	searchSmartCase: true,
 	extensionLogLevel: 'info',
@@ -218,6 +229,9 @@ export const SETTING_DEFS: SettingDef[] = [
 		{ value: 'paste', label: 'settings.terminalRightClickBehavior.paste' },
 		{ value: 'nothing', label: 'settings.terminalRightClickBehavior.nothing' }
 	] },
+	{ key: 'terminalScrollback', category: 'general', kind: 'number', min: 100, max: 100000, step: 500 },
+	{ key: 'terminalCopyOnSelect', category: 'general', kind: 'boolean' },
+	{ key: 'terminalFontSize', category: 'general', kind: 'number', min: 6, max: 32, step: 1 },
 	{ key: 'theme', category: 'appearance', kind: 'theme' },
 	{ key: 'density', category: 'appearance', kind: 'enum', options: [
 		{ value: 'comfortable', label: 'settings.density.comfortable' },
@@ -478,7 +492,7 @@ function applyExplorerContextMenu(notifyUser: boolean): void {
 const DEVICE_SCOPED_KEYS = new Set<keyof AppSettings>([
 	'theme', 'locale', 'fontSize', 'density', 'minimap', 'stickyScroll', 'showOutline',
 	'bracketColors', 'wordWrap', 'mouseWheelScrollSensitivity', 'fastScrollSensitivity',
-	'terminalRightClickBehavior'
+	'terminalRightClickBehavior', 'terminalFontSize', 'terminalScrollback', 'terminalCopyOnSelect'
 ]);
 
 /** Apply `~/.ggs/settings.json` over the stored settings, if the file exists: a hand edit is

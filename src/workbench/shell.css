@@ -437,6 +437,43 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .terminal-tabs .row .actions { display: none; }
 .terminal-tabs .row:hover .actions { display: flex; }
 
+/* ---------- Terminal link layer + find bar (module 11, the VS Code terminal parity pass).
+   The hover hint floats over the shell; the find bar sits top-right of the host and mirrors
+   the editor find widget's look (.cm-find-widget below) without reaching into the editor. */
+.terminal-link-hint {
+	position: fixed; z-index: 70; pointer-events: none;
+	max-width: min(480px, 60vw); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+	padding: 3px 8px; font-size: 12px;
+	background: var(--vscode-editorHoverWidget-background, #252526);
+	color: var(--vscode-editorHoverWidget-foreground, #cccccc);
+	border: 1px solid var(--vscode-editorWidget-border, #454545); border-radius: 3px;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+.terminal-link-hint .modifier { margin-left: 10px; color: var(--vscode-descriptionForeground, #9d9d9d); }
+.terminal-find-bar {
+	position: absolute; top: 4px; right: 18px; z-index: 6;
+	padding: 4px 8px; background: var(--vscode-editorWidget-background, #252526);
+	border: 1px solid var(--vscode-editorWidget-border, #454545); border-radius: 4px;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+.terminal-find-bar[hidden] { display: none; }
+.terminal-find-row { display: flex; align-items: center; gap: 2px; }
+.terminal-find-input {
+	flex: 1; min-width: 140px; width: 220px; height: 24px; padding: 0 6px;
+	border: 1px solid var(--vscode-input-border, transparent);
+	background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+}
+.terminal-find-input:focus { outline: 1px solid var(--vscode-focusBorder); }
+/* The no-results flash: the border reddens for a beat, then returns. */
+.terminal-find-input.no-results { outline: 1px solid var(--vscode-inputValidation-errorBorder, #be1100); }
+.terminal-find-btn {
+	flex: none; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
+	border: none; background: transparent; color: var(--vscode-editorWidget-foreground, #cccccc); cursor: pointer;
+}
+.terminal-find-btn:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2)); }
+.terminal-find-btn.toggle.active { background: var(--vscode-inputOption-activeBackground, rgba(0, 127, 212, 0.4)); outline: 1px solid var(--vscode-inputOption-activeBorder); }
+.terminal-find-spacer { width: 8px; flex: none; }
+
 /* The saved tab flashes once (M7 7.8): renderTabs marks it, the animation retires it. */
 .tab.just-saved { animation: tab-saved var(--motion-normal) var(--ease-out); }
 @keyframes tab-saved {

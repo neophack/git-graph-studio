@@ -495,7 +495,26 @@ setting exists, the terminal opens the system's own `$SHELL`, and the Settings d
 hides the row); the choice rides every `pty_create`, so it reaches the next terminal
 without a restart.
 
-- Frontend: `src/features/terminal/terminal.ts` (+ `outputFollow.ts`, the output-follow
+- Frontend: `src/features/terminal/terminal.ts` (+ `links.ts`, the link layer — the VS Code
+  terminal parity pass's core answer to "the paths a shell prints are not clickable": a pure
+  per-line scan (`detectLinks`) over URLs, Windows absolute paths, git-bash's MSYS `/c/...`
+  spelling and workspace-relative paths, each with its `:LINE:COL` (or `path(LINE,COL)`)
+  suffix parsed off and its sentence punctuation trimmed; the xterm-facing half rides the
+  public `registerLinkProvider` (no addon — links.ts never imports @xterm/xterm at runtime,
+  the terminal module is already an async chunk), whose hover machinery underlines and keeps
+  plain clicks free for selection while ctrl+click opens — a URL through the opener, a file
+  path through the view's `onOpenFile` (boot resolves the raw target — MSYS unmaps, relative
+  joins the workspace root — and lands it in an editor group; an unwired frontend, the remote
+  shell, copies the path instead), a hover hint floats the target and the key, and a right
+  click gains Open Link / Copy Link over a hovered link;
+  + `findBar.ts`, the Ctrl+F bar over the shell — @xterm/addon-search (reached through
+  `loadXterm`'s `SearchAddon`, per lazy.ts's one-import-point seam) drives `findNext` /
+  `findPrevious` with the case/word/regex toggles and highlight-all decorations, Esc closes
+  back into the shell, a no-result answer flashes the input; `terminal.find` / `clear` /
+  `selectAll` / `runSelectedText` (Ctrl+Shift+Enter) are the palette's terminal commands,
+  Ctrl+Insert / Shift+Insert the VS Code copy/paste pair, and the scrollback / font-size /
+  copy-on-select settings are read at `makeTerm` (the first two newly-opened-terminals-only);
+  + `outputFollow.ts`, the output-follow
   state machine of docs/remote-client-plan.md §6.6: a frontend not looking at the terminal
   page carries no terminal traffic — the remote's `terminalFollow.ts` drives
   `setOutputFollow`, a 30 s grace rides a page hop, the drop after it unsubscribes the
@@ -518,6 +537,14 @@ without a restart.
   mirror on `pty-sessions-changed`, retirement of a PC-killed terminal, the shared
   geometry's deform without a resize ping-pong, unload killing only created shells, and
   the §6.6 follow's drop/return over adopted sessions)
+  + `tests/terminalLinks.test.ts` (the link layer: the pure scan's classification and
+  suffix/punctuation rules, the MSYS/root path resolution, the provider's links and cell
+  ranges over a buffer line, ctrl+click into the opener and into the wired `onOpenFile`
+  against the plain click that must not fire, the clipboard fallback without a wiring, the
+  hover hint, the context menu's Open/Copy Link, the find bar over the search-addon mock,
+  the three terminal settings' defaults and both language tables, and copy-on-select /
+  clear / select-all / run-selected-text; the real-xterm mouse hit-testing lives in the
+  dev harness's `?terminal=1` mode)
 
 ### 12. Extension Platform
 

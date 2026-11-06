@@ -10,8 +10,10 @@
 
 import type { Terminal } from '@xterm/xterm';
 import type { FitAddon } from '@xterm/addon-fit';
+import type { SearchAddon } from '@xterm/addon-search';
 import { ptyCreate, ptyKill, ptyList, ptyResize, ptyTail, ptyWrite, type PtySessionInfo } from '../../platform/ipc/pty';
 import { listen, type UnlistenFn } from '../../platform/ipc/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { loadXterm } from '../../platform/lazy';
@@ -21,12 +23,19 @@ import { THEME_EVENT, settings } from '../../platform/settings';
 import { t } from '../../platform/i18n';
 import { OutputFollow, FOLLOW_GRACE_MS } from './outputFollow';
 import { planSessionSync } from './sessionSync';
+import { attachTerminalLinks, copyLinkFallback, type TerminalLinkController, type DetectedLink } from './links';
+import { mountTerminalFindBar, type TerminalFindBar } from './findBar';
 
 interface Session {
 	id: number;
 	name: string;
 	term: Terminal;
 	fit: FitAddon;
+	/** The search addon the find bar drives (one per terminal). */
+	search: SearchAddon;
+	/** The link layer's controller: the hover state the context menu reads, and the
+	 *  provider's disposal when the session goes away. */
+	links: TerminalLinkController;
 	element: HTMLElement;
 	row: HTMLElement;
 	exited: boolean;
@@ -94,6 +103,14 @@ export class TerminalView {
 	onCommandEntered: (() => void) | null = null;
 	/** The last shell was closed: the panel may want to hide. */
 	onEmpty: (() => void) | null = null;
+	/** A ctrl+clicked file link asks to open: the wiring resolves the raw path (MSYS
+	 *  `/c/...`, workspace-relative) against its own workspace and lands it in an editor
+	 *  group. Unwired frontends (the remote shell has no editor group) copy the path
+	 *  instead — the desktop window wires this from the boot path. */
+	onOpenFile: ((path: string, line?: number, column?: number) => void) | null = null;
+	/** The find bar, mounted on first Ctrl+F and kept for the view's lifetime (it serves
+	 *  whichever session is active through its delegates). */
+	private find: TerminalFindBar | null = null;
 
 	constructor() {
 		this.actions = el('div', 'actions', [
@@ -181,6 +198,44 @@ export class TerminalView {
 		session.term.focus();
 	}
 
+	/** Open the find bar over the active shell (`terminal.find`, Ctrl+F inside the shell). */
+	showFind(): void {
+		if (!this.find) {
+			this.find = mountTerminalFindBar(this.host, {
+				term: () => this.active?.term ?? null,
+				search: () => this.active?.search ?? null,
+				focusTerminal: () => this.active?.term.focus()
+			});
+		}
+		this.find.open();
+	}
+
+	/** Clear the active shell's viewport (`terminal.clear`; the scrollback the backend's
+	 *  tail replays is not the term's buffer and stays). */
+	clearActive(): void {
+		const session = this.active;
+		if (!session) return;
+		session.term.clear();
+		session.term.focus();
+	}
+
+	/** Select the active shell's whole buffer (`terminal.selectAll`). */
+	selectAllActive(): void {
+		const session = this.active;
+		if (!session) return;
+		session.term.selectAll();
+		session.term.focus();
+	}
+
+	/** Run the selection in the active shell (`terminal.runSelectedText`): the selected
+	 *  text crosses the same write path typing uses, a `\r` after it. Nothing selected —
+	 *  nothing sent. */
+	async runSelectedText(): Promise<void> {
+		const session = this.active;
+		if (!session || session.exited || !session.term.hasSelection()) return;
+		await this.run(session.term.getSelection());
+	}
+
 	focus(): void {
 		this.active?.term.focus();
 	}
@@ -220,33 +275,42 @@ export class TerminalView {
 
 	/* ---------- Sessions ---------- */
 
-	/** One xterm instance's shared construction — the theme, the clipboard keys, the
-	 *  right-click menu — everything a created and an adopted session need alike. */
-	private async makeTerm(): Promise<{ term: Terminal; fit: FitAddon; element: HTMLElement }> {
+	/** One xterm instance's shared construction — the theme, the clipboard keys, the link
+	 *  layer, the find addon, the right-click menu — everything a created and an adopted
+	 *  session need alike. */
+	private async makeTerm(): Promise<{ term: Terminal; fit: FitAddon; search: SearchAddon; links: TerminalLinkController; element: HTMLElement }> {
 		// xterm is an async chunk: the first terminal pays for its load, the workbench never does.
-		const { Terminal, FitAddon } = await loadXterm();
+		const { Terminal, FitAddon, SearchAddon } = await loadXterm();
 		const term = new Terminal({
 			fontFamily: cssVar('--vscode-editor-font-family') || 'Menlo, Consolas, monospace',
-			fontSize: 14,
+			fontSize: settings.terminalFontSize,
 			lineHeight: 1,
 			cursorBlink: true,
 			cursorStyle: 'bar',
-			scrollback: 5000,
+			scrollback: settings.terminalScrollback,
 			allowProposedApi: true,
 			theme: terminalTheme()
 		});
 		const fit = new FitAddon();
 		term.loadAddon(fit);
+		const search = new SearchAddon();
+		term.loadAddon(search);
 		const element = el('div', 'terminal-instance');
 		this.host.appendChild(element);
 		term.open(element);
 		// VS Code's terminal clipboard keys: Ctrl+Shift+C copies the selection, Ctrl+Shift+V
 		// pastes, and Ctrl+C copies too while text is selected (the interrupt goes to the
-		// shell only with nothing selected). They stop here so the workbench's own bindings
-		// (the Markdown preview on Ctrl+Shift+V, the editor's copy) never answer instead.
+		// shell only with nothing selected). Ctrl+Insert / Shift+Insert are VS Code's other
+		// copy/paste pair, and Ctrl+F opens the find bar (plain Ctrl+Shift+F stays the
+		// workbench's Search view). They stop here so the workbench's own bindings (the
+		// Markdown preview on Ctrl+Shift+V, the editor's find on Ctrl+F) never answer while
+		// a terminal is focused.
 		term.attachCustomKeyEventHandler((event) => {
-			if (event.type !== 'keydown' || !(event.ctrlKey || event.metaKey) || event.altKey) return true;
+			if (event.type !== 'keydown' || event.altKey) return true;
+			const ctrl = event.ctrlKey || event.metaKey;
 			const key = event.key.toLowerCase();
+			// Shift+Insert needs no ctrl: let it through this guard, nothing else without it.
+			if (!ctrl && !(event.shiftKey && event.key === 'Insert')) return true;
 			if (key === 'c' && (event.shiftKey || term.hasSelection())) {
 				if (term.hasSelection()) void writeText(term.getSelection()).catch(() => undefined);
 				event.preventDefault();
@@ -259,7 +323,43 @@ export class TerminalView {
 				event.stopPropagation();
 				return false;
 			}
+			if (ctrl && !event.shiftKey && key === 'f') {
+				this.showFind();
+				event.preventDefault();
+				event.stopPropagation();
+				return false;
+			}
+			if (event.key === 'Insert' && ctrl && !event.shiftKey) {
+				if (term.hasSelection()) void writeText(term.getSelection()).catch(() => undefined);
+				event.preventDefault();
+				event.stopPropagation();
+				return false;
+			}
+			if (event.key === 'Insert' && event.shiftKey && !ctrl) {
+				void readText().then((text) => { if (text) term.paste(text); }).catch(() => undefined);
+				event.preventDefault();
+				event.stopPropagation();
+				return false;
+			}
 			return true;
+		});
+		// VS Code's terminal.integrated.copyOnSelect: the selection lands on the clipboard
+		// as soon as it is made.
+		term.onSelectionChange(() => {
+			if (!settings.terminalCopyOnSelect || !term.hasSelection()) return;
+			void writeText(term.getSelection()).catch(() => undefined);
+		});
+		// The link layer: every URL and path a shell prints hovers underlined, and a
+		// ctrl+click opens it — a URL through the opener, a file path through the window's
+		// own `onOpenFile` wiring (unwired shells copy the path instead).
+		const links = attachTerminalLinks(term, {
+			openUrl: (url) => {
+				void openUrl(url).catch((error) => notify('error', String(error)));
+			},
+			openFile: (path, line, column) => {
+				if (this.onOpenFile) this.onOpenFile(path, line, column);
+				else void copyLinkFallback(path).catch(() => undefined);
+			}
 		});
 		// The right mouse button follows the Terminal Right-Click setting (VS Code's
 		// terminal.integrated.rightClickBehavior): the menu by default, smart copy/paste
@@ -279,7 +379,17 @@ export class TerminalView {
 				term.clearSelection();
 				return;
 			}
-			const entries: MenuEntry[] = [
+			// A link under the cursor leads the menu: the two actions that speak for it.
+			const link: DetectedLink | null = links.hoveredLink();
+			const entries: MenuEntry[] = [];
+			if (link) {
+				entries.push(
+					{ label: t('terminal.menu.openLink'), run: () => { links.open(link); term.focus(); } },
+					{ label: t('terminal.menu.copyLink'), run: () => { links.copy(link); term.focus(); } },
+					'separator'
+				);
+			}
+			entries.push(
 				{ label: t('terminal.menu.copy'), keybinding: 'Ctrl+Shift+C', disabled: !term.hasSelection(),
 					run: () => { void writeText(term.getSelection()).catch(() => undefined); term.focus(); } },
 				{ label: t('terminal.menu.paste'), keybinding: 'Ctrl+Shift+V',
@@ -287,10 +397,10 @@ export class TerminalView {
 				{ label: t('terminal.menu.selectAll'), run: () => { term.selectAll(); term.focus(); } },
 				'separator',
 				{ label: t('terminal.menu.clear'), run: () => { term.clear(); term.focus(); } }
-			];
+			);
 			showContextMenu(event.clientX, event.clientY, entries);
 		});
-		return { term, fit, element };
+		return { term, fit, search, links, element };
 	}
 
 	/** The lifetime listeners every session carries from birth: its shell's exit, and the
@@ -330,10 +440,10 @@ export class TerminalView {
 	 *  Terminal"); without one the backend opens it at the workspace root, the plain
 	 *  new-terminal behavior. */
 	async create(cwd?: string): Promise<void> {
-		const { term, fit, element } = await this.makeTerm();
+		const { term, fit, search, links, element } = await this.makeTerm();
 		const id = this.nextId++;
 		const row = el('div', 'row');
-		const session: Session = { id, name: 'shell', term, fit, element, row, exited: false, unlisten: [], outputUnlisten: null, attached: false };
+		const session: Session = { id, name: 'shell', term, fit, search, links, element, row, exited: false, unlisten: [], outputUnlisten: null, attached: false };
 		this.sessions.push(session);
 		this.activate(session);
 		fit.fit();
@@ -371,10 +481,10 @@ export class TerminalView {
 	 *  tail replayed, its output followed live, its input shared — never a second shell
 	 *  spawned beside it. */
 	private async adopt(info: PtySessionInfo): Promise<void> {
-		const { term, fit, element } = await this.makeTerm();
+		const { term, fit, search, links, element } = await this.makeTerm();
 		const row = el('div', 'row');
 		const session: Session = {
-			id: info.id, name: info.name || 'shell', term, fit, element, row,
+			id: info.id, name: info.name || 'shell', term, fit, search, links, element, row,
 			exited: false, unlisten: [], outputUnlisten: null, attached: true
 		};
 		this.sessions.push(session);
@@ -465,6 +575,7 @@ export class TerminalView {
 		}
 		this.dropOutput(session);
 		for (const unlisten of session.unlisten) unlisten();
+		session.links.dispose();
 		session.term.dispose();
 		session.element.remove();
 		const index = this.sessions.indexOf(session);

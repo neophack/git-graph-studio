@@ -21,6 +21,8 @@ describe('lazy chunks', () => {
 		expect(typeof merge.MergeView).toBe('function');
 		const xterm = await loadXterm();
 		expect(typeof xterm.Terminal).toBe('function');
+		// The search addon rides the same chunk: the terminal's find bar never imports it directly.
+		expect(typeof xterm.SearchAddon).toBe('function');
 		const [diagnostics, decorations, providers] = await loadEditorExtensions();
 		expect(typeof diagnostics.diagnosticsExtension).toBe('function');
 		expect(typeof decorations.extensionDecorationsExtension).toBe('function');

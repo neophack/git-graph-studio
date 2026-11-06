@@ -11,11 +11,12 @@ import { isPermissionGranted, requestPermission, sendNotification } from '@tauri
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { resolveTerminalPath } from '../features/terminal/links';
 import { type AnalysisStatus } from '../features/analysis';
 import type { AnalysisToolId } from '../features/analysis';
 import { commands } from '../platform/commands';
 import { registerGitCommands } from '../features/scm';
-import { t, tf } from '../platform/i18n';
+import { registerZhCnText, t, tf } from '../platform/i18n';
 import { hook } from '../platform/hooks';
 import { openSettingsPanel } from './settingsPanel';
 import { settings, updateSetting } from '../platform/settings';
@@ -192,6 +193,28 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'terminal.toggle', title: 'Toggle Terminal', category: 'Terminal', keybinding: 'Ctrl+`', run: () => this.panel.toggle('terminal') });
 		register({ id: 'terminal.new', title: 'New Terminal', category: 'Terminal', keybinding: 'Ctrl+Shift+`', run: async () => { this.panel.show('terminal'); await this.panel.terminal.newTerminal(); } });
 		register({ id: 'terminal.kill', title: 'Kill the Active Terminal Instance', category: 'Terminal', enabled: () => this.panel.terminal.sessionCount() > 0, run: () => this.panel.terminal.killActive() });
+		// Ctrl+Click on a printed path lands here: the layer reports the path raw (MSYS
+		// `/c/...`, `src/foo.ts:12`, a drive spelling) and THIS window resolves it — the
+		// MSYS mapping unmaps, a relative path joins the open workspace root — before the
+		// editor group opens it at the printed line/column. An unwired frontend (the remote
+		// shell has no editor group) copies the path instead, inside the terminal module.
+		this.panel.terminal.onOpenFile = (path, line, column) => {
+			void this.editors.openFile(resolveTerminalPath(path, this.repoPath), { line, column });
+		};
+		// The four commands' zh-cn titles, through the same merge the extension manifests use
+		// (i18n's registerZhCnText — the registry's titles localize at render, and the
+		// localization sweep fails any title the table cannot answer).
+		registerZhCnText({
+			'Find in Terminal': '在终端中查找',
+			'Clear Terminal': '清空终端',
+			'Select All in Terminal': '在终端中全选',
+			'Run Selected Text in Terminal': '在终端中运行选中文本'
+		});
+		register({ id: 'terminal.find', title: 'Find in Terminal', category: 'Terminal', enabled: () => this.panel.terminal.sessionCount() > 0, run: () => { this.panel.show('terminal'); this.panel.terminal.showFind(); } });
+		register({ id: 'terminal.clear', title: 'Clear Terminal', category: 'Terminal', enabled: () => this.panel.terminal.sessionCount() > 0, run: () => this.panel.terminal.clearActive() });
+		register({ id: 'terminal.selectAll', title: 'Select All in Terminal', category: 'Terminal', enabled: () => this.panel.terminal.sessionCount() > 0, run: () => this.panel.terminal.selectAllActive() });
+		// Ctrl+Shift+Enter is free: no other command binds Enter anywhere.
+		register({ id: 'terminal.runSelectedText', title: 'Run Selected Text in Terminal', category: 'Terminal', keybinding: 'Ctrl+Shift+Enter', enabled: () => this.panel.terminal.sessionCount() > 0, run: () => void this.panel.terminal.runSelectedText() });
 		register({ id: 'help.welcome', title: 'Welcome', category: 'Help', run: () => this.editors.openHelp('welcome') });
 		register({ id: 'help.shortcuts', title: 'Keyboard Shortcuts', category: 'Help', keybinding: 'Ctrl+K Ctrl+S', run: () => this.editors.openHelp('shortcuts') });
 		register({ id: 'help.selfTest', title: 'Run Module Self-Tests', category: 'Help', run: () => this.editors.openSelfTest() });
