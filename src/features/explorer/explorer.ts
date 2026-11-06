@@ -1028,7 +1028,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		if (!clipped || !this.rootPath) return;
 		let landed: string[] = [];
 		try {
-			landed = clipped.cut ? await pasteMove(clipped.paths, folder) : await pasteCopy(clipped.paths, folder);
+			landed = (clipped.cut ? await pasteMove(clipped.paths, folder) : await pasteCopy(clipped.paths, folder)) ?? [];
 		} catch (error) {
 			notify('error', String(error));
 			return;
@@ -1057,7 +1057,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		let landed: string[] = [];
 		try {
 			for (const [parent, entries] of groups) {
-				landed = landed.concat(await pasteCopy(entries, parent));
+				landed = landed.concat((await pasteCopy(entries, parent)) ?? []);
 			}
 		} catch (error) {
 			notify('error', String(error));
