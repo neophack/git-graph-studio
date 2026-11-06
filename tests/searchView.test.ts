@@ -262,11 +262,11 @@ describe('Search view', () => {
 		expect(group.classList.contains('collapsed')).toBe(false);
 		expect(view.container.querySelector('.search-file-head .twistie')!.className).toContain('chevron-down');
 
-		// The title's collapse-all / expand-all reach the same groups.
+		// The title's actions are VS Code's exactly: refresh, clear, collapse all — and no
+		// expand-all (a tree that collapses in place offers no unfold-everything action).
+		expect(view.container.querySelector('[title="Expand All"]')).toBeNull();
 		click(view.container.querySelector('[title="Collapse All"]')!);
 		expect(group.classList.contains('collapsed')).toBe(true);
-		click(view.container.querySelector('[title="Expand All"]')!);
-		expect(group.classList.contains('collapsed')).toBe(false);
 	});
 
 	it("right-click offers VS Code's result menu: Copy / Copy Path / Copy All / Reveal — the file row without the line's Copy", async () => {
@@ -644,5 +644,155 @@ describe('Search view: Preserve Case, per-result replace, keyboard', () => {
 		await flush();
 		expect(search).toHaveBeenCalled();
 		expect(search.mock.calls.at(-1)![0]).toMatchObject({ query: 'fn', include: 'src/**' });
+	});
+});
+
+describe('Search view: the VS Code widget details', () => {
+	beforeEach(() => {
+		localStorage.clear();
+	});
+
+	it('the Preserve Case toggle rides the replace widget, hidden with its row', () => {
+		const view = new SearchView(document.createElement('div'));
+		const replaceWidget = view.container.querySelector('.replace-row .search-widget')!;
+		// The toggle lives beside the Replace All button, inside the folded replace row.
+		expect(replaceWidget.querySelector('[title="Preserve Case (Alt+P)"]')).not.toBeNull();
+		expect(replaceWidget.querySelector('button[title*="Replace All"]')).toBeTruthy();
+		// The query box no longer carries it.
+		expect(view.container.querySelector('.query-row [title="Preserve Case (Alt+P)"]')).toBeNull();
+	});
+
+	it('the include / exclude fields carry their VS Code headers, placeholders shown on focus only', () => {
+		const view = new SearchView(document.createElement('div'));
+		view.toggleFilters();
+		const rows = view.container.querySelectorAll('.search-filter-row');
+		expect(rows).toHaveLength(2);
+		expect(texts('.search-filter-row h4', view.container)).toEqual(['files to include', 'files to exclude']);
+		const include = rows[0]!.querySelector('input') as HTMLInputElement;
+		expect(include.placeholder).toBe('');
+		include.dispatchEvent(new FocusEvent('focus'));
+		expect(include.placeholder).toBe('e.g. *.ts, src/**/include');
+		include.dispatchEvent(new FocusEvent('blur'));
+		expect(include.placeholder).toBe('');
+	});
+
+	it('Ctrl+Down walks query → replace → include → exclude and wraps; Ctrl+Up walks back', () => {
+		const host = document.createElement('div');
+		document.body.appendChild(host);
+		const view = new SearchView(host);
+		view.focusReplace();
+		view.toggleFilters();
+		const query = host.querySelector('.query-row input') as HTMLInputElement;
+		const replace = host.querySelector('.replace-row input') as HTMLInputElement;
+		const [include, exclude] = Array.from(host.querySelectorAll('.search-filter-row input')) as HTMLInputElement[];
+		query.focus();
+		key(query, 'ArrowDown', { ctrlKey: true });
+		expect(document.activeElement).toBe(replace);
+		key(replace, 'ArrowDown', { ctrlKey: true });
+		expect(document.activeElement).toBe(include);
+		key(include, 'ArrowDown', { ctrlKey: true });
+		expect(document.activeElement).toBe(exclude);
+		key(exclude, 'ArrowDown', { ctrlKey: true });
+		expect(document.activeElement).toBe(query);
+		key(query, 'ArrowUp', { ctrlKey: true });
+		expect(document.activeElement).toBe(exclude);
+		host.remove();
+	});
+
+	it('the Replace All button title explains the disabled state, as VS Code does', async () => {
+		const view = new SearchView(document.createElement('div'));
+		const button = view.container.querySelector('.replace-row .action-btn[title*="Replace All"], .replace-row button[title^="Replace All"]') as HTMLButtonElement;
+		expect(button.title).toBe('Replace All (Submit Search to Enable)');
+		expect(button.disabled).toBe(true);
+
+		streams([[{ path: 'a.txt', matches: [{ line: 1, column: 1, length: 1, text: 'x' }] }]]);
+		type(view.container.querySelector('.query-row input') as HTMLInputElement, 'x');
+		await view.runSearch();
+		expect(button.title).toBe('Replace All');
+		expect(button.disabled).toBe(false);
+	});
+
+	it('an empty answer shows the no-results hint with an Open Settings link', async () => {
+		streams([], { scanned: 3 });
+		const view = new SearchView(document.createElement('div'));
+		type(view.container.querySelector('.query-row input') as HTMLInputElement, 'nothing');
+		await view.runSearch();
+		const summary = view.container.querySelector('.search-summary')!;
+		expect(summary.textContent).toContain('No results found. Review your configured exclusions and check your gitignore files');
+		expect(summary.querySelector('.search-link')!.textContent).toBe('Open Settings');
+	});
+
+	it('no folder open: the welcome names it and offers Open Folder', () => {
+		const view = new SearchView(document.createElement('div'));
+		view.setEnabled(false);
+		const welcome = view.container.querySelector('.welcome-view')!;
+		expect(welcome.textContent).toContain('You have not opened or specified a folder');
+		expect(welcome.querySelector('.search-link')!.textContent).toBe('Open Folder');
+		// A folder opening flips back to the normal empty-query welcome.
+		view.setEnabled(true);
+		expect(view.container.querySelector('.welcome-view')!.textContent).toContain('Type to search');
+	});
+
+	it('the file header gains a hover Replace All in replace mode, rewriting exactly that file', async () => {
+		const replace = vi.fn(async () => ({ files: 1, replacements: 2 }));
+		backend.on('replace_in_files', replace);
+		// The post-write re-search answers the file with one match left.
+		let pass = 0;
+		backend.on('search_workspace', async (args) => {
+			const channel = args.onEvent as Channel<SearchEvent>;
+			pass++;
+			const matches = pass === 1
+				? [{ line: 1, column: 1, length: 1, text: 'x one' }, { line: 2, column: 1, length: 1, text: 'x two' }]
+				: [{ line: 2, column: 1, length: 1, text: 'y two' }];
+			channel.send({ kind: 'batch', files: [{ path: 'src/a.rs', matches }] });
+			channel.send({ kind: 'done', scanned: 1, truncated: false, cancelled: false });
+			return null;
+		});
+		backend.on('search_cancel', () => null);
+		const view = new SearchView(document.createElement('div'));
+		view.setRoots(['C:\\repo']);
+		click(view.container.querySelector('.search-replace-toggle')!);
+		type(view.container.querySelector('.query-row input') as HTMLInputElement, 'x');
+		await view.runSearch();
+
+		click(view.container.querySelector('.search-file-head .file-replace')!);
+		await flush();
+		// The workspace replace ran with the file's own path as the include glob, in its root.
+		expect(replace).toHaveBeenCalledTimes(1);
+		expect(replace.mock.calls[0]![0]).toMatchObject({ query: 'x', include: 'src/a.rs', replacement: '', repo: 'C:\\repo' });
+		// The tree re-listed what remains after the write.
+		expect(texts('.search-file-head .badge', view.container)).toEqual(['1']);
+		expect(texts('.search-match .hit', view.container)).toEqual(['y']);
+	});
+
+	it('replace mode adds the context menu replace rows: Replace on a match, Replace All on a file', async () => {
+		rootedStream([{ path: 'src/lib.rs', matches: [{ line: 3, column: 7, length: 2, text: 'alpha fn beta' }] }]);
+		// The single replace keeps its match (a fresh listing after the row's edit re-answers).
+		const replaceOne = vi.fn(async () => [{ line: 3, column: 7, length: 2, text: 'alpha fn beta' }]);
+		backend.on('search_replace_one', replaceOne);
+		const replaceAll = vi.fn(async () => ({ files: 1, replacements: 1 }));
+		backend.on('replace_in_files', replaceAll);
+		const view = await rootedView('fn');
+
+		// Replace mode off: the menus are the copy set only.
+		rightClick(view.container.querySelector('.search-match')!);
+		expect(menuLabels()).toEqual(['Copy', 'Copy Path', 'Copy All', 'Reveal in File Explorer']);
+		key(document, 'Escape');
+
+		click(view.container.querySelector('.search-replace-toggle')!);
+		rightClick(view.container.querySelector('.search-match')!);
+		expect(menuLabels()).toEqual(['Copy', 'Replace', 'Copy Path', 'Copy All', 'Reveal in File Explorer']);
+		click(menuItem('Replace'));
+		await flush();
+		expect(replaceOne).toHaveBeenCalledTimes(1);
+		key(document, 'Escape');
+
+		rightClick(view.container.querySelector('.search-file-head')!);
+		expect(menuLabels()).toEqual(['Replace All', 'Copy Path', 'Copy All', 'Reveal in File Explorer']);
+		click(menuItem('Replace All'));
+		await flush();
+		expect(replaceAll).toHaveBeenCalledTimes(1);
+		expect(replaceAll.mock.calls[0]![0]).toMatchObject({ include: 'src/lib.rs' });
+		key(document, 'Escape');
 	});
 });

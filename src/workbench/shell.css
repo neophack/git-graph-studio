@@ -1216,9 +1216,15 @@ body.resizing iframe { pointer-events: none; }
 .search-widget .action-btn.toggle.active { background: var(--vscode-inputOption-activeBackground, rgba(0, 103, 192, 0.35)); outline: 1px solid var(--vscode-inputOption-activeBorder, #0078d4); }
 .search-widget .action-btn.toggle .codicon { font-size: 13px; }
 .search-widget .action-btn[disabled] { opacity: .4; }
-/* The "…" that unfolds the include / exclude fields, aligned under the input. */
-.search-filters-toggle { width: 20px; height: 16px; margin-left: 20px; align-self: flex-start; background: none; border: none; padding: 0; color: var(--vscode-icon-foreground, #c5c5c5); cursor: pointer; }
+/* The "…" that unfolds the include / exclude fields, right-aligned in the details area as
+   VS Code draws it (and indented past the replace chevron's column like its fields). */
+.search-filters-toggle { width: 20px; height: 16px; margin-left: auto; margin-right: 12px; align-self: flex-start; background: none; border: none; padding: 0; color: var(--vscode-icon-foreground, #c5c5c5); cursor: pointer; }
 .search-filters-toggle:hover { background: var(--vscode-toolbar-hoverBackground, rgba(90, 93, 94, 0.31)); }
+.search-filter-rows { display: flex; flex-direction: column; gap: 6px; padding-left: 20px; }
+.search-filter-row h4 { margin: 0 0 2px; font-size: 11px; font-weight: 400; color: var(--vscode-descriptionForeground, #999); }
+/* The text links the messages area carries (Open Settings, Open Folder), as VS Code's. */
+.search-link { background: none; border: none; padding: 0; margin-left: 6px; color: var(--vscode-textLink-foreground, #3794ff); cursor: pointer; font-size: inherit; }
+.search-link:hover { text-decoration: underline; }
 .search-error { padding: 6px 12px; color: var(--vscode-errorForeground, #f48771); font-size: 12px; }
 .search-warning { padding: 6px 12px; font-size: 11px; color: var(--vscode-editorWarning-foreground, #cca700); background: var(--vscode-inputValidation-warningBackground, rgba(204, 167, 0, 0.1)); }
 .search-summary { padding: 6px 12px; font-size: 11px; color: var(--vscode-descriptionForeground, #999); }

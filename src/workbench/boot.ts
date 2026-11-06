@@ -219,7 +219,12 @@ export const bootMethods: ThisType<Workbench> = {
 
 		register({ id: 'workbench.showExplorer', title: 'Explorer', category: 'View', keybinding: 'Ctrl+Shift+E', run: () => this.showView('explorer') });
 		register({ id: 'workbench.showSearch', title: 'Search', category: 'View', keybinding: 'Ctrl+Shift+F', run: () => { this.showView('search'); this.seedSearchQuery(); this.search.focus(); } });
+		// The Search view's new title's zh-cn twin (the localization sweep reads it here).
+		registerZhCnText({
+			'Toggle Search Details': '切换搜索详细信息'
+		});
 		register({ id: 'workbench.replaceInFiles', title: 'Replace in Files', category: 'Search', keybinding: 'Ctrl+Shift+H', run: () => { this.showView('search'); this.search.focusReplace(); } });
+		register({ id: 'search.toggleQueryDetails', title: 'Toggle Search Details', category: 'Search', keybinding: 'Ctrl+Shift+J', run: () => { this.showView('search'); this.search.toggleFilters(); } });
 		register({ id: 'workbench.showScm', title: 'Source Control', category: 'View', keybinding: 'Ctrl+Shift+G', run: () => this.showView('scm') });
 		register({ id: 'workbench.showExtensions', title: 'Extensions', category: 'View', keybinding: 'Ctrl+Shift+X', run: () => this.showView('extensions') });
 		register({ id: 'workbench.showAnalysis', title: 'Analysis', category: 'View', keybinding: 'Ctrl+Shift+A', run: () => this.showView('analysis') });

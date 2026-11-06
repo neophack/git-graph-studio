@@ -32,3 +32,25 @@
 	color: var(--vscode-list-activeSelectionForeground, inherit);
 	outline: none;
 }
+
+/* The per-file Replace All: a hover button at the file header's right edge, shown only in
+   replace mode (the `.replace-mode` marker the replace row's toggle flips), exactly like
+   VS Code's per-file replace affordance. */
+.search-rows .search-file-head .file-replace {
+	visibility: hidden;
+	border: none;
+	background: none;
+	padding: 0 2px;
+	color: var(--vscode-descriptionForeground, #999);
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	font-size: 14px;
+}
+.search-rows.replace-mode .search-file-head:hover .file-replace,
+.search-rows.replace-mode .search-file-head.kb-focused .file-replace {
+	visibility: visible;
+}
+.search-rows .search-file-head .file-replace:hover {
+	color: var(--vscode-focusBorder, #0078d4);
+}

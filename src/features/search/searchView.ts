@@ -16,6 +16,7 @@ import { Channel } from '../../platform/ipc/core';
 import { replaceInFiles, searchCancel, searchReplaceOne, searchWorkspace, type SearchEvent } from '../../platform/ipc/search';
 
 import * as state from '../../platform/state';
+import { commands } from '../../platform/commands';
 import { t } from '../../platform/i18n';
 import { queryHasUppercase } from '../../platform/find/findOptions';
 import { FindHistory, HistoryRecall, recallKey } from '../../platform/find/findHistory';
@@ -108,8 +109,8 @@ export class SearchView {
 	private readonly replaceAllButton: HTMLButtonElement;
 	private readonly includeInput: HTMLInputElement;
 	private readonly excludeInput: HTMLInputElement;
-	private readonly filterRows: HTMLElement;
-	private readonly filterButton: HTMLElement;
+	/** The fold-away include / exclude fields (the "…" toggle holds the local in buildBox). */
+	private filterRows: HTMLElement | null = null;
 	/** The fold-away replace row and the chevron that unfolds it. */
 	private replaceRow: HTMLElement | null = null;
 	private replaceToggleIcon: HTMLElement | null = null;
@@ -127,6 +128,8 @@ export class SearchView {
 	private showFilters = false;
 	/** Whether the replace row is unfolded, as VS Code keeps it collapsed until asked for. */
 	private showReplace = state.load<{ showReplace?: boolean }>('searchUi', {}).showReplace ?? false;
+	/** Whether a workspace folder is open — the welcome page VS Code shows otherwise. */
+	private hasFolder = true;
 	private results: FileMatches[] = [];
 	private truncated = false;
 	private scanned = 0;
@@ -156,14 +159,9 @@ export class SearchView {
 
 		this.queryInput = el('input', 'input');
 		this.replaceInput = el('input', 'input');
-		this.includeInput = this.makeFilterInput('files to include (e.g. *.rs, *.ts)', 'include', this.includeRecall);
-		this.excludeInput = this.makeFilterInput('files to exclude (e.g. node_modules, *.lock)', 'exclude', this.excludeRecall);
-		this.filterRows = el('div', 'search-filter-rows', [
-			el('div', 'search-widget', [this.includeInput]),
-			el('div', 'search-widget', [this.excludeInput])
-		]);
+		this.includeInput = this.makeFilterInput('search.include.placeholder', 'include', this.includeRecall);
+		this.excludeInput = this.makeFilterInput('search.exclude.placeholder', 'exclude', this.excludeRecall);
 		this.replaceAllButton = actionButton('replace-all', 'Replace All', () => void this.replaceAll());
-		this.filterButton = el('button', 'search-filters-toggle', [icon('ellipsis')]);
 		this.progress = el('div', 'search-progress');
 		this.messageArea = el('div', 'search-messages');
 		this.list = el('div', 'pane-body search-results');
@@ -201,7 +199,9 @@ export class SearchView {
 	}
 
 	setEnabled(hasFolder: boolean): void {
+		this.hasFolder = hasFolder;
 		this.container.classList.toggle('disabled', !hasFolder);
+		this.render();
 	}
 
 	/** Focus the query box (the Search command / Ctrl+Shift+F), its text selected so typing
@@ -242,18 +242,20 @@ export class SearchView {
 	/* ---------- Static chrome, built once ---------- */
 
 	private buildTitle(): void {
+		// VS Code's title actions exactly: refresh, clear, collapse all (its tree collapses
+		// in place and offers no expand-all).
 		this.title.appendChild(el('div', 'actions', [
 			actionButton('refresh', 'Refresh Search', () => void this.runSearch()),
 			actionButton('clear-all', 'Clear Search Results', () => this.clear()),
-			actionButton('collapse-all', 'Collapse All', () => this.setAllCollapsed(true)),
-			actionButton('expand-all', 'Expand All', () => this.setAllCollapsed(false))
+			actionButton('collapse-all', 'Collapse All', () => this.setAllCollapsed(true))
 		]));
 		this.title.querySelector<HTMLElement>('.actions')!.style.visibility = 'visible';
 	}
 
-	/** The query area, as VS Code's search widget: one bordered composite per row, with the
-	 *  option toggles living inside the query box, the replace row folded away behind a
-	 *  chevron, and the include / exclude fields behind the "…" button. */
+	/** The query area, as VS Code's search widget: one bordered composite per row — the
+	 *  query box carries the Match Case / Whole Word / Regex toggles, the replace box the
+	 *  Preserve Case toggle beside the Replace All action — with the replace row folded away
+	 *  behind a chevron and the include / exclude fields behind the "…" button. */
 	private buildBox(): void {
 		const box = el('div', 'search-box');
 
@@ -267,7 +269,7 @@ export class SearchView {
 		this.replaceToggleIcon = replaceToggle.querySelector('.twistie')!;
 
 		this.queryInput.type = 'text';
-		this.queryInput.placeholder = 'Search';
+		this.queryInput.placeholder = t('search.query.placeholder');
 		this.queryInput.spellcheck = false;
 		this.queryInput.value = this.query;
 		this.queryInput.addEventListener('input', () => {
@@ -287,14 +289,13 @@ export class SearchView {
 			el('div', 'search-toggles', [
 				this.toggle('case-sensitive', 'Match Case (Alt+C)', 'caseSensitive'),
 				this.toggle('whole-word', 'Match Whole Word (Alt+W)', 'wholeWord'),
-				this.toggle('regex', 'Use Regular Expression (Alt+R)', 'useRegex'),
-				this.toggle('preserve-case', t('search.preserveCase'), 'preserveCase')
+				this.toggle('regex', 'Use Regular Expression (Alt+R)', 'useRegex')
 			])
 		]);
 		const queryRow = el('div', 'search-row query-row', [replaceToggle, queryWidget]);
 
 		this.replaceInput.type = 'text';
-		this.replaceInput.placeholder = 'Replace';
+		this.replaceInput.placeholder = t('search.replace.placeholder');
 		this.replaceInput.spellcheck = false;
 		this.replaceInput.value = this.replacement;
 		this.replaceInput.addEventListener('input', () => {
@@ -302,21 +303,44 @@ export class SearchView {
 		});
 		this.replaceInput.addEventListener('keydown', (event) => this.onInputKey(event, null));
 		const replaceRow = el('div', 'search-row replace-row', [
-			el('div', 'search-widget', [this.replaceInput, this.replaceAllButton])
+			el('div', 'search-widget', [
+				this.replaceInput,
+				el('div', 'search-toggles', [
+					this.toggle('preserve-case', t('search.preserveCase'), 'preserveCase')
+				]),
+				this.replaceAllButton
+			])
 		]);
 		this.replaceRow = replaceRow;
 
-		this.filterButton.title = 'Toggle Include / Exclude Filters';
-		this.filterButton.setAttribute('aria-label', 'Toggle Include / Exclude Filters');
-		this.filterButton.addEventListener('click', () => {
-			this.showFilters = !this.showFilters;
-			this.filterRows.style.display = this.showFilters ? '' : 'none';
-		});
+		const filterButton = el('button', 'search-filters-toggle', [icon('ellipsis')]);
+		filterButton.title = 'Toggle Search Details (Ctrl+Shift+J)';
+		filterButton.setAttribute('aria-label', t('search.more'));
+		filterButton.addEventListener('click', () => this.toggleFilters());
 
-		box.append(queryRow, replaceRow, this.filterButton, this.filterRows);
+		this.filterRows = el('div', 'search-filter-rows', [
+			el('div', 'search-filter-row', [
+				el('h4', '', [t('search.include')]),
+				el('div', 'search-widget', [this.includeInput])
+			]),
+			el('div', 'search-filter-row', [
+				el('h4', '', [t('search.exclude')]),
+				el('div', 'search-widget', [this.excludeInput])
+			])
+		]);
+
+		box.append(queryRow, replaceRow, filterButton, this.filterRows);
 		this.filterRows.style.display = this.showFilters ? '' : 'none';
 		this.applyReplaceVisibility();
 		this.content.appendChild(box);
+	}
+
+	/** VS Code's "…": unfold the include / exclude fields (the command palette's Toggle
+	 *  Search Details rides this too). */
+	toggleFilters(): void {
+		if (!this.filterRows) return;
+		this.showFilters = !this.showFilters;
+		this.filterRows.style.display = this.showFilters ? '' : 'none';
 	}
 
 	private toggleReplace(): void {
@@ -331,13 +355,20 @@ export class SearchView {
 		this.replaceRow.style.display = this.showReplace ? '' : 'none';
 		this.replaceToggleIcon?.classList.toggle('codicon-chevron-right', !this.showReplace);
 		this.replaceToggleIcon?.classList.toggle('codicon-chevron-down', this.showReplace);
+		// The replace affordances on the result tree (the per-file replace-all hover button)
+		// follow the replace row: VS Code shows them only while replace mode is open.
+		this.listInner.classList.toggle('replace-mode', this.showReplace);
 	}
 
-	private makeFilterInput(placeholder: string, key: 'include' | 'exclude', recall: HistoryRecall): HTMLInputElement {
+	private makeFilterInput(placeholderKey: 'search.include.placeholder' | 'search.exclude.placeholder', key: 'include' | 'exclude', recall: HistoryRecall): HTMLInputElement {
 		const input = el('input', 'input');
 		input.type = 'text';
-		input.placeholder = placeholder;
+		// VS Code shows these fields' placeholders only while focused (showPlaceholderOnFocus) —
+		// an empty unfocused field reads blank, the value or nothing.
+		input.placeholder = '';
 		input.spellcheck = false;
+		input.addEventListener('focus', () => { input.placeholder = t(placeholderKey); });
+		input.addEventListener('blur', () => { input.placeholder = ''; });
 		input.value = this.options[key];
 		input.addEventListener('input', () => {
 			recall.edited();
@@ -363,9 +394,20 @@ export class SearchView {
 		});
 	}
 
-	/** Enter searches at once; Alt+C / Alt+W / Alt+R / Alt+P flip the toggles, as in VS Code. */
+	/** Enter searches at once; Alt+C / Alt+W / Alt+R / Alt+P flip the toggles, as in VS Code;
+	 *  Ctrl+Down / Ctrl+Up walk the widget's inputs in display order (query → replace →
+	 *  include → exclude), wrapping — VS Code's focus next / previous search input. */
 	private onInputKey(event: KeyboardEvent, onEnter: (() => void) | null): void {
 		event.stopPropagation();
+		if (event.ctrlKey && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+			event.preventDefault();
+			const fields = this.focusableInputs();
+			const at = fields.indexOf(event.target as HTMLInputElement);
+			const next = fields[(at + (event.key === 'ArrowDown' ? 1 : -1) + fields.length) % fields.length]!;
+			next.focus();
+			next.select();
+			return;
+		}
 		if (event.key === 'Enter' && onEnter) {
 			event.preventDefault();
 			onEnter();
@@ -385,10 +427,20 @@ export class SearchView {
 		}
 	}
 
+	/** The inputs the Ctrl+Down / Ctrl+Up walk crosses: only the visible ones — a folded
+	 *  replace row or a hidden details area holds no stop. */
+	private focusableInputs(): HTMLInputElement[] {
+		const fields: HTMLInputElement[] = [this.queryInput];
+		if (this.showReplace) fields.push(this.replaceInput);
+		if (this.showFilters) fields.push(this.includeInput, this.excludeInput);
+		return fields;
+	}
+
 	private toggle(iconName: string, title: string, key: keyof SearchOptions): HTMLButtonElement {
 		const button = el('button', 'action-btn toggle' + (this.options[key] ? ' active' : ''), [icon(iconName)]);
 		button.title = title;
-		button.addEventListener('click', () => this.setOption(key, !this.options[key] as never));
+		// Preserve Case is a replace-side option only: flipping it never reruns the search.
+		button.addEventListener('click', () => this.setOption(key, !this.options[key] as never, key !== 'preserveCase'));
 		this.toggleButtons.set(key, button);
 		return button;
 	}
@@ -586,6 +638,38 @@ export class SearchView {
 		}
 	}
 
+	/** The search's own matcher options, as every replace flow threads them (whole word
+	 *  included, so what was listed is exactly what gets replaced). */
+	private matcher() {
+		return {
+			query: this.query,
+			isRegex: this.options.useRegex,
+			caseSensitive: this.options.caseSensitive,
+			wordOnly: this.options.wholeWord,
+			include: this.options.include,
+			exclude: this.options.exclude,
+			preserveCase: this.options.preserveCase
+		};
+	}
+
+	/** VS Code's per-file Replace All: the file header's hover button (or its context-menu
+	 *  row) rewrites exactly that one file — the workspace replace runs with the file's own
+	 *  root-relative path as the include glob — and the search re-lists what remains (a
+	 *  replacement that itself matches re-appears, as it would in VS Code). No confirmation,
+	 *  like VS Code's per-file replace; the workspace Replace All is the confirmed one. */
+	private async replaceFileAll(file: FileMatches): Promise<void> {
+		if (this.results.indexOf(file) === -1) return;
+		try {
+			await replaceInFiles({ ...this.matcher(), include: file.path }, this.replacement, file.root);
+			await this.runSearch();
+		} catch (error) {
+			notify('error', String(error));
+		}
+	}
+
+	/** VS Code's Replace All action (Ctrl+Alt+Enter on the replace field, the toolbar
+	 *  button otherwise): the confirmation's counts describe the listed results, and the
+	 *  replacement runs with the same matcher across every root. */
 	async replaceAll(): Promise<void> {
 		// The dialog's counts describe `this.results`, but the replacement runs `this.query`:
 		// a query edited within the typing pause (its search still on the debounce timer) or a
@@ -622,15 +706,7 @@ export class SearchView {
 				// The same matcher as the search (whole word included), so what was listed is
 				// exactly what gets replaced — Preserve Case threaded through, each
 				// replacement's casing derived from its own match.
-				const outcome = await replaceInFiles({
-					query: this.query,
-					isRegex: this.options.useRegex,
-					caseSensitive: this.options.caseSensitive,
-					wordOnly: this.options.wholeWord,
-					include: this.options.include,
-					exclude: this.options.exclude,
-					preserveCase: this.options.preserveCase
-				}, this.replacement, root);
+				const outcome = await replaceInFiles(this.matcher(), this.replacement, root);
 				files += outcome.files;
 				replacements += outcome.replacements;
 			}
@@ -653,10 +729,23 @@ export class SearchView {
 	private render(error: string | null = null): void {
 		this.messageArea.innerHTML = '';
 		this.progress.classList.toggle('running', this.searching);
-		this.replaceAllButton.disabled = this.results.length === 0;
+		const replaceEnabled = this.results.length > 0;
+		this.replaceAllButton.disabled = !replaceEnabled;
+		// VS Code's Replace All button title carries the disabled state's explanation.
+		this.replaceAllButton.title = replaceEnabled ? t('search.replaceAll') : t('search.replaceAll.disabled');
 
 		if (error) {
 			this.messageArea.appendChild(el('div', 'search-error', [error]));
+			return;
+		}
+		if (!this.hasFolder) {
+			// VS Code's no-folder welcome: the sentence and an Open Folder link-button.
+			const welcome = el('div', 'welcome-view');
+			welcome.append(el('p', '', [t('search.noFolder')]));
+			const openFolder = el('button', 'search-link', [t('search.openFolder')]);
+			openFolder.addEventListener('click', () => void commands.execute('workbench.openFolder'));
+			welcome.append(openFolder);
+			this.messageArea.appendChild(welcome);
 			return;
 		}
 		if (this.query === '') {
@@ -664,11 +753,24 @@ export class SearchView {
 			return;
 		}
 		const total = this.results.reduce((sum, f) => sum + f.matches.length, 0);
+		if (total === 0 && !this.searching) {
+			// VS Code's no-results message: the hint sentence, then the Open Settings link.
+			const summary = el('div', 'search-summary');
+			summary.append(t('search.noResults'));
+			const openSettings = el('button', 'search-link', [t('search.openSettings')]);
+			openSettings.addEventListener('click', () => void commands.execute('workbench.openSettings'));
+			summary.append(openSettings);
+			this.messageArea.appendChild(summary);
+			if (this.truncated) {
+				this.messageArea.appendChild(el('div', 'search-warning', [
+					'The result set only contains a subset of all matches. Use a more specific search term to narrow down the results.'
+				]));
+			}
+			return;
+		}
 		const header = this.searching
 			? total === 0 ? 'Searching…' : `Searching… ${total} result${total === 1 ? '' : 's'} so far`
-			: total === 0
-				? 'No results found'
-				: `${total} result${total === 1 ? '' : 's'} in ${this.results.length} file${this.results.length === 1 ? '' : 's'}`;
+			: `${total} result${total === 1 ? '' : 's'} in ${this.results.length} file${this.results.length === 1 ? '' : 's'}`;
 		this.messageArea.appendChild(el('div', 'search-summary', [header]));
 		if (this.truncated) {
 			this.messageArea.appendChild(el('div', 'search-warning', [
@@ -689,17 +791,27 @@ export class SearchView {
 
 	/** One file's subtree, as VS Code's search tree: the header row (twistie, file icon, name,
 	 *  dimmed folder, match-count badge), then its match rows - present but hidden when the
-	 *  group is collapsed, so folding is a class flip with no rebuild. */
+	 *  group is collapsed, so folding is a class flip with no rebuild. Replace mode adds the
+	 *  header's hover Replace All button (VS Code's per-file replace). */
 	private renderFileGroup(file: FileMatches): HTMLElement {
 		const collapsed = this.collapsed.has(this.fileKey(file));
 		const group = el('div', 'search-file-group' + (collapsed ? ' collapsed' : ''));
 		const folder = dirname(file.path);
+		const fileReplace = el('button', 'file-replace', [icon('replace-all')]);
+		fileReplace.title = t('search.replaceAll');
+		fileReplace.setAttribute('aria-label', t('search.replaceAll'));
+		fileReplace.addEventListener('click', (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			void this.replaceFileAll(file);
+		});
 		const head = el('div', 'row search-file-head', [
 			icon(collapsed ? 'chevron-right' : 'chevron-down', 'twistie'),
 			icon('file-code'),
 			el('span', 'label', [basename(file.path)]),
 			folder ? el('span', 'description', [folder]) : null,
-			el('span', 'badge', [String(file.matches.length)])
+			el('span', 'badge', [String(file.matches.length)]),
+			fileReplace
 		]);
 		head.title = file.path;
 		head.addEventListener('click', () => this.setCollapsed(file, !this.collapsed.has(this.fileKey(file))));
@@ -749,15 +861,7 @@ export class SearchView {
 		try {
 			const remaining = await searchReplaceOne(
 				{ path: file.path, line: match.line, column: match.column },
-				{
-					query: this.query,
-					isRegex: this.options.useRegex,
-					caseSensitive: this.options.caseSensitive,
-					wordOnly: this.options.wholeWord,
-					include: this.options.include,
-					exclude: this.options.exclude,
-					preserveCase: this.options.preserveCase
-				},
+				this.matcher(),
 				this.replacement,
 				file.root
 			);
@@ -831,12 +935,16 @@ export class SearchView {
 	 *  Explorer" — a desktop-only row (a browser page has no such place), shown only for a
 	 *  file whose absolute path the view can name: a multi-root search's results carry their
 	 *  root, a single-folder search's root is derived backend-side and never crosses here, and
-	 *  a relative path is nothing the OS's File Explorer could reveal. The file row's menu is
-	 *  the same without the line's Copy. */
+	 *  a relative path is nothing the OS's File Explorer could reveal. Replace mode adds the
+	 *  replace rows: Replace on a match (the one occurrence), Replace All on a file head —
+	 *  VS Code gates both on the replace field being open, as here. The file row's menu is
+	 *  the same without the line's Copy and Replace. */
 	private showResultMenu(event: MouseEvent, file: FileMatches, match: SearchMatch | null): void {
 		const absolute = this.absolutePath(file);
 		const entries: MenuEntry[] = [
 			...(match ? [{ label: 'Copy', run: () => void writeText(match.text) }] : []),
+			...(match && this.showReplace ? [{ label: t('search.replaceMatch'), run: () => void this.replaceOne(file, match) }] : []),
+			...(match === null && this.showReplace ? [{ label: t('search.replaceAll'), run: () => void this.replaceFileAll(file) }] : []),
 			{ label: 'Copy Path', keybinding: 'Shift+Alt+C', run: () => void writeText(absolute) },
 			{ label: 'Copy All', run: () => void writeText(this.results.map((result) => this.absolutePath(result)).join('\n')) },
 			'separator',
