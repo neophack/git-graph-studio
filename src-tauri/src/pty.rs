@@ -391,12 +391,14 @@ const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 /// its own exit path — Git Bash flushes `~/.bash_history`, PowerShell's PSReadLine flushes
 /// its history, GGS Bash flushes its own — where a bare kill loses all of it (the command
 /// history of every closed terminal, gone since the first build). A busy command leaves
-/// the `exit` queued behind it; [`CLOSE_GRACE`] bounds the wait, the kill ends it, and
-/// the wait past the kill reaps the child — the signal itself crosses asynchronously, so
-/// a `try_wait` can still answer "running" after the kill returned, and the contract the
-/// callers and the close test lean on ("the function returns with the child reaped")
-/// holds only past this wait. The reader thread announces the exit to the frontends
-/// exactly as before.
+/// the `exit` queued behind it; [`CLOSE_GRACE`] bounds the wait, the kill ends it, and a
+/// bounded poll past the kill reaps the child — the signal crosses asynchronously, so a
+/// `try_wait` the instant after the kill returned can still answer "running" (the close
+/// test's "the shell outlived the close grace" on a loaded macOS runner), and the
+/// contract "returns with the child reaped" holds once the poll has seen the exit. The
+/// poll is bounded, never a blocking wait: a blocking `wait` hung the macOS runner for
+/// 47 minutes on a SIGKILLed shell, and a wedged pty must not park a thread forever. The
+/// reader thread announces the exit to the frontends exactly as before.
 fn close_session(session: &mut PtySession) {
     let _ = session.writer.write_all(b"exit\r");
     let _ = session.writer.flush();
@@ -409,8 +411,16 @@ fn close_session(session: &mut PtySession) {
         }
     }
     let _ = session.child.kill();
-    // A SIGKILLed child answers its wait at once; the reaping is the point.
-    let _ = session.child.wait();
+    // A SIGKILLed child answers its wait in milliseconds; the poll is the reaping, and
+    // its bound is the backstop, not the expectation.
+    let reaping = std::time::Instant::now() + CLOSE_GRACE;
+    loop {
+        match session.child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) if std::time::Instant::now() >= reaping => return,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
 }
 
 /// Kill the shell (the "trash" action): politely first — an interactive shell writes its
