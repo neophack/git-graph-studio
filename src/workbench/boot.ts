@@ -406,8 +406,14 @@ export const bootMethods: ThisType<Workbench> = {
 			this.extensionHost.noteTabsChanged();
 			this.statusBar.setEditor(editor);
 			this.followContextSymbol(editor);
-			if (editor?.kind === 'file' && editor.path && state.layout.sidebarVisible && this.activeView === 'explorer') {
-				void this.explorer.reveal(editor.path);
+			if (editor?.kind === 'file' && editor.path) {
+				// explorer.autoReveal: the active file reveals in the tree when the Explorer is
+				// watching; opened elsewhere, the reveal is owed the moment the view returns
+				// (layout.ts's showView/toggleSidebar run it). The same open feeds the picker's
+				// recently-opened rows.
+				this.noteRecentFile(editor.path);
+				if (state.layout.sidebarVisible && this.activeView === 'explorer') void this.explorer.reveal(editor.path);
+				else this.pendingReveal = editor.path;
 			}
 			// The extension frames learn the active editor, and an editor of a declared
 			// language wakes the extensions listening for it.

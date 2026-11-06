@@ -4,6 +4,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { FilePickSource } from '../src/features/quickOpen';
+import { quickOpenItems, recentFileItems, type SymbolSources } from '../src/workbench';
 import { flush } from './helpers';
 import { backend } from './tauriMock';
 
@@ -129,5 +130,49 @@ describe('FilePickSource', () => {
 		expect((await picks.query('b', () => undefined, () => false))).toEqual([]);
 		fails = false;
 		expect((await picks.query('b', () => undefined, () => false)).map((i) => i.value)).toEqual(['file:b.txt']);
+	});
+});
+
+describe('recently opened (the picker\'s empty-query section)', () => {
+	const symbols: SymbolSources = { fileSymbols: async () => [], workspaceSymbols: async () => [] };
+	const noRecents = () => [] as string[];
+
+	it('lists the recents first, the walked rows after without repeats', async () => {
+		const picks = source(['src/main.ts', 'src/app.ts', 'README.md']);
+		await flush();
+		const picker = quickOpenItems(picks, () => null, symbols, () => ['README.md', 'src/main.ts']);
+		const items = await picker.query('', () => undefined, () => false);
+		expect(items.map((i) => i.value)).toEqual(['file:README.md', 'file:src/main.ts', 'file:src/app.ts']);
+		// The rows open exactly like walked ones (the same `file:` value), and a root-level
+		// file's folder line stays empty while a nested one names its folder.
+		expect(items[0]!.description).toBeUndefined();
+		expect(items[1]!.description).toBe('src');
+		expect(items[0]!.icon).toBe('file');
+	});
+
+	it('a typed query goes straight to the fuzzy scorer, recents out of the way', async () => {
+		const picks = source(['src/main.ts', 'src/app.ts', 'README.md']);
+		await flush();
+		const picker = quickOpenItems(picks, () => null, symbols, () => ['README.md']);
+		const items = await picker.query('app', () => undefined, () => false);
+		expect(items.map((i) => i.value)).toEqual(['file:src/app.ts']);
+	});
+
+	it('no recents means today\'s walked list alone', async () => {
+		const picks = source(['src/main.ts', 'README.md']);
+		await flush();
+		const picker = quickOpenItems(picks, () => null, symbols, noRecents);
+		const items = await picker.query('', () => undefined, () => false);
+		expect(items.map((i) => i.value)).toEqual(['file:src/main.ts', 'file:README.md']);
+	});
+
+	it('recentFileItems spells the row the picker renders', () => {
+		const items = recentFileItems(['docs/read me.md', 'C:\\outside\\x.ts']);
+		expect(items[0]!.label).toBe('read me.md');
+		expect(items[0]!.description).toBe('docs');
+		expect(items[0]!.value).toBe('file:docs/read me.md');
+		expect(items[1]!.label).toBe('x.ts');
+		expect(items[1]!.description).toBe('C:\\outside');
+		expect(items[1]!.value).toBe('file:C:\\outside\\x.ts');
 	});
 });

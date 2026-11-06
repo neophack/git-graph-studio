@@ -34,7 +34,7 @@ import { SETTINGS_EVENT, settings, THEME_EVENT, updateSetting } from '../platfor
 import * as state from '../platform/state';
 import { StatusBar } from './statusbar';
 import { TitleBar } from './titlebar';
-import { basename, busy, el, icon, notify, quickInput, quickPick, type QuickPickItem, type QuickPickSource } from '../platform/ui/index';
+import { basename, busy, el, icon, notify, quickInput, quickPick, relativeTo, type QuickPickItem, type QuickPickSource } from '../platform/ui/index';
 import { FilePickSource, pickedFilePosition } from '../features/quickOpen';
 import { ExtensionTreeView } from '../features/extensions';
 import { extFileDataUrl } from '../platform/extAssets';
@@ -352,7 +352,7 @@ export class Workbench {
 		const chosen = await quickInput({
 			value: initial,
 			placeholder: t('quickopen.placeholder'),
-			items: quickOpenItems(this.fileSource(), () => this.editors.lineInfo(), this.symbolSources())
+			items: quickOpenItems(this.fileSource(), () => this.editors.lineInfo(), this.symbolSources(), () => this.recentPickPaths())
 		});
 		if (!chosen) return;
 		if (chosen.startsWith('command:')) await commands.execute(chosen.slice('command:'.length));
@@ -379,6 +379,37 @@ export class Workbench {
 	}
 
 	filePicks: FilePickSource | null = null;
+
+	/** The recently opened files, most recent first — the picker's empty-query section
+	 *  (VS Code's anythingQuickAccess opening rows) and the Explorer's deferred reveal
+	 *  (`pendingReveal`) are its only readers. */
+	recentFiles: string[] = [];
+	/** A file that became the active editor while the Explorer was elsewhere: the reveal it
+	 *  is owed runs when the view returns (explorer.autoReveal). */
+	pendingReveal: string | null = null;
+
+	/** VS Code's Ctrl+P opening section: the file joins the front of the recents, each file
+	 *  once, the oldest dropped past nine. */
+	noteRecentFile(path: string): void {
+		if (!path) return;
+		this.recentFiles = [path, ...this.recentFiles.filter((p) => p !== path)].slice(0, QUICK_RECENTS);
+	}
+
+	/** The recents spelled the way the picker's walked rows spell their files: a plain
+	 *  folder's are repo-relative (the dispatch absolutises them), a multi-root's stay
+	 *  absolute — and a file outside the roots keeps its absolute path either way. */
+	recentPickPaths(): string[] {
+		const single = this.repoPaths.length <= 1 ? this.repoPath : null;
+		const seen = new Set<string>();
+		const paths: string[] = [];
+		for (const path of this.recentFiles) {
+			const spelled = single ? relativeTo(single, path) : path;
+			if (seen.has(spelled)) continue;
+			seen.add(spelled);
+			paths.push(spelled);
+		}
+		return paths;
+	}
 
 	fileSource(): FilePickSource {
 		if (!this.filePicks) {
@@ -1025,14 +1056,23 @@ export function isNativeClipboardKey(event: KeyboardEvent): boolean {
 	return (event.ctrlKey || event.metaKey) && !event.altKey && (key === 'c' || key === 'x');
 }
 
-function quickOpenItems(files: FilePickSource, lineInfo: () => { line: number; column: number; lines: number } | null, symbols: SymbolSources): QuickPickSource {
+export function quickOpenItems(files: FilePickSource, lineInfo: () => { line: number; column: number; lines: number } | null, symbols: SymbolSources, recents: () => string[]): QuickPickSource {
 	return {
 		query: async (query, onPartial, isCancelled) => {
 			if (query.startsWith('?')) return quickOpenHelpItems();
 			if (query.startsWith(':')) return gotoLineItems(query.slice(1), lineInfo());
 			if (query.startsWith('@')) return fileSymbolItems(query.slice(1), await symbols.fileSymbols());
 			if (query.startsWith('#')) return workspaceSymbolItems(query.slice(1), await symbols.workspaceSymbols());
-			if (!query.startsWith('>')) return files.query(query, onPartial, isCancelled);
+			if (!query.startsWith('>')) {
+				// VS Code's anythingQuickAccess opening section: with nothing typed, the
+				// recently opened files lead and the walked list fills the rest (each recent
+				// listed once). Any other query goes straight to the fuzzy scorer.
+				const recent = query === '' ? recents() : [];
+				if (recent.length === 0) return files.query(query, onPartial, isCancelled);
+				const rest = await files.query('', onPartial, isCancelled);
+				const picked = new Set(recent.map((path) => 'file:' + path));
+				return [...recentFileItems(recent), ...rest.filter((item) => !picked.has(item.value))];
+			}
 			const q = query.slice(1).trim().toLowerCase();
 			const items = commands.paletteItems()
 				.filter((command) => command.label.toLowerCase().includes(q))
@@ -1041,6 +1081,24 @@ function quickOpenItems(files: FilePickSource, lineInfo: () => { line: number; c
 			return items;
 		}
 	};
+}
+
+/** How many recently-opened files the picker's empty-query section leads with. */
+const QUICK_RECENTS = 9;
+
+/** The recently-opened rows, VS Code's Ctrl+P opening section: the file's basename as the
+ *  label, its folder as the second line, and the same `file:` value a walked row carries, so
+ *  the pick opens (and lands at a goto position) exactly like any other file row. */
+export function recentFileItems(paths: string[]): QuickPickItem[] {
+	return paths.map((path) => {
+		const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+		return {
+			label: path.slice(cut + 1),
+			description: cut === -1 ? undefined : path.slice(0, cut),
+			icon: 'file',
+			value: 'file:' + path
+		};
+	});
 }
 
 /** The "?" mode's rows, VS Code's quick access help: every prefix with its wording and one

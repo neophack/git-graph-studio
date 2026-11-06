@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Explorer } from '../src/features/explorer';
+import { Workbench } from '../src/workbench';
 import { setRemoteEnv } from '../src/remote/session';
 import { provideHook } from '../src/platform/hooks';
 import { basename } from '../src/platform/ui';
@@ -912,4 +913,19 @@ describe('explorer clipboard', () => {
 		expect(document.querySelector('.row.filter-match')).toBeNull();
 	});
 
+	it('reveals the active file when the Explorer becomes visible (explorer.autoReveal)', async () => {
+		fileSystem({ [ROOT]: ['src/', 'README.md'], [`${ROOT}\\src`]: ['main.ts'] });
+		backend.on('boot_context', () => ({ file: null, actions: [], repo: null }));
+		backend.on('ext_list', () => []);
+		const workbench = new Workbench();
+		workbench.explorer.setRoot(ROOT);
+		await flush();
+		// A file opened while the Explorer was elsewhere: the reveal parks on the workbench.
+		workbench.pendingReveal = `${ROOT}\\src\\main.ts`;
+		workbench.showView('explorer');
+		await flush();
+		expect(texts('.tree .row.selected .label')).toEqual(['main.ts']);
+		expect(workbench.pendingReveal).toBeNull();
+		workbench.dispose();
+	});
 });

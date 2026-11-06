@@ -157,6 +157,13 @@ export const layoutMethods: ThisType<Workbench> = {
 		if (view === 'scm') void this.scm.refresh();
 		if (view === 'extensions') void this.extensions.refresh();
 		if (view === 'analysis') void this.analysis.refresh();
+		// explorer.autoReveal: a file that became the active editor while the Explorer was
+		// elsewhere (boot.ts parked it) reveals the moment the view returns.
+		if (view === 'explorer' && this.pendingReveal) {
+			const path = this.pendingReveal;
+			this.pendingReveal = null;
+			void this.explorer.reveal(path);
+		}
 		if (focus) {
 			const element = this.isExtensionView(view) ? this.extContainers.get(view)?.element : this.views[view as ViewId];
 			element?.querySelector<HTMLElement>('[tabindex]')?.focus();
@@ -176,6 +183,13 @@ export const layoutMethods: ThisType<Workbench> = {
 			if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis' || id === 'extensions' || this.isExtensionView(id)) item.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
 		}
 		state.saveLayout();
+		// The bar's return shows the Explorer again: the reveal a file opened elsewhere was
+		// owed (explorer.autoReveal) runs now, the same moment showView's branch would.
+		if (state.layout.sidebarVisible && this.activeView === 'explorer' && this.pendingReveal) {
+			const path = this.pendingReveal;
+			this.pendingReveal = null;
+			void this.explorer.reveal(path);
+		}
 	},
 
 	/* ---------- The window/view modes (the Appearance menu) ---------- */
