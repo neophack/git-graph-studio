@@ -42,6 +42,7 @@ export const zhCn: typeof en = {
 	'editor.conflict.diskSide': '磁盘',
 	'editor.conflict.mineSide': '我的版本',
 	'editor.conflict.reloaded': '已在另一台设备上更新',
+	'editor.saveAs.alreadyOpen': '已有标签页打开了 {0}；文件已写入，由那个标签页显示。',
 	'editor.menu.compareWithClipboard': '与剪贴板比较',
 	'breadcrumbs.emptyFolder': '空文件夹',
 	'breadcrumbs.noSymbols': '未找到符号',

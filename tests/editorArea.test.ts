@@ -5,7 +5,7 @@ import { tabDrag } from '../src/features/editor';
 import { applyContributions, removeContributions } from '../src/features/extensions';
 import { SETTINGS_EVENT } from '../src/platform/settings';
 import { backend } from './tauriMock';
-import { click, flush, menuItem, notificationButton, notifications, rightClick, texts } from './helpers';
+import { click, flush, menuItem, menuLabels, notificationButton, notifications, rightClick, texts } from './helpers';
 
 function files(contents: Record<string, string | null>): void {
 	backend.on('read_file', ({ path }) => {
@@ -56,6 +56,27 @@ describe('editor area (M3 3.1)', () => {
 		area.focusIndex(1);
 		expect(area.activeInput?.kind === 'file' && area.activeInput.path.endsWith('b.ts')).toBe(true);
 		expect(area.focusedIndex).toBe(1);
+	});
+
+	it('the tab menu\'s split family splits the tab\'s own group, not the focused one', async () => {
+		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		const second = area.split('right');
+		await second.openFile('C:\\repo\\b.ts');
+
+		// The focused group is the second one, but the menu is opened on the first group's
+		// tab: Split Down must split THAT group (below the first), taking the tab's own
+		// editor again — VS Code's tab-menu split acts on that tab.
+		area.focusIndex(1);
+		const firstTab = document.querySelector('.editor-group-box .tab')!; // a.ts in the first group
+		rightClick(firstTab);
+		expect(menuLabels()).toContain('Split Down');
+		click(menuItem('Split Down'));
+		await flush();
+		expect(area.groupCount).toBe(3);
+		expect(groupTabs()).toEqual([['a.ts'], ['a.ts'], ['b.ts']]);
 	});
 
 	it('moves a tab between groups by drag and drop', async () => {

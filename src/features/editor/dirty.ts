@@ -1,7 +1,8 @@
 import { backupClear, backupWrite, type FileContents, writeFile } from '../../platform/ipc/fs';
 import { samePath } from '../extensions';
 import { settings } from '../../platform/settings';
-import { t } from '../../platform/i18n';
+import { t, tf } from '../../platform/i18n';
+import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { basename, el, notify, toPosix } from '../../platform/ui/index';
 import { fileIcon } from '../../platform/fileIcons';
 import type { EditorGroup } from './group';
@@ -119,6 +120,49 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 		for (const editor of this.open) if (editor.dirty) await this.save(editor);
 	},
 
+	/** VS Code's Save As: a dialog picks the target, the buffer is written there in the
+	 *  editor's own encoding and line endings, and the tab becomes the new file — input,
+	 *  label, icon, id, the history stops that hold the old input, and a fresh saved
+	 *  baseline (the write above), so the tab lands clean. The old file keeps what disk
+	 *  already held; the tab's previous path is simply no longer held. */
+	async saveAs(editor?: Editor | null): Promise<void> {
+		if (editor === undefined) editor = this.active;
+		if (!editor || editor.input.kind !== 'file' || !editor.view) return;
+		const target = await saveDialog({ defaultPath: editor.input.path });
+		if (!target || target === editor.input.path) return;
+		const contents = editor.view.state.doc.toString();
+		try {
+			await writeFile(target, contents, editor.encoding ?? 'utf8', editor.eol ?? 'lf');
+		} catch (error) {
+			notify('error', `Failed to save '${editor.label}': ${String(error)}`);
+			return;
+		}
+		// A tab already holds the target: the write stands and that tab is the file's home —
+		// rebinding here would put two tabs on one path.
+		if (this.open.some((candidate) => candidate !== editor && candidate.input.kind === 'file' && samePath(candidate.input.path, target))) {
+			notify('warning', tf('editor.saveAs.alreadyOpen', target));
+			return;
+		}
+		const previousInput = editor.input;
+		editor.input = { kind: 'file', path: target };
+		editor.label = basename(target);
+		editor.iconClass = fileIcon(editor.label);
+		editor.id = inputId(editor.input);
+		// The history's stops hold the editor's input by identity: Back from the renamed tab
+		// must land on the new path (pathRenamed carries the same mechanics).
+		for (const entry of this.navHistory) {
+			if (entry.input === previousInput) entry.input = editor.input;
+		}
+		void backupClear(previousInput.path).catch(() => undefined);
+		editor.savedDoc = editor.view.state.doc;
+		editor.savedEol = editor.eol;
+		editor.savedEncoding = editor.encoding;
+		editor.dirty = false;
+		this.renderTabs();
+		this.emitActive();
+		this.onFileSaved?.(target);
+	},
+
 	async saveByPath(path: string): Promise<boolean> {
 		const editor = this.open.find((candidate) => candidate.input.kind === 'file' && samePath(candidate.input.path, path));
 		if (!editor) return false;
@@ -195,7 +239,9 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 
 	async settleDirty(choice: 'save' | 'discard'): Promise<boolean> {
 		for (const editor of [...this.open]) {
-			if (!editor.dirty) continue;
+			// A pinned tab is sticky: no bulk settle may save or discard its buffer — the
+			// bulk close that follows skips it, so its unsaved changes must survive.
+			if (!editor.dirty || editor.pinned) continue;
 			if (choice === 'save') {
 				await this.save(editor);
 				if (editor.dirty) return false; // the save failed and was reported
@@ -243,13 +289,15 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 	},
 
 	async closeAll(): Promise<boolean> {
-		// Several dirty files get one prompt (VS Code's), not one per file.
-		const dirty = this.dirtyLabels();
+		// Several dirty files get one prompt (VS Code's), not one per file. A pinned tab is
+		// sticky: no bulk close touches it, only its own Close does.
+		const dirty = this.open.filter((e) => !e.pinned && e.dirty).map((e) => e.label);
 		if (dirty.length > 1) {
 			const choice = await askToSaveMany(dirty);
 			if (choice === 'cancel' || !(await this.settleDirty(choice))) return false;
 		}
 		for (const editor of [...this.open]) {
+			if (editor.pinned) continue;
 			await this.close(editor);
 			if (this.open.includes(editor)) return false; // cancelled
 		}
@@ -258,17 +306,22 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 
 	async closeOthers(keep: Editor): Promise<void> {
 		for (const editor of [...this.open]) {
-			if (editor !== keep) await this.close(editor);
+			if (editor === keep || editor.pinned) continue;
+			await this.close(editor);
 		}
 	},
 
 	async closeToTheRight(from: Editor): Promise<void> {
-		for (const editor of this.open.slice(this.open.indexOf(from) + 1)) await this.close(editor);
+		for (const editor of this.open.slice(this.open.indexOf(from) + 1)) {
+			if (editor.pinned) continue;
+			await this.close(editor);
+		}
 	},
 
 	async closeSaved(): Promise<void> {
 		for (const editor of [...this.open]) {
-			if (!editor.dirty) await this.close(editor);
+			if (editor.dirty || editor.pinned) continue;
+			await this.close(editor);
 		}
 	},
 

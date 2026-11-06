@@ -313,6 +313,13 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .tab.dirty:hover .close .codicon-close { display: inline-block; }
 .tab.dirty:hover .close .codicon-circle-filled { display: none; }
 .tab .close .codicon-circle-filled { display: none; }
+/* A pinned tab's pin marker takes the close button's place; its dirty state reads from the
+   label (VS Code marks it italic), and the close never shows. */
+.tab .pin { width: 20px; height: 20px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; visibility: hidden; }
+.tab .pin .codicon { font-size: 16px; }
+.tab.pinned .pin, .tab.pinned:hover .pin { visibility: visible; }
+.tab .pin:hover { background: var(--vscode-toolbar-hoverBackground); }
+.tab.pinned.dirty .label { font-style: italic; }
 .tab-actions { margin-left: auto; display: flex; align-items: center; padding: 0 6px; flex: none; }
 .markdown-preview-button {
 	display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;

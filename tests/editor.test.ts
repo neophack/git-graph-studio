@@ -454,7 +454,7 @@ describe('editor group', () => {
 
 		const firstTab = document.querySelector('.tab')!; // a.txt
 		rightClick(firstTab);
-		expect(menuLabels()).toEqual(['Close', 'Close Others', 'Close to the Right', 'Close Saved', 'Close All', 'Copy Path', 'Copy Relative Path', 'Reveal in File Explorer', 'Lock Editor Group']);
+		expect(menuLabels()).toEqual(['Close', 'Close Others', 'Close to the Right', 'Close Saved', 'Close All', 'Save As...', 'Save All', 'Copy Path', 'Copy Relative Path', 'Reveal in File Explorer', 'Pin', 'Move into New Window', 'Copy into New Window', 'Lock Editor Group']);
 		click(menuItem('Copy Relative Path'));
 		expect(backend.clipboard).toEqual(['a.txt']);
 
@@ -463,24 +463,28 @@ describe('editor group', () => {
 		click(menuItem('Reveal in File Explorer'));
 		expect(backend.revealed).toEqual(['C:\\repo\\a.txt']);
 
-		// VS Code shows Save on a dirty tab's menu only, between Close All and the copies.
+		// VS Code shows Save on a dirty tab's menu only, between Close All and Save As.
 		const view = group.activeView!;
 		view.dispatch({ changes: { from: 0, insert: 'x' } });
 		rightClick(document.querySelector('.tab.active')!);
-		expect(menuLabels()).toEqual(['Close', 'Close Others', 'Close to the Right', 'Close Saved', 'Close All', 'Save', 'Copy Path', 'Copy Relative Path', 'Reveal in File Explorer', 'Lock Editor Group']);
+		expect(menuLabels()).toEqual(['Close', 'Close Others', 'Close to the Right', 'Close Saved', 'Close All', 'Save', 'Save As...', 'Save All', 'Copy Path', 'Copy Relative Path', 'Reveal in File Explorer', 'Pin', 'Move into New Window', 'Copy into New Window', 'Lock Editor Group']);
 		click(menuItem('Save'));
 		await flush();
 		expect(document.querySelector('.tab.active')!.classList.contains('dirty')).toBe(false);
 		expect(backend.callsTo('write_file').at(-1)).toMatchObject({ path: 'C:\\repo\\b.txt', contents: 'xb' });
 
-		// The remote shell is a browser page: no desktop file manager, so Reveal hides
-		// while the rest of the menu stands (the Explorer's row-menu gate).
+		// The remote shell is a browser page: no desktop file manager and no sibling
+		// instance, so Reveal and the new-window pair hide while the rest stands (the
+		// Explorer's row-menu gate).
 		document.documentElement.setAttribute('data-remote-shell', '');
 		try {
 			rightClick(document.querySelector('.tab.active')!);
-			expect(menuLabels()).not.toContain('Reveal in File Explorer');
-			expect(menuLabels()).toContain('Copy Path');
-			expect(menuLabels()).toContain('Copy Relative Path');
+			const remote = menuLabels();
+			expect(remote).not.toContain('Reveal in File Explorer');
+			expect(remote).not.toContain('Move into New Window');
+			expect(remote).not.toContain('Copy into New Window');
+			expect(remote).toContain('Copy Path');
+			expect(remote).toContain('Copy Relative Path');
 		} finally {
 			document.documentElement.removeAttribute('data-remote-shell');
 		}
@@ -491,6 +495,85 @@ describe('editor group', () => {
 		expect(texts('.tab .label')).toEqual(['a.txt']);
 		rightClick(firstTab);
 		click(menuItem('Close Saved'));
+		await flush();
+		expect(texts('.tab .label')).toEqual([]);
+	});
+
+	it('Save As writes the buffer to the chosen path and the tab becomes the new file', async () => {
+		files({ 'C:\\repo\\a.txt': 'a' });
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openFile('C:\\repo\\a.txt');
+		const view = group.activeView!;
+		view.dispatch({ changes: { from: 0, insert: 'x' } });
+
+		// A cancelled dialog leaves the tab alone.
+		backend.dialog.saveResult = null;
+		rightClick(document.querySelector('.tab.active')!);
+		click(menuItem('Save As...'));
+		await flush();
+		expect(texts('.tab .label')).toEqual(['a.txt']);
+
+		backend.dialog.saveResult = 'C:\\repo\\renamed.txt';
+		rightClick(document.querySelector('.tab.active')!);
+		click(menuItem('Save As...'));
+		await flush();
+		expect(backend.callsTo('write_file').at(-1)).toMatchObject({ path: 'C:\\repo\\renamed.txt', contents: 'xa' });
+		// The tab became the new file, clean: input, label and the saved baseline moved.
+		expect(texts('.tab .label')).toEqual(['renamed.txt']);
+		expect(document.querySelector('.tab')!.classList.contains('dirty')).toBe(false);
+		expect(group.activeInput).toMatchObject({ kind: 'file', path: 'C:\\repo\\renamed.txt' });
+		// The history stops that held the old input now land on the new path.
+		expect(group.navHistory.at(-1)?.input).toMatchObject({ kind: 'file', path: 'C:\\repo\\renamed.txt' });
+	});
+
+	it('a pinned tab renders the pin marker, sorts ahead, and every bulk close skips it', async () => {
+		files({ 'C:\\repo\\a.txt': 'a', 'C:\\repo\\b.txt': 'b', 'C:\\repo\\c.txt': 'c' });
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openFile('C:\\repo\\a.txt');
+		await group.openFile('C:\\repo\\b.txt');
+		await group.openFile('C:\\repo\\c.txt');
+
+		// Double-clicking a tab pins it (VS Code's doubleClickTabToPin): the pinned tab
+		// sorts ahead of the unpinned ones and carries the pin marker, not the close button.
+		const bTab = Array.from(document.querySelectorAll('.tab')).find((tab) => tab.querySelector('.label')?.textContent === 'b.txt')!;
+		bTab.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+		expect(texts('.tab .label')).toEqual(['b.txt', 'a.txt', 'c.txt']);
+		expect(document.querySelector('.tab.pinned .pin')).not.toBeNull();
+		expect(document.querySelector('.tab.pinned .close')).toBeNull();
+
+		// The pinned tab's menu offers Unpin now.
+		rightClick(document.querySelector('.tab.pinned')!);
+		expect(menuLabels()).toContain('Unpin');
+
+		// No bulk close touches the pinned tab; only its own Close does. The dirty mark
+		// reads from the label, so a dirty pinned tab stays on the bar too.
+		const pinned = group.open.find((editor) => editor.label === 'b.txt')!;
+		pinned.dirty = true;
+		group.update();
+		rightClick(document.querySelector('.tab.pinned')!);
+		click(menuItem('Close All'));
+		await flush();
+		expect(texts('.tab .label')).toEqual(['b.txt']);
+
+		// Middle-click on a pinned tab is sticky, like VS Code's.
+		document.querySelector('.tab.pinned')!.dispatchEvent(new MouseEvent('auxclick', { button: 1, bubbles: true }));
+		await flush();
+		expect(texts('.tab .label')).toEqual(['b.txt']);
+
+		// The pin marker's click unhooks it; the close button comes back. The buffer was
+		// dirtied above and no bulk close may touch it — its unsaved changes survive the
+		// Close All, so the explicit close still asks before dropping them.
+		const editor = group.open[0]!;
+		expect(editor.dirty).toBe(true);
+		click(document.querySelector('.tab.pinned .pin'));
+		await flush();
+		expect(document.querySelector('.tab.pinned')).toBeNull();
+		expect(document.querySelector('.tab .close')).not.toBeNull();
+		editor.dirty = false;
+		group.update();
+		click(document.querySelector('.tab .close')!);
 		await flush();
 		expect(texts('.tab .label')).toEqual([]);
 	});

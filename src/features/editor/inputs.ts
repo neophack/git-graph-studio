@@ -101,6 +101,9 @@ export interface Editor {
 	doc?: EditableDocView;
 	/** An enormous file's read-only windowed viewer — past what an editable document can hold. */
 	fast?: FastView;
+	/** The tab is pinned (VS Code's pinned editor): it renders the pin marker instead of the
+	 *  close button, sorts ahead of the unpinned tabs, and every bulk close skips it. */
+	pinned?: boolean;
 	dirty: boolean;
 	/** The buffer as it was last saved — or loaded, before any save: the doc's own `Text`
 	 *  object, so the equality check shares unchanged nodes with the live document. An

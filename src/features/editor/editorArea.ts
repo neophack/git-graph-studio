@@ -399,6 +399,19 @@ export class EditorArea {
 		if (group !== from && editor) this.reopenOf(editor)?.(group);
 	}
 
+	/** The tab menu's Split Up/Down/Left/Right: the group the right-clicked tab belongs to
+	 *  splits in the direction and the tab's own editor rides again in the fresh group,
+	 *  focused — VS Code's tab-menu split acts on that tab, not on the focused group. */
+	splitGroupEditor(group: EditorGroup, editor: Editor, direction: Direction): void {
+		if (this.groupCount >= 8) return;
+		const leaf = this.leafOfGroup(group);
+		if (!leaf) return;
+		const fresh = this.insertBeside(leaf, direction);
+		this.render();
+		this.focus(fresh.box);
+		this.reopenOf(editor)?.(fresh.box.group);
+	}
+
 	/** VS Code's Split Editor Orthogonal (Ctrl+K Ctrl+\): the direction orthogonal to the
 	 *  last split — down after a horizontal one, right after a vertical one. */
 	splitEditorOrthogonal(): void {
@@ -1039,6 +1052,8 @@ export class EditorArea {
 		// The group's own lock surfaces — the badge's click, the tab menu's entry — toggle
 		// through the one state-changer (the box's state class and the tab re-render ride it).
 		group.onToggleGroupLock = () => this.setGroupLock(group, !group.locked);
+		// The tab menu's split family: the group the tab belongs to splits in the direction.
+		group.onSplit = (editor, direction) => this.splitGroupEditor(group, editor, direction);
 		group.onFileSaved = (path) => this.onFileSaved?.(path);
 		group.onDocumentEdited = (path, text) => this.onDocumentEdited?.(path, text);
 		group.onDocumentClosed = (path) => {

@@ -48,6 +48,10 @@ export class EditorGroup {
 
 	onToggleGroupLock: (() => void) | null = null;
 
+	/** The tab menu's Split Up/Down/Left/Right: the area splits THIS group (the tab's own,
+	 *  not the focused one) in the direction and takes the right-clicked editor with it. */
+	onSplit: ((editor: Editor, direction: 'left' | 'right' | 'up' | 'down') => void) | null = null;
+
 	onActiveChange: ((editor: { kind: EditorInput['kind']; id?: string; path?: string; languageName?: string; encoding?: string; eol?: 'lf' | 'crlf'; line: number; column: number; selected?: number; selections?: number } | null) => void) | null = null;
 
 	onNavigationChange: (() => void) | null = null;
@@ -385,6 +389,10 @@ export class EditorGroup {
 
 	declare save: (editor?: Editor | null) => Promise<void>;
 
+	/** VS Code's Save As: a dialog picks the target, the buffer is written there and the
+	 *  tab becomes the new file, clean (dirty.ts). */
+	declare saveAs: (editor?: Editor | null) => Promise<void>;
+
 	declare flashSavedTab: (editor: Editor) => void ;
 
 	declare forgetBackup: (editor: Editor) => void ;
@@ -453,6 +461,14 @@ export class EditorGroup {
 	}
 
 	declare tabMenu: (editor: Editor) => MenuEntry[] ;
+
+	/** The tab's pin toggle (tabs.ts): the pinned tab renders the pin marker instead of the
+	 *  close button, sorts ahead of the unpinned tabs, and every bulk close skips it. */
+	declare togglePin: (editor: Editor) => void ;
+
+	/** VS Code's Move into New Window: save, spawn a sibling instance with the file, close
+	 *  the tab here (tabs.ts). */
+	declare moveToNewWindow: (editor: Editor) => void ;
 
 	declare attachTextServices: (editor: Editor) => void ;
 

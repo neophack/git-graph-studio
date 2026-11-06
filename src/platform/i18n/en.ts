@@ -42,6 +42,7 @@ export const en = {
 	'editor.conflict.diskSide': 'Disk',
 	'editor.conflict.mineSide': 'Mine',
 	'editor.conflict.reloaded': 'Updated on another device',
+	'editor.saveAs.alreadyOpen': 'A tab already holds {0}; the file was written, that tab shows it.',
 	'editor.menu.compareWithClipboard': 'Compare with Clipboard',
 	'breadcrumbs.emptyFolder': 'Empty Folder',
 	'breadcrumbs.noSymbols': 'No Symbols Found',

@@ -6,6 +6,7 @@ import { t, trText } from '../../platform/i18n';
 import { basename, el, icon, notify, relativeTo, showContextMenu, showMenuBelow, type MenuEntry } from '../../platform/ui/index';
 import { fileIconColor, isCanLog } from '../../platform/fileIcons';
 import { hook } from '../../platform/hooks';
+import { appNewInstance } from '../../platform/ipc/app';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import type { EditorGroup } from './group';
@@ -263,7 +264,7 @@ export const tabsMethods: ThisType<EditorGroup> = {
 		const names = new Map<string, number>();
 		for (const editor of this.open) names.set(editor.label, (names.get(editor.label) ?? 0) + 1);
 		for (const editor of this.open) {
-			const tab = el('div', 'tab' + (editor === this.active ? ' active' : '') + (editor.dirty ? ' dirty' : ''));
+			const tab = el('div', 'tab' + (editor === this.active ? ' active' : '') + (editor.dirty ? ' dirty' : '') + (editor.pinned ? ' pinned' : ''));
 			tab.setAttribute('role', 'tab');
 			tab.setAttribute('aria-selected', editor === this.active ? 'true' : 'false');
 			// What the tab holds, for shells that mirror the strip (the remote phone's page
@@ -288,14 +289,33 @@ export const tabsMethods: ThisType<EditorGroup> = {
 				const folder = basename(editor.input.path.slice(0, editor.input.path.length - editor.label.length - 1));
 				if (folder) tab.appendChild(el('span', 'description', [folder]));
 			}
-			const close = el('span', 'close', [icon('close'), icon('circle-filled')]);
-			close.title = 'Close';
-			close.addEventListener('click', (event) => {
-				event.stopPropagation();
-				void this.close(editor);
-			});
-			tab.appendChild(close);
+			// A pinned tab carries the pin marker instead of the close button — the click
+			// unhooks it, the close never shows (VS Code's pinned editor). An unpinned one is
+			// the close button as always, dirty dot included.
+			if (editor.pinned) {
+				const pin = el('span', 'pin', [icon('pinned')]);
+				pin.title = trText('Unpin');
+				pin.addEventListener('click', (event) => {
+					event.stopPropagation();
+					this.togglePin(editor);
+				});
+				tab.appendChild(pin);
+			} else {
+				const close = el('span', 'close', [icon('close'), icon('circle-filled')]);
+				close.title = trText('Close');
+				close.addEventListener('click', (event) => {
+					event.stopPropagation();
+					void this.close(editor);
+				});
+				tab.appendChild(close);
+			}
 			tab.addEventListener('click', () => this.activate(editor));
+			// Double-clicking a tab pins it, as VS Code's doubleClickTabToPin does (a double
+			// click on the pinned/close marker itself is that button's own click, not a pin).
+			tab.addEventListener('dblclick', (event) => {
+				if ((event.target as HTMLElement).closest('.close, .pin')) return;
+				this.togglePin(editor);
+			});
 			// Tabs drag into other editor groups (M3 3.1): the payload travels in a module-level
 			// slot, because DataTransfer's custom types are not readable during dragover.
 			tab.draggable = true;
@@ -306,7 +326,8 @@ export const tabsMethods: ThisType<EditorGroup> = {
 			});
 			tab.addEventListener('dragend', () => { tabDrag.editor = null; tabDrag.groupId = null; });
 			tab.addEventListener('auxclick', (event) => {
-				if (event.button === 1) void this.close(editor);
+				// Middle-click closes; a pinned tab is sticky, as in VS Code.
+				if (event.button === 1 && !editor.pinned) void this.close(editor);
 			});
 			tab.addEventListener('contextmenu', (event) => {
 				event.preventDefault();
@@ -388,36 +409,102 @@ export const tabsMethods: ThisType<EditorGroup> = {
 		}
 	},
 
-	tabMenu(editor: Editor): MenuEntry[] {
-		const entries: MenuEntry[] = [
-			{ label: 'Close', keybinding: 'Ctrl+W', run: () => void this.close(editor) },
-			{ label: 'Close Others', run: () => void this.closeOthers(editor) },
-			{ label: 'Close to the Right', disabled: this.open.indexOf(editor) === this.open.length - 1, run: () => void this.closeToTheRight(editor) },
-			{ label: 'Close Saved', run: () => void this.closeSaved() },
-			{ label: 'Close All', keybinding: 'Ctrl+K Ctrl+W', run: () => void this.closeAll() },
-			// VS Code's 1_close_save group: Save rides a dirty tab's menu only, and the write
-			// goes through the group's own save lifecycle (dirty.ts).
-			...(editor.dirty ? [{ label: 'Save', keybinding: 'Ctrl+S', run: () => void this.save(editor) }] as MenuEntry[] : []),
-			'separator'
-		];
-		if (editor.input.kind === 'file') {
-			const path = editor.input.path;
-			entries.push(
-				{ label: 'Copy Path', keybinding: 'Shift+Alt+C', run: () => void writeText(path) },
-				{ label: 'Copy Relative Path', keybinding: 'Ctrl+K Ctrl+Shift+C', run: () => void writeText(this.rootPath ? relativeTo(this.rootPath, path) : path) },
-				// VS Code's 2_files group: the PC's own File Explorer at the file. A browser
-				// page — the remote shell — has no such place, so the row hides there, the
-				// same gate the Explorer's row menu applies.
-				...(remoteShell() ? [] : [{ label: 'Reveal in File Explorer', run: () => void revealItemInDir(path).catch((e) => notify('error', String(e))) }] as MenuEntry[]));
+	/** Pin (or unpin) a tab: the pinned one renders the pin marker instead of the close
+	 *  button, sorts ahead of the unpinned tabs, and every bulk close skips it — VS Code's
+	 *  pinned editor. Unpinning leaves the tab where it sits. */
+	togglePin(editor: Editor): void {
+		const index = this.open.indexOf(editor);
+		if (index === -1) return;
+		if (editor.pinned) {
+			editor.pinned = false;
+			this.update();
+			return;
 		}
-		// VS Code's tab-menu lock toggle, labelled by the state — the discoverable exit
-		// beside the badge's click (the palette names the commands too). `trText` reuses
-		// the palette labels' own translations, so every surface says the same thing. VS
-		// Code pins/locks below the copy group, so the toggle stands after it here.
-		entries.push('separator',
-			{ label: trText(this.locked ? 'Unlock Editor Group' : 'Lock Editor Group'), run: () => this.onToggleGroupLock?.() });
-		entries.push(...menuSection('editor/title/context', editor.input.kind === 'file' ? [contextUri(editor.input.path), [contextUri(editor.input.path)]] : undefined, editor.input.kind === 'file' ? resourceContext(editor.input.path) : undefined));
+		editor.pinned = true;
+		this.open.splice(index, 1);
+		let at = 0;
+		while (at < this.open.length && this.open[at]!.pinned) at++;
+		this.open.splice(at, 0, editor);
+		this.update();
+	},
+
+	/** The tab's context menu, VS Code's EditorTitleContext in its own group order: the
+	 *  close family, the save family, the copies, reveal, pin, the splits, the new-window
+	 *  pair, then the group lock and the extensions' contributions. */
+	tabMenu(editor: Editor): MenuEntry[] {
+		const isFile = editor.input.kind === 'file';
+		// The file rows' closures capture the path once: a property access re-read inside a
+		// callback loses the union's narrowing.
+		const path = editor.input.kind === 'file' ? editor.input.path : '';
+		const entries: MenuEntry[] = [
+			{ label: trText('Close'), keybinding: 'Ctrl+W', run: () => void this.close(editor) },
+			{ label: trText('Close Others'), run: () => void this.closeOthers(editor) },
+			{ label: trText('Close to the Right'), disabled: this.open.indexOf(editor) === this.open.length - 1, run: () => void this.closeToTheRight(editor) },
+			{ label: trText('Close Saved'), run: () => void this.closeSaved() },
+			{ label: trText('Close All'), keybinding: 'Ctrl+K Ctrl+W', run: () => void this.closeAll() },
+			// VS Code's 1_close_save group: Save rides a dirty tab's menu only (the write goes
+			// through the group's own save lifecycle, dirty.ts), Save As re-points the tab,
+			// Save All is this group's dirty editors whatever the menu opened on.
+			...(editor.dirty ? [{ label: trText('Save'), keybinding: 'Ctrl+S', run: () => void this.save(editor) }] as MenuEntry[] : []),
+			...(isFile ? [{ label: trText('Save As...'), run: () => void this.saveAs(editor) }] as MenuEntry[] : []),
+			{ label: trText('Save All'), disabled: !this.hasDirtyEditors(), run: () => void this.saveAll() },
+			'separator',
+			// VS Code's 1_cutcopypaste group, then the reveal (2_files). A browser page — the
+			// remote shell — has no file manager, so the row hides there, the same gate the
+			// Explorer's row menu applies.
+			...(isFile ? [
+				{ label: trText('Copy Path'), keybinding: 'Shift+Alt+C', run: () => void writeText(path) },
+				{ label: trText('Copy Relative Path'), keybinding: 'Ctrl+K Ctrl+Shift+C', run: () => void writeText(this.rootPath ? relativeTo(this.rootPath, path) : path) }
+			] as MenuEntry[] : []),
+			...(isFile && !remoteShell() ? [{ label: trText('Reveal in File Explorer'), run: () => void revealItemInDir(path).catch((e) => notify('error', String(e))) }] as MenuEntry[] : []),
+			'separator',
+			// VS Code's 3_preview group: the pin toggle (the pinned tab's marker click is the
+			// other exit).
+			{ label: editor.pinned ? trText('Unpin') : trText('Pin'), run: () => this.togglePin(editor) },
+			'separator',
+			// VS Code's split family: the group this tab belongs to splits in the direction
+			// and takes the tab's editor again, focused.
+			...(['up', 'down', 'left', 'right'] as const).flatMap((direction): MenuEntry[] => this.onSplit ? [{
+				label: trText(`Split ${direction[0]!.toUpperCase()}${direction.slice(1)}`),
+				run: () => this.onSplit?.(editor, direction)
+			}] : []),
+			// VS Code's 7_new_window pair: a sibling instance opens with the file. The move
+			// saves the buffer first (a second process cannot carry unsaved state) and closes
+			// this tab once the new window has spawned; a browser page cannot spawn one.
+			...(isFile && !remoteShell() ? [
+				{ label: trText('Move into New Window'), run: () => this.moveToNewWindow(editor) },
+				{ label: trText('Copy into New Window'), run: () => void appNewInstance(path).catch((e) => notify('error', String(e))) }
+			] as MenuEntry[] : []),
+			// The tab-menu lock toggle, labelled by the state — the discoverable exit beside
+			// the badge's click (the palette names the commands too). `trText` reuses the
+			// palette labels' own translations, so every surface says the same thing.
+			'separator',
+			{ label: trText(this.locked ? 'Unlock Editor Group' : 'Lock Editor Group'), run: () => this.onToggleGroupLock?.() }
+		];
+		entries.push(...menuSection('editor/title/context', isFile ? [contextUri(path), [contextUri(path)]] : undefined, isFile ? resourceContext(path) : undefined));
 		return entries;
+	},
+
+	/** VS Code's Move into New Window: the buffer is saved first (a sibling instance cannot
+	 *  carry unsaved state across processes), the sibling spawns with the file, and this
+	 *  tab closes once the spawn has succeeded — a failed spawn keeps the tab and reports. */
+	moveToNewWindow(editor: Editor): void {
+		const spawn = async () => {
+			if (editor.dirty) {
+				await this.save(editor);
+				if (editor.dirty) return; // the save failed and was reported
+			}
+			if (editor.input.kind !== 'file') return;
+			const path = editor.input.path;
+			try {
+				await appNewInstance(path);
+			} catch (error) {
+				notify('error', String(error));
+				return;
+			}
+			if (this.open.includes(editor)) await this.close(editor);
+		};
+		void spawn();
 	},
 
 	canGoBack(): boolean {
