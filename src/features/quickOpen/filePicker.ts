@@ -22,6 +22,44 @@ function toEntry(path: string): FileEntry {
 	return { path, label, labelLower: label.toLowerCase(), pathLower: path.toLowerCase() };
 }
 
+/** VS Code's goto suffix, parsed off before scoring: `main.ts:42` opens the file at line 42,
+ *  `main.ts:42:7` also at character 7. Only digits after the final colon count — `foo:` is
+ *  still a (futile) file search, never a jump. The position rides the picked item's value as
+ *  `file:<path>\u0000<line>\u0000<column>` (the same NUL separator the `#` mode's `sym:` uses,
+ *  a character no path carries). */
+export interface FileQuery {
+	/** What the fuzzy scorer sees — the suffix stripped. */
+	term: string;
+	/** The 1-based line, when the query carried one. */
+	line: number | null;
+	/** The 1-based column, when the query carried one too. */
+	column: number | null;
+}
+
+export function parseGotoSuffix(query: string): FileQuery {
+	// The lazy term keeps the FIRST colon-column pair as the suffix: `main.ts:42:7` reads
+	// line 42, column 7 — the greedy reading would take `:7` and mangle the term instead.
+	const match = /^(.*?):(\d+)(?::(\d+))?$/.exec(query);
+	if (!match) return { term: query, line: null, column: null };
+	return { term: match[1] ?? '', line: Number(match[2]), column: match[3] ? Number(match[3]) : null };
+}
+
+/** The pick's `file:` value, with the goto position folded in when the query carried one. */
+function fileValue(path: string, position: FileQuery): string {
+	if (position.line === null) return 'file:' + path;
+	return `file:${path}\u0000${position.line}\u0000${position.column ?? 1}`;
+}
+
+/** The position a picked `file:` value carries, or null when the pick is a plain file open.
+ *  The workbench's dispatch reads this to open the file at the line/column. */
+export function pickedFilePosition(value: string): { path: string; line: number | null; column: number | null } {
+	const parts = value.split('\u0000');
+	if (parts.length === 3) {
+		return { path: parts[0]!.slice('file:'.length), line: Number(parts[1]), column: Number(parts[2]) };
+	}
+	return { path: value.slice('file:'.length), line: null, column: null };
+}
+
 /** The row's second line: the file's folder, VS Code-style — a root-level file's folder is
  *  the empty string, and repeating the label there read as duplicated text. */
 function descriptionOf(path: string): string | undefined {
@@ -29,19 +67,19 @@ function descriptionOf(path: string): string | undefined {
 	return cut === -1 ? undefined : path.slice(0, cut);
 }
 
-function toItem(match: FileMatch): QuickPickItem {
+function toItem(match: FileMatch, position: FileQuery): QuickPickItem {
 	return {
 		label: match.entry.label,
 		description: descriptionOf(match.entry.path),
 		icon: 'file',
-		value: 'file:' + match.entry.path,
+		value: fileValue(match.entry.path, position),
 		highlights: match.labelRanges
 	};
 }
 
 /** The un-ranked empty-query rows: the first files as walked, nothing highlighted. */
-function entryToItem(entry: FileEntry): QuickPickItem {
-	return { label: entry.label, description: descriptionOf(entry.path), icon: 'file', value: 'file:' + entry.path };
+function entryToItem(entry: FileEntry, position: FileQuery): QuickPickItem {
+	return { label: entry.label, description: descriptionOf(entry.path), icon: 'file', value: fileValue(entry.path, position) };
 }
 
 /** Keep `list` the best `limit` matches, sorted best-first, without re-sorting per chunk. */
@@ -112,22 +150,25 @@ export class FilePickSource implements QuickPickSource {
 
 	/** The chunked scan. The backend scores its cached file list in Rust first (`fuzzy_files`,
 	 *  `cmd_fuzzy.rs`) and ships only the top rows - a keystroke stops costing an event-loop
-	 *  scan. The TS scan below is the fallback: no folder open, or a stubbed backend. */
+	 *  scan. The TS scan below is the fallback: no folder open, or a stubbed backend.
+	 *  A trailing `:line[:col]` goto suffix is parsed off before either scorer sees the
+	 *  query (it would corrupt the match) and rides the picked rows' values instead. */
 	async query(query: string, onPartial: (items: QuickPickItem[]) => void, isCancelled: () => boolean): Promise<QuickPickItem[]> {
 		const trimmed = query.trim();
+		const parsed = parseGotoSuffix(trimmed);
 		// A TS-scanned source starts the list load at the first query (the picker's
 		// "Reading…" status follows it); a backend-scored one loads it only below, once the
 		// backend has failed to answer.
 		if (this.options.backend === false && !this.loaded && !this.loading) void this.refresh();
 		try {
-			const hits = this.options.backend === false ? null : await fuzzyFiles(trimmed, PICK_LIMIT);
+			const hits = this.options.backend === false ? null : await fuzzyFiles(parsed.term, PICK_LIMIT);
 			if (Array.isArray(hits)) {
 				if (isCancelled()) return [];
 				return hits.map((hit) => ({
 					label: hit.label,
 					description: descriptionOf(hit.path),
 					icon: 'file',
-					value: 'file:' + hit.path,
+					value: fileValue(hit.path, parsed),
 					highlights: hit.ranges
 				}));
 			}
@@ -135,8 +176,8 @@ export class FilePickSource implements QuickPickSource {
 			// No backend answer (no folder open, tests): the TS scan takes over.
 		}
 		if (!this.loaded || this.loading) await this.refresh();
-		if (trimmed === '') return this.entries.slice(0, PICK_LIMIT).map(entryToItem);
-		const fuzzyQuery = makeQuery(trimmed);
+		if (parsed.term === '') return this.entries.slice(0, PICK_LIMIT).map((entry) => entryToItem(entry, parsed));
+		const fuzzyQuery = makeQuery(parsed.term);
 		const top: FileMatch[] = [];
 		for (let start = 0; start < this.entries.length; start += CHUNK) {
 			const end = Math.min(this.entries.length, start + CHUNK);
@@ -144,11 +185,11 @@ export class FilePickSource implements QuickPickSource {
 				const match = scoreFile(this.entries[i]!, fuzzyQuery);
 				if (match) insertBounded(top, match, PICK_LIMIT);
 			}
-			if (isCancelled()) return top.map(toItem);
-			onPartial(top.map(toItem));
+			if (isCancelled()) return top.map((match) => toItem(match, parsed));
+			onPartial(top.map((match) => toItem(match, parsed)));
 			await yieldToUi();
 		}
-		return top.map(toItem);
+		return top.map((match) => toItem(match, parsed));
 	}
 
 	status(): string | null {

@@ -35,7 +35,7 @@ import * as state from '../platform/state';
 import { StatusBar } from './statusbar';
 import { TitleBar } from './titlebar';
 import { basename, busy, el, icon, notify, quickInput, quickPick, type QuickPickItem, type QuickPickSource } from '../platform/ui/index';
-import { FilePickSource } from '../features/quickOpen';
+import { FilePickSource, pickedFilePosition } from '../features/quickOpen';
 import { ExtensionTreeView } from '../features/extensions';
 import { extFileDataUrl } from '../platform/extAssets';
 
@@ -356,7 +356,12 @@ export class Workbench {
 		});
 		if (!chosen) return;
 		if (chosen.startsWith('command:')) await commands.execute(chosen.slice('command:'.length));
-		else if (chosen.startsWith('line:')) {
+		else if (chosen.startsWith('mode:')) {
+			// The "?" help mode's rows: picking one switches the picker to that prefix, the
+			// way VS Code's quick access help does.
+			const target = chosen.slice('mode:'.length);
+			await this.quickOpen(target === 'files' ? '' : target);
+		} else if (chosen.startsWith('line:')) {
 			const [line, column] = chosen.slice('line:'.length).split(':').map(Number);
 			this.editors.gotoLine(line!, column || 1);
 		} else if (chosen.startsWith('sym:')) {
@@ -366,8 +371,10 @@ export class Workbench {
 			await this.editors.openFile(/^([a-zA-Z]:[\\/]|\\|\/)/.test(picked) || !this.repoPath ? picked : joinRepo(this.repoPath, picked), { line: Number(line) + 1 });
 		} else if (chosen.startsWith('file:') && this.repoPath) {
 			// Multi-root Quick Open hands out absolute paths; a plain folder's are repo-relative.
-			const picked = chosen.slice('file:'.length);
-			await this.editors.openFile(/^([a-zA-Z]:[\\/]|\\|\/)/.test(picked) ? picked : joinRepo(this.repoPath, picked));
+			// A query that carried a `:line[:column]` suffix folds the position into the value:
+			// the pick opens the file exactly like the goto-line mode's jump would.
+			const { path: picked, line, column } = pickedFilePosition(chosen);
+			await this.editors.openFile(/^([a-zA-Z]:[\\/]|\\|\/)/.test(picked) || !this.repoPath ? picked : joinRepo(this.repoPath, picked), line !== null ? { line, column: column ?? 1 } : {});
 		}
 	}
 
@@ -988,11 +995,13 @@ export function joinRepo(root: string, relative: string): string {
 	return root.replace(/[\\/]+$/, '') + separator + relative.replaceAll('/', separator);
 }
 
-/** Quick Open's modes in one source, as VS Code switches them: a leading ">" filters the
+/** Quick Open's modes in one source, as VS Code switches them: a leading "?" is the help
+ *  list (every prefix, one row each, picking one switches the mode), a leading ">" filters the
  *  command palette (a small list, filtered in place), a leading ":" is Go to Line/Column
  *  (the picker's one row narrates the jump), "@" is Go to Symbol in File and "#" Go to
  *  Symbol in Workspace (M4 4.9); anything else goes to the chunked file scan, including
- *  mid-session - backspacing out of a prefix returns to files. */
+ *  mid-session - backspacing out of a prefix returns to files. A file query may carry a
+ *  trailing `:line[:column]` goto suffix, which the file source parses off before scoring. */
 export interface SymbolSources {
 	fileSymbols(): Promise<{ name: string; kind: string; line: number }[]>;
 	workspaceSymbols(): Promise<{ name: string; kind: string; path: string; line: number }[]>;
@@ -1008,6 +1017,7 @@ export function isNativeClipboardKey(event: KeyboardEvent): boolean {
 function quickOpenItems(files: FilePickSource, lineInfo: () => { line: number; column: number; lines: number } | null, symbols: SymbolSources): QuickPickSource {
 	return {
 		query: async (query, onPartial, isCancelled) => {
+			if (query.startsWith('?')) return quickOpenHelpItems();
 			if (query.startsWith(':')) return gotoLineItems(query.slice(1), lineInfo());
 			if (query.startsWith('@')) return fileSymbolItems(query.slice(1), await symbols.fileSymbols());
 			if (query.startsWith('#')) return workspaceSymbolItems(query.slice(1), await symbols.workspaceSymbols());
@@ -1020,6 +1030,19 @@ function quickOpenItems(files: FilePickSource, lineInfo: () => { line: number; c
 			return items;
 		}
 	};
+}
+
+/** The "?" mode's rows, VS Code's quick access help: every prefix with its wording and one
+ *  example spelling. Picking a row switches the picker to that mode (`mode:` dispatches back
+ *  into quickOpen with the prefix typed), so the help is a door, not a dead end. */
+export function quickOpenHelpItems(): QuickPickItem[] {
+	return [
+		{ label: t('quickopen.help.files'), description: t('quickopen.help.filesHint'), icon: 'file', value: 'mode:files' },
+		{ label: t('quickopen.help.gotoLine'), description: t('quickopen.help.gotoLineHint'), icon: 'symbol-numeric', value: 'mode::' },
+		{ label: t('quickopen.help.symbolInFile'), description: t('quickopen.help.symbolInFileHint'), icon: 'symbol-method', value: 'mode:@' },
+		{ label: t('quickopen.help.symbolInWorkspace'), description: t('quickopen.help.symbolInWorkspaceHint'), icon: 'symbol-method', value: 'mode:#' },
+		{ label: t('quickopen.help.commands'), description: t('quickopen.help.commandsHint'), icon: 'tools', value: 'mode:>' }
+	];
 }
 
 /** The "@" mode's rows: the file's outline filtered by name; a pick jumps by line (the
