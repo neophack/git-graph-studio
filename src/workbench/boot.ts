@@ -15,6 +15,7 @@ import { resolveTerminalPath } from '../features/terminal/links';
 import { type AnalysisStatus } from '../features/analysis';
 import type { AnalysisToolId } from '../features/analysis';
 import { commands } from '../platform/commands';
+import { registerZhCnText } from '../platform/i18n';
 import { registerGitCommands } from '../features/scm';
 import { registerZhCnText, t, tf } from '../platform/i18n';
 import { hook } from '../platform/hooks';
@@ -142,6 +143,36 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'editor.toggleBlockComment', title: 'Toggle Block Comment', category: 'Edit', keybinding: 'Shift+Alt+A', enabled: hasCommentSurface, run: () => this.editors.runEditorCommand('toggleBlockComment') });
 		register({ id: 'editor.toggleWordWrap', title: 'Toggle Word Wrap', category: 'View', keybinding: 'Alt+Z', run: () => updateSetting('wordWrap', !settings.wordWrap) });
 		register({ id: 'editor.selectAll', title: 'Select All', category: 'Selection', keybinding: 'Ctrl+A', enabled: hasEditor, run: () => this.editors.runEditorCommand('selectAll') });
+		// VS Code's line-editing family: join, sort, the case transforms, trim. None carries
+		// a free VS Code-matching single key here (Ctrl+J toggles the panel; VS Code's own
+		// spellings are chords the registry's chord matcher owns), so they are palette rows.
+		// They run on a whole-document CodeMirror view only — the enablement says so.
+		register({ id: 'editor.joinLines', title: 'Join Lines', category: 'Edit', enabled: hasEditor, run: () => this.editors.runEditorCommand('joinLines') });
+		register({ id: 'editor.sortLinesAscending', title: 'Sort Lines Ascending', category: 'Edit', enabled: hasEditor, run: () => this.editors.runEditorCommand('sortLinesAscending') });
+		register({ id: 'editor.sortLinesDescending', title: 'Sort Lines Descending', category: 'Edit', enabled: hasEditor, run: () => this.editors.runEditorCommand('sortLinesDescending') });
+		register({ id: 'editor.transformToUppercase', title: 'Transform to Uppercase', category: 'Edit', enabled: hasEditor, run: () => this.editors.runEditorCommand('transformToUppercase') });
+		register({ id: 'editor.transformToLowercase', title: 'Transform to Lowercase', category: 'Edit', enabled: hasEditor, run: () => this.editors.runEditorCommand('transformToLowercase') });
+		register({ id: 'editor.transformToTitlecase', title: 'Transform to Title Case', category: 'Edit', enabled: hasEditor, run: () => this.editors.runEditorCommand('transformToTitleCase') });
+		register({ id: 'editor.trimTrailingWhitespace', title: 'Trim Trailing Whitespace', category: 'Edit', enabled: hasEditor, run: () => this.editors.runEditorCommand('trimTrailingWhitespace') });
+		register({ id: 'editor.expandSelection', title: 'Expand Selection', category: 'Selection', keybinding: 'Shift+Alt+Right', enabled: hasEditor, run: () => this.editors.runEditorCommand('expandSelection') });
+		register({ id: 'editor.shrinkSelection', title: 'Shrink Selection', category: 'Selection', keybinding: 'Shift+Alt+Left', enabled: hasEditor, run: () => this.editors.runEditorCommand('shrinkSelection') });
+		// The new titles' zh-cn twins. Every older command's pair sits in i18n.ts's own
+		// table; these register beside the commands that own them, through the same public
+		// seam the manifest translations ride (`registerZhCnText`), so the localization
+		// sweep sees the labels translated without reaching into that table from here.
+		registerZhCnText({
+			'Join Lines': '联接行',
+			'Sort Lines Ascending': '升序排列行',
+			'Sort Lines Descending': '降序排列行',
+			'Transform to Uppercase': '转换为大写',
+			'Transform to Lowercase': '转换为小写',
+			'Transform to Title Case': '转换为标题大小写',
+			'Trim Trailing Whitespace': '删除尾随空格',
+			'Expand Selection': '扩展选择',
+			'Shrink Selection': '缩小选择',
+			'Open Previous Recently Used Editor': '打开上一个最近使用的编辑器',
+			'Open Next Recently Used Editor': '打开下一个最近使用的编辑器'
+		});
 
 		register({ id: 'workbench.quickOpen', title: 'Go to File...', category: 'Go', keybinding: 'Ctrl+P', enabled: hasRepo, run: () => this.quickOpen('') });
 		register({ id: 'workbench.commandPalette', title: 'Command Palette...', category: 'View', keybinding: 'Ctrl+Shift+P', run: () => this.quickOpen('>') });
@@ -150,6 +181,12 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'editor.gotoDefinition', title: 'Go to Definition', category: 'Go', keybinding: 'F12', enabled: () => this.editors.activeView !== null, run: () => void this.editors.goToDefinition() });
 		register({ id: 'workbench.nextEditor', title: 'Next Editor', category: 'Go', keybinding: 'Ctrl+PageDown', run: () => this.editors.activateNext(1) });
 		register({ id: 'workbench.previousEditor', title: 'Previous Editor', category: 'Go', keybinding: 'Ctrl+PageUp', run: () => this.editors.activateNext(-1) });
+		// Ctrl+Tab: the most-recently-used walk within the focused group (the mru the tabs
+		// maintain is one group's). Repeats while Ctrl is held walk further; Shift reverses.
+		// Unconditioned like next/previousEditor — the walk itself answers nothing with a
+		// single editor open.
+		register({ id: 'workbench.openPreviousRecentlyUsed', title: 'Open Previous Recently Used Editor', category: 'Go', keybinding: 'Ctrl+Tab', run: () => this.editors.activeGroup.cycleMru(-1) });
+		register({ id: 'workbench.openNextRecentlyUsed', title: 'Open Next Recently Used Editor', category: 'Go', keybinding: 'Ctrl+Shift+Tab', run: () => this.editors.activeGroup.cycleMru(1) });
 
 		register({ id: 'workbench.showExplorer', title: 'Explorer', category: 'View', keybinding: 'Ctrl+Shift+E', run: () => this.showView('explorer') });
 		register({ id: 'workbench.showSearch', title: 'Search', category: 'View', keybinding: 'Ctrl+Shift+F', run: () => { this.showView('search'); this.seedSearchQuery(); this.search.focus(); } });

@@ -253,7 +253,7 @@ export class EditorGroup {
 
 	declare setEol: (eol: 'lf' | 'crlf') => void ;
 
-	declare runEditorCommand: (command: 'undo' | 'redo' | 'selectAll' | 'find' | 'replace' | 'toggleLineComment' | 'toggleBlockComment') => void ;
+	declare runEditorCommand: (command: import('./types').EditorCommandName) => void ;
 
 	declare bufferAtSavedState: (editor: Editor) => boolean ;
 
@@ -339,6 +339,9 @@ export class EditorGroup {
 	declare revealPosition: (view: EditorView, line: number, column: number) => void ;
 
 	declare activateNext: (direction: 1 | -1) => void ;
+
+	/** Ctrl+Tab / Ctrl+Shift+Tab: the most-recently-used editor walk (tabs.ts). */
+	declare cycleMru: (direction: 1 | -1) => void ;
 
 	declare moveOut: (editor: Editor) => Editor | null ;
 

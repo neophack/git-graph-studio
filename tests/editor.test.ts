@@ -569,7 +569,7 @@ describe('editor group', () => {
 		group.activeView!.dispatch({ selection: { anchor: group.activeView!.state.doc.line(2).from + 'const other = '.length } });
 
 		rightClick(document.querySelector('.cm-content'));
-		expect(menuLabels()).toEqual(['Go to Definition', 'Find References', 'Show Call Tree', 'Go Back', 'Go Forward', 'Toggle Bookmark', 'Change All Occurrences', 'Cut', 'Copy', 'Paste', 'Find', 'Command Palette...']);
+		expect(menuLabels()).toEqual(['Go to Definition', 'Find References', 'Show Call Tree', 'Go Back', 'Go Forward', 'Toggle Bookmark', 'Change All Occurrences', 'Cut', 'Copy', 'Paste', 'Compare with Clipboard', 'Find', 'Command Palette...']);
 		expect(menuItem('Go Back')!.classList.contains('disabled')).toBe(true);
 		click(menuItem('Go to Definition'));
 		await flush();
@@ -584,14 +584,17 @@ describe('editor group', () => {
 		await flush();
 		expect(document.querySelector('.tab.active .label')!.textContent).toBe('main.ts');
 
-		// Copy works from the menu with a selection; the definition-less case reports it.
+		// Copy speaks for the cursor's whole line when the selection is empty (the linewise
+		// form the native Ctrl+C already has), and for the selection otherwise.
 		group.activeView!.dispatch({ selection: { anchor: 0 } });
 		rightClick(document.querySelector('.cm-content'));
-		expect(menuItem('Copy')!.classList.contains('disabled')).toBe(true);
+		expect(menuItem('Copy')!.classList.contains('disabled')).toBe(false);
+		click(menuItem('Copy'));
+		expect(backend.clipboard).toEqual(['helper();\n']);
 		group.activeView!.dispatch({ selection: { anchor: 0, head: 3 } });
 		rightClick(document.querySelector('.cm-content'));
 		click(menuItem('Copy'));
-		expect(backend.clipboard).toEqual(['hel']);
+		expect(backend.clipboard).toEqual(['helper();\n', 'hel']);
 
 		group.activeView!.dispatch({ selection: { anchor: group.activeView!.state.doc.line(3).from } });
 		await group.goToDefinition();

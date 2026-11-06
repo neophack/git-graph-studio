@@ -1368,7 +1368,7 @@ export class EditorArea {
 	activateNext = (direction: 1 | -1) => this.activeGroup.activateNext(direction);
 	close = () => this.activeGroup.close();
 	save = () => this.activeGroup.save();
-	runEditorCommand = (command: 'undo' | 'redo' | 'selectAll' | 'find' | 'replace' | 'toggleLineComment' | 'toggleBlockComment') => this.activeGroup.runEditorCommand(command);
+	runEditorCommand = (command: import('./types').EditorCommandName) => this.activeGroup.runEditorCommand(command);
 	goToDefinition = () => this.activeGroup.goToDefinition();
 	findReferences = () => this.activeGroup.findReferences();
 	openCallTreeAtCursor = () => this.activeGroup.openCallTreeAtCursor();

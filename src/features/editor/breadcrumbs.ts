@@ -1,10 +1,15 @@
+import { listDir } from '../../platform/ipc/fs';
 import { viewerClose, viewerOpen, type ViewerOutlineSymbol } from '../../platform/ipc/viewer';
-import { t } from '../../platform/i18n';
+import { t, tf } from '../../platform/i18n';
 import { settings } from '../../platform/settings';
-import { el, icon, relativeTo, toPosix } from '../../platform/ui/index';
+import { el, icon, relativeTo, showMenuBelow, toPosix, type MenuEntry } from '../../platform/ui/index';
 import { fileIcon, fileIconColor } from '../../platform/fileIcons';
 import type { EditorGroup } from './group';
 import type { Editor } from './inputs';
+
+/** How many entries a folder crumb's dropdown lists before a "more" row stands in — the
+ *  menu is a navigation aid, not the Explorer. */
+const CRUMB_MENU_CAP = 100;
 
 
 /** A symbol the backend's outline extraction found in a document. */
@@ -81,13 +86,68 @@ export const breadcrumbsMethods: ThisType<EditorGroup> = {
 		if (path === null) return;
 		const relative = this.rootPath ? relativeTo(this.rootPath, path) : toPosix(path);
 		const parts = relative.split('/').filter((p) => p !== '');
+		// The absolute path a crumb stands for: the full path minus the crumbs after it.
+		// The crumbs spell the root-relative POSIX form, the path itself carries the
+		// platform's separators — drop segments from the path's own end, never rejoin the
+		// relative parts onto a guessed root.
+		const separator = path.includes('\\') ? '\\' : '/';
+		const segments = path.split(/[\\/]/);
+		const nodePath = (index: number): string => segments.slice(0, segments.length - (parts.length - 1 - index)).join(separator);
+		// A folder crumb lists that folder's entries (folders first, then files); a folder
+		// pick drills one level deeper at the same crumb, a file pick opens it in this
+		// group — VS Code's breadcrumb reveal. The listing is fetched per click: cheap, and
+		// always what the folder holds right now.
+		const openFolderMenu = (anchor: HTMLElement, folder: string): void => {
+			void listDir(folder).then((entries) => {
+				const sorted = [...entries].sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name));
+				const items: MenuEntry[] = sorted.slice(0, CRUMB_MENU_CAP).map((entry) => ({
+					label: entry.name,
+					run: () => (entry.isDir ? openFolderMenu(anchor, entry.path) : void this.openFile(entry.path))
+				}));
+				if (items.length === 0) items.push({ label: t('breadcrumbs.emptyFolder'), disabled: true });
+				else if (sorted.length > CRUMB_MENU_CAP) items.push({ label: tf('breadcrumbs.moreEntries', String(sorted.length - CRUMB_MENU_CAP)), disabled: true });
+				showMenuBelow(anchor, items);
+			}).catch(() => undefined); // an unreadable folder leaves the click a no-op
+		};
+		// The file crumb lists the file's symbol outline — the same symbols the outline
+		// pane shows — and a pick reveals the line in the active editor, exactly the
+		// outline click's reveal.
+		const openFileMenu = (anchor: HTMLElement, filePath: string): void => {
+			void viewerOpen(filePath).then(async (info) => {
+				const symbols = info.symbols ?? [];
+				await viewerClose(info.docId).catch(() => undefined);
+				if (symbols.length === 0) {
+					showMenuBelow(anchor, [{ label: t('breadcrumbs.noSymbols'), disabled: true }]);
+					return;
+				}
+				const editor = this.active;
+				showMenuBelow(anchor, symbols.map((symbol) => ({
+					label: symbol.name,
+					run: () => {
+						if (editor) this.revealIn(editor, symbol.line + 1, 1);
+					}
+				})));
+			}).catch(() => undefined); // no outline for this file (binary, unreadable): no menu
+		};
 		parts.forEach((part, index) => {
 			if (index > 0) this.breadcrumbs.appendChild(icon('chevron-right'));
 			const last = index === parts.length - 1;
 			const glyph = icon(last ? this.active!.iconClass ?? fileIcon(part) : 'folder');
 			const color = last ? fileIconColor(part) : undefined;
 			if (color) glyph.style.color = color;
-			this.breadcrumbs.appendChild(el('span', 'crumb', [glyph, part]));
+			const crumb = el('span', 'crumb', [glyph, part]);
+			// Clicking a crumb opens its dropdown (VS Code's breadcrumb picker): the folder
+			// crumbs walk the workspace, the file crumb walks the outline.
+			crumb.style.cursor = 'pointer';
+			const node = nodePath(index);
+			crumb.title = node;
+			crumb.addEventListener('click', (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				if (last) openFileMenu(crumb, path!);
+				else openFolderMenu(crumb, node);
+			});
+			this.breadcrumbs.appendChild(crumb);
 		});
 	},
 };

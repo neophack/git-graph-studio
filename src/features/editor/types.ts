@@ -25,6 +25,28 @@ export interface DiffSide {
  *  not exist yet). `undefined` is the focused group, VS Code's default. */
 export type EditorPlacement = 'beside' | number;
 
+/** The editor commands `runEditorCommand` dispatches — the palette's Edit / Selection rows
+ *  route through it, so the CodeMirror chunk (the async one) stays out of the first paint
+ *  until the first editor opens. The line-editing and selection-ladder names run on a
+ *  whole-document CodeMirror view only; on a windowed or fast view they answer nothing. */
+export type EditorCommandName =
+	| 'undo'
+	| 'redo'
+	| 'selectAll'
+	| 'find'
+	| 'replace'
+	| 'toggleLineComment'
+	| 'toggleBlockComment'
+	| 'joinLines'
+	| 'sortLinesAscending'
+	| 'sortLinesDescending'
+	| 'transformToUppercase'
+	| 'transformToLowercase'
+	| 'transformToTitleCase'
+	| 'trimTrailingWhitespace'
+	| 'expandSelection'
+	| 'shrinkSelection';
+
 /** A diff the workbench was asked to open (the editor input's diff shape minus the kind). */
 export interface DiffRequest {
 	id: string;

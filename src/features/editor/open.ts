@@ -1,4 +1,5 @@
 import type { Extension } from '@codemirror/state';
+import type { EditorView } from '@codemirror/view';
 import { type FileContents, type FileProbe, fileProbe, readFileBase64 } from '../../platform/ipc/fs';
 import { materializeRevisionFile, readFileAt } from '../../platform/ipc/revision';
 import { scmBlame } from '../../platform/ipc/scm';
@@ -14,6 +15,7 @@ import { basename, el, icon, joinPath, notify, relativeTo, type MenuEntry } from
 import { fileIcon, isCanLog } from '../../platform/fileIcons';
 import { hook } from '../../platform/hooks';
 import type { DiffSide } from './types';
+import type { EditorCommandName } from './types';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import type { EditorGroup } from './group';
 import { editorState } from './editorState';
@@ -1102,18 +1104,31 @@ export const openMethods: ThisType<EditorGroup> = {
 
 	textMenu(editor: Editor, pos: number | null): MenuEntry[] {
 		const view = editor.view;
-		const hasSelection = !!view && !view.state.selection.main.empty;
 		const readOnly = !!view && view.state.readOnly;
+		// Cut and copy speak for the cursor's whole line when the selection is empty — the
+		// linewise form the native Ctrl+X / Ctrl+C already have through CodeMirror's
+		// copiedRange, so the menu rows behave like the keys they are labelled with.
 		const copy = () => {
 			if (!view) return;
 			const selection = view.state.selection.main;
-			if (selection.empty) return;
+			if (selection.empty) {
+				const line = view.state.doc.lineAt(selection.head);
+				void writeText(line.text + view.state.lineBreak);
+				return;
+			}
 			void writeText(view.state.sliceDoc(selection.from, selection.to));
 		};
 		const cut = () => {
 			if (!view || readOnly) return;
 			const selection = view.state.selection.main;
-			if (selection.empty) return;
+			if (selection.empty) {
+				const line = view.state.doc.lineAt(selection.head);
+				void writeText(line.text + view.state.lineBreak);
+				// The line's own newline goes with it; the document's last line has none to take.
+				const to = line.number < view.state.doc.lines ? line.to + 1 : line.to;
+				view.dispatch({ changes: { from: line.from, to }, selection: { anchor: line.from } });
+				return;
+			}
 			void writeText(view.state.sliceDoc(selection.from, selection.to));
 			view.dispatch({ changes: { from: selection.from, to: selection.to } });
 		};
@@ -1126,6 +1141,28 @@ export const openMethods: ThisType<EditorGroup> = {
 			} catch {
 				notify('warning', 'The clipboard could not be read.');
 			}
+		};
+		// VS Code's Compare with Clipboard (the copy-compare extensions' entry): the live
+		// buffer against the clipboard's text in the shell's own diff editor — both sides
+		// cross as in-memory content (`DiffSide.content`), no temp file, no re-read.
+		const compareWithClipboard = async (): Promise<void> => {
+			if (!view) return;
+			const path = editor.input.kind === 'file' ? editor.input.path : editor.label;
+			let clipboard: string;
+			try {
+				clipboard = await readText();
+			} catch {
+				notify('warning', 'The clipboard could not be read.');
+				return;
+			}
+			const name = basename(path);
+			await this.openDiff({
+				kind: 'diff',
+				id: `clipboard:${editor.id}:${Date.now()}`,
+				title: `${name} ↔ Clipboard`,
+				left: { revision: '*', path, label: 'Clipboard', exists: true, content: clipboard },
+				right: { revision: '*', path, label: path, exists: true, content: view.state.doc.toString() }
+			});
 		};
 		const currentLine = view ? view.state.doc.lineAt(view.state.selection.main.head).number : null;
 		return [
@@ -1140,9 +1177,10 @@ export const openMethods: ThisType<EditorGroup> = {
 			'separator',
 			{ label: 'Change All Occurrences', keybinding: 'Ctrl+F2', disabled: !view || readOnly, run: () => { if (view) editorState.cm?.changeAllOccurrences(view); } },
 			'separator',
-			{ label: 'Cut', keybinding: 'Ctrl+X', disabled: !hasSelection || readOnly, run: () => cut() },
-			{ label: 'Copy', keybinding: 'Ctrl+C', disabled: !hasSelection, run: () => copy() },
+			{ label: 'Cut', keybinding: 'Ctrl+X', disabled: readOnly, run: () => cut() },
+			{ label: 'Copy', keybinding: 'Ctrl+C', disabled: !view, run: () => copy() },
 			{ label: 'Paste', keybinding: 'Ctrl+V', disabled: readOnly, run: () => void paste() },
+			{ label: t('editor.menu.compareWithClipboard'), disabled: !view, run: () => void compareWithClipboard() },
 			'separator',
 			{ label: 'Find', keybinding: 'Ctrl+F', run: () => this.runEditorCommand('find') },
 			{ label: 'Command Palette...', keybinding: 'Ctrl+Shift+P', run: () => void commands.execute('workbench.commandPalette') },
@@ -1152,7 +1190,7 @@ export const openMethods: ThisType<EditorGroup> = {
 		];
 	},
 
-	runEditorCommand(command: 'undo' | 'redo' | 'selectAll' | 'find' | 'replace' | 'toggleLineComment' | 'toggleBlockComment'): void {
+	runEditorCommand(command: EditorCommandName): void {
 		// A windowed editor keeps its undo stack in the backend's document; the rest run on
 		// its small window view.
 		if (this.active?.doc) {
@@ -1162,7 +1200,9 @@ export const openMethods: ThisType<EditorGroup> = {
 			else if (command === 'replace') this.active.doc.openReplace();
 			else if (command === 'toggleLineComment') this.active.doc.toggleComment('line');
 			else if (command === 'toggleBlockComment') this.active.doc.toggleComment('block');
-			else this.active.doc.selectAll();
+			else if (command === 'selectAll') this.active.doc.selectAll();
+			// The line-editing and selection-ladder commands have no whole-document view here
+			// to work on: they answer nothing, like a disabled palette row.
 			return;
 		}
 		// A fast-view tab has no editor at all — find still serves its read-only rope.
@@ -1172,11 +1212,33 @@ export const openMethods: ThisType<EditorGroup> = {
 		}
 		const view = this.activeView;
 		if (!view || !editorState.cm) return;
+		const cm = editorState.cm;
+		// The line-editing and selection-ladder commands live on the CodeMirror module (the
+		// async chunk); they run on a whole-document view only, which is what an activeView
+		// is — the windowed editor's window above never sees them.
+		const lineCommand: Partial<Record<EditorCommandName, (target: EditorView) => boolean>> = {
+			joinLines: cm.joinLines,
+			sortLinesAscending: cm.sortLines(1),
+			sortLinesDescending: cm.sortLines(-1),
+			transformToUppercase: cm.transformSelection('upper'),
+			transformToLowercase: cm.transformSelection('lower'),
+			transformToTitleCase: cm.transformSelection('title'),
+			trimTrailingWhitespace: cm.trimTrailingWhitespace,
+			expandSelection: cm.expandSelection,
+			shrinkSelection: cm.shrinkSelection
+		};
+		const lineRun = lineCommand[command];
+		if (lineRun) {
+			lineRun(view);
+			return;
+		}
 		const path = this.active?.input.kind === 'file' ? this.active.input.path : this.active?.label ?? '';
-		if (command === 'find') editorState.cm.openSearchPanel(view);
-		else if (command === 'replace') editorState.cm.openReplacePanel(view);
+		if (command === 'find') cm.openSearchPanel(view);
+		else if (command === 'replace') cm.openReplacePanel(view);
 		else if (command === 'toggleLineComment') void import('./comments').then(({ toggleLineComment }) => toggleLineComment(view, path));
 		else if (command === 'toggleBlockComment') void import('./comments').then(({ toggleBlockComment }) => toggleBlockComment(view, path));
-		else editorState.cm[command](view);
+		else if (command === 'undo') cm.undo(view);
+		else if (command === 'redo') cm.redo(view);
+		else if (command === 'selectAll') cm.selectAll(view);
 	},
 };

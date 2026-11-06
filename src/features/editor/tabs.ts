@@ -21,6 +21,64 @@ import { inputId } from './inputs';
 /** The tab being dragged between editor groups: filled on `dragstart`, consumed on drop. */
 export const tabDrag: { editor: Editor | null; groupId: number | null } = { editor: null, groupId: null };
 
+/** A held-Ctrl MRU walk in progress: the group it walks, the frozen use-order it walks
+ *  through (the live `mru` keeps reordering as every previewed editor activates), and the
+ *  index of the editor being previewed. One walk at a time — a second Ctrl+Tab walk in
+ *  another group replaces it. */
+interface MruWalk {
+	group: EditorGroup;
+	order: Editor[];
+	index: number;
+	/** The listeners that end the walk, unhooked on end. */
+	stop: () => void;
+}
+let mruWalk: MruWalk | null = null;
+
+/** End the walk: only the listeners go. The live mru needs no commit — every previewed
+ *  editor activated along the way already fronted itself in `activate`, so the list reads
+ *  exactly as if the previews had been ordinary uses (VS Code commits the walk's order the
+ *  same way when the modifier comes up on the last previewed editor). */
+function endMruWalk(): void {
+	const walk = mruWalk;
+	if (!walk) return;
+	mruWalk = null;
+	walk.stop();
+}
+
+/** The listeners one walk rides: the modifier coming up ends the preview, any other key or
+ *  a mouse press abandons it before that key does its own work, and losing the window ends
+ *  it too (the keyup may never arrive). */
+function startMruWalk(group: EditorGroup, order: Editor[], index: number): MruWalk {
+	const onKey = (event: KeyboardEvent): void => {
+		if (event.type === 'keyup') {
+			if (event.key === 'Control' || event.key === 'Meta') endMruWalk();
+			return;
+		}
+		// The walk's own chord (Ctrl+Tab / Ctrl+Shift+Tab, either Ctrl spelling) continues
+		// it; anything else ends it in place.
+		if (!((event.ctrlKey || event.metaKey) && event.key === 'Tab')) endMruWalk();
+	};
+	const onMouseDown = (): void => endMruWalk();
+	const onBlur = (): void => endMruWalk();
+	const walk: MruWalk = {
+		group,
+		order,
+		index,
+		stop: () => {
+			document.removeEventListener('keydown', onKey, true);
+			document.removeEventListener('keyup', onKey, true);
+			document.removeEventListener('mousedown', onMouseDown, true);
+			window.removeEventListener('blur', onBlur);
+		}
+	};
+	document.addEventListener('keydown', onKey, true);
+	document.addEventListener('keyup', onKey, true);
+	document.addEventListener('mousedown', onMouseDown, true);
+	window.addEventListener('blur', onBlur);
+	mruWalk = walk;
+	return walk;
+}
+
 
 /** The desktop vs the browser shell: the remote workbench's marker (boot.ts sets it before
  *  main.ts loads) — the same gate the Explorer's row menu applies to its desktop-only rows. */
@@ -96,6 +154,33 @@ export const tabsMethods: ThisType<EditorGroup> = {
 		if (!this.active || this.open.length < 2) return;
 		const index = this.open.indexOf(this.active);
 		this.activate(this.open[(index + direction + this.open.length) % this.open.length]!);
+	},
+
+	/** Ctrl+Tab / Ctrl+Shift+Tab: the most-recently-used walk. The first press activates the
+	 *  editor used just before the current one (Ctrl+Shift+Tab: the least recent one), and
+	 *  every repeat while the walk is live steps further along a use-order frozen at the
+	 *  walk's start — OS key auto-repeat delivers plain repeated keydowns, so the walk is
+	 *  per-press. The walk ends when the modifier comes up, on any other key or click, or
+	 *  when the window loses focus. Within-group: the mru the tabs maintain is one group's. */
+	cycleMru(direction: 1 | -1): void {
+		if (mruWalk && mruWalk.group !== this) endMruWalk();
+		let walk = mruWalk;
+		if (!walk) {
+			const order = this.mru.filter((candidate) => this.open.includes(candidate));
+			if (order.length < 2) return;
+			walk = startMruWalk(this, order, direction === -1 ? 1 : order.length - 1);
+		} else {
+			const count = walk.order.length;
+			const step = direction === -1 ? 1 : -1;
+			// Walk past entries closed while the walk was live; a fully closed walk stops.
+			for (let tries = 0; tries < count; tries++) {
+				walk.index = (walk.index + step + count) % count;
+				if (this.open.includes(walk.order[walk.index]!)) break;
+			}
+		}
+		const editor = walk.order[walk.index]!;
+		if (this.open.includes(editor)) this.activate(editor);
+		else endMruWalk();
 	},
 
 	activateSuccessor(editor: Editor, index: number): void {

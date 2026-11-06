@@ -6,7 +6,7 @@
 
 import { Compartment, EditorSelection, EditorState, type Extension, type StateCommand } from '@codemirror/state';
 import { EditorView, gutter, GutterMarker, keymap, type Command, type KeyBinding, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, highlightSpecialChars, rectangularSelection, crosshairCursor, ViewPlugin, type ViewUpdate } from '@codemirror/view';
-import { defaultKeymap, history, historyKeymap, indentWithTab, redo, selectAll, selectLine, undo } from '@codemirror/commands';
+import { defaultKeymap, deleteTrailingWhitespace, history, historyKeymap, indentWithTab, redo, selectAll, selectLine, undo } from '@codemirror/commands';
 import { closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
 import { searchKeymap, highlightSelectionMatches, search, openSearchPanel, selectSelectionMatches } from '@codemirror/search';
 import { bracketMatching, foldGutter, foldKeymap, indentOnInput, indentUnit } from '@codemirror/language';
@@ -15,13 +15,14 @@ import { languages } from '@codemirror/language-data';
 import { completionExtension } from './autocomplete';
 import { commentKeymapFor } from './comments';
 import { hasBookmark } from './bookmarks';
+import { expandSelection, shrinkSelection } from './expandSelection';
 import { bracketColorsExtension, minimapExtension, stickyScrollExtension, wheelExtension } from './editorExtras';
 import { createFindPanel, openReplacePanel } from './findWidget';
 import { vscodeHighlighting } from './cmTheme';
 import { settings } from '../../platform/settings';
 import { icon } from '../../platform/ui/index';
 
-export { EditorState, EditorView, keymap, openSearchPanel, openReplacePanel, redo, selectAll, undo, completionExtension };
+export { EditorState, EditorView, keymap, openSearchPanel, openReplacePanel, redo, selectAll, undo, completionExtension, expandSelection, shrinkSelection };
 
 /** The phone's read-only open's reconfigure point (src/remote/editLock.ts): the locked
  *  configuration is editor state, lifted and restored in place by the app bar's lock toggle. */
@@ -72,16 +73,152 @@ export const changeAllOccurrences: Command = (view) => {
  *  both would run on one keystroke), and Alt+L is not VS Code's line selection (Ctrl+L is). */
 const editingKeymap = defaultKeymap.filter((binding) => !['Alt-ArrowLeft', 'Alt-ArrowRight', 'Alt-l'].includes(binding.key ?? ''));
 
+/** The merged line span of every selection that spans more than one line, plus the cursor's
+ *  own line paired with its successor — the spans Join Lines collapses, merged where the
+ *  selections' line ranges overlap (CodeMirror's changes must not). */
+function joinSpans(state: EditorState): { first: number; last: number }[] {
+	const spans: { first: number; last: number }[] = [];
+	for (const range of state.selection.ranges) {
+		const first = state.doc.lineAt(range.from).number;
+		const lastTouched = state.doc.lineAt(range.to).number;
+		// A bare cursor joins its line with the next; a spanning selection joins all its lines.
+		const last = !range.empty && lastTouched > first ? lastTouched : first + 1;
+		if (last > state.doc.lines) continue; // the document's last line joins nothing
+		// The phantom line a trailing newline creates (empty, at the very end) joins
+		// nothing either — the join would only eat the document's final newline.
+		if (last === state.doc.lines && state.doc.line(last).length === 0) continue;
+		const previous = spans[spans.length - 1];
+		if (previous && first <= previous.last) {
+			previous.last = Math.max(previous.last, last);
+			continue;
+		}
+		spans.push({ first, last });
+	}
+	return spans;
+}
+
+/** The text lines `first..last` join into: VS Code's semantics — one space at each seam,
+ *  each joined line's trailing whitespace and leading indentation gone. Empty lines
+ *  contribute no seam ("a" joined with "" and "b" reads "a b"), and a join whose every
+ *  follower is empty just eats their newlines. Returns the insert and the cursor's offset
+ *  from the span start (the first seam, clamped to the text). */
+function joinedSpan(state: EditorState, first: number, last: number): { insert: string; seam: number } {
+	const lines: string[] = [];
+	for (let n = first; n <= last; n++) lines.push(state.doc.line(n).text);
+	const head = lines[0]!.replace(/\s+$/, '');
+	const insert = [head, ...lines.slice(1).map((line) => line.trim()).filter((text) => text !== '')].join(' ');
+	return { insert, seam: Math.min(head.length + 1, insert.length) };
+}
+
+/** VS Code's Join Lines: the cursor's line joins the next one (every line of a multi-line
+ *  selection joins together), correct under multiple selections, one undo step (a single
+ *  transaction). Ctrl+J toggles the panel here, so the command is palette-only. */
+export const joinLines: Command = (view) => {
+	if (view.state.readOnly) return false;
+	const spans = joinSpans(view.state);
+	if (spans.length === 0) return false;
+	const changes: { from: number; to: number; insert: string }[] = [];
+	const cursors: number[] = [];
+	let shift = 0;
+	for (const span of spans) {
+		const first = view.state.doc.line(span.first);
+		const last = view.state.doc.line(span.last);
+		const { insert, seam } = joinedSpan(view.state, span.first, span.last);
+		changes.push({ from: first.from, to: last.to, insert });
+		// Every change sits before the next cursor, so the shift it causes accumulates.
+		cursors.push(first.from + seam + shift);
+		shift += insert.length - (last.to - first.from);
+	}
+	if (changes.length === 0) return false;
+	view.dispatch({
+		changes,
+		selection: EditorSelection.create(cursors.map((anchor) => EditorSelection.cursor(anchor))),
+		scrollIntoView: true,
+		userEvent: 'input.join'
+	});
+	return true;
+};
+
+/** VS Code's Sort Lines: every selection spanning more than one line sorts its lines
+ *  (stable, so equal lines keep their order); a lone cursor or a single-line selection
+ *  sorts nothing, which is the command's disabled state. One transaction for everything. */
+export const sortLines = (direction: 1 | -1): Command => (view) => {
+	if (view.state.readOnly) return false;
+	const state = view.state;
+	const spans: { first: number; last: number }[] = [];
+	for (const range of state.selection.ranges) {
+		if (range.empty) continue;
+		const first = state.doc.lineAt(range.from).number;
+		const last = state.doc.lineAt(range.to).number;
+		if (last === first) continue;
+		const previous = spans[spans.length - 1];
+		if (previous && first <= previous.last) {
+			previous.last = Math.max(previous.last, last);
+			continue;
+		}
+		spans.push({ first, last });
+	}
+	if (spans.length === 0) return false;
+	const changes = spans.map((span) => {
+		const lines = [];
+		for (let n = span.first; n <= span.last; n++) lines.push({ text: state.doc.line(n).text, at: n });
+		// `at` keeps the sort stable — a reversed comparator alone would reverse equal lines.
+		lines.sort((a, b) => (direction * (a.text < b.text ? -1 : a.text > b.text ? 1 : 0)) || a.at - b.at);
+		const from = state.doc.line(span.first).from;
+		const to = state.doc.line(span.last).to;
+		return { from, to, insert: lines.map((line) => line.text).join(state.lineBreak) };
+	});
+	// The selection rides along: CodeMirror maps it through the permutation itself.
+	view.dispatch({ changes, scrollIntoView: true, userEvent: 'input.sort' });
+	return true;
+};
+
+/** VS Code's Title Case: the first letter of every whitespace-delimited word capitalized,
+ *  the rest lowered — "hello WORLD" becomes "Hello World". */
+function toTitleCase(text: string): string {
+	return text.replace(/[^\s]+/g, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
+}
+
+/** VS Code's case transforms: every non-empty selection is rewritten in place (empty
+ *  cursors are left alone, and with none selected the command refuses, like VS Code's
+ *  disabled palette rows). One transaction, so one undo step undoes all selections. */
+export const transformSelection = (mode: 'upper' | 'lower' | 'title'): Command => (view) => {
+	if (view.state.readOnly) return false;
+	const transform = mode === 'upper' ? (text: string) => text.toUpperCase() : mode === 'lower' ? (text: string) => text.toLowerCase() : toTitleCase;
+	const changes: { from: number; to: number; insert: string }[] = [];
+	for (const range of view.state.selection.ranges) {
+		if (range.empty) continue;
+		const text = view.state.sliceDoc(range.from, range.to);
+		const insert = transform(text);
+		if (insert !== text) changes.push({ from: range.from, to: range.to, insert });
+	}
+	if (changes.length === 0) return false;
+	// Same-length (upper/lower) or mapped automatically — the selections keep covering
+	// their rewritten text either way.
+	view.dispatch({ changes, scrollIntoView: true, userEvent: 'input.transform' });
+	return true;
+};
+
+/** VS Code's Trim Trailing Whitespace: CodeMirror's own whole-document pass (every line's
+ *  trailing spaces and tabs gone, one undo step, whitespace-only lines emptied entirely). */
+export const trimTrailingWhitespace: Command = (view) => deleteTrailingWhitespace(view);
+
 /** The search keys, minus Ctrl+G: VS Code's Ctrl+G is Go to Line (the workbench's command,
  *  which only runs when the editor leaves the key alone); F3 / Shift+F3 stay find next/previous. */
 const findKeymap = searchKeymap.filter((binding) => binding.key !== 'Mod-g');
 
-/** The VS Code editing keys CodeMirror does not ship. */
+/** The VS Code editing keys CodeMirror does not ship. The expand/shrink entries stop
+ *  propagation: their keys are ALSO registry keybindings (the palette rows), and a handled
+ *  key that bubbles to the workbench's keydown runs the command a second time — a comment
+ *  toggle survives its double run (toggle + untoggle), a selection ladder would climb two
+ *  tiers per press. */
 const vscodeKeymap: KeyBinding[] = [
 	{ key: 'Mod-h', run: openReplacePanel },
 	{ key: 'Shift-Mod-Enter', run: insertBlankLineAbove },
 	{ key: 'Mod-l', run: selectLine, preventDefault: true },
-	{ key: 'Mod-F2', run: changeAllOccurrences, preventDefault: true }
+	{ key: 'Mod-F2', run: changeAllOccurrences, preventDefault: true },
+	{ key: 'Shift-Alt-ArrowRight', run: expandSelection, preventDefault: true, stopPropagation: true },
+	{ key: 'Shift-Alt-ArrowLeft', run: shrinkSelection, preventDefault: true, stopPropagation: true }
 ];
 
 /** The tab-size setting is both the indent unit Tab inserts and the width a tab character
