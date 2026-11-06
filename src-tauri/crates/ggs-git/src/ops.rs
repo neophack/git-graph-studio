@@ -1354,10 +1354,18 @@ mod tests {
     #[test]
     fn cherry_pick_revert_and_the_reset_modes_run() {
         let scratch = Scratch::new("scm-rewrite");
-        let git = scratch.repo("repo");
+        let mut git = scratch.repo("repo");
         let base = commit(&git, "a.txt", "one\n", "base");
         git.run(&["checkout", "-q", "-b", "side"]).unwrap();
+        // The cherry-pick keeps the author stamp and takes the committer stamp from the
+        // clock, whose second resolution a fast runner can land inside the picked
+        // commit's own second — the replay onto this commit's parent would then mint a
+        // byte-identical object and hash. Pinning this commit's committer date keeps the
+        // pick's fresh stamp from ever matching it.
+        git.env
+            .push(("GIT_COMMITTER_DATE".into(), "2020-01-01T00:00:00 +0000".into()));
         let picked = commit(&git, "picked.txt", "picked\n", "The picked change");
+        git.env.pop();
         git.run(&["checkout", "-q", "main"]).unwrap();
         assert!(!git.repo.join("picked.txt").exists());
 
