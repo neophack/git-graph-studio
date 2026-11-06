@@ -1,14 +1,15 @@
 // The editor command bundle: the line-editing family (join, sort, transforms, trim), the
-// selection ladder (expand/shrink), the Ctrl+Tab most-recently-used walk, the text menu's
-// linewise cut/copy and its Compare with Clipboard diff, and the breadcrumb dropdowns.
-// The pure CodeMirror commands run on bare views; the group-level behaviour runs over the
-// scripted backend like the rest of the module's suites.
+// line-motion family (move / copy / delete line, go to bracket, the add-cursor pair,
+// duplicate selection), the selection ladder (expand/shrink), the Ctrl+Tab most-recently-used
+// walk, the text menu's linewise cut/copy and its Compare with Clipboard diff, and the
+// breadcrumb dropdowns. The pure CodeMirror commands run on bare views; the group-level
+// behaviour runs over the scripted backend like the rest of the module's suites.
 
 import { describe, expect, it } from 'vitest';
 import { EditorSelection, EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 
-import { EditorGroup, expandSelection, joinLines, shrinkSelection, sortLines, transformSelection, trimTrailingWhitespace } from '../src/features/editor';
+import { EditorGroup, duplicateSelection, expandSelection, joinLines, shrinkSelection, sortLines, transformSelection, trimTrailingWhitespace } from '../src/features/editor';
 import { backend } from './tauriMock';
 import { click, flush, menuItem, menuLabels, rightClick, texts, until } from './helpers';
 
@@ -120,6 +121,89 @@ describe('line-editing commands', () => {
 		expect(trimTrailingWhitespace(view)).toBe(true);
 		expect(view.state.sliceDoc()).toBe('a\nb\nc\n');
 		view.destroy();
+	});
+});
+
+describe('the line-motion family', () => {
+	it('Duplicate Selection copies the selection after itself and selects the copy', () => {
+		const view = viewOf('alpha beta\n', { anchor: 0, head: 5 });
+		expect(duplicateSelection(view)).toBe(true);
+		expect(view.state.sliceDoc()).toBe('alphaalpha beta\n');
+		// The duplicate is what stands selected now, cursor at its end.
+		expect(view.state.selection.main.from).toBe(5);
+		expect(view.state.selection.main.to).toBe(10);
+		view.destroy();
+	});
+
+	it('Duplicate Selection with a bare cursor duplicates the line below onto the same column', () => {
+		const view = viewOf('one\ntwo\n', { anchor: 5 }); // line 2, column 2
+		expect(duplicateSelection(view)).toBe(true);
+		expect(view.state.sliceDoc()).toBe('one\ntwo\ntwo\n');
+		expect(view.state.selection.main.head).toBe(9); // column 2 of the duplicated line
+		view.destroy();
+	});
+
+	it('Duplicate Selection serves every cursor in one press and refuses a read-only view', () => {
+		const view = viewOf('a\nb\nc\n');
+		view.dispatch({ selection: EditorSelection.create([EditorSelection.cursor(0), EditorSelection.cursor(2), EditorSelection.cursor(4)]) });
+		expect(duplicateSelection(view)).toBe(true);
+		expect(view.state.sliceDoc()).toBe('a\na\nb\nb\nc\nc\n');
+		view.destroy();
+		const readOnly = new EditorView({
+			state: EditorState.create({ doc: 'x\n', extensions: EditorState.readOnly.of(true) }),
+			parent: document.body.appendChild(document.createElement('div'))
+		});
+		expect(duplicateSelection(readOnly)).toBe(false);
+		expect(readOnly.state.sliceDoc()).toBe('x\n');
+		readOnly.destroy();
+	});
+
+	it('Move, Copy and Delete Line run through the group\'s editor commands', async () => {
+		files({ 'C:\\repo\\lines.txt': 'one\ntwo\nthree\n' });
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openFile('C:\\repo\\lines.txt');
+		const view = group.activeView!;
+		view.dispatch({ selection: { anchor: view.state.doc.line(2).from } });
+		group.runEditorCommand('moveLineUp');
+		expect(view.state.sliceDoc()).toBe('two\none\nthree\n');
+		group.runEditorCommand('moveLineDown');
+		expect(view.state.sliceDoc()).toBe('one\ntwo\nthree\n');
+		group.runEditorCommand('copyLineDown');
+		expect(view.state.sliceDoc()).toBe('one\ntwo\ntwo\nthree\n');
+		// The cursor sits on the copy, so Delete Line removes the duplicate again.
+		group.runEditorCommand('deleteLine');
+		expect(view.state.sliceDoc()).toBe('one\ntwo\nthree\n');
+	});
+
+	it('Go to Bracket jumps the cursor to the matching bracket', async () => {
+		files({ 'C:\\repo\\calc.ts': 'const a = (1 + 2);\n' });
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openFile('C:\\repo\\calc.ts');
+		const view = group.activeView!;
+		const openParen = view.state.doc.line(1).text.indexOf('(');
+		// The cursor just past the opener lands just before the closer — the cursor crosses
+		// to the other side of the pair, VS Code's Go to Bracket.
+		view.dispatch({ selection: { anchor: openParen + 1 } });
+		group.runEditorCommand('goToBracket');
+		expect(view.state.selection.main.head).toBe(view.state.doc.line(1).text.indexOf(')'));
+	});
+
+	it('Add Cursor Above/Below dispatch through the editor commands', async () => {
+		files({ 'C:\\repo\\rows.txt': 'one\ntwo\n' });
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openFile('C:\\repo\\rows.txt');
+		const view = group.activeView!;
+		view.dispatch({ selection: { anchor: view.state.doc.line(2).from } });
+		// The vertical reach depends on real line heights (absent under jsdom, where the
+		// command may answer nothing); what this suite owns is the wiring — the palette row
+		// dispatches the command and never corrupts the document.
+		group.runEditorCommand('addCursorAbove');
+		expect(view.state.sliceDoc()).toBe('one\ntwo\n');
+		group.runEditorCommand('addCursorBelow');
+		expect(view.state.sliceDoc()).toBe('one\ntwo\n');
 	});
 });
 
@@ -280,6 +364,21 @@ describe('the text menu\'s clipboard group', () => {
 		const diff = group.active!;
 		expect(diff.merge!.a.state.doc.toString()).toBe('clip');
 		expect(diff.merge!.b.state.doc.toString()).toBe('edited saved\n');
+	});
+
+	it('the context menu carries the selection and comment rows VS Code shows', async () => {
+		files({ 'C:\\repo\\menu.ts': 'one\n' });
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openFile('C:\\repo\\menu.ts');
+		const view = group.activeView!;
+		rightClick(document.querySelector('.cm-content'));
+		for (const row of ['Duplicate Selection', 'Toggle Line Comment', 'Toggle Block Comment', 'Format Document']) {
+			expect(menuLabels()).toContain(row);
+		}
+		// Duplicate Selection from the menu duplicates the cursor's line, as a bare cursor.
+		click(menuItem('Duplicate Selection'));
+		expect(view.state.sliceDoc()).toBe('one\none\n');
 	});
 });
 

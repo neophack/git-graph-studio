@@ -6,7 +6,7 @@
 
 import { Compartment, EditorSelection, EditorState, type Extension, type StateCommand } from '@codemirror/state';
 import { EditorView, gutter, GutterMarker, keymap, type Command, type KeyBinding, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, highlightSpecialChars, rectangularSelection, crosshairCursor, ViewPlugin, type ViewUpdate } from '@codemirror/view';
-import { defaultKeymap, deleteTrailingWhitespace, history, historyKeymap, indentWithTab, redo, selectAll, selectLine, undo } from '@codemirror/commands';
+import { addCursorAbove, addCursorBelow, copyLineDown, copyLineUp, cursorMatchingBracket, defaultKeymap, deleteLine, deleteTrailingWhitespace, history, historyKeymap, indentWithTab, moveLineDown, moveLineUp, redo, selectAll, selectLine, undo } from '@codemirror/commands';
 import { closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
 import { searchKeymap, highlightSelectionMatches, search, openSearchPanel, selectSelectionMatches } from '@codemirror/search';
 import { bracketMatching, foldGutter, foldKeymap, indentOnInput, indentUnit } from '@codemirror/language';
@@ -23,6 +23,7 @@ import { settings } from '../../platform/settings';
 import { icon } from '../../platform/ui/index';
 
 export { EditorState, EditorView, keymap, openSearchPanel, openReplacePanel, redo, selectAll, undo, completionExtension, expandSelection, shrinkSelection };
+export { addCursorAbove, addCursorBelow, copyLineDown, copyLineUp, cursorMatchingBracket, deleteLine, moveLineDown, moveLineUp };
 
 /** The phone's read-only open's reconfigure point (src/remote/editLock.ts): the locked
  *  configuration is editor state, lifted and restored in place by the app bar's lock toggle. */
@@ -203,6 +204,36 @@ export const transformSelection = (mode: 'upper' | 'lower' | 'title'): Command =
  *  trailing spaces and tabs gone, one undo step, whitespace-only lines emptied entirely). */
 export const trimTrailingWhitespace: Command = (view) => deleteTrailingWhitespace(view);
 
+/** VS Code's Duplicate Selection: every selection's text copies in place right after itself,
+ *  the duplicate selected (a bare cursor duplicates its whole line below and lands on the
+ *  same column of the copy, VS Code's editor.action.duplicateSelection). A last line without
+ *  a trailing newline gains one, so the copy is a line of its own there too. Multiple
+ *  selections ride one transaction, so one undo step takes them all back. */
+export const duplicateSelection: Command = (view) => {
+	if (view.state.readOnly) return false;
+	const state = view.state;
+	const result = state.changeByRange((range) => {
+		if (range.empty) {
+			const line = state.doc.lineAt(range.head);
+			// The copy goes below the line: past its newline where one follows; the last line
+			// without a trailing break inserts its own, or the copy would share its line.
+			const trailing = line.to < state.doc.length;
+			const insert = trailing ? line.text + state.lineBreak : state.lineBreak + line.text;
+			return {
+				changes: { from: trailing ? line.to + 1 : line.to, insert },
+				range: EditorSelection.cursor(range.head + insert.length)
+			};
+		}
+		const text = state.sliceDoc(range.from, range.to);
+		return {
+			changes: { from: range.to, insert: text },
+			range: EditorSelection.range(range.from + text.length, range.to + text.length)
+		};
+	});
+	view.dispatch(state.update(result, { scrollIntoView: true, userEvent: 'input.duplicate' }));
+	return true;
+};
+
 /** The search keys, minus Ctrl+G: VS Code's Ctrl+G is Go to Line (the workbench's command,
  *  which only runs when the editor leaves the key alone); F3 / Shift+F3 stay find next/previous. */
 const findKeymap = searchKeymap.filter((binding) => binding.key !== 'Mod-g');
@@ -211,14 +242,24 @@ const findKeymap = searchKeymap.filter((binding) => binding.key !== 'Mod-g');
  *  propagation: their keys are ALSO registry keybindings (the palette rows), and a handled
  *  key that bubbles to the workbench's keydown runs the command a second time — a comment
  *  toggle survives its double run (toggle + untoggle), a selection ladder would climb two
- *  tiers per press. */
+ *  tiers per press. The line-motion family (move / copy / delete line, go to bracket, the
+ *  add-cursor pair) stops propagation for the same reason — a moved line moved twice is a
+ *  different document. */
 const vscodeKeymap: KeyBinding[] = [
 	{ key: 'Mod-h', run: openReplacePanel },
 	{ key: 'Shift-Mod-Enter', run: insertBlankLineAbove },
 	{ key: 'Mod-l', run: selectLine, preventDefault: true },
 	{ key: 'Mod-F2', run: changeAllOccurrences, preventDefault: true },
 	{ key: 'Shift-Alt-ArrowRight', run: expandSelection, preventDefault: true, stopPropagation: true },
-	{ key: 'Shift-Alt-ArrowLeft', run: shrinkSelection, preventDefault: true, stopPropagation: true }
+	{ key: 'Shift-Alt-ArrowLeft', run: shrinkSelection, preventDefault: true, stopPropagation: true },
+	{ key: 'Alt-ArrowUp', run: moveLineUp, preventDefault: true, stopPropagation: true },
+	{ key: 'Alt-ArrowDown', run: moveLineDown, preventDefault: true, stopPropagation: true },
+	{ key: 'Shift-Alt-ArrowUp', run: copyLineUp, preventDefault: true, stopPropagation: true },
+	{ key: 'Shift-Alt-ArrowDown', run: copyLineDown, preventDefault: true, stopPropagation: true },
+	{ key: 'Shift-Mod-k', run: deleteLine, preventDefault: true, stopPropagation: true },
+	{ key: 'Shift-Mod-\\', run: cursorMatchingBracket, preventDefault: true, stopPropagation: true },
+	{ key: 'Mod-Alt-ArrowUp', run: addCursorAbove, preventDefault: true, stopPropagation: true },
+	{ key: 'Mod-Alt-ArrowDown', run: addCursorBelow, preventDefault: true, stopPropagation: true }
 ];
 
 /** The tab-size setting is both the indent unit Tab inserts and the width a tab character

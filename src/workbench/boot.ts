@@ -153,6 +153,23 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'editor.transformToLowercase', title: 'Transform to Lowercase', category: 'Edit', enabled: hasEditor, run: () => this.editors.runEditorCommand('transformToLowercase') });
 		register({ id: 'editor.transformToTitlecase', title: 'Transform to Title Case', category: 'Edit', enabled: hasEditor, run: () => this.editors.runEditorCommand('transformToTitleCase') });
 		register({ id: 'editor.trimTrailingWhitespace', title: 'Trim Trailing Whitespace', category: 'Edit', enabled: hasEditor, run: () => this.editors.runEditorCommand('trimTrailingWhitespace') });
+		// VS Code's line-motion family and multi-cursor keys, the editor's own keymap bound
+		// beside them (textEditor.ts). The arrow keys answer only while the editor itself is
+		// focused — Alt+Up/Down and Ctrl+Alt+Up/Down mean other things to an input's history,
+		// a terminal shell, and a GPU driver's display rotation, and the focused editor is
+		// VS Code's own editorFocus context for them.
+		const hasFocusedEditor = () => editorView() !== null && document.activeElement instanceof Element && document.activeElement.closest('.cm-editor') !== null;
+		register({ id: 'editor.moveLineUp', title: 'Move Line Up', category: 'Edit', keybinding: 'Alt+Up', enabled: hasFocusedEditor, run: () => this.editors.runEditorCommand('moveLineUp') });
+		register({ id: 'editor.moveLineDown', title: 'Move Line Down', category: 'Edit', keybinding: 'Alt+Down', enabled: hasFocusedEditor, run: () => this.editors.runEditorCommand('moveLineDown') });
+		register({ id: 'editor.copyLineUp', title: 'Copy Line Up', category: 'Edit', keybinding: 'Shift+Alt+Up', enabled: hasFocusedEditor, run: () => this.editors.runEditorCommand('copyLineUp') });
+		register({ id: 'editor.copyLineDown', title: 'Copy Line Down', category: 'Edit', keybinding: 'Shift+Alt+Down', enabled: hasFocusedEditor, run: () => this.editors.runEditorCommand('copyLineDown') });
+		register({ id: 'editor.deleteLine', title: 'Delete Line', category: 'Edit', keybinding: 'Ctrl+Shift+K', enabled: hasEditor, run: () => this.editors.runEditorCommand('deleteLine') });
+		register({ id: 'editor.goToBracket', title: 'Go to Bracket', category: 'Go', keybinding: 'Ctrl+Shift+\\', enabled: hasEditor, run: () => this.editors.runEditorCommand('goToBracket') });
+		register({ id: 'editor.addCursorAbove', title: 'Add Cursor Above', category: 'Selection', keybinding: 'Ctrl+Alt+Up', enabled: hasFocusedEditor, run: () => this.editors.runEditorCommand('addCursorAbove') });
+		register({ id: 'editor.addCursorBelow', title: 'Add Cursor Below', category: 'Selection', keybinding: 'Ctrl+Alt+Down', enabled: hasFocusedEditor, run: () => this.editors.runEditorCommand('addCursorBelow') });
+		// VS Code's Duplicate Selection (editor.action.duplicateSelection): no default
+		// keybinding in VS Code either — the row lives in the editor's context menu and here.
+		register({ id: 'editor.duplicateSelection', title: 'Duplicate Selection', category: 'Edit', enabled: hasEditor, run: () => this.editors.runEditorCommand('duplicateSelection') });
 		register({ id: 'editor.expandSelection', title: 'Expand Selection', category: 'Selection', keybinding: 'Shift+Alt+Right', enabled: hasEditor, run: () => this.editors.runEditorCommand('expandSelection') });
 		register({ id: 'editor.shrinkSelection', title: 'Shrink Selection', category: 'Selection', keybinding: 'Shift+Alt+Left', enabled: hasEditor, run: () => this.editors.runEditorCommand('shrinkSelection') });
 		// The new titles' zh-cn twins. Every older command's pair sits in i18n.ts's own
@@ -167,6 +184,19 @@ export const bootMethods: ThisType<Workbench> = {
 			'Transform to Lowercase': '转换为小写',
 			'Transform to Title Case': '转换为标题大小写',
 			'Trim Trailing Whitespace': '删除尾随空格',
+			// The line-motion family's titles double as the editor context menu's row labels.
+			'Move Line Up': '上移行',
+			'Move Line Down': '下移行',
+			'Copy Line Up': '向上复制行',
+			'Copy Line Down': '向下复制行',
+			'Delete Line': '删除行',
+			'Go to Bracket': '转到括号',
+			'Add Cursor Above': '在上面添加光标',
+			'Add Cursor Below': '在下面添加光标',
+			'Duplicate Selection': '重复选择',
+			'Toggle Line Comment': '切换行注释',
+			'Toggle Block Comment': '切换块注释',
+			'Format Document': '格式化文档',
 			'Expand Selection': '扩展选择',
 			'Shrink Selection': '缩小选择',
 			'Open Previous Recently Used Editor': '打开上一个最近使用的编辑器',

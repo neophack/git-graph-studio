@@ -10,7 +10,7 @@ import { imageMime, renderMarkdown } from '../../platform/markdown';
 import type { BlameLine } from '../scm/types';
 import type { WsSymbol } from '../search/types';
 import { commands } from '../../platform/commands';
-import { t } from '../../platform/i18n';
+import { t, trText } from '../../platform/i18n';
 import { basename, el, icon, joinPath, notify, relativeTo, type MenuEntry } from '../../platform/ui/index';
 import { fileIcon, isCanLog } from '../../platform/fileIcons';
 import { hook } from '../../platform/hooks';
@@ -1182,6 +1182,14 @@ export const openMethods: ThisType<EditorGroup> = {
 			{ label: 'Paste', keybinding: 'Ctrl+V', disabled: readOnly, run: () => void paste() },
 			{ label: t('editor.menu.compareWithClipboard'), disabled: !view, run: () => void compareWithClipboard() },
 			'separator',
+			// VS Code's selection/comment block: the duplicate (its palette row and the
+			// selection family), the comment toggles and the formatter — every command the
+			// rows name exists; the menu is the discoverable surface the palette alone misses.
+			{ label: trText('Duplicate Selection'), disabled: !view || readOnly, run: () => this.runEditorCommand('duplicateSelection') },
+			{ label: trText('Toggle Line Comment'), keybinding: 'Ctrl+/', disabled: !view || readOnly, run: () => this.runEditorCommand('toggleLineComment') },
+			{ label: trText('Toggle Block Comment'), keybinding: 'Shift+Alt+A', disabled: !view || readOnly, run: () => this.runEditorCommand('toggleBlockComment') },
+			{ label: trText('Format Document'), keybinding: 'Ctrl+Shift+I', disabled: !view || readOnly, run: () => void commands.execute('editor.formatDocument') },
+			'separator',
 			{ label: 'Find', keybinding: 'Ctrl+F', run: () => this.runEditorCommand('find') },
 			{ label: 'Command Palette...', keybinding: 'Ctrl+Shift+P', run: () => void commands.execute('workbench.commandPalette') },
 			// Extensions' `contributes.menus["editor/context"]` entries, handed the file the
@@ -1224,6 +1232,15 @@ export const openMethods: ThisType<EditorGroup> = {
 			transformToLowercase: cm.transformSelection('lower'),
 			transformToTitleCase: cm.transformSelection('title'),
 			trimTrailingWhitespace: cm.trimTrailingWhitespace,
+			moveLineUp: cm.moveLineUp,
+			moveLineDown: cm.moveLineDown,
+			copyLineUp: cm.copyLineUp,
+			copyLineDown: cm.copyLineDown,
+			deleteLine: cm.deleteLine,
+			goToBracket: cm.cursorMatchingBracket,
+			addCursorAbove: cm.addCursorAbove,
+			addCursorBelow: cm.addCursorBelow,
+			duplicateSelection: cm.duplicateSelection,
 			expandSelection: cm.expandSelection,
 			shrinkSelection: cm.shrinkSelection
 		};

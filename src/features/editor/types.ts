@@ -44,6 +44,15 @@ export type EditorCommandName =
 	| 'transformToLowercase'
 	| 'transformToTitleCase'
 	| 'trimTrailingWhitespace'
+	| 'moveLineUp'
+	| 'moveLineDown'
+	| 'copyLineUp'
+	| 'copyLineDown'
+	| 'deleteLine'
+	| 'goToBracket'
+	| 'addCursorAbove'
+	| 'addCursorBelow'
+	| 'duplicateSelection'
 	| 'expandSelection'
 	| 'shrinkSelection';
 

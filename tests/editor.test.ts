@@ -652,7 +652,7 @@ describe('editor group', () => {
 		group.activeView!.dispatch({ selection: { anchor: group.activeView!.state.doc.line(2).from + 'const other = '.length } });
 
 		rightClick(document.querySelector('.cm-content'));
-		expect(menuLabels()).toEqual(['Go to Definition', 'Find References', 'Show Call Tree', 'Go Back', 'Go Forward', 'Toggle Bookmark', 'Change All Occurrences', 'Cut', 'Copy', 'Paste', 'Compare with Clipboard', 'Find', 'Command Palette...']);
+		expect(menuLabels()).toEqual(['Go to Definition', 'Find References', 'Show Call Tree', 'Go Back', 'Go Forward', 'Toggle Bookmark', 'Change All Occurrences', 'Cut', 'Copy', 'Paste', 'Compare with Clipboard', 'Duplicate Selection', 'Toggle Line Comment', 'Toggle Block Comment', 'Format Document', 'Find', 'Command Palette...']);
 		expect(menuItem('Go Back')!.classList.contains('disabled')).toBe(true);
 		click(menuItem('Go to Definition'));
 		await flush();
