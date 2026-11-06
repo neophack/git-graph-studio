@@ -705,6 +705,7 @@ mod desktop {
                 cmd_search::search_workspace,
                 cmd_search::search_cancel,
                 cmd_search::replace_in_files,
+                cmd_search::search_replace_one,
                 cmd_search::compare_dirs,
                 cmd_search::workspace_symbols,
                 cmd_search::find_references,

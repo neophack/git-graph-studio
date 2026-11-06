@@ -13,8 +13,8 @@ use tauri::State;
 use ggs_fs::{cached_file_list, walk_files};
 use ggs_index::compare::{compare_roots, DirDiffEntry};
 use ggs_index::hexdiff::{hex_of, HexDiff};
-use ggs_index::replace::{replace_root, ReplaceOutcome};
-use ggs_index::scan::{build_matcher, select_paths, FileMatches};
+use ggs_index::replace::{replace_one_in_file, replace_root, ReplaceOutcome};
+use ggs_index::scan::{build_matcher, select_paths, FileMatches, SearchMatch};
 use ggs_index::search::{search_files, SearchEvent, FILE_LIST_TTL};
 use ggs_index::symbols::index::references_for;
 use ggs_index::symbols::WorkspaceSymbol;
@@ -94,7 +94,9 @@ pub fn search_cancel(search: State<'_, std::sync::Arc<ggs_index::search::SearchS
 }
 
 /// Replace every match in every file of the open folder. Files are rewritten whole; the file
-/// list cache is dropped so Quick Open and the search see the new state.
+/// list cache is dropped so Quick Open and the search see the new state. `preserve_case`
+/// derives each replacement's casing from its own match (all-lower → lower, ALL-UPPER →
+/// UPPER, Title → Title) — off by default, the replacement as typed.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // the search options mirror search_workspace's
 pub async fn replace_in_files(
@@ -108,6 +110,7 @@ pub async fn replace_in_files(
     exclude: Option<String>,
     repo: Option<String>,
     word_only: Option<bool>,
+    preserve_case: Option<bool>,
 ) -> Result<ReplaceOutcome, String> {
     let root = repo
         .or_else(|| roots.inner().first())
@@ -125,9 +128,52 @@ pub async fn replace_in_files(
         is_regex,
         case_sensitive,
         word_only.unwrap_or(false),
+        preserve_case.unwrap_or(false),
     )?;
     cache.invalidate();
     Ok(outcome)
+}
+
+/// Replace exactly one listed match — a search result row's own file, line and character
+/// column. The path is the result's root-relative spelling (an absolute path or a `..`
+/// segment would leave the workspace and is refused); the file is re-matched with the
+/// search's own options so what is replaced is exactly the occurrence the row showed, and
+/// the line's remaining matches come back recomputed for the row's local update.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn search_replace_one(
+    roots: State<'_, WorkspaceRoots>,
+    cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
+    path: String,
+    line: usize,
+    column: usize,
+    query: String,
+    replacement: String,
+    is_regex: bool,
+    case_sensitive: bool,
+    repo: Option<String>,
+    word_only: Option<bool>,
+    preserve_case: Option<bool>,
+) -> Result<Vec<SearchMatch>, String> {
+    if Path::new(&path).is_absolute() || path.split(['/', '\\']).any(|segment| segment == "..") {
+        return Err(format!("{path}: only a workspace-relative result path is accepted"));
+    }
+    let root = repo
+        .or_else(|| roots.inner().first())
+        .ok_or_else(|| "No folder is open".to_string())?;
+    let outcome = replace_one_in_file(
+        &Path::new(&root).join(&path),
+        line,
+        column,
+        &query,
+        &replacement,
+        is_regex,
+        case_sensitive,
+        word_only.unwrap_or(false),
+        preserve_case.unwrap_or(false),
+    )?;
+    cache.invalidate();
+    Ok(outcome.matches)
 }
 
 /// Compare two folders file by file (the folder-comparison page's backend).

@@ -22,7 +22,7 @@ import { hook } from '../platform/hooks';
 import { openSettingsPanel } from './settingsPanel';
 import { settings, updateSetting } from '../platform/settings';
 import * as state from '../platform/state';
-import { basename, notify } from '../platform/ui/index';
+import { basename, notify, relativeTo, toPosix } from '../platform/ui/index';
 import { FS_CHANGED_EVENT, FsChange, OPEN_PATHS_EVENT, OpenedPaths, joinRepo, whenIdle } from './workbench';
 
 /** The close decision's pure half (§17.2, G13): the window hides instead of the instance
@@ -303,6 +303,17 @@ export const bootMethods: ThisType<Workbench> = {
 		// The shell spawns IN the folder (pty_create's cwd), VS Code's own shape — no `cd`
 		// line typed into a shell that started at the root.
 		this.explorer.onOpenInTerminal = (folder) => void this.panel.openTerminal(folder);
+		// "Find in Folder": the Search view opens with the folder's own include glob seeded
+		// (`src/**` spells the folder's subtree; the root's search is the whole workspace,
+		// so its include clears) and the query box focused — VS Code's Find in Folder flow.
+		this.explorer.onFindInFolder = (folder) => {
+			this.showView('search');
+			const roots = this.repoPaths.length > 0 ? this.repoPaths : this.repoPath ? [this.repoPath] : [];
+			const root = roots.find((candidate) => relativeTo(candidate, folder) !== folder) ?? this.repoPath;
+			const relative = root ? relativeTo(root, folder) : '';
+			this.search.seedInclude(relative === '' ? '' : `${toPosix(relative)}/**`);
+			this.search.focus();
+		};
 		// "Module Analysis" over the picked folder(s): a scoped Module Analysis tab,
 		// one per folder set (the blank-area pick on the root is the workspace page).
 		this.explorer.onModuleAnalysis = (folders) => void this.editors.openAnalysisPage('modules', folders);

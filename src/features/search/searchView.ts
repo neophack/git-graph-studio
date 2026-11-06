@@ -1,24 +1,28 @@
 // The Search view: workspace-wide search and replace, as VS Code's Search sidebar - the query
-// box with its case / word / regex toggles, the include and exclude fields, and results grouped
-// by file. Results stream in: the backend pushes batches (in path order) over a channel as it
-// scans, the list grows as they land, and typing again cancels the search in flight. The result
-// tree is a plain DOM tree, like VS Code's search tree: one group per file (its header row
-// followed by its match rows) in normal document flow - every row in the DOM, no windowing.
-// Every row carries VS Code's result context menu: Copy (a match's line), Copy Path, Copy
-// All (every result file's path) and, on the desktop, Reveal in File Explorer.
+// box with its case / word / regex / preserve-case toggles, the include and exclude fields, and
+// results grouped by file. Results stream in: the backend pushes batches (in path order) over a
+// channel as it scans, the list grows as they land, and typing again cancels the search in
+// flight. The result tree is a plain DOM tree, like VS Code's search tree: one group per file
+// (its header row followed by its match rows) in normal document flow - every row in the DOM,
+// no windowing. Every row carries VS Code's result context menu: Copy (a match's line), Copy
+// Path, Copy All (every result file's path) and, on the desktop, Reveal in File Explorer; a
+// hover button replaces exactly that one occurrence; and once the tree holds the focus, the
+// ArrowUp/Down walk, Enter and the F4 jumps move through the matches.
 
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { Channel } from '../../platform/ipc/core';
-import { replaceInFiles, searchCancel, searchWorkspace, type SearchEvent } from '../../platform/ipc/search';
+import { replaceInFiles, searchCancel, searchReplaceOne, searchWorkspace, type SearchEvent } from '../../platform/ipc/search';
 
 import * as state from '../../platform/state';
+import { t } from '../../platform/i18n';
 import { queryHasUppercase } from '../../platform/find/findOptions';
 import { FindHistory, HistoryRecall, recallKey } from '../../platform/find/findHistory';
 import { settings } from '../../platform/settings';
 import { actionButton, basename, confirmDialog, dirname, el, icon, liveSidebarTitle, notify, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 
+import './searchView.css';
 
 import type { FileMatches, SearchMatch } from '../../platform/ipc/search';
 export type { FileMatches, SearchEvent, SearchMatch };
@@ -27,11 +31,15 @@ export interface SearchOptions {
 	caseSensitive: boolean;
 	wholeWord: boolean;
 	useRegex: boolean;
+	/** The replace side's Preserve Case: each replacement derives its casing from the match
+	 *  it replaces (all-lower → lower, ALL-UPPER → UPPER, Title → Title). The search itself
+	 *  never reads it. */
+	preserveCase: boolean;
 	include: string;
 	exclude: string;
 }
 
-export const DEFAULT_OPTIONS: SearchOptions = { caseSensitive: false, wholeWord: false, useRegex: false, include: '', exclude: '' };
+export const DEFAULT_OPTIONS: SearchOptions = { caseSensitive: false, wholeWord: false, useRegex: false, preserveCase: false, include: '', exclude: '' };
 
 /** How long after the last keystroke the as-you-type search fires, as in VS Code. */
 const TYPE_DEBOUNCE_MS = 300;
@@ -160,6 +168,12 @@ export class SearchView {
 		this.messageArea = el('div', 'search-messages');
 		this.list = el('div', 'pane-body search-results');
 		this.listInner = el('div', 'search-rows');
+		// The result tree answers the keyboard once it has the focus (a click inside a
+		// tabindex container takes it): ArrowUp/Down walk the match rows, Enter opens the
+		// focused one, F4 / Shift+F4 jump to (and open) the next / previous match — VS
+		// Code's search tree keys, the mouse behaviour untouched.
+		this.list.tabIndex = 0;
+		this.list.addEventListener('keydown', (event) => this.onListKey(event));
 
 		this.buildTitle();
 		this.buildBox();
@@ -215,6 +229,16 @@ export class SearchView {
 		this.replaceInput.focus();
 	}
 
+	/** "Find in Folder" (the Explorer's folder menu): the include field takes the folder's
+	 *  own glob (`src/**` — the workspace root clears it, so the search is whole) and the
+	 *  search runs after the typing pause, exactly as a typed include would. */
+	seedInclude(glob: string): void {
+		this.options.include = glob;
+		this.includeInput.value = glob;
+		state.save('searchOptions', this.options);
+		this.scheduleTypedSearch();
+	}
+
 	/* ---------- Static chrome, built once ---------- */
 
 	private buildTitle(): void {
@@ -263,7 +287,8 @@ export class SearchView {
 			el('div', 'search-toggles', [
 				this.toggle('case-sensitive', 'Match Case (Alt+C)', 'caseSensitive'),
 				this.toggle('whole-word', 'Match Whole Word (Alt+W)', 'wholeWord'),
-				this.toggle('regex', 'Use Regular Expression (Alt+R)', 'useRegex')
+				this.toggle('regex', 'Use Regular Expression (Alt+R)', 'useRegex'),
+				this.toggle('preserve-case', t('search.preserveCase'), 'preserveCase')
 			])
 		]);
 		const queryRow = el('div', 'search-row query-row', [replaceToggle, queryWidget]);
@@ -338,7 +363,7 @@ export class SearchView {
 		});
 	}
 
-	/** Enter searches at once; Alt+C / Alt+W / Alt+R flip the toggles, as in VS Code. */
+	/** Enter searches at once; Alt+C / Alt+W / Alt+R / Alt+P flip the toggles, as in VS Code. */
 	private onInputKey(event: KeyboardEvent, onEnter: (() => void) | null): void {
 		event.stopPropagation();
 		if (event.key === 'Enter' && onEnter) {
@@ -351,7 +376,8 @@ export class SearchView {
 				event.key === 'c' || event.key === 'C' ? 'caseSensitive'
 					: event.key === 'w' || event.key === 'W' ? 'wholeWord'
 						: event.key === 'r' || event.key === 'R' ? 'useRegex'
-							: null;
+							: event.key === 'p' || event.key === 'P' ? 'preserveCase'
+								: null;
 			if (key) {
 				event.preventDefault();
 				this.setOption(key, !this.options[key] as never);
@@ -525,12 +551,16 @@ export class SearchView {
 	/** Merge a streamed batch into the results and grow the tree. Batches arrive in path
 	 *  order, so the common case appends: new groups go on the end, existing rows are never
 	 *  touched. A batch that lands out of order (a re-search over a changed file list) falls
-	 *  back to one full redraw, which puts every file in sorted position. */
+	 *  back to one full redraw, which puts every file in sorted position. The groups render
+	 *  from the same tagged objects the results hold — a row's closures must speak for the
+	 *  very file entry a later per-result replace updates. */
 	private appendBatch(files: FileMatches[], root?: string): void {
 		const keyOf = (path: string, at: string | undefined): string => `${at ?? ''}/${path}`;
+		const taggedFiles: FileMatches[] = [];
 		let inOrder = true;
 		for (const file of files) {
 			const tagged = { ...file, root };
+			taggedFiles.push(tagged);
 			const key = keyOf(file.path, root);
 			const last = this.results[this.results.length - 1];
 			const lastKey = last ? keyOf(last.path, last.root) : '';
@@ -550,7 +580,7 @@ export class SearchView {
 			else this.results.splice(low, 0, tagged);
 		}
 		if (inOrder) {
-			for (const file of files) this.listInner.appendChild(this.renderFileGroup({ ...file, root }));
+			for (const tagged of taggedFiles) this.listInner.appendChild(this.renderFileGroup(tagged));
 		} else {
 			this.renderResults();
 		}
@@ -590,14 +620,16 @@ export class SearchView {
 			let replacements = 0;
 			for (const root of this.roots.length ? this.roots : [undefined]) {
 				// The same matcher as the search (whole word included), so what was listed is
-				// exactly what gets replaced.
+				// exactly what gets replaced — Preserve Case threaded through, each
+				// replacement's casing derived from its own match.
 				const outcome = await replaceInFiles({
 					query: this.query,
 					isRegex: this.options.useRegex,
 					caseSensitive: this.options.caseSensitive,
 					wordOnly: this.options.wholeWord,
 					include: this.options.include,
-					exclude: this.options.exclude
+					exclude: this.options.exclude,
+					preserveCase: this.options.preserveCase
 				}, this.replacement, root);
 				files += outcome.files;
 				replacements += outcome.replacements;
@@ -646,8 +678,10 @@ export class SearchView {
 	}
 
 	/** Redraw the whole result tree: a new search, a clear, or the rare batch that lands out
-	 *  of order. Streamed batches append through `appendBatch` instead, group by group. */
+	 *  of order. Streamed batches append through `appendBatch` instead, group by group.
+	 *  The keyboard walk's row belongs to the old tree, so its focus goes with it. */
 	private renderResults(): void {
+		this.focusRow(null);
 		this.groups.clear();
 		this.listInner.innerHTML = '';
 		for (const file of this.results) this.listInner.appendChild(this.renderFileGroup(file));
@@ -684,6 +718,17 @@ export class SearchView {
 		const line = renderMatchLine(match);
 		line.classList.add('row', 'search-match');
 		line.prepend(el('span', 'line-no', [String(match.line)]));
+		// The hover replace button (VS Code's per-result replace): exactly this occurrence
+		// is replaced, the row updated locally — the click never opens the file.
+		const replaceButton = el('button', 'match-replace', [icon('replace')]);
+		replaceButton.title = t('search.replaceMatch');
+		replaceButton.setAttribute('aria-label', t('search.replaceMatch'));
+		replaceButton.addEventListener('click', (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			void this.replaceOne(file, match);
+		});
+		line.appendChild(replaceButton);
 		line.title = `${file.path}:${match.line}`;
 		line.addEventListener('click', () => this.onOpenMatch?.(file.path, match.line, match.column, file.root));
 		line.addEventListener('contextmenu', (event) => {
@@ -692,6 +737,93 @@ export class SearchView {
 			this.showResultMenu(event, file, match);
 		});
 		return line;
+	}
+
+	/** The per-result replace: the backend re-matches the row's line with the search's own
+	 *  options and replaces exactly the occurrence at the row's column, answering the line's
+	 *  remaining matches — the group repaints from them, no re-search. A file with no
+	 *  matches left drops its group; a match that changed on disk reports the error. */
+	private async replaceOne(file: FileMatches, match: SearchMatch): Promise<void> {
+		const index = this.results.indexOf(file);
+		if (index === -1) return;
+		try {
+			const remaining = await searchReplaceOne(
+				{ path: file.path, line: match.line, column: match.column },
+				{
+					query: this.query,
+					isRegex: this.options.useRegex,
+					caseSensitive: this.options.caseSensitive,
+					wordOnly: this.options.wholeWord,
+					include: this.options.include,
+					exclude: this.options.exclude,
+					preserveCase: this.options.preserveCase
+				},
+				this.replacement,
+				file.root
+			);
+			const firstOfLine = file.matches.findIndex((m) => m.line === match.line);
+			if (firstOfLine === -1) return;
+			let end = firstOfLine;
+			while (end < file.matches.length && file.matches[end]!.line === match.line) end++;
+			file.matches.splice(firstOfLine, end - firstOfLine, ...remaining);
+			const group = this.groups.get(this.fileKey(file));
+			if (file.matches.length === 0) {
+				group?.remove();
+				this.groups.delete(this.fileKey(file));
+				this.results.splice(index, 1);
+			} else if (group) {
+				group.replaceWith(this.renderFileGroup(file));
+			}
+			this.render();
+		} catch (error) {
+			notify('error', String(error));
+		}
+	}
+
+	/* ---------- Result tree keyboard (VS Code's search tree keys) ---------- */
+
+	/** The row the ArrowUp/Down walk sits on. */
+	private focusedRow: HTMLElement | null = null;
+
+	private matchRows(): HTMLElement[] {
+		return Array.from(this.listInner.querySelectorAll<HTMLElement>('.search-match'));
+	}
+
+	private focusRow(row: HTMLElement | null): void {
+		this.focusedRow?.classList.remove('kb-focused');
+		this.focusedRow = row;
+		if (!row) return;
+		row.classList.add('kb-focused');
+		row.scrollIntoView({ block: 'nearest' });
+	}
+
+	/** One step along the match rows (skipping into the next file happens naturally — the
+	 *  walk is over rows, file heads are not rows); `open` also opens the landing row, the
+	 *  F4 jump's shape. */
+	private moveFocus(delta: number, open: boolean): void {
+		const rows = this.matchRows();
+		if (rows.length === 0) return;
+		const index = this.focusedRow ? rows.indexOf(this.focusedRow) : -1;
+		const at = index === -1 ? (delta > 0 ? -1 : 0) : index;
+		const next = rows[Math.max(0, Math.min(rows.length - 1, at + delta))] ?? null;
+		this.focusRow(next);
+		if (open && next) next.click();
+	}
+
+	private onListKey(event: KeyboardEvent): void {
+		if (event.key === 'ArrowDown' || (event.key === 'F4' && !event.shiftKey)) {
+			event.preventDefault();
+			event.stopPropagation();
+			this.moveFocus(1, event.key === 'F4');
+		} else if (event.key === 'ArrowUp' || (event.key === 'F4' && event.shiftKey)) {
+			event.preventDefault();
+			event.stopPropagation();
+			this.moveFocus(-1, event.key === 'F4');
+		} else if (event.key === 'Enter' && this.focusedRow) {
+			event.preventDefault();
+			event.stopPropagation();
+			this.focusedRow.click();
+		}
 	}
 
 	/** VS Code's search-result context menu: Copy (the match's line text), Copy Path

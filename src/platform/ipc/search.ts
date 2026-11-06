@@ -26,7 +26,9 @@ export type SearchEvent =
 	| { kind: 'done'; scanned: number; truncated: boolean; cancelled: boolean };
 
 /** The matcher options the search and the replace share (whole word included, so what was
- *  listed is exactly what gets replaced). */
+ *  listed is exactly what gets replaced). `preserveCase` is the replace side's only
+ *  optional: each replacement derives its casing from the match it replaces (all-lower →
+ *  lower, ALL-UPPER → UPPER, Title → Title); the search never reads it. */
 export interface SearchMatcher {
 	query: string;
 	isRegex: boolean;
@@ -34,6 +36,7 @@ export interface SearchMatcher {
 	wordOnly: boolean;
 	include: string;
 	exclude: string;
+	preserveCase?: boolean;
 }
 
 /** One workspace symbol the index answers — the parser layer's additions optional. */
@@ -69,6 +72,24 @@ export const searchWorkspace = (matcher: SearchMatcher, repo: string | undefined
 	invoke<void>('search_workspace', { ...matcher, repo, onEvent });
 export const replaceInFiles = (matcher: SearchMatcher, replacement: string, repo: string | undefined) =>
 	invoke<{ files: number; replacements: number }>('replace_in_files', { ...matcher, replacement, repo });
+/** Replace exactly one listed match — the row's own file, line and character column. The
+ *  backend re-matches the query on that line, replaces the occurrence at the column, and
+ *  answers the line's remaining matches recomputed, so the view updates the row locally
+ *  without re-running the whole search. The path is the result's root-relative spelling. */
+export const searchReplaceOne = (
+	target: { path: string; line: number; column: number },
+	matcher: SearchMatcher,
+	replacement: string,
+	repo: string | undefined
+) =>
+	invoke<SearchMatch[]>('search_replace_one', {
+		path: target.path,
+		line: target.line,
+		column: target.column,
+		...matcher,
+		replacement,
+		repo
+	});
 export const compareDirs = (left: string, right: string, include: string | null, exclude: string | null) =>
 	invoke<DirDiffEntry[] | null>('compare_dirs', { left, right, include, exclude });
 export const findReferences = (name: string) => invoke<RefFile[]>('find_references', { name });

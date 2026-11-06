@@ -9,6 +9,12 @@ export interface FindOptions {
 	caseSensitive: boolean;
 	wholeWord: boolean;
 	useRegex: boolean;
+	/** The replace side's Preserve Case (Workspace Search's toggle only today): each
+	 *  replacement derives its casing from the match it replaces — all-lower → lower,
+	 *  ALL-UPPER → UPPER, Title → Title. Optional so the editor find widget's reads are
+	 *  untouched: it never replaces through this option's meaning, and an older persisted
+	 *  `searchOptions` simply lacks the key. */
+	preserveCase?: boolean;
 }
 
 /** Read the shared options (falling back to the defaults for missing keys). */
@@ -17,7 +23,8 @@ export function findOptions(): FindOptions {
 	return {
 		caseSensitive: stored.caseSensitive ?? false,
 		wholeWord: stored.wholeWord ?? false,
-		useRegex: stored.useRegex ?? false
+		useRegex: stored.useRegex ?? false,
+		preserveCase: stored.preserveCase ?? false
 	};
 }
 

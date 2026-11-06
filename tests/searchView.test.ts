@@ -373,7 +373,7 @@ describe('Search view', () => {
 		click(notificationButton('Replace'));
 		await replacing;
 		await flush();
-		expect(replace).toHaveBeenCalledWith({ query: 'x', replacement: 'y', isRegex: false, caseSensitive: false, wordOnly: false, include: '', exclude: '' });
+		expect(replace).toHaveBeenCalledWith({ query: 'x', replacement: 'y', isRegex: false, caseSensitive: false, wordOnly: false, include: '', exclude: '', preserveCase: false });
 		expect(notifications().some((n) => n === "Replaced 1 occurrence across 1 file with 'y'.")).toBe(true);
 	});
 	it('a replace-all mid-debounce flushes the pending search first: the confirmation counts the query that will replace', async () => {
@@ -404,7 +404,7 @@ describe('Search view', () => {
 		expect(notifications().at(-1)).toBe("Replace 1 occurrence across 1 file with 'z'?");
 		click(notificationButton('Replace'));
 		await replacing;
-		expect(replace).toHaveBeenCalledWith({ query: 'yy', replacement: 'z', isRegex: false, caseSensitive: false, wordOnly: false, include: '', exclude: '' });
+		expect(replace).toHaveBeenCalledWith({ query: 'yy', replacement: 'z', isRegex: false, caseSensitive: false, wordOnly: false, include: '', exclude: '', preserveCase: false });
 	});
 
 	it('focuses the query box', () => {
@@ -508,5 +508,141 @@ describe('Search view', () => {
 		await flush();
 		expect(search).toHaveBeenCalled();
 		expect(search.mock.calls.at(-1)![0]).toMatchObject({ query: 'fn \\(', isRegex: true });
+	});
+});
+
+describe('Search view: Preserve Case, per-result replace, keyboard', () => {
+	beforeEach(() => {
+		localStorage.clear();
+	});
+
+	it('the Preserve Case toggle lights, rides Alt+P and reaches both replace flows', async () => {
+		streams([[{ path: 'a.txt', matches: [{ line: 1, column: 1, length: 3, text: 'foo' }] }]]);
+		const replace = vi.fn(async () => ({ files: 1, replacements: 1 }));
+		backend.on('replace_in_files', replace);
+		const view = new SearchView(document.createElement('div'));
+		const toggle = view.container.querySelector('[title="Preserve Case (Alt+P)"]')!;
+		expect(toggle.classList.contains('active')).toBe(false);
+
+		// The Alt+P chord flips it right in the query box.
+		key(view.container.querySelector('.search-row.query-row input') as HTMLInputElement, 'p', { altKey: true });
+		expect(toggle.classList.contains('active')).toBe(true);
+
+		type(view.container.querySelectorAll('.search-row input')[0] as HTMLInputElement, 'foo');
+		type(view.container.querySelectorAll('.search-row input')[1] as HTMLInputElement, 'bar');
+		await view.runSearch();
+		const replacing = view.replaceAll();
+		await flush();
+		click(notificationButton('Replace'));
+		await replacing;
+		expect(replace).toHaveBeenCalledWith({ query: 'foo', replacement: 'bar', isRegex: false, caseSensitive: false, wordOnly: false, include: '', exclude: '', preserveCase: true });
+		// The search itself never reads the option.
+		expect(view.container.querySelector('[title="Preserve Case (Alt+P)"]')!.classList.contains('active')).toBe(true);
+	});
+
+	it('the hover button replaces exactly the listed match and repaints the group from the remaining matches', async () => {
+		streams([[
+			{ path: 'src/a.rs', matches: [{ line: 3, column: 5, length: 2, text: 'fn alpha()' }] },
+			{ path: 'src/b.rs', matches: [{ line: 1, column: 1, length: 2, text: 'fn main()' }] }
+		]]);
+		const one = vi.fn(async (args: Record<string, unknown>) => {
+			expect(args).toMatchObject({ path: 'src/a.rs', line: 3, column: 5, query: 'fn', replacement: 'trait', preserveCase: false });
+			// The line no longer matches `fn` after the splice: no matches remain on it.
+			return [];
+		});
+		backend.on('search_replace_one', one);
+		const view = new SearchView(document.createElement('div'));
+		view.setRoots(['C:\\repo']);
+		type(view.container.querySelector('.search-row.query-row input') as HTMLInputElement, 'fn');
+		type(view.container.querySelectorAll('.search-row input')[1] as HTMLInputElement, 'trait');
+		await view.runSearch();
+		expect(texts('.search-summary', view.container)).toEqual(['2 results in 2 files']);
+
+		click(view.container.querySelectorAll('.search-match .match-replace')[0]);
+		await flush();
+		expect(one).toHaveBeenCalledTimes(1);
+		// The replaced row is gone; the file's group holds its other match, the summary follows.
+		expect(texts('.search-file-head .label', view.container)).toEqual(['b.rs']);
+		expect(texts('.search-summary', view.container)).toEqual(['1 result in 1 file']);
+	});
+
+	it('a per-result replace that empties a file drops its group; a changed-disk refusal reports', async () => {
+		// A fresh batch per search: the real backend re-reads the file each scan, and the
+		// view's local update (the splice in replaceOne) owns the batch's matches array.
+		const search = vi.fn(async (args: Record<string, unknown>) => {
+			const channel = args.onEvent as Channel<SearchEvent>;
+			channel.send({ kind: 'batch', files: [{ path: 'a.txt', matches: [{ line: 1, column: 1, length: 1, text: 'x' }] }] });
+			channel.send({ kind: 'done', scanned: 1, truncated: false, cancelled: false });
+			return null;
+		});
+		backend.on('search_workspace', search);
+		backend.on('search_cancel', () => null);
+		const replaceOne = vi.fn(async () => [] as { line: number; column: number; length: number; text: string }[]);
+		backend.on('search_replace_one', replaceOne);
+		const view = new SearchView(document.createElement('div'));
+		type(view.container.querySelector('.search-row.query-row input') as HTMLInputElement, 'x');
+		await view.runSearch();
+		click(view.container.querySelector('.search-match .match-replace')!);
+		await flush();
+		expect(view.container.querySelectorAll('.search-file-group')).toHaveLength(0);
+
+		// The file changed on disk since the search: the error surfaces, the tree stands.
+		replaceOne.mockRejectedValue(new Error('no longer on disk'));
+		type(view.container.querySelector('.search-row.query-row input') as HTMLInputElement, 'y');
+		await view.runSearch();
+		click(view.container.querySelector('.search-match .match-replace')!);
+		await flush();
+		expect(notifications().at(-1)).toContain('no longer on disk');
+		expect(view.container.querySelectorAll('.search-file-group')).toHaveLength(1);
+	});
+
+	it('the result tree answers the keyboard: arrows walk, Enter opens, F4 jumps', async () => {
+		streams([[
+			{ path: 'a.txt', matches: [{ line: 1, column: 1, length: 1, text: 'x one' }, { line: 2, column: 1, length: 1, text: 'x two' }] },
+			{ path: 'b.txt', matches: [{ line: 1, column: 1, length: 1, text: 'x three' }] }
+		]]);
+		const view = new SearchView(document.createElement('div'));
+		const opened: [string, number, number][] = [];
+		view.onOpenMatch = (path, line, column) => opened.push([path, line, column]);
+		type(view.container.querySelector('.search-row.query-row input') as HTMLInputElement, 'x');
+		await view.runSearch();
+		const list = view.container.querySelector('.search-results') as HTMLElement;
+		const rows = () => Array.from(view.container.querySelectorAll<HTMLElement>('.search-match'));
+
+		// Nothing is focused yet: ArrowDown lands on the first row.
+		key(list, 'ArrowDown');
+		expect(rows()[0].classList.contains('kb-focused')).toBe(true);
+		key(list, 'ArrowDown');
+		expect(rows()[0].classList.contains('kb-focused')).toBe(false);
+		expect(rows()[1].classList.contains('kb-focused')).toBe(true);
+		// Enter opens the focused match; the walk steps into the next file naturally.
+		key(list, 'Enter');
+		expect(opened).toEqual([['a.txt', 2, 1]]);
+		key(list, 'ArrowDown');
+		expect(rows()[2].classList.contains('kb-focused')).toBe(true);
+
+		// F4 jumps to (and opens) the next match, Shift+F4 the previous one.
+		key(list, 'F4', { shiftKey: true });
+		expect(opened.at(-1)).toEqual(['a.txt', 2, 1]);
+		key(list, 'F4');
+		expect(rows()[2].classList.contains('kb-focused')).toBe(true);
+		expect(opened.at(-1)).toEqual(['b.txt', 1, 1]);
+
+		// A new search clears the walk's focus with the old tree.
+		await view.runSearch();
+		expect(view.container.querySelector('.kb-focused')).toBeNull();
+	});
+
+	it('seedInclude sets the include glob and the search runs after the typing pause', async () => {
+		const search = streams([]);
+		const view = new SearchView(document.createElement('div'));
+		view.seedQuery('fn');
+		view.seedInclude('src/**');
+		const include = view.container.querySelector('.search-filter-rows input') as HTMLInputElement;
+		expect(include.value).toBe('src/**');
+		await new Promise((resolve) => setTimeout(resolve, 350));
+		await flush();
+		expect(search).toHaveBeenCalled();
+		expect(search.mock.calls.at(-1)![0]).toMatchObject({ query: 'fn', include: 'src/**' });
 	});
 });
