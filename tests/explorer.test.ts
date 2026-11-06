@@ -128,7 +128,7 @@ describe('explorer', () => {
 
 		// Rename through the context menu.
 		rightClick(document.querySelector('.tree .row'));
-		expect(menuLabels()).toEqual(['Open to the Right', 'Open to the Left', 'Open Below', 'Open Above', 'Open in Hex Viewer', 'New File...', 'New Folder...', 'Reveal in File Explorer', 'Open in Integrated Terminal', 'Copy Path', 'Copy Relative Path', 'Select for Compare', 'Rename...', 'Delete']);
+		expect(menuLabels()).toEqual(['Open to the Right', 'Open to the Left', 'Open Below', 'Open Above', 'Open in Hex Viewer', 'New File...', 'New Folder...', 'Reveal in File Explorer', 'Open in Integrated Terminal', 'Cut', 'Copy', 'Copy Path', 'Copy Relative Path', 'Paste', 'Duplicate', 'Select for Compare', 'Rename...', 'Delete']);
 		// "Open in Hex Viewer" hands the clicked file's path to the hex tab.
 		const hexed: string[] = [];
 		explorer.onOpenHex = (p) => hexed.push(p);
@@ -703,5 +703,170 @@ describe('explorer external drops', () => {
 		hitTest(document.querySelector('.tree .row')); // the README row: its parent (the root) takes it
 		expect(await explorer.dropExternalFiles(5, 5, ['C:\\elsewhere\\big.bin'])).toBe(true);
 		expect(notifications().at(-1)).toContain('disk full');
+	});
+});
+
+describe('explorer clipboard', () => {
+	/** A recording paste half that lands every source in the destination (the tree gains
+	 *  it, so the post-paste refresh and reveal see it). */
+	function paste(command: 'fs_paste_copy' | 'fs_paste_move', tree: Record<string, string[]>): { calls: { sources: string[]; destDir: string }[] } {
+		const calls: { sources: string[]; destDir: string }[] = [];
+		backend.on(command, ({ sources, destDir }) => {
+			const dir = String(destDir);
+			const landed = (sources as string[]).map((source) => {
+				tree[dir] = [...(tree[dir] ?? []), basename(source)];
+				return `${dir}\\${basename(source)}`;
+			});
+			calls.push({ sources: [...(sources as string[])], destDir: dir });
+			if (command === 'fs_paste_move') {
+				// A move removes its source from the folder that held it.
+				for (const source of sources as string[]) {
+					const parent = source.slice(0, source.length - basename(source).length - 1);
+					tree[parent] = (tree[parent] ?? []).filter((n) => n !== basename(source));
+				}
+			}
+			return landed;
+		});
+		return { calls };
+	}
+
+	it('Copy then Paste pastes the selection into the pasted-on folder', async () => {
+		const tree: Record<string, string[]> = { [ROOT]: ['src/', 'README.md'], [`${ROOT}\\src`]: ['a.ts'] };
+		fileSystem(tree);
+		const { calls } = paste('fs_paste_copy', tree);
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoot(ROOT);
+		await flush();
+		click(document.querySelector('.tree .row')); // expand src
+		await flush();
+
+		// Copy the README: its row menu clips it.
+		rightClick(document.querySelectorAll('.tree .row')[2]);
+		click(menuItem('Copy'));
+		expect(backend.callsTo('fs_paste_copy')).toHaveLength(0);
+
+		// Paste onto the src folder row: the copy lands inside it, revealed and selected.
+		rightClick(document.querySelector('.tree .row'));
+		click(menuItem('Paste'));
+		await flush();
+		expect(calls).toEqual([{ sources: [`${ROOT}\\README.md`], destDir: `${ROOT}\\src` }]);
+		expect(texts('.tree .row.selected .label')).toEqual(['README.md']);
+	});
+
+	it('Cut dims its rows until the paste moves them, then the clipboard clears', async () => {
+		const tree: Record<string, string[]> = { [ROOT]: ['src/', 'README.md'], [`${ROOT}\\src`]: [] };
+		fileSystem(tree);
+		const { calls } = paste('fs_paste_move', tree);
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoot(ROOT);
+		await flush();
+		click(document.querySelector('.tree .row')); // expand src
+		await flush();
+		const rows = () => Array.from(document.querySelectorAll<HTMLElement>('.tree .row'));
+
+		rightClick(rows()[1]); // the README
+		click(menuItem('Cut'));
+		expect(rows()[1].classList.contains('cut-pending')).toBe(true);
+		// A refresh reconciles rows without the clipboard's knowledge; the dim is re-painted.
+		await explorer.refresh();
+		expect(rows()[1].classList.contains('cut-pending')).toBe(true);
+
+		rightClick(document.querySelector('.tree .row')); // the src folder
+		click(menuItem('Paste'));
+		await flush();
+		expect(calls).toEqual([{ sources: [`${ROOT}\\README.md`], destDir: `${ROOT}\\src` }]);
+		expect(backend.callsTo('fs_paste_move').length).toBe(1);
+		// The moved entry is gone from the root's clipboard state: no row is dimmed any more.
+		expect(rows().some((row) => row.classList.contains('cut-pending'))).toBe(false);
+	});
+
+	it('a multi-selection is what Cut and Copy speak for, Duplicate clones in place', async () => {
+		const tree: Record<string, string[]> = { [ROOT]: ['a.txt', 'b.txt', 'c.txt'] };
+		fileSystem(tree);
+		const { calls } = paste('fs_paste_copy', tree);
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoot(ROOT);
+		await flush();
+		const rows = document.querySelectorAll<HTMLElement>('.tree .row');
+
+		// Ctrl+click adds to the selection; the right-clicked row inside it clips the whole.
+		click(rows[0], { ctrlKey: true });
+		click(rows[1], { ctrlKey: true });
+		rightClick(rows[1]);
+		click(menuItem('Copy'));
+		rightClick(document.querySelector('.tree .row'));
+		click(menuItem('Paste'));
+		await flush();
+		expect(calls.at(-1)).toEqual({ sources: [`${ROOT}\\a.txt`, `${ROOT}\\b.txt`], destDir: ROOT });
+
+		// Duplicate clones in place — the same paste-copy, one call per containing folder.
+		rightClick(rows[2]);
+		click(menuItem('Duplicate'));
+		await flush();
+		expect(calls.at(-1)).toEqual({ sources: [`${ROOT}\\c.txt`], destDir: ROOT });
+	});
+
+	it('the clipboard keys ride the tree focus alone: Ctrl+C clips, Ctrl+V pastes', async () => {
+		const tree: Record<string, string[]> = { [ROOT]: ['src/', 'README.md'], [`${ROOT}\\src`]: [] };
+		fileSystem(tree);
+		const { calls } = paste('fs_paste_copy', tree);
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoot(ROOT);
+		await flush();
+		click(document.querySelector('.tree .row')); // expand src
+		await flush();
+		const body = document.querySelector<HTMLElement>('.pane-body')!;
+
+		// The selection stands on src (the click expanded it); ArrowDown reaches the README.
+		key(body, 'ArrowDown');
+		key(body, 'c', { ctrlKey: true });
+		await flush();
+		expect(backend.callsTo('fs_paste_copy')).toHaveLength(0);
+
+		// ArrowUp back to src, then Ctrl+V pastes there — without the editor's global copy.
+		key(body, 'ArrowUp');
+		key(body, 'v', { ctrlKey: true });
+		await flush();
+		expect(calls).toEqual([{ sources: [`${ROOT}\\README.md`], destDir: `${ROOT}\\src` }]);
+	});
+
+	it('a failed paste reports and keeps the clipboard', async () => {
+		const tree: Record<string, string[]> = { [ROOT]: ['src/', 'README.md'], [`${ROOT}\\src`]: [] };
+		fileSystem(tree);
+		backend.on('fs_paste_move', () => {
+			throw new Error('cannot move');
+		});
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoot(ROOT);
+		await flush();
+		click(document.querySelector('.tree .row'));
+		await flush();
+		rightClick(document.querySelectorAll('.tree .row')[1]);
+		click(menuItem('Cut'));
+		rightClick(document.querySelector('.tree .row'));
+		click(menuItem('Paste'));
+		await flush();
+		expect(notifications().at(-1)).toContain('cannot move');
+		// The cut row keeps its dim: the clipboard still holds it for a retry.
+		expect(document.querySelectorAll<HTMLElement>('.tree .row')[1].classList.contains('cut-pending')).toBe(true);
+	});
+
+	it('a folder row offers Find in Folder and hands the folder over', async () => {
+		fileSystem({ [ROOT]: ['src/', 'README.md'], [`${ROOT}\\src`]: [] });
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		const found: string[] = [];
+		explorer.onFindInFolder = (folder) => found.push(folder);
+		explorer.setRoot(ROOT);
+		await flush();
+
+		rightClick(document.querySelector('.tree .row')); // the src folder
+		expect(menuLabels()).toContain('Find in Folder...');
+		click(menuItem('Find in Folder...'));
+		expect(found).toEqual([`${ROOT}\\src`]);
+
+		// A file row never shows the row.
+		rightClick(document.querySelectorAll('.tree .row')[1]);
+		expect(menuLabels()).not.toContain('Find in Folder...');
+		key(document, 'Escape');
 	});
 });

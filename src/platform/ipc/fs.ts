@@ -79,6 +79,11 @@ export const createFolder = (path: string) => invoke<void>('create_folder', { pa
 export const renamePath = (from: string, to: string) => invoke<void>('rename_path', { from, to });
 export const deletePath = (path: string, permanent: boolean) => invoke<void>('delete_path', { path, permanent });
 export const copyInto = (sources: string[], destDir: string) => invoke<string[]>('copy_into', { sources, destDir });
+/** The Explorer clipboard's paste halves (both confined to the open folders backend-side):
+ *  the clipped entries land beside whatever exists in `destDir` (" (copy)" naming), a move
+ *  removing its sources. Answers the paths that landed. */
+export const pasteCopy = (sources: string[], destDir: string) => invoke<string[]>('fs_paste_copy', { sources, destDir });
+export const pasteMove = (sources: string[], destDir: string) => invoke<string[]>('fs_paste_move', { sources, destDir });
 /** The workspace file list every walk reuses (Quick Open, search, symbol tools); the
  *  repo-scoped form narrows to one root of a workspace. */
 export const listFiles = (repo?: string) => invoke<string[]>('list_files', repo === undefined ? undefined : { repo });

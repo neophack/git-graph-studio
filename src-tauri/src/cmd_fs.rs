@@ -481,6 +481,104 @@ mod upload_tests {
 }
 
 #[cfg(test)]
+mod paste_tests {
+    use super::paste_confined;
+
+    /// The Explorer's clipboard only ever holds tree entries, so the paste commands confine
+    /// every source and the destination to the open folders — the boundary the remote path
+    /// gate holds `copy_into` to. A path outside them is refused before any entry moves.
+    #[test]
+    fn pastes_copy_and_move_inside_the_open_folders_and_refuse_outside() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let nested = root.join("nested");
+        let dest = root.join("dest");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(root.join("a.txt"), b"one").unwrap();
+        std::fs::write(nested.join("b.txt"), b"two").unwrap();
+        let open = vec![root.clone()];
+
+        // A multi-entry copy into a sibling folder lands whole; nothing is removed.
+        let landed = paste_confined(
+            &open,
+            &[
+                root.join("a.txt").display().to_string(),
+                nested.display().to_string(),
+            ],
+            &dest.display().to_string(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(landed.len(), 2, "{landed:?}");
+        assert!(dest.join("a.txt").exists());
+        assert!(dest.join("nested").is_dir());
+        assert!(dest.join("nested").join("b.txt").exists());
+        assert!(root.join("a.txt").exists(), "a copy keeps its source");
+
+        // The cut paste moves: the sources are gone, the entries are in the destination.
+        let landed = paste_confined(
+            &open,
+            &[dest.join("a.txt").display().to_string()],
+            &nested.display().to_string(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(landed.len(), 1, "{landed:?}");
+        assert!(nested.join("a.txt").exists());
+        assert!(!dest.join("a.txt").exists(), "a move removes its source");
+
+        // A source outside the open folders is refused, whichever half runs.
+        let outside = dir.path().join("elsewhere.txt");
+        std::fs::write(&outside, b"secret").unwrap();
+        let err = paste_confined(
+            &open,
+            &[outside.display().to_string()],
+            &root.display().to_string(),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("pastes land inside the open folders only"), "{err}");
+        let err = paste_confined(
+            &open,
+            &[outside.display().to_string()],
+            &root.display().to_string(),
+            true,
+        )
+        .unwrap_err();
+        assert!(err.contains("pastes land inside the open folders only"), "{err}");
+        assert!(outside.exists(), "the refused source was never touched");
+
+        // So is a destination outside them — the paste never lands at all.
+        let dest = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&dest).unwrap();
+        let err = paste_confined(
+            &open,
+            &[root.join("a.txt").display().to_string()],
+            &dest.display().to_string(),
+            true,
+        )
+        .unwrap_err();
+        assert!(err.contains("pastes land inside the open folders only"), "{err}");
+        assert!(!dest.join("a.txt").exists());
+
+        // An escape past the root with `..` is caught by the canonical check, not the spelling.
+        let escape = root
+            .join("..")
+            .join(dir.path().file_name().unwrap())
+            .join("escape.txt");
+        let err = paste_confined(
+            &open,
+            &[root.join("a.txt").display().to_string()],
+            &escape.display().to_string(),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("pastes land inside the open folders only"), "{err}");
+    }
+}
+
+#[cfg(test)]
 mod temp_blob_tests {
     use super::{discard_temp_blob, write_temp_blob};
 
@@ -641,6 +739,74 @@ pub fn copy_into(
 ) -> Result<Vec<String>, String> {
     cache.invalidate();
     copy_into_paths(&sources, &dest_dir)
+}
+
+/* ---------- Explorer clipboard: paste ---------- */
+
+/// The Explorer's Copy / Cut paste — an in-workspace operation, so both ends (every source
+/// and the destination) are confined to the open folders, the same boundary the remote
+/// path gate holds `copy_into` to (docs/ggs-remote-plan.md §7.8): the clipboard only ever
+/// holds tree entries, a path outside them is not a paste the UI can produce, and a
+/// caller naming one is refused rather than handed the machine. `copy_into_paths` /
+/// `move_into_paths` provide the no-clobber " (copy)" naming and the self-subtree refusal.
+fn paste_confined(
+    open: &[PathBuf],
+    sources: &[String],
+    dest_dir: &str,
+    move_entries: bool,
+) -> Result<Vec<String>, String> {
+    let confined = |path: &str| upload_allowed(Path::new(path), open);
+    for source in sources {
+        if !confined(source) {
+            return Err(format!("{source}: pastes land inside the open folders only"));
+        }
+    }
+    if !confined(dest_dir) {
+        return Err(format!("{dest_dir}: pastes land inside the open folders only"));
+    }
+    if move_entries {
+        move_into_paths(sources, dest_dir)
+    } else {
+        copy_into_paths(sources, dest_dir)
+    }
+}
+
+/// The Explorer's Copy paste: every clipped entry copies into `dest_dir`, beside whatever
+/// exists there (" (copy)" naming), inside the open folders.
+#[tauri::command]
+pub fn fs_paste_copy(
+    roots: State<'_, WorkspaceRoots>,
+    cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
+    sources: Vec<String>,
+    dest_dir: String,
+) -> Result<Vec<String>, String> {
+    cache.invalidate();
+    let open: Vec<PathBuf> = roots
+        .inner()
+        .list()
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    paste_confined(&open, &sources, &dest_dir, false)
+}
+
+/// The Explorer's Cut paste: every clipped entry moves into `dest_dir` (its source is gone
+/// afterwards), the same safety and naming as the copy paste.
+#[tauri::command]
+pub fn fs_paste_move(
+    roots: State<'_, WorkspaceRoots>,
+    cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
+    sources: Vec<String>,
+    dest_dir: String,
+) -> Result<Vec<String>, String> {
+    cache.invalidate();
+    let open: Vec<PathBuf> = roots
+        .inner()
+        .list()
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    paste_confined(&open, &sources, &dest_dir, true)
 }
 
 /// Every file under the open folder (repo-relative, forward slashes), for "Go to File", the

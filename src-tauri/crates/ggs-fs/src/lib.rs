@@ -466,6 +466,65 @@ pub fn unique_target(dest: &Path, name: &str) -> PathBuf {
     unreachable!("u32 overflow before the disk fills")
 }
 
+/// Move entries into a folder — the Explorer's cut/paste, sharing `copy_into_paths`' whole
+/// safety shape: the destination must be a folder, an entry pasted into its own containing
+/// folder is a no-op, a folder cannot move into itself or its own subtree, and an existing
+/// entry is never clobbered (the move lands beside it as "name (copy).ext", then "(copy 2)",
+/// the same naming the copy and the drop use). The move itself prefers the file system's
+/// rename (same volume, one operation); across a volume boundary it falls back to copy then
+/// delete. Returns the paths that landed. Sources may sit in other folders of the same
+/// workspace — the command layer confines them there.
+pub fn move_into_paths(sources: &[String], dest_dir: &str) -> Result<Vec<String>, String> {
+    let dest = checked(dest_dir)?;
+    if !dest.is_dir() {
+        return Err(format!("{dest_dir} is not a folder"));
+    }
+    let dest_canon = fs::canonicalize(&dest).map_err(|e| format!("{dest_dir}: {e}"))?;
+    let mut landed = Vec::new();
+    for source in sources {
+        let from = checked(source)?;
+        let meta = fs::symlink_metadata(&from).map_err(|e| format!("{source}: {e}"))?;
+        // An entry pasted into its own containing folder is a no-op, not a duplicate.
+        if from.parent().is_some_and(|parent| same_entry(parent, &dest)) {
+            continue;
+        }
+        // Pasting onto the entry itself (or its case-only spelling) moves nothing.
+        if same_entry(&from, &dest) {
+            continue;
+        }
+        if meta.is_dir() {
+            let from_canon = fs::canonicalize(&from).map_err(|e| format!("{source}: {e}"))?;
+            if dest_canon.starts_with(&from_canon) {
+                return Err(format!("{source} cannot be moved into itself"));
+            }
+        }
+        let name = from
+            .file_name()
+            .ok_or_else(|| format!("{source}: not a file name"))?
+            .to_string_lossy()
+            .into_owned();
+        let target = unique_target(&dest, &name);
+        move_entry(&from, &target, &meta)?;
+        landed.push(target.to_string_lossy().into_owned());
+    }
+    Ok(landed)
+}
+
+/// One entry's move: the file system's rename when it can (fast, metadata-preserving, the
+/// common same-volume case), a copy-then-delete across the volume boundary it cannot cross.
+fn move_entry(from: &Path, to: &Path, meta: &fs::Metadata) -> Result<(), String> {
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    if meta.is_dir() {
+        copy_dir(from, to)?;
+        fs::remove_dir_all(from).map_err(|e| format!("{}: {e}", from.display()))
+    } else {
+        fs::copy(from, to).map_err(|e| format!("{}: {e}", from.display()))?;
+        fs::remove_file(from).map_err(|e| format!("{}: {e}", from.display()))
+    }
+}
+
 pub fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
     fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
     for entry in fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))? {
@@ -1113,6 +1172,115 @@ mod copy_into_tests {
         let err = copy_into_paths(&[here], &dir.path().join("nowhere").to_string_lossy()).unwrap_err();
         assert!(err.contains("is not a folder"), "{err}");
         let err = copy_into_paths(
+            &[dir.path().join("ghost.txt").to_string_lossy().into_owned()],
+            &root,
+        )
+        .unwrap_err();
+        assert!(err.contains("ghost.txt"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod move_into_tests {
+    use super::*;
+
+    #[test]
+    fn moves_files_and_folders_and_removes_the_sources() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        fs::write(src.path().join("notes.txt"), b"moved").unwrap();
+        fs::create_dir(src.path().join("pack")).unwrap();
+        fs::write(src.path().join("pack").join("inner.md"), b"#").unwrap();
+
+        let sources = [
+            src.path().join("notes.txt").to_string_lossy().into_owned(),
+            src.path().join("pack").to_string_lossy().into_owned(),
+        ];
+        let landed = move_into_paths(&sources, &dest.path().to_string_lossy()).unwrap();
+        assert_eq!(landed.len(), 2, "{landed:?}");
+        assert_eq!(
+            fs::read(dest.path().join("notes.txt")).unwrap(),
+            b"moved",
+            "a file moves with its contents"
+        );
+        assert_eq!(
+            fs::read(dest.path().join("pack").join("inner.md")).unwrap(),
+            b"#",
+            "a folder moves recursively"
+        );
+        assert!(
+            !src.path().join("notes.txt").exists(),
+            "the moved file's source is gone"
+        );
+        assert!(
+            !src.path().join("pack").exists(),
+            "the moved folder's source is gone"
+        );
+    }
+
+    #[test]
+    fn a_move_never_clobbers_but_lands_beside_the_existing_entry() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        fs::write(src.path().join("a.txt"), b"new").unwrap();
+        fs::write(dest.path().join("a.txt"), b"old").unwrap();
+        fs::write(dest.path().join("a (copy).txt"), b"first copy").unwrap();
+        // A directory lands beside its namesake the same way.
+        fs::create_dir(src.path().join("pack")).unwrap();
+        fs::create_dir(dest.path().join("pack")).unwrap();
+
+        let sources = [src.path().join("a.txt").to_string_lossy().into_owned()];
+        let landed = move_into_paths(&sources, &dest.path().to_string_lossy()).unwrap();
+        assert_eq!(
+            fs::read(dest.path().join("a.txt")).unwrap(),
+            b"old",
+            "the existing file keeps its contents"
+        );
+        assert_eq!(
+            fs::read(dest.path().join("a (copy).txt")).unwrap(),
+            b"first copy",
+            "the first duplicate keeps its contents too — the move steps past it"
+        );
+        assert_eq!(fs::read(dest.path().join("a (copy 2).txt")).unwrap(), b"new");
+        assert!(!src.path().join("a.txt").exists(), "{landed:?}");
+    }
+
+    #[test]
+    fn pasting_onto_the_owning_folder_is_a_noop_and_into_itself_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("here.txt"), b"").unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let here = dir.path().join("here.txt").to_string_lossy().into_owned();
+
+        // A file pasted into its own containing folder makes no duplicate and deletes nothing.
+        assert_eq!(
+            move_into_paths(std::slice::from_ref(&here), &root).unwrap(),
+            Vec::<String>::new()
+        );
+        let names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["here.txt"], "{names:?}");
+
+        // Pasting a folder onto itself moves nothing either.
+        fs::create_dir_all(dir.path().join("pack").join("sub")).unwrap();
+        let pack = dir.path().join("pack").to_string_lossy().into_owned();
+        assert_eq!(
+            move_into_paths(std::slice::from_ref(&pack), &pack).unwrap(),
+            Vec::<String>::new()
+        );
+
+        // A folder pasted into its own subtree would recurse forever - refused whole.
+        let sub = dir.path().join("pack").join("sub").to_string_lossy().into_owned();
+        let err = move_into_paths(&[pack], &sub).unwrap_err();
+        assert!(err.contains("cannot be moved into itself"), "{err}");
+
+        // A missing destination or source is an error, not a silent nothing.
+        let err =
+            move_into_paths(&[here], &dir.path().join("nowhere").to_string_lossy()).unwrap_err();
+        assert!(err.contains("is not a folder"), "{err}");
+        let err = move_into_paths(
             &[dir.path().join("ghost.txt").to_string_lossy().into_owned()],
             &root,
         )

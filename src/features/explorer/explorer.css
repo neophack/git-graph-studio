@@ -1,0 +1,8 @@
+/* The File Explorer's clipboard affordance — the shared tree vocabulary lives in the
+   workbench shell's stylesheet; only the new pieces render here. */
+
+/* A row cut to the clipboard (waiting for its paste): dimmed, the way VS Code dims the
+   pending-cut entry. */
+.tree .row.cut-pending {
+	opacity: 0.55;
+}

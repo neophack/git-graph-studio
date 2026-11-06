@@ -561,6 +561,8 @@ mod desktop {
                 cmd_fs::rename_path,
                 cmd_fs::delete_path,
                 cmd_fs::copy_into,
+                cmd_fs::fs_paste_copy,
+                cmd_fs::fs_paste_move,
                 cmd_fs::session_log_file,
                 cmd_fs::backup_write,
                 cmd_fs::backup_clear,

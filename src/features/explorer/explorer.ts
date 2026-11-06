@@ -1,18 +1,22 @@
 // The Explorer view: the folder tree (lazy, with VS Code's indent guides, twisties and
 // codicon file/folder icons), git status decorations, the title actions (new file / new
-// folder / refresh / collapse all), inline new/rename inputs, and the context menu.
+// folder / refresh / collapse all), inline new/rename inputs, the context menu with VS
+// Code's clipboard group (Copy / Cut / Paste / Duplicate over the selection), and the
+// "Find in Folder" hand-off to the Search view.
 
-import { copyInto, createFile, createFolder, deletePath, type DirEntryInfo, listDir, listDirPage, renamePath } from '../../platform/ipc/fs';
+import { copyInto, createFile, createFolder, deletePath, type DirEntryInfo, listDir, listDirPage, pasteCopy, pasteMove, renamePath } from '../../platform/ipc/fs';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { fileIcon, fileIconColor } from '../../platform/fileIcons';
 import type { StatusMap } from '../../platform/ipc/scm';
 import { contextUri, menuSection, resourceContext } from '../extensions';
-import { tf } from '../../platform/i18n';
+import { t, tf } from '../../platform/i18n';
 import { coalesced } from '../../platform/coalesce';
 import { transferMenuEntries } from './transfer';
-import { actionButton, basename, confirmDialog, el, icon, joinPath, liveSidebarTitle, notify, relativeTo, showContextMenu, toPosix, type MenuEntry } from '../../platform/ui/index';
+import { actionButton, basename, confirmDialog, dirname, el, icon, joinPath, liveSidebarTitle, notify, relativeTo, showContextMenu, toPosix, type MenuEntry } from '../../platform/ui/index';
+
+import './explorer.css';
 
 /** Remote traffic (docs/ggs-remote-plan.md §10.3): over the WebSocket every byte is metered,
  *  so a huge directory pages — the first `REMOTE_DIR_PAGE` entries render and a "load more"
@@ -58,6 +62,10 @@ export class Explorer {
 	 *  that pairs it with another entry of the same kind (VS Code's flow). It rides across
 	 *  selections and refreshes; a folder switch drops it. */
 	private compareWith: string | null = null;
+	/** The Explorer clipboard (VS Code's Cut / Copy): the absolute paths and whether a paste
+	 *  moves them. Cleared by a folder switch — the entries belonged to the old tree — and
+	 *  by the paste of a cut. */
+	private clipboard: { paths: string[]; cut: boolean } | null = null;
 
 	/** The selected entry's absolute path, or null. */
 	get selectedPath(): string | null {
@@ -90,6 +98,8 @@ export class Explorer {
 onCompare: ((left: string, right: string, isDir: boolean) => void) | null = null;
 /** "Open in Integrated Terminal": the shell is asked to cd into the folder. */
 onOpenInTerminal: ((folder: string) => void) | null = null;
+/** "Find in Folder": the Search view opens with the folder's own include glob seeded. */
+onFindInFolder: ((folder: string) => void) | null = null;
 /** "Module Analysis" over the picked folder(s): every folder in the selection
  *  (the clicked one alone when it sits outside it), handed repo-relative with
  *  forward slashes — the Module Analysis page's scope. */
@@ -147,6 +157,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		this.status = new Map(); // the old repo's status letters must not decorate the new tree
 		this.expanded.clear();
 		this.dirPages.clear(); // the old tree's paging state belongs to the old tree
+		this.clipboard = null; // the clipped entries belonged to the old tree
 		if (rootPath) {
 			const separator = rootPath.includes('\\') ? '\\' : '/';
 			for (const folder of expanded) this.expanded.add(rootPath.replace(/[\\/]+$/, '') + separator + folder.replaceAll('/', separator));
@@ -187,6 +198,9 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		if (this.rootPaths.length > 1) await this.renderRoots();
 		else await this.renderLevel(this.tree, this.rootPath, 0);
 		this.body.scrollTop = scrollTop;
+		// Reconciliation keeps (or builds) rows without the clipboard's knowledge: the cut
+		// dim is re-painted over whatever rows now exist.
+		this.paintClipboard();
 	}
 
 	/** An inline new/rename input the tree is about to drop must settle (as cancelled), or the
@@ -738,6 +752,25 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		} else if (event.key === 'Delete' && current) {
 			event.preventDefault();
 			void this.delete(current.dataset['path']!, event.shiftKey);
+		} else if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
+			// The tree's own clipboard keys (VS Code's explorer keys, only while the tree holds
+			// the focus): Copy / Cut clip the selection, Paste lands in the focused row's
+			// folder. The propagation stops here, so the global handler never turns the key
+			// into an editor command against the tree.
+			const key = event.key.toLowerCase();
+			if (key === 'c' && current) {
+				event.preventDefault();
+				event.stopPropagation();
+				this.clipSelection(this.groupFor(current.dataset['path']!), false);
+			} else if (key === 'x' && current) {
+				event.preventDefault();
+				event.stopPropagation();
+				this.clipSelection(this.groupFor(current.dataset['path']!), true);
+			} else if (key === 'v') {
+				event.preventDefault();
+				event.stopPropagation();
+				void this.pasteInto(this.targetFolder());
+			}
 		}
 	}
 
@@ -753,9 +786,9 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		const folder = isDir ? path : path.slice(0, path.length - basename(path).length - 1);
 		const isRoot = path === this.rootPath;
 		const pair = this.comparePair(path, isDir);
-		// A right-click into a live multi-selection acts on the whole of it (the copy paths
-		// below, and the delete); anywhere else the clicked entry is the whole story.
-		const group = this.selection.includes(path) && this.selection.length >= 2 ? [...this.selection] : [path];
+		// A right-click into a live multi-selection acts on the whole of it (the clipboard's
+		// Copy/Cut below, and the delete); anywhere else the clicked entry is the whole story.
+		const group = this.groupFor(path);
 		// The entry picked through "Select for Compare" pairs with another entry of the same
 		// kind; opening the pair clears the pick, ready for the next one.
 		const withRow = this.compareWith !== null && this.compareWith !== path ? this.rowFor(this.compareWith) : null;
@@ -792,15 +825,24 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 			// two folders of one machine is the system file manager's job.
 			...(remoteShell() ? transferMenuEntries(path, isDir) : []),
 			...(isDir ? [
+				{ label: t('explorer.findInFolder'), run: () => this.onFindInFolder?.(path) },
 				{ label: 'Module Analysis', run: () => this.onModuleAnalysis?.(this.selectedFolders(path)) }
 			] : []),
 			// A folder row opens the terminal in the folder; a file row in its containing one.
 			{ label: 'Open in Integrated Terminal', run: () => this.onOpenInTerminal?.(folder) },
 			'separator',
+			// The Explorer clipboard (VS Code's group): the multi-selection is what Copy and
+			// Cut speak for (a lone row clips alone), Paste lands in the folder the menu was
+			// opened on, Duplicate clones the selection in place. The backend confines both
+			// paste halves to the open folders and never clobbers what exists.
+			{ label: t('explorer.cut'), keybinding: 'Ctrl+X', disabled: isRoot, run: () => this.clipSelection(group, true) },
+			{ label: t('explorer.copy'), keybinding: 'Ctrl+C', run: () => this.clipSelection(group, false) },
 			// A multi-selection copies one path per line, in selection order (VS Code's
 			// behaviour); a lone entry copies alone.
 			{ label: 'Copy Path', keybinding: 'Shift+Alt+C', run: () => void writeText(group.join('\n')) },
 			{ label: 'Copy Relative Path', keybinding: 'Ctrl+K Ctrl+Shift+C', run: () => void writeText(group.map((p) => relativeTo(this.rootPath!, p)).join('\n')) },
+			{ label: t('explorer.paste'), keybinding: 'Ctrl+V', disabled: this.clipboard === null, run: () => void this.pasteInto(folder) },
+			{ label: t('explorer.duplicate'), disabled: isRoot, run: () => void this.duplicateSelection(group) },
 			'separator',
 			{ label: 'Select for Compare', disabled: this.compareWith === path, run: () => { this.compareWith = path; } },
 			...(canCompare ? [{
@@ -949,6 +991,80 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		}
 		if (isDir) this.rekeyExpanded(path, null);
 		await this.onPathDeleted?.(path);
+	}
+
+	/* ---------- Clipboard: Copy / Cut / Paste / Duplicate (VS Code's group) ---------- */
+
+	/** The entries a clipboard- or delete-shaped act on one row speaks for: the whole live
+	 *  multi-selection when the row is inside it, the row alone otherwise. */
+	private groupFor(path: string): string[] {
+		return this.selection.includes(path) && this.selection.length >= 2 ? [...this.selection] : [path];
+	}
+
+	/** Clip `paths` for the next paste — a cut dims its rows until the paste lands. The root
+	 *  itself is never clipped (a paste of the workspace would move it into itself). */
+	private clipSelection(paths: string[], cut: boolean): void {
+		const entries = paths.filter((p) => p !== this.rootPath);
+		if (entries.length === 0) return;
+		this.clipboard = { paths: entries, cut };
+		this.paintClipboard();
+	}
+
+	/** The cut dim over the rows that exist right now (a refresh reconciles rows without the
+	 *  clipboard's knowledge, so the paint runs over the whole tree). */
+	private paintClipboard(): void {
+		const cut = new Set(this.clipboard?.cut ? this.clipboard.paths : []);
+		for (const row of this.tree.querySelectorAll<HTMLElement>('.row[data-path]')) {
+			row.classList.toggle('cut-pending', cut.has(row.dataset['path']!));
+		}
+	}
+
+	/** Paste the clipboard into `folder`: a cut's entries move (the clipboard and its dim
+	 *  clear with them), a copy's land beside whatever exists (" (copy)" naming). The last
+	 *  landed entry is revealed; the paste's own refresh and the watcher's ride the one
+	 *  coalesced flight (src/platform/coalesce.ts). */
+	private async pasteInto(folder: string): Promise<void> {
+		const clipped = this.clipboard;
+		if (!clipped || !this.rootPath) return;
+		let landed: string[] = [];
+		try {
+			landed = clipped.cut ? await pasteMove(clipped.paths, folder) : await pasteCopy(clipped.paths, folder);
+		} catch (error) {
+			notify('error', String(error));
+			return;
+		}
+		if (clipped.cut) {
+			this.clipboard = null;
+			this.paintClipboard();
+		}
+		await this.refresh();
+		if (landed.length > 0) void this.reveal(landed[landed.length - 1]!);
+	}
+
+	/** Duplicate: every entry is copied into its own containing folder, beside whatever
+	 *  exists there — the entries grouped by folder, one paste per folder. */
+	private async duplicateSelection(paths: string[]): Promise<void> {
+		if (!this.rootPath) return;
+		const groups = new Map<string, string[]>();
+		for (const path of paths) {
+			if (path === this.rootPath) continue;
+			const parent = dirname(path);
+			const list = groups.get(parent) ?? [];
+			list.push(path);
+			groups.set(parent, list);
+		}
+		if (groups.size === 0) return;
+		let landed: string[] = [];
+		try {
+			for (const [parent, entries] of groups) {
+				landed = landed.concat(await pasteCopy(entries, parent));
+			}
+		} catch (error) {
+			notify('error', String(error));
+			return;
+		}
+		await this.refresh();
+		if (landed.length > 0) void this.reveal(landed[landed.length - 1]!);
 	}
 
 	/** `except` is the entry being renamed: its own current name is not a collision. */
