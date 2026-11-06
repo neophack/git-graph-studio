@@ -5,9 +5,10 @@ import { describe, expect, it } from 'vitest';
 import { EditorState } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
 
-import { applyChoice, conflictAt, MergeToolbar, parseConflicts } from '../src/features/compare';
+import { applyChoice, conflictAt, conflictDecorations, MergeToolbar, parseConflicts } from '../src/features/compare';
 import { backend } from './tauriMock';
 import { click, flush } from './helpers';
+import type { Extension } from '@codemirror/state';
 
 const CONFLICTED = [
 	'common start',
@@ -23,10 +24,18 @@ const CONFLICTED = [
 
 const SIMPLE = ['one', '<<<<<<< HEAD', 'ours', '=======', 'theirs', '>>>>>>> b', 'two'].join('\n');
 
-function viewOf(text: string): EditorView {
+const TWO = [
+	'a',
+	'<<<<<<< HEAD', 'ours one', '=======', 'theirs one', '>>>>>>> b',
+	'mid',
+	'<<<<<<< HEAD', 'ours two', '=======', 'theirs two', '>>>>>>> c',
+	'z'
+].join('\n');
+
+function viewOf(text: string, extensions: Extension[] = []): EditorView {
 	const host = document.createElement('div');
 	document.body.appendChild(host);
-	return new EditorView({ state: EditorState.create({ doc: text }), parent: host });
+	return new EditorView({ state: EditorState.create({ doc: text, extensions }), parent: host });
 }
 
 describe('merge conflict parsing', () => {
@@ -67,6 +76,63 @@ describe('merge conflict resolution', () => {
 		const text = view.state.doc.toString();
 		expect(text).toBe('one\nours\ntheirs\ntwo');
 		expect(parseConflicts(text)).toEqual([]);
+		view.destroy();
+	});
+
+	it('a side the merge resolved away applies as nothing, never an inverted range', () => {
+		const view = viewOf('<<<<<<< HEAD\n=======\ntheirs\n>>>>>>> b');
+		const conflict = parseConflicts(view.state.doc.toString())[0]!;
+		// Keep ours on an empty-ours conflict: the whole block (theirs side included) is
+		// replaced by ours' zero lines.
+		expect(applyChoice(view, conflict, 'ours')).toBe(true);
+		expect(view.state.doc.toString()).toBe('');
+		view.destroy();
+		// Keep theirs brings that side's lines back.
+		const view2 = viewOf('<<<<<<< HEAD\n=======\ntheirs\n>>>>>>> b');
+		expect(applyChoice(view2, parseConflicts(view2.state.doc.toString())[0]!, 'theirs')).toBe(true);
+		expect(view2.state.doc.toString()).toBe('theirs');
+		view2.destroy();
+	});
+});
+
+describe('merge conflict decorations', () => {
+	it('paints the sides in VS Code\'s tints, one actions widget above each conflict', () => {
+		const view = viewOf(CONFLICTED, [conflictDecorations()]);
+		const lines = (cls: string) => Array.from(view.dom.querySelectorAll(`.cm-line.${cls}`)).map((line) => line.textContent);
+		expect(lines('cm-conflict-ours')).toEqual(['ours line']);
+		expect(lines('cm-conflict-base')).toEqual(['base line']);
+		expect(lines('cm-conflict-theirs')).toEqual(['theirs line']);
+		expect(lines('cm-conflict-ours-head')).toEqual(['<<<<<<< HEAD']);
+		expect(lines('cm-conflict-theirs-head')).toEqual(['>>>>>>> feature']);
+		expect(lines('cm-conflict-mid')).toEqual(['=======']);
+		expect(view.dom.querySelectorAll('.cm-conflict-actions')).toHaveLength(1);
+		view.destroy();
+	});
+
+	it('a plain document paints nothing, and an edit that resolves the markers clears the paint', () => {
+		const view = viewOf(SIMPLE, [conflictDecorations()]);
+		expect(view.dom.querySelector('.cm-conflict-actions')).not.toBeNull();
+		click(Array.from(view.dom.querySelectorAll('.cm-conflict-action')).find((b) => b.textContent === 'Accept Current Change')!);
+		expect(view.state.doc.toString()).toBe('one\nours\ntwo');
+		expect(view.dom.querySelector('.cm-conflict-actions')).toBeNull();
+		expect(view.dom.querySelector('.cm-conflict-ours')).toBeNull();
+		view.destroy();
+
+		const plain = viewOf('no markers\nat all\n', [conflictDecorations()]);
+		plain.dispatch({ changes: { from: plain.state.doc.length, insert: 'x' } });
+		expect(plain.dom.querySelector('.cm-conflict-ours')).toBeNull();
+		plain.destroy();
+	});
+
+	it('the widget resolves against its own conflict, not whichever is first', () => {
+		const view = viewOf(TWO, [conflictDecorations()]);
+		const widgets = Array.from(view.dom.querySelectorAll('.cm-conflict-actions'));
+		expect(widgets).toHaveLength(2);
+		// The second conflict's widget accepts ITS incoming side; the first conflict's
+		// markers stand untouched.
+		const theirs = Array.from(widgets[1]!.querySelectorAll('button')).find((b) => b.textContent === 'Accept Incoming Change')!;
+		click(theirs);
+		expect(view.state.doc.toString()).toBe('a\n<<<<<<< HEAD\nours one\n=======\ntheirs one\n>>>>>>> b\nmid\ntheirs two\nz');
 		view.destroy();
 	});
 });
@@ -140,6 +206,25 @@ describe('mark resolved', () => {
 		await flush();
 		expect(backend.callsTo('write_file')).toHaveLength(0);
 		expect(backend.callsTo('git_stage')).toHaveLength(0);
+		conflicted.destroy();
+	});
+
+	it('previous and next land the selection on the conflict, like VS Code\'s navigation', () => {
+		const conflicted = viewOf(TWO);
+		const { bar } = toolbarFor(conflicted);
+		// The count names the first conflict; stepping forward moves the selection to the
+		// second one's first marker, and stepping back past the first wraps to it.
+		expect(bar.textContent).toContain('1 / 2');
+		click(button(bar, '›')!);
+		const head = conflicted.state.selection.main.head;
+		expect(conflicted.state.doc.lineAt(head).number).toBe(8);
+		expect(conflicted.state.doc.lineAt(head).text).toBe('<<<<<<< HEAD');
+		click(button(bar, '‹')!);
+		const back = conflicted.state.selection.main.head;
+		expect(conflicted.state.doc.lineAt(back).number).toBe(2);
+		click(button(bar, '‹')!);
+		const wrapped = conflicted.state.selection.main.head;
+		expect(conflicted.state.doc.lineAt(wrapped).number).toBe(8);
 		conflicted.destroy();
 	});
 });

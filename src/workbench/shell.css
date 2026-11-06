@@ -1275,6 +1275,24 @@ body.resizing iframe { pointer-events: none; }
 .merge-bar .button { height: 22px; font-size: 11px; }
 .merge-count { font-size: 12px; margin-right: 4px; }
 
+/* ---------- Merge-conflict decorations (VS Code's merge.* colours) ---------- */
+/* The marker lines carry the stronger header tints — ours teal, theirs blue, the diff3 base
+   grey — the bodies their content tints; the theme files define the variables. */
+.cm-conflict-ours-head { background: var(--vscode-merge-currentHeaderBackground); border-bottom: 1px solid var(--vscode-merge-border); }
+.cm-conflict-theirs-head { background: var(--vscode-merge-incomingHeaderBackground); border-top: 1px solid var(--vscode-merge-border); }
+.cm-conflict-mid { background: var(--vscode-merge-commonHeaderBackground); }
+.cm-conflict-ours { background: var(--vscode-merge-currentContentBackground); }
+.cm-conflict-theirs { background: var(--vscode-merge-incomingContentBackground); }
+.cm-conflict-base { background: var(--vscode-merge-commonContentBackground); }
+/* The inline actions widget above each conflict's first marker (VS Code's accept codelenses). */
+.cm-conflict-actions { display: flex; gap: 4px; padding: 2px 0 3px 8px; }
+.cm-conflict-action {
+	font-size: 11px; height: 20px; padding: 0 8px; border-radius: 4px; cursor: pointer;
+	background: var(--vscode-editorWidget-background, #252526); color: var(--vscode-editorWidget-foreground, #cccccc);
+	border: 1px solid var(--vscode-widget-border, #454545);
+}
+.cm-conflict-action:hover { background: var(--vscode-toolbar-hoverBackground, #2a2d2e); }
+
 /* ---------- Diff toolbar & hex entry ---------- */
 .diff-header { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
 .diff-toolbar { display: flex; gap: 4px; }

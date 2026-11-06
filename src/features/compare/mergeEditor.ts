@@ -1,11 +1,14 @@
-// Merge conflict resolution: a file with git's conflict markers gets a toolbar that walks the
-// conflicts and resolves each one in place (keep ours, keep theirs, keep both), then "Mark
-// Resolved" saves the file and stages it - the workflow of a three-way merge view without a
-// language server or a separate merge tool.
+// Merge conflict resolution: a file with git's conflict markers gets VS Code's two surfaces —
+// the editor decorates every conflict block (ours teal, theirs blue) and rides an inline
+// actions widget above each one (Accept Current / Incoming / Both), and a toolbar walks the
+// conflicts and resolves each one in place, then "Mark Resolved" saves the file and stages it
+// - the workflow of a three-way merge view without a language server or a separate merge tool.
 
+import { Decoration, EditorView, WidgetType, type DecorationSet } from '@codemirror/view';
+import { StateField, type Extension, type Text } from '@codemirror/state';
 import { gitStage } from '../../platform/ipc/scm';
 import { type FileContents, readFile, writeFile } from '../../platform/ipc/fs';
-import type { EditorView } from '@codemirror/view';
+import { t } from '../../platform/i18n';
 
 import { el, icon, notify } from '../../platform/ui/index';
 
@@ -70,7 +73,9 @@ function lineRange(view: EditorView, conflict: Conflict): { from: number; to: nu
 export function applyChoice(view: EditorView, conflict: Conflict, choice: ConflictChoice): boolean {
 	const doc = view.state.doc;
 	if (conflict.end > doc.lines) return false;
-	const block = (from: number, to: number) => view.state.sliceDoc(doc.line(from).from, doc.line(to).to);
+	// A side the merge already resolved away has no lines — an empty replacement, never an
+	// inverted range (sliceDoc would throw on start > end).
+	const block = (from: number, to: number) => (from > to ? '' : view.state.sliceDoc(doc.line(from).from, doc.line(to).to));
 	const ours = block(conflict.start + 1, (conflict.baseSeparator ?? conflict.separator) - 1);
 	const theirs = block(conflict.separator + 1, conflict.end - 1);
 	const replacement = choice === 'ours' ? ours : choice === 'theirs' ? theirs : [ours, theirs].filter((part) => part !== '').join('\n');
@@ -82,6 +87,91 @@ export function applyChoice(view: EditorView, conflict: Conflict, choice: Confli
 /** The conflict at (or around) a 1-based line, or null. */
 export function conflictAt(conflicts: Conflict[], line: number): Conflict | null {
 	return conflicts.find((c) => line >= c.start && line <= c.end) ?? null;
+}
+
+/** VS Code's inline conflict actions: one widget above each conflict's first marker line with
+ *  the three accept buttons. A click resolves against the conflict at the widget's own start
+ *  line as the document stands in that moment, so a widget whose conflict was resolved by a
+ *  neighbouring action simply answers nothing. */
+class ConflictActionsWidget extends WidgetType {
+	constructor(readonly startLine: number) {
+		super();
+	}
+
+	eq(other: ConflictActionsWidget): boolean {
+		return other.startLine === this.startLine;
+	}
+
+	toDOM(view: EditorView): HTMLElement {
+		const box = el('div', 'cm-conflict-actions');
+		const actions: [ConflictChoice, string][] = [
+			['ours', t('merge.acceptCurrent')],
+			['theirs', t('merge.acceptIncoming')],
+			['both', t('merge.acceptBoth')]
+		];
+		for (const [choice, label] of actions) {
+			const button = el('button', 'cm-conflict-action', [label]);
+			// A press must not move the editor's own focus into the widget.
+			button.addEventListener('mousedown', (event) => event.preventDefault());
+			button.addEventListener('click', (event) => {
+				event.stopPropagation();
+				const conflict = parseConflicts(view.state.doc.toString()).find((c) => c.start === this.startLine);
+				if (conflict) applyChoice(view, conflict, choice);
+			});
+			box.appendChild(button);
+		}
+		return box;
+	}
+}
+
+/** The conflict blocks' line decorations, with one actions widget above each conflict's
+ *  first marker: the marker lines carry the stronger header tints (ours teal, theirs blue,
+ *  the diff3 base grey), the bodies their content tints — VS Code's `merge.*` colours, which
+ *  the theme files define as `--vscode-merge-*`. */
+export function conflictDecorations(): Extension {
+	return StateField.define<DecorationSet>({
+		create: (state) => conflictDecorationsOf(state.doc),
+		update: (value, update) => {
+			if (!update.docChanged) return value;
+			// An editor without decorations stays cheap: only a change that could have brought
+			// a marker into the document pays the reparse, and a decorated document reparses
+			// on every edit (a resolution's edit must clear its decorations).
+			let dirty = value.size > 0;
+			if (!dirty) {
+				const doc = update.state.doc;
+				update.changes.iterChangedRanges((_fromA, _toA, from, to) => {
+					if (doc.sliceString(Math.max(0, from - 8), Math.min(doc.length, to + 8)).includes('<<<<<<<')) dirty = true;
+				});
+			}
+			return dirty ? conflictDecorationsOf(update.state.doc) : value;
+		},
+		provide: (field) => EditorView.decorations.from(field)
+	});
+}
+
+function conflictDecorationsOf(doc: Text): DecorationSet {
+	const conflicts = parseConflicts(doc.toString());
+	if (conflicts.length === 0) return Decoration.none;
+	const ranges: { from: number; to: number; value: Decoration }[] = [];
+	const line = (n: number) => doc.line(Math.min(Math.max(n, 1), doc.lines));
+	const lineDeco = (n: number, cls: string) => {
+		const at = line(n);
+		ranges.push({ from: at.from, to: at.from, value: Decoration.line({ class: cls }) });
+	};
+	for (const conflict of conflicts) {
+		const anchor = line(conflict.start).from;
+		ranges.push({ from: anchor, to: anchor, value: Decoration.widget({ widget: new ConflictActionsWidget(conflict.start), side: -1, block: true }) });
+		lineDeco(conflict.start, 'cm-conflict-head cm-conflict-ours-head');
+		const oursEnd = (conflict.baseSeparator ?? conflict.separator) - 1;
+		for (let n = conflict.start + 1; n <= oursEnd; n++) lineDeco(n, 'cm-conflict-ours');
+		if (conflict.baseSeparator !== null) {
+			for (let n = conflict.baseSeparator + 1; n <= conflict.separator - 1; n++) lineDeco(n, 'cm-conflict-base');
+		}
+		lineDeco(conflict.separator, 'cm-conflict-mid');
+		for (let n = conflict.separator + 1; n <= conflict.end - 1; n++) lineDeco(n, 'cm-conflict-theirs');
+		lineDeco(conflict.end, 'cm-conflict-head cm-conflict-theirs-head');
+	}
+	return Decoration.set(ranges.map((r) => r.value.range(r.from, r.to)), true);
 }
 
 /** The toolbar of a conflicted editor: the remaining count, prev / next, the three choices for
@@ -151,45 +241,55 @@ export class MergeToolbar {
 		this.bar.hidden = false;
 		if (this.conflicts.length === 0) {
 			// The last conflict is resolved: finishing (save + stage) is the bar's one offer now.
-			this.count.textContent = 'No conflicts remaining';
+			this.count.textContent = t('merge.noConflicts');
 			this.bar.append(
 				icon('git-merge'),
 				this.count,
-				this.button('Mark Resolved', 'Save the file and stage it', () => void this.markResolved())
+				this.button(t('merge.markResolved'), t('merge.markResolvedHint'), () => void this.markResolved())
 			);
 			return;
 		}
 		const active = this.conflicts[this.activeIndex] ?? null;
-		this.count.textContent = `${this.activeIndex + 1} / ${this.conflicts.length} conflicts`;
-		// Select the active conflict's start line so the user sees which one the buttons target.
-		const reveal = () => {
-			if (!this.view || !active) return;
-			const doc = this.view.state.doc;
-			const line = doc.line(Math.min(active.start, doc.lines));
-			this.view.dispatch({ selection: { anchor: line.from } });
-			this.view.focus();
-		};
+		this.count.textContent = `${this.activeIndex + 1} / ${this.conflicts.length} ${t('merge.conflicts')}`;
 		const choose = (choice: ConflictChoice) => {
 			if (!this.view || !active) return;
 			if (applyChoice(this.view, active, choice)) this.update();
 		};
+		// Prev / next land on the conflict: the selection moves to its first marker and the
+		// view scrolls it into sight — VS Code's conflict navigation walks you there, it
+		// never just renumbers.
+		const step = (delta: number) => {
+			this.activeIndex = (this.activeIndex + delta + this.conflicts.length) % this.conflicts.length;
+			this.render();
+			this.revealActive();
+		};
 		this.bar.append(
 			icon('git-merge'),
 			this.count,
-			this.button('‹', 'Previous conflict', () => { this.activeIndex = (this.activeIndex - 1 + this.conflicts.length) % this.conflicts.length; this.render(); }),
-			this.button('›', 'Next conflict', () => { this.activeIndex = (this.activeIndex + 1) % this.conflicts.length; this.render(); }),
-			this.button('Go To', 'Reveal this conflict', reveal),
-			this.button('Keep Ours', 'Resolve with the current branch\'s lines', () => choose('ours')),
-			this.button('Keep Theirs', 'Resolve with the incoming branch\'s lines', () => choose('theirs')),
-			this.button('Keep Both', 'Keep both sides', () => choose('both')),
-			this.button('Mark Resolved', 'Save the file and stage it', () => void this.markResolved())
+			this.button('‹', t('merge.prev'), () => step(-1)),
+			this.button('›', t('merge.next'), () => step(1)),
+			this.button(t('merge.keepOurs'), t('merge.keepOursHint'), () => choose('ours')),
+			this.button(t('merge.keepTheirs'), t('merge.keepTheirsHint'), () => choose('theirs')),
+			this.button(t('merge.keepBoth'), t('merge.keepBothHint'), () => choose('both')),
+			this.button(t('merge.markResolved'), t('merge.markResolvedHint'), () => void this.markResolved())
 		);
+	}
+
+	/** Bring the active conflict's first marker line into the view: the selection lands on
+	 *  it and the transaction scrolls it into sight. */
+	private revealActive(): void {
+		const active = this.conflicts[this.activeIndex];
+		if (!this.view || !active) return;
+		const doc = this.view.state.doc;
+		const line = doc.line(Math.min(active.start, doc.lines));
+		this.view.dispatch({ selection: { anchor: line.from }, scrollIntoView: true });
+		this.view.focus();
 	}
 
 	private async markResolved(): Promise<void> {
 		if (!this.view || !this.path) return;
 		if (this.conflicts.length > 0) {
-			notify('warning', 'Resolve all conflicts first (or edit them away) before marking the file resolved.');
+			notify('warning', t('merge.resolveFirst'));
 			return;
 		}
 		const view = this.view;
@@ -209,7 +309,7 @@ export class MergeToolbar {
 		// (the write it makes is the one just staged - byte-identical).
 		const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? { metaKey: true } : { ctrlKey: true };
 		view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 's', bubbles: true, cancelable: true, ...mod }));
-		notify('info', 'The merge conflict was resolved and staged.');
+		notify('info', t('merge.resolved'));
 		this.staged = true;
 		this.render();
 		this.onResolved?.();

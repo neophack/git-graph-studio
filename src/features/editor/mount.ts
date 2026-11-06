@@ -4,7 +4,7 @@
 
 import { type FileContents, type FileProbe, fileProbe } from '../../platform/ipc/fs';
 import { declaredLanguageName } from '../extensions';
-import { loadCanViews, loadEditorExtensions, loadFastView, loadHexView, loadImageView } from '../../platform/lazy';
+import { loadCanViews, loadEditorExtensions, loadFastView, loadHexView, loadImageView, loadMergeEditor } from '../../platform/lazy';
 import { t } from '../../platform/i18n';
 import { settings } from '../../platform/settings';
 import { basename, el, icon, notify, showContextMenu } from '../../platform/ui/index';
@@ -245,6 +245,11 @@ export const mountMethods: ThisType<import('./group').EditorGroup> = {
 	async mountTextEditor(editor: Editor, contents: string, parent: HTMLElement = editor.pane): Promise<void> {
 		const { EditorView, EditorState, baseExtensions, completionExtension, bookmarkGutter, languageSlot, blameSlot, keymap, loadLanguage, editLockSlot, editLockedExtensions } = await textEditor();
 		const [{ diagnosticsExtension }, { extensionDecorationsExtension }, { extensionProviderExtensions }] = await loadEditorExtensions();
+		// The merge-conflict decorations ride every text editor: the extension stays inert
+		// (one substring check per edit) until the document actually carries conflict
+		// markers, then paints them — including on the silent reload that brings markers
+		// into an editor that was open before a merge ran.
+		const { conflictDecorations } = await loadMergeEditor();
 		// A phone's remote workbench opens files locked: the app bar's lock button toggles
 		// the edit grant (src/remote/editLock.ts). Everywhere else this is false and
 		// the editor is born editable as always.
@@ -261,6 +266,7 @@ export const mountMethods: ThisType<import('./group').EditorGroup> = {
 					...baseExtensions(false, editor.input.kind === 'file' ? editor.input.path : editor.label),
 					...completionExtension(editor.input.kind === 'file' ? editor.input.path : editor.label),
 					...(editor.input.kind === 'file' ? [diagnosticsExtension(editor.input.path), extensionDecorationsExtension(editor.input.path), extensionProviderExtensions(editor.input.path)] : []),
+					conflictDecorations(),
 					bookmarkGutter(editor.input.kind === 'file' ? editor.input.path : ''),
 					languageSlot.of([]),
 					blameSlot.of([]),

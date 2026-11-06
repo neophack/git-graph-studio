@@ -214,6 +214,16 @@
 	--vscode-gitDecoration-stageModifiedResourceForeground: #ebcb8b;
 	--vscode-gitDecoration-stageDeletedResourceForeground: #bf616a;
 
+	/* Merge-conflict markers (VS Code's merge.* defaults: ours teal, theirs blue, the diff3
+	 base grey; the header tints the stronger halves). */
+	--vscode-merge-currentHeaderBackground: #40c8ae80;
+	--vscode-merge-currentContentBackground: #40c8ae33;
+	--vscode-merge-incomingHeaderBackground: #40a6ff80;
+	--vscode-merge-incomingContentBackground: #40a6ff33;
+	--vscode-merge-commonHeaderBackground: #60606066;
+	--vscode-merge-commonContentBackground: #60606029;
+	--vscode-merge-border: transparent;
+
 	/* Charts, testing */
 	--vscode-charts-red: #bf616a;
 	--vscode-charts-blue: #81a1c1;
