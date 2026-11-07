@@ -157,6 +157,8 @@ impl FolderWatcher {
                     &root_label,
                     &raw_rx,
                     &stopped,
+                    DEBOUNCE,
+                    MAX_WINDOW,
                     on_change,
                 )
             })
@@ -174,16 +176,24 @@ impl Drop for FolderWatcher {
     }
 }
 
-/// Collect raw paths until the stream has been quiet for `DEBOUNCE`, then report the batch.
-/// Ends when the watcher is dropped (the raw sender closes) or `stopped` fires. Events fold
-/// against the opened root and — when its canonical spelling differs — against that too;
-/// the batch reports the root as opened (`root_label`), the spelling consumers match on.
+/// Collect raw paths until the stream has been quiet for `quiet_window`, then report the
+/// batch — at most `max_window` after the burst began, whichever comes first, so a
+/// sustained writer flushes its batch instead of postponing the refresh forever. Ends when
+/// the watcher is dropped (the raw sender closes) or `stopped` fires. Events fold against
+/// the opened root and — when its canonical spelling differs — against that too; the batch
+/// reports the root as opened (`root_label`), the spelling consumers match on. The
+/// production caller passes `(DEBOUNCE, MAX_WINDOW)`; the windows are parameters so the
+/// sustained-writer test can pace the loop at a scale where CI-load scheduling noise
+/// cannot split its burst.
+#[allow(clippy::too_many_arguments)]
 fn debounce_loop(
     root: &Path,
     canonical: Option<&Path>,
     root_label: &str,
     raw: &mpsc::Receiver<PathBuf>,
     stopped: &mpsc::Receiver<()>,
+    quiet_window: Duration,
+    max_window: Duration,
     on_change: impl Fn(FsChange),
 ) {
     let fold = |batch: &mut FsChange, path: &Path| {
@@ -206,14 +216,14 @@ fn debounce_loop(
         let mut batch = FsChange::default();
         fold(&mut batch, &first);
         // Burst: keep folding until the stream is quiet for the debounce window — at most
-        // `MAX_WINDOW`, whichever comes first, so a sustained writer flushes its batch
+        // `max_window`, whichever comes first, so a sustained writer flushes its batch
         // instead of postponing the refresh forever.
         let mut quiet_since = Instant::now();
         let burst_started = Instant::now();
         loop {
-            let wait = DEBOUNCE
+            let wait = quiet_window
                 .saturating_sub(quiet_since.elapsed())
-                .min(MAX_WINDOW.saturating_sub(burst_started.elapsed()));
+                .min(max_window.saturating_sub(burst_started.elapsed()));
             match raw.recv_timeout(wait) {
                 Ok(path) => {
                     fold(&mut batch, &path);
@@ -413,9 +423,24 @@ mod tests {
         let (stop_tx, stop_rx) = mpsc::channel();
         let (batch_tx, batch_rx) = mpsc::channel();
         let watcher = std::thread::spawn(move || {
-            debounce_loop(&root, None, "sustained", &raw_rx, &stop_rx, move |batch| {
-                let _ = batch_tx.send(batch);
-            })
+            debounce_loop(
+                &root,
+                None,
+                "sustained",
+                &raw_rx,
+                &stop_rx,
+                // The production windows (DEBOUNCE, MAX_WINDOW) scale up for the test's
+                // pace: against a 50 ms writer cadence the 100 ms quiet window expired on
+                // the first scheduler hiccup CI load produces (a macOS runner once split
+                // the burst at 121 ms), so the quiet window sits at 400 ms — the burst
+                // only breaks if one scheduling stall exceeds 350 ms — and the cap at
+                // 1 s keeps the whole test quick.
+                Duration::from_millis(400),
+                Duration::from_secs(1),
+                move |batch| {
+                    let _ = batch_tx.send(batch);
+                },
+            )
         });
         // One event every 50 ms for 3 s: each one resets the quiet window, so only the
         // maximum-window cap can end the burst.
@@ -434,13 +459,13 @@ mod tests {
             .expect("the sustained burst flushed within the cap");
         let elapsed = started.elapsed();
         assert!(
-            elapsed >= Duration::from_millis(900),
-            "the debounce still coalesced ({elapsed:?})"
+            elapsed >= Duration::from_millis(800),
+            "the burst broke and coalesced at the quiet window ({elapsed:?})"
         );
         // Without the cap the batch would land only after the writer stops (~3.05 s: the
-        // last event plus one quiet window); the cap flushes near 2 s.
+        // last event plus one quiet window); the cap flushes near 1 s.
         assert!(
-            elapsed <= Duration::from_millis(2_800),
+            elapsed <= Duration::from_millis(1_400),
             "the sustained burst flushed at the cap, not when the writer stopped ({elapsed:?})"
         );
         assert!(!batch.paths.is_empty());
