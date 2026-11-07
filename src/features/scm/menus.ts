@@ -3,6 +3,7 @@
 
 import { invoke } from '../../platform/ipc/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { resolvedMenuEntries } from '../extensions';
 import { gerritInstallHook, gerritPushRef, scmAbortMerge, scmAbortRebase, scmAmendLastCommit, scmBranches, scmBranchMerged, scmCheckout, scmCherryPick, scmCreateBranch, scmDeleteRemoteBranch, scmDeleteRemoteTag, scmFetch, scmOperationState, scmPull, scmPush, scmPushBranch, scmPushTags, scmRevertCommit, scmResetRef, scmRemotes, scmResetToRemote, scmSync, scmTags } from '../../platform/ipc/scm';
 import { repoHead } from '../../platform/ipc/revision';
@@ -64,7 +65,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 			] },
 			{ label: 'Pull, Push', submenu: [cmd('git.sync'), cmd('git.syncRebase'), 'separator', cmd('git.pull'), cmd('git.pullRebase'), cmd('git.pullFrom'), 'separator', cmd('git.push'), cmd('git.pushTo'), cmd('git.pushForce'), 'separator', cmd('git.fetch'), cmd('git.fetchPrune'), cmd('git.fetchFrom'), ...(pullPushMenu.length > 0 ? ['separator' as const, ...pullPushMenu] : [])] },
 			{ label: 'Branch', submenu: [cmd('git.merge'), cmd('git.rebase'), cmd('git.mergeAbort'), cmd('git.rebaseAbort'), cmd('git.cherryPick'), cmd('git.revertCommit'), cmd('git.resetToCommit'), 'separator', cmd('git.branch'), cmd('git.branchFrom'), cmd('git.renameBranch'), cmd('git.deleteBranch'), cmd('git.deleteRemoteBranch')] },
-			{ label: 'Remote', submenu: [cmd('git.addRemote'), cmd('git.removeRemote')] },
+			{ label: 'Remote', submenu: [cmd('git.addRemote'), cmd('git.removeRemote'), cmd('git.listRemotes')] },
 			{ label: 'Stash', submenu: [cmd('git.stash'), cmd('git.stashIncludeUntracked'), cmd('git.stashStaged'), 'separator', cmd('git.stashApply'), cmd('git.stashApplyLatest'), cmd('git.stashPop'), cmd('git.stashPopLatest'), cmd('git.stashDrop')] },
 			{ label: 'Tags', submenu: [cmd('git.createTag'), cmd('git.deleteTag'), cmd('git.deleteRemoteTag'), cmd('git.pushTags')] },
 			'separator',
@@ -334,6 +335,29 @@ export const menusMethods: ThisType<SourceControlView> = {
 							}
 							const chosen = await quickPick(remotes.map((r) => ({ label: r.name, description: r.url, icon: 'cloud', value: r.name })), 'Pick a remote to remove');
 							if (chosen) run(() => gitOp('scm_delete_remote', { name: chosen }));
+						})()
+					},
+					{
+						label: 'All Remotes...', run: () => void (async () => {
+							const remotes = await scmRemotes(repo);
+							if (remotes.length === 0) {
+								notify('info', 'The repository has no remotes.');
+								return;
+							}
+							const chosen = await quickPick(remotes.map((r) => ({ label: r.name, description: r.url, icon: 'cloud', value: r.name })), 'Pick a remote to copy its URL or delete it');
+							if (!chosen) return;
+							const remote = remotes.find((r) => r.name === chosen);
+							if (!remote) return;
+							const action = await quickPick([
+								{ label: 'Copy URL', icon: 'copy', value: 'copy' },
+								{ label: 'Delete', icon: 'trash', value: 'delete' }
+							], remote.name);
+							if (action === 'copy') {
+								await writeText(remote.url);
+								notify('info', `The URL of '${remote.name}' is on the clipboard.`);
+							} else if (action === 'delete') {
+								run(() => gitOp('scm_delete_remote', { name: remote.name }));
+							}
 						})()
 					}
 				]

@@ -249,6 +249,8 @@ const zhCnText: Record<string, string> = {
 	'Delete Remote Branch...': '删除远程分支...',
 	'Add Remote...': '添加远程...',
 	'Remove Remote': '移除远程',
+	'All Remotes...': '所有远程...',
+	'Copy URL': '复制 URL',
 	Stash: '贮藏',
 	'Stash (Include Untracked)': '贮藏（含未跟踪文件）',
 	'Stash Staged': '贮藏已暂存的修改',

@@ -1455,6 +1455,41 @@ describe('git commands', () => {
 		expect(backend.callsTo('scm_delete_remote_tag')).toEqual([{ remote: 'mirror', tagName: 'v2' }]);
 	});
 
+	it('All Remotes lists every remote and copies a URL or deletes the picked one', async () => {
+		backend.on('scm_remotes', () => [
+			{ name: 'origin', url: 'https://example.com/r.git' },
+			{ name: 'mirror', url: 'https://example.com/m.git' }
+		]);
+		backend.on('scm_delete_remote', () => null);
+		const { registry } = setup();
+
+		const executing = registry.execute('git.listRemotes');
+		await flush();
+		// The pick lists every remote, its URL beside the name.
+		const rows = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		expect(rows.map((r) => r.querySelector('.label')!.textContent)).toEqual(['origin', 'mirror']);
+		click(rows.find((r) => r.textContent!.includes('mirror'))!);
+		await flush();
+		// The chosen remote's own actions: copy its URL first.
+		const actions = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		expect(actions.map((r) => r.querySelector('.label')!.textContent)).toEqual(['Copy URL', 'Delete']);
+		click(actions.find((r) => r.textContent!.includes('Copy URL'))!);
+		await executing;
+		await flush();
+		expect(backend.clipboard.at(-1)).toBe('https://example.com/m.git');
+
+		const again = registry.execute('git.listRemotes');
+		await flush();
+		const rows2 = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		click(rows2.find((r) => r.textContent!.includes('origin'))!);
+		await flush();
+		const actions2 = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		click(actions2.find((r) => r.textContent!.includes('Delete'))!);
+		await again;
+		await flush();
+		expect(backend.callsTo('scm_delete_remote')).toEqual([{ name: 'origin' }]);
+	});
+
 	it('push with no upstream and several remotes asks which one to publish to', async () => {
 		backend.on('repo_head', () => ({ branch: 'main', shortHash: 'abc1234', hash: 'd'.repeat(40), ahead: 0, behind: 0, upstream: null }));
 		backend.on('scm_remotes', () => [

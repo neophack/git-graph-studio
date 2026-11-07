@@ -8,6 +8,7 @@ import { invoke } from '../../platform/ipc/core';
 import { scmAbortMerge, scmAbortRebase, type BranchInfo, scmBranches, scmBranchMerged, scmCheckout, scmCherryPick, scmClone, scmCreateBranch, scmDeleteRemoteBranch, scmDeleteRemoteTag, type RemoteInfo, scmFetch, scmOperationState, scmPull, scmPush, scmPushBranch, scmPushTags, scmRevertCommit, scmResetRef, type StashInfo, scmRemotes, scmStashes, scmSync, scmTags } from '../../platform/ipc/scm';
 import { repoHead } from '../../platform/ipc/revision';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import type { CommandRegistry } from '../../platform/commands';
 import { t, tf } from '../../platform/i18n';
@@ -367,6 +368,27 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 		}
 		const chosen = await quickPick(remotes.map((r) => ({ label: r.name, description: r.url, icon: 'cloud', value: r.name })), 'Pick a remote to remove');
 		if (chosen) await gitOp('scm_delete_remote', { name: chosen });
+	});
+	add('git.listRemotes', 'All Remotes...', async () => {
+		const remotes = await scmRemotes();
+		if (remotes.length === 0) {
+			notify('info', 'The repository has no remotes.');
+			return;
+		}
+		const chosen = await quickPick(remotes.map((r) => ({ label: r.name, description: r.url, icon: 'cloud', value: r.name })), 'Pick a remote to copy its URL or delete it');
+		if (!chosen) return;
+		const remote = remotes.find((r) => r.name === chosen);
+		if (!remote) return;
+		const action = await quickPick([
+			{ label: 'Copy URL', icon: 'copy', value: 'copy' },
+			{ label: 'Delete', icon: 'trash', value: 'delete' }
+		], remote.name);
+		if (action === 'copy') {
+			await writeText(remote.url);
+			notify('info', `The URL of '${remote.name}' is on the clipboard.`);
+		} else if (action === 'delete') {
+			await gitOp('scm_delete_remote', { name: remote.name });
+		}
 	});
 
 	/* Stashes */
