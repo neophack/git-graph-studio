@@ -378,11 +378,30 @@ mod tests {
     fn replace_counts_unwritable_files_instead_of_dropping_them() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "x y\n").unwrap();
-        let locked = dir.path().join("b.txt");
-        std::fs::write(&locked, "x z\n").unwrap();
-        let mut perms = std::fs::metadata(&locked).unwrap().permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&locked, perms).unwrap();
+        // The unwritable file, in the shape each platform's atomic write refuses: Windows'
+        // rename refuses a read-only destination, so the read-only bit on the file is the
+        // lock; Unix's rename asks the directory instead and replaces a read-only file
+        // without a glance, so there the file sits in a directory stripped of its write
+        // bit (the execute bit stays, so the walk still lists it) — the temp write_atomic
+        // creates beside the file cannot exist, and the write fails the same way.
+        #[cfg(windows)]
+        let locked = {
+            let p = dir.path().join("b.txt");
+            std::fs::write(&p, "x z\n").unwrap();
+            let mut perms = std::fs::metadata(&p).unwrap().permissions();
+            perms.set_readonly(true);
+            std::fs::set_permissions(&p, perms).unwrap();
+            p
+        };
+        #[cfg(unix)]
+        let locked_dir = {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.path().join("locked");
+            std::fs::create_dir(&p).unwrap();
+            std::fs::write(p.join("b.txt"), "x z\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o555)).unwrap();
+            p
+        };
         let root = dir.path().display().to_string();
 
         let outcome = replace_root(
@@ -407,13 +426,18 @@ mod tests {
             "w y\n"
         );
 
-        // Clearing the read-only bit so the temp dir can be removed (clippy warns that on Unix
-        // this alone does not make a file world-writable; here it only undoes the line above).
+        // The lock comes off so the temp dir can be removed.
+        #[cfg(windows)]
         #[allow(clippy::permissions_set_readonly_false)]
         {
             let mut perms = std::fs::metadata(&locked).unwrap().permissions();
             perms.set_readonly(false);
             std::fs::set_permissions(&locked, perms).unwrap();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
 
