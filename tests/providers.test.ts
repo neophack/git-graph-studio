@@ -63,6 +63,16 @@ function keylessListAnswer(): Record<string, unknown> {
 	return answer;
 }
 
+/** The store with an added official account beside the seeded shared one (2026-11-07). */
+function listWithAccount(activeId?: string): Record<string, unknown> {
+	const answer = providerListAnswer();
+	(answer['profiles'] as Record<string, unknown>[]).push({
+		id: 'official-2', preset: 'official', label: 'Work account', baseUrl: null, model: null, smallModel: null, hasKey: false, keyHint: null
+	});
+	if (activeId) answer['activeId'] = activeId;
+	return answer;
+}
+
 /** A usage answer with one shaped hour at today's local midnight (the bucket the
  *  jsdom hover — a zero-width layout — always lands on) and a sprinkle yesterday. */
 function usageAnswer(): Record<string, unknown>[] {
@@ -300,13 +310,29 @@ describe('the Model Providers page', () => {
 		select.dispatchEvent(new Event('change'));
 		await flush();
 		// No endpoint, no models, no key field: the official service needs a sign-in,
-		// not a configuration.
+		// not a configuration. An added official profile is an ACCOUNT (2026-11-07) —
+		// the hint names its separate state and where it signs in.
 		expect(formInputs().length).toBe(1);
 		expect(formInputs()[0].value).toBe('DeepSeek'); // the label survives the preset switch
+		expect(texts('.providers-form-hint')[0]).toContain('~/.ggs/claude-accounts');
 		click(document.querySelector('.providers-form-actions .button.primary')!);
 		await flush();
 		const profile = backend.callsTo('provider_save')[0]!.profile as Record<string, unknown>;
-		expect(profile).toMatchObject({ id: 'deepseek-2', preset: 'official', baseUrl: '', apiKey: null });
+		// A new draft takes the fresh id the preset derives — an account is
+		// `official-2`, never the seeded shared `official`.
+		expect(profile).toMatchObject({ id: 'official-2', preset: 'official', baseUrl: '', apiKey: null });
+	});
+
+	it('renders an added official account as its own record: separate-login hint, deletable', async () => {
+		backend.on('provider_list', () => listWithAccount());
+		mountProvidersPage(host());
+		await flush();
+		expect(texts('.prov-row .name')).toEqual(['Official Claude', 'DeepSeek', 'Work account']);
+		// The account describes its separate login, not the shared service's.
+		expect(texts('.prov-row .desc')[2]).toContain('signs in separately');
+		// Unlike the seeded shared profile, the account is the user's own record.
+		expect(actionByTitle('Delete', rows()[0]!)).toBeNull();
+		expect(actionByTitle('Delete', rows()[2]!)).not.toBeNull();
 	});
 });
 
@@ -374,6 +400,25 @@ describe('the sidebar provider chip', () => {
 		click(quickRows[0]!); // the active one
 		await flush();
 		expect(backend.callsTo('provider_activate')).toEqual([]);
+		dispose();
+	});
+
+	it('labels an active official account by its own name, and offers it in the pick (2026-11-07)', async () => {
+		backend.on('provider_list', () => listWithAccount('official-2'));
+		const slot = host();
+		const dispose = mountProviderSwitcher('Anthropic.claude-code', slot);
+		await flush();
+		// Two official profiles must not read alike on the chip: the account shows
+		// the name the user gave it, never the shared service's localized one.
+		const chip = slot.querySelector<HTMLButtonElement>('.provider-chip')!;
+		expect(chip.querySelector('.label')!.textContent).toBe('Work account');
+		click(chip);
+		await flush();
+		const quickRows = [...document.querySelectorAll('.quick-input .row')];
+		expect(quickRows.map((row) => row.querySelector('.label')!.textContent)).toEqual(
+			['Official Claude', 'DeepSeek', 'Work account', 'Configure Providers…']);
+		// The account's pick row describes the separate login, not the shared service's.
+		expect(quickRows[2]!.querySelector('.description')!.textContent).toContain('signs in separately');
 		dispose();
 	});
 });

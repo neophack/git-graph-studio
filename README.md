@@ -28,12 +28,13 @@ extensions; a release form checkbox or `GGS_BUNDLE_CLAUDE_CODE=0` leaves claude-
 out, and the Extensions view's marketplace row then installs it on demand). The Claude sidebar carries an **AI provider switcher**: run the official
 Claude service or any Anthropic-compatible endpoint — DeepSeek, Zhipu GLM, Moonshot Kimi,
 a custom gateway — with the API key AES-256-GCM sealed at rest under `~/.ggs/` and
-decrypted only when the active provider is applied to Claude's redirected settings
-`~/.ggs/claude` (whose own state — login, history — never touches `~/.claude`);
-switching provider is one click on the view's
-header chip or the **Model Providers** page, writes the choice into Claude's
-redirected settings so the next new session uses it (a running conversation is never
-interrupted), and the page also probes the endpoint (Test
+decrypted only when the active provider is injected into the backend's spawn
+environment (never a file on disk). Claude's own state stays under `~/.ggs` too,
+never touching `~/.claude`: the shared `~/.ggs/claude` — plus `~/.ggs/claude-accounts/<id>`
+for each added **official account** (several official logins, each signed in once
+inside the Claude view and kept there). Switching provider is one click on the view's
+header chip or the **Model Providers** page and restarts the window's backend, so the
+next session runs on it; the page also probes the endpoint (Test
 Connection), pulls the gateway's model catalogue (NewAPI / OneAPI `/v1/models`), and
 imports an existing **cc-switch** configuration (keys sealed on import, the one
 cc-switch points at becoming active).
@@ -210,8 +211,9 @@ shaped like:
 ```
 
 Inside Git Graph Studio, the bundled Claude Code extension gets this without any
-configuration: the app registers the same server (named `ggs`) into its redirected
-Claude configuration (`~/.ggs/claude/settings.json`) for the open folder — removed
+configuration: the app registers the same server (named `ggs`) into the window's
+active Claude state (`~/.ggs/claude/.claude.json`, or an official account's own
+`~/.ggs/claude-accounts/<id>/.claude.json`) for the open folder — removed
 when no folder is open, your other servers and settings untouched — so `/mcp` in any
 new session lists the symbol index and the analysis tools, and the server's
 instructions teach the model the workflow (map a symbol's references and a change's

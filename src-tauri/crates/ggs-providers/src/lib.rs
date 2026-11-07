@@ -624,12 +624,34 @@ pub fn provider_env_vars(active: &ProviderProfile, home: &Path) -> Vec<(String, 
     env
 }
 
+/// The Claude state dir one profile's bridged backend runs in. An official account —
+/// a profile whose preset is `official` and whose id is anything but the seeded
+/// `official` — owns `~/.ggs/claude-accounts/<id>`: its own login, history and
+/// settings, signed into once inside the Claude view and kept there; switching to it
+/// is a pick plus the backend restart, switching away and back reattaches the login.
+/// The seeded `official` profile and every third-party profile share `~/.ggs/claude`
+/// (the per-machine login and history the bridge has always kept). The id was
+/// validated at save time (`normalize_profile` rejects separators and `..`), so
+/// joining it cannot escape the accounts root. Pure; the test seam.
+pub fn claude_dir_for(profile: Option<&ProviderProfile>, home: &Path) -> PathBuf {
+    let shared = || home.join("claude");
+    let Some(profile) = profile else {
+        return shared();
+    };
+    if profile.preset == "official" && profile.id != "official" {
+        home.join("claude-accounts").join(&profile.id)
+    } else {
+        shared()
+    }
+}
+
 /// The spawn environment a bridged extension's backend runs with — the provider
 /// configuration's only sink. Pure over the home and the window's choice, so the exact
 /// bytes a backend sees are testable (`instance` is the window's own provider id, or
 /// `None` for a fresh window following the store's default — the shape
 /// [`effective_choice`] snapshots at boot). The state redirect always rides the
-/// process environment; the window's active provider's endpoint and key ride it too
+/// process environment — for an active official account, the account's own dir (see
+/// [`claude_dir_for`]); the window's active provider's endpoint and key ride it too
 /// (2026-10-01, the long-login-page bug): the extension process reads `process.env`
 /// for exactly the keyless-auth shape — a token there is Claude Code's own, and the
 /// chat authenticates from the first state push instead of rendering the official
@@ -643,14 +665,16 @@ pub fn backend_env_for(ext_id: &str, home: &Path, instance: Option<&str>) -> Vec
     if !BRIDGED_EXT_IDS.contains(&ext_id) {
         return Vec::new();
     }
+    let store = read_store(home).ok();
+    let active = store
+        .as_ref()
+        .and_then(|store| resolve_active(store, instance));
     let mut env = vec![(
         "CLAUDE_CONFIG_DIR".to_owned(),
-        home.join("claude").to_string_lossy().into_owned(),
+        claude_dir_for(active, home).to_string_lossy().into_owned(),
     )];
-    if let Ok(store) = read_store(home) {
-        if let Some(active) = resolve_active(&store, instance) {
-            env.extend(provider_env_vars(active, home));
-        }
+    if let Some(active) = active {
+        env.extend(provider_env_vars(active, home));
     }
     env.extend(claude_shell_env(home));
     env
@@ -1129,11 +1153,21 @@ pub fn backend_env(ext_id: &str) -> Vec<(String, String)> {
 /* ---------- The provider switch's gate and Claude-settings withdrawal ---------- */
 
 /// One window's active profile's provider environment, resolved through that window's
-/// choice — the lens [`provider_change`] compares under.
+/// choice — the lens [`provider_change`] compares under. The config dir rides the
+/// comparison too: an official-account switch (2026-11-07) moves only the dir — its
+/// provider env is empty — and the restarted backend must still land in the account's
+/// own login state.
 fn active_env(store: &ProviderStore, instance: Option<&str>, home: &Path) -> Vec<(String, String)> {
-    resolve_active(store, instance)
+    let active = resolve_active(store, instance);
+    let dir = claude_dir_for(active, home);
+    let mut env = active
         .map(|active| provider_env_vars(active, home))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    env.push((
+        "CLAUDE_CONFIG_DIR".to_owned(),
+        dir.to_string_lossy().into_owned(),
+    ));
+    env
 }
 
 /// What a store-writing command's tail must run, decided by comparing the store before
@@ -1143,16 +1177,17 @@ fn active_env(store: &ProviderStore, instance: Option<&str>, home: &Path) -> Vec
 /// own start and keeps the provider it booted under);
 /// `store_changed` pushes the event the windows' switcher chips re-read on.
 ///
-/// The env comparison is over the *provider environment*, never the spawn environment:
-/// the spawn env derives from the same store at every spawn, so comparing it made every
-/// switch a silent no-op — the backend kept the previous provider and new chats never
-/// moved. The two choices are the window's before and after the command, so a switch
-/// (the choice itself moves) and an edit of the active profile (the profile under a
-/// standing choice moves) both gate correctly.
+/// The env comparison is over the *provider environment* plus the one dir line
+/// ([`active_env`]), never the whole spawn environment: the spawn env derives from the
+/// same store at every spawn, so comparing it made every switch a silent no-op — the
+/// backend kept the previous provider and new chats never moved. The two choices are
+/// the window's before and after the command, so a switch (the choice itself moves)
+/// and an edit of the active profile (the profile under a standing choice moves) both
+/// gate correctly — an official-account switch through the dir line alone included.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProviderChange {
-    /// The window's active provider's environment (endpoint, key, models) changed:
-    /// restart the bridged backend on the new spawn environment.
+    /// The window's active provider's environment (endpoint, key, models) or Claude
+    /// state dir changed: restart the bridged backend on the new spawn environment.
     pub env_changed: bool,
     /// The store visibly changed (the active id, a label): the windows re-read.
     pub store_changed: bool,
@@ -1629,8 +1664,10 @@ fn collect_usage(
 }
 
 /// The usage scan's answer: every non-empty UTC hour inside the window, oldest first.
-/// A missing `projects/` tree (the extension never ran here) answers empty, never an
-/// error — the curve's empty state is a state, not a failure.
+/// The scan runs over the shared dir's `projects/` tree plus every official account's
+/// own one (2026-11-07) — the curve is the machine's total token spend, whatever
+/// account ran the session. A missing tree (the extension never ran there) answers
+/// empty, never an error — the curve's empty state is a state, not a failure.
 pub fn usage_answer(home: &Path, now: std::time::SystemTime) -> Vec<ProviderUsageHour> {
     let now_secs = now
         .duration_since(std::time::UNIX_EPOCH)
@@ -1638,9 +1675,16 @@ pub fn usage_answer(home: &Path, now: std::time::SystemTime) -> Vec<ProviderUsag
         .unwrap_or(0);
     let cutoff_secs = now_secs.saturating_sub(USAGE_WINDOW);
     let mut hours: std::collections::BTreeMap<u64, UsageTotals> = Default::default();
-    let projects = home.join("claude").join("projects");
-    if projects.is_dir() {
-        let _ = collect_usage(&projects, now_secs.saturating_sub(USAGE_WINDOW), &mut hours);
+    let mut roots = vec![home.join("claude").join("projects")];
+    if let Ok(entries) = std::fs::read_dir(home.join("claude-accounts")) {
+        for entry in entries.flatten() {
+            roots.push(entry.path().join("projects"));
+        }
+    }
+    for projects in roots {
+        if projects.is_dir() {
+            let _ = collect_usage(&projects, now_secs.saturating_sub(USAGE_WINDOW), &mut hours);
+        }
     }
     hours
         .into_iter()
@@ -1842,7 +1886,16 @@ pub fn claude_mcp_settings(
 /// of this bridge mistakenly wrote there).
 pub fn apply_claude_mcp(folders: &[String], command: Option<&Path>) -> Result<(), String> {
     let home = ggs_home()?;
-    let dir = home.join("claude");
+    // THIS window's active profile decides the dir (2026-11-07): an official account's
+    // registration lands in the account's own state — the only place its Claude
+    // sessions read it — while the shared dir and every third-party choice land where
+    // they always have. A store that cannot be read resolves to the shared dir.
+    let store = read_store(&home).ok();
+    let active = store.as_ref().and_then(|store| {
+        let choice = effective_choice(store);
+        resolve_active(store, choice.as_deref())
+    });
+    let dir = claude_dir_for(active, &home);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let command = command
         .map(Path::to_string_lossy)
@@ -1893,10 +1946,17 @@ pub struct ClaudeMcpStatus {
     pub command: Option<String>,
 }
 
-/// What the page reports, read off the redirected global config: Claude Code loads the
-/// registration from `~/.ggs/claude/.claude.json`'s user-scope `mcpServers`.
+/// What the page reports, read off this window's active Claude state (the shared dir,
+/// or an official account's own one — 2026-11-07): Claude Code loads the registration
+/// from the state dir's `.claude.json` user-scope `mcpServers`.
 pub fn claude_mcp_status(home: &Path) -> ClaudeMcpStatus {
-    let path = home.join("claude").join(".claude.json");
+    let store = read_store(home).ok();
+    let active = store.as_ref().and_then(|store| {
+        let choice = effective_choice(store);
+        resolve_active(store, choice.as_deref())
+    });
+    let dir = claude_dir_for(active, home);
+    let path = dir.join(".claude.json");
     let server = std::fs::read_to_string(&path)
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
@@ -2589,6 +2649,43 @@ mod tests {
         let before = store.clone();
         set_active(&mut store, "deepseek").unwrap();
         assert!(provider_change(&before, &store, &home, None, None).env_changed);
+
+        // An official account joins the store. official → official-2 moves only the
+        // config dir — the account's provider env is empty — and the restarted
+        // backend must still land in the account's own login state, so the gate
+        // fires (2026-11-07).
+        let mut account = official_profile();
+        account.id = "official-2".to_owned();
+        account.label = "Work account".to_owned();
+        store.profiles.push(account);
+        let before = store.clone();
+        set_active(&mut store, "official-2").unwrap();
+        let change = provider_change(&before, &store, &home, Some("official"), Some("official-2"));
+        assert!(change.env_changed && change.store_changed);
+
+        // The no-op re-activate of the account: neither.
+        let before = store.clone();
+        set_active(&mut store, "official-2").unwrap();
+        assert_eq!(
+            provider_change(&before, &store, &home, Some("official-2"), Some("official-2")),
+            ProviderChange {
+                env_changed: false,
+                store_changed: false
+            }
+        );
+
+        // A label-only edit of the account the window runs under: the chips re-read,
+        // the backend's environment (dir included) does not.
+        let before = store.clone();
+        store.profiles[2].label = "Work account (team)".to_owned();
+        let change = provider_change(&before, &store, &home, Some("official-2"), Some("official-2"));
+        assert!(!change.env_changed && change.store_changed);
+
+        // And back: account → deepseek moves both the dir and the provider env.
+        let before = store.clone();
+        set_active(&mut store, "deepseek").unwrap();
+        let change = provider_change(&before, &store, &home, Some("official-2"), Some("deepseek"));
+        assert!(change.env_changed && change.store_changed);
     }
 
     /// The tail the gate drives, end to end: switch the store, write it — and the
@@ -2649,19 +2746,32 @@ mod tests {
     /// The isolation itself (2026-10-13, the owner's direction): several windows over
     /// one shared store — one that chose GLM, one that chose the official service,
     /// one freshly opened — each window's spawn answers its own provider, never
-    /// another window's, and the config dir is the one shared `~/.ggs/claude` for all
-    /// of them (the login and history are per-machine).
+    /// another window's, and (2026-11-07) the config dir follows the profile: the
+    /// seeded official and every third-party window share `~/.ggs/claude`, an
+    /// official-account window lands in its account's own state dir, and a window
+    /// whose store cannot be read falls back to the shared dir.
     #[test]
     fn each_window_resolves_its_own_provider() {
         let _guard = ProviderHome::pin();
         let home = ggs_home().unwrap();
         let mut store = seeded_store();
         store.active_id = Some("glm".to_owned());
+        store.profiles.push(ProviderProfile {
+            id: "official-work".to_owned(),
+            preset: "official".to_owned(),
+            label: "Work account".to_owned(),
+            base_url: None,
+            model: None,
+            small_model: None,
+            api_key_enc: None,
+            api_key_hint: None,
+            fold_system: None,
+        });
         write_store(&home, &store).unwrap();
         let shared_dir = home.join("claude").to_str().unwrap().to_owned();
 
         // The window that chose official: no provider vars — its own login, never
-        // the store's default GLM.
+        // the store's default GLM — over the shared dir (the seeded profile).
         let official_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, Some("official"));
         let official = env_map(&official_env);
         assert!(!official.contains_key("ANTHROPIC_BASE_URL"), "{official:?}");
@@ -2679,6 +2789,16 @@ mod tests {
             assert_eq!(glm["CLAUDE_CONFIG_DIR"], shared_dir);
         }
 
+        // The window on the official work account: keyless like the official service,
+        // but its own state dir — the login it signs into there is that account's.
+        let account_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, Some("official-work"));
+        let account = env_map(&account_env);
+        assert!(!account.contains_key("ANTHROPIC_BASE_URL"), "{account:?}");
+        assert_eq!(
+            account["CLAUDE_CONFIG_DIR"],
+            home.join("claude-accounts").join("official-work").to_str().unwrap()
+        );
+
         // A choice whose profile is gone (deleted in another window) falls back to
         // the store's default — the bridge never runs provider-less.
         let gone_env =
@@ -2688,6 +2808,14 @@ mod tests {
             gone["ANTHROPIC_BASE_URL"], "https://open.bigmodel.cn/api/anthropic",
             "{gone:?}"
         );
+
+        // A store that cannot be read resolves to the shared dir — a broken provider
+        // file must never keep a backend from starting.
+        std::fs::remove_file(home.join("ai-providers.json")).unwrap();
+        let bare_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, Some("official-work"));
+        let bare = env_map(&bare_env);
+        assert_eq!(bare["CLAUDE_CONFIG_DIR"], shared_dir);
+        assert!(!bare.contains_key("ANTHROPIC_BASE_URL"), "{bare:?}");
     }
 
     /// The window's choice snapshot: the first resolution claims the store's default
@@ -3574,6 +3702,80 @@ mod tests {
         );
     }
 
+    /// The registration follows the window's account (2026-11-07): with an official
+    /// account active, the write lands in the account's own state dir — the only place
+    /// its Claude sessions read it — and the status read-back follows; switching the
+    /// window back to the shared profile re-registers there, leaving the account's
+    /// own registration untouched.
+    #[test]
+    fn the_mcp_registration_lands_in_the_active_accounts_state() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let exe = home.join("app").join("ggs");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        let command = exe.to_str().unwrap();
+
+        let mut store = seeded_store();
+        let mut account = official_profile();
+        account.id = "official-work".to_owned();
+        account.label = "Work account".to_owned();
+        store.profiles.push(account);
+        store.active_id = Some("official-work".to_owned());
+        write_store(&home, &store).unwrap();
+        set_instance_choice("official-work");
+
+        apply_claude_mcp(&["/repo".to_owned()], Some(Path::new(command))).unwrap();
+        let account_config: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                home.join("claude-accounts").join("official-work").join(".claude.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            account_config
+                .pointer("/mcpServers/ggs/args/1")
+                .and_then(|v| v.as_str()),
+            Some("/repo")
+        );
+        // The shared dir was never this window's target: nothing of ours there.
+        assert!(!home.join("claude").join(".claude.json").exists());
+        // The status read-back resolves through the same window choice.
+        let status = claude_mcp_status(&home);
+        assert!(status.registered);
+        assert_eq!(status.folder.as_deref(), Some("/repo"));
+
+        // Back on the shared profile: the registration lands there, and the
+        // account's own one stands.
+        set_active(&mut store, "official").unwrap();
+        set_instance_choice("official");
+        write_store(&home, &store).unwrap();
+        apply_claude_mcp(&["/repo".to_owned()], Some(Path::new(command))).unwrap();
+        let shared_config: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join("claude").join(".claude.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            shared_config
+                .pointer("/mcpServers/ggs/args/1")
+                .and_then(|v| v.as_str()),
+            Some("/repo")
+        );
+        let account_config: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                home.join("claude-accounts").join("official-work").join(".claude.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            account_config
+                .pointer("/mcpServers/ggs/args/1")
+                .and_then(|v| v.as_str()),
+            Some("/repo")
+        );
+    }
+
     /* ---------- The usage curve's aggregation ---------- */
 
     /// The epoch an ISO timestamp in the transcripts' format parses to.
@@ -3714,6 +3916,40 @@ mod tests {
         // A missing projects/ tree (the extension never ran) answers empty, not an error.
         let empty_home = tempfile::tempdir().unwrap();
         assert!(usage_answer(empty_home.path(), now).is_empty());
+    }
+
+    /// The curve is the machine's total token spend (2026-11-07): transcripts under an
+    /// official account's own `projects/` tree aggregate beside the shared dir's, into
+    /// the same buckets.
+    #[test]
+    fn usage_aggregates_across_the_official_accounts() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let now = std::time::SystemTime::now();
+        let now_secs = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let hour_start = now_secs / 3_600 * 3_600;
+        let usage = serde_json::json!({
+            "input_tokens": 1,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 1
+        });
+        let write_session = |root: &Path| {
+            let projects = root.join("projects").join("-repo");
+            std::fs::create_dir_all(&projects).unwrap();
+            std::fs::write(
+                projects.join("session.jsonl"),
+                assistant_line(&iso_at(hour_start + 60), usage.clone()) + "\n",
+            )
+            .unwrap();
+        };
+        write_session(&home.join("claude"));
+        write_session(&home.join("claude-accounts").join("official-work"));
+
+        let answer = usage_answer(&home, now);
+        assert_eq!(answer.len(), 1, "{answer:?}");
+        // Both accounts' turns land in the one bucket.
+        assert_eq!(usage_numbers(&answer[0]), [0, 0, 2, 2]);
     }
 
     /// The aggregation reads the real redirected state's shape: every field it needs

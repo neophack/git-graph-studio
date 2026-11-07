@@ -2418,6 +2418,7 @@ body.resizing iframe { pointer-events: none; }
 .providers-combo .input { flex: 1; min-width: 0; width: auto; }
 .providers-form-actions { display: flex; gap: 8px; align-items: center; }
 .providers-form-actions.tail { justify-content: flex-end; }
+.providers-form-hint { font-size: 11px; color: color-mix(in srgb, var(--vscode-descriptionForeground, #8b8b8b) 85%, transparent); }
 .providers-test-result { min-height: 15px; font-size: 11px; }
 .providers-test-ok { color: var(--vscode-charts-green, var(--vscode-descriptionForeground)); }
 .providers-test-bad { color: var(--vscode-errorForeground); }

@@ -20,8 +20,10 @@ import {
 	cachedProviders,
 	deleteProvider,
 	draftFromPreset,
+	describeProvider,
 	fetchGatewayModels,
 	importCcSwitch,
+	isOfficialAccount,
 	loadProviders,
 	saveProvider,
 	scanCcSwitch,
@@ -280,9 +282,7 @@ const notes = (['providers.note.state', 'providers.note.key', 'providers.note.re
 		const row = el('div', `prov-row${active ? ' active' : ''}`);
 		const name = el('span', 'name', [profile.label]);
 		name.title = profile.label;
-		const desc = profile.preset === 'official'
-			? t('providers.official.description')
-			: [profile.baseUrl ?? '', profile.model ?? ''].filter((part) => part !== '').join(' · ');
+		const desc = describeProvider(profile);
 		const keyChip = profile.preset === 'official'
 			? null
 			: el('span', 'key-chip', [profile.hasKey ? `••••${profile.keyHint ?? ''}` : t('providers.noKey')]);
@@ -297,7 +297,11 @@ const notes = (['providers.note.state', 'providers.note.key', 'providers.note.re
 		const actions = el('span', 'actions');
 		if (!active) actions.appendChild(actionButton('play', t('providers.activate'), () => void activateProvider(profile.id)));
 		actions.appendChild(actionButton('edit', t('providers.edit'), () => this.startEdit(profile)));
-		if (profile.preset !== 'official') actions.appendChild(actionButton('trash', t('providers.delete'), () => void this.remove(profile)));
+		// The seeded shared official profile has no delete (it holds the machine's
+		// default login); an added official account is the user's own record and goes
+		// like any other — its state dir on disk is left alone (the login survives a
+		// re-create under the same id).
+		if (profile.preset !== 'official' || isOfficialAccount(profile)) actions.appendChild(actionButton('trash', t('providers.delete'), () => void this.remove(profile)));
 		row.appendChild(actions);
 		return row;
 	}
@@ -327,8 +331,13 @@ const notes = (['providers.note.state', 'providers.note.key', 'providers.note.re
 			const next = presets.find((preset) => preset.id === presetSelect.value);
 			if (!next) return;
 			this.resetFormProbeState();
-			const refilled = draftFromPreset(next, new Set());
-			this.editing = { ...refilled, id: draft.id, label: draft.label };
+			const refilled = draftFromPreset(next, new Set(this.list?.profiles.map((profile) => profile.id) ?? []));
+			// A draft that is not yet a record takes the fresh id the preset derives —
+			// an added official account is `official-2`, never the seeded shared
+			// `official` — while a saved profile keeps its id (and the user's name)
+			// across preset switches.
+			const isRecord = this.list?.profiles.some((profile) => profile.id === draft.id) ?? false;
+			this.editing = { ...refilled, id: isRecord ? draft.id : refilled.id, label: draft.label };
 			this.render();
 		});
 		presetRow.appendChild(presetSelect);
@@ -337,6 +346,13 @@ const notes = (['providers.note.state', 'providers.note.key', 'providers.note.re
 		form.appendChild(this.field('providers.label', draft.label, (value) => {
 			draft.label = value;
 		}));
+		// An official account's only field is its name. The hint says what activating
+		// it does: the account signs in inside the Claude view and keeps its own
+		// login, history and settings there (2026-11-07).
+		if (official && draft.id !== 'official') {
+			const hint = el('div', 'providers-form-hint span2', [t('providers.officialAccount.hint')]);
+			form.appendChild(hint);
+		}
 		if (!official) {
 			const baseUrl = this.field('providers.baseUrl', draft.baseUrl, (value) => {
 				draft.baseUrl = value;

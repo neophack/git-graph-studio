@@ -125,31 +125,42 @@ export async function activateProvider(id: string): Promise<ProviderList | null>
 	}
 }
 
-/** The chip's label: the active profile's name (the official service when nothing
- *  third-party is active). */
+/** An official account (2026-11-07): an official-preset profile that is not the
+ *  seeded shared one — its own Claude login, history and settings under
+ *  `~/.ggs/claude-accounts/<id>`, signed into once inside the Claude view. The id
+ *  mirror of the backend's `claude_dir_for` rule. */
+export function isOfficialAccount(profile: ProviderProfile): boolean {
+	return profile.preset === 'official' && profile.id !== 'official';
+}
+
+/** The chip's label: the active profile's name — an official account under its own
+ *  name (two accounts must not read alike), the official service's localized name
+ *  when nothing third-party or account is active. */
 export function activeProviderLabel(list: ProviderList): string {
 	const active = list.profiles.find((profile) => profile.id === list.activeId);
-	if (!active || active.preset === 'official') return t('providers.preset.official');
+	if (!active || (active.preset === 'official' && !isOfficialAccount(active))) return t('providers.preset.official');
 	return active.label;
 }
 
 /** A profile's one-line description: the endpoint and model for a third-party profile,
- *  the sign-in hint for the official one. */
+ *  the account hint for an official account, the sign-in hint for the official one. */
 export function describeProvider(profile: ProviderProfile): string {
-	if (profile.preset === 'official') return t('providers.official.description');
+	if (profile.preset === 'official') {
+		return t(isOfficialAccount(profile) ? 'providers.officialAccount.description' : 'providers.official.description');
+	}
 	const parts = [profile.baseUrl ?? '', profile.model ?? ''];
 	if (profile.hasKey) parts.push(`••••${profile.keyHint ?? ''}`);
 	else parts.push(t('providers.noKey'));
 	return parts.filter((part) => part !== '').join(' · ');
 }
 
-/** The preset switch the Add flow pre-fills a draft from (endpoint, models). */
+/** The preset switch the Add flow pre-fills a draft from (endpoint, models). An
+ *  official preset becomes an account (2026-11-07): a fresh suffixed id, the label
+ *  prefilled but editable — the seeded `official` profile keeps the shared login. */
 export function draftFromPreset(preset: ProviderPreset, takenIds: Set<string>): ProviderDraft {
 	let id = preset.id;
-	if (preset.id !== 'official') {
-		let suffix = 2;
-		while (takenIds.has(id)) id = `${preset.id}-${suffix++}`;
-	}
+	let suffix = 2;
+	while (takenIds.has(id)) id = `${preset.id}-${suffix++}`;
 	return {
 		id,
 		preset: preset.id,

@@ -676,12 +676,22 @@ the bridged backend — through the spawn-env source the composition root regist
 `ext_process::add_spawn_env_source`), so `ext_process` names no provider knowledge and
 the coupling stays one-directional (providers reach the spawn path only through the
 composition-root-registered environment source; the spawn path is
-provider-agnostic). That spawn always carries `CLAUDE_CONFIG_DIR=<~/.ggs/claude>` (the
+provider-agnostic). That spawn always carries `CLAUDE_CONFIG_DIR` under `~/.ggs` (the
 extension's own state — login, history — never touches `~/.claude`; an explicit
 `CLAUDE_CONFIG_DIR` in the app's own environment wins — the sandbox probe's hermetic
-config dir rides on it), and every window shares that one `~/.ggs/claude` (the official
-login, the chat history and the analysis MCP registration are per-machine, not
-per-provider), while the **active provider is per window** (2026-10-13, the owner's
+config dir rides on it). Which dir is the profile's own (2026-11-07, the owner's
+direction — multiple official logins, freely switchable): the seeded `official`
+profile and every third-party profile share `~/.ggs/claude` (the machine's original
+login, chat history and analysis MCP registration — per-machine, not per-provider),
+while an **official account** — a profile whose preset is `official` and whose id is
+anything but `official` (`ggs-providers`' `claude_dir_for`) — owns
+`~/.ggs/claude-accounts/<id>`: it signs in once inside the Claude view and keeps its
+own login, history, settings and MCP registration there; switching to it is one pick
+plus the backend restart (the switch gate compares the dir line beside the provider
+env, so a dir-only change still restarts), switching away and back reattaches the
+login, deleting the profile leaves the dir (the login survives a re-create under the
+same id), and the usage curve aggregates the shared dir's transcripts beside every
+account's own. The **active provider is per window** (2026-10-13, the owner's
 direction): several GGS instances run at once — one on GLM, one on the official
 service, one on Kimi — and a switch in one window never drags another. The window's
 choice lives in its own process memory (`effective_choice`: seeded from the store's
@@ -783,7 +793,9 @@ into the store and activates the one cc-switch points at (this window's choice a
 new-window default together). **The analysis rides into
 Claude itself** (2026-09-30): `apply_claude_mcp` — wired at the composition root beside
 every `notify_workspace` call — keeps a `ggs` entry in the user-scope `mcpServers` of
-the redirected global config (`~/.ggs/claude/.claude.json` — the one place Claude Code
+the window's active Claude state's global config (`~/.ggs/claude/.claude.json`, or an
+official account's `~/.ggs/claude-accounts/<id>/.claude.json` since 2026-11-07 — the
+one place Claude Code
 reads user-level MCP servers from; the first cut of this bridge wrote `settings.json`,
 whose schema has no `mcpServers` key at all, so Claude never listed the server — fixed
 the same day, the stale entry retired wherever it is found), pointing at the app
@@ -916,8 +928,9 @@ page shows the integration's state (`claude_mcp_status`).
   `~/.ggs/ai-providers.json`, the AES-256-GCM key sealing under `~/.ggs/keys/`, the
   built-in presets — official / DeepSeek / Zhipu GLM / Moonshot Kimi / custom, each
   flagging whether it can run keyless — `provider_usage` (the usage curve's data: the
-  redirected Claude state's session transcripts `~/.ggs/claude/projects/**/*.jsonl`,
-  their assistant turns' usage records aggregated per UTC hour over the last 31 days,
+  redirected Claude state's session transcripts `~/.ggs/claude/projects/**/*.jsonl`
+  beside every official account's `~/.ggs/claude-accounts/<id>/projects/**/*.jsonl`,
+  aggregated per UTC hour over the last 31 days,
   tokens only) and the
   spawn-time environment `ext_process` injects into the bridged backend through its
   registered spawn-env sources — the composition root's wiring, so the two modules do
