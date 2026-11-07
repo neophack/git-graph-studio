@@ -373,12 +373,17 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 	add('git.stash', 'Stash', async () => {
 		const message = await quickInput({ title: 'Stash', placeholder: 'Optionally provide a stash message' });
 		if (message === null) return;
-		await gitOp('scm_push_stash', { message, includeUntracked: false });
+		await gitOp('scm_push_stash', { message, includeUntracked: false, staged: false });
 	});
 	add('git.stashIncludeUntracked', 'Stash (Include Untracked)', async () => {
 		const message = await quickInput({ title: 'Stash (Include Untracked)', placeholder: 'Optionally provide a stash message' });
 		if (message === null) return;
-		await gitOp('scm_push_stash', { message, includeUntracked: true });
+		await gitOp('scm_push_stash', { message, includeUntracked: true, staged: false });
+	});
+	add('git.stashStaged', 'Stash Staged', async () => {
+		const message = await quickInput({ title: 'Stash Staged', placeholder: 'Optionally provide a stash message' });
+		if (message === null) return;
+		await gitOp('scm_push_stash', { message, includeUntracked: false, staged: true });
 	});
 	add('git.stashApply', 'Apply Stash...', async () => {
 		const stash = await pickStash('Pick a stash to apply');

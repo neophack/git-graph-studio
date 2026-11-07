@@ -65,7 +65,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 			{ label: 'Pull, Push', submenu: [cmd('git.sync'), cmd('git.syncRebase'), 'separator', cmd('git.pull'), cmd('git.pullRebase'), cmd('git.pullFrom'), 'separator', cmd('git.push'), cmd('git.pushTo'), cmd('git.pushForce'), 'separator', cmd('git.fetch'), cmd('git.fetchPrune'), cmd('git.fetchFrom'), ...(pullPushMenu.length > 0 ? ['separator' as const, ...pullPushMenu] : [])] },
 			{ label: 'Branch', submenu: [cmd('git.merge'), cmd('git.rebase'), cmd('git.mergeAbort'), cmd('git.rebaseAbort'), cmd('git.cherryPick'), cmd('git.revertCommit'), cmd('git.resetToCommit'), 'separator', cmd('git.branch'), cmd('git.branchFrom'), cmd('git.renameBranch'), cmd('git.deleteBranch'), cmd('git.deleteRemoteBranch')] },
 			{ label: 'Remote', submenu: [cmd('git.addRemote'), cmd('git.removeRemote')] },
-			{ label: 'Stash', submenu: [cmd('git.stash'), cmd('git.stashIncludeUntracked'), 'separator', cmd('git.stashApply'), cmd('git.stashApplyLatest'), cmd('git.stashPop'), cmd('git.stashPopLatest'), cmd('git.stashDrop')] },
+			{ label: 'Stash', submenu: [cmd('git.stash'), cmd('git.stashIncludeUntracked'), cmd('git.stashStaged'), 'separator', cmd('git.stashApply'), cmd('git.stashApplyLatest'), cmd('git.stashPop'), cmd('git.stashPopLatest'), cmd('git.stashDrop')] },
 			{ label: 'Tags', submenu: [cmd('git.createTag'), cmd('git.deleteTag'), cmd('git.deleteRemoteTag'), cmd('git.pushTags')] },
 			'separator',
 			cmd('git.showOutput'),
@@ -344,14 +344,21 @@ export const menusMethods: ThisType<SourceControlView> = {
 						label: 'Stash', run: () => void (async () => {
 							const message = await quickInput({ title: 'Stash', placeholder: 'Optionally provide a stash message' });
 							if (message === null) return;
-							run(() => gitOp('scm_push_stash', { message, includeUntracked: false }));
+							run(() => gitOp('scm_push_stash', { message, includeUntracked: false, staged: false }));
 						})()
 					},
 					{
 						label: 'Stash (Include Untracked)', run: () => void (async () => {
 							const message = await quickInput({ title: 'Stash (Include Untracked)', placeholder: 'Optionally provide a stash message' });
 							if (message === null) return;
-							run(() => gitOp('scm_push_stash', { message, includeUntracked: true }));
+							run(() => gitOp('scm_push_stash', { message, includeUntracked: true, staged: false }));
+						})()
+					},
+					{
+						label: 'Stash Staged', run: () => void (async () => {
+							const message = await quickInput({ title: 'Stash Staged', placeholder: 'Optionally provide a stash message' });
+							if (message === null) return;
+							run(() => gitOp('scm_push_stash', { message, includeUntracked: false, staged: true }));
 						})()
 					},
 					{

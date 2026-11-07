@@ -376,7 +376,7 @@ describe('source control view', () => {
 		hover(menuItem('Branch'));
 		expect(menuLabels()).toEqual(['Merge Branch...', 'Rebase Branch...', 'Abort Merge', 'Abort Rebase', 'Cherry-Pick...', 'Revert Commit...', 'Reset Current Branch to Commit...', 'Create Branch...', 'Create Branch From...', 'Rename Branch...', 'Delete Branch...', 'Delete Remote Branch...']);
 		hover(menuItem('Stash'));
-		expect(menuLabels()).toEqual(['Stash', 'Stash (Include Untracked)', 'Apply Stash...', 'Apply Latest Stash', 'Pop Stash...', 'Pop Latest Stash', 'Drop Stash...']);
+		expect(menuLabels()).toEqual(['Stash', 'Stash (Include Untracked)', 'Stash Staged', 'Apply Stash...', 'Apply Latest Stash', 'Pop Stash...', 'Pop Latest Stash', 'Drop Stash...']);
 		hover(menuItem('View & Sort'));
 		expect(menuLabels()).toEqual(['View as Tree', 'Sort by Name', 'Sort by Path', 'Sort by Status']);
 		expect(menuItem('Sort by Path')!.querySelector('.codicon-check')).not.toBeNull();

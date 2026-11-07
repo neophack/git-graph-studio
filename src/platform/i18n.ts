@@ -251,6 +251,7 @@ const zhCnText: Record<string, string> = {
 	'Remove Remote': '移除远程',
 	Stash: '贮藏',
 	'Stash (Include Untracked)': '贮藏（含未跟踪文件）',
+	'Stash Staged': '贮藏已暂存的修改',
 	'Apply Stash...': '应用贮藏...',
 	'Apply Latest Stash': '应用最新贮藏',
 	'Pop Stash...': '弹出贮藏...',

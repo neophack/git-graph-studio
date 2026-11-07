@@ -453,9 +453,14 @@ pub fn delete_remote(git: &Git, name: &str) -> Status {
     check_ref("name", name).and_then(|_| git.run(&["remote", "remove", name]))
 }
 
-pub fn push_stash(git: &Git, message: &str, include_untracked: bool) -> Status {
+/// `git stash push`. `staged` rides git's `--staged` (2.35+): only the changes in the
+/// index go into the stash, the unstaged ones stay in the working tree — so it wins
+/// over `include_untracked`, whose untracked files are by definition not staged.
+pub fn push_stash(git: &Git, message: &str, include_untracked: bool, staged: bool) -> Status {
     let mut args = vec!["stash", "push"];
-    if include_untracked {
+    if staged {
+        args.push("--staged");
+    } else if include_untracked {
         args.push("--include-untracked");
     }
     if !message.trim().is_empty() {
@@ -1416,9 +1421,9 @@ mod tests {
         let scratch = Scratch::new("scm-stash-hash");
         let git = scratch.repo("repo");
         write(&git, "README.md", "older\n");
-        push_stash(&git, "the older stash", false).unwrap();
+        push_stash(&git, "the older stash", false, false).unwrap();
         write(&git, "README.md", "newer\n");
-        push_stash(&git, "the newer stash", false).unwrap();
+        push_stash(&git, "the newer stash", false, false).unwrap();
 
         let list = stashes(&git).unwrap();
         assert_eq!(list.len(), 2);
@@ -1433,7 +1438,7 @@ mod tests {
         // A push after the listing shifts every index — a stale listing's index would
         // now name the newer entry, the hash still names its own.
         write(&git, "README.md", "third\n");
-        push_stash(&git, "the third stash", false).unwrap();
+        push_stash(&git, "the third stash", false, false).unwrap();
 
         // Applying the older entry by its hash restores its content, however far the
         // list has shifted.
@@ -1468,6 +1473,48 @@ mod tests {
         let error = drop_stash(&git, &"9".repeat(40)).unwrap_err();
         assert!(error.contains("not a stash reference"), "{error}");
         assert_eq!(stashes(&git).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stash_staged_takes_only_the_index_and_leaves_the_rest() {
+        let scratch = Scratch::new("scm-stash-staged");
+        let git = scratch.repo("repo");
+        commit(&git, "a.txt", "one\n", "init");
+        commit(&git, "b.txt", "two\n", "add b");
+
+        // a.txt's change is staged, b.txt's is not: only the first goes into the stash.
+        write(&git, "a.txt", "staged change\n");
+        write(&git, "b.txt", "unstaged change\n");
+        git.run(&["add", "a.txt"]).unwrap();
+        push_stash(&git, "only staged", false, true).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(git.repo.join("a.txt")).unwrap(),
+            "one\n",
+            "the staged change left the working tree"
+        );
+        assert_eq!(
+            std::fs::read_to_string(git.repo.join("b.txt")).unwrap(),
+            "unstaged change\n",
+            "the unstaged change stayed in the working tree"
+        );
+        let list = stashes(&git).unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].message.contains("only staged"));
+
+        // The stash entry itself carries only the staged file: applying it onto a clean
+        // tree restores a.txt alone.
+        git.run(&["checkout", "-q", "--", "b.txt"]).unwrap();
+        apply_stash(&git, &list[0].selector, false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(git.repo.join("a.txt")).unwrap(),
+            "staged change\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(git.repo.join("b.txt")).unwrap(),
+            "two\n",
+            "b.txt's unstaged change is nowhere in the stash entry"
+        );
     }
 
     #[test]
@@ -1531,7 +1578,7 @@ mod tests {
         );
 
         write(&git, "a.txt", "wip\n");
-        push_stash(&git, "mine", true).unwrap();
+        push_stash(&git, "mine", true, false).unwrap();
         assert!(stashes(&git).unwrap()[0].message.contains("mine"));
         git.run(&["stash", "pop", "-q"]).unwrap();
 

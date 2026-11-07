@@ -159,9 +159,10 @@ pub async fn scm_push_stash(
     roots: State<'_, WorkspaceRoots>,
     message: String,
     include_untracked: bool,
+    staged: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
-    ops::push_stash(&git(&roots, repo)?, &message, include_untracked)
+    ops::push_stash(&git(&roots, repo)?, &message, include_untracked, staged)
 }
 
 #[tauri::command]
