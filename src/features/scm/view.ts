@@ -11,11 +11,40 @@ import type { DiffRequest } from '../editor/types';
 import type { BranchInfo, RemoteInfo, ScmChange, StashInfo, StatusMap } from '../../platform/ipc/scm';
 import { scmBranches, scmRemotes, scmStashes, scmStatus } from '../../platform/ipc/scm';
 import { repoHead, repoSubmodules } from '../../platform/ipc/revision';
+import { isSafeRefName } from './gitCommands';
 import * as state from '../../platform/state';
 import { coalesced } from '../../platform/coalesce';
+import { tf } from '../../platform/i18n';
 import { actionButton, basename, el, icon, liveSidebarTitle, notify, quickPick, showMenuBelow, toPosix, type MenuEntry, type QuickPickItem } from '../../platform/ui/index';
 
 export type ScmGroup = 'merge' | 'staged' | 'changes';
+
+/** The batch writes whose args carry paths: a path git could not decode arrives as a name
+ *  containing U+FFFD (git's replacement character — an unpaired surrogate in a Windows
+ *  name, an invalid byte sequence it printed lossily), and no pathspec matches the real
+ *  file. The write is refused here in the user's language instead of failing in git with
+ *  a message that names nothing useful; the backend keeps the same guard for every other
+ *  way in. */
+const PATH_COMMANDS = new Set(['git_stage', 'git_unstage', 'git_discard', 'git_discard_all']);
+
+/** The path strings a PATH_COMMANDS invocation carries, in argument order. */
+function argsPaths(args: Record<string, unknown>): string[] {
+	const paths: string[] = [];
+	for (const key of ['paths', 'restore', 'clean', 'path']) {
+		const value = args[key];
+		if (typeof value === 'string') paths.push(value);
+		else if (Array.isArray(value)) for (const entry of value) if (typeof entry === 'string') paths.push(entry);
+	}
+	return paths;
+}
+
+/** True (and the notification already shown) when the args carry a path with the
+ *  decode-replacement character — the caller skips its backend write. */
+function refuseUndecodablePaths(args: Record<string, unknown>): boolean {
+	const bad = argsPaths(args).find((path) => path.includes('\u{FFFD}'));
+	if (bad) notify('error', tf('scm.pathUnrepresentable', bad));
+	return bad !== undefined;
+}
 
 
 /** One of the open folder's initialised submodules, rendered as its own repository section
@@ -40,9 +69,8 @@ export interface SubRepoState {
 
 /** Same validity rule gitCommands.ts uses for a new branch/tag/remote name - a submodule's
  *  "..." menu asks for one exactly like the main repository's. */
-const SUB_REF_NAME = /^(?![-.])(?!.*(\.\.|@\{|[\\^:?*\[\s~]))[^\x00-\x1f\x7f]+(?<![./])(?<!\.lock)$/;
 export function validateSubRef(value: string): string | null {
-	return value.trim() === '' ? 'A name is required' : SUB_REF_NAME.test(value.trim()) ? null : `'${value}' is not a valid Git reference name`;
+	return value.trim() === '' ? 'A name is required' : isSafeRefName(value.trim()) ? null : `'${value}' is not a valid Git reference name`;
 }
 
 /** The pick flows a submodule's "..." menu needs, scoped to `repo` - gitCommands.ts's own
@@ -242,7 +270,7 @@ export class SourceControlView {
 
 	onChanged: (() => void) | null = null;
 
-	onHead: ((head: { repo: string; branch: string | null; shortHash: string; ahead: number; behind: number; upstream: string | null } | null) => void) | null = null;
+	onHead: ((head: { repo: string; branch: string | null; shortHash: string; hash: string; ahead: number; behind: number; upstream: string | null } | null) => void) | null = null;
 
 	onCount: ((count: number) => void) | null = null;
 
@@ -317,8 +345,11 @@ export class SourceControlView {
 			this.error = null;
 		} catch (error) {
 			if (generation !== this.generation) return;
-			changes = [];
-			this.changes = [];
+			// One transient failure — another git process, lock contention — keeps the
+			// last known change list (VS Code keeps its state too); the error is shown
+			// and the next healthy refresh clears it. Wiping the list here emptied the
+			// view on every failed refresh the watcher's batch burst triggered.
+			changes = this.changes;
 			this.error = String(error);
 		}
 		this.trackSelection(changes);
@@ -552,6 +583,12 @@ export class SourceControlView {
 
 	declare commitAction: (state: { changes: number; branch: string | null; shortHash: string; ahead: number; behind: number; upstream: string | null }) => 'commit' | 'publish' | 'push' | 'sync' | 'idle' ;
 
+	declare publishBranch: () => Promise<void> ;
+
+	declare subPublishBranch: (sub: SubRepoState) => Promise<void> ;
+
+	declare pickPublishRemote: (repo?: string) => Promise<string | null> ;
+
 	declare commitBox: () => HTMLElement ;
 
 	declare buildRows: () => ScmRow[] ;
@@ -632,14 +669,27 @@ export class SourceControlView {
 
 	declare discardAll: () => Promise<void> ;
 
+	/** The one in-flight mutating run: every `run` joins this chain, so a double-click on
+	 *  Stage never spawns two concurrent `git add` — the second's `index.lock: File exists`
+	 *  used to surface as an error although the first had already done the work. Reads and
+	 *  refreshes stay parallel; only the writes serialize. */
+	private mutationFlight: Promise<void> = Promise.resolve();
+
 	async run(command: string, args: Record<string, unknown> = {}): Promise<void> {
-		try {
-			await invoke(command, args);
-		} catch (error) {
-			notify('error', String(error));
-		}
-		await this.refresh();
-		this.onChanged?.();
+		if (PATH_COMMANDS.has(command) && refuseUndecodablePaths(args)) return;
+		const flight = this.mutationFlight.then(async () => {
+			try {
+				await invoke(command, args);
+			} catch (error) {
+				notify('error', String(error));
+			}
+			await this.refresh();
+			this.onChanged?.();
+		});
+		// The chain itself never rejects: a failed run's notification has been delivered
+		// above, and the next queued write must still start.
+		this.mutationFlight = flight.catch(() => undefined);
+		await flight;
 	}
 
 	declare subGroups: (sub: SubRepoState) => { key: ScmGroup; label: string; files: ScmChange[]; always: boolean }[] ;
@@ -663,6 +713,7 @@ export class SourceControlView {
 	declare subDiscardAll: (sub: SubRepoState) => Promise<void> ;
 
 	async subRun(sub: SubRepoState, command: string, args: Record<string, unknown> = {}): Promise<void> {
+		if (PATH_COMMANDS.has(command) && refuseUndecodablePaths(args)) return;
 		try {
 			await invoke(command, { ...args, repo: sub.repoPath });
 		} catch (error) {

@@ -56,6 +56,12 @@ export class RopeDocMock {
 	private savedText: string;
 	/** Set by a test to stand in for the file changing on disk under the editor. */
 	diskChanged = false;
+	/** When set, the next `viewer_text` answers with this generation instead of the
+	 *  document's own — the stale window a read in flight across a reload carries. */
+	nextWindowGen: number | null = null;
+	/** The reload generation (`DocHandle::gen`): `viewer_reload` swaps the document and
+	 *  advances it by one. */
+	private generation = 0;
 	/** When set, the next `viewer_edit` throws once (a failed send). */
 	failNextEdit = false;
 	private undoStack: (Step | MultiStep)[] = [];
@@ -244,7 +250,9 @@ export class RopeDocMock {
 			const last = lines.length - 1;
 			const from = Math.min(start, last);
 			const to = Math.min(end, last);
-			return { startLine: from, lineCount: lines.length, lines: lines.slice(from, to + 1) };
+			const gen = this.nextWindowGen ?? this.generation;
+			this.nextWindowGen = null;
+			return { startLine: from, lineCount: lines.length, lines: lines.slice(from, to + 1), gen };
 		});
 		backend.on('viewer_edit', ({ startLine, startCol, endLine, endCol, text }: { startLine: number; startCol: number; endLine: number; endCol: number; text: string }) => {
 			if (this.failNextEdit) {
@@ -282,9 +290,10 @@ export class RopeDocMock {
 			return null;
 		});
 		backend.on('viewer_reload', () => {
-			if (!this.diskChanged) return { changed: false, lineCount: 0 };
+			if (!this.diskChanged) return { changed: false, lineCount: 0, gen: this.generation };
 			this.diskChanged = false;
-			return { changed: true, lineCount: this.lineCount() };
+			this.generation += 1;
+			return { changed: true, lineCount: this.lineCount(), gen: this.generation };
 		});
 		backend.on('viewer_backup', () => null);
 		backend.on('backup_clear', () => null);

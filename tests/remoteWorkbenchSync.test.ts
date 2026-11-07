@@ -536,6 +536,64 @@ describe('the sync core over a shared bus', () => {
 		expect(channel.by('main')).toEqual([{ by: 'main', k: 'close', path: NOTES }]);
 	});
 
+	it('re-opens a remote open the failed local open had satisfied away', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const phone = fakeWorkbench();
+		attachWorkbenchSync(pc, channel.deps, 'main');
+		attachWorkbenchSync(phone, channel.deps, 'remote/1');
+		let release!: () => void;
+		pc.setHold(new Promise<void>((resolve) => {
+			release = resolve;
+		}));
+		pc.failOpens.add(NOTES);
+		// The PC's own open stalls on the hold; the remote's open of the same file arrives
+		// mid-flight and is recorded ("the in-flight one satisfies it"), not applied.
+		const localOpen = pc.editors.openFile(NOTES);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		channel.deps.send({ by: 'remote/1', k: 'open', path: NOTES });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(pc.tabs()).toEqual([]);
+		expect(pc.opened).toEqual([]);
+		// The local open fails (the editor's quiet failure) once the hold lifts — the
+		// failure was transient — and the recorded remote open must still land: its sender
+		// already believes the file opened, and before the fix it stayed closed forever.
+		pc.failOpens.delete(NOTES);
+		release();
+		pc.setHold(null);
+		await localOpen;
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		expect(pc.tabs()).toEqual([NOTES]);
+		expect(pc.opened).toEqual([{ path: NOTES, line: undefined, column: undefined }]);
+		// The retry rode the raw open: it announced nothing new (the sender already knows).
+		expect(channel.by('main')).toEqual([{ by: 'main', k: 'open', path: NOTES }]);
+	});
+
+	it('consumes a satisfied remote open when the local open lands, without applying it again', async () => {
+		const channel = bus();
+		const pc = fakeWorkbench();
+		const phone = fakeWorkbench();
+		attachWorkbenchSync(pc, channel.deps, 'main');
+		attachWorkbenchSync(phone, channel.deps, 'remote/1');
+		let release!: () => void;
+		pc.setHold(new Promise<void>((resolve) => {
+			release = resolve;
+		}));
+		const localOpen = pc.editors.openFile(NOTES);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		channel.deps.send({ by: 'remote/1', k: 'open', path: NOTES });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		release();
+		pc.setHold(null);
+		await localOpen;
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		// The local open landed: the remote's copy was satisfied by it — the file is open
+		// exactly once, nothing re-applies afterwards, and the traffic is the one open.
+		expect(pc.tabs()).toEqual([NOTES]);
+		expect(pc.opened).toEqual([{ path: NOTES, line: undefined, column: undefined }]);
+		expect(channel.by('main')).toEqual([{ by: 'main', k: 'open', path: NOTES }]);
+	});
+
 	it('goes quiet for a session restore: rebuilt tabs stay local, later operations cross', async () => {
 		const channel = bus();
 		const pc = fakeWorkbench();

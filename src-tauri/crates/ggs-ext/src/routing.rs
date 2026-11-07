@@ -186,6 +186,16 @@ fn is_tabs(method: &str) -> bool {
     method.starts_with("tabs.")
 }
 
+/// Whether a host request carries the extension's persisted mementos
+/// (`globalState` / `workspaceState` — `state.update`, and the read `state.get` a newer
+/// shim may make): VS Code keeps them machine-wide, INSTANCE data. This instance's one
+/// store is the desktop window's localStorage; a write that followed its caller used to
+/// land in the remote session's own page storage, and the value was gone at the next
+/// boot of the desktop, which serves every later read.
+fn is_instance_state(method: &str) -> bool {
+    method == "state.update" || method == "state.get"
+}
+
 /// A panel id as [`ExtRoutes::panels`] keys it.
 fn panel_key(id: &Value) -> Option<String> {
     match id {
@@ -271,12 +281,14 @@ fn opens_document(method: &str, args: &Value) -> bool {
 }
 
 /// The frontend a request should reach, when one claims it: the desktop window for a
-/// webview, else the click attribution and the caller in flight — a document open IS the
-/// latest page click even while another frontend's call runs; every other request follows
-/// its caller first, falling back to the click attribution (a phone tap's input box fires
-/// with no call of its own in flight). `None` leaves it to the default policy.
+/// webview, a tab close, or the instance's persisted state (a memento write or read —
+/// INSTANCE data, the desktop's storage, whoever calls); else the click attribution and
+/// the caller in flight — a document open IS the latest page click even while another
+/// frontend's call runs; every other request follows its caller first, falling back to
+/// the click attribution (a phone tap's input box fires with no call of its own in
+/// flight). `None` leaves it to the default policy.
 pub fn preferred(ext_id: &str, method: &str, args: &Value) -> Option<String> {
-    if is_webview(method) || is_tabs(method) {
+    if is_webview(method) || is_tabs(method) || is_instance_state(method) {
         return Some(WEBVIEW_HOME.into());
     }
     let attributed = recent_message(ext_id);
@@ -475,6 +487,17 @@ fn journal_key(method: &str, args: &Value) -> Option<Option<String>> {
         "webviewView.setHtml" => {
             let id = args.get(0).and_then(Value::as_str)?;
             Some(Some(format!("viewhtml:{id}")))
+        }
+        // A view's runtime title / description render on the section header; every
+        // frontend's own section (the desktop's, a per-frontend webview's phone page)
+        // replays the latest one, or a late frontend's header keeps the manifest's name.
+        "webviewView.setTitle" => {
+            let id = args.get(0).and_then(Value::as_str)?;
+            Some(Some(format!("viewtitle:{id}")))
+        }
+        "webviewView.setDescription" => {
+            let id = args.get(0).and_then(Value::as_str)?;
+            Some(Some(format!("viewdesc:{id}")))
         }
         _ if method.starts_with("languages.register")
             || method.starts_with("languages.unregister") =>
@@ -811,6 +834,56 @@ mod tests {
                 "{method}"
             );
         }
+    }
+
+    #[test]
+    fn the_mementos_write_into_the_home_frontend_whoever_calls() {
+        // `globalState` / `workspaceState` are INSTANCE data (VS Code keeps them
+        // machine-wide): a remote call in flight must not carry the write into its own
+        // page's storage — the value was gone at the desktop's next boot, which serves
+        // every later read (2026-11). A read lands in the same store.
+        let ext = "test.state-home";
+        reset(ext);
+        let remote = call_begin(ext, "remote/5");
+        for method in ["state.update", "state.get"] {
+            assert_eq!(
+                preferred(ext, method, &json!([["global", "key"]])).as_deref(),
+                Some(WEBVIEW_HOME),
+                "{method}"
+            );
+        }
+        drop(remote);
+        // No call in flight at all: still the home frontend, never the default policy
+        // that would scatter it over whichever frontend happens to serve.
+        assert_eq!(
+            preferred(ext, "state.update", &json!([["global", "key"]])).as_deref(),
+            Some(WEBVIEW_HOME)
+        );
+    }
+
+    #[test]
+    fn a_views_runtime_title_joins_the_journal_for_the_next_frontend() {
+        // The section headers each frontend builds replay the extension's latest runtime
+        // title / description, compacted — a late frontend's header keeps the manifest's
+        // name otherwise.
+        let ext = "test.view-title-journal";
+        reset(ext);
+        routed(ext, "webviewView.setTitle", &json!(["sessions", "Signed in"]));
+        routed(ext, "webviewView.setTitle", &json!(["sessions", "Acme Chat"]));
+        routed(ext, "webviewView.setDescription", &json!(["sessions", "2 sessions"]));
+        let replayed: Vec<Value> = journal(ext)
+            .into_iter()
+            .filter(|entry| entry["method"].as_str().is_some_and(|m| m.starts_with("webviewView.set")))
+            .map(|entry| entry["args"].clone())
+            .collect();
+        assert_eq!(
+            replayed,
+            vec![
+                json!(["sessions", "Acme Chat"]),
+                json!(["sessions", "2 sessions"]),
+            ]
+        );
+        reset(ext);
     }
 
     #[test]

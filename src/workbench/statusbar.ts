@@ -88,6 +88,22 @@ export class StatusBar {
 	onEolClick: (() => void) | null = null;
 	onIndentClick: (() => void) | null = null;
 
+	/** The document-level registrations the constructor makes, kept by name for dispose —
+	 *  plus the notification-centre watch's unlisten and the centre panel itself, which
+	 *  lives on document.body, not this container. */
+	private readonly onDocumentClick = (event: MouseEvent): void => {
+		if (this.centreOpen && !this.centrePanel.contains(event.target as Node) && !this.bellItem.contains(event.target as Node)) {
+			this.toggleCentre();
+		}
+	};
+	private readonly onSettingsChanged = (): void => this.renderIndent(null);
+	private readonly onNotificationsChanged = (count: number): void => {
+		this.bellItem.hidden = count === 0 && !this.centreOpen;
+		this.bellBadge.textContent = count > 0 ? String(count) : '';
+		if (this.centreOpen) this.renderCentre();
+	};
+	private stopNotifications: (() => void) | null = null;
+
 	constructor(container: HTMLElement) {
 		this.left = el('div', 'status-left');
 		this.right = el('div', 'status-right');
@@ -141,19 +157,21 @@ export class StatusBar {
 		this.centrePanel.hidden = true;
 		document.body.appendChild(this.centrePanel);
 		// The bell follows the centre in real time, and refreshes an open panel.
-		onNotificationsChange((count) => {
-			this.bellItem.hidden = count === 0 && !this.centreOpen;
-			this.bellBadge.textContent = count > 0 ? String(count) : '';
-			if (this.centreOpen) this.renderCentre();
-		});
-		document.addEventListener('click', (event) => {
-			if (this.centreOpen && !this.centrePanel.contains(event.target as Node) && !this.bellItem.contains(event.target as Node)) {
-				this.toggleCentre();
-			}
-		}, true);
-		document.addEventListener(SETTINGS_EVENT, () => this.renderIndent(null));
+		this.stopNotifications = onNotificationsChange(this.onNotificationsChanged);
+		document.addEventListener('click', this.onDocumentClick, true);
+		document.addEventListener(SETTINGS_EVENT, this.onSettingsChanged);
 		this.setEditor(null);
 		this.setRepo(false);
+	}
+
+	/** The workbench's dispose: the listeners the constructor registered against document,
+	 *  the centre's change watch, and the centre panel itself (appended to document.body)
+	 *  must not outlive the bar. */
+	dispose(): void {
+		this.stopNotifications?.();
+		document.removeEventListener('click', this.onDocumentClick, true);
+		document.removeEventListener(SETTINGS_EVENT, this.onSettingsChanged);
+		this.centrePanel.remove();
 	}
 
 	/** The indent item: the tab-size setting when no editor overrides it. */

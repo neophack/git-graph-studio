@@ -1,7 +1,9 @@
 //! Start at login, and come back after a crash (docs/ggs-remote-plan.md §7.12): a Windows
 //! scheduled task (logon trigger, restart on failure — a service would run in session 0,
 //! without a tray), a macOS LaunchAgent with `KeepAlive`, a Linux XDG autostart entry (plus
-//! a systemd user unit example in the README for crash restarts).
+//! a systemd user unit example in the README for crash restarts). The binary itself is
+//! `windows_subsystem = "windows"` on Windows, so a login start allocates no console — the
+//! black window the task used to show; main.rs reattaches one on demand for terminal runs.
 
 use std::path::PathBuf;
 

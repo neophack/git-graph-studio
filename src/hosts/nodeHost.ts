@@ -30,7 +30,7 @@ import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { join, resolve } from 'node:path';
 import Module from 'node:module';
-import { activationContext, createVscodeApi, readLocalDocProvider, rehydrateUris, serveExtensionHostCall, Uri, type HostBridge, type HostContext, type HostEvent, type VscodeApi } from './vscodeApi';
+import { activationContext, createVscodeApi, readLocalDocProvider, rehydrateUris, restoreWireArgs, serveExtensionHostCall, Uri, type HostBridge, type HostContext, type HostEvent, type VscodeApi } from './vscodeApi';
 import { probeVscodeNamespace } from './vscodeNamespaceProbe';
 import { VSCODE_ESM_GLOBAL, vscodeEsmHookUrl } from './nodeHostEsm';
 
@@ -257,7 +257,10 @@ function dispatch(id: number, method: string, params: unknown): void {
 			() => {
 				const handler = registeredCommands.get(String(requestParams.command));
 				if (!handler) throw new Error(`no handler registered for ${String(requestParams.command)}`);
-				return handler(...(rehydrateUris(requestParams.args ?? []) as unknown[]));
+				// Top-level null placeholders the ggs-ext/1 line carried come back as the
+				// undefined the caller passed (`restoreWireArgs`) — JSON has no undefined,
+				// and handlers distinguish (claude-code's `editor.open` threw on a null one).
+				return handler(...(rehydrateUris(restoreWireArgs(requestParams.args ?? [])) as unknown[]));
 			},
 		).then(
 			(result) => answer(id, result === undefined ? null : result),

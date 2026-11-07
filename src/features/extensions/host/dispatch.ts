@@ -163,6 +163,12 @@ export const dispatchMethods: ThisType<ExtensionHost> = {
 		const late = commandsRegistered.get(id);
 		if (late) await this.callFrame(late.handle, 'runCommand', [id, args]);
 		else if (this.processBacked.has(extId)) await this.runProcessCommand(extId, id, args);
+		else {
+			// Declared, activated, and still nothing registered: the activation failed (its
+			// failure already surfaced) or never got to the registerCommand — a silent
+			// return here would read as a command that works and does nothing.
+			extLog('warn', extId, `command ${id} has no handler — the extension's activation registered no such command (see its activation errors, if any)`);
+		}
 	},
 
 	declaringExtension(command: string): string | null {

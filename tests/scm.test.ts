@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { CommandRegistry } from '../src/platform/commands';
 import { applyContributions, contextUri, removeContributions } from '../src/features/extensions';
-import { registerGitCommands, type GitCommandHost } from '../src/features/scm';
+import { isSafeRefName, registerGitCommands, validateTarget, type GitCommandHost } from '../src/features/scm';
 import { buildChangeTree, SourceControlView, sortChanges } from '../src/features/scm';
 import type { DiffRequest } from '../src/features/editor/types';
 import { backend } from './tauriMock';
@@ -207,6 +207,42 @@ describe('source control view', () => {
 		expect(diffs).toHaveLength(1);
 	});
 
+	it('refuses to write a path git cannot decode, and stages the rest of the list', async () => {
+		const { view } = setup([
+			// A name git reported with its decode-replacement character in it: no pathspec
+			// matches the real file, so every write naming it is refused up front — in the
+			// UI's language, before any backend command — while the representable rows
+			// stage as usual.
+			change('\u{FFFD}bad.txt', { untracked: true }),
+			change('good.txt', { untracked: true })
+		]);
+		view.setRepo(REPO);
+		await view.refresh();
+		const row = (label: string) => Array.from(document.querySelectorAll<HTMLElement>('.scm-group .row'))
+			.find((r) => r.querySelector('.label')!.textContent === label)!;
+
+		click(row('\u{FFFD}bad.txt').querySelector('[title="Stage Changes"]')!);
+		await flush();
+		expect(backend.callsTo('git_stage')).toHaveLength(0);
+		expect(notifications().at(-1)).toContain('U+FFFD');
+		expect(notifications().at(-1)).toContain('\u{FFFD}bad.txt');
+
+		// The single-path discard shape carries the same refusal (its own confirm first,
+		// the write's guard behind it — nothing ever reaches the backend).
+		rightClick(row('\u{FFFD}bad.txt'));
+		click(menuItem('Discard Changes'));
+		await flush();
+		click(notificationButton('Delete file'));
+		await flush();
+		expect(backend.callsTo('git_discard')).toHaveLength(0);
+		expect(notifications().at(-1)).toContain('U+FFFD');
+
+		// A representable row stages as usual.
+		click(row('good.txt').querySelector('[title="Stage Changes"]')!);
+		await flush();
+		expect(backend.callsTo('git_stage')).toEqual([{ paths: ['good.txt'] }]);
+	});
+
 	it('keeps the selection across a refresh that moves a file between groups', async () => {
 		const { view, setChanges } = setup();
 		view.setRepo(REPO);
@@ -268,6 +304,22 @@ describe('source control view', () => {
 		await flush();
 		expect(backend.callsTo('git_discard_all')).toHaveLength(1);
 		expect(changed).toBeGreaterThanOrEqual(4);
+	});
+
+	it("an untracked discard's confirmation stays honest: the file goes to the trash, it is not lost forever", async () => {
+		const { view } = setup([change('new.txt', { untracked: true })]);
+		view.setRepo(REPO);
+		await view.refresh();
+		const row = Array.from(document.querySelectorAll<HTMLElement>('.scm-group .row'))
+			.find((r) => r.textContent!.includes('new.txt'))!;
+		click(row.querySelector('.codicon-discard')!.parentElement);
+		await flush();
+		expect(notifications().at(-1)).toContain('DELETE new.txt');
+		expect(notifications().at(-1)).toContain('system trash');
+		expect(notifications().at(-1)).not.toContain('IRREVERSIBLE');
+		click(notificationButton('Delete file'));
+		await flush();
+		expect(backend.callsTo('git_discard')).toEqual([{ path: 'new.txt', untracked: true }]);
 	});
 
 	it('commits with Ctrl+Enter, smart-stages when nothing is staged, and amends', async () => {
@@ -723,6 +775,80 @@ describe('source control view', () => {
 		await expect(view.statusDiffers()).resolves.toBe(true);
 	});
 
+	it('a failed status refresh keeps the last known change list and shows the error', async () => {
+		const { view, setChanges } = setup([
+			change('src/main.ts', { staged: 'modified' }),
+			change('README.md', { unstaged: 'modified' })
+		]);
+		view.setRepo(REPO);
+		await view.refresh();
+		// One transient failure (another git process holds the index) must not wipe the
+		// last known list: the view keeps it, shows the error, and the next healthy
+		// refresh clears the error and updates the rows.
+		backend.on('scm_status', () => { throw new Error('fatal: index.lock: File exists'); });
+		await view.refresh();
+		expect(texts('.scm-rows .row .label')).toEqual(['main.ts', 'README.md']);
+		expect(document.querySelector('.view-pane .error')!.textContent).toContain('index.lock');
+		const healthy = [change('README.md', { unstaged: 'modified' })];
+		backend.on('scm_status', () => healthy);
+		await view.refresh();
+		expect(texts('.scm-rows .row .label')).toEqual(['README.md']);
+		expect(document.querySelector('.view-pane .error')).toBeNull();
+	});
+
+	it('serializes mutating runs: an overlapping second stage waits for the first', async () => {
+		const { view } = setup();
+		view.setRepo(REPO);
+		await view.refresh();
+		let inFlight = 0;
+		let maxConcurrent = 0;
+		backend.on('git_stage', async () => {
+			inFlight++;
+			maxConcurrent = Math.max(maxConcurrent, inFlight);
+			await flush(3); // the spawn takes a few ticks
+			inFlight--;
+			return null;
+		});
+		// A double-click: two stage calls overlap, and the second must queue behind the
+		// first instead of racing it into `index.lock: File exists`.
+		const first = view.run('git_stage', { paths: ['a.txt'] });
+		const second = view.run('git_stage', { paths: ['b.txt'] });
+		await Promise.all([first, second]);
+		await flush();
+		expect(maxConcurrent).toBe(1);
+		expect(backend.callsTo('git_stage')).toEqual([{ paths: ['a.txt'] }, { paths: ['b.txt'] }]);
+	});
+
+	it('the publish button asks which remote to publish to when the repository has several', async () => {
+		const { view } = setup([]);
+		backend.on('repo_head', () => ({ branch: 'main', shortHash: 'abc1234', ahead: 0, behind: 0, upstream: null }));
+		backend.on('scm_remotes', () => [
+			{ name: 'origin', url: 'https://example.com/r.git' },
+			{ name: 'mirror', url: 'https://example.com/m.git' }
+		]);
+		backend.on('scm_push', () => null);
+		view.setRepo(REPO);
+		await view.refresh();
+		const button = document.querySelector<HTMLButtonElement>('.commit-row.single .button')!;
+		expect(button.textContent).toContain('Publish Branch');
+		click(button);
+		await flush();
+		// Two remotes: the pick names the server the branch belongs on.
+		const rows = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		expect(rows.map((r) => r.querySelector('.label')!.textContent)).toEqual(['origin', 'mirror']);
+		click(rows.find((r) => r.textContent!.includes('mirror'))!);
+		await flush();
+		expect(backend.callsTo('scm_push')).toEqual([{ remote: 'mirror', setUpstream: true, force: false }]);
+
+		// One remote keeps today's path: no pick, the backend's own choice rides the null.
+		backend.calls.length = 0;
+		backend.on('scm_remotes', () => [{ name: 'origin', url: 'https://example.com/r.git' }]);
+		await view.refresh();
+		click(document.querySelector<HTMLButtonElement>('.commit-row.single .button')!);
+		await flush();
+		expect(backend.callsTo('scm_push')).toEqual([{ remote: null, setUpstream: true, force: false }]);
+	});
+
 });
 
 describe('submodule sections', () => {
@@ -986,6 +1112,49 @@ describe('submodule sections', () => {
 	});
 });
 
+describe('git ref-name and target validation', () => {
+	// The battery mirrors the Rust side's (ggs-git's is_safe_ref_name), and both were
+	// pinned against the real `git check-ref-format` (git 2.50.1.windows.1, one call per
+	// line) — the validator must agree with git in both directions.
+	it('isSafeRefName matches git check-ref-format', () => {
+		const accepted = [
+			'main', 'v1.0.0', 'feature.x', 'feature/foo', 'a/b/c', 'refs',
+			'refs/heads/@',       // an @ component is legal
+			'foo./bar',           // a component ending in '.' mid-name is legal
+			'a/foo.lock./b',      // …and so is one ending in '.lock.'
+			'a/@b/c', 'a/b@/c', 'a/@@/b', 'f@oo', 'a@b', '@oo', 'fo@', 'a@@b',
+			'a]b/c', 'foo-', 'trail'
+		];
+		const rejected = [
+			'',                 // empty
+			'@',                // the revision-syntax token alone
+			'-dash',            // git refuses a leading dash; our spawn would too
+			'.hidden', 'refs/.hidden', 'a/.hidden', 'a/./b',   // a component may not start with '.'
+			'foo.lock', 'foo.lock/bar', 'a/@.lock/b',          // …nor end with '.lock'
+			'refs//heads',      // no empty component
+			'a..b', 'a../b', 'b/..a', 'x/a..b/z',              // no consecutive dots anywhere
+			'a@{b', 'refs/heads/a@{b',                          // no reflog sequence anywhere
+			'a b', 'a b/c',                                     // no space
+			'a~b', 'a^b', 'a:b', 'a?b', 'a*b', 'a[b', 'a\\b',   // no ~ ^ : ? * [ \ anywhere
+			'/lead', '/lead/x', 'trail/', 'trail/x/',           // no leading or trailing slash
+			'trail.', 'trail/x.'                                // the name may not end with '.'
+		];
+		for (const name of accepted) expect(isSafeRefName(name)).toBe(true);
+		for (const name of rejected) expect(isSafeRefName(name)).toBe(false);
+	});
+
+	it('validateTarget takes revision expressions and refuses only the impossible shapes', () => {
+		expect(validateTarget('HEAD~1')).toBeNull();
+		expect(validateTarget('HEAD^')).toBeNull();
+		expect(validateTarget('main@{yesterday}')).toBeNull();
+		expect(validateTarget('abc1234def')).toBeNull();
+		expect(validateTarget('')).not.toBeNull();
+		expect(validateTarget('   ')).not.toBeNull();
+		expect(validateTarget('-force')).not.toBeNull();
+		expect(validateTarget('HEAD~1 extra')).not.toBeNull();
+	});
+});
+
 describe('git commands', () => {
 	function setup() {
 		const registry = new CommandRegistry();
@@ -1069,24 +1238,26 @@ describe('git commands', () => {
 		expect(backend.callsTo('scm_checkout')).toEqual([{ name: 'abc1234def' }]);
 	});
 
-	it('cherry-pick asks for a commit-ish and reports the new head subject', async () => {
+	it('cherry-pick takes a commit-ish, refusing only the shapes that could never be one', async () => {
 		backend.on('scm_cherry_pick', () => 'The picked change');
 		const { registry } = setup();
 
 		const executing = registry.execute('git.cherryPick');
 		await flush();
 		const quick = document.querySelector<HTMLInputElement>('.quick-input input')!;
-		// An invalid target is refused before anything is invoked.
-		type(quick, 'wip..');
+		// A leading dash is refused before anything is invoked: it would ride the spawn as
+		// an option. Revision expressions pass now — the backend resolves the expression
+		// against git and reports git's own complaint when it names nothing.
+		type(quick, '-force');
 		key(quick, 'Enter');
 		await flush();
 		expect(backend.callsTo('scm_cherry_pick')).toHaveLength(0);
 		expect(document.querySelector('.quick-input .hint')!.textContent).toContain('commit hash');
-		type(quick, 'abc123');
+		type(quick, 'HEAD~1');
 		key(quick, 'Enter');
 		await executing;
 		await flush();
-		expect(backend.callsTo('scm_cherry_pick')).toEqual([{ target: 'abc123' }]);
+		expect(backend.callsTo('scm_cherry_pick')).toEqual([{ target: 'HEAD~1' }]);
 		expect(notifications().at(-1)).toContain('Cherry-picked: The picked change');
 	});
 
@@ -1282,6 +1453,51 @@ describe('git commands', () => {
 		await executing;
 		await flush();
 		expect(backend.callsTo('scm_delete_remote_tag')).toEqual([{ remote: 'mirror', tagName: 'v2' }]);
+	});
+
+	it('push with no upstream and several remotes asks which one to publish to', async () => {
+		backend.on('repo_head', () => ({ branch: 'main', shortHash: 'abc1234', hash: 'd'.repeat(40), ahead: 0, behind: 0, upstream: null }));
+		backend.on('scm_remotes', () => [
+			{ name: 'origin', url: 'https://example.com/r.git' },
+			{ name: 'mirror', url: 'https://example.com/m.git' }
+		]);
+		backend.on('scm_push', () => null);
+		const { registry } = setup();
+
+		const executing = registry.execute('git.push');
+		await flush();
+		const rows = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .list .row'));
+		expect(rows.map((r) => r.querySelector('.label')!.textContent)).toEqual(['origin', 'mirror']);
+		click(rows.find((r) => r.textContent!.includes('mirror'))!);
+		await executing;
+		await flush();
+		expect(backend.callsTo('scm_push')).toEqual([{ remote: 'mirror', setUpstream: false, force: false }]);
+
+		// An upstream already set (or a single remote) keeps the plain push: no pick.
+		backend.calls.length = 0;
+		backend.on('repo_head', () => ({ branch: 'main', shortHash: 'abc1234', hash: 'd'.repeat(40), ahead: 0, behind: 0, upstream: 'origin/main' }));
+		await registry.execute('git.push');
+		await flush();
+		expect(backend.callsTo('scm_push')).toEqual([{ remote: null, setUpstream: false, force: false }]);
+	});
+
+	it('create tag names the full head hash, never the short display prefix', async () => {
+		const full = 'c'.repeat(40);
+		backend.on('repo_head', () => ({ branch: 'main', shortHash: full.slice(0, 7), hash: full, ahead: 0, behind: 0, upstream: 'origin/main' }));
+		const { registry } = setup();
+
+		const executing = registry.execute('git.createTag');
+		await flush();
+		const name = document.querySelector<HTMLInputElement>('.quick-input input')!;
+		type(name, 'v9');
+		key(name, 'Enter');
+		await flush();
+		const message = document.querySelector<HTMLInputElement>('.quick-input input')!;
+		type(message, 'release nine');
+		key(message, 'Enter');
+		await executing;
+		await flush();
+		expect(backend.callsTo('scm_add_tag')).toEqual([{ tagName: 'v9', commitHash: full, message: 'release nine', force: false }]);
 	});
 
 	it('abort merge guards on the in-progress state and confirms before aborting', async () => {

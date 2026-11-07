@@ -8,6 +8,7 @@ import { compareDirs } from '../../platform/ipc/search';
 import type { EditorView } from '@codemirror/view';
 import type { MergeView } from '@codemirror/merge';
 
+import { coalesced } from '../../platform/coalesce';
 import { loadHexCompare, loadMerge, loadTextEditor } from '../../platform/lazy';
 import type { HexCompareView } from '../viewers/types';
 
@@ -39,6 +40,13 @@ export class FolderCompareView {
 	 *  its DOM was wiped and its `fileDiff` slot reassigned, so its continuation must not
 	 *  attach to the detached element nor claim the slot (the stale check in `detail`). */
 	private detailLoad = 0;
+	/** Paths whose detail probes answered binary: the pair's copy entries disable (a binary
+	 *  copy could only warn), Delete stays. */
+	private binaryPaths = new Set<string>();
+	/** One comparison walk in flight, one queued: repeated Refresh clicks (or a sync action's
+	 *  refresh landing inside a run) never stack concurrent full two-tree walks on the
+	 *  backend — the platform's single-flight coalescer, as the SCM and Explorer use it. */
+	private readonly refresh = coalesced(() => this.refreshOnce());
 
 	onDispose: (() => void) | null = null;
 	/** A file changed on disk through a sync action; the host refreshes editors and SCM. */
@@ -60,7 +68,7 @@ export class FolderCompareView {
 		this.onDispose?.();
 	}
 
-	async refresh(): Promise<void> {
+	private async refreshOnce(): Promise<void> {
 		this.loading = true;
 		this.render();
 		try {
@@ -204,8 +212,11 @@ export class FolderCompareView {
 			}
 		};
 		const entries: MenuEntry[] = [];
-		if (entry.status !== 'rightOnly') entries.push({ label: 'Copy Left → Right', disabled: entry.status === 'same', run: () => void copy(leftPath, rightPath) });
-		if (entry.status !== 'leftOnly') entries.push({ label: 'Copy Right → Left', disabled: entry.status === 'same', run: () => void copy(rightPath, leftPath) });
+		// A known-binary `different` pair's copy could only hit the warning in `copy` —
+		// its entries disable (Delete stays); an unknown pair keeps them until a probe says.
+		const binaryPair = entry.status === 'different' && this.binaryPaths.has(entry.path);
+		if (entry.status !== 'rightOnly') entries.push({ label: 'Copy Left → Right', disabled: entry.status === 'same' || binaryPair, run: () => void copy(leftPath, rightPath) });
+		if (entry.status !== 'leftOnly') entries.push({ label: 'Copy Right → Left', disabled: entry.status === 'same' || binaryPair, run: () => void copy(rightPath, leftPath) });
 		entries.push('separator');
 		if (entry.status !== 'rightOnly') entries.push({ label: 'Delete Left File', run: () => void remove(leftPath) });
 		if (entry.status !== 'leftOnly') entries.push({ label: 'Delete Right File', run: () => void remove(rightPath) });
@@ -248,6 +259,9 @@ export class FolderCompareView {
 			]);
 			if (stale()) return;
 			if (leftProbe?.binary || rightProbe?.binary) {
+				// Remembered for the context menu: a binary pair's Copy can only warn, so its
+				// entries disable once the pair is known binary (Delete stays).
+				this.binaryPaths.add(entry.path);
 				const { HexCompareView } = await loadHexCompare();
 				if (stale()) return;
 				const host = el('div', 'fc-file-diff');

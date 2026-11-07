@@ -14,7 +14,7 @@ import { assocListDefaults } from '../platform/ipc/assoc';
 import { LOCALES, t, tf } from '../platform/i18n';
 import { DEFAULT_SETTINGS, SETTINGS_EVENT, SETTING_DEFS, THEMES, applyEnumSetting, isSettingModified, settings, updateSetting, type SettingDef } from '../platform/settings';
 import { extensionSettingDefs, type ExtensionSettingDef } from '../features/extensions';
-import { saveExtSetting, extSettings } from '../platform/state';
+import { EXT_SETTINGS_EVENT, extSettings, saveExtSetting } from '../platform/state';
 import { el, icon, notify } from '../platform/ui/index';
 import { extLog } from '../features/extensions';
 
@@ -195,8 +195,16 @@ function extensionSettingRow(def: ExtensionSettingDef, query: string): HTMLEleme
 	input.type = def.type === 'number' ? 'number' : 'text';
 	input.value = String(value);
 	input.addEventListener('change', () => {
-		const raw = def.type === 'number' ? Number(input.value) : input.value;
-		saveExtSetting(def.extId, def.id, raw);
+		if (def.type === 'number') {
+			// A number input's unreadable text parses as NaN, which serializes to null at
+			// rest — the built-in number rows keep their old value on invalid input, and
+			// the extension's do the same.
+			const parsed = Number(input.value);
+			if (Number.isNaN(parsed)) return;
+			saveExtSetting(def.extId, def.id, parsed);
+			return;
+		}
+		saveExtSetting(def.extId, def.id, input.value);
 	});
 	return settingRow(def.id, described, input, modified, { onReset });
 }
@@ -348,6 +356,7 @@ export function openSettingsPanel(): void {
 	const closeDialog = () => {
 		document.removeEventListener('keydown', onKeyDown);
 		document.removeEventListener(SETTINGS_EVENT, render);
+		document.removeEventListener(EXT_SETTINGS_EVENT, render);
 		overlay.remove();
 		openDialog = null;
 	};
@@ -355,7 +364,11 @@ export function openSettingsPanel(): void {
 		if (event.key === 'Escape') closeDialog();
 	};
 	// A language switch re-renders the labels in place; control state comes from `settings`.
+	// The extension rows save through `saveExtSetting`, which dispatches the extension
+	// event and not this one — a reset-to-default click or a JSON save would otherwise
+	// leave the row, its modified marker and the Modified badge stale until reopen.
 	document.addEventListener(SETTINGS_EVENT, render);
+	document.addEventListener(EXT_SETTINGS_EVENT, render);
 	document.addEventListener('keydown', onKeyDown);
 	overlay.addEventListener('mousedown', (event) => {
 		if (event.target === overlay) closeDialog();

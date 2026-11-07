@@ -7,7 +7,7 @@ import { EditorState } from '@codemirror/state';
 import { CompletionContext } from '@codemirror/autocomplete';
 
 import { FilePickSource } from '../src/features/quickOpen';
-import { fileNameFacet, pathCompletion } from '../src/features/editor';
+import { fileNameFacet, pathCompletion } from '../src/features/editor/autocomplete';
 import { backend } from './tauriMock';
 
 describe('the Rust-backed completion paths', () => {

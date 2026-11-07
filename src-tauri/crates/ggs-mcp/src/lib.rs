@@ -703,6 +703,16 @@ impl McpServer {
                 bytes.len()
             ));
         }
+        // A binary blob is not a text read: git's own heuristic (a NUL within the leading
+        // window) decides. Lossy-decoding it would feed the model megabytes of U+FFFD —
+        // a structured refusal instead.
+        let window = &bytes[..bytes.len().min(8000)];
+        if window.contains(&0) {
+            return Ok(format!(
+                "{path} is a binary file ({n} bytes); read_file serves text only — use search_text to locate passages, or the app's hex viewer",
+                n = bytes.len()
+            ));
+        }
         let text = String::from_utf8_lossy(&bytes);
         let lines: Vec<&str> = text.split('\n').collect();
         if lines.is_empty() {
@@ -1135,11 +1145,14 @@ impl McpServer {
         {
             let data = data.lock().unwrap();
             for file in data.files() {
-                let Ok(text) =
-                    std::fs::read_to_string(std::path::Path::new(&self.root).join(&file.path))
+                // Secrets are usually ASCII: a non-UTF-8 file decodes lossily and stays
+                // scannable, instead of silently dropping out of the answer whole.
+                let Ok(bytes) =
+                    std::fs::read(std::path::Path::new(&self.root).join(&file.path))
                 else {
                     continue;
                 };
+                let text = String::from_utf8_lossy(&bytes);
                 let ext = file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
                 for finding in scan_file(&file.path, ext, &text, &file.calls) {
                     if severity.is_none_or(|want| finding.severity == want) {
@@ -1959,6 +1972,25 @@ mod tests {
         );
         assert!(call(&server, "search_symbols", json!({ "query": "zzz" }))
             .contains("No symbol name contains"));
+    }
+
+    #[test]
+    fn read_file_refuses_a_binary_file_and_serves_text() {
+        let (dir, server) = scratch_server();
+        // A PNG header: a NUL within the first window is git's own binary heuristic, and
+        // a lossy decode would hand the model a blob of U+FFFD.
+        std::fs::write(
+            dir.path().join("logo.png"),
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR",
+        )
+        .unwrap();
+        let refused = call(&server, "read_file", json!({ "path": "logo.png" }));
+        assert!(refused.contains("binary file"), "{refused}");
+        assert!(refused.contains("16 bytes"), "{refused}");
+        assert!(!refused.contains('\u{FFFD}'), "{refused}");
+        // A text file passes through whole.
+        let text = call(&server, "read_file", json!({ "path": "src/lib.rs" }));
+        assert!(text.contains("pub fn alpha()"), "{text}");
     }
 
     #[test]

@@ -25,11 +25,12 @@ describe('image types', () => {
 describe('markdown', () => {
 	it('sanitises rendered markup', () => {
 		const article = document.createElement('article');
-		article.innerHTML = '<h1>Hi</h1><script>alert(1)</script><link rel="stylesheet" href="https://x.y/evil.css"><base href="https://x.y/"><a href="https://x.y" onclick="evil()">x</a><a href="other.md">o</a><iframe></iframe>';
+		article.innerHTML = '<h1>Hi</h1><script>alert(1)</script><link rel="stylesheet" href="https://x.y/evil.css"><base href="https://x.y/"><meta http-equiv="refresh" content="0;url=https://x.y/"><a href="https://x.y" onclick="evil()">x</a><a href="other.md">o</a><iframe></iframe>';
 		sanitizeMarkdown(article);
 		expect(article.querySelector('script')).toBeNull();
 		expect(article.querySelector('iframe')).toBeNull();
-		expect(article.querySelector('link, base')).toBeNull();
+		// A refresh tag navigates the webview the way <base> retargets its links - both go.
+		expect(article.querySelector('link, base, meta')).toBeNull();
 		const anchors = article.querySelectorAll('a');
 		expect(anchors[0]!.getAttribute('onclick')).toBeNull();
 		expect(anchors[0]!.target).toBe('_blank');

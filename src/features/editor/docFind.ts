@@ -367,6 +367,11 @@ export class DocFindController {
 		} else if ((event.code === 'Digit1' || event.key === '1') && event.shiftKey && (event.ctrlKey || event.metaKey)) {
 			event.preventDefault();
 			void this.replace(false);
+		} else if (event.key === 'Enter' && event.target === this.replaceInput) {
+			// Enter in the replace field replaces the current match and moves to the next
+			// (findWidget.ts's binding) — the shared branch below would only step to it.
+			event.preventDefault();
+			void this.replace(false);
 		} else if (event.key === 'F3' || event.key === 'Enter') {
 			event.preventDefault();
 			this.step(event.shiftKey ? -1 : 1);

@@ -70,6 +70,21 @@ export function subtreeCounts(folders: FolderNode[], files: TreeFile[]): { files
 	return { files: fileCount, symbols };
 }
 
+/** One visible row's identity and content — what the render's reconciliation compares
+ *  before keeping an existing row's DOM (element, listeners included) instead of rebuilding. */
+interface RowSpec {
+	/** The folder path, file path, or `file:line` of a symbol — unique per visible row. */
+	key: string;
+	container: boolean;
+	glyph: string;
+	label: string;
+	description: string;
+	tail: string | null;
+	/** A symbol row's click handler (the open target folded in); a container row toggles
+	 *  its own key instead. */
+	onOpen: (() => void) | null;
+}
+
 export class SymbolDatabaseView {
 	private readonly list: HTMLElement;
 	private files: TreeFile[] = [];
@@ -161,20 +176,25 @@ export class SymbolDatabaseView {
 	}
 
 	render(): void {
-		this.list.textContent = '';
 		const total = subtreeCounts([], this.files);
 		this.title.textContent = this.loading
 			? `${t('symbols.indexing')}…`
 			: `${total.files} ${t('symbols.page.files')} · ${total.symbols} ${t('symbols.page.symbols')}`;
 		if (!this.loading && this.files.length === 0) {
+			this.list.textContent = '';
 			this.list.appendChild(el('div', 'sd-empty', [t('symbols.page.empty')]));
 			return;
 		}
+		const rows: { spec: RowSpec; depth: number }[] = [];
 		const root = buildTree(this.files);
-		this.renderFolders(root.folders, root.files, 0);
+		this.collectRows(root.folders, root.files, 0, rows);
+		this.reconcile(rows);
 	}
 
-	private renderFolders(folders: FolderNode[], files: TreeFile[], depth: number): void {
+	/** The visible rows in tree order: folders first (each followed by its subtree), then
+	 *  the files, each open file followed by its declarations. Pure assembly — the DOM
+	 *  changes only in `reconcile`. */
+	private collectRows(folders: FolderNode[], files: TreeFile[], depth: number, out: { spec: RowSpec; depth: number }[]): void {
 		// With a filter, a folder stays on screen only while something under it matches.
 		const countMatches = (folders: FolderNode[]): number => {
 			let count = 0;
@@ -188,30 +208,71 @@ export class SymbolDatabaseView {
 		for (const folder of folders) {
 			if (!folderVisible(folder)) continue;
 			const counts = subtreeCounts(folder.folders, folder.files);
-			this.list.appendChild(this.row(depth, true, folder.path, icon('folder'), folder.name, `${counts.files} ${t('symbols.page.files')}`, null, () => {
-				this.toggle(folder.path);
-			}));
-			if (this.isOpen(folder.path)) this.renderFolders(folder.folders, folder.files, depth + 1);
+			out.push({
+				depth,
+				spec: { key: folder.path, container: true, glyph: 'folder', label: folder.name, description: `${counts.files} ${t('symbols.page.files')}`, tail: null, onOpen: null }
+			});
+			if (this.isOpen(folder.path)) this.collectRows(folder.folders, folder.files, depth + 1, out);
 		}
 		for (const file of files) {
 			// With a filter, a file stays on screen only while one of its symbols matches.
 			if (this.filter !== '' && !file.symbols.some((symbol) => this.matches(symbol))) continue;
 			const name = file.path.slice(file.path.lastIndexOf('/') + 1);
 			const directory = file.path.includes('/') ? file.path.slice(0, file.path.lastIndexOf('/')) : '';
-			this.list.appendChild(this.row(depth, true, file.path, icon('file'), name, `${file.symbols.length} ${t('symbols.page.symbols')}`, directory, () => {
-				this.toggle(file.path);
-			}));
-			if (this.isOpen(file.path)) this.renderSymbols(file, depth + 1);
+			out.push({
+				depth,
+				spec: { key: file.path, container: true, glyph: 'file', label: name, description: `${file.symbols.length} ${t('symbols.page.symbols')}`, tail: directory, onOpen: null }
+			});
+			if (!this.isOpen(file.path)) continue;
+			for (const symbol of file.symbols) {
+				if (!this.matches(symbol)) continue;
+				out.push({
+					depth: depth + 1,
+					spec: {
+						key: `${file.path}:${symbol.line}`,
+						container: false,
+						glyph: KIND_ICONS[symbol.kind] ?? 'symbol-variable',
+						label: symbol.name,
+						description: symbol.kind,
+						tail: `${symbol.line + 1} · ${symbol.refs} ${t('symbols.page.refs')}`,
+						onOpen: () => this.onOpen?.(file.path, symbol.line + 1)
+					}
+				});
+			}
 		}
 	}
 
-	private renderSymbols(file: TreeFile, depth: number): void {
-		for (const symbol of file.symbols) {
-			if (!this.matches(symbol)) continue;
-			const row = this.row(depth, false, `${file.path}:${symbol.line}`, icon(KIND_ICONS[symbol.kind] ?? 'symbol-variable'), symbol.name, symbol.kind, `${symbol.line + 1} · ${symbol.refs} ${t('symbols.page.refs')}`, null);
-			row.addEventListener('click', () => this.onOpen?.(file.path, symbol.line + 1));
-			this.list.appendChild(row);
+	/** Rebuild only the rows whose content changed: a keystroke in the filter, a folder
+	 *  toggle or a reload keeps every unchanged visible row's element (its listeners ride
+	 *  along), so a 20k-symbol index never re-creates thousands of rows per keystroke. */
+	private reconcile(rows: { spec: RowSpec; depth: number }[]): void {
+		const existing = new Map<string, HTMLElement>();
+		for (const child of Array.from(this.list.children) as HTMLElement[]) {
+			if (child.dataset['key'] !== undefined) existing.set(child.dataset['key']!, child);
 		}
+		const next: HTMLElement[] = [];
+		const keep = new Set<HTMLElement>();
+		for (const { spec, depth } of rows) {
+			// The signature is every input the row's DOM derives from; an unchanged one
+			// keeps its element.
+			const signature = [depth, spec.container ? 'c' : 'f', this.isOpen(spec.key) ? 'open' : 'closed', spec.glyph, spec.label, spec.description, spec.tail ?? ''].join('\u0000');
+			const current = existing.get(spec.key);
+			if (current && current.dataset['sig'] === signature) {
+				keep.add(current);
+				next.push(current);
+				continue;
+			}
+			const row = this.row(spec, depth, signature);
+			keep.add(row);
+			next.push(row);
+		}
+		for (const child of Array.from(this.list.children) as HTMLElement[]) {
+			if (!keep.has(child)) child.remove();
+		}
+		// Restore the tree order — skipped entirely when it already holds (the common
+		// keystroke): every append of a kept row is a move, and a no-op order moves nothing.
+		const unchanged = next.length === this.list.children.length && next.every((node, index) => this.list.children[index] === node);
+		if (!unchanged) for (const node of next) this.list.appendChild(node);
 	}
 
 	private toggle(key: string): void {
@@ -220,19 +281,22 @@ export class SymbolDatabaseView {
 		this.render();
 	}
 
-	/** One tree row: twistie + icon + label + description + tail, at an indentation depth. */
-	private row(depth: number, container: boolean, key: string, glyph: HTMLElement, label: string, description: string, tail: string | null, onToggle: (() => void) | null): HTMLElement {
-		const row = el('div', 'sd-row' + (container ? ' container' : ''));
-		row.dataset['key'] = key;
+	/** One tree row: twistie + icon + label + description + tail, at an indentation depth.
+	 *  `signature` is what reconciliation compared; a row carries it forward in its dataset. */
+	private row(spec: RowSpec, depth: number, signature: string): HTMLElement {
+		const row = el('div', 'sd-row' + (spec.container ? ' container' : ''));
+		row.dataset['key'] = spec.key;
+		row.dataset['sig'] = signature;
 		row.style.setProperty('--depth', String(depth));
 		row.setAttribute('role', 'treeitem');
-		if (container) row.setAttribute('aria-expanded', this.isOpen(key) ? 'true' : 'false');
-		const twistie = el('span', 'twistie', [icon(container ? (this.isOpen(key) ? 'chevron-down' : 'chevron-right') : 'none')]);
+		if (spec.container) row.setAttribute('aria-expanded', this.isOpen(spec.key) ? 'true' : 'false');
+		const twistie = el('span', 'twistie', [icon(spec.container ? (this.isOpen(spec.key) ? 'chevron-down' : 'chevron-right') : 'none')]);
 		twistie.tabIndex = -1;
-		row.append(twistie, glyph, el('span', 'label', [label]));
-		if (description) row.appendChild(el('span', 'description', [description]));
-		if (tail !== null) row.appendChild(el('span', 'tail', [tail]));
-		if (onToggle) row.addEventListener('click', () => onToggle());
+		row.append(twistie, icon(spec.glyph), el('span', 'label', [spec.label]));
+		if (spec.description) row.appendChild(el('span', 'description', [spec.description]));
+		if (spec.tail !== null) row.appendChild(el('span', 'tail', [spec.tail]));
+		if (spec.container) row.addEventListener('click', () => this.toggle(spec.key));
+		else row.addEventListener('click', () => spec.onOpen?.());
 		return row;
 	}
 }

@@ -178,6 +178,66 @@ describe('frame codec', () => {
 		expect(whole.flags & FLAG.MORE).toBe(0);
 	}, 30_000);
 
+	/** The daemon stamps every emitted fragment with a consecutive seq (its conn.rs emit
+	 *  increments once per fragment): the reassembler's chain validation reads exactly
+	 *  that marker, so these chains wear it too. Small splits keep the copies cheap. */
+	const stamped = (parts: Frame[], from: number): Frame[] => parts.map((part, i) => ({ ...part, seq: (from + i) >>> 0 }));
+
+	it('discards a chain whose middle fragment fails, and drops the orphaned tail', () => {
+		const errors: string[] = [];
+		const joiner = new Reassembler((reason) => errors.push(reason));
+		const parts = stamped(splitFrame(makeFrame(T.RESULT, Enc.Raw, new Uint8Array(64).map((_, i) => i), 9), 24), 5);
+		expect(parts.length).toBe(3);
+		expect(joiner.push(parts[0]!)).toBeNull();
+		// The middle fragment's payload would not inflate: it never reaches the push.
+		joiner.fail(parts[1]!);
+		expect(errors).toEqual(['fragment chain discarded: a fragment failed']);
+		// The chain is gone, and the tail it left behind is dropped — never completed
+		// into bytes silently missing a segment, never delivered as if it were whole.
+		expect(joiner.push(parts[2]!)).toBeNull();
+		expect(errors).toHaveLength(1);
+		// The next message on the same key reassembles cleanly.
+		const next = stamped(splitFrame(makeFrame(T.RESULT, Enc.Raw, new Uint8Array(32).fill(9), 9), 24), 8);
+		expect(joiner.push(next[0]!)).toBeNull();
+		const whole = joiner.push(next[1]!)!;
+		expect(whole.payload).toEqual(new Uint8Array(32).fill(9));
+		expect(errors).toHaveLength(1);
+	});
+
+	it('discards a chain whose final fragment fails, so the next message does not append onto it', () => {
+		const errors: string[] = [];
+		const joiner = new Reassembler((reason) => errors.push(reason));
+		const parts = stamped(splitFrame(makeFrame(T.RESULT, Enc.Raw, new Uint8Array(64).map((_, i) => i % 7), 3), 24), 1);
+		expect(joiner.push(parts[0]!)).toBeNull();
+		expect(joiner.push(parts[1]!)).toBeNull();
+		// The final fragment fails: the chain must not linger for the next message on
+		// the key to append onto.
+		joiner.fail(parts[2]!);
+		expect(errors).toEqual(['fragment chain discarded: a fragment failed']);
+		const next = stamped(splitFrame(makeFrame(T.RESULT, Enc.Raw, new Uint8Array(32).fill(5), 3), 24), 4);
+		expect(joiner.push(next[0]!)).toBeNull();
+		const whole = joiner.push(next[1]!)!;
+		// Exactly the fresh message — none of the abandoned chain's bytes in front of it.
+		expect(whole.payload).toEqual(new Uint8Array(32).fill(5));
+		expect(errors).toHaveLength(1);
+	});
+
+	it('discards a stale chain whose continuation does not follow it', () => {
+		// The guard that needs no failure report: a fragment arriving out of succession is
+		// the leftover of a broken chain, and the chain it found is discarded whole.
+		const errors: string[] = [];
+		const joiner = new Reassembler((reason) => errors.push(reason));
+		const parts = stamped(splitFrame(makeFrame(T.EVENT, Enc.Json, JSON.stringify({ event: 'x', payload: 'y'.repeat(64) }), 2), 24), 10);
+		expect(joiner.push(parts[0]!)).toBeNull();
+		expect(joiner.push(parts[1]!)).toBeNull();
+		const fresh = stamped(splitFrame(makeFrame(T.EVENT, Enc.Json, JSON.stringify({ event: 'z', payload: 'w'.repeat(16) }), 2), 24), 14);
+		expect(joiner.push(fresh[0]!)).toBeNull();
+		expect(errors).toEqual(['fragment chain discarded: a continuation does not follow it']);
+		const whole = joiner.push(fresh[1]!)!;
+		expect(frameJson<{ payload: string }>(whole).payload).toBe('w'.repeat(16));
+		expect(errors).toHaveLength(1);
+	});
+
 	it('round-trips the binary invoke body', () => {
 		const body = new Uint8Array([1, 2, 3, 250]);
 		const decoded = decodeRawInvoke(encodeRawInvoke('fs_write_chunk', body, { 'x-ggs-path': 'a' }));
@@ -410,6 +470,29 @@ describe('transport', () => {
 		);
 		await expect(call).resolves.toEqual(['ok']);
 		expect(good).toEqual(['yes']);
+	});
+
+	it('drops a fragment chain whose middle fragment fails to inflate, so no truncated result lands', async () => {
+		// The old catch dropped only the failing frame: the chain kept the head, the tail
+		// still completed the message, and the RESULT resolved with bytes silently missing
+		// a segment. Now the whole chain goes with the failing fragment, the orphaned tail
+		// is dropped on sight, and the link stays healthy for what follows.
+		const { transport, socket } = await connected();
+		const call = transport.call('list_dir', { path: '/repo' });
+		await new Promise((r) => setTimeout(r, 20));
+		const stream = socket.frames().filter((f) => f.type === T.INVOKE).pop()!.stream;
+		const parts = splitFrame(jsonFrame(T.RESULT, { files: 'x'.repeat(100) }, stream), 32).map((part) => down(part));
+		expect(parts.length).toBeGreaterThan(2);
+		const corrupt = { ...parts[1], flags: parts[1].flags | FLAG.COMPRESSED, payload: new Uint8Array([0x11, 0x22, 0x33]) };
+		socket.deliver(parts[0], corrupt, ...parts.slice(2));
+		await flush();
+		await flush();
+		// The corrupt message never lands — not whole, not truncated.
+		const verdict = await Promise.race([call.then(() => 'resolved'), new Promise((r) => setTimeout(() => r('pending'), 10))]);
+		expect(verdict).toBe('pending');
+		// And the downlink is not wedged: a clean frame after the wreckage still lands.
+		socket.deliver(down(jsonFrame(T.RESULT, ['late'], stream)));
+		await expect(call).resolves.toEqual(['late']);
 	});
 
 	it('coalesces a visibility-driven retry with the in-flight one, and stays dead once shut down', async () => {

@@ -64,7 +64,9 @@ export const bootMethods: ThisType<Workbench> = {
 		// (transfers, the window switcher) registers from the remote shell with
 		// profiles: ['remote'].
 		const desktopOnly = { profiles: ['desktop'] as const };
-		register({ ...desktopOnly, id: 'workbench.openFolder', title: 'Open Folder...', category: 'File', keybinding: 'Ctrl+O', run: () => this.pickFolder() });
+		// VS Code's Windows defaults: Ctrl+O opens a file, the folder lives behind the
+		// Ctrl+K Ctrl+O chord — the same chord prefix the rest of this registry spells.
+		register({ ...desktopOnly, id: 'workbench.openFolder', title: 'Open Folder...', category: 'File', keybinding: 'Ctrl+K Ctrl+O', run: () => this.pickFolder() });
 		// A second workbench is a second instance (no single-instance plugin — every launch
 		// its own process, backends and watcher), so "New Window" asks the backend to spawn
 		// one; the new window boots like a fresh launch. On Windows and Linux a second launch
@@ -72,10 +74,13 @@ export const bootMethods: ThisType<Workbench> = {
 		// multi-open, where clicking the app's icon again only focuses the running window.
 		register({ ...desktopOnly, id: 'workbench.newWindow', title: 'New Window', category: 'File', keybinding: 'Ctrl+Shift+N', run: () => void appNewInstance().catch((error) => notify('error', tf('workbench.newWindowFailed', String(error)))) });
 		register({ ...desktopOnly, id: 'workbench.openWorkspace', title: 'Open Workspace...', category: 'File', run: () => this.pickWorkspace() });
-		register({ ...desktopOnly, id: 'workbench.openFileStandalone', title: 'Open File...', category: 'File', run: () => this.pickSingleFile() });
+		register({ ...desktopOnly, id: 'workbench.openFileStandalone', title: 'Open File...', category: 'File', keybinding: 'Ctrl+O', run: () => this.pickSingleFile() });
 		register({ ...desktopOnly, id: 'workbench.closeFolder', title: 'Close Folder', category: 'File', enabled: hasRepo, run: () => this.closeFolder() });
 		register({ id: 'workbench.newFile', title: 'New File...', category: 'File', keybinding: 'Ctrl+N', enabled: hasRepo, run: () => this.explorer.newFile() });
 		register({ id: 'workbench.save', title: 'Save', category: 'File', keybinding: 'Ctrl+S', enabled: () => this.editors.hasDirtyEditors(), run: () => this.editors.save() });
+		// The tab context menu's Save As, as a palette row and Ctrl+Shift+S: it runs the active
+		// editor group's own saveAs — the same path the tab menu's row takes.
+		register({ id: 'file.saveAs', title: 'Save As...', category: 'File', keybinding: 'Ctrl+Shift+S', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.editors.activeGroup.saveAs() });
 		register({ id: 'workbench.saveAll', title: 'Save All', category: 'File', keybinding: 'Ctrl+K S', enabled: () => this.editors.hasDirtyEditors(), run: () => this.editors.saveAll() });
 		register({ id: 'workbench.closeEditor', title: 'Close Editor', category: 'View', keybinding: 'Ctrl+W', enabled: () => this.editors.activeInput !== null, run: () => this.editors.close() });
 		register({ id: 'workbench.closeAllEditors', title: 'Close All Editors', category: 'View', keybinding: 'Ctrl+K Ctrl+W', enabled: () => this.editors.activeInput !== null, run: () => void this.editors.closeAll() });
@@ -177,6 +182,7 @@ export const bootMethods: ThisType<Workbench> = {
 		// seam the manifest translations ride (`registerZhCnText`), so the localization
 		// sweep sees the labels translated without reaching into that table from here.
 		registerZhCnText({
+			'Save As...': '另存为...',
 			'Join Lines': '联接行',
 			'Sort Lines Ascending': '升序排列行',
 			'Sort Lines Descending': '降序排列行',
@@ -329,6 +335,9 @@ export const bootMethods: ThisType<Workbench> = {
 		this.search.onOpenMatch = (relative, line, column) => {
 			if (this.repoPath) void this.editors.openFile(joinRepo(this.repoPath, relative), { line, column });
 		};
+		// A replace consults the open-and-dirty paths before writing: a dirty tab never
+		// auto-reloads, so the view names those files before the disk write lands.
+		this.search.dirtyFilePaths = () => this.editors.contentSummary().filter((s) => s.dirty).map((s) => s.path);
 		this.editors.onMergeResolved = () => this.scheduleRefresh(0);
 		this.editors.onExternalFileChange = () => this.scheduleRefresh(0);
 		// A `.py` file's tab-strip run button: the terminal opens with the file's run line
@@ -579,39 +588,28 @@ export const bootMethods: ThisType<Workbench> = {
 		// A `ggs <file>` launch shows exactly that file, alone.
 		if (context.file) {
 			await this.openFileStandalone(context.file);
-			return;
-		}
-		// A remote session never opens folders itself — `open_folder` is refused at its
-		// gate (docs/remote-client-plan.md §3.3, R0): the instance's current roots arrive
-		// in the boot context (the workspace file they came from included) and apply
-		// directly — exactly the reopen the desktop's own boot resolves to, minus the
-		// invoke. Launch actions and workspaces are the PC's launch vocabulary; a session
-		// attaches to what the window already holds.
-		if (hook('session').remote()) {
+		} else if (hook('session').remote()) {
+			// A remote session never opens folders itself — `open_folder` is refused at its
+			// gate (docs/remote-client-plan.md §3.3, R0): the instance's current roots arrive
+			// in the boot context (the workspace file they came from included) and apply
+			// directly — exactly the reopen the desktop's own boot resolves to, minus the
+			// invoke. Launch actions and workspaces are the PC's launch vocabulary; a session
+			// attaches to what the window already holds.
 			const roots = context.roots ?? [];
 			if (roots.length > 0) {
 				await this.applyRoots(roots.map((entry) => entry.root), roots.some((entry) => entry.isRepo), context.workspaceFile ?? null);
 			} else {
 				this.statusBar.setRepo(false);
 			}
-			whenIdle(() => {
-				if (state.layout.panelVisible) this.panel.show('terminal');
-				void this.extensionHost.activateInstalled();
-				void this.recoverBackups();
-			});
-			return;
-		}
-		// A `ggs <workspace>.ggs-workspace` launch opens that multi-root workspace. A page
-		// reload is past its launch: the window may have switched folders since, and what it
-		// holds now is the remembered folder below.
-		if (context.workspace && !context.reloaded) {
+		} else if (context.workspace && !context.reloaded) {
+			// A `ggs <workspace>.ggs-workspace` launch opens that multi-root workspace. A page
+			// reload is past its launch: the window may have switched folders since, and what it
+			// holds now is the remembered folder below.
 			await this.openWorkspace(context.workspace);
-			return;
-		}
-		// A `ggs compare|hex|hex-compare|folder-compare ...` launch opens its comparison as the
-		// window's first tab, over no folder of its own - the same tabs the Explorer's
-		// "Compare Two Files/Folders" menu opens.
-		if (context.actions.length > 0) {
+		} else if (context.actions.length > 0) {
+			// A `ggs compare|hex|hex-compare|folder-compare ...` launch opens its comparison as
+			// the window's first tab, over no folder of its own - the same tabs the Explorer's
+			// "Compare Two Files/Folders" menu opens.
 			this.statusBar.setRepo(false);
 			for (const action of context.actions) {
 				if (action.type === 'compareFiles' && action.left && action.right) {
@@ -661,7 +659,9 @@ export const bootMethods: ThisType<Workbench> = {
 		// main thread with the explorer's first listing and the graph view's boot: the
 		// terminal (its xterm chunk and a shell process), the extension host (its frame and
 		// every installed bundle) and the backup recovery run once that first burst is
-		// through - at the next idle moment, or within two seconds regardless.
+		// through - at the next idle moment, or within two seconds regardless. Every launch
+		// form above falls through here: a file or workspace launch needs the extensions and
+		// the panel restore as much as a folder launch does.
 		whenIdle(() => {
 			if (state.layout.panelVisible) this.panel.show('terminal');
 			// Extensions activate after the workbench is up: their commands join the registry

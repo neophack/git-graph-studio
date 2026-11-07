@@ -150,6 +150,8 @@ export class Panel {
 	private readonly maximizeButton: HTMLButtonElement;
 	private active: PanelViewId = 'terminal';
 	private maximized = false;
+	/** The constructor's document-level registration, kept by name so dispose can drop it. */
+	private readonly onSettingsChanged = (): void => this.renderTabLabels();
 
 	onVisibilityChange: ((visible: boolean) => void) | null = null;
 	onMaximizeChange: ((maximized: boolean) => void) | null = null;
@@ -169,7 +171,7 @@ export class Panel {
 			this.tabs.appendChild(tab);
 		}
 		// A language switch relabels the tabs in place.
-		document.addEventListener(SETTINGS_EVENT, () => this.renderTabLabels());
+		document.addEventListener(SETTINGS_EVENT, this.onSettingsChanged);
 		this.actionsHost = el('div', 'panel-actions');
 		this.maximizeButton = actionButton('chevron-up', 'Maximize Panel Size', () => this.toggleMaximized());
 		const header = el('div', 'panel-header', [
@@ -184,6 +186,12 @@ export class Panel {
 
 	isVisible(): boolean {
 		return !this.element.hidden;
+	}
+
+	/** The workbench's dispose: the document-level registration the constructor made must
+	 *  not outlive it (a second workbench would relabel a dead panel forever). */
+	dispose(): void {
+		document.removeEventListener(SETTINGS_EVENT, this.onSettingsChanged);
 	}
 
 	activeView(): PanelViewId {
@@ -223,10 +231,11 @@ export class Panel {
 		else this.show(view);
 	}
 
-	/** Reveal the terminal and type a command into it. */
-	async runInTerminal(command: string): Promise<void> {
+	/** Reveal the terminal and type a command into it. `pressEnter === false` types the
+	 *  text alone (an extension's `sendText(text, false)` — VS Code's `addNewLine`). */
+	async runInTerminal(command: string, pressEnter = true): Promise<void> {
 		this.show('terminal');
-		await this.terminal.run(command);
+		await this.terminal.run(command, pressEnter);
 	}
 
 	/** Reveal the terminal and open a new shell IN `cwd` — the spawn's working directory,

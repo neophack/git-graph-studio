@@ -12,7 +12,6 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { CommandRegistry } from '../../platform/commands';
 import { t, tf } from '../../platform/i18n';
 import { confirmDialog, notify, quickInput, quickPick, type QuickPickItem } from '../../platform/ui/index';
-
 /** What the commands need from the workbench. */
 export interface GitCommandHost {
 	repoPath(): string | null;
@@ -81,21 +80,63 @@ async function pickStash(placeholder: string): Promise<StashInfo | null> {
 	return stashes.find((s) => s.selector === chosen) ?? null;
 }
 
-const REF_NAME = /^(?![-.])(?!.*(\.\.|@\{|[\\^:?*\[\s~]))[^\x00-\x1f\x7f]+(?<![./])(?<!\.lock)$/;
-
-function validateRef(value: string): string | null {
-	return value.trim() === '' ? 'A name is required' : REF_NAME.test(value.trim()) ? null : `'${value}' is not a valid Git reference name`;
+/** Push the current branch. With no upstream and several remotes, ask which one to
+ *  publish to — the silent first-remote guess records the wrong upstream; a single
+ *  remote (or an upstream already set) keeps the plain push. */
+async function pushCurrent(setUpstream: boolean, force: boolean): Promise<void> {
+	let remote: string | null = null;
+	const head = await repoHead().catch(() => null);
+	if (head && head.upstream === null) {
+		const remotes = (await scmRemotes().catch(() => [])) ?? [];
+		if (remotes.length > 1) {
+			const chosen = await pickRemote('Pick a remote to publish the branch to');
+			if (!chosen) return;
+			remote = chosen.name;
+		}
+	}
+	await scmPush(remote, setUpstream, force);
 }
 
-/** The commit-ish the cherry-pick / revert / reset / detached-checkout inputs take: a commit
- *  hash (4-64 hex digits, the shape the backend's validator accepts) or a named ref. */
-const COMMIT_HASH = /^[0-9a-fA-F]{4,64}$/;
+/** Git's own ref-name rules — `git check-ref-format`'s set, pinned against the real
+ *  binary (every line a case it answers; the backend's `is_safe_ref_name` mirrors this
+ *  line for line): no empty name; nothing leading with `-` (git itself refuses it — and
+ *  our spawn would read it as an option), `/` or `.`; nothing ending with `/` or `.`;
+ *  not the single `@` (the revision-syntax token — an `@` component or an `@` anywhere
+ *  else is legal, as are `]` and dots inside a name); no `..` or `@{` sequence anywhere;
+ *  nowhere any character git refuses: ASCII control, space, `~ ^ : ? * [` and `\`. Per
+ *  component (`/` splits): no empty component (`//`), none starting with `.`
+ *  (`refs/.hidden` is out), none ending with `.lock` (`foo.lock/bar` is out, while
+ *  `foo./bar` and `foo.lock./bar` stand). */
+export function isSafeRefName(name: string): boolean {
+	if (name === '' || name === '@') return false;
+	if (/^[-/.]/.test(name) || /[/.]$/.test(name)) return false;
+	if (/[\x00-\x1f\x7f\s~^:?*[]/.test(name) || name.includes('\\')) return false;
+	if (name.includes('..') || name.includes('@{')) return false;
+	return !name.split('/').some((component) => component === '' || component.startsWith('.') || component.endsWith('.lock'));
+}
 
+function validateRef(value: string): string | null {
+	return value.trim() === '' ? 'A name is required' : isSafeRefName(value.trim()) ? null : `'${value}' is not a valid Git reference name`;
+}
+
+/** The commit-ish the cherry-pick / revert / reset inputs take: a commit hash, a ref, or a
+ *  revision expression ("HEAD~1", "HEAD^", "main@{yesterday}") — what VS Code's own
+ *  "Reset Current Branch to Commit" accepts. The backend resolves the raw expression
+ *  against git (`rev-parse --verify <expr>^{commit}`) before anything runs, git's own
+ *  complaint traveling back when it names nothing, so this local check keeps only the
+ *  shapes that could never be a revision: an empty input, or a leading dash that would
+ *  ride the spawn as an option. */
 export function validateTarget(value: string): string | null {
 	const trimmed = value.trim();
 	if (trimmed === '') return t('scm.target.required');
-	return COMMIT_HASH.test(trimmed) || REF_NAME.test(trimmed) ? null : t('scm.target.invalid');
+	if (trimmed.startsWith('-') || /\s/.test(trimmed)) return t('scm.target.invalid');
+	return null;
 }
+
+/** The detached-checkout input takes a commit hash alone (4-64 hex digits, the shape the
+ *  backend's validator accepts) — `validateTarget`'s looser commit-ish rules do not apply
+ *  to it. */
+const COMMIT_HASH = /^[0-9a-fA-F]{4,64}$/;
 
 export function validateCommitHash(value: string): string | null {
 	const trimmed = value.trim();
@@ -119,7 +160,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 		if (!branch) return;
 		await scmPull(remote.name, branch.name.slice(remote.name.length + 1), false);
 	});
-	add('git.push', 'Push', () => scmPush(null, false, false));
+	add('git.push', 'Push', () => pushCurrent(false, false));
 	add('git.pushTo', 'Push to...', async () => {
 		const remote = await pickRemote('Pick a remote to publish the branch to');
 		if (!remote) return;
@@ -135,7 +176,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 	});
 	add('git.pushForce', 'Push (Force With Lease)', async () => {
 		if (!(await confirmDialog('Force-push the current branch to its upstream? Commits the remote has that this push does not contain become unreachable there.', 'Force Push'))) return;
-		await scmPush(null, false, true);
+		await pushCurrent(false, true);
 	});
 	add('git.sync', 'Sync', () => scmSync(false));
 	add('git.syncRebase', 'Sync (Rebase)', () => scmSync(true));
@@ -363,7 +404,9 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 		const message = await quickInput({ title: 'Create Tag', placeholder: 'Message (leave empty for a lightweight tag)' });
 		if (message === null) return;
 		const head = await repoHead();
-		await gitOp('scm_add_tag', { tagName: name.trim(), commitHash: head.shortHash, message, force: false });
+		// The full hash, never the 7-character display prefix: a short form is ambiguous
+		// in a large repository, and a tag on the wrong commit is a rewrite to undo.
+		await gitOp('scm_add_tag', { tagName: name.trim(), commitHash: head.hash || head.shortHash, message, force: false });
 	});
 	add('git.deleteTag', 'Delete Tag', async () => {
 		const tags = await scmTags();

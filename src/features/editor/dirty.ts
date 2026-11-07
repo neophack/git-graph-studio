@@ -10,6 +10,7 @@ import { editorState } from './editorState';
 import type { Editor } from './inputs';
 import { inputId } from './inputs';
 import { readFileRaw } from './shared';
+import { invalidateWorkspaceFileCache } from './navigate';
 
 
 /** How long after the last keystroke an unsaved buffer is backed up for hot exit. */
@@ -74,16 +75,22 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 			return;
 		}
 		// A windowed editor's document lives in the backend: the save writes it from there,
-		// so nothing the size of the file ever crosses the IPC.
+		// so nothing the size of the file ever crosses the IPC. The tab's encoding and EOL
+		// choice (Save with Encoding, the EOL pick) ride along as the write's override.
 		if (editor.doc && editor.input.kind === 'file') {
 			// A failed save (the view reports the error) leaves the tab dirty and its
 			// backup in place, exactly like a failed write_file below.
-			if (!(await editor.doc.save())) return;
+			if (!(await editor.doc.save(editor.encoding, editor.eol))) return;
 			editor.dirty = false;
 			this.renderTabs();
 			this.clearSaveConflict(editor);
 			this.flashSavedTab(editor);
 			this.forgetBackup(editor);
+			invalidateWorkspaceFileCache(editor.input.path);
+			// The saved text changed the file's symbol set: the outline re-runs against it
+			// (VS Code's outline follows the save) — only where an outline is mounted, so a
+			// windowed or fast-view tab never grows one on a save.
+			if (editor.outline) this.updateOutline(editor);
 			this.onFileSaved?.(editor.input.path);
 			return;
 		}
@@ -113,6 +120,12 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 		this.clearSaveConflict(editor);
 		this.flashSavedTab(editor);
 		if (!editor.dirty) this.forgetBackup(editor);
+		// The write changed the file on disk: Go to Definition must not jump by the text
+		// the definition search cached there before it.
+		invalidateWorkspaceFileCache(editor.input.path);
+		// The saved text changed the file's symbol set: the outline re-runs against it
+		// (VS Code's outline follows the save) — only where an outline is mounted.
+		if (editor.outline) this.updateOutline(editor);
 		this.onFileSaved?.(editor.input.path);
 	},
 
@@ -130,7 +143,12 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 		if (!editor || editor.input.kind !== 'file' || !editor.view) return;
 		const target = await saveDialog({ defaultPath: editor.input.path });
 		if (!target || target === editor.input.path) return;
-		const contents = editor.view.state.doc.toString();
+		// The saved baseline is the buffer as it crosses this line (save()'s invariant): an
+		// edit landing while the write runs leaves the buffer past what disk now holds, and
+		// the tab must stay dirty for it — reading the view back after the await would mark
+		// that edit saved and lose it on close.
+		const savedDoc = editor.view.state.doc;
+		const contents = savedDoc.toString();
 		try {
 			await writeFile(target, contents, editor.encoding ?? 'utf8', editor.eol ?? 'lf');
 		} catch (error) {
@@ -154,12 +172,19 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 			if (entry.input === previousInput) entry.input = editor.input;
 		}
 		void backupClear(previousInput.path).catch(() => undefined);
-		editor.savedDoc = editor.view.state.doc;
+		editor.savedDoc = savedDoc;
 		editor.savedEol = editor.eol;
 		editor.savedEncoding = editor.encoding;
-		editor.dirty = false;
+		// An edit typed while the write ran sits past the baseline: the tab stays dirty for
+		// it — save()'s recompute, not a blind clean — so closing can never silently lose it.
+		editor.dirty = !this.bufferAtSavedState(editor);
 		this.renderTabs();
 		this.emitActive();
+		// The write changed the target on disk: Go to Definition must not jump by the text
+		// the definition search read there before it.
+		invalidateWorkspaceFileCache(target);
+		// The tab is the new file now: the outline re-runs against it where one is mounted.
+		if (editor.outline) this.updateOutline(editor);
 		this.onFileSaved?.(target);
 	},
 
@@ -172,7 +197,9 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 
 	async saveWithEncoding(encoding: string): Promise<void> {
 		const editor = this.active;
-		if (!editor || editor.input.kind !== 'file' || !editor.view) return;
+		// A windowed editor has no in-page view, but its save takes the choice as an
+		// override — refusing on `editor.view` alone made Save with Encoding a no-op there.
+		if (!editor || editor.input.kind !== 'file' || (!editor.view && !editor.doc)) return;
 		editor.encoding = encoding;
 		editor.dirty = true;
 		await this.save(editor);
@@ -221,7 +248,8 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 
 	setEol(eol: 'lf' | 'crlf'): void {
 		const editor = this.active;
-		if (!editor || editor.input.kind !== 'file' || !editor.view || editor.eol === eol) return;
+		// Same as saveWithEncoding: the windowed editor carries the choice on its save.
+		if (!editor || editor.input.kind !== 'file' || (!editor.view && !editor.doc) || editor.eol === eol) return;
 		editor.eol = eol;
 		editor.dirty = true;
 		this.renderTabs();

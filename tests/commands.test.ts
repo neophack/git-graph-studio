@@ -208,6 +208,33 @@ describe('every command of the workbench', () => {
 		expect(workbench.editors.focusedIndex).toBe(0);
 	});
 
+	it('Ctrl+O opens a file; Open Folder rides the Ctrl+K Ctrl+O chord (VS Code\'s Windows defaults)', async () => {
+		await bootWithRepo();
+		expect(commands.get('workbench.openFileStandalone')?.keybinding).toBe('Ctrl+O');
+		expect(commands.get('workbench.openFolder')?.keybinding).toBe('Ctrl+K Ctrl+O');
+		// The keyboard's lookup answers the file open, not the folder (it used to own Ctrl+O).
+		expect(commands.forKeyEvent(new KeyboardEvent('keydown', { key: 'o', ctrlKey: true, bubbles: true, cancelable: true }))?.id).toBe('workbench.openFileStandalone');
+	});
+
+	it('Save As is a command beside Save, keyed Ctrl+Shift+S, running the active editor group', async () => {
+		const workbench = await bootWithRepo();
+		const saveAs = commands.get('file.saveAs');
+		expect(saveAs).toBeDefined();
+		expect(saveAs!.category).toBe('File');
+		expect(saveAs!.keybinding).toBe('Ctrl+Shift+S');
+		expect(commands.isEnabled('file.saveAs')).toBe(true);
+		// The tab context menu's row and this command take the same path.
+		let saved = false;
+		workbench.editors.activeGroup.saveAs = async () => { saved = true; };
+		await commands.execute('file.saveAs');
+		expect(saved).toBe(true);
+		// The File menu carries it next to Save.
+		const file = workbench.menus()[0]!;
+		const labels = file.entries().filter((entry) => entry !== 'separator').map((entry) => (entry as { label: string }).label);
+		expect(labels.indexOf('Save')).toBeGreaterThanOrEqual(0);
+		expect(labels.indexOf('Save As...')).toBe(labels.indexOf('Save') + 1);
+	});
+
 	it('python.runFile runs the active .py file in the terminal (the tab-strip run button)', async () => {
 		const workbench = await bootWithRepo();
 		await workbench.editors.openFile(`${REPO}\\main.py`);

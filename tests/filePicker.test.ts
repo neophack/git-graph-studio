@@ -3,8 +3,10 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { commands } from '../src/platform/commands';
+import * as state from '../src/platform/state';
 import { FilePickSource } from '../src/features/quickOpen';
-import { quickOpenItems, recentFileItems, type SymbolSources } from '../src/workbench';
+import { commandPaletteItems, quickOpenItems, recentFileItems, type SymbolSources } from '../src/workbench';
 import { flush } from './helpers';
 import { backend } from './tauriMock';
 
@@ -174,5 +176,61 @@ describe('recently opened (the picker\'s empty-query section)', () => {
 		expect(items[1]!.label).toBe('x.ts');
 		expect(items[1]!.description).toBe('C:\\outside');
 		expect(items[1]!.value).toBe('file:C:\\outside\\x.ts');
+	});
+});
+
+describe('the command palette\'s \'>\' mode', () => {
+	const symbols: SymbolSources = { fileSymbols: async () => [], workspaceSymbols: async () => [] };
+	const noRecents = () => [] as string[];
+
+	/** `commandPaletteItems` keeps the `command:` prefix on every row's value, so the picker's
+	 *  dispatch (`quickOpen` in workbench.ts) runs the pick exactly like before. */
+	const palette = (labels: string[], query: string, recents: string[] = []): string[] =>
+		commandPaletteItems(labels.map((label) => ({ label, value: label })), query, recents).map((item) => item.value);
+
+	it('the empty query is MRU-first, the alphabetical rest after', () => {
+		const items = ['View: Terminal', 'File: Save', 'Go: Symbol'];
+		expect(palette(items, '', ['File: Save', 'View: Terminal']))
+			// most recent first, then the never-run commands alphabetically
+			.toEqual(['command:File: Save', 'command:View: Terminal', 'command:Go: Symbol']);
+	});
+
+	it('a recent command outranks a better-scoring one', () => {
+		// "Open Terminal" is an exact-substring match worth far more than "Group Edit"'s
+		// scattered o..p, and the alphabetical order agrees — recency still wins.
+		const items = ['Open Terminal', 'Group Edit'];
+		expect(palette(items, 'op', ['Group Edit'])).toEqual(['command:Group Edit', 'command:Open Terminal']);
+	});
+
+	it('an exact substring outranks a fuzzy-only match', () => {
+		expect(palette(['Save All', 'Salvage'], 'save')).toEqual(['command:Save All', 'command:Salvage']);
+	});
+
+	it('score breaks the substring tier before the alphabetical order does', () => {
+		// "Save" prefixes at the word start (the scorer's +8) where "My Save Place" sits
+		// mid-label, and M sorts before S — the higher score still leads.
+		expect(palette(['My Save Place', 'Save'], 'save')).toEqual(['command:Save', 'command:My Save Place']);
+	});
+
+	it('scattered letters match what `includes` never would', () => {
+		const items = ['Git: Clone', 'Terminal: New'];
+		expect(palette(items, 'gcl')).toEqual(['command:Git: Clone']);
+		expect(palette(items, 'Git: Clone')).toEqual(['command:Git: Clone']);
+	});
+
+	it('a run through the registry leads the palette, on disk and on the next open', async () => {
+		commands.register({ id: 'test.palette.first', title: 'Palette First', run: () => undefined });
+		commands.register({ id: 'test.palette.second', title: 'Palette Second', run: () => undefined });
+		await commands.execute('test.palette.second');
+		// The registry's execute persisted the run, so a fresh read of the state — what a
+		// restarted window's first palette answers from — already leads with it.
+		expect(state.commandRecents()).toEqual(['test.palette.second']);
+		const picker = quickOpenItems(source(['a.txt']), () => null, symbols, noRecents);
+		const mine = async (query: string): Promise<string[]> =>
+			(await picker.query(query, () => undefined, () => false))
+				.filter((item) => item.value.startsWith('command:test.palette.')).map((item) => item.value);
+		expect(await mine('> ')).toEqual(['command:test.palette.second', 'command:test.palette.first']);
+		// A fuzzy query keeps the recency lead too.
+		expect(await mine('> pfst')).toEqual(['command:test.palette.first']);
 	});
 });

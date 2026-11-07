@@ -1,6 +1,5 @@
 import { EXT_HOST_LOG_OWNER } from './sharedTypes';
-import { EditorGroupSummary, WebviewContextMenuReport, WebviewDelivery, WebviewHandle, WebviewViewRecord } from './sharedTypes';
-import { ExtStatusBarItem } from './sharedTypes';
+import { EditorGroupSummary, WebviewContextMenuReport, WebviewDelivery, WebviewHandle, WebviewViewRecord } from './sharedTypes';import { ExtStatusBarItem } from './sharedTypes';
 import { FormatterSelector } from './sharedTypes';
 import { PageDiffRequest, PageFrameHandle, PageTheme } from './sharedTypes';
 ;
@@ -110,7 +109,9 @@ export class ExtensionHost {
 
 	onRevealTerminal: (() => void) | null = null;
 
-	onRunInTerminal: ((command: string) => void) | null = null;
+	/** Workbench hook: run text in the integrated terminal (`terminal.sendText`). The
+	 *  `pressEnter` flag is VS Code's `addNewLine` — false writes the text alone. */
+	onRunInTerminal: ((command: string, pressEnter?: boolean) => void) | null = null;
 
 	onRepoChanged: (() => void) | null = null;
 
@@ -150,9 +151,13 @@ export class ExtensionHost {
 
 	onCloseWebviewTab: ((tabId: string) => void) | null = null;
 
-	/** Workbench hook: focus a webview panel's tab (`panel.reveal()`); answers whether a
-	 *  tab held the id, so a reveal of a record whose tab is gone can re-open it. */
-	onRevealWebviewTab: ((tabId: string) => boolean) | null = null;
+	/** Workbench hook: reveal a webview panel's tab (`panel.reveal(viewColumn?,
+	 *  preserveFocus?)`). `placement` carries the requested column through the same
+	 *  EditorPlacement a create's showOptions takes; `preserveFocus` asks the reveal to
+	 *  leave the current editor focused (the tab activates without taking the group).
+	 *  Answers whether a tab held the id, so a reveal of a record whose tab is gone can
+	 *  re-open it. */
+	onRevealWebviewTab: ((tabId: string, placement?: EditorPlacement, preserveFocus?: boolean) => boolean) | null = null;
 
 	onRenameWebviewTab: ((tabId: string, title: string) => void) | null = null;
 
@@ -440,6 +445,13 @@ export class ExtensionHost {
 	declare resetViewsAfterBackendRestart: (extId: string) => void ;
 
 	declare setWebviewViewHtml: (extId: string, viewId: string, html: string) => void ;
+
+	/** The view's record, created on demand — the title / html an extension set before
+	 *  the section mounted wait in it (webviews.ts). */
+	declare ensureWebviewViewRecord: (extId: string, viewId: string) => WebviewViewRecord ;
+
+	/** Render a view's runtime title / description on its section header (webviews.ts). */
+	declare applyWebviewViewChrome: (viewId: string) => void ;
 
 	declare armLoadGrace: (view: WebviewDelivery, owner: string) => void ;
 

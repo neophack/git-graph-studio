@@ -62,7 +62,16 @@ export class FileHistoryView {
 			return;
 		}
 		const relative = toPosix(this.path);
+		// The revision sides read the file under the path it carried at that commit: a
+		// rename's earlier commits hold it at the old name, where the current path does
+		// not exist. An entry naming no path (an older backend) falls back to the path
+		// the history was opened for, and a parent missing from the list falls back to
+		// its child's.
+		const pathAt = (revision: string | undefined, fallback: string): string =>
+			entries.find((entry) => entry.hash === revision)?.path || fallback;
 		for (const entry of entries) {
+			const path = entry.path || relative;
+			const parent = entry.parents[0];
 			const row = el('div', 'row file-history-row', [
 				el('span', 'file-history-hash', [entry.hash.slice(0, 8)]),
 				el('span', 'file-history-message', [entry.message]),
@@ -70,17 +79,16 @@ export class FileHistoryView {
 			]);
 			row.title = `${entry.hash}\n${entry.message}\n${entry.author}, ${new Date(entry.date * 1000).toLocaleString()}`;
 			row.addEventListener('click', () => {
-				const parent = entry.parents[0];
 				this.onOpenDiff?.({
-					id: `history:${entry.hash}:${relative}`,
-					title: `${basename(relative)} (${entry.hash.slice(0, 8)})`,
-					left: { revision: parent ?? entry.hash, path: relative, label: parent ? parent.slice(0, 8) : 'empty', exists: parent !== undefined },
-					right: { revision: entry.hash, path: relative, label: entry.hash.slice(0, 8), exists: true }
+					id: `history:${entry.hash}:${path}`,
+					title: `${basename(path)} (${entry.hash.slice(0, 8)})`,
+					left: { revision: parent ?? entry.hash, path: parent ? pathAt(parent, path) : path, label: parent ? parent.slice(0, 8) : 'empty', exists: parent !== undefined },
+					right: { revision: entry.hash, path, label: entry.hash.slice(0, 8), exists: true }
 				});
 			});
 			row.addEventListener('contextmenu', (event) => {
 				event.preventDefault();
-				this.onOpenRevision?.(entry.hash, relative, `${basename(relative)} @ ${entry.hash.slice(0, 8)}`);
+				this.onOpenRevision?.(entry.hash, path, `${basename(path)} @ ${entry.hash.slice(0, 8)}`);
 			});
 			this.list.appendChild(row);
 		}

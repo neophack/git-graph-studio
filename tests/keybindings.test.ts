@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { commandForBinding, commands, setKeybindingResolver } from '../src/platform/commands';
-import { bindingFromEvent, commandsBoundTo, effectiveKeybinding, loadUserKeybindings, renderKeybindingsEditor, setUserKeybinding, userKeybindings } from '../src/platform/keybindings';
+import { bindingFromEvent, commandsBoundTo, effectiveKeybinding, loadUserKeybindings, renderKeybindingsEditor, setUserKeybinding, userKeybindingFor, userKeybindings } from '../src/platform/keybindings';
 import { backend } from './tauriMock';
 import { click, texts, type } from './helpers';
 
@@ -20,7 +20,7 @@ function registerTestCommands(): void {
 	] as const) {
 		if (!commands.get(id)) commands.register({ id, title: id, keybinding, run: () => undefined });
 	}
-	setKeybindingResolver((id) => effectiveKeybinding(id));
+	setKeybindingResolver((id) => userKeybindingFor(id));
 }
 
 describe('the keybinding store', () => {
@@ -59,6 +59,25 @@ describe('the keybinding store', () => {
 		// Resetting removes the user entry and the conflict.
 		await setUserKeybinding('workbench.showScm', undefined);
 		expect(commandsBoundTo('Ctrl+Shift+F')).toEqual(['workbench.showSearch']);
+	});
+
+	it('a user binding beats another command\'s DEFAULT binding (Ctrl+S rebinds to Save All)', async () => {
+		// VS Code's precedence: the first-registered default used to win the key, so a
+		// rebind onto a chord another command claims never fired.
+		if (!commands.get('workbench.saveAll')) commands.register({ id: 'workbench.saveAll', title: 'workbench.saveAll', keybinding: 'Ctrl+K S', run: () => undefined });
+		await loadUserKeybindings();
+		await setUserKeybinding('workbench.saveAll', 'Ctrl+S');
+
+		const event = new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, cancelable: true });
+		expect(commands.forKeyEvent(event)?.id).toBe('workbench.saveAll');
+		// The chord lookup (and every menu/palette advertisement) resolves the same way.
+		expect(commandForBinding('Ctrl+S')?.id).toBe('workbench.saveAll');
+		expect(commands.menuItem('workbench.saveAll').keybinding).toBe('Ctrl+S');
+
+		// Without the user rule the first-registered default answers again.
+		await setUserKeybinding('workbench.saveAll', undefined);
+		expect(commands.forKeyEvent(event)?.id).toBe('workbench.save');
+		expect(commandForBinding('Ctrl+S')?.id).toBe('workbench.save');
 	});
 
 	it('the menus advertise the effective binding, and nothing when unbound', async () => {

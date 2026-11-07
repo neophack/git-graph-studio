@@ -128,6 +128,13 @@ class ConflictActionsWidget extends WidgetType {
  *  first marker: the marker lines carry the stronger header tints (ours teal, theirs blue,
  *  the diff3 base grey), the bodies their content tints — VS Code's `merge.*` colours, which
  *  the theme files define as `--vscode-merge-*`. */
+/** The marker lines that can complete (or carry) a conflict: a changed region touching any
+ *  of them could have brought a parseable block into the document, so the decorations
+ *  re-parse. Typing the last `=` of a separator or the `>>>>>>>` line completes a conflict
+ *  whose opening `<<<<<<<` sits far outside the changed range — checking only the opening
+ *  marker let the toolbar count a conflict the decorations never drew. */
+const CONFLICT_MARKERS = ['<<<<<<<', '=======', '>>>>>>>', '|||||||'];
+
 export function conflictDecorations(): Extension {
 	return StateField.define<DecorationSet>({
 		create: (state) => conflictDecorationsOf(state.doc),
@@ -140,7 +147,8 @@ export function conflictDecorations(): Extension {
 			if (!dirty) {
 				const doc = update.state.doc;
 				update.changes.iterChangedRanges((_fromA, _toA, from, to) => {
-					if (doc.sliceString(Math.max(0, from - 8), Math.min(doc.length, to + 8)).includes('<<<<<<<')) dirty = true;
+					const window = doc.sliceString(Math.max(0, from - 8), Math.min(doc.length, to + 8));
+					if (CONFLICT_MARKERS.some((marker) => window.includes(marker))) dirty = true;
 				});
 			}
 			return dirty ? conflictDecorationsOf(update.state.doc) : value;
@@ -190,6 +198,10 @@ export class MergeToolbar {
 	private staged = false;
 	/** Fired after "Mark Resolved" so the workbench refreshes SCM and the graph. */
 	onResolved: (() => void) | null = null;
+	/** The editor group's own save path (dirty.ts's `save`), wired by whoever mounted the
+	 *  toolbar: it settles the dirty flag, the tab dot and the hot-exit backup. A
+	 *  synthesized Mod-S keystroke depended on the save binding living in the keymap. */
+	onSave: (() => void) | null = null;
 
 	constructor(bar: HTMLElement) {
 		this.bar = bar;
@@ -297,18 +309,19 @@ export class MergeToolbar {
 			// CodeMirror holds the document normalized to \n; the file's own encoding and line
 			// endings come from a fresh read, or the write would re-encode it as UTF-8/LF
 			// (flipping every line ending of a CRLF file, corrupting a GB18030/UTF-16 one).
-			const format: FileContents | null = await readFile(this.path).catch(() => null);
-			await writeFile(this.path, view.state.doc.toString(), format?.encoding ?? 'utf8', format?.eol ?? 'lf');
+			// A failed read aborts the resolve — guessing utf8/lf would transcode a file the
+			// read could not even answer (locked, deleted, unreadable).
+			const format: FileContents = await readFile(this.path);
+			await writeFile(this.path, view.state.doc.toString(), format.encoding, format.eol);
 			await gitStage([this.path]);
 		} catch (error) {
 			notify('error', String(error));
 			return;
 		}
 		// The resolution edits were never the editor's own save: its buffer still reads dirty.
-		// Running its save binding settles the dirty flag, the tab dot and the hot-exit backup
-		// (the write it makes is the one just staged - byte-identical).
-		const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? { metaKey: true } : { ctrlKey: true };
-		view.contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 's', bubbles: true, cancelable: true, ...mod }));
+		// Saving through the editor group's own save path settles the dirty flag, the tab dot
+		// and the hot-exit backup (the write it makes is the one just staged - byte-identical).
+		this.onSave?.();
 		notify('info', t('merge.resolved'));
 		this.staged = true;
 		this.render();

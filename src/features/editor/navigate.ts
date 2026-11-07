@@ -28,6 +28,16 @@ function cacheWorkspaceFile(path: string, contents: string | null): void {
 	}
 }
 
+/** Drop the definition search's cached text of one file (both separator spellings): a save
+ *  just changed what disk holds, and Go to Definition must re-read it, not jump by the
+ *  pre-save text. The save path in dirty.ts calls this. */
+export function invalidateWorkspaceFileCache(path: string): void {
+	const posix = toPosix(path);
+	for (const key of [...workspaceFileCache.keys()]) {
+		if (key === path || toPosix(key) === posix) workspaceFileCache.delete(key);
+	}
+}
+
 function escapeRegExp(text: string): string {
 	return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

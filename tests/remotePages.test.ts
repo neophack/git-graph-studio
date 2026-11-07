@@ -216,10 +216,22 @@ describe('the terminal output follow (§6.6)', () => {
 	function machine(): { follow: OutputFollow<FakeSession>; log: string[]; sessions: FakeSession[] } {
 		const log: string[] = [];
 		const sessions: FakeSession[] = [{ id: 1 }, { id: 2 }];
+		// The real subscribe (terminal.ts's subscribeOutput) is guarded on the live
+		// listener: OutputFollow asks for EVERY session on a return, and a take for one
+		// that held its stream all along answers nothing — the guarded fake models that
+		// seam, so the log records only real takes.
+		const held = new Set<number>([1, 2]);
 		const follow = new OutputFollow<FakeSession>({
 			sessions: () => sessions,
-			subscribe: (session, catchUp) => log.push(`take:${session.id}:${catchUp ? 'tail' : 'live'}`),
-			drop: (session) => log.push(`drop:${session.id}`)
+			subscribe: (session, catchUp) => {
+				if (held.has(session.id)) return;
+				held.add(session.id);
+				log.push(`take:${session.id}:${catchUp ? 'tail' : 'live'}`);
+			},
+			drop: (session) => {
+				held.delete(session.id);
+				log.push(`drop:${session.id}`);
+			}
 		});
 		return { follow, log, sessions };
 	}
@@ -248,7 +260,22 @@ describe('the terminal output follow (§6.6)', () => {
 		follow.setFollowing(true);
 		vi.advanceTimersByTime(60_000);
 		expect(log).toEqual([]);
-		// The timer was cancelled by the return: nothing ever drops.
+		// The timer was cancelled by the return: nothing ever drops, and the held
+		// sessions' re-takes answered nothing (the guarded subscribe).
+		expect(follow.holding).toBe(true);
+	});
+
+	it('a return inside the grace re-takes a session born unsubscribed mid-grace', () => {
+		// The E2 hole: a terminal that appeared while the page was away starts without its
+		// subscription, and with `dropped` still false the return used to leave it frozen
+		// forever — every return now asks for every session, and the lacking one is taken
+		// with the tail catch-up (it missed everything since its birth).
+		const { follow, log, sessions } = machine();
+		follow.setFollowing(false);
+		vi.advanceTimersByTime(1_000); // inside the grace, the timer never fires
+		sessions.push({ id: 3 }); // it appears away: born unsubscribed
+		follow.setFollowing(true);
+		expect(log).toEqual(['take:3:tail']);
 		expect(follow.holding).toBe(true);
 	});
 

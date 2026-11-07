@@ -4,7 +4,7 @@
 // `editor.ts` reaches it through `lazy.ts`'s `loadTextEditor()` and keeps the loaded module
 // around; `folderCompare.ts` does the same for its read-only panes.
 
-import { Compartment, EditorSelection, EditorState, type Extension, type StateCommand } from '@codemirror/state';
+import { Compartment, EditorSelection, EditorState, Transaction, type Extension, type StateCommand } from '@codemirror/state';
 import { EditorView, gutter, GutterMarker, keymap, type Command, type KeyBinding, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, highlightSpecialChars, rectangularSelection, crosshairCursor, ViewPlugin, type ViewUpdate } from '@codemirror/view';
 import { addCursorAbove, addCursorBelow, copyLineDown, copyLineUp, cursorMatchingBracket, defaultKeymap, deleteLine, deleteTrailingWhitespace, history, historyKeymap, indentWithTab, moveLineDown, moveLineUp, redo, selectAll, selectLine, undo } from '@codemirror/commands';
 import { closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
@@ -479,7 +479,16 @@ export function replaceDocument(view: EditorView, contents: string): void {
 	// so every position below is computed against the same normalised text, or each CRLF
 	// line start would land one character late (a drift that grows with the line number).
 	const text = contents.replace(/\r\n?/g, '\n');
-	view.dispatch({ changes: { from: 0, to: state.doc.length, insert: text } });
+	// The replace is not the reader's edit: a silent reload (the watcher's), a redecode in
+	// another encoding and the conflict bar's "use the disk version" must not enter the
+	// undo stack — Ctrl+Z over one would resurrect the stale text as dirty and Ctrl+S
+	// write it back. `addToHistory: false` still maps the history's positions through the
+	// replace (the history field keeps the change descriptor), so every earlier undo step
+	// keeps pointing where its text now sits.
+	view.dispatch({
+		changes: { from: 0, to: state.doc.length, insert: text },
+		annotations: Transaction.addToHistory.of(false)
+	});
 	// The restore runs as its own follow-up transaction: a `scrollIntoView` effect rides
 	// through its transaction's changes, and a whole-document replace maps any interior
 	// position onto the replaced range's edge - these coordinates must not be mapped.

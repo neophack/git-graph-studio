@@ -71,6 +71,40 @@ describe('file history', () => {
 		expect(group.activeInput).toMatchObject({ kind: 'diff', left: { exists: false } });
 	});
 
+	it('opens the revision sides at the path the file had at each commit', async () => {
+		// A rename: the entry after the rename holds b.ts, the earlier one the old name —
+		// the row's diff must read the parent side at the path that commit carried.
+		backend.on('file_log', () => [
+			{ hash: 'b'.repeat(40), parents: ['a'.repeat(40)], author: 'Bob', date: NOW / 1000, message: 'after the rename', path: 'src/b.ts' },
+			{ hash: 'a'.repeat(40), parents: [], author: 'Ada', date: NOW / 1000, message: 'before the rename', path: 'src/old.ts' }
+		]);
+		backend.on('read_file_at', () => ({ contents: 'x\n', binary: false, size: 2, encoding: 'utf8', eol: 'lf' }));
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot(REPO);
+		group.openFileHistory(`${REPO}\\src\\b.ts`);
+		await flush(10);
+		const rows = document.querySelectorAll('.file-history-row');
+
+		click(rows[0]);
+		await until(() => group.activeInput?.kind === 'diff' && (group.activeInput as { id: string }).id.endsWith('src/b.ts'));
+		expect(group.activeInput).toMatchObject({
+			id: `history:${'b'.repeat(40)}:src/b.ts`,
+			left: { revision: 'a'.repeat(40), path: 'src/old.ts' },
+			right: { revision: 'b'.repeat(40), path: 'src/b.ts' }
+		});
+
+		// The pre-rename row's own sides read at its old path too.
+		click(rows[1]);
+		await until(() => group.activeInput?.kind === 'diff' && (group.activeInput as { id: string }).id.endsWith('src/old.ts'));
+		expect(group.activeInput).toMatchObject({
+			id: `history:${'a'.repeat(40)}:src/old.ts`,
+			right: { revision: 'a'.repeat(40), path: 'src/old.ts' }
+		});
+		const reads = backend.callsTo('read_file_at');
+		expect(reads).toContainEqual({ revision: 'a'.repeat(40), path: 'src/old.ts' });
+		expect(reads).toContainEqual({ revision: 'b'.repeat(40), path: 'src/b.ts' });
+	});
+
 	it('toggles the blame gutter on the active file editor', async () => {
 		backend.on('read_file', () => ({ contents: 'one\ntwo\n', binary: false, size: 8, encoding: 'utf8', eol: 'lf' }));
 		backend.on('file_fingerprint', () => '8:1');

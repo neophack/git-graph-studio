@@ -127,10 +127,8 @@ pub struct Git {
 /// same discovery the Terminal Shell's Git Bash choice rides. Resolved once per run.
 fn executable() -> &'static std::ffi::OsStr {
     static GIT: OnceLock<PathBuf> = OnceLock::new();
-    GIT.get_or_init(|| {
-        crate::locate::find_git_exe().unwrap_or_else(|| PathBuf::from("git"))
-    })
-    .as_os_str()
+    GIT.get_or_init(|| crate::locate::find_git_exe().unwrap_or_else(|| PathBuf::from("git")))
+        .as_os_str()
 }
 
 impl Git {
@@ -533,19 +531,121 @@ pub fn is_valid_commit_hash(hash: &str) -> bool {
     (4..=64).contains(&hash.len()) && hash.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// `git check-ref-format`'s rule set, pinned against the real binary (every line below is
+/// a case it answers, verified on git 2.50.1.windows.1): no empty name; nothing leading
+/// with `-` (git itself refuses it — and our spawn would read it as an option), `/` or
+/// `.`; nothing ending with `/` or `.`; not the single `@` (the revision-syntax token —
+/// an `@` component, a trailing `@`, or `@` anywhere else is legal, as are `]` and dots
+/// inside a name); no `..` or `@{` sequence anywhere; and nowhere any character git
+/// refuses: ASCII control, space, `~ ^ : ? * [` and `\`. Per component (`/` splits): no
+/// empty component (`//`), none starting with `.` (so `refs/.hidden` is out), none
+/// ending with `.lock` (so `foo.lock/bar` is out, while `foo./bar` and `foo.lock./bar`
+/// stand). The frontend's `isSafeRefName` mirrors this line for line.
 pub fn is_safe_ref_name(name: &str) -> bool {
-    if name.is_empty() || name.starts_with('-') || name.starts_with('.') {
+    if name.is_empty() || name == "@" {
         return false;
     }
-    if name.ends_with('/') || name.ends_with('.') || name.ends_with(".lock") {
+    if name.starts_with(['-', '/', '.']) || name.ends_with(['/', '.']) {
         return false;
     }
-    if name.chars().any(|c| c.is_control()) {
+    if name
+        .chars()
+        .any(|c| c.is_control() || matches!(c, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\'))
+    {
         return false;
     }
-    !["..", "@{", "\\", "^", ":", "?", "[", "*"]
-        .iter()
-        .any(|seq| name.contains(seq))
+    if name.contains("..") || name.contains("@{") {
+        return false;
+    }
+    !name.split('/').any(|component| {
+        component.is_empty() || component.starts_with('.') || component.ends_with(".lock")
+    })
+}
+
+/* ---------- Batched path arguments (the Windows command-line ceiling) ---------- */
+
+/// The byte budget one batched spawn may spend on path arguments: Windows caps a spawn's
+/// command line at 32 767 characters, every path lands on it (one space separating it
+/// from the next, quotes doubling where the shell rules demand), and the error-206
+/// recovery ladder re-spawns the same line with `-C <repo>` prepended. The budget stays
+/// far under the ceiling so every shape of the spawn survives; the fixed prefixes
+/// (`add --all --`, `-C <repo>`) never come close to mattering — paths are the
+/// unbounded half, and the ladder itself cannot rescue argument length.
+const PATH_CHUNK_BYTES: usize = 8_000;
+
+/// Split `paths` into consecutive chunks whose accumulated byte length stays under
+/// [`PATH_CHUNK_BYTES`] — a single path longer than the budget still gets a chunk of its
+/// own (a pathspec is legal at any length a git child can receive), never an infinite
+/// loop nor a dropped path. Pure over the input, so the boundaries are unit-tested.
+pub fn path_chunks<'a>(paths: &'a [&'a str]) -> Vec<&'a [&'a str]> {
+    let mut chunks: Vec<&[&str]> = Vec::new();
+    let mut start = 0usize;
+    let mut budget = 0usize;
+    for (index, path) in paths.iter().enumerate() {
+        let spent = path.len() + 1; // the separating space the joined command line spends
+        if index > start && budget + spent > PATH_CHUNK_BYTES {
+            chunks.push(&paths[start..index]);
+            start = index;
+            budget = 0;
+        }
+        budget += spent;
+    }
+    if start < paths.len() {
+        chunks.push(&paths[start..]);
+    }
+    chunks
+}
+
+/// Run `prefix` + a batch of `paths` through `git`, one spawn per [`path_chunks`] chunk —
+/// the stage / unstage / discard shapes are incremental (each chunk only adds to what
+/// the chunks before it did), so a batch of hundreds of paths keeps every spawn's
+/// command line far under Windows' 32 767-character ceiling no matter how large the
+/// batch grows. An empty batch spawns nothing (a bare prefix — `git add --all --` with
+/// no pathspec — would mean something entirely different). A mid-batch failure aborts
+/// the rest and names how far the batch got: the chunks before it have already applied,
+/// and the error must say so rather than leave the caller guessing.
+pub fn run_chunked(git: &Git, prefix: &[&str], paths: &[&str]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let total = paths.len();
+    let mut applied = 0usize;
+    for chunk in path_chunks(paths) {
+        let args: Vec<&str> = prefix
+            .iter()
+            .copied()
+            .chain(chunk.iter().copied())
+            .collect();
+        if let Err(error) = git.run(&args) {
+            return Err(format!(
+                "{error} — the batch stopped after {applied} of {total} path(s); the remaining {} were left untouched.",
+                total - applied
+            ));
+        }
+        applied += chunk.len();
+    }
+    Ok(())
+}
+
+/* ---------- The decode-replacement guard (the C-2 finding's defensive half) ---------- */
+
+/// U+FFFD REPLACEMENT CHARACTER — what a lossy decode leaves where bytes it could not
+/// decode stood. Git's own path listings can carry one: verified live on this machine,
+/// a file named with an unpaired surrogate (a legal NTFS name) is listed by
+/// `git status --porcelain -z` with the bytes `EF BF BD` where the surrogate stood —
+/// git itself decodes lossily and its output stays valid UTF-8, so [`Git::output`]'s
+/// `from_utf8_lossy` adds no corruption on Windows. On a Linux checkout an invalid byte
+/// sequence in a name decodes to the same character here instead. Either way the
+/// reported name no longer matches the file on disk — `git add` answers "pathspec did
+/// not match" — so the batch writes refuse or skip such paths with the fact named,
+/// instead of failing with a message that names nothing useful.
+pub const REPLACEMENT_CHAR: char = '\u{FFFD}';
+
+/// Whether a path carries the decode-replacement character ([`REPLACEMENT_CHAR`]). A file
+/// legitimately named with U+FFFD is refused too: vanishingly rare, and the refusal says
+/// what to do about it.
+pub fn has_undecodable_name(path: &str) -> bool {
+    path.contains(REPLACEMENT_CHAR)
 }
 
 /// `git fetch` with the view's options: one named remote (validated) or `--all`, optional
@@ -698,5 +798,125 @@ mod git_dir_tests {
         let none = dir.path().join("none");
         std::fs::create_dir_all(&none).unwrap();
         assert!(Git::new(&none).git_dir().is_err());
+    }
+}
+
+#[cfg(test)]
+mod refname_tests {
+    use super::is_safe_ref_name;
+
+    /// The battery the real `git check-ref-format` answered on this machine (git
+    /// 2.50.1.windows.1, one call per line) — the validator must agree with git line for
+    /// line, in both directions: what git accepts stays acceptable, what it refuses is
+    /// refused here before it ever reaches a spawn.
+    #[test]
+    fn the_validator_matches_the_real_check_ref_format() {
+        let accepted = [
+            "main",
+            "v1.0.0",
+            "feature.x",
+            "feature/foo",
+            "a/b/c",
+            "refs/heads/@",  // an @ component is legal
+            "foo./bar",      // a component ending in '.' mid-name is legal
+            "a/foo.lock./b", // …and so is one ending in '.lock.'
+            "a/@b/c",
+            "a/b@/c",
+            "a/@@/b",
+            "f@oo",
+            "a@b",
+            "@oo",
+            "fo@",
+            "a@@b",
+            "a]b/c",
+            "foo-",
+            "trail",
+        ];
+        for name in accepted {
+            assert!(
+                is_safe_ref_name(name),
+                "git accepts {name:?}; the validator must too"
+            );
+        }
+        let rejected = [
+            "",      // empty
+            "@",     // the revision-syntax token alone
+            "-dash", // git refuses a leading dash; our spawn would too
+            ".hidden",
+            "refs/.hidden", // a component may not start with '.'
+            "a/.hidden",
+            "a/./b",
+            "foo.lock", // …nor end with '.lock'
+            "foo.lock/bar",
+            "a/@.lock/b",
+            "refs//heads", // no empty component
+            "a..b",        // no consecutive dots anywhere
+            "a../b",
+            "b/..a",
+            "x/a..b/z",
+            "a@{b", // no reflog sequence anywhere
+            "refs/heads/a@{b",
+            "a b", // no space
+            "a b/c",
+            "a~b", // no ~ ^ : ? * [ \ anywhere
+            "a^b",
+            "a:b",
+            "a?b",
+            "a*b",
+            "a[b",
+            "a\\b",
+            "/lead", // no leading or trailing slash
+            "/lead/x",
+            "trail/",
+            "trail/x/",
+            "trail.", // the name itself may not end with '.'
+            "trail/x.",
+        ];
+        for name in rejected {
+            assert!(
+                !is_safe_ref_name(name),
+                "git refuses {name:?}; the validator must too"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod chunk_tests {
+    use super::{path_chunks, PATH_CHUNK_BYTES};
+
+    /// The chunker's whole contract: every chunk within budget, every path carried
+    /// exactly once in order, no chunk empty — including the shapes that break a naive
+    /// accumulator (a single path longer than the budget, the empty batch, an exact
+    /// boundary hit).
+    #[test]
+    fn chunks_stay_in_budget_and_carry_every_path_in_order() {
+        let owned: Vec<String> = (0..100)
+            .map(|i| format!("{}{i}.txt", "f".repeat(200)))
+            .collect();
+        let paths: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let chunks = path_chunks(&paths);
+        assert!(chunks.len() > 1, "a 20 000+ byte batch splits several ways");
+        assert_eq!(chunks.concat(), paths, "every path once, in order");
+        for chunk in &chunks {
+            let bytes: usize = chunk.iter().map(|p| p.len() + 1).sum();
+            assert!(
+                bytes <= PATH_CHUNK_BYTES,
+                "a chunk may not exceed the budget"
+            );
+            assert!(!chunk.is_empty());
+        }
+
+        // A single path longer than the whole budget still gets its own chunk.
+        let huge = "x".repeat(PATH_CHUNK_BYTES * 2);
+        let huge_paths = vec![huge.as_str()];
+        assert_eq!(path_chunks(&huge_paths), vec![huge_paths.as_slice()]);
+
+        // Nothing in, nothing out.
+        assert!(path_chunks(&[]).is_empty());
+
+        // One path, one chunk.
+        let one = vec!["a.txt"];
+        assert_eq!(path_chunks(&one), vec![one.as_slice()]);
     }
 }

@@ -9,7 +9,9 @@ import { describe, expect, it } from 'vitest';
 import { EditorSelection, EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 
-import { EditorGroup, duplicateSelection, expandSelection, joinLines, shrinkSelection, sortLines, transformSelection, trimTrailingWhitespace } from '../src/features/editor';
+import { EditorGroup } from '../src/features/editor';
+import { duplicateSelection, joinLines, sortLines, transformSelection, trimTrailingWhitespace } from '../src/features/editor/textEditor';
+import { expandSelection, shrinkSelection } from '../src/features/editor/expandSelection';
 import { backend } from './tauriMock';
 import { click, flush, menuItem, menuLabels, rightClick, texts, until } from './helpers';
 

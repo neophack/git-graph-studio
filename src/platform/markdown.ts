@@ -73,9 +73,10 @@ function annotateSourceLines(renderer: MarkdownIt): MarkdownIt {
  *  through. Links: http(s) open in the system browser, in-page anchors scroll, anything else
  *  is inert (its target shown as the tooltip). */
 export function sanitizeMarkdown(article: HTMLElement): void {
-	// A <link> or <base> pasted through raw HTML would load a stylesheet or retarget every
-	// relative link of the page - neither has a place in a rendered document.
-	for (const element of Array.from(article.querySelectorAll('script, style, link, base, iframe, object, embed'))) {
+	// A <link>, <base> or <meta http-equiv="refresh"> pasted through raw HTML would load a
+	// stylesheet, retarget every relative link of the page, or navigate the webview to an
+	// arbitrary URL - none has a place in a rendered document.
+	for (const element of Array.from(article.querySelectorAll('script, style, link, base, meta, iframe, object, embed'))) {
 		element.remove();
 	}
 	for (const element of article.querySelectorAll('*')) {

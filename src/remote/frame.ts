@@ -258,19 +258,67 @@ export function splitFrame(frame: Frame, max = MAX_PAYLOAD): Frame[] {
 	return parts;
 }
 
-/** Joins MORE fragment chains, keyed by session, stream and type. */
+/** Joins MORE fragment chains, keyed by session, stream and type.
+ *
+ *  Chains are validated: the daemon stamps every frame it emits — every fragment of one
+ *  split message included — with a monotonically increasing `seq` (§6.1; its conn.rs
+ *  increments once per emitted fragment), so a fragment that does not succeed its
+ *  chain's last seq is a broken or stale chain, never a continuation, and is discarded
+ *  instead of feeding a message it cannot complete.
+ *
+ *  A fragment that fails above its push (its payload would not inflate) is reported
+ *  through `fail`: the whole chain for its key is discarded and exactly one error
+ *  surfaces — a corrupt message never reassembles into bytes silently missing a segment,
+ *  and a chain never lingers for the next message on its key to append onto. A failed
+ *  head or middle fragment leaves its chain's tail expected but unreassemblable, so the
+ *  key is poisoned: the tail's fragments are dropped on sight (never delivered as if
+ *  they were a whole message), and the guard disarms on anything that cannot be one of
+ *  the failed chain's fragments. */
 export class Reassembler {
-	private partial = new Map<string, Uint8Array[]>();
+	private partial = new Map<string, { parts: Uint8Array[]; seq: number }>();
+	/** Keys whose chain failed mid-flight with fragments still expected (the failed frame
+	 *  carried MORE). `seq` is the next expected fragment's marker, advanced as consumed
+	 *  middles go by — or null where the frames carry no marker (seq 0), where the guard
+	 *  holds until the chain's final fragment disarms it. A fragment that does not
+	 *  continue the guard is a fresh message and disarms it. */
+	private poisoned = new Map<string, { seq: number | null }>();
+
+	constructor(private readonly onError?: (reason: string) => void) {}
 
 	push(frame: Frame): Frame | null {
 		const key = `${frame.session}:${frame.stream}:${frame.type}`;
 		const more = (frame.flags & FLAG.MORE) !== 0;
+		const tail = this.poisoned.get(key);
+		if (tail) {
+			// The failed chain's own fragments: dropped, never spliced into a partial
+			// message. With the seq marker the match is exact and the guard advances with
+			// every middle it consumes, disarming on the chain's last fragment; without
+			// one it can only be sure of the frames still to come on the key — the sender
+			// never abandons a chain mid-flight (split and emit are atomic per message) —
+			// so it holds until that chain's final fragment disarms it.
+			if (tail.seq === null || frame.seq === tail.seq) {
+				if (!more) this.poisoned.delete(key);
+				else if (tail.seq !== null) tail.seq = (frame.seq + 1) >>> 0;
+				return null;
+			}
+			this.poisoned.delete(key);
+		}
 		const chain = this.partial.get(key);
 		if (!chain && !more) return frame;
-		const parts = chain ?? [];
+		if (chain && !this.continues(chain.seq, frame.seq)) {
+			// The fragment does not follow the chain it found: the chain is stale or broken
+			// (its middle already failed above, or a fragment never arrived). Discard it
+			// whole and let this fragment stand for itself — the stale chain never feeds
+			// the next message on the key.
+			this.partial.delete(key);
+			this.report('fragment chain discarded: a continuation does not follow it');
+			if (!more) return frame;
+		}
+		const live = this.partial.get(key);
+		const parts = live ? live.parts : [];
 		parts.push(frame.payload);
 		if (more) {
-			this.partial.set(key, parts);
+			this.partial.set(key, { parts, seq: frame.seq });
 			return null;
 		}
 		this.partial.delete(key);
@@ -283,8 +331,41 @@ export class Reassembler {
 		return { ...frame, flags: frame.flags & ~FLAG.MORE, payload };
 	}
 
+	/** A fragment failed above its push — the payload would not inflate, so it never
+	 *  arrived: its whole chain is discarded and one error reported. A head or middle
+	 *  fragment (MORE) still expects its chain's tail, which can never reassemble into
+	 *  the message it belonged to — the key is poisoned against delivering it; a failed
+	 *  final fragment leaves nothing to guard, only a chain that must not linger for the
+	 *  next message on its key to append onto. */
+	fail(frame: Frame): void {
+		const key = `${frame.session}:${frame.stream}:${frame.type}`;
+		const had = this.partial.delete(key);
+		const tail = (frame.flags & FLAG.MORE) !== 0;
+		if (tail) this.poisoned.set(key, { seq: this.nextSeq(frame.seq) });
+		if (had || tail) this.report('fragment chain discarded: a fragment failed');
+	}
+
 	dropSession(session: number): void {
 		for (const key of [...this.partial.keys()]) if (key.startsWith(`${session}:`)) this.partial.delete(key);
+		for (const key of [...this.poisoned.keys()]) if (key.startsWith(`${session}:`)) this.poisoned.delete(key);
+	}
+
+	/** Whether `seq` continues a chain whose last fragment carried `last`: exact
+	 *  succession where the marker exists, always true where it does not — the
+	 *  un-stamped shapes (seq 0) carry no per-fragment order to validate. */
+	private continues(last: number, seq: number): boolean {
+		return last === 0 || seq === 0 ? true : seq === ((last + 1) >>> 0);
+	}
+
+	/** The seq the fragment after `seq` would carry, or null where the frames carry no
+	 *  marker (seq 0). */
+	private nextSeq(seq: number): number | null {
+		return seq === 0 ? null : (seq + 1) >>> 0;
+	}
+
+	/** One error per discarded chain, wherever the caller reports. */
+	private report(reason: string): void {
+		this.onError?.(reason);
 	}
 }
 

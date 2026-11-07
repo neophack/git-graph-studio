@@ -93,10 +93,44 @@ pub fn search_cancel(search: State<'_, std::sync::Arc<ggs_index::search::SearchS
     search.cancel();
 }
 
+/// The replace's file list: the exact workspace-relative paths a single-file replace names
+/// (`files` carries them — no glob interpretation, because a separator-free include pattern
+/// would be matched against the basename at any depth and hit every same-named file), or the
+/// include/exclude selection over the cached walk for the workspace-wide replace. Absolute
+/// paths and `..` segments are refused: a replace never leaves the workspace.
+fn replace_files(
+    files: Option<Vec<String>>,
+    cache: &ggs_fs::FileListCache,
+    root: &str,
+    include: Option<&str>,
+    exclude: Option<&str>,
+) -> Result<Vec<String>, String> {
+    match files {
+        Some(list) => {
+            for relative in &list {
+                if Path::new(relative).is_absolute()
+                    || relative.split(['/', '\\']).any(|segment| segment == "..")
+                {
+                    return Err(format!(
+                        "{relative}: only a workspace-relative path is accepted"
+                    ));
+                }
+            }
+            Ok(list)
+        }
+        None => Ok(select_paths(
+            &cached_file_list(cache, root, FILE_LIST_TTL, walk_files),
+            include.unwrap_or(""),
+            exclude.unwrap_or(""),
+        )),
+    }
+}
+
 /// Replace every match in every file of the open folder. Files are rewritten whole; the file
 /// list cache is dropped so Quick Open and the search see the new state. `preserve_case`
 /// derives each replacement's casing from its own match (all-lower → lower, ALL-UPPER →
-/// UPPER, Title → Title) — off by default, the replacement as typed.
+/// UPPER, Title → Title) — off by default, the replacement as typed. `files` (the per-file
+/// replace) names exact workspace-relative paths instead of the include selection.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // the search options mirror search_workspace's
 pub async fn replace_in_files(
@@ -111,15 +145,18 @@ pub async fn replace_in_files(
     repo: Option<String>,
     word_only: Option<bool>,
     preserve_case: Option<bool>,
+    files: Option<Vec<String>>,
 ) -> Result<ReplaceOutcome, String> {
     let root = repo
         .or_else(|| roots.inner().first())
         .ok_or_else(|| "No folder is open".to_string())?;
-    let files = select_paths(
-        &cached_file_list(cache.inner(), &root, FILE_LIST_TTL, walk_files),
-        include.as_deref().unwrap_or(""),
-        exclude.as_deref().unwrap_or(""),
-    );
+    let files = replace_files(
+        files,
+        cache.inner(),
+        &root,
+        include.as_deref(),
+        exclude.as_deref(),
+    )?;
     let outcome = replace_root(
         files,
         &root,
@@ -176,7 +213,9 @@ pub async fn search_replace_one(
     Ok(outcome.matches)
 }
 
-/// Compare two folders file by file (the folder-comparison page's backend).
+/// Compare two folders file by file (the folder-comparison page's backend). The full
+/// two-tree walk with its per-pair hashing is blocking work: it runs off the async
+/// runtime, the way the search scan and the analysis builds do.
 #[tauri::command]
 pub async fn compare_dirs(
     left: String,
@@ -184,12 +223,16 @@ pub async fn compare_dirs(
     include: Option<String>,
     exclude: Option<String>,
 ) -> Result<Vec<DirDiffEntry>, String> {
-    compare_roots(
-        &left,
-        &right,
-        include.as_deref().unwrap_or(""),
-        exclude.as_deref().unwrap_or(""),
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        compare_roots(
+            &left,
+            &right,
+            include.as_deref().unwrap_or(""),
+            exclude.as_deref().unwrap_or(""),
+        )
+    })
+    .await
+    .map_err(|e| format!("The comparison thread failed: {e}"))?
 }
 
 /// Every workspace symbol whose name contains the (case-insensitive) query; an empty query
@@ -275,4 +318,58 @@ pub async fn hex_diff(
     let a = bytes_at(&git, &root, &revision_a, &path_a)?;
     let b = bytes_at(&git, &root, &revision_b, &path_b)?;
     Ok(hex_of(a, b))
+}
+
+#[cfg(test)]
+mod replace_files_tests {
+    use super::*;
+
+    /// The per-file replace's exact-path list names exactly that one file. A workspace with
+    /// `README.md` at the root and `docs/README.md` used to rewrite both: the per-file
+    /// replace passed the path as an include glob, and a separator-free pattern is matched
+    /// against the basename at any depth (`ggs_index::scan::glob_match`).
+    #[test]
+    fn a_single_file_replace_names_exactly_that_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# one\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs").join("README.md"), "# two\n").unwrap();
+        let root = dir.path().display().to_string();
+        let cache = ggs_fs::FileListCache::default();
+
+        let files = replace_files(Some(vec!["README.md".to_owned()]), &cache, &root, None, None)
+            .unwrap();
+        assert_eq!(files, ["README.md"]);
+
+        // The include path `docs/README.md` (a separator-carrying glob) names its own file.
+        let files = replace_files(
+            Some(vec!["docs/README.md".to_owned()]),
+            &cache,
+            &root,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(files, ["docs/README.md"]);
+
+        // The workspace-wide replace still walks the include/exclude selection.
+        let both = replace_files(None, &cache, &root, Some("README.md"), None).unwrap();
+        assert_eq!(both, ["README.md", "docs/README.md"]);
+    }
+
+    /// A replace never leaves the workspace: a `..` segment is refused before any file is
+    /// touched (the absolute-path refusal is Windows-shaped and covered by the same check's
+    /// `is_absolute` arm on that platform).
+    #[test]
+    fn a_path_outside_the_workspace_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().display().to_string();
+        let cache = ggs_fs::FileListCache::default();
+        for escape in ["../outside.txt", "src/../../a.txt"] {
+            let err =
+                replace_files(Some(vec![escape.to_owned()]), &cache, &root, None, None)
+                    .unwrap_err();
+            assert!(err.contains("workspace-relative"), "{escape}: {err}");
+        }
+    }
 }

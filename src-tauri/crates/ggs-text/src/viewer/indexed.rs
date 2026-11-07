@@ -60,7 +60,8 @@ pub fn utf16_of(encoding: &str) -> Option<bool> {
 
 /// The parallel index build: positioned reads in chunks, `memchr` for `\n` on each core,
 /// offsets concatenated in order. UTF-16 checks the pairing (`0A 00` / `00 0A`) and the
-/// code-unit parity, reading two bytes past its chunk end so a pair never straddles unseen.
+/// code-unit parity, reading two bytes past its chunk end and one byte before its chunk
+/// start so a pair never straddles unseen.
 pub fn build_index(
     path: &str,
     from: u64,
@@ -83,18 +84,26 @@ pub fn build_index(
         .par_windows(2)
         .map(|pair| {
             let (start, end) = (pair[0], pair[1]);
-            // The +2 tail lets a UTF-16 pair complete; its offsets still report below `end`.
-            let mut buf = vec![0u8; (end - start) as usize + 2];
             let len = (end - start) as usize;
-            read_exact_at(file, &mut buf[..len], start).map_err(|e| format!("{path}: {e}"))?;
+            // The +2 tail lets a UTF-16LE pair complete; its offsets still report below
+            // `end`. The one leading byte — every chunk after the first reads the previous
+            // chunk's last byte — lets a UTF-16BE pair complete whose 0x00 sits in the
+            // chunk before: the neighbour check must see that byte to call the pair real.
+            let mut buf = vec![0u8; len + 3];
+            if start > from {
+                read_exact_at(file, &mut buf[..1], start - 1)
+                    .map_err(|e| format!("{path}: {e}"))?;
+            }
+            read_exact_at(file, &mut buf[1..1 + len], start).map_err(|e| format!("{path}: {e}"))?;
             if end < total {
-                let _ = positioned_read(file, &mut buf[len..], end);
+                let _ = positioned_read(file, &mut buf[1 + len..], end);
             }
             let mut found: Vec<u64> = Vec::new();
-            let mut at = 0usize;
-            while let Some(hit) = memchr::memchr(b'\n', &buf[at..len]) {
+            // Buffer index 0 is file offset `start - 1`; the chunk itself is buf[1..=len].
+            let mut at = 1usize;
+            while let Some(hit) = memchr::memchr(b'\n', &buf[at..1 + len]) {
                 let at_newline = at + hit;
-                let raw = start + at_newline as u64;
+                let raw = start + (at_newline - 1) as u64;
                 match utf16 {
                     Some(little) => {
                         // LE stores a code unit low-byte-first (\n = 0A 00), BE high-first
@@ -103,15 +112,22 @@ pub fn build_index(
                         // pair's OTHER byte, on the side the encoding dictates. (The old
                         // alignment branch checked `at_newline + 1` for BE too — the NEXT
                         // character's high byte — so a line break after `\n` + non-ASCII
-                        // was missed and two lines merged in the index.)
+                        // was missed and two lines merged in the index.) At a chunk's head
+                        // the neighbour behind is the carried byte, real only when there
+                        // actually is one (a chunk from the file start has none).
                         let low_first = (raw - bom).is_multiple_of(2);
+                        let preceded = at_newline > 1 || start > from;
                         let paired = if little {
                             low_first && buf.get(at_newline + 1).copied() == Some(0)
                         } else {
-                            !low_first && at_newline > 0 && buf[at_newline - 1] == 0
+                            !low_first && preceded && buf[at_newline - 1] == 0
                         };
                         if paired {
-                            found.push(raw + 1);
+                            // The whole code unit ends the line: LE's 0x0A is its FIRST
+                            // byte, so the next line starts past the pair's 0x00 too —
+                            // pushing `raw + 1` (the BE arithmetic) prefixed every later
+                            // line with U+0000 and shifted every later offset.
+                            found.push(raw + if little { 2 } else { 1 });
                         }
                     }
                     None => found.push(raw + 1),
@@ -551,15 +567,103 @@ mod tests {
 
     #[test]
     fn utf16_lines_index_on_code_unit_pairs() {
-        let encoded: Vec<u8> = "first\r\nsecond\nthird"
-            .encode_utf16()
-            .flat_map(|unit| unit.to_le_bytes())
-            .collect();
-        let mut bytes = vec![0xFF, 0xFE]; // the LE BOM
-        bytes.extend_from_slice(&encoded);
-        let (_dir, path) = scratch_bytes("utf16.txt", &bytes);
-        let index = build_index(&path, 2, bytes.len() as u64, Some(true), 2).unwrap();
-        assert_eq!(index.line_count(), 3);
+        // Both byte orders index the same three lines — and the windows serve their
+        // CONTENTS, not just the count: LE stores the break as `0A 00`, so the next line
+        // starts past BOTH bytes of the pair. Pushing `raw + 1` (the BE arithmetic) put
+        // the 0x00 into every later line's byte range, prefixing its text with U+0000.
+        let text = "first\r\nsecond\nthird";
+        for little in [true, false] {
+            let mut bytes = if little { vec![0xFF, 0xFE] } else { vec![0xFE, 0xFF] };
+            for unit in text.encode_utf16() {
+                if little {
+                    bytes.extend_from_slice(&unit.to_le_bytes());
+                } else {
+                    bytes.extend_from_slice(&unit.to_be_bytes());
+                }
+            }
+            let (_dir, path) = scratch_bytes("utf16.txt", &bytes);
+            let head = open_indexed(&path).expect("head");
+            assert_eq!(head.encoding, if little { "utf-16le" } else { "utf-16be" });
+            let index = build_index(&path, head.bom, head.total, utf16_of(&head.encoding), head.bom)
+                .expect("index");
+            assert_eq!(index.line_count(), 3);
+            let doc = IndexedDoc {
+                path: path.clone(),
+                total: head.total,
+                encoding: head.encoding.clone(),
+                head_text: head.head_text.clone(),
+                file: Mutex::new(None),
+                estimate: 1,
+                index: RwLock::new(Some(Arc::new(index))),
+                error: Mutex::new(None),
+                gate: TailGate::pending(),
+                find_gen: AtomicU64::new(0),
+            };
+            let window = doc.window(0, 2).expect("window");
+            assert_eq!(window, ["first", "second", "third"]);
+        }
+    }
+
+    #[test]
+    fn utf16be_lines_index_across_a_chunk_boundary() {
+        // The chunk carry: every chunk after the first now reads the previous chunk's last
+        // byte, so a pair whose neighbour sits in the chunk before is still seen — and the
+        // carried byte must not corrupt the ordinary in-chunk pairing. The file straddles
+        // the 16 MiB chunk with real breaks on both sides of the boundary.
+        const CHUNK: u64 = 16 << 20;
+        let units = (CHUNK as usize) / 2 + 2048; // code units; the file crosses one boundary
+        let break_at: std::collections::HashSet<usize> =
+            [CHUNK as usize / 2 - 1, CHUNK as usize / 2, CHUNK as usize / 2 + 1, units - 1]
+                .into_iter()
+                .collect();
+        let mut bytes = vec![0xFE, 0xFF];
+        for i in 0..units {
+            let unit: u16 = if break_at.contains(&i) { 0x000A } else { 0x0041 };
+            bytes.extend_from_slice(&unit.to_be_bytes());
+        }
+        let (_dir, path) = scratch_bytes("be-boundary.txt", &bytes);
+        let head = open_indexed(&path).expect("head");
+        assert_eq!(head.encoding, "utf-16be");
+        let index = build_index(&path, head.bom, head.total, utf16_of(&head.encoding), head.bom)
+            .expect("index");
+        // Four breaks: the chunk-one tail, the first two code units of chunk two and the
+        // last unit — none merged, none duplicated by the boundary.
+        assert_eq!(index.line_count(), 5);
+        // The boundary's own offsets: line 1 starts exactly at chunk two's first code unit
+        // (past both bytes of the carried pair's neighbours), line 2 one unit later.
+        assert_eq!(
+            index.byte_range(0, 0, head.total),
+            (head.bom, head.bom + CHUNK)
+        );
+        assert_eq!(
+            index.byte_range(1, 1, head.total),
+            (head.bom + CHUNK, head.bom + CHUNK + 2)
+        );
+        assert_eq!(
+            index.byte_range(2, 2, head.total),
+            (head.bom + CHUNK + 2, head.bom + CHUNK + 4)
+        );
+        let doc = IndexedDoc {
+            path: path.clone(),
+            total: head.total,
+            encoding: head.encoding.clone(),
+            head_text: head.head_text.clone(),
+            file: Mutex::new(None),
+            estimate: 1,
+            index: RwLock::new(Some(Arc::new(index))),
+            error: Mutex::new(None),
+            gate: TailGate::pending(),
+            find_gen: AtomicU64::new(0),
+        };
+        // Lines 1 and 2 are the single breaks between them (empty); line 3 runs to the
+        // final break; line 4 is the empty tail. (Line 0 is a 16 MiB monster the window
+        // cap serves as a slice — its exact range is asserted above.)
+        assert_eq!(doc.window(1, 2).expect("window"), ["", ""]);
+        assert_eq!(
+            doc.window(3, 3).expect("window"),
+            ["A".repeat(units - (CHUNK as usize) / 2 - 3)]
+        );
+        assert_eq!(doc.window(4, 4).expect("window"), [""]);
     }
 
     #[test]

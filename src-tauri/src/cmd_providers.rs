@@ -119,9 +119,11 @@ fn restart_bridged_backends(app: &tauri::AppHandle) {
         // The frame host's children the extension spawned go with it — the same cleanup
         // the Extensions view's restart runs.
         let _ = crate::ext_child::ext_child_stop_for(ext_id.clone());
-        if host.stop(&ext_id).is_err() {
-            continue;
-        }
+        // An error from stop means the process died between the status answer and here —
+        // already stopped, which is all the pass needed from it. The start and the event
+        // still go ahead: skipping them left the sidebar on the old provider's login page
+        // forever (the fresh process never spawned, the views never re-resolved).
+        let _ = host.stop(&ext_id);
         let Ok(dir) = crate::cmd_ext::extensions_dir(app) else {
             continue;
         };

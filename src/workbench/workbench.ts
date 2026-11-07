@@ -24,7 +24,7 @@ import { Explorer } from '../features/explorer';
 import { ExtensionHost, extTitle, type ExtInfo, type PageDiffRequest } from '../features/extensions';
 import { ExtensionsPanel } from '../features/extensions';
 import { clearBookmarks, listBookmarks, toggleBookmark } from '../features/editor';
-import { effectiveKeybinding, loadUserKeybindings, renderKeybindingsEditor } from '../platform/keybindings';
+import { loadUserKeybindings, renderKeybindingsEditor, userKeybindingFor } from '../platform/keybindings';
 import { Panel } from './panel';
 import { SearchView } from '../features/search';
 import { SourceControlView } from '../features/scm';
@@ -35,7 +35,7 @@ import * as state from '../platform/state';
 import { StatusBar } from './statusbar';
 import { TitleBar } from './titlebar';
 import { basename, busy, el, icon, notify, quickInput, quickPick, relativeTo, type QuickPickItem, type QuickPickSource } from '../platform/ui/index';
-import { FilePickSource, pickedFilePosition } from '../features/quickOpen';
+import { FilePickSource, pickedFilePosition, scoreSequence } from '../features/quickOpen';
 import { ExtensionTreeView } from '../features/extensions';
 import { extFileDataUrl } from '../platform/extAssets';
 
@@ -241,7 +241,17 @@ export class Workbench {
 		// and channels. All wired here: the host owns the data, the views own the DOM.
 		this.extensionHost.onOpenWebview = (panelId, title, extId, placement, focus) => this.openWebviewPanel(panelId, title, extId, placement, focus);
 		this.extensionHost.onCloseWebviewTab = (tabId) => this.editors.closeById(tabId);
-		this.extensionHost.onRevealWebviewTab = (tabId) => this.editors.revealById(tabId);
+		this.extensionHost.onRevealWebviewTab = (tabId, placement, preserveFocus) => {
+			// `panel.reveal(viewColumn?, preserveFocus?)`: preserveFocus reveals the tab
+			// without stealing the current editor's focus — it activates in its group
+			// alone. A living tab reveals in place (the editor area cannot move an open
+			// tab between groups; the placement governs the host's re-open path instead).
+			if (preserveFocus !== true) return this.editors.revealById(tabId);
+			const group = this.editors.groups().find((candidate) => candidate.hasEditor(tabId));
+			if (!group) return false;
+			group.activateById(tabId);
+			return true;
+		};
 		// `window.tabGroups`: the frames read the editor area's strips and close tabs by id.
 		this.extensionHost.tabGroupsSource = () => this.editors.tabSummary().map((group) => ({
 			...group,
@@ -307,13 +317,15 @@ export class Workbench {
 		this.extensionHost.onOpenFileAtRevision = (revision, path, title, repo) => void this.editors.openRevision(revision, path, title, repo);
 		this.extensionHost.onShowView = (id) => this.showView(id as never);
 		this.extensionHost.onRevealTerminal = () => this.panel.show('terminal');
-		this.extensionHost.onRunInTerminal = (command) => void this.panel.runInTerminal(command);
+		this.extensionHost.onRunInTerminal = (command, pressEnter) => void this.panel.runInTerminal(command, pressEnter !== false);
 		this.extensionHost.onRepoChanged = () => this.scheduleRefresh(0);
 		this.extensionHost.onForwardKey = (key) => document.dispatchEvent(new KeyboardEvent('keydown', key));
 
 		// The user's keybindings (~/.ggs/keybindings.json) override the registry's defaults
-		// everywhere a binding is matched or shown (M3 3.10).
-		setKeybindingResolver((id) => effectiveKeybinding(id));
+		// everywhere a binding is matched or shown (M3 3.10). The resolver answers the USER
+		// rule only (undefined when none) — its contract makes "user" distinct from
+		// "default", which is what lets a user rule beat another command's default key.
+		setKeybindingResolver((id) => userKeybindingFor(id));
 		void loadUserKeybindings();
 		this.registerCommands();
 		this.buildActivityBar();
@@ -548,6 +560,8 @@ export class Workbench {
 	declare enterZenMode: () => void ;
 
 	declare exitZenMode: () => void ;
+
+	declare disposeZenMode: () => void ;
 
 	declare visibleExtensionViews: () => string ;
 
@@ -846,7 +860,9 @@ export class Workbench {
 			// such as "Ctrl+K Alt+Left" resolves like a single-key binding does.
 			const key = event.shiftKey ? (UNSHIFTED_GLYPHS[event.key] ?? event.key) : event.key;
 			const named = key.replace(/^Arrow/, '');
-			const spelled = named.length === 1 ? named.toUpperCase() : named === ' ' ? 'Space' : named;
+			// Space first: its key IS a one-character string, so a length check ahead of the
+			// ' ' branch would spell it " " and never match a "Ctrl+K Space" binding.
+			const spelled = named === ' ' ? 'Space' : named.length === 1 ? named.toUpperCase() : named;
 			const full = `${chord} ${event.ctrlKey || event.metaKey ? 'Ctrl+' : ''}${event.shiftKey ? 'Shift+' : ''}${event.altKey ? 'Alt+' : ''}${spelled}`;
 			const command = commandForBinding(full);
 			if (command) {
@@ -894,10 +910,13 @@ export class Workbench {
 	}
 
 	async pickIndent(): Promise<void> {
-		const chosen = await quickPick([
-			{ label: 'Indent Using Spaces', description: 'The tab size applies to every editor', value: 'header' },
-			...[2, 4, 8].map((size) => ({ label: String(size), description: settings.tabSize === size ? 'current' : undefined, value: String(size) }))
-		], 'Select Indentation', 'Indentation');
+		// The app indents with spaces only (the status bar's item reads them, and the only
+		// indent setting is tabSize): VS Code's Spaces/Tabs fork has nothing to switch, so
+		// the picker offers the sizes directly.
+		const chosen = await quickPick(
+			[2, 4, 8].map((size) => ({ label: String(size), description: settings.tabSize === size ? 'current' : undefined, value: String(size) })),
+			'Select Indentation', 'Indentation'
+		);
 		if (chosen === '2' || chosen === '4' || chosen === '8') updateSetting('tabSize', Number(chosen));
 	}
 
@@ -1039,7 +1058,7 @@ export function joinRepo(root: string, relative: string): string {
 
 /** Quick Open's modes in one source, as VS Code switches them: a leading "?" is the help
  *  list (every prefix, one row each, picking one switches the mode), a leading ">" filters the
- *  command palette (a small list, filtered in place), a leading ":" is Go to Line/Column
+ *  command palette (recently-run first, then fuzzy-scored), a leading ":" is Go to Line/Column
  *  (the picker's one row narrates the jump), "@" is Go to Symbol in File and "#" Go to
  *  Symbol in Workspace (M4 4.9); anything else goes to the chunked file scan, including
  *  mid-session - backspacing out of a prefix returns to files. A file query may carry a
@@ -1073,18 +1092,59 @@ export function quickOpenItems(files: FilePickSource, lineInfo: () => { line: nu
 				const picked = new Set(recent.map((path) => 'file:' + path));
 				return [...recentFileItems(recent), ...rest.filter((item) => !picked.has(item.value))];
 			}
-			const q = query.slice(1).trim().toLowerCase();
-			const items = commands.paletteItems()
-				.filter((command) => command.label.toLowerCase().includes(q))
-				.map((command) => ({ ...command, value: 'command:' + command.value }))
-				.slice(0, 60);
-			return items;
+			const q = query.slice(1).trim();
+			return commandPaletteItems(commands.paletteItems(), q, state.commandRecents());
 		}
 	};
 }
 
 /** How many recently-opened files the picker's empty-query section leads with. */
 const QUICK_RECENTS = 9;
+
+/** The '>' mode's palette row vocabulary, before the `command:` prefix goes on. */
+interface PaletteEntry {
+	label: string;
+	description?: string;
+	value: string;
+}
+
+/** Any exact substring of the command's label outranks every fuzzy-only match, whatever
+ *  alignment bonuses a scattered match piles up — the tier gap the palette ordering leans
+ *  on (the fuzzy scorer's own tiers are path tiers, which a command label never has). */
+const PALETTE_SUBSTRING_SCORE = 1 << 14;
+
+/** A '>' row with its match score (0 when nothing is typed). */
+interface ScoredPaletteEntry { entry: PaletteEntry; score: number }
+
+/** The '>' mode's rows, VS Code's command palette: the recently-run commands lead (the MRU
+ *  the registry records, most recent first), then the fuzzy scorer ranks the rest — an
+ *  exact substring of the label above a scattered-letter match — and the alphabetical
+ *  order `paletteItems` built breaks the ties. The empty query is the same order with no
+ *  score to separate anyone. */
+export function commandPaletteItems(items: PaletteEntry[], query: string, recents: string[]): QuickPickItem[] {
+	const rank = new Map(recents.map((id, index) => [id, index]));
+	const queryLower = query.toLowerCase();
+	const scored = items
+		.map((entry): ScoredPaletteEntry | null => {
+			if (query === '') return { entry, score: 0 };
+			const labelLower = entry.label.toLowerCase();
+			const match = scoreSequence(entry.label, labelLower, query, queryLower);
+			if (!match) return null;
+			// `includes` stays the base: a substring match carries the tier boost on top of
+			// its fuzzy score, so typing a whole word always beats typing it scattered.
+			return { entry, score: (labelLower.includes(queryLower) ? PALETTE_SUBSTRING_SCORE : 0) + match.score };
+		})
+		.filter((scored): scored is ScoredPaletteEntry => scored !== null)
+		.sort((a, b) => {
+			const ra = rank.get(a.entry.value) ?? Number.MAX_SAFE_INTEGER;
+			const rb = rank.get(b.entry.value) ?? Number.MAX_SAFE_INTEGER;
+			if (ra !== rb) return ra - rb;
+			if (a.score !== b.score) return b.score - a.score;
+			return a.entry.label.localeCompare(b.entry.label);
+		})
+		.slice(0, 60);
+	return scored.map(({ entry }) => ({ label: entry.label, description: entry.description, value: 'command:' + entry.value }));
+}
 
 /** The recently-opened rows, VS Code's Ctrl+P opening section: the file's basename as the
  *  label, its folder as the second line, and the same `file:` value a walked row carries, so

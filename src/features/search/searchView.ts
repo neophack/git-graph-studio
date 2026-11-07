@@ -17,7 +17,7 @@ import { replaceInFiles, searchCancel, searchReplaceOne, searchWorkspace, type S
 
 import * as state from '../../platform/state';
 import { commands } from '../../platform/commands';
-import { t } from '../../platform/i18n';
+import { t, tf } from '../../platform/i18n';
 import { queryHasUppercase } from '../../platform/find/findOptions';
 import { FindHistory, HistoryRecall, recallKey } from '../../platform/find/findHistory';
 import { settings } from '../../platform/settings';
@@ -150,6 +150,11 @@ export class SearchView {
 
 	/** A click on a match: open the file at the position. */
 	onOpenMatch: ((path: string, line: number, column: number, root?: string) => void) | null = null;
+	/** The workspace's open-and-dirty file paths (the workbench wires the editor area in):
+	 *  every replace flow consults it before writing — a dirty tab never auto-reloads, so
+	 *  a later save of its stale buffer would overwrite the replacement that landed on
+	 *  disk. Unwired (a frontend without the hook) skips the check. */
+	dirtyFilePaths: (() => string[]) | null = null;
 
 	constructor(container: HTMLElement) {
 		this.container = container;
@@ -652,15 +657,57 @@ export class SearchView {
 		};
 	}
 
+	/** The pending as-you-type search is flushed before any replace: every replace flow
+	 *  runs `this.query` / `this.matcher()` against the listed results, and a query edited
+	 *  within the typing pause would otherwise replace the new query at the old rows'
+	 *  coordinates (the same rule Replace All already applied, shared by all three now). */
+	private async flushPendingSearch(): Promise<void> {
+		if (this.debounceTimer === null && !this.searching) return;
+		if (this.debounceTimer !== null) {
+			window.clearTimeout(this.debounceTimer);
+			this.debounceTimer = null;
+		}
+		await this.runSearch();
+		// `runSearch`'s await can resolve before the `done` event's dispatch lands (an IPC
+		// event queues behind the invoke answer): drain the queued ticks — bounded, so a
+		// backend that never finishes cannot wedge the button.
+		for (let i = 0; this.searching && i < 100; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+	}
+
+	/** The replace targets among `files` that are open in an editor with unsaved changes,
+	 *  matched case-insensitively the way the lifecycle's own fs-change matching is (the
+	 *  editor's open path and the search root's joined spelling drift on Windows). */
+	private dirtyTargets(files: FileMatches[]): string[] {
+		if (!this.dirtyFilePaths) return [];
+		const dirty = this.dirtyFilePaths();
+		if (dirty.length === 0) return [];
+		const lowered = new Set(dirty.map((path) => path.toLowerCase()));
+		return files.map((file) => this.absolutePath(file)).filter((path) => lowered.has(path.toLowerCase()));
+	}
+
+	/** The dirty-buffer gate every replace flow runs before writing: one confirmation
+	 *  naming the open-and-dirty targets — the write lands on disk, and a stale buffer
+	 *  saved later would overwrite it (VS Code applies into the buffer; here the buffer is
+	 *  the user's to reconcile, so the user is asked first). */
+	private async confirmDirtyTargets(dirty: string[]): Promise<boolean> {
+		if (dirty.length === 0) return true;
+		return confirmDialog(tf('search.dirtyConfirm', dirty.join(', ')), 'Replace');
+	}
+
 	/** VS Code's per-file Replace All: the file header's hover button (or its context-menu
 	 *  row) rewrites exactly that one file — the workspace replace runs with the file's own
-	 *  root-relative path as the include glob — and the search re-lists what remains (a
-	 *  replacement that itself matches re-appears, as it would in VS Code). No confirmation,
-	 *  like VS Code's per-file replace; the workspace Replace All is the confirmed one. */
+	 *  exact path (`files`, never a glob: a separator-free pattern would match the basename
+	 *  at any depth) — and the search re-lists what remains (a replacement that itself
+	 *  matches re-appears, as it would in VS Code). No count confirmation, like VS Code's
+	 *  per-file replace; the dirty-buffer gate and the workspace Replace All's confirmation
+	 *  are the asks. */
 	private async replaceFileAll(file: FileMatches): Promise<void> {
 		if (this.results.indexOf(file) === -1) return;
+		await this.flushPendingSearch();
+		if (this.results.indexOf(file) === -1) return;
+		if (!(await this.confirmDirtyTargets(this.dirtyTargets([file])))) return;
 		try {
-			await replaceInFiles({ ...this.matcher(), include: file.path }, this.replacement, file.root);
+			await replaceInFiles(this.matcher(), this.replacement, file.root, [file.path]);
 			await this.runSearch();
 		} catch (error) {
 			notify('error', String(error));
@@ -669,34 +716,28 @@ export class SearchView {
 
 	/** VS Code's Replace All action (Ctrl+Alt+Enter on the replace field, the toolbar
 	 *  button otherwise): the confirmation's counts describe the listed results, and the
-	 *  replacement runs with the same matcher across every root. */
+	 *  replacement runs with the same matcher across every root. One confirmation — the
+	 *  counts and, when open editors hold unsaved changes among the targets, their names. */
 	async replaceAll(): Promise<void> {
 		// The dialog's counts describe `this.results`, but the replacement runs `this.query`:
 		// a query edited within the typing pause (its search still on the debounce timer) or a
 		// search still streaming would have the dialog confirm one count while the backend
 		// replaces another set entirely. The pending search is flushed first, so what the user
 		// confirms is exactly what gets replaced.
-		if (this.debounceTimer !== null || this.searching) {
-			if (this.debounceTimer !== null) {
-				window.clearTimeout(this.debounceTimer);
-				this.debounceTimer = null;
-			}
-			await this.runSearch();
-			// `runSearch`'s await can resolve before the `done` event's dispatch lands (an IPC
-			// event queues behind the invoke answer): drain the queued ticks — bounded, so a
-			// backend that never finishes cannot wedge the button.
-			for (let i = 0; this.searching && i < 100; i++) await new Promise((resolve) => setTimeout(resolve, 0));
-		}
+		await this.flushPendingSearch();
 		if (this.query === '' || this.results.length === 0) return;
 		const count = this.results.reduce((sum, f) => sum + f.matches.length, 0);
-		// VS Code's confirmation and report, word for word.
-		const occurrences = (n: number) => `${n} occurrence${n === 1 ? '' : 's'}`;
-		const acrossFiles = (n: number) => `${n === 1 ? '1 file' : `${n} files`}`;
+		// VS Code's confirmation and report, word for word — the dirty-buffer names appended
+		// when the targets include open editors with unsaved changes, all in the one dialog.
+		const occurrences = (n: number) => tf(n === 1 ? 'search.occurrence.one' : 'search.occurrence.many', n);
+		const acrossFiles = (n: number) => tf(n === 1 ? 'search.fileCount.one' : 'search.fileCount.many', n);
+		const dirtyNote = this.dirtyTargets(this.results);
+		const dirty = dirtyNote.length > 0 ? ` ${tf('search.dirtyNote', dirtyNote.join(', '))}` : '';
 		const confirmed = await confirmDialog(
 			this.replacement === ''
-				? `Replace ${occurrences(count)} across ${acrossFiles(this.results.length)}?`
-				: `Replace ${occurrences(count)} across ${acrossFiles(this.results.length)} with '${this.replacement}'?`,
-			'Replace'
+				? `${tf('search.replaceAll.confirm', occurrences(count), acrossFiles(this.results.length))}${dirty}`
+				: `${tf('search.replaceAll.confirmWith', occurrences(count), acrossFiles(this.results.length), this.replacement)}${dirty}`,
+			t('search.replaceAll.confirmButton')
 		);
 		if (!confirmed) return;
 		try {
@@ -711,8 +752,8 @@ export class SearchView {
 				replacements += outcome.replacements;
 			}
 			notify('info', this.replacement === ''
-				? `Replaced ${occurrences(replacements)} across ${acrossFiles(files)}.`
-				: `Replaced ${occurrences(replacements)} across ${acrossFiles(files)} with '${this.replacement}'.`);
+				? tf('search.replaceAll.done', occurrences(replacements), acrossFiles(files))
+				: tf('search.replaceAll.doneWith', occurrences(replacements), acrossFiles(files), this.replacement));
 		} catch (error) {
 			notify('error', String(error));
 			return;
@@ -749,7 +790,7 @@ export class SearchView {
 			return;
 		}
 		if (this.query === '') {
-			this.messageArea.appendChild(el('div', 'welcome-view', [el('p', '', ['Type to search across all files in the open folder.'])]));
+			this.messageArea.appendChild(el('div', 'welcome-view', [el('p', '', [t('search.typeToSearch')])]));
 			return;
 		}
 		const total = this.results.reduce((sum, f) => sum + f.matches.length, 0);
@@ -762,20 +803,18 @@ export class SearchView {
 			summary.append(openSettings);
 			this.messageArea.appendChild(summary);
 			if (this.truncated) {
-				this.messageArea.appendChild(el('div', 'search-warning', [
-					'The result set only contains a subset of all matches. Use a more specific search term to narrow down the results.'
-				]));
+				this.messageArea.appendChild(el('div', 'search-warning', [t('search.truncated')]));
 			}
 			return;
 		}
+		const results = tf(total === 1 ? 'search.result.one' : 'search.result.many', total);
+		const files = tf(this.results.length === 1 ? 'search.fileCount.one' : 'search.fileCount.many', this.results.length);
 		const header = this.searching
-			? total === 0 ? 'Searching…' : `Searching… ${total} result${total === 1 ? '' : 's'} so far`
-			: `${total} result${total === 1 ? '' : 's'} in ${this.results.length} file${this.results.length === 1 ? '' : 's'}`;
+			? total === 0 ? t('search.searching') : tf(total === 1 ? 'search.searchingProgress.one' : 'search.searchingProgress.many', total)
+			: tf('search.resultsIn', results, files);
 		this.messageArea.appendChild(el('div', 'search-summary', [header]));
 		if (this.truncated) {
-			this.messageArea.appendChild(el('div', 'search-warning', [
-				'The result set only contains a subset of all matches. Use a more specific search term to narrow down the results.'
-			]));
+			this.messageArea.appendChild(el('div', 'search-warning', [t('search.truncated')]));
 		}
 	}
 
@@ -854,10 +893,16 @@ export class SearchView {
 	/** The per-result replace: the backend re-matches the row's line with the search's own
 	 *  options and replaces exactly the occurrence at the row's column, answering the line's
 	 *  remaining matches — the group repaints from them, no re-search. A file with no
-	 *  matches left drops its group; a match that changed on disk reports the error. */
+	 *  matches left drops its group; a match that changed on disk reports the error. The
+	 *  flush and the dirty-buffer gate run first, like every other replace flow — a query
+	 *  edited within the typing pause re-lists before this row can replace anything, and a
+	 *  dirty target is named before the write. */
 	private async replaceOne(file: FileMatches, match: SearchMatch): Promise<void> {
+		if (this.results.indexOf(file) === -1) return;
+		await this.flushPendingSearch();
 		const index = this.results.indexOf(file);
 		if (index === -1) return;
+		if (!(await this.confirmDirtyTargets(this.dirtyTargets([file])))) return;
 		try {
 			const remaining = await searchReplaceOne(
 				{ path: file.path, line: match.line, column: match.column },
@@ -942,13 +987,13 @@ export class SearchView {
 	private showResultMenu(event: MouseEvent, file: FileMatches, match: SearchMatch | null): void {
 		const absolute = this.absolutePath(file);
 		const entries: MenuEntry[] = [
-			...(match ? [{ label: 'Copy', run: () => void writeText(match.text) }] : []),
+			...(match ? [{ label: t('search.copy'), run: () => void writeText(match.text) }] : []),
 			...(match && this.showReplace ? [{ label: t('search.replaceMatch'), run: () => void this.replaceOne(file, match) }] : []),
 			...(match === null && this.showReplace ? [{ label: t('search.replaceAll'), run: () => void this.replaceFileAll(file) }] : []),
-			{ label: 'Copy Path', keybinding: 'Shift+Alt+C', run: () => void writeText(absolute) },
-			{ label: 'Copy All', run: () => void writeText(this.results.map((result) => this.absolutePath(result)).join('\n')) },
+			{ label: t('search.copyPath'), keybinding: 'Shift+Alt+C', run: () => void writeText(absolute) },
+			{ label: t('search.copyAll'), run: () => void writeText(this.results.map((result) => this.absolutePath(result)).join('\n')) },
 			'separator',
-			...(remoteShell() || !file.root ? [] : [{ label: 'Reveal in File Explorer', run: () => void revealItemInDir(absolute).catch((error) => notify('error', String(error))) }])
+			...(remoteShell() || !file.root ? [] : [{ label: t('search.revealInFileExplorer'), run: () => void revealItemInDir(absolute).catch((error) => notify('error', String(error))) }])
 		];
 		showContextMenu(event.clientX, event.clientY, entries);
 	}

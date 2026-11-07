@@ -508,7 +508,10 @@ without a restart.
   path through the view's `onOpenFile` (boot resolves the raw target — MSYS unmaps, relative
   joins the workspace root — and lands it in an editor group; an unwired frontend, the remote
   shell, copies the path instead), a hover hint floats the target and the key, and a right
-  click gains Open Link / Copy Link over a hovered link;
+  click gains Open Link / Copy Link over a hovered link; the provider's ranges are CELL
+  columns, converted from the scan's string indices through `wcwidth.ts` (the leaf width
+  table — East Asian Wide/Fullwidth two cells, combining marks none — without which one
+  full-width character shifts every later link's underline onto the wrong cells);
   + `findBar.ts`, the Ctrl+F bar over the shell — @xterm/addon-search (reached through
   `loadXterm`'s `SearchAddon`, per lazy.ts's one-import-point seam) drives `findNext` /
   `findPrevious` with the case/word/regex toggles and highlight-all decorations, Esc closes
@@ -532,8 +535,13 @@ without a restart.
   while its page is visible, deforms each term along a `studio://pty-resized-{id}`
   broadcast (the shared geometry, one size — the echo back is a same-size resize the
   backend's change gate silences), and a page reload kills only the shells it created —
-  never an adopted one)
-- Backend: `src-tauri/src/pty.rs`
+  never an adopted one; the session ids a page CREATES under draw from that page's own
+  crypto base (`drawIdBase`) and step past `pty_list`'s live ids on every spawn
+  (`pickSessionId`), so two pages never meet on one number)
+- Backend: `src-tauri/src/pty.rs` (`pty_create` refuses to replace a session whose child
+  still runs — an id collision costs an error the frontend surfaces, never a killed shell;
+  the replace path stays for a session whose child already exited, the half-dead entry its
+  reader still holds)
 - Tests: `tests/terminal.test.ts` (the session sync: the planner's rules, adoption on
   `shown()` — tail replayed, output live, input shared, never a private spawn — the
   mirror on `pty-sessions-changed`, retirement of a PC-killed terminal, the shared

@@ -12,14 +12,22 @@ export function installLongPress(root: HTMLElement | Document = document): () =>
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let start: { x: number; y: number; target: EventTarget | null } | null = null;
 	let fired = false;
-	const cancel = () => {
-		clearTimeout(timer);
-		start = null;
-	};
+	/** The pointers currently on the glass: a second finger is the pinch forming, never a
+	 *  longer press — the first finger's timer dies the moment it lands (left alone it
+	 *  would fire the context menu mid-pinch, at the first finger's stale coordinates). */
+	const pointers = new Set<number>();
 	const down = (event: Event) => {
 		const e = event as PointerEvent;
 		if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return;
+		clearTimeout(timer);
+		pointers.add(e.pointerId);
 		fired = false;
+		if (pointers.size !== 1) {
+			// A pinch in the making: no finger of it arms a long-press, and none does
+			// until a fresh sole finger lands.
+			start = null;
+			return;
+		}
 		start = { x: e.clientX, y: e.clientY, target: e.target };
 		timer = setTimeout(() => {
 			if (!start) return;
@@ -31,9 +39,13 @@ export function installLongPress(root: HTMLElement | Document = document): () =>
 			start = null;
 		}, LONG_PRESS_MS);
 	};
+	const disarm = (): void => {
+		clearTimeout(timer);
+		start = null;
+	};
 	const move = (event: Event) => {
 		const e = event as PointerEvent;
-		if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > MOVE_TOLERANCE) cancel();
+		if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > MOVE_TOLERANCE) disarm();
 	};
 	// The click that ends a long-press must not also activate the row under the finger.
 	const click = (event: Event) => {
@@ -43,16 +55,20 @@ export function installLongPress(root: HTMLElement | Document = document): () =>
 			fired = false;
 		}
 	};
+	const lift = (event: Event) => {
+		pointers.delete((event as PointerEvent).pointerId);
+		disarm();
+	};
 	root.addEventListener('pointerdown', down, true);
 	root.addEventListener('pointermove', move, true);
-	root.addEventListener('pointerup', cancel, true);
-	root.addEventListener('pointercancel', cancel, true);
+	root.addEventListener('pointerup', lift, true);
+	root.addEventListener('pointercancel', lift, true);
 	root.addEventListener('click', click, true);
 	return () => {
 		root.removeEventListener('pointerdown', down, true);
 		root.removeEventListener('pointermove', move, true);
-		root.removeEventListener('pointerup', cancel, true);
-		root.removeEventListener('pointercancel', cancel, true);
+		root.removeEventListener('pointerup', lift, true);
+		root.removeEventListener('pointercancel', lift, true);
 		root.removeEventListener('click', click, true);
 	};
 }

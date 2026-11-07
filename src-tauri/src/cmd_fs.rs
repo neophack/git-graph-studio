@@ -4,7 +4,7 @@
 
 use ggs_fs::*;
 use ggs_fs::{cached_file_list, walk_files};
-use ggs_git::revision::{parse_status_branch, repo_folder_name, revision_file_bytes, revision_file_text, write_temp_blob, HeadInfo};
+use ggs_git::revision::{parse_status_branch, repo_folder_name, revision_file_bytes, write_temp_blob, HeadInfo};
 
 use serde::Serialize;
 use std::fs;
@@ -153,6 +153,22 @@ pub async fn write_file(
     fs::write(target, bytes).map_err(|e| format!("{path}: {e}"))
 }
 
+/// The revision side's bytes as `FileContents`, decoded exactly like the working-tree
+/// read (`decode`: binary sniff, then detection — GB18030, Shift_JIS, EUC-KR, Big5,
+/// finally Windows-1252), so a mixed-encoding diff does not show replacement characters
+/// on one side. A path absent at the revision keeps the "does not exist" error the
+/// editors' missing-side handling keys off.
+fn revision_file_contents(
+    git: &Git,
+    revision: &str,
+    path: &str,
+) -> Result<FileContents, String> {
+    match revision_file_bytes(git, revision, path)? {
+        None => Err(format!("The file \"{path}\" does not exist in {revision}")),
+        Some(bytes) => Ok(decode(bytes, None)),
+    }
+}
+
 /// A file as it is in a revision of the open repository, for the diff editors. `HEAD`, a hash,
 /// `<hash>^`… are all accepted; `*` (the view's uncommitted sentinel) reads the working tree,
 /// and `:index` reads the staged copy.
@@ -177,23 +193,12 @@ pub async fn read_file_at(
         .await;
     }
     let (rev, file_path) = (revision.clone(), path.clone());
-    let (binary, contents) = tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || {
         let git = Git::new(&repo_path);
-        revision_file_text(&git, &rev, &file_path)
+        revision_file_contents(&git, &rev, &file_path)
     })
     .await
-    .map_err(|e| e.to_string())??;
-    Ok(FileContents {
-        binary,
-        size: contents.as_ref().map(|c| c.len() as u64).unwrap_or(0),
-        eol: contents
-            .as_deref()
-            .map(ggs_text::encoding::detect_eol)
-            .unwrap_or("lf")
-            .into(),
-        contents,
-        encoding: "utf8".into(),
-    })
+    .map_err(|e| e.to_string())?
 }
 
 /// A file's bytes at a revision, written to a private temp file so the byte-level comparison
@@ -1075,5 +1080,45 @@ mod remote_gate_tests {
             target_form.push_str("/f.txt");
             assert_eq!(linked[0].as_deref(), Some(target_form.as_str()));
         }
+    }
+}
+
+#[cfg(test)]
+mod revision_read_tests {
+    use super::revision_file_contents;
+    use crate::test_git_helpers::*;
+    use ggs_testkit::Scratch;
+
+    #[test]
+    fn a_gbk_blob_at_a_revision_decodes_like_the_working_tree() {
+        let scratch = Scratch::new("read-file-at-gbk");
+        let git = scratch.repo("repo");
+        // GBK bytes for "中文注释" — a lossy UTF-8 decode turns them into replacement
+        // characters, so one side of a mixed-encoding diff used to show them while the
+        // working-tree side (the detecting `read_file`) rendered the text fine. The
+        // revision read runs the same detection now.
+        let mut bytes = vec![0xD6, 0xD0, 0xCE, 0xC4, 0xD7, 0xA2, 0xCA, 0xCD, b'\r', b'\n'];
+        bytes.extend_from_slice(b"value = 42\n");
+        std::fs::write(git.repo.join("gbk.txt"), &bytes).unwrap();
+        git.run(&["add", "--", "gbk.txt"]).unwrap();
+        git.run(&["commit", "-q", "-m", "gbk"]).unwrap();
+
+        let contents = revision_file_contents(&git, "HEAD", "gbk.txt").unwrap();
+        assert!(!contents.binary);
+        assert_eq!(contents.encoding, "gb18030");
+        assert_eq!(contents.eol, "crlf");
+        assert!(contents.contents.as_deref().unwrap().contains("中文注释"));
+        assert_eq!(contents.size, bytes.len() as u64);
+    }
+
+    #[test]
+    fn a_missing_path_keeps_the_absence_error() {
+        let scratch = Scratch::new("read-file-at-missing");
+        let git = scratch.repo("repo");
+        let error = match revision_file_contents(&git, "HEAD", "gone.txt") {
+            Err(error) => error,
+            Ok(_) => panic!("a missing path must not answer contents"),
+        };
+        assert!(error.contains("does not exist in HEAD"), "{error}");
     }
 }

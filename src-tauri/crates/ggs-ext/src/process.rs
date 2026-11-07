@@ -104,6 +104,15 @@ const NODE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(90);
 /// Lines of stderr and `$/log` kept per process, for the status view and crash reports.
 const LOG_CAP: usize = 200;
 
+/// The `initialize` handshake's request id. It is reserved: `start` registers its reply
+/// channel under it BEFORE the reader thread exists, and the handshake waits while the
+/// map lock is dropped — a `call` landing in that window must never draw this id, or its
+/// own insert into `pending` would evict the handshake's channel and both replies would
+/// cross (the backend's initialize answer landing in the caller, the caller's answer
+/// dropped — the call hanging until the start timeout killed the fresh backend).
+/// Every handle's counter therefore starts one above it.
+const HANDSHAKE_REQUEST_ID: u64 = 1;
+
 /// A pending call's reply channel (the result of one JSON-RPC request), by request id.
 type PendingMap = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>>;
 
@@ -402,7 +411,10 @@ impl ExtHost {
         // start would then wait out the full handshake timeout reporting a bogus
         // "did not answer initialize".
         let (handshake_tx, handshake_rx) = mpsc::channel();
-        pending.lock().unwrap().insert(1, handshake_tx.clone());
+        pending
+            .lock()
+            .unwrap()
+            .insert(HANDSHAKE_REQUEST_ID, handshake_tx.clone());
 
         // The stdout reader: resolves responses, records notifications, forwards a real-Node
         // host's `ggs.hostRequest`s into the workbench, and — on EOF — fails everything
@@ -431,7 +443,10 @@ impl ExtHost {
             child,
             stdin: Mutex::new(Some(stdin)),
             pending: Arc::clone(&pending),
-            next_id: AtomicU64::new(1),
+            // The handshake owns id 1 already (its channel is in the map above); the
+            // counter starts above it so a call in the handshake window draws 2 —
+            // never the handshake's id (see `HANDSHAKE_REQUEST_ID`).
+            next_id: AtomicU64::new(HANDSHAKE_REQUEST_ID + 1),
             commands: Vec::new(),
             log: Arc::clone(&log),
         };
@@ -446,7 +461,7 @@ impl ExtHost {
             .unwrap_or_else(|p| p.into_inner())
             .clone();
         let handshake_line = proto::request(
-            1,
+            HANDSHAKE_REQUEST_ID,
             "initialize",
             json!({
                 "protocolVersion": proto::PROTOCOL_VERSION,
@@ -1286,6 +1301,67 @@ mod tests {
         );
     }
 
+    /// A call landing in the handshake window (the map lock is dropped across the
+    /// handshake wait) must never draw the handshake's reserved id: with the counter
+    /// starting AT the reserved id the call's insert evicted the handshake's reply
+    /// channel, the backend's initialize answer landed in the caller and the start hung
+    /// to its timeout killing the fresh backend. The counter starts above the reserved
+    /// id, so both waiters keep their own channels and both replies resolve to their
+    /// own callers.
+    #[test]
+    fn a_call_concurrent_with_the_handshake_never_collides() {
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let (handshake_tx, handshake_rx) = mpsc::channel();
+        pending
+            .lock()
+            .unwrap()
+            .insert(HANDSHAKE_REQUEST_ID, handshake_tx);
+        // A stand-in child: only its pid matters (the reader never touches it here).
+        let child = Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let handle = ProcHandle {
+            child,
+            stdin: Mutex::new(None),
+            pending: Arc::clone(&pending),
+            // The fresh handle's counter, exactly as `start` installs it.
+            next_id: AtomicU64::new(HANDSHAKE_REQUEST_ID + 1),
+            commands: Vec::new(),
+            log: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        // The concurrent call allocates while the handshake is still outstanding —
+        // precisely the `call` / `notify_workspace` fetch_add during the window.
+        let first = handle.next_id.fetch_add(1, Ordering::Relaxed);
+        assert_ne!(
+            first,
+            HANDSHAKE_REQUEST_ID,
+            "the call drew the handshake's reserved id"
+        );
+        let (call_tx, call_rx) = mpsc::channel();
+        pending.lock().unwrap().insert(first, call_tx);
+        let second = handle.next_id.fetch_add(1, Ordering::Relaxed);
+        assert_ne!(second, first);
+
+        // Both replies cross the reader: each resolves to its own waiter.
+        let wire = format!(
+            "{}\n{}",
+            proto::response(HANDSHAKE_REQUEST_ID, Ok(json!({ "capabilities": {} }))),
+            proto::response(first, Ok(json!("the call's own answer"))),
+        );
+        make_reader(&pending).serve(Cursor::new(wire));
+        let handshake = handshake_rx.recv().unwrap().unwrap();
+        assert!(handshake.get("capabilities").is_some());
+        assert_eq!(
+            call_rx.recv().unwrap().unwrap(),
+            json!("the call's own answer")
+        );
+    }
+
     /// The restart race: a backend's reader reaches its EOF cleanup only after a stop+start
     /// already installed the FRESH process under the same extension id. The cleanup must fail
     /// its own pending calls but leave the fresh handle in the map — removing and killing it
@@ -1381,5 +1457,18 @@ mod tests {
         // An absolute path is allowed as-is: it is how the tests point at a helper binary.
         let absolute = tmp.path().join("main");
         assert!(resolve_command(tmp.path(), absolute.to_str().unwrap()).is_ok());
+    }
+
+    /// The provider bridge's restart pass asks a running backend to stop, then starts it
+    /// fresh. A process that died between the pass's status answer and its stop reports
+    /// "not running" here — and the pass must proceed to the start and the restarted
+    /// event all the same (skipping them left the sidebar on the old provider's login
+    /// page: the fresh process never spawned, the views never re-resolved). This pins
+    /// the exact signal the pass tolerates.
+    #[test]
+    fn a_stop_of_an_already_gone_backend_errors_so_the_restart_pass_proceeds() {
+        let host = ExtHost::default();
+        let error = host.stop("acme.demo").unwrap_err();
+        assert!(error.contains("has no running backend"), "{error}");
     }
 }

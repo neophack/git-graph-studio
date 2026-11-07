@@ -119,3 +119,17 @@ export function serializeDiagnostic(value: unknown): SerializableDiagnostic {
 		code
 	};
 }
+
+/** A command call's wire arguments with every top-level `null` restored to the
+ * `undefined` the caller passed. The wires a command crosses here are JSON at both hops
+ * (the workbench's invoke, the ggs-ext/1 line, the bridge's JSON strings) and JSON has
+ * no undefined: a placeholder argument the caller passed — the host's
+ * `executeCommand('id', sessionId, undefined, …)` slots, claude-code's `editor.open`
+ * branching on `viewColumn !== void 0` — lands as null, and handlers distinguish. A real
+ * null argument is not a shape VS Code commands take, so null arrives as undefined — the
+ * argument shape VS Code's own dispatch guarantees. Top level only: a null inside an
+ * object is data. (Frames keep theirs without this — postMessage's structured clone
+ * carries undefined.) */
+export function restoreWireArgs(args: unknown[]): unknown[] {
+	return args.map((value) => (value === null ? undefined : value));
+}

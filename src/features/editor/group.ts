@@ -298,6 +298,9 @@ export class EditorGroup {
 		editor.pane.prepend(bar);
 		const toolbar = new MergeToolbar(bar);
 		toolbar.onResolved = () => this.onMergeResolved?.();
+		// Mark Resolved's own write bypassed the editor's save; the group's save settles the
+		// dirty flag, the tab dot and the hot-exit backup afterwards (a byte-identical write).
+		toolbar.onSave = () => void this.save(editor);
 		toolbar.attach(editor.view, editor.input.path);
 		editor.mergeToolbar = toolbar;
 	}

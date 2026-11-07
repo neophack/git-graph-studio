@@ -401,6 +401,12 @@ export function attachWorkbenchSync(
 	 *  close naming one queues in `pendingCloses` instead of finding no tab and getting
 	 *  lost (which would re-open the other side's just-closed tab when the open lands). */
 	const applyingOpens = new Set<string>();
+	/** Remote `open` messages that arrived while the same path's local open was still in
+	 *  flight ("it satisfies this message") and were recorded instead of applied. The
+	 *  sender already believes the file opened, so if the in-flight local open FAILS, its
+	 *  settle re-applies the recorded one; if it lands, the record is simply consumed.
+	 *  The newest message wins — the editor's own openIntent rule. */
+	const droppedOpens = new Map<string, Extract<WorkbenchSyncMessage, { k: 'open' }>>();
 	/** Closes that arrived while their open was still in flight: applied when it lands. */
 	const pendingCloses = new Set<string>();
 	const pendingTabCloses = new Set<string>();
@@ -643,19 +649,34 @@ export function attachWorkbenchSync(
 			if (!landedFile(key)) {
 				announced.delete(key);
 				pendingOpens.delete(key);
+				// A remote open recorded while this one was in flight still opens the file:
+				// its sender already believes it did. It re-applies through the same guarded
+				// run (its boundary gate passed when it first arrived), and a close that
+				// queued behind this open is consumed by the retry's own settle instead of
+				// being discarded with the failed open.
+				const dropped = live ? droppedOpens.get(key) : undefined;
+				if (dropped !== undefined) {
+					droppedOpens.delete(key);
+					applyOpen(dropped);
+					return;
+				}
 				pendingCloses.delete(key);
-			} else if (pendingCloses.delete(key)) {
-				announced.delete(key);
-				void closeNow(key);
-			} else if (options?.inactive !== true) {
-				// This user's own open landed — behind a foreign page hold, possibly: a
-				// remote operation still in flight, a mirrored webview act. The hold exists
-				// to stop REMOTE acts from yanking the page, and the activation's own
-				// `revealEditorPage` already honoured it; the page this tap asked for comes
-				// forward anyway, ungated — the same cut the webview ops' own-act reveal
-				// makes (2026-10-16: 手机端 claude 的 new session/history 点击后新页面没有到
-				// 前台). Off a page-stack shell the ungated reveal is a no-op.
-				(hook('navigation').revealEditorPageUngated ?? hook('navigation').revealEditorPage)();
+			} else {
+				// The local open satisfied it, if one was waiting behind it.
+				droppedOpens.delete(key);
+				if (pendingCloses.delete(key)) {
+					announced.delete(key);
+					void closeNow(key);
+				} else if (options?.inactive !== true) {
+					// This user's own open landed — behind a foreign page hold, possibly: a
+					// remote operation still in flight, a mirrored webview act. The hold exists
+					// to stop REMOTE acts from yanking the page, and the activation's own
+					// `revealEditorPage` already honoured it; the page this tap asked for comes
+					// forward anyway, ungated — the same cut the webview ops' own-act reveal
+					// makes (2026-10-16: 手机端 claude 的 new session/history 点击后新页面没有到
+					// 前台). Off a page-stack shell the ungated reveal is a no-op.
+					(hook('navigation').revealEditorPageUngated ?? hook('navigation').revealEditorPage)();
+				}
 			}
 		};
 		const opened = rawOpenFile(path, options, placement);
@@ -955,8 +976,29 @@ export function attachWorkbenchSync(
 		}
 	});
 
+	/** Apply one crossed `open`: pre-marked, run raw, verified like every remote
+	 *  operation. An open whose path is already landing here (a local facade open, or the
+	 *  message's own earlier copy) is recorded rather than applied blind — that in-flight
+	 *  open satisfies it, and the facade's settle re-applies the record if the open
+	 *  fails (the sender already believes the file opened), or consumes it when the open
+	 *  lands. */
+	const applyOpen = (message: Extract<WorkbenchSyncMessage, { k: 'open' }>): void => {
+		const key = keyOf(message.path);
+		if (applyingOpens.has(key)) {
+			droppedOpens.set(key, message);
+			return;
+		}
+		const openOptions = message.line !== undefined
+			? { line: message.line, column: message.column, inactive: message.inactive === true }
+			: message.inactive === true ? { inactive: true } : undefined;
+		void run(() => rawOpenFile(message.path, openOptions), { add: key, spell: message.path })
+			.then(() => {
+				if (message.quiet !== true) noteOpened(fileTitle(message.path), landedFile(key));
+			});
+	};
+
 	/** One crossed message, applied: the receive handler's body, kept whole so the
-	 *  remote-open gate can call back into it after its async canonical re-check. */
+	 * remote-open gate can call back into it after its async canonical re-check. */
 	const applyMessage = (message: WorkbenchSyncMessage): void => {
 		// An open or activation that really applies retires the close this side recorded
 		// for its file or tab: the other side's user is acting on it right now, and their
@@ -981,20 +1023,9 @@ export function attachWorkbenchSync(
 			saveDeferredCloses(deferred);
 		}
 		switch (message.k) {
-			case 'open': {
-				const key = keyOf(message.path);
-				// An open of it is already landing here (a local one, or the message's
-				// own earlier copy): it satisfies this message.
-				if (applyingOpens.has(key)) break;
-				const openOptions = message.line !== undefined
-					? { line: message.line, column: message.column, inactive: message.inactive === true }
-					: message.inactive === true ? { inactive: true } : undefined;
-				void run(() => rawOpenFile(message.path, openOptions), { add: key, spell: message.path })
-					.then(() => {
-						if (message.quiet !== true) noteOpened(fileTitle(message.path), landedFile(key));
-					});
+			case 'open':
+				applyOpen(message);
 				break;
-			}
 			case 'close': {
 				const key = keyOf(message.path);
 				// Its open is still in flight: close it the moment it lands — closing now
@@ -1149,6 +1180,7 @@ export function attachWorkbenchSync(
 			pendingOpens.clear();
 			pendingCloses.clear();
 			pendingTabCloses.clear();
+			droppedOpens.clear();
 			freshTabs.clear();
 			// The restore never announces, so a close it raced stays recorded — with the
 			// gate open it crosses now.
@@ -1168,8 +1200,9 @@ export function attachWorkbenchSync(
 				navHold();
 				navHold = null;
 			}
-			applying = 0;
-			editors.openFile = rawOpenFile;
+		applying = 0;
+		droppedOpens.clear();
+		editors.openFile = rawOpenFile;
 			editors.onTabsChange = prevOnTabsChange;
 			editors.onActiveChange = prevOnActiveChange;
 		}

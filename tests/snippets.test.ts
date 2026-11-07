@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { pathOptions, snippetCompletionSource, wordCompletion, fileNameFacet } from '../src/features/editor';
+import { pathOptions, snippetCompletionSource, wordCompletion, fileNameFacet } from '../src/features/editor/autocomplete';
 import { BUILTIN_LANGUAGE_COUNT, languageOf, loadWorkspaceSnippets, parseCodeSnippets, resolveVariables, snippetsFor } from '../src/features/editor';
 import { EditorState } from '@codemirror/state';
 import { CompletionContext } from '@codemirror/autocomplete';

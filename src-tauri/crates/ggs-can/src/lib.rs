@@ -220,8 +220,10 @@ pub struct ChannelLoadProfile {
 
 /// The payload-length histogram the way the bus writes it: the classic lengths 0..8 then
 /// the CAN FD lengths 12,16,20,24,32,48,64 — `PAYLOAD_DIST_BINS` bins whose labels the
-/// view draws in the same order.
-pub const PAYLOAD_DIST_BINS: usize = 15;
+/// view draws in the same order. Nine classic + seven FD lengths = 16: one bin per label
+/// the view's table carries, so a 64-byte FD frame has a bin of its own instead of
+/// folding into 48's.
+pub const PAYLOAD_DIST_BINS: usize = 16;
 
 /// Which payload bin a frame's length falls into — CAN FD keeps the classic bins up to 8;
 /// a remote frame's length is 0.
@@ -293,6 +295,10 @@ struct IdAgg {
     cycle_sum_ns: u128,
     /// Sum of squared cycle times (ns²) as an f64 — the raw material of the jitter σ.
     cycle_sq_sum: f64,
+    /// How many cycle samples the aggregate holds — one per in-order consecutive pair.
+    /// An out-of-order frame contributes a count but no sample, so the min/max/avg/σ
+    /// arithmetic divides by this, not by the frame count.
+    cycle_samples: u64,
 }
 
 #[derive(Default)]
@@ -447,15 +453,15 @@ impl Aggregator {
                 last_s: a.last_ns as f64 / 1e9,
                 min_cycle_s: a.min_cycle_ns as f64 / 1e9,
                 max_cycle_s: a.max_cycle_ns as f64 / 1e9,
-                avg_cycle_s: if a.count > 1 {
-                    (a.cycle_sum_ns / ((a.count - 1) as u128)) as f64 / 1e9
+                avg_cycle_s: if a.cycle_samples > 0 {
+                    (a.cycle_sum_ns / (a.cycle_samples as u128)) as f64 / 1e9
                 } else {
                     0.0
                 },
-                // σ over the count-1 deltas (E[x²] − E[x]², clamped at 0 against float
+                // σ over the cycle samples (E[x²] − E[x]², clamped at 0 against float
                 // cancellation on a perfectly periodic message).
-                std_cycle_s: if a.count > 2 {
-                    let n = (a.count - 1) as f64;
+                std_cycle_s: if a.cycle_samples > 1 {
+                    let n = a.cycle_samples as f64;
                     let mean_ns = (a.cycle_sum_ns as f64) / n;
                     ((a.cycle_sq_sum / n - mean_ns * mean_ns).max(0.0)).sqrt() / 1e9
                 } else {
@@ -559,6 +565,7 @@ impl FrameSink for Aggregator {
                     max_cycle_ns: 0,
                     cycle_sum_ns: 0,
                     cycle_sq_sum: 0.0,
+                    cycle_samples: 0,
                 },
             );
             update_id(&frame, len, self.ids.get_mut(&key).unwrap());
@@ -600,16 +607,24 @@ fn update_id(frame: &RawFrame, len: u64, id_agg: &mut IdAgg) {
     id_agg.count += 1;
     id_agg.payload_bytes += len;
     let previous = id_agg.last_ns;
+    if frame.t_ns < previous {
+        // The .asc grammar can hand frames over out of order (the LoadTracker above
+        // documents the same). The frame is real — its counts land — but an interval run
+        // backwards is not a cycle: keep the later timestamp and skip the sample, so a
+        // re-opened earlier frame never reads as a 0 ms cycle or pollutes the jitter.
+        return;
+    }
     id_agg.last_ns = frame.t_ns;
     if id_agg.count > 1 {
-        let cycle = frame.t_ns.saturating_sub(previous);
-        if id_agg.count == 2 {
+        let cycle = frame.t_ns - previous;
+        if id_agg.cycle_samples == 0 {
             id_agg.min_cycle_ns = cycle;
             id_agg.max_cycle_ns = cycle;
         } else {
             id_agg.min_cycle_ns = id_agg.min_cycle_ns.min(cycle);
             id_agg.max_cycle_ns = id_agg.max_cycle_ns.max(cycle);
         }
+        id_agg.cycle_samples += 1;
         id_agg.cycle_sum_ns += cycle as u128;
         let cycle_f = cycle as f64;
         id_agg.cycle_sq_sum += cycle_f * cycle_f;
@@ -743,13 +758,39 @@ fn analyse_intervals(
     }
     // A frame is "missing" when the bus stayed silent past 1.5 cycles: at 1.5 the odd
     // jittered-but-present frame is still counted present, a full cycle lost is not.
-    let loss_threshold = median_ns + median_ns / 2;
+    //
+    // The rule needs a cycle to key on, and a median of 0 is no cycle: quantized or
+    // repeated stamps (some .asc writers log several frames under one time) make half the
+    // deltas 0, the median 0 — and 1.5 × 0 blames every positive delta, pricing a plain
+    // 10 ms silence at (delta − 1) "missing frames". When the median is 0 the mean
+    // positive delta stands in as the period: the zeros are the duplicates, the positives
+    // the real gaps between them. With not a single positive delta there is nothing to
+    // estimate from, so the loss check stands down for the identifier.
+    let mut period_ns = median_ns;
+    if period_ns == 0 {
+        let mut positive_sum = 0u128;
+        let mut positive_count = 0u64;
+        for &d in &deltas {
+            if d > 0 {
+                positive_sum += d as u128;
+                positive_count += 1;
+            }
+        }
+        if positive_count > 0 {
+            period_ns = (positive_sum / positive_count as u128) as u64;
+        }
+    }
+    let loss_threshold = if period_ns == 0 {
+        u64::MAX // no period at all: nothing can be blamed for a lost frame
+    } else {
+        period_ns + period_ns / 2
+    };
     let mut missed_gaps = 0u64;
     let mut missed_frames = 0u64;
     for &d in &deltas {
         if d > loss_threshold {
             missed_gaps += 1;
-            missed_frames += ((d + median_ns / 2) / median_ns.max(1)).saturating_sub(1);
+            missed_frames += ((d + period_ns / 2) / period_ns.max(1)).saturating_sub(1);
         }
     }
     // The chart series: every interval if it fits, otherwise one in every kth so the
@@ -2185,7 +2226,9 @@ impl ProgressReporter {
         if let Some(doc) = &self.doc {
             doc.bytes.store(bytes, Ordering::Relaxed);
         }
-        let Some(report) = self.report.as_mut() else { return };
+        let Some(report) = self.report.as_mut() else {
+            return;
+        };
         if !force && self.last.elapsed() < std::time::Duration::from_millis(200) {
             return;
         }
@@ -2785,7 +2828,6 @@ impl FrameStore {
     }
 }
 
-
 /* ---------- The pure cores behind the commands (the app's adapters spawn these) ---------- */
 
 /// The statistics command's core: one walk of the log into the aggregator.
@@ -2967,7 +3009,6 @@ pub fn frames_of(
 }
 
 /* ---------- Tests ---------- */
-
 
 #[cfg(test)]
 mod tests {
@@ -3166,6 +3207,10 @@ mod tests {
             RawFrame::data_frame(0, 3, 0x2, false, false, 0, 0, &data, false),
             RawFrame::data_frame(0, 3, 0x3, false, true, 15, 64, &data, false),
             RawFrame::data_frame(0, 3, 0x4, false, true, 9, 12, &data, false),
+            // The 48-byte FD frame owns its bin — and the 64-byte one the last. Before
+            // the bin count matched the label table (16), 64 folded into 48 and the
+            // view's "64" column stayed empty however many 64-byte frames the log ran.
+            RawFrame::data_frame(0, 3, 0x6, false, true, 14, 48, &data, false),
         ];
         // A remote frame asks for a length it does not carry — binned by its 0 bytes.
         let mut remote = RawFrame::data_frame(0, 3, 0x5, false, false, 2, 2, &data, false);
@@ -3174,12 +3219,13 @@ mod tests {
         let stats = stats_of_frames(&frames);
         let dist = &stats.payload_dist[0];
         assert_eq!(dist.channel, 3);
-        // Bins 0..8, then 12 and 64; everything else empty.
+        // Bins 0..8, then 12, 48 and 64; everything else empty.
         let mut expected = [0u64; PAYLOAD_DIST_BINS];
         expected[0] = 2; // the zero-length frame and the remote request
         expected[8] = 1;
         expected[9] = 1; // FD 12
-        expected[14] = 1; // FD 64
+        expected[14] = 1; // FD 48
+        expected[15] = 1; // FD 64 — the last bin, the one the view's "64" label names
         assert_eq!(dist.counts, expected);
     }
 
@@ -3748,6 +3794,59 @@ Begin TriggerBlock Mon Sep 14 11:01:16.396 am 2026
     }
 
     #[test]
+    fn zero_median_stamps_estimated_loss_off_the_positive_delta_mean() {
+        // Quantized logging: several frames share one timestamp, so half the deltas are 0
+        // and the median is 0. The old rule keyed on the median alone — 1.5 × 0 — blamed
+        // every positive delta as a gap worth (delta − 1) "frames", i.e. millions for one
+        // plain 10 ms silence. The mean positive delta stands in as the period: a real
+        // 30 ms gap among 10 ms cycles is still two missing frames, the duplicate-stamp
+        // zeros blame nothing.
+        let mut times: Vec<u64> = Vec::new();
+        for i in 0..100u64 {
+            times.push(i * 10_000_000);
+            times.push(i * 10_000_000); // the quantizer's duplicate stamp
+        }
+        // The frames at 1000 and 1010 ms are missing: a 30 ms gap.
+        times.push(1_020_000_000);
+        times.push(1_020_000_000);
+        let stats = intervals_of(&times);
+        assert_eq!(stats.missed_gaps, 1);
+        assert_eq!(stats.missed_frames, 2);
+        assert_eq!(stats.points.iter().filter(|p| p.missed).count(), 1);
+
+        // And when not a single positive delta exists (every stamp repeated outright),
+        // there is no period to estimate from: the loss check stands down for the id
+        // instead of inventing losses off a threshold of zero.
+        let stats = intervals_of(&[0, 0, 0, 0]);
+        assert_eq!(stats.missed_gaps, 0);
+        assert_eq!(stats.missed_frames, 0);
+    }
+
+    #[test]
+    fn an_out_of_order_frame_counts_but_skips_its_cycle_sample() {
+        // The id runs at 10 ms and a frame stamped before its predecessor arrives
+        // mid-stream (the .asc grammar's documented disorder). The frame counts, the
+        // aggregate keeps the later timestamp as last — and the backwards interval never
+        // reads as a 0 ms cycle or pollutes the jitter.
+        let stats = stats_of_frames(&[
+            RawFrame::data_frame(0, 1, 0x50, false, false, 8, 8, &[0; 8], false),
+            RawFrame::data_frame(10_000_000, 1, 0x50, false, false, 8, 8, &[0; 8], false),
+            RawFrame::data_frame(5_000_000, 1, 0x50, false, false, 8, 8, &[0; 8], false),
+            RawFrame::data_frame(20_000_000, 1, 0x50, false, false, 8, 8, &[0; 8], false),
+        ]);
+        let m = stats.messages.iter().find(|m| m.id == 0x50).unwrap();
+        assert_eq!(m.count, 4);
+        // The two in-order intervals are both 10 ms: min/avg/max all read 10 ms, no 0
+        // among them, and σ over identical samples clamps to zero.
+        assert!((m.min_cycle_s - 0.01).abs() < 1e-9);
+        assert!((m.max_cycle_s - 0.01).abs() < 1e-9);
+        assert!((m.avg_cycle_s - 0.01).abs() < 1e-9);
+        assert!(m.std_cycle_s.abs() < 1e-12);
+        // `last` stays the latest stamp, not the out-of-order one.
+        assert!((m.last_s - 0.02).abs() < 1e-9);
+    }
+
+    #[test]
     fn intervals_downsample_large_series() {
         let times: Vec<u64> = (0..100_000).map(|i| i as u64 * 1_000_000).collect();
         let stats = intervals_of(&times);
@@ -4272,10 +4371,9 @@ base hex timestamps relative
         let counter = Arc::clone(&hits);
         // The channel's receive side is untyped (InvokeResponseBody); CanProgress is only
         // what our reporter sends over it.
-        let mut reporter =
-            ProgressReporter::reporting(total_bytes_of(&path), move |_| {
-                counter.fetch_add(1, Ordering::SeqCst);
-            });
+        let mut reporter = ProgressReporter::reporting(total_bytes_of(&path), move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
         let mut agg = Aggregator::new();
         walk_source(&path, &mut agg, &mut reporter).unwrap();
         assert!(hits.load(Ordering::SeqCst) >= 1);
@@ -4804,7 +4902,12 @@ base hex timestamps relative
         )
         .unwrap();
         let original = std::fs::read(&path).unwrap();
-        let result = convert_log(&path, &path, "blf", &mut ProgressReporter::reporting(0, |_| ()));
+        let result = convert_log(
+            &path,
+            &path,
+            "blf",
+            &mut ProgressReporter::reporting(0, |_| ()),
+        );
         assert!(
             result.is_err(),
             "converting a log onto itself must fail, not truncate it"

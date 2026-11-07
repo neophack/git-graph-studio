@@ -2,8 +2,8 @@
 
 
 import { invoke } from '../../platform/ipc/core';
-import { gitCommit, gitStageAll } from '../../platform/ipc/scm';
-import { confirmDialog, el, icon, notify, showContextMenu } from '../../platform/ui/index';
+import { gitCommit, gitStageAll, scmRemotes, type RemoteInfo } from '../../platform/ipc/scm';
+import { confirmDialog, el, icon, notify, quickPick, showContextMenu } from '../../platform/ui/index';
 import { SubRepoState } from './view';
 import type { SourceControlView } from './view';
 
@@ -70,7 +70,7 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 			if (action === 'publish') {
 				commit.append(icon('cloud-upload'), 'Publish Branch');
 				commit.title = 'Publish the branch to its remote (push, setting the upstream)';
-				commit.addEventListener('click', () => void this.run('scm_push', { remote: null, setUpstream: true, force: false }));
+				commit.addEventListener('click', () => void this.publishBranch());
 			} else if (action === 'push') {
 				commit.append(icon('cloud-upload'), `Push ${this.ahead}`);
 				commit.title = `Push ${this.ahead} commit${this.ahead === 1 ? '' : 's'} to ${this.upstream}`;
@@ -88,6 +88,35 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 		}
 		requestAnimationFrame(grow);
 		return box;
+	},
+
+	/** The remote a publish pushes to: `null` keeps the backend's own pick — the only
+	 *  remote, or whatever it answers. Several remotes ask, because the silent
+	 *  "first remote" guess publishes the branch to the wrong server. */
+	async pickPublishRemote(repo?: string): Promise<string | null> {
+		let remotes: RemoteInfo[];
+		try {
+			remotes = (await scmRemotes(repo)) ?? [];
+		} catch {
+			return null; // no answer: the backend's own push names a remotes problem itself
+		}
+		if (remotes.length <= 1) return null;
+		return await quickPick(
+			remotes.map((r) => ({ label: r.name, description: r.url, icon: 'cloud', value: r.name })),
+			'Pick a remote to publish the branch to'
+		);
+	},
+
+	/** Publish Branch (the clean tree's cloud-upload button): push setting the upstream,
+	 *  the remote picked when the repository has several. */
+	async publishBranch(): Promise<void> {
+		const remote = await this.pickPublishRemote();
+		await this.run('scm_push', { remote, setUpstream: true, force: false });
+	},
+
+	async subPublishBranch(sub: SubRepoState): Promise<void> {
+		const remote = await this.pickPublishRemote(sub.repoPath);
+		await this.subRun(sub, 'scm_push', { remote, setUpstream: true, force: false });
 	},
 
 	async afterCommit(command: string, args: Record<string, unknown>): Promise<void> {
@@ -194,7 +223,7 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 			if (action === 'publish') {
 				commit.append(icon('cloud-upload'), 'Publish Branch');
 				commit.title = 'Publish the branch to its remote (push, setting the upstream)';
-				commit.addEventListener('click', () => void this.subRun(sub, 'scm_push', { remote: null, setUpstream: true, force: false }));
+				commit.addEventListener('click', () => void this.subPublishBranch(sub));
 			} else if (action === 'push') {
 				commit.append(icon('cloud-upload'), `Push ${sub.ahead}`);
 				commit.title = `Push ${sub.ahead} commit${sub.ahead === 1 ? '' : 's'} to ${sub.upstream}`;

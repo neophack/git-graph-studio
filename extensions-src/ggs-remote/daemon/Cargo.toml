@@ -77,7 +77,7 @@ tao = { version = "0.34", optional = true, default-features = false }
 ksni = { version = "0.3", optional = true, features = ["blocking"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_System_Console", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile = "3"

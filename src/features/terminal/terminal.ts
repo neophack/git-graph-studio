@@ -22,7 +22,7 @@ import { actionButton, el, icon, notify, showContextMenu, type MenuEntry } from 
 import { THEME_EVENT, settings } from '../../platform/settings';
 import { t } from '../../platform/i18n';
 import { OutputFollow, FOLLOW_GRACE_MS } from './outputFollow';
-import { planSessionSync } from './sessionSync';
+import { planSessionSync, pickSessionId } from './sessionSync';
 import { attachTerminalLinks, copyLinkFallback, type TerminalLinkController, type DetectedLink } from './links';
 import { mountTerminalFindBar, type TerminalFindBar } from './findBar';
 
@@ -74,6 +74,35 @@ function terminalTheme(): Record<string, string> {
 /** A window event whose `detail` string is written to the active terminal's shell. */
 export const TERMINAL_SEND_EVENT = 'ggs:terminal-send';
 
+/** This page's session-id base: one crypto draw over half the backend's u32 id space
+ *  (`pty_create`'s `id`), with the sign bit dropped. Two pages load two independent
+ *  bases, so a same-number draw is a one-in-two-billion coincidence — the old 30-bit
+ *  `Math.random` base collided with any live session about as often as it pleased, and
+ *  a collision used to REPLACE (kill) the other page's shell. The degenerate
+ *  environment's `Math.random` stand-in keeps the shape where `crypto` is absent. */
+function drawIdBase(): number {
+	const words = new Uint16Array(2);
+	if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+		crypto.getRandomValues(words);
+	} else {
+		words[0] = Math.floor(Math.random() * 0x1_0000);
+		words[1] = Math.floor(Math.random() * 0x1_0000);
+	}
+	return ((words[0]! << 16) | words[1]!) >>> 1;
+}
+
+/** The instance's live session ids — the same `pty_list` the session sync mirrors. An
+ *  unserved list (the dev harness's plain-browser mock answers unscripted commands with
+ *  null) is an empty set: the backend's live-replacement refusal remains the guard. */
+async function liveSessionIds(): Promise<Set<number>> {
+	try {
+		const list = await ptyList();
+		return new Set((list ?? []).map((info) => info.id));
+	} catch {
+		return new Set();
+	}
+}
+
 export class TerminalView {
 	readonly element: HTMLElement;
 	readonly actions: HTMLElement;
@@ -83,8 +112,10 @@ export class TerminalView {
 	private active: Session | null = null;
 	private readonly resizeTimers = new Map<number, number>();
 	/** Unique across page reloads: the backend keys its sessions by this, and a reload must
-	 *  not replace (and so close) the previous page's shells under the same numbers. */
-	private nextId = Math.floor(Math.random() * 0x3fff_ffff);
+	 *  not replace (and so close) the previous page's shells under the same numbers. The
+	 *  base is a crypto draw (`drawIdBase`) and every spawn re-checks the live list
+	 *  (`nextFreeId`), so two pages never meet on one number. */
+	private nextId = drawIdBase();
 	private visible = false;
 	/** One sync at a time; events landing mid-sync queue one re-run (a burst of
 	 *  sessions-changed must not adopt the same terminal twice). */
@@ -189,12 +220,14 @@ export class TerminalView {
 		return this.kill();
 	}
 
-	/** Type a command into the active shell (the graph's interactive rebase / difftool). */
-	async run(command: string): Promise<void> {
+	/** Type a command into the active shell (the graph's interactive rebase / difftool;
+	 *  an extension's `sendText` too). `pressEnter === false` writes the text alone —
+	 *  VS Code's `addNewLine: false`, text without the Enter. */
+	async run(command: string, pressEnter = true): Promise<void> {
 		if (!this.active || this.active.exited) await this.create();
 		const session = this.active;
 		if (!session || session.exited) return;
-		await ptyWrite(session.id, command + '\r');
+		await ptyWrite(session.id, pressEnter ? command + '\r' : command);
 		session.term.focus();
 	}
 
@@ -441,7 +474,7 @@ export class TerminalView {
 	 *  new-terminal behavior. */
 	async create(cwd?: string): Promise<void> {
 		const { term, fit, search, links, element } = await this.makeTerm();
-		const id = this.nextId++;
+		const id = await this.nextFreeId();
 		const row = el('div', 'row');
 		const session: Session = { id, name: 'shell', term, fit, search, links, element, row, exited: false, unlisten: [], outputUnlisten: null, attached: false };
 		this.sessions.push(session);
@@ -475,6 +508,17 @@ export class TerminalView {
 		this.wireShared(session);
 		this.renderList();
 		term.focus();
+	}
+
+	/** The next session id of this page: the random base stepped past every id the
+	 *  instance's live list holds (`pickSessionId`), so a spawn never asks the backend
+	 *  for a number a running shell — this page's own, another window's, an adopted
+	 *  one — already owns. The backend refuses a live replacement regardless; the check
+	 *  keeps that refusal unobservable. */
+	private async nextFreeId(): Promise<number> {
+		const id = pickSessionId(this.nextId, await liveSessionIds());
+		this.nextId = id + 1;
+		return id;
 	}
 
 	/** Adopt a terminal the instance already runs (§8.6 #5): the PC's shell, its 64 KB
@@ -516,18 +560,31 @@ export class TerminalView {
 
 	/** Take a session's output subscription. `catchUp` (a return after the subscription was
 	 *  actually dropped) repaints from the backend's 64 KB tail first — the buffer still
-	 *  holds the older half of it, and appending would duplicate every line. */
+	 *  holds the older half of it, and appending would duplicate every line. The
+	 *  subscription goes up BEFORE the tail is fetched, holding what arrives while the
+	 *  snapshot is in flight: the old order (tail, then listen) lost every byte that
+	 *  crossed the gap between the snapshot and the subscription. */
 	private async subscribeOutput(session: Session, catchUp: boolean): Promise<void> {
 		if (session.outputUnlisten || session.exited) return;
-		if (catchUp) {
-			session.term.reset();
-			try {
-				session.term.write(await ptyTail(session.id));
-			} catch {
-				/* the session died while away: the exit listener owns that */
-			}
+		if (!catchUp) {
+			session.outputUnlisten = await listen<string>(`studio://pty-output-${session.id}`, (event) => session.term.write(event.payload));
+			return;
 		}
-		session.outputUnlisten = await listen<string>(`studio://pty-output-${session.id}`, (event) => session.term.write(event.payload));
+		const held: string[] = [];
+		let holding = true;
+		const unlisten = await listen<string>(`studio://pty-output-${session.id}`, (event) => {
+			if (holding) held.push(event.payload);
+			else session.term.write(event.payload);
+		});
+		session.outputUnlisten = unlisten;
+		session.term.reset();
+		try {
+			session.term.write(await ptyTail(session.id));
+		} catch {
+			/* the session died while away: the exit listener owns that */
+		}
+		holding = false;
+		for (const chunk of held) session.term.write(chunk);
 	}
 
 	private dropOutput(session: Session): void {

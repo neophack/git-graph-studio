@@ -191,7 +191,15 @@ export interface WebviewContextMenuReport {
 	editable?: unknown;
 }
 
-export type WebviewViewRecord = WebviewDelivery;
+/** One sidebar webview view (`registerWebviewViewProvider`): the delivery gate, plus the
+ *  runtime chrome an extension set (`webviewView.title` / `.description`) — the section
+ *  header renders it live, over the manifest's name. */
+export interface WebviewViewRecord extends WebviewDelivery {
+	/** The runtime title; undefined keeps the manifest's name. */
+	title?: string;
+	/** The runtime description; undefined clears it. */
+	description?: string;
+}
 
 /** The owner id the extension host's own Output channel logs under. */
 export const EXT_HOST_LOG_OWNER = 'ggs.extension-host';

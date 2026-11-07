@@ -141,9 +141,11 @@ export const hostRequestsMethods: ThisType<ExtensionHost> = {
 				return Promise.resolve(undefined);
 			}
 			case 'terminal.send': {
-				// `window.createTerminal().sendText(text)`: the text runs in the integrated
-				// terminal (VS Code's semantics — the panel comes up with the run).
-				this.onRunInTerminal?.(String(args[0] ?? ''));
+				// `window.createTerminal().sendText(text, addNewLine)`: the text runs in the
+				// integrated terminal (VS Code's semantics — the panel comes up with the
+				// run); `addNewLine: false` writes the text without pressing Enter.
+				const pressEnter = args[1] !== false;
+				this.onRunInTerminal?.(String(args[0] ?? ''), pressEnter);
 				return Promise.resolve(undefined);
 			}
 			case 'terminal.show': {
@@ -176,7 +178,12 @@ export const hostRequestsMethods: ThisType<ExtensionHost> = {
 			}
 			case 'state.update': {
 				const [scope, key, value] = args as ['global' | 'workspace', string, unknown];
-				state.saveExtMemento(extId, scope, key, value);
+				// The wire is JSON: a memento delete arrives as null and cannot be told from
+				// a stored null — the host treats null as the delete it was sent as, or the
+				// shim's `update(key, undefined)` would leave the key in `keys()` forever.
+				// The limitation lives on this seam (VS Code stores nulls; this wire cannot
+				// carry one).
+				state.saveExtMemento(extId, scope, key, value === null ? undefined : value);
 				return Promise.resolve(undefined);
 			}
 			case 'host.env':
@@ -239,7 +246,15 @@ export const hostRequestsMethods: ThisType<ExtensionHost> = {
 			}
 			case 'progress.begin': {
 				const id = this.nextProgressId++;
-				this.progress.set(id, { toast: progressToast(String(args[0] ?? extId)), extId });
+				// A cancellable task's toast carries the VS Code-shaped Cancel affordance;
+				// the click crosses back as a progressCancelled push (the shim resolves
+				// the token it handed the task) and the toast goes away — the progress.end
+				// that follows only settles this record.
+				const cancellable = args[1] === true;
+				const toast = progressToast(String(args[0] ?? extId), cancellable
+					? () => handle.send?.({ type: '__studioExtEvent', event: 'progressCancelled', progressId: id })
+					: undefined);
+				this.progress.set(id, { toast, extId });
 				return Promise.resolve(id);
 			}
 			case 'progress.report': {
@@ -561,18 +576,22 @@ export const hostRequestsMethods: ThisType<ExtensionHost> = {
 				const view = this.webviews.get(this.webviewKey(extId, panelId));
 				if (!view) {
 					extLog('warn', 'host', `webview ${extId}#${panelId}: postMessage with no panel record — dropped`);
-					return Promise.resolve(undefined);
+					// VS Code's verdict: false — the panel is gone, the message was not
+					// delivered, and an extension's retry logic (claude-code's page
+					// handshake) reads this to resend.
+					return Promise.resolve(false);
 				}
 				// A synthesized remote-control request's answer is consumed before it
-				// reaches the page (the page never made that request).
+				// reaches the page (the page never made that request). The verdict stays
+				// true: the panel is live and the host took the message deliberately.
 				const inner = claudePageMessage(message);
-				if (this.consumeClaudeRcResponse(extId, panelId, inner)) return Promise.resolve(undefined);
+				if (this.consumeClaudeRcResponse(extId, panelId, inner)) return Promise.resolve(true);
 				// The conversation tap copies synchronously before the delivery; its own
 				// failures can never touch the message it copies (plan §2.2). It copies the
 				// protocol message, not Claude Code's page wrapper around it.
 				this.noteClaudeTap(extId, panelId, 'out', inner);
 				this.gateWebviewMessage(view, message, `${extId}#${panelId}`);
-				return Promise.resolve(undefined);
+				return Promise.resolve(true);
 			}
 			case 'tabs.close': {
 				// `window.tabGroups.close(tabs)`: the tabs by id, through the editor area's own
@@ -586,16 +605,21 @@ export const hostRequestsMethods: ThisType<ExtensionHost> = {
 				return Promise.resolve(closed);
 			}
 			case 'webview.reveal': {
-				const panelId = args[0] as number;
+				// VS Code's contract: `reveal(viewColumn?, preserveFocus?)`. The column
+				// places the panel through the same EditorPlacement a create's showOptions
+				// takes; preserveFocus reveals without stealing the current editor's focus.
+				const [panelId, column, preserveFocus] = args as [number, unknown, boolean | undefined];
+				const placement = ExtensionHost.placementOf(column);
 				const view = this.webviews.get(this.webviewKey(extId, panelId));
 				if (view) {
 					// The hook answers whether a tab held the id: a panel record without its
 					// tab (a tab close whose disposer never reached this record, a teardown
 					// race) must not spend the reveal silently — the panel lives, so the
-					// reveal re-opens its tab from the record it kept.
-					if (this.onRevealWebviewTab?.(this.webviewTabId(extId, panelId)) === false) {
+					// reveal re-opens its tab from the record it kept, at the requested
+					// placement; preserveFocus keeps the current editor focused.
+					if (this.onRevealWebviewTab?.(this.webviewTabId(extId, panelId), placement, preserveFocus === true) === false) {
 						extLog('info', 'host', `webview ${extId}#${panelId}: reveal found no tab — re-opening the panel's tab`);
-						this.onOpenWebview?.(panelId, view.title, extId, undefined, true);
+						this.onOpenWebview?.(panelId, view.title, extId, placement, preserveFocus !== true);
 					}
 				} else {
 					// The extension is revealing a panel this host has no record of: the
@@ -628,21 +652,38 @@ export const hostRequestsMethods: ThisType<ExtensionHost> = {
 				this.setWebviewViewHtml(extId, args[0] as string, args[1] as string);
 				return Promise.resolve(undefined);
 			}
-			case 'webviewView.setTitle':
-			case 'webviewView.setDescription':
-				// The sidebar sections carry their manifest names; a runtime title or
-				// description change is accepted and noted (no re-render surface yet).
-				extLogOnce(`${method}:${extId}`, 'info', extId, `${method} is accepted but the sidebar keeps the manifest's name`);
+			case 'webviewView.setTitle': {
+				// VS Code's `WebviewView.title`: a runtime title overrides the section
+				// header's manifest name, rendered live; '' / undefined reverts to the
+				// manifest's. The value waits in the record when the section has not
+				// mounted yet — the mount applies it.
+				const [viewId, title] = args as [string, string | undefined];
+				const record = this.webviewViews.get(viewId) ?? this.ensureWebviewViewRecord(extId, viewId);
+				record.title = typeof title === 'string' && title !== '' ? title : undefined;
+				this.applyWebviewViewChrome(viewId);
 				return Promise.resolve(undefined);
+			}
+			case 'webviewView.setDescription': {
+				// The same surface as the title, one header over: the description renders
+				// dimmed beside it, exactly the tree views' header shape.
+				const [viewId, description] = args as [string, string | undefined];
+				const record = this.webviewViews.get(viewId) ?? this.ensureWebviewViewRecord(extId, viewId);
+				record.description = typeof description === 'string' && description !== '' ? description : undefined;
+				this.applyWebviewViewChrome(viewId);
+				return Promise.resolve(undefined);
+			}
 			case 'webviewView.postMessage': {
 				const [viewId, message] = args as [string, unknown];
 				const record = this.webviewViews.get(viewId);
 				if (!record) {
 					extLog('warn', 'host', `webview view ${viewId}: postMessage with no view record — dropped`);
-					return Promise.resolve(undefined);
+					// The same verdict a panel's postMessage gives: false — the view is
+					// gone (uninstalled, its provider disposed), the message was not
+					// delivered.
+					return Promise.resolve(false);
 				}
 				this.gateWebviewMessage(record, message, `view:${record.extId}/${viewId}`);
-				return Promise.resolve(undefined);
+				return Promise.resolve(true);
 			}
 			case 'webviewView.show': {
 				this.onRevealWebviewView?.(args[0] as string);
@@ -657,10 +698,13 @@ export const hostRequestsMethods: ThisType<ExtensionHost> = {
 				return Promise.resolve(undefined);
 			}
 			case 'dialog.open': {
-				const options = args[0] as { canSelectMany?: boolean; defaultUri?: { fsPath?: string }; filters?: Record<string, string[]>; title?: string };
+				// VS Code's `showOpenDialog` options, including `canSelectFolders` — a folder
+				// picker needs the dialog opened in directory mode, or the extension can
+				// only ever offer files.
+				const options = args[0] as { canSelectMany?: boolean; canSelectFolders?: boolean; defaultUri?: { fsPath?: string }; filters?: Record<string, string[]>; title?: string };
 				// multiple=false yields one path, not an array — normalize both to the array
 				// the shim's `Uri[] | undefined` contract carries.
-				const picked = await openDialog({ title: options.title, defaultPath: options.defaultUri?.fsPath, multiple: options.canSelectMany ?? false, filters: dialogFilters(options.filters) });
+				const picked = await openDialog({ title: options.title, defaultPath: options.defaultUri?.fsPath, multiple: options.canSelectMany ?? false, directory: options.canSelectFolders ?? false, filters: dialogFilters(options.filters) });
 				const paths = picked === null ? [] : Array.isArray(picked) ? picked : [picked];
 				return paths;
 			}

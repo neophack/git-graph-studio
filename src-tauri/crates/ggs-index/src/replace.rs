@@ -3,7 +3,8 @@
 //! terminator (a kept `\r`, the `\n`) survives untouched.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use regex::bytes::Regex;
 use serde::Serialize;
@@ -18,6 +19,33 @@ pub struct ReplaceOutcome {
     pub files: usize,
     pub replacements: usize,
     pub failed: usize,
+}
+
+/// Distinguishes the concurrent writers' temp files (the rayon workers rewrite files in
+/// parallel; two replaces can also run against one tree at once).
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Write `bytes` to `path` through a temp file in the file's own directory, then rename over
+/// the target — a crash mid-write can never leave a half-written source file (a plain
+/// `fs::write` truncates in place first). `fs::rename` replaces an existing destination on
+/// every supported platform.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let temp = PathBuf::from(dir).join(format!(
+        ".{name}.{}.ggs-replace.tmp",
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = fs::write(&temp, bytes).and_then(|()| fs::rename(&temp, path));
+    if written.is_err() {
+        // The half-written temp is never left behind to become a searched file.
+        let _ = fs::remove_file(&temp);
+    }
+    written
 }
 
 /// One per-result replace's answer: the replaced line's remaining matches, recomputed —
@@ -35,7 +63,10 @@ pub struct ReplaceOneOutcome {
 /// cased characters at all (CJK, digits, symbols) and a mixed-case match leave the
 /// replacement exactly as typed — there is no shape worth copying.
 pub fn apply_preserved_case(matched: &str, replacement: &str) -> String {
-    if !matched.chars().any(|c| c.is_uppercase() || c.is_lowercase()) {
+    if !matched
+        .chars()
+        .any(|c| c.is_uppercase() || c.is_lowercase())
+    {
         return replacement.to_owned();
     }
     if matched.chars().all(|c| !c.is_uppercase()) {
@@ -45,9 +76,7 @@ pub fn apply_preserved_case(matched: &str, replacement: &str) -> String {
         return replacement.to_uppercase();
     }
     let mut chars = matched.chars();
-    let title = chars
-        .next()
-        .is_some_and(|first| first.is_uppercase())
+    let title = chars.next().is_some_and(|first| first.is_uppercase())
         && chars.all(|rest| !rest.is_uppercase());
     if title {
         let lowered = replacement.to_lowercase();
@@ -66,7 +95,12 @@ pub fn apply_preserved_case(matched: &str, replacement: &str) -> String {
 /// pattern containing a newline never matches, and each line's terminator (a kept `\r`, the
 /// `\n`) survives untouched. With `preserve_case`, every replacement's casing derives from
 /// its own match.
-fn replace_per_line(bytes: &[u8], matcher: &Regex, replacement: &str, preserve_case: bool) -> (Vec<u8>, usize) {
+fn replace_per_line(
+    bytes: &[u8],
+    matcher: &Regex,
+    replacement: &str,
+    preserve_case: bool,
+) -> (Vec<u8>, usize) {
     let mut out = Vec::with_capacity(bytes.len());
     let mut count = 0usize;
     let mut start = 0usize;
@@ -179,7 +213,8 @@ pub fn replace_one_in_file(
                 if hit_column != column {
                     continue;
                 }
-                let matched = String::from_utf8_lossy(&line[whole.start()..whole.end()]).into_owned();
+                let matched =
+                    String::from_utf8_lossy(&line[whole.start()..whole.end()]).into_owned();
                 let mut expanded = Vec::new();
                 caps.expand(replacement.as_bytes(), &mut expanded);
                 let expanded = String::from_utf8_lossy(&expanded).into_owned();
@@ -198,7 +233,7 @@ pub fn replace_one_in_file(
                 bytes.extend_from_slice(&text[..start]);
                 bytes.extend_from_slice(&new_line);
                 bytes.extend_from_slice(&text[line_end..]);
-                fs::write(path, encode_searchable(bytes, encoding))
+                write_atomic(path, &encode_searchable(bytes, encoding))
                     .map_err(|e| format!("{}: {e}", path.display()))?;
                 return Ok(ReplaceOneOutcome { matches: remaining });
             }
@@ -248,7 +283,7 @@ pub fn replace_root(
             // Report a failed write instead of discarding the count, which would make the
             // replace look like it never matched anything.
             let failed =
-                count > 0 && fs::write(&path, encode_searchable(replaced, encoding)).is_err();
+                count > 0 && write_atomic(&path, &encode_searchable(replaced, encoding)).is_err();
             Some((count, failed))
         })
         .collect();
@@ -265,6 +300,55 @@ pub fn replace_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replace_writes_atomically_and_leaves_no_temp_files_behind() {
+        // The write goes through a same-directory temp + rename: the content lands whole,
+        // and neither a successful pass nor a failed one leaves a `.tmp` sibling the next
+        // search would pick up (the dot prefix would only hide it from the walk — the
+        // directory must come out clean either way).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x y\n").unwrap();
+        let root = dir.path().display().to_string();
+        let outcome = replace_root(
+            crate::scan::filter_paths(ggs_fs::walk_files(&root), "", ""),
+            &root,
+            "x",
+            "w",
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(outcome.failed, 0);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "w y\n"
+        );
+        let entries: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, ["a.txt"]);
+
+        // The one-match path is atomic the same way.
+        let file = dir.path().join("b.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        replace_one_in_file(&file, 1, 1, "one", "two", false, false, false, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "two\n");
+        let entries: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries
+                .iter()
+                .all(|name| name == "a.txt" || name == "b.txt"),
+            "{entries:?}"
+        );
+    }
 
     #[test]
     fn replace_rewrites_files_and_counts() {
@@ -341,9 +425,17 @@ mod tests {
         let file = dir.path().join("a.txt");
         std::fs::write(&file, "foo one\nbar\nfoo two\n").unwrap();
         let root = dir.path().display().to_string();
-        let outcome =
-            replace_root(ggs_fs::walk_files(&root), &root, "^foo", "X", true, false, false, false)
-                .unwrap();
+        let outcome = replace_root(
+            ggs_fs::walk_files(&root),
+            &root,
+            "^foo",
+            "X",
+            true,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(outcome.replacements, 2);
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
@@ -380,9 +472,17 @@ mod tests {
         let file = dir.path().join("a.txt");
         std::fs::write(&file, "hello\n").unwrap();
         let root = dir.path().display().to_string();
-        let outcome =
-            replace_root(ggs_fs::walk_files(&root), &root, "", "x", false, false, false, false)
-                .unwrap();
+        let outcome = replace_root(
+            ggs_fs::walk_files(&root),
+            &root,
+            "",
+            "x",
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             (outcome.files, outcome.replacements, outcome.failed),
             (0, 0, 0)
@@ -400,9 +500,17 @@ mod tests {
         let file = dir.path().join("u.txt");
         std::fs::write(&file, &bytes).unwrap();
         let root = dir.path().display().to_string();
-        let outcome =
-            replace_root(ggs_fs::walk_files(&root), &root, "bar", "qux", false, false, false, false)
-                .unwrap();
+        let outcome = replace_root(
+            ggs_fs::walk_files(&root),
+            &root,
+            "bar",
+            "qux",
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(outcome.replacements, 1);
         // A replace writes the file back as UTF-16, not as re-encoded UTF-8.
         let written = std::fs::read(&file).unwrap();
@@ -459,8 +567,8 @@ mod tests {
         let file = dir.path().join("a.txt");
         std::fs::write(&file, "one two one\nthree one\n").unwrap();
         // The line's second `one` (column 9): only that occurrence goes.
-        let outcome = replace_one_in_file(&file, 1, 9, "one", "X", false, false, false, false)
-            .unwrap();
+        let outcome =
+            replace_one_in_file(&file, 1, 9, "one", "X", false, false, false, false).unwrap();
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
             "one two X\nthree one\n"
@@ -471,14 +579,17 @@ mod tests {
         assert_eq!(outcome.matches[0].text, "one two X");
 
         // A second replace on the same line clears it entirely: no matches left.
-        let outcome = replace_one_in_file(&file, 1, 1, "one", "Y", false, false, false, false)
-            .unwrap();
+        let outcome =
+            replace_one_in_file(&file, 1, 1, "one", "Y", false, false, false, false).unwrap();
         assert!(outcome.matches.is_empty());
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "Y two X\nthree one\n");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "Y two X\nthree one\n"
+        );
 
         // The other line's occurrence still answers, at its own line.
-        let outcome = replace_one_in_file(&file, 2, 7, "one", "Z", false, false, false, false)
-            .unwrap();
+        let outcome =
+            replace_one_in_file(&file, 2, 7, "one", "Z", false, false, false, false).unwrap();
         assert!(outcome.matches.is_empty());
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
@@ -505,13 +616,14 @@ mod tests {
         // The match changed on disk since the search listed it: refused, never a wrong-place
         // rewrite; an empty query and a past-the-end line refuse the same way.
         std::fs::write(&file, "gamma\n").unwrap();
-        let err = replace_one_in_file(&file, 1, 7, "beta", "B", false, false, false, false)
-            .unwrap_err();
+        let err =
+            replace_one_in_file(&file, 1, 7, "beta", "B", false, false, false, false).unwrap_err();
         assert!(err.contains("no longer on disk"), "{err}");
-        let err = replace_one_in_file(&file, 9, 1, "gamma", "G", false, false, false, false)
-            .unwrap_err();
+        let err =
+            replace_one_in_file(&file, 9, 1, "gamma", "G", false, false, false, false).unwrap_err();
         assert!(err.contains("no longer on disk"), "{err}");
-        let err = replace_one_in_file(&file, 1, 1, "", "G", false, false, false, false).unwrap_err();
+        let err =
+            replace_one_in_file(&file, 1, 1, "", "G", false, false, false, false).unwrap_err();
         assert!(err.contains("empty query"), "{err}");
     }
 
@@ -521,8 +633,18 @@ mod tests {
         let file = dir.path().join("a.txt");
         std::fs::write(&file, "value: Foo\n").unwrap();
         // The regex match STARTS at column 1 (`value: …` is the whole match).
-        let outcome = replace_one_in_file(&file, 1, 1, r"value: (\w+)", "<$1>", true, false, false, false)
-            .unwrap();
+        let outcome = replace_one_in_file(
+            &file,
+            1,
+            1,
+            r"value: (\w+)",
+            "<$1>",
+            true,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "<Foo>\n");
         assert!(outcome.matches.is_empty());
 
@@ -530,9 +652,15 @@ mod tests {
         // literal `foo` sits at column 8.
         std::fs::write(&file, "value: FOO\nvalue: foo\n").unwrap();
         replace_one_in_file(&file, 1, 8, "foo", "bar", false, false, false, true).unwrap();
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "value: BAR\nvalue: foo\n");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "value: BAR\nvalue: foo\n"
+        );
         replace_one_in_file(&file, 2, 8, "foo", "bar", false, false, false, true).unwrap();
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "value: BAR\nvalue: bar\n");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "value: BAR\nvalue: bar\n"
+        );
     }
 
     #[test]

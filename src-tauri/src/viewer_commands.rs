@@ -3,9 +3,9 @@
 //! highlight checkpoints, the indexed viewer's windows all live in the ggs-text crate.
 //! This is the only viewer file that may name tauri.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::fs::File;
 use std::io::Read;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use ggs_text::viewer::doc;
@@ -44,13 +44,13 @@ pub async fn viewer_open(
     let handle = state.insert_doc(doc_id, doc, None);
     if let Some((from, total)) = tail {
         ggs_text::viewer::spawn_tail(
-        &handle,
-        Some(Arc::new(crate::events::TauriEvents(app)) as Arc<dyn ggs_base::sink::EventSink>),
-        doc_id,
-        path,
-        from,
-        total,
-    );
+            &handle,
+            Some(Arc::new(crate::events::TauriEvents(app)) as Arc<dyn ggs_base::sink::EventSink>),
+            doc_id,
+            path,
+            from,
+            total,
+        );
     }
     Ok(result)
 }
@@ -124,10 +124,12 @@ pub async fn viewer_highlight(
 }
 
 /// Apply one replacement to the document's rope. Positions are 0-based line + code-point
-/// columns (the frontend converts its UTF-16 offsets before sending).
+/// columns (the frontend converts its UTF-16 offsets before sending). Off the main thread
+/// like `viewer_find`: the whole-rope scan a find runs holds the document lock, and a sync
+/// edit must queue on the blocking pool for it — never stall the window's UI waiting.
 #[tauri::command]
-pub fn viewer_edit(
-    state: tauri::State<ggs_text::viewer::ViewerState>,
+pub async fn viewer_edit(
+    state: tauri::State<'_, ggs_text::viewer::ViewerState>,
     doc_id: u64,
     start_line: usize,
     start_col: usize,
@@ -136,20 +138,30 @@ pub fn viewer_edit(
     text: String,
 ) -> Result<EditResult, String> {
     state.stop_warming(doc_id);
-    edit_impl(
-        &state, doc_id, start_line, start_col, end_line, end_col, &text,
-    )
+    let handle = state
+        .doc_handle(doc_id)
+        .ok_or_else(|| format!("No open document {doc_id}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        edit_handle(&handle, start_line, start_col, end_line, end_col, &text)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Write a viewer document back to disk, reporting progress over `on_progress` as the rope
 /// streams out — a multi-hundred-megabyte Ctrl+S takes seconds, and the status bar's bar is
 /// how the user knows it is moving. The encode and write run on the blocking pool — the UI
 /// must not freeze the way it did when the whole document crossed the IPC as one JSON string.
+/// `encoding` / `eol` are the Save-with-Encoding / EOL pick the tab passes: they override
+/// the document's own for this write (resolved in the crate's `save_plan`, adopted by its
+/// `save_adopt`).
 #[tauri::command]
 pub async fn viewer_save(
     app: tauri::AppHandle,
     state: tauri::State<'_, ggs_text::viewer::ViewerState>,
     doc_id: u64,
+    encoding: Option<String>,
+    eol: Option<String>,
     on_progress: tauri::ipc::Channel<SaveProgress>,
 ) -> Result<(), String> {
     // Saving a document whose tail has not landed would write the head alone — the file
@@ -160,37 +172,25 @@ pub async fn viewer_save(
     tauri::async_runtime::spawn_blocking(move || wait_tail(&wait))
         .await
         .map_err(|e| e.to_string())??;
-    // The rope clones cheap (ropey chunks share under an Arc — the `viewer_symbols` pattern),
-    // so the blocking writer below never queues the document lock behind a whole-file pass.
-    // The second clone is the saved-state baseline: exactly the text this write puts on
-    // disk, so an edit landing while the write runs still reads dirty against it.
-    let (path, encoding, eol, rope, saved_rope) = state.with_doc(doc_id, |doc| {
-        (
-            doc.path.clone(),
-            doc.encoding.clone(),
-            doc.eol.clone(),
-            doc.rope.clone(),
-            doc.rope.clone(),
-        )
-    })?;
+    let (path, encoding, eol, rope, saved_rope) = save_plan(&state, doc_id, encoding, eol)?;
+    // The choice survives the blocking pass for the adoption below.
+    let write_encoding = encoding.clone();
+    let write_eol = eol.clone();
     let stamp = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let progress = move |written: u64, total: u64| {
             let _ = on_progress.send(SaveProgress { written, total });
         };
-        write_doc(&path, &rope, &encoding, &eol, &progress)?;
+        write_doc(&path, &rope, &write_encoding, &write_eol, &progress)?;
         // The stamp the file now carries, so the save's own watcher echo reads as "unchanged".
         Ok(fingerprint(&path))
     })
     .await
     .map_err(|e| e.to_string())??;
-    let _ = state.with_doc(doc_id, |doc| {
-        doc.fingerprint = stamp.clone();
-        doc.saved_rope = saved_rope;
-    });
+    save_adopt(&state, doc_id, encoding, eol, saved_rope, stamp);
     // Match write_file: a saved (possibly new) file must show up in Quick Open and search.
     use tauri::Manager;
     app.state::<std::sync::Arc<ggs_fs::FileListCache>>()
-            .invalidate();
+        .invalidate();
     Ok(())
 }
 
@@ -209,6 +209,12 @@ pub async fn viewer_reload(
         return Ok(ReloadResult {
             changed: false,
             line_count: 0,
+            // No swap: the generation the document currently serves, so the caller's
+            // baseline stays truthful either way.
+            gen: state
+                .doc_handle(doc_id)
+                .map(|h| h.gen.load(Ordering::Relaxed))
+                .unwrap_or(0),
         });
     }
     let load = path.display().to_string();
@@ -225,41 +231,26 @@ pub async fn viewer_reload(
     };
     let line_count = doc.line_count();
     // The tab may have closed while the file was being read: a closed id must not come
-    // back as a document nobody will ever close again.
-    let mut docs = state
-        .docs
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match docs.get_mut(&doc_id) {
-        Some(slot) => {
-            // The reloaded document replaces the old one's checkpoints wholesale; the old
-            // handle's warmer (it holds its own Arc) must not parse on against them.
-            slot.warm_gen.fetch_add(1, Ordering::Relaxed);
-            *slot = Arc::new(DocHandle {
-                doc: Mutex::new(doc),
-                find_gen: AtomicU64::new(0),
-                lines_gen: AtomicU64::new(0),
-                warm_gen: AtomicU64::new(0),
-                warmer_running: AtomicBool::new(false),
-                tail: Mutex::new(None),
-            });
-            if let Some((from, total)) = tail {
-                ggs_text::viewer::spawn_tail(
-                    slot,
-                    Some(Arc::new(crate::events::TauriEvents(app))
-                        as Arc<dyn ggs_base::sink::EventSink>),
-                    doc_id,
-                    path.display().to_string(),
-                    from,
-                    total,
-                );
-            }
-        }
-        None => return Err(format!("No open document {doc_id}")),
+    // back as a document nobody will ever close again. The swap keeps the id and advances
+    // the reload generation (`ViewerState::replace_doc`), so any window read that cloned
+    // the old handle names a generation the frontend has since been told past — its
+    // response is dropped instead of written (`docEditView`'s gen baseline).
+    let (generation, handle) = state.replace_doc(doc_id, doc, None)?;
+    if let Some((from, total)) = tail {
+        ggs_text::viewer::spawn_tail(
+            &handle,
+            Some(Arc::new(crate::events::TauriEvents(app))
+                as Arc<dyn ggs_base::sink::EventSink>),
+            doc_id,
+            path.display().to_string(),
+            from,
+            total,
+        );
     }
     Ok(ReloadResult {
         changed: true,
         line_count,
+        gen: generation,
     })
 }
 
@@ -278,13 +269,18 @@ pub async fn viewer_text(
     let doc = state
         .doc_handle(doc_id)
         .ok_or_else(|| format!("No open document {doc_id}"))?;
+    // The reload generation the window serves against, read with the clone: however long
+    // the read runs, the response names exactly what it served — and a `viewer_reload`
+    // swapping the document meanwhile (same id, next generation) is the frontend's to
+    // drop, so a predecessor's rows are never written into the editor.
+    let generation = doc.gen.load(Ordering::Relaxed);
     tauri::async_runtime::spawn_blocking(move || {
         ensure_lines(&doc, start)?;
         let mut doc = doc
             .doc
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(text_of(&mut doc, start, end))
+        Ok(text_of(&mut doc, start, end, generation))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -306,9 +302,12 @@ pub async fn viewer_find(
         .doc_handle(doc_id)
         .ok_or_else(|| format!("No open document {doc_id}"))?;
     // The bump is what cancels an in-flight scan, and it must not need the lock that scan
-    // still holds.
+    // still holds. `served` is the reload generation the scan runs against: a reload (or a
+    // close) during the walk — the tail wait alone can hold it for seconds — makes the
+    // matches a predecessor's, and the response is refused below.
     let generation = handle.find_gen.fetch_add(1, Ordering::Relaxed) + 1;
-    tauri::async_runtime::spawn_blocking(move || {
+    let served = handle.gen.load(Ordering::Relaxed);
+    let result = tauri::async_runtime::spawn_blocking(move || {
         // A whole-document scan must see the whole document: wait out a still-building tail.
         wait_tail(&handle)?;
         let doc = handle
@@ -335,7 +334,17 @@ pub async fn viewer_find(
         })
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    // The scan is stale when the slot no longer holds the handle it served: refuse with
+    // the supersede marker the find widget already drops silently (a newer find or a
+    // refresh rescans the current document).
+    let current = state
+        .doc_handle(doc_id)
+        .map(|h| h.gen.load(Ordering::Relaxed));
+    if current != Some(served) {
+        return Err("superseded".to_owned());
+    }
+    result
 }
 
 /// Replace the next `max` matches of a query from a 0-based line/column position — `1` is
@@ -400,11 +409,9 @@ pub async fn viewer_backup(
         (doc.path.display().to_string(), doc.full_text())
     })?;
     let dir = ggs_base::paths::backups_home()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        ggs_text::backup::write_into(&dir, &path, text)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || ggs_text::backup::write_into(&dir, &path, text))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// The document's outline, computed on demand (the open path no longer pays for it). The
@@ -436,38 +443,63 @@ pub async fn viewer_symbols(
         .map_err(|e| e.to_string())
 }
 
-/// Undo the most recent edit. `None` when there is nothing to undo.
+/// Undo the most recent edit. `None` when there is nothing to undo. Off the main thread
+/// like `viewer_edit`: the document lock it takes must queue behind a running find on the
+/// blocking pool, not on the window's UI.
 #[tauri::command]
-pub fn viewer_undo(
-    state: tauri::State<ggs_text::viewer::ViewerState>,
+pub async fn viewer_undo(
+    state: tauri::State<'_, ggs_text::viewer::ViewerState>,
     doc_id: u64,
 ) -> Result<Option<UndoResult>, String> {
     state.stop_warming(doc_id);
-    state.with_doc(doc_id, |doc| {
-        let (first_line, line_count) = doc.undo()?;
-        Some(UndoResult {
-            first_line,
-            line_count,
-            clean: doc.at_saved_state(),
-        })
+    let handle = state
+        .doc_handle(doc_id)
+        .ok_or_else(|| format!("No open document {doc_id}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut doc = handle
+            .doc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match doc.undo() {
+            Some((first_line, line_count)) => Ok(Some(UndoResult {
+                first_line,
+                line_count,
+                clean: doc.at_saved_state(),
+            })),
+            None => Ok(None),
+        }
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-/// Redo the most recently undone edit. `None` when there is nothing to redo.
+/// Redo the most recently undone edit. `None` when there is nothing to redo. Async like
+/// `viewer_undo`, for the same lock-vs-find reason.
 #[tauri::command]
-pub fn viewer_redo(
-    state: tauri::State<ggs_text::viewer::ViewerState>,
+pub async fn viewer_redo(
+    state: tauri::State<'_, ggs_text::viewer::ViewerState>,
     doc_id: u64,
 ) -> Result<Option<UndoResult>, String> {
     state.stop_warming(doc_id);
-    state.with_doc(doc_id, |doc| {
-        let (first_line, line_count) = doc.redo()?;
-        Some(UndoResult {
-            first_line,
-            line_count,
-            clean: doc.at_saved_state(),
-        })
+    let handle = state
+        .doc_handle(doc_id)
+        .ok_or_else(|| format!("No open document {doc_id}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut doc = handle
+            .doc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match doc.redo() {
+            Some((first_line, line_count)) => Ok(Some(UndoResult {
+                first_line,
+                line_count,
+                clean: doc.at_saved_state(),
+            })),
+            None => Ok(None),
+        }
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Drop a document (its tab closed). The warmer holds its own `Arc` to the handle, so the
@@ -622,6 +654,80 @@ pub async fn indexed_lines(
     .map_err(|e| e.to_string())?
 }
 
+/// The streamed line scan behind `indexed_find`: chunks read off the disk, complete lines
+/// fed to the same matcher the rope viewer uses. One line is one number: a monster line
+/// (past `LINE_CAP`, dropped rather than buffered whole) takes its number when its
+/// trailing newline arrives, so every later match's line stays true to LineIndex's count.
+/// Returns the matches (0-based lines, code-point columns) and whether the cap cut the
+/// list short. `still_current` is the supersede check between chunks.
+fn scan_indexed_matches(
+    path: &std::path::Path,
+    matcher: &Matcher,
+    whole_word: bool,
+    still_current: impl Fn() -> bool,
+) -> Result<(Vec<MatchLoc>, bool), String> {
+    const CHUNK: usize = 4 << 20;
+    const LINE_CAP: usize = 4 << 20;
+    let mut file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut matches: Vec<MatchLoc> = Vec::new();
+    let mut capped = false;
+    let mut carried: Vec<u8> = Vec::new();
+    let mut line_no = 0usize;
+    let mut chunk = vec![0u8; CHUNK];
+    loop {
+        let read = file
+            .read(&mut chunk)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        if !still_current() {
+            return Err("superseded".to_owned());
+        }
+        carried.extend_from_slice(&chunk[..read]);
+        let mut from = 0usize;
+        while let Some(hit) = memchr::memchr(b'\n', &carried[from..]) {
+            let line_end = from + hit;
+            let text = String::from_utf8_lossy(&carried[from..line_end]);
+            for (start, end) in matcher.matches_in(&text, whole_word) {
+                if matches.len() >= find::MAX_FIND_MATCHES {
+                    capped = true;
+                    break;
+                }
+                matches.push(MatchLoc {
+                    line: line_no,
+                    start_col: start,
+                    end_col: end,
+                });
+            }
+            line_no += 1;
+            from = line_end + 1;
+        }
+        carried.drain(..from);
+        if carried.len() > LINE_CAP {
+            // A monster line: drop the buffer, its matches are not worth the memory. The
+            // line's own number lands with its newline — counting it here too made one
+            // such line consume two numbers and drift every later match.
+            carried.clear();
+        }
+    }
+    if !carried.is_empty() {
+        let text = String::from_utf8_lossy(&carried);
+        for (start, end) in matcher.matches_in(&text, whole_word) {
+            if matches.len() >= find::MAX_FIND_MATCHES {
+                capped = true;
+                break;
+            }
+            matches.push(MatchLoc {
+                line: line_no,
+                start_col: start,
+                end_col: end,
+            });
+        }
+    }
+    Ok((matches, capped))
+}
+
 /// Find over the whole file by streaming it: chunks read off the disk, whole lines fed to
 /// the same matcher the rope viewer uses. A newer find on the same document supersedes the
 /// walk between chunks. A line past the cap is skipped rather than buffered whole.
@@ -646,64 +752,13 @@ pub async fn indexed_find(
                 regexp,
             },
         )?;
-        const CHUNK: usize = 4 << 20;
-        const LINE_CAP: usize = 4 << 20;
-        let mut file = File::open(&doc.path).map_err(|e| format!("{}: {e}", doc.path))?;
-        let mut matches: Vec<MatchLoc> = Vec::new();
-        let mut capped = false;
-        let mut carried: Vec<u8> = Vec::new();
-        let mut line_no = 0usize;
-        let mut chunk = vec![0u8; CHUNK];
-        loop {
-            let read = file
-                .read(&mut chunk)
-                .map_err(|e| format!("{}: {e}", doc.path))?;
-            if read == 0 {
-                break;
-            }
-            if doc.find_gen.load(Ordering::Relaxed) != generation {
-                return Err("superseded".to_owned());
-            }
-            carried.extend_from_slice(&chunk[..read]);
-            let mut from = 0usize;
-            while let Some(hit) = memchr::memchr(b'\n', &carried[from..]) {
-                let line_end = from + hit;
-                let text = String::from_utf8_lossy(&carried[from..line_end]);
-                for (start, end) in matcher.matches_in(&text, whole_word) {
-                    if matches.len() >= find::MAX_FIND_MATCHES {
-                        capped = true;
-                        break;
-                    }
-                    matches.push(MatchLoc {
-                        line: line_no,
-                        start_col: start,
-                        end_col: end,
-                    });
-                }
-                line_no += 1;
-                from = line_end + 1;
-            }
-            carried.drain(..from);
-            if carried.len() > LINE_CAP {
-                // A monster line: drop the buffer, its matches are not worth the memory.
-                carried.clear();
-                line_no += 1;
-            }
-        }
-        if !carried.is_empty() {
-            let text = String::from_utf8_lossy(&carried);
-            for (start, end) in matcher.matches_in(&text, whole_word) {
-                if matches.len() >= find::MAX_FIND_MATCHES {
-                    capped = true;
-                    break;
-                }
-                matches.push(MatchLoc {
-                    line: line_no,
-                    start_col: start,
-                    end_col: end,
-                });
-            }
-        }
+        let still_current = || doc.find_gen.load(Ordering::Relaxed) == generation;
+        let (matches, capped) = scan_indexed_matches(
+            std::path::Path::new(&doc.path),
+            &matcher,
+            whole_word,
+            still_current,
+        )?;
         Ok(IndexedFindResult {
             matches,
             capped,
@@ -725,4 +780,74 @@ pub fn indexed_close(state: tauri::State<ggs_text::viewer::indexed::IndexedState
         doc.find_gen.fetch_add(1, Ordering::Relaxed);
     }
     docs.remove(&doc_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch directory unique to this test process, fresh per call. The caller cleans
+    /// it up; tests must not depend on anything outside it.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ggs-viewer-commands-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn indexed_find_counts_a_monster_line_once() {
+        // One line spanning two full chunk reads plus change, then a match on the next
+        // line: the monster consumes one line number — when its newline arrives — so the
+        // match sits on line 1, exactly where LineIndex puts it. Counting the dropped
+        // buffer too made one such line eat two numbers and drift every later match.
+        let dir = scratch("monster-line");
+        let path = dir.join("monster.log");
+        let monster = "x".repeat((4 << 20) * 2 + 16);
+        std::fs::write(&path, format!("{monster}\nneedle here\n")).unwrap();
+        let matcher = Matcher::compile(
+            "needle",
+            &FindOptions {
+                case_sensitive: true,
+                whole_word: false,
+                regexp: false,
+            },
+        )
+        .unwrap();
+        let (matches, capped) = scan_indexed_matches(&path, &matcher, false, || true).unwrap();
+        assert!(!capped);
+        assert_eq!(
+            matches,
+            vec![MatchLoc {
+                line: 1,
+                start_col: 0,
+                end_col: 6,
+            }]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn indexed_find_reports_a_trailing_line_without_newline() {
+        let dir = scratch("trailing-line");
+        let path = dir.join("tail.log");
+        std::fs::write(&path, "first needle\nlast needle").unwrap();
+        let matcher = Matcher::compile(
+            "needle",
+            &FindOptions {
+                case_sensitive: true,
+                whole_word: false,
+                regexp: false,
+            },
+        )
+        .unwrap();
+        let (matches, capped) = scan_indexed_matches(&path, &matcher, false, || true).unwrap();
+        assert!(!capped);
+        assert_eq!(
+            matches.iter().map(|m| m.line).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

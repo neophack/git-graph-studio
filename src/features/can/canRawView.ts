@@ -34,7 +34,7 @@ import { attachPageKeys, attachWheel, type Disposable } from '../../scroll/input
 import { ScrollModel } from '../../scroll/model';
 import { Scrollbar } from '../../scroll/scrollbar';
 import { basename, el, icon } from '../../platform/ui/index';
-import { t } from '../../platform/i18n';
+import { t, tf } from '../../platform/i18n';
 
 /** The raw view's filter, one field per toolbar control — CANoe's Trace-window set. Sent
  *  on every poll and fetch; `null` while every control sits on its "all" default, so the
@@ -51,10 +51,11 @@ const MAX_WINDOW = 500;
 /** How often the view asks the background walk how far it has come. */
 const POLL_MS = 400;
 
-/** The "Type" column's badge: what kind of frame the row carries. */
+/** The "Type" column's badge: what kind of frame the row carries. CAN, CAN FD, BRS and
+ *  ESI are the protocol's own acronyms — Latin in both display languages. */
 function typeBadge(line: CanFrameLine): HTMLElement {
-	if (line.error) return el('span', 'can-raw-type can-badge can-badge-err', ['Error']);
-	if (line.remote) return el('span', 'can-raw-type can-badge can-badge-rmt', ['Remote']);
+	if (line.error) return el('span', 'can-raw-type can-badge can-badge-err', [t('can.raw.kindError')]);
+	if (line.remote) return el('span', 'can-raw-type can-badge can-badge-rmt', [t('can.raw.kindRemote')]);
 	if (line.fd) {
 		const text = 'CAN FD' + (line.brs ? ' BRS' : '') + (line.esi ? ' ESI' : '');
 		return el('span', 'can-raw-type can-badge can-badge-fd', [text]);
@@ -178,48 +179,48 @@ export class CanRawView {
 	private readonly sheet: CanActionSheet;
 
 	constructor(private path: string, options: CanRawViewOptions = {}) {
-		this.analyzeButton = el('button', 'button secondary can-analyze', [icon('pulse'), ' Statistics']) as HTMLButtonElement;
-		this.analyzeButton.title = 'Analyse this log (opens in a new tab; runs in the background)';
+		this.analyzeButton = el('button', 'button secondary can-analyze', [icon('pulse'), ` ${t('can.raw.statistics')}`]) as HTMLButtonElement;
+		this.analyzeButton.title = t('can.raw.statistics.title');
 		this.analyzeButton.addEventListener('click', () => options.onAnalyze?.());
-		this.convertButton = el('button', 'button secondary can-convert', [icon('save-as'), ' Convert…']) as HTMLButtonElement;
-		this.convertButton.title = 'Convert this log to the other format (Save As)';
+		this.convertButton = el('button', 'button secondary can-convert', [icon('save-as'), ` ${t('can.convert')}`]) as HTMLButtonElement;
+		this.convertButton.title = t('can.convert.title');
 		this.convertButton.addEventListener('click', () => {
 			this.convertButton.disabled = true;
 			void convertCanLog(this.path, null, (text) => this.setLive(text)).finally(() => (this.convertButton.disabled = false));
 		});
 		this.liveDot = el('span', 'can-live-dot');
-		this.liveText = el('span', 'can-live-text', ['Opening…']);
+		this.liveText = el('span', 'can-live-text', [t('can.live.opening')]);
 		this.live = el('span', 'can-live can-live-parsing', [this.liveDot, this.liveText]);
 		this.progressFill = el('i');
 		this.progress = el('div', 'can-progress', [this.progressFill]);
 		// A `.blf` is binary: the form its button swaps to is the hex editor; an `.asc` is
 		// text and really does switch to the text editor.
 		const binaryLog = /\.blf$/i.test(path);
-		this.textButton = el('button', 'button secondary can-text', [icon(binaryLog ? 'file-binary' : 'edit'), binaryLog ? ' Hex' : ' Text']) as HTMLButtonElement;
-		this.textButton.title = binaryLog ? 'View and edit this file as bytes (hex editor)' : 'View and edit this log as plain text';
+		this.textButton = el('button', 'button secondary can-text', [icon(binaryLog ? 'file-binary' : 'edit'), binaryLog ? ` ${t('can.raw.hex')}` : ` ${t('can.raw.text')}`]) as HTMLButtonElement;
+		this.textButton.title = binaryLog ? t('can.raw.hex.title') : t('can.raw.text.title');
 		this.textButton.addEventListener('click', () => options.onEditText?.());
 		// CANoe's Trace-window filter set: identifiers, channel, direction, frame type. All
 		// four sit on "all" defaults, and only a non-default state makes a spec — the
 		// unfiltered browse stays the backend's fast path.
 		this.idBox = el('input', 'hex-search can-filter') as HTMLInputElement;
 		this.idBox.type = 'search';
-		this.idBox.placeholder = 'Filter IDs (0x100, 1A0-1FF)';
+		this.idBox.placeholder = t('can.filter.placeholder');
 		this.idBox.spellcheck = false;
 		this.idBox.addEventListener('input', () => this.onFilterChange());
 		this.channelSelect = el('select', 'can-channel') as HTMLSelectElement;
-		this.channelSelect.title = 'Channel filter';
-		this.channelSelect.setAttribute('aria-label', 'Channel filter');
-		this.channelSelect.append(selectOption('', 'All channels'));
+		this.channelSelect.title = t('can.raw.channelFilter');
+		this.channelSelect.setAttribute('aria-label', t('can.raw.channelFilter'));
+		this.channelSelect.append(selectOption('', t('can.channel.all')));
 		this.channelSelect.addEventListener('change', () => this.onFilterChange());
 		this.dirSelect = el('select', 'can-dir') as HTMLSelectElement;
-		this.dirSelect.title = 'Direction filter';
-		this.dirSelect.setAttribute('aria-label', 'Direction filter');
-		this.dirSelect.append(selectOption('all', 'All directions'), selectOption('rx', 'Rx'), selectOption('tx', 'Tx'));
+		this.dirSelect.title = t('can.raw.directionFilter');
+		this.dirSelect.setAttribute('aria-label', t('can.raw.directionFilter'));
+		this.dirSelect.append(selectOption('all', t('can.raw.directionAll')), selectOption('rx', 'Rx'), selectOption('tx', 'Tx'));
 		this.dirSelect.addEventListener('change', () => this.onFilterChange());
 		this.kindSelect = el('select', 'can-type') as HTMLSelectElement;
-		this.kindSelect.title = 'Frame type filter';
-		this.kindSelect.setAttribute('aria-label', 'Frame type filter');
-		this.kindSelect.append(selectOption('all', 'All types'), selectOption('can', 'CAN'), selectOption('canfd', 'CAN FD'), selectOption('error', 'Error'), selectOption('remote', 'Remote'));
+		this.kindSelect.title = t('can.raw.kindFilter');
+		this.kindSelect.setAttribute('aria-label', t('can.raw.kindFilter'));
+		this.kindSelect.append(selectOption('all', t('can.raw.kindAll')), selectOption('can', 'CAN'), selectOption('canfd', 'CAN FD'), selectOption('error', t('can.raw.kindError')), selectOption('remote', t('can.raw.kindRemote')));
 		this.kindSelect.addEventListener('change', () => this.onFilterChange());
 		this.clearChip = el('button', 'can-chip can-chip-clear', [icon('clear-all')]) as HTMLButtonElement;
 		this.clearChip.type = 'button';
@@ -244,7 +245,7 @@ export class CanRawView {
 		pathChip.title = this.path;
 		// The find bar's toolbar entry — Ctrl+F anywhere in the view opens it too.
 		this.findButton = el('button', 'button secondary can-find-open', [icon('search')]) as HTMLButtonElement;
-		this.findButton.title = 'Find (Ctrl+F)';
+		this.findButton.title = t('can.raw.find.title');
 		this.findButton.addEventListener('click', () => this.openFind());
 		// The toolbar is two compact rows at every width (the 2026-10-19 redesign): the
 		// command row (the file, the live chip, then Find / Text / Statistics / Convert at
@@ -271,22 +272,22 @@ export class CanRawView {
 			this.kindSelect
 		]);
 		const toolbar = el('div', 'hex-toolbar can-toolbar', [this.mainBar, this.filtersBar]);
-		const heads = ['No.', 'Time', 'Ch', 'ID', 'Dir', 'Type', 'DLC', 'Data'];
+		const heads = [t('can.raw.col.no'), t('can.raw.col.time'), t('can.raw.col.ch'), t('can.raw.col.id'), t('can.raw.col.dir'), t('can.raw.col.type'), t('can.raw.col.dlc'), t('can.raw.col.data')];
 		const headClasses = ['can-raw-no', 'can-raw-time', 'can-raw-ch', 'can-raw-id', 'can-raw-dir', 'can-raw-type-h', 'can-raw-dlc', ''];
-		const header = el('div', 'can-raw-head can-raw-grid', heads.map((t, i) => el('span', headClasses[i], [t])));
+		const header = el('div', 'can-raw-head can-raw-grid', heads.map((head, i) => el('span', headClasses[i]!, [head])));
 		this.banner = el('div', 'can-error can-raw-banner');
 		this.banner.hidden = true;
 		this.scroller = el('div', 'can-raw-scroll');
 		this.rows = el('div', 'can-raw-rows');
 		this.scroller.appendChild(this.rows);
-		this.emptyHint = el('div', 'can-raw-empty', ['No frames match the filter']);
+		this.emptyHint = el('div', 'can-raw-empty', [t('can.raw.noMatch')]);
 		this.emptyHint.hidden = true;
 		const viewport = el('div', 'can-raw-viewport', [this.scroller, this.emptyHint]);
 		// Search only: the query matches a frame's id or its payload bytes (hex, the way
 		// the log writes them), the count is "n of m", Enter / F3 step, Escape closes —
 		// no replace controls, a trace is a measurement.
 		this.findBox = el('input', 'cm-find-input') as HTMLInputElement;
-		this.findBox.placeholder = 'Find id or data (hex)';
+		this.findBox.placeholder = t('can.raw.find.placeholder');
 		this.findBox.spellcheck = false;
 		this.findBox.addEventListener('input', () => this.scheduleFind());
 		this.findBox.addEventListener('keydown', (event) => this.findKeydown(event));
@@ -302,9 +303,9 @@ export class CanRawView {
 				el('span', 'cm-find-spacer'),
 				this.findBox,
 				this.findCount,
-				findButtonIn('arrow-up', 'Previous Match (Shift+Enter)', () => this.stepFind(-1)),
-				findButtonIn('arrow-down', 'Next Match (Enter)', () => this.stepFind(1)),
-				findButtonIn('close', 'Close (Escape)', () => this.closeFind())
+				findButtonIn('arrow-up', t('can.raw.find.prev'), () => this.stepFind(-1)),
+				findButtonIn('arrow-down', t('can.raw.find.next'), () => this.stepFind(1)),
+				findButtonIn('close', t('can.raw.find.close'), () => this.closeFind())
 			])
 		]);
 		this.findBar.hidden = true;
@@ -380,21 +381,21 @@ export class CanRawView {
 		const at = count.bytes || 0;
 		const pct = total > 0 ? Math.min(100, Math.floor((at / total) * 100)) : null;
 		const shown = count.matched ?? count.parsed;
-		const ofAll = this.filter ? ` of ${count.parsed.toLocaleString()}` : '';
+		const ofAll = this.filter ? tf('can.raw.live.of', count.parsed.toLocaleString()) : '';
 		if (count.done) {
 			this.live.classList.remove('can-live-parsing');
 			this.progress.classList.add('can-progress-done');
-			this.setLive(`${shown.toLocaleString()}${ofAll} frames`);
+			this.setLive(`${shown.toLocaleString()}${ofAll} ${t('can.status.frames')}`);
 			return;
 		}
 		const now = performance.now();
 		let speed = '';
 		if (this.mark && now > this.mark.at) {
 			const rate = ((count.parsed - this.mark.parsed) * 1000) / (now - this.mark.at);
-			if (rate > 0) speed = ` · ${compact(rate)} f/s`;
+			if (rate > 0) speed = ` · ${tf('can.raw.live.rate', compact(rate))}`;
 		}
 		this.mark = { at: now, parsed: count.parsed };
-		this.setLive(`${shown.toLocaleString()}${ofAll} frames · parsing…${pct !== null ? ` ${pct}%` : ''}${speed}`);
+		this.setLive(`${shown.toLocaleString()}${ofAll} ${t('can.status.frames')} · ${t('can.raw.live.parsing')}${pct !== null ? ` ${pct}%` : ''}${speed}`);
 		if (pct !== null) this.progressFill.style.width = `${pct}%`;
 	}
 
@@ -405,7 +406,7 @@ export class CanRawView {
 		try {
 			doc = await canLogOpen(this.path);
 		} catch (error) {
-			this.fail(`Failed to open '${basename(this.path)}': ${String(error)}`);
+			this.fail(tf('can.raw.openFailed', basename(this.path), String(error)));
 			return;
 		}
 		if (this.disposed) {
@@ -428,8 +429,8 @@ export class CanRawView {
 			this.applyCount(count);
 			if (count.done) {
 				this.done = true;
-				if (count.error && this.parsed === 0) this.fail(`Failed to parse '${basename(this.path)}': ${count.error}`);
-				else if (count.error) this.setLive(`${count.parsed.toLocaleString()} frames · parse stopped: ${count.error}`);
+				if (count.error && this.parsed === 0) this.fail(`${t('can.parseError')} '${basename(this.path)}': ${count.error}`);
+				else if (count.error) this.setLive(`${count.parsed.toLocaleString()} ${t('can.status.frames')} · ${tf('can.raw.parseStopped', count.error)}`);
 				// A find over the still-growing log saw only the parsed prefix; the finished
 				// walk gets one rescan so the count and the jumps cover the whole file.
 				if (!count.error) this.scheduleFind(0);
@@ -482,7 +483,7 @@ export class CanRawView {
 		const current = this.channelSelect.value;
 		const options = this.channelSelect.options;
 		if (options.length === channels.length + 1 && Array.from(options).every((option, i) => option.value === (i === 0 ? '' : String(channels[i - 1])))) return;
-		this.channelSelect.replaceChildren(selectOption('', 'All channels'), ...channels.map((channel) => selectOption(String(channel), `Channel ${channel}`)));
+		this.channelSelect.replaceChildren(selectOption('', t('can.channel.all')), ...channels.map((channel) => selectOption(String(channel), `${t('can.channel')} ${channel}`)));
 		this.channelSelect.value = channels.includes(Number(current)) ? current : '';
 	}
 
@@ -626,7 +627,7 @@ export class CanRawView {
 			const message = String(error);
 			if (message.includes('not a hexadecimal')) {
 				this.findBox.classList.add('invalid');
-				this.findCount.textContent = 'Not hex';
+				this.findCount.textContent = t('can.raw.find.notHex');
 				this.findCount.classList.add('invalid');
 			} else {
 				this.findCount.textContent = '';
@@ -672,7 +673,7 @@ export class CanRawView {
 
 	private refreshFindCount(): void {
 		if (this.hits.length === 0) {
-			this.findCount.textContent = this.findBox.value.trim() === '' ? '' : 'No matches';
+			this.findCount.textContent = this.findBox.value.trim() === '' ? '' : t('can.raw.find.noMatches');
 			return;
 		}
 		const current = (this.hitIndex + 1).toLocaleString();
@@ -712,7 +713,7 @@ export class CanRawView {
 		this.live.classList.remove('can-live-parsing');
 		this.liveDot.classList.add('can-live-dot-failed');
 		this.progress.classList.add('can-progress-done');
-		this.setLive('Failed');
+		this.setLive(t('can.raw.failed'));
 	}
 
 	/** Pull the newly visible window from the backend. Runs on every scroll event and every
@@ -815,7 +816,7 @@ export class CanRawView {
 		const bytes = line.dataHex ? line.dataHex.split(' ').length : 0;
 		const dlcShown = line.remote || line.error ? line.dlc : bytes;
 		const dir = el('span', 'can-raw-dir' + (line.tx ? ' can-dir-tx' : ''), [line.tx ? 'Tx' : 'Rx']);
-		dir.title = line.tx ? 'Transmitted' : 'Received';
+		dir.title = line.tx ? t('can.raw.dir.tx') : t('can.raw.dir.rx');
 		const id = el('span', 'can-raw-id' + (line.error ? ' can-warn' : ''), [idHex(line.id, line.extended) + (line.extended && !line.error ? 'x' : '')]);
 		const data = el('span', 'can-raw-data', [line.dataHex]);
 		const cells = [

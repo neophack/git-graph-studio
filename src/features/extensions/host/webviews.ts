@@ -1,4 +1,4 @@
-import type { WebviewContextMenuReport, WebviewDelivery } from './sharedTypes';
+import type { WebviewContextMenuReport, WebviewDelivery, WebviewViewRecord } from './sharedTypes';
 // The webview surfaces: panels and sidebar views, mirror copies, the per-frontend
 // instances (a remote's own phone-sized page of Git Graph, 2026-10-18), html composition
 // (with the srcdoc history shield), load watchdogs, session bookkeeping and asset roots.
@@ -9,7 +9,7 @@ import type { ExtensionHost } from './extensionHost';
 import { extLog, extLogOnce } from '../extLog';
 import { extWebviewHosted } from '../../../platform/ipc/extProcess';
 import { hook } from '../../../platform/hooks';
-import { showContextMenu, type MenuEntry } from '../../../platform/ui/index';
+import { el, showContextMenu, type MenuEntry } from '../../../platform/ui/index';
 import { menuItems } from '../contributions';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 
@@ -427,8 +427,7 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 	mountWebviewView(viewId: string, extId: string, container: HTMLElement): () => void {
 		// A remote page shows the desktop window's live page of the view (§22.6).
 		if (this.sharesWebviews(extId)) return this.mountWebviewCopy(container, hook('webviewStreams')!.viewStream(viewId), extId);
-		const record = this.webviewViews.get(viewId) ?? { extId, html: '', frame: null, pending: [], loaded: false, painted: null, loadGrace: null, firstPaintTimer: null };
-		this.webviewViews.set(viewId, record);
+		const record = this.ensureWebviewViewRecord(extId, viewId);
 		const frame = document.createElement('iframe');
 		frame.className = 'ext-page-frame';
 		frame.title = `${extId}: ${viewId}`;
@@ -438,6 +437,9 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 		container.appendChild(frame);
 		record.frame = frame;
 		this.noteOwnWebviewHosted(extId, hook('webviewStreams')!.viewStream(viewId), true);
+		// The runtime title / description the extension set before the section existed
+		// (or on its previous mount) render now.
+		this.applyWebviewViewChrome(viewId);
 		// The same delivery gate as a panel's: the section's mount races the provider's
 		// first pushes exactly the way a tab's mount does.
 		frame.addEventListener('load', () => this.armLoadGrace(record, `view:${record.extId}/${viewId}`));
@@ -456,7 +458,7 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 				// exists.
 				if (record.loadGrace !== null) clearTimeout(record.loadGrace);
 				if (record.firstPaintTimer !== null) clearTimeout(record.firstPaintTimer);
-				this.webviewViews.set(viewId, { extId: record.extId, html: record.html, frame: null, pending: [], loaded: false, painted: null, loadGrace: null, firstPaintTimer: null });
+				this.webviewViews.set(viewId, { extId: record.extId, html: record.html, title: record.title, description: record.description, frame: null, pending: [], loaded: false, painted: null, loadGrace: null, firstPaintTimer: null });
 				this.resolvedWebviewViews.delete(viewId);
 			}
 			this.noteOwnWebviewHosted(extId, hook('webviewStreams')!.viewStream(viewId), false);
@@ -490,15 +492,52 @@ export const webviewsMethods: ThisType<ExtensionHost> = {
 		}
 	},
 
-	setWebviewViewHtml(extId: string, viewId: string, html: string): void {
-		// A view's html can precede its mount (a journal replay on a re-attached frontend,
-		// the backend racing the sidebar's first show): the record is created on demand so
-		// the html waits for the section instead of being dropped.
+	ensureWebviewViewRecord(extId: string, viewId: string): WebviewViewRecord {
+		// A view's state can precede its mount (a journal replay on a re-attached
+		// frontend, the backend racing the sidebar's first show): the record is created
+		// on demand so the html — and the title / description — wait for the section
+		// instead of being dropped.
 		let record = this.webviewViews.get(viewId);
 		if (!record) {
 			record = { extId, html: '', frame: null, pending: [], loaded: false, painted: null, loadGrace: null, firstPaintTimer: null };
 			this.webviewViews.set(viewId, record);
 		}
+		return record;
+	},
+
+	/** Render a webview view's runtime title / description (`webviewView.setTitle` /
+	 *  `setDescription`) on the section header — the surface the view's name lives in.
+	 *  The workbench builds the header with the manifest's name; a runtime title
+	 *  overrides it live and '' / undefined reverts to the manifest's, remembered on the
+	 *  label the first time the override lands. A description renders dimmed beside the
+	 *  title, the tree views' header shape, in an element the header carries only once a
+	 *  description arrives. Values set before the mount wait in the record; the mount
+	 *  calls this to apply them. */
+	applyWebviewViewChrome(viewId: string): void {
+		const record = this.webviewViews.get(viewId);
+		if (!record) return;
+		const header = record.frame?.closest('.ext-view-section')?.querySelector('.sidebar-title');
+		if (!header) return;
+		const label = header.querySelector<HTMLElement>('.label');
+		if (label) {
+			if (record.title !== undefined) {
+				label.dataset.manifestName ??= label.textContent ?? '';
+				label.textContent = record.title;
+			} else if (label.dataset.manifestName !== undefined) {
+				label.textContent = label.dataset.manifestName;
+				delete label.dataset.manifestName;
+			}
+		}
+		let descriptionEl = header.querySelector<HTMLElement>('.ext-tree-title-description');
+		if (descriptionEl === null) {
+			descriptionEl = el('span', 'ext-tree-title-description');
+			(label ?? header).insertAdjacentElement('afterend', descriptionEl);
+		}
+		descriptionEl.textContent = record.description ?? '';
+	},
+
+	setWebviewViewHtml(extId: string, viewId: string, html: string): void {
+		const record = this.ensureWebviewViewRecord(extId, viewId);
 		record.html = html;
 		if (!record.frame) return; // the section mounts later and loads record.html then
 		const owner = `view:${record.extId}/${viewId}`;

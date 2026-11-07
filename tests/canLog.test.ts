@@ -74,10 +74,11 @@ const STATS: CanLogStats = {
 			buckets: [0, 5].map((t) => ({ tS: t, durS: 5, frames: 250, errors: 0, arbBits: 9360, dataBits: 0 }))
 		}
 	],
-	// Classic 8-byte frames dominate; channel 1 also carries the FD 12-byte message.
+	// Classic 8-byte frames dominate; channel 1 also carries the FD 12-byte and FD
+	// 64-byte messages — the 64s in the last bin, the one the "64" label names.
 	payloadDist: [
-		{ channel: 1, counts: [0, 0, 0, 0, 0, 0, 0, 0, 1000, 500, 0, 0, 0, 0, 0] },
-		{ channel: 2, counts: [0, 0, 0, 0, 0, 0, 0, 0, 500, 0, 0, 0, 0, 0, 0] }
+		{ channel: 1, counts: [0, 0, 0, 0, 0, 0, 0, 0, 1000, 500, 0, 0, 0, 0, 0, 200] },
+		{ channel: 2, counts: [0, 0, 0, 0, 0, 0, 0, 0, 500, 0, 0, 0, 0, 0, 0, 0] }
 	]
 };
 
@@ -928,8 +929,9 @@ describe('CAN log views', () => {
 		// The legends name the channels.
 		expect(texts(`${STATS_VIEW} .can-section-load .can-legend-chip`)).toEqual(['Channel 1', 'Channel 2']);
 		// The payload distribution stacks one segment per channel per bin: bin 8 holds
-		// both channels, bin 9 (FD 12) only channel 1 - three segments in all.
-		expect(document.querySelectorAll(`${STATS_VIEW} .can-section-payload rect.can-chart-bar`).length).toBe(3);
+		// both channels, bin 9 (FD 12) only channel 1 and the last bin (FD 64) only
+		// channel 1 - four segments in all.
+		expect(document.querySelectorAll(`${STATS_VIEW} .can-section-payload rect.can-chart-bar`).length).toBe(4);
 		// The channel table carries the peak beside the average load: channel 1's burst
 		// bucket (11232 arb bits + 7488 data bits in 1 s at 500 k / 2 M) is 2.62 % against
 		// the 1.31 % average.
@@ -993,12 +995,22 @@ describe('CAN log views', () => {
 
 		// The payload chart lights the length bin under the cursor, labels it on the axis
 		// and totals it: bin 8 holds 1000 of channel 1's frames and 500 of channel 2's.
-		hover('.can-section-payload svg.can-chart', 56 + 8 * (732 / 15) + 10, 170);
+		// 16 bins share the 732-unit plot, so each column is 732 / 16 wide.
+		hover('.can-section-payload svg.can-chart', 56 + 8 * (732 / 16) + 10, 170);
 		const payTip = document.querySelector(`${STATS_VIEW} .can-section-payload .can-chart-tip`)!;
 		expect(payTip.querySelector('.can-chart-tip-head')!.textContent).toBe('8 B');
 		expect(rowTexts(payTip)).toEqual([`Channel 1${(1_000).toLocaleString()}`, `Channel 2${(500).toLocaleString()}`, `Total${(1_500).toLocaleString()}`]);
 		expect(document.querySelector(`${STATS_VIEW} .can-section-payload .can-chart-col`)).not.toBeNull();
 		expect(document.querySelector(`${STATS_VIEW} .can-section-payload .can-chart-axislabel-text`)!.textContent).toBe('8 B');
+
+		// The last bin receives the FD 64-byte frames: hovering the "64" column reads
+		// channel 1's 200 and no channel 2 — the frames the off-by-one backend used to
+		// fold into the "48" column, leaving "64" permanently empty.
+		document.querySelector(`${STATS_VIEW} .can-section-payload svg.can-chart`)!.dispatchEvent(new MouseEvent('mouseleave'));
+		hover('.can-section-payload svg.can-chart', 56 + 15 * (732 / 16) + 10, 170);
+		const lastTip = document.querySelector(`${STATS_VIEW} .can-section-payload .can-chart-tip`)!;
+		expect(lastTip.querySelector('.can-chart-tip-head')!.textContent).toBe('64 B');
+		expect(rowTexts(lastTip)).toEqual([`Channel 1${(200).toLocaleString()}`, `Channel 2${(0).toLocaleString()}`, `Total${(200).toLocaleString()}`]);
 	});
 
 	it('hovering the analysis charts reads the cycle sample and the histogram bin', async () => {

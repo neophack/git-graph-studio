@@ -19,9 +19,14 @@ export class Memento {
 	}
 
 	async update(key: string, value: unknown): Promise<void> {
-		if (value === undefined) delete this.ctx.state[this.scope][key];
+		// The wire this crosses is JSON at both hops: undefined dies there, so a delete
+		// arrives at the host as null and cannot be told from a stored null. Both halves
+		// therefore treat null as the delete it was sent as — the limitation lives here,
+		// on the memento seam (VS Code itself would store the null; this host cannot
+		// represent one).
+		if (value === undefined || value === null) delete this.ctx.state[this.scope][key];
 		else this.ctx.state[this.scope][key] = value;
-		await this.bridge.request('state.update', [this.scope, key, value]);
+		await this.bridge.request('state.update', [this.scope, key, value ?? null]);
 	}
 
 	keys(): string[] {

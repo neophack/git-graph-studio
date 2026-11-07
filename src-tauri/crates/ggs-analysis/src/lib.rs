@@ -657,12 +657,20 @@ fn display_name(symbol: &ParsedSymbol) -> String {
         .unwrap_or_else(|| symbol.name.clone())
 }
 
-/// Read and parse one file. `None` when it is gone or not decodable text.
+/// Read and parse one file. `None` when it is gone. Non-UTF-8 bytes decode lossily — the
+/// ASCII identifiers and string literals survive, so a GBK or UTF-16 file keeps its
+/// declarations and stays scannable instead of silently dropping out of the `files`
+/// count — and an extension-less name parses under the outline fallback (its extension
+/// table answers nothing) rather than being skipped.
 fn parse_one(root: &str, relative: &str) -> Option<FileAnalysis> {
     let path = std::path::Path::new(root).join(relative);
     let (mtime_ms, size) = file_stat(&path)?;
-    let text = std::fs::read_to_string(&path).ok()?;
-    let ext = relative.rsplit_once('.')?.1;
+    let bytes = std::fs::read(&path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let ext = relative
+        .rsplit_once('.')
+        .map(|(_, extension)| extension)
+        .unwrap_or("");
     let ParsedFile {
         symbols,
         calls,

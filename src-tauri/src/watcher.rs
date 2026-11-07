@@ -17,6 +17,11 @@ use serde::Serialize;
 /// How long after the last raw event a batch is reported. A git checkout or a build touches
 /// hundreds of files in a burst; one refresh at the end of the burst is what the UI wants.
 pub const DEBOUNCE: Duration = Duration::from_millis(100);
+/// The longest a burst can postpone its batch. The quiet window resets on every event, so
+/// a sustained writer (a build's log, a busy trace) would hold the batch forever; past this
+/// cap the batch flushes even while events keep arriving, and the next burst continues the
+/// story (VS Code's watcher flushes the same way).
+pub const MAX_WINDOW: Duration = Duration::from_secs(2);
 /// A batch never carries more paths than this; the flag says the list is incomplete and the
 /// consumer does a full refresh instead of a per-path one.
 pub const MAX_PATHS: usize = 200;
@@ -200,10 +205,16 @@ fn debounce_loop(
         }
         let mut batch = FsChange::default();
         fold(&mut batch, &first);
-        // Burst: keep folding until the stream is quiet for the debounce window.
+        // Burst: keep folding until the stream is quiet for the debounce window — at most
+        // `MAX_WINDOW`, whichever comes first, so a sustained writer flushes its batch
+        // instead of postponing the refresh forever.
         let mut quiet_since = Instant::now();
+        let burst_started = Instant::now();
         loop {
-            match raw.recv_timeout(DEBOUNCE.saturating_sub(quiet_since.elapsed())) {
+            let wait = DEBOUNCE
+                .saturating_sub(quiet_since.elapsed())
+                .min(MAX_WINDOW.saturating_sub(burst_started.elapsed()));
+            match raw.recv_timeout(wait) {
                 Ok(path) => {
                     fold(&mut batch, &path);
                     quiet_since = Instant::now();
@@ -386,5 +397,55 @@ mod tests {
         assert_eq!(batch.root, root);
         assert_eq!(batch.paths, ["through-link.txt"]);
         drop(watcher);
+    }
+
+    /// A sustained writer resets the 100 ms quiet window on every event; without a cap the
+    /// batch would only flush when the writer stopped. The maximum window ends the burst
+    /// while events are still arriving.
+    #[test]
+    fn a_sustained_writer_flushes_at_the_maximum_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        // The raw events carry absolute paths under the root, the way the OS watch reports
+        // them — a bare relative name folds into nothing.
+        let watched = root.clone();
+        let (raw_tx, raw_rx) = mpsc::channel();
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let (batch_tx, batch_rx) = mpsc::channel();
+        let watcher = std::thread::spawn(move || {
+            debounce_loop(&root, None, "sustained", &raw_rx, &stop_rx, move |batch| {
+                let _ = batch_tx.send(batch);
+            })
+        });
+        // One event every 50 ms for 3 s: each one resets the quiet window, so only the
+        // maximum-window cap can end the burst.
+        let writer = std::thread::spawn(move || {
+            for i in 0..60 {
+                let path = watched.join(format!("log{i}.txt"));
+                if raw_tx.send(path).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let started = Instant::now();
+        let batch = batch_rx
+            .recv_timeout(Duration::from_secs(4))
+            .expect("the sustained burst flushed within the cap");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "the debounce still coalesced ({elapsed:?})"
+        );
+        // Without the cap the batch would land only after the writer stops (~3.05 s: the
+        // last event plus one quiet window); the cap flushes near 2 s.
+        assert!(
+            elapsed <= Duration::from_millis(2_800),
+            "the sustained burst flushed at the cap, not when the writer stopped ({elapsed:?})"
+        );
+        assert!(!batch.paths.is_empty());
+        stop_tx.send(()).ok();
+        let _ = watcher.join();
+        let _ = writer.join();
     }
 }

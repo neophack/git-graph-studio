@@ -148,7 +148,7 @@ export interface RelayDeps {
 /** The Relay's frame engine, separated from the socket so it can be driven in tests. */
 export class RelayEngine {
 	private readonly sessions = new Map<number, SessionState>();
-	private readonly joiner = new Reassembler();
+	private readonly joiner = new Reassembler((reason) => console.warn(`[ggs] remote link: ${reason}`));
 	private chain: Promise<void> = Promise.resolve();
 	private readonly ptyBuffers = new Map<string, { frameFor: (text: string) => Frame; text: string; timer: ReturnType<typeof setTimeout> }>();
 	/** Streams whose UNLISTEN arrived while their LISTEN's round trip was still in flight
@@ -173,7 +173,12 @@ export class RelayEngine {
 				if (whole) await this.handle(whole);
 			}).catch(() => {
 				// One malformed frame is dropped, never wedged: a rejected chain would skip
-				// every later frame of every session until the socket died.
+				// every later frame of every session until the socket died. Its fragment
+				// chain is discarded with it — a fragment that did not inflate leaves
+				// nothing behind for its message's next fragment to complete into bytes
+				// missing a segment, and nothing for the next message on the key to append
+				// onto.
+				this.joiner.fail(frame);
 			});
 		}
 	}

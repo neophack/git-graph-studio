@@ -853,10 +853,7 @@ mod tests {
             sink.0.first(),
             Some(SymbolIndexEvent::Progress { .. })
         ));
-        assert!(matches!(
-            sink.0.last(),
-            Some(SymbolIndexEvent::Done { .. })
-        ));
+        assert!(matches!(sink.0.last(), Some(SymbolIndexEvent::Done { .. })));
     }
 
     #[test]

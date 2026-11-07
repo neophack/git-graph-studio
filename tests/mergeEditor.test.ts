@@ -1,13 +1,13 @@
 // Merge conflict parsing and resolution: the marker blocks git leaves in a conflicted file,
 // and the document edits the three choices apply.
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { EditorState } from '@codemirror/state';
-import { EditorView, keymap } from '@codemirror/view';
+import { EditorView } from '@codemirror/view';
 
 import { applyChoice, conflictAt, conflictDecorations, MergeToolbar, parseConflicts } from '../src/features/compare';
 import { backend } from './tauriMock';
-import { click, flush } from './helpers';
+import { click, flush, notifications } from './helpers';
 import type { Extension } from '@codemirror/state';
 
 const CONFLICTED = [
@@ -135,6 +135,28 @@ describe('merge conflict decorations', () => {
 		expect(view.state.doc.toString()).toBe('a\n<<<<<<< HEAD\nours one\n=======\ntheirs one\n>>>>>>> b\nmid\ntheirs two\nz');
 		view.destroy();
 	});
+
+	it('a conflict completed away from its opening marker draws and counts the same', () => {
+		// A stray `<<<<<<<` with no partners: nothing to draw yet, the toolbar hides.
+		const view = viewOf('<<<<<<< HEAD\nours\n', [conflictDecorations()]);
+		const bar = document.createElement('div');
+		view.dom.prepend(bar);
+		const toolbar = new MergeToolbar(bar);
+		toolbar.attach(view, 'C:\\repo\\f.ts');
+		expect(view.dom.querySelector('.cm-conflict-ours')).toBeNull();
+		expect(toolbar.conflictCount).toBe(0);
+
+		// Completing the block (separator, theirs side, end marker) types markers that are
+		// not the opening one — the change that completes the conflict never sits within
+		// eight characters of its `<<<<<<<` (the document already ends with a newline).
+		view.dispatch({ changes: { from: view.state.doc.length, insert: '=======\ntheirs\n>>>>>>> b' } });
+		toolbar.update();
+		expect(toolbar.conflictCount).toBe(1);
+		expect(view.dom.querySelector('.cm-conflict-actions')).not.toBeNull();
+		expect(view.dom.querySelectorAll('.cm-line.cm-conflict-ours')).toHaveLength(1);
+		expect(view.dom.querySelectorAll('.cm-line.cm-conflict-theirs')).toHaveLength(1);
+		view.destroy();
+	});
 });
 
 describe('mark resolved', () => {
@@ -155,18 +177,12 @@ describe('mark resolved', () => {
 		backend.on('write_file', () => null);
 		backend.on('git_stage', () => null);
 		let editorSaves = 0;
-		const host = document.createElement('div');
-		document.body.appendChild(host);
-		// The Mod-s binding mirrors the editor group's (editor.ts): saving through it is what
-		// clears the dirty flag, the tab dot and the hot-exit backup.
-		const view = new EditorView({
-			state: EditorState.create({
-				doc: SIMPLE,
-				extensions: [keymap.of([{ key: 'Mod-s', preventDefault: true, run: () => { editorSaves++; return true; } }])]
-			}),
-			parent: host
-		});
+		const view = viewOf(SIMPLE);
 		const { bar, toolbar } = toolbarFor(view);
+		// The group's own save path (dirty.ts's save), wired like attachMergeSupport does:
+		// saving through it is what clears the dirty flag, the tab dot and the hot-exit
+		// backup — never a synthesized keystroke.
+		toolbar.onSave = () => { editorSaves++; };
 		expect(bar.hidden).toBe(false);
 
 		// Resolving the last conflict keeps the bar - now offering to finish the resolution.
@@ -187,6 +203,22 @@ describe('mark resolved', () => {
 		expect(editorSaves).toBe(1);
 		// Staged: the bar steps aside until another conflict appears.
 		expect(bar.hidden).toBe(true);
+		view.destroy();
+	});
+
+	it('a failed read aborts the resolve instead of writing utf8/lf guesses', async () => {
+		backend.on('read_file', () => { throw new Error('f.txt: The process cannot access the file'); });
+		const view = viewOf(SIMPLE);
+		const { bar, toolbar } = toolbarFor(view);
+		toolbar.onSave = () => { throw new Error('the resolve must abort before any save'); };
+		click(button(bar, 'Keep Ours'));
+		click(button(bar, 'Mark Resolved'));
+		await flush();
+		// Nothing written, nothing staged: the resolve reported the failure instead of
+		// transcoding an unreadable file as UTF-8/LF.
+		expect(backend.callsTo('write_file')).toHaveLength(0);
+		expect(backend.callsTo('git_stage')).toHaveLength(0);
+		expect(notifications().some((n) => n.includes('cannot access'))).toBe(true);
 		view.destroy();
 	});
 

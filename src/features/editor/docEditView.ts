@@ -78,15 +78,15 @@ const windowMatchField = StateField.define<DecorationSet>({
 	provide: (field) => EditorView.decorations.from(field)
 });
 
-/** A code-point column on a line to the UTF-16 offset CodeMirror addresses it by. */
-function utf16Col(lineText: string, cp: number): number {
-	if (cp <= 0) return 0;
-	let units = 0;
-	for (const char of Array.from(lineText).slice(0, cp)) units += char.length;
-	return units;
-}
+	/** A code-point column on a line to the UTF-16 offset CodeMirror addresses it by. */
+	function utf16Col(lineText: string, cp: number): number {
+		if (cp <= 0) return 0;
+		let units = 0;
+		for (const char of Array.from(lineText).slice(0, cp)) units += char.length;
+		return units;
+	}
 
-/** A UTF-16 offset on a line to its code-point column — the unit `viewer_find` reports. */
+	/** A UTF-16 offset on a line to its code-point column — the unit `viewer_find` reports. */
 function codePointCol(lineText: string, utf16: number): number {
 	return Array.from(lineText.slice(0, utf16)).length;
 }
@@ -101,6 +101,11 @@ export class EditableDocView {
 	private path = '';
 	private lineCount = 0;
 	private syntax = '';
+	/** The encoding and line endings the backend opened the file with: what a plain save
+	 *  writes back, and what a Save-with-Encoding / EOL choice overrides (the tab carries
+	 *  them the same way the full editor carries its read's — dirty.ts passes them here). */
+	encoding = 'utf8';
+	eol: 'lf' | 'crlf' = 'lf';
 	/** The 0-based line the current window starts at. */
 	private first = 0;
 	/** The window's lines exactly as the backend holds them (the last synced state). */
@@ -128,6 +133,12 @@ export class EditableDocView {
 	/** Edits are sent strictly one at a time, chained through this promise. */
 	private queue: Promise<void> = Promise.resolve();
 	private disposed = false;
+	/** The reload generation the window's rows were served against (`viewer_text.gen`):
+	 *  `viewer_reload` replaces the backend document wholesale under the same docId, so a
+	 *  window read that was in flight across the swap names the old generation — its
+	 *  response is a predecessor's rows and must not be written (every later diff would
+	 *  run against stale baseline lines). */
+	private gen: number | null = null;
 	/** Set when a send failed: the next sync resends the whole window instead of a diff. */
 	private needsFullResync = false;
 	/** True only for the dispatches that put fetched window text into the view, so the
@@ -202,6 +213,8 @@ export class EditableDocView {
 		this.path = path;
 		this.lineCount = info.lineCount;
 		this.syntax = info.syntaxName;
+		this.encoding = info.encoding || 'utf8';
+		this.eol = info.eol === 'crlf' ? 'crlf' : 'lf';
 		this.buildEditor();
 		await this.showWindow(0);
 		return true;
@@ -323,6 +336,11 @@ export class EditableDocView {
 			return;
 		}
 		if (this.disposed || this.docId !== docId || !this.cm) return;
+		// The window may have been fetched across a reload (the docId never changes on
+		// one): a response naming anything but the current generation is a predecessor's
+		// rows — dropped, the reload's own fetch following right behind it in the queue.
+		if (this.gen !== null && fetched.gen !== this.gen) return;
+		this.gen = fetched.gen;
 		// Where the cursor sits now, captured before the replace resets it: an explicit
 		// `cursorLine` (a reveal, an undo) wins over "keep the current position", and a slide
 		// keeps both the line and the column. A jump to a *different* line lands at the
@@ -514,6 +532,17 @@ export class EditableDocView {
 		cm.dispatch({ selection: { anchor: Math.min(target.from + column, target.to) } });
 	}
 
+	/** A match's code-point column (`viewer_find`'s unit) as the UTF-16 offset the window's
+	 *  cursor arithmetic addresses it by — against the loaded line's text. A match past the
+	 *  window has no line text to convert against yet: the raw column rides the slide and
+	 *  selectMatch re-anchors the selection once it lands. */
+	private matchColumn(line: number, cp: number): number {
+		const cm = this.cm;
+		const relative = line - this.first;
+		if (!cm || relative < 0 || relative >= cm.state.doc.lines) return cp;
+		return utf16Col(cm.state.doc.line(relative + 1).text, cp);
+	}
+
 	/** PageUp / PageDown (Zed's `move_page_down`): the caret walks a viewport less one line
 	 *  and the model's `fit` brings the view after it — a caret at the bottom margin pages
 	 *  the view a full screen each press. Every press is a queued step, so a burst of them
@@ -647,12 +676,20 @@ export class EditableDocView {
 		}, BACKUP_DELAY_MS);
 	}
 
-	/** Write the document back to disk. False (with the error reported) when it failed. */
-	save(): Promise<boolean> {
+	/** Write the document back to disk. False (with the error reported) when it failed.
+	 *  `encoding` / `eol` are the tab's Save-with-Encoding / EOL choice — the write's
+	 *  override; the document's own stand in when either is omitted. */
+	save(encoding?: string, eol?: 'lf' | 'crlf'): Promise<boolean> {
 		if (this.docId === null) return Promise.resolve(false);
 		if (this.syncTimer !== undefined) {
 			window.clearTimeout(this.syncTimer);
 			this.syncTimer = undefined;
+		}
+		// A still-queued backup would run after backupClear below and resurrect a backup for
+		// a clean file (ghost hot-exit recovery): the save retires it with the sync.
+		if (this.backupTimer !== undefined) {
+			window.clearTimeout(this.backupTimer);
+			this.backupTimer = undefined;
 		}
 		// Queued with the syncs and history jumps: a save must land the buffer's pending
 		// edit and then write exactly what the editor shows, never a step interleaved.
@@ -666,7 +703,7 @@ export class EditableDocView {
 				this.onSaveProgress?.({ written: 0, total: 0 });
 				const onProgress = new Channel<ViewerSaveProgress>();
 				onProgress.onmessage = (progress) => this.onSaveProgress?.(progress);
-				await viewerSave(this.docId, onProgress);
+				await viewerSave(this.docId, onProgress, { encoding, eol });
 				this.touched = false;
 				const path = this.path;
 				if (path) void backupClear(path).catch(() => undefined);
@@ -751,6 +788,9 @@ export class EditableDocView {
 			try {
 				const result = await viewerReload(this.docId);
 				if (this.disposed || this.docId === null || !result.changed) return;
+				// The swap's new generation is the baseline: every window response naming an
+				// older one is from the replaced document, and showWindow drops it.
+				this.gen = result.gen;
 				this.lineCount = result.lineCount;
 				const cursor = this.cm ? this.cm.state.selection.main.head : 0;
 				const cursorLine = this.cm
@@ -806,7 +846,7 @@ export class EditableDocView {
 					return this.cm.state.sliceDoc(selection.from, selection.to);
 				},
 				revealMatch: (match) => {
-					void this.ensureAround(match.line, true, match.startCol, 'fit').then(() => this.selectMatch(match));
+					void this.ensureAround(match.line, true, this.matchColumn(match.line, match.startCol), 'fit').then(() => this.selectMatch(match));
 				},
 				paintMatches: (matches, current) => this.paintMatches(matches, current),
 				replace: (spec, from, replacement, all) => this.replaceMatches(spec, from, replacement, all),
@@ -868,7 +908,11 @@ export class EditableDocView {
 				// A replaced buffer is dirty however the watch reports it, and the tab must say so.
 				this.touched = true;
 				const target = Math.max(0, Math.min(result.firstLine - Math.floor(WINDOW / 2), Math.max(0, this.lineCount - WINDOW)));
-				await this.showWindow(target, result.firstLine, from ? from.startCol : 0);
+				await this.showWindow(target, result.firstLine);
+				// The replaced line sits inside the fetched window now: place the cursor on the
+				// site with the match's code-point column converted to the window's UTF-16
+				// arithmetic — passing the raw column put it one unit short per surrogate pair.
+				if (from) this.placeCursor(result.firstLine, this.matchColumn(result.firstLine, from.startCol));
 				this.scroll.autoscroll(result.firstLine, 'center');
 				this.cm?.focus();
 				this.onChanged?.(result.clean ?? false);

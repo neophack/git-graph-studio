@@ -10,6 +10,8 @@ export interface HeadInfo {
 	repo: string;
 	branch: string | null;
 	shortHash: string;
+	/** The full commit hash — the unambiguous form a write naming HEAD takes. */
+	hash: string;
 	ahead: number;
 	behind: number;
 	upstream: string | null;

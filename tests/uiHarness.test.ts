@@ -9,6 +9,7 @@ import { Workbench } from '../src/workbench';
 import { commands } from '../src/platform/commands';
 import { effectiveKeybinding } from '../src/platform/keybindings';
 import { settings } from '../src/platform/settings';
+import { loadEditorExtensions, loadSnippetRegistry, loadTextEditor } from '../src/platform/lazy';
 import { backend } from './tauriMock';
 import { click, flush, key, notificationButton, notifications, texts, type } from './helpers';
 
@@ -25,9 +26,12 @@ class DefaultingHandlers extends Map<string, (args: Record<string, unknown>) => 
 let workbench: Workbench;
 
 // The editor widget lives in an async chunk; pay its one-time transform before the flows, so
-// a file open inside a test is ticks, not wall-clock.
+// a file open inside a test is ticks, not wall-clock. The facade no longer carries the
+// CodeMirror-carrying modules (a static reach from boot would drag them into first paint),
+// so warm the lazy seams an open rides — their `once` memoizes the load, and every later
+// await resolves from the settled promise.
 beforeAll(async () => {
-	await import('../src/features/editor');
+	await Promise.all([loadTextEditor(), loadEditorExtensions(), loadSnippetRegistry()]);
 });
 
 beforeEach(async () => {

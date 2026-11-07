@@ -32,7 +32,7 @@ export const menusMethods: ThisType<Workbench> = {
 					...(state.recentFolders().length > 0 ? ['separator' as const] : []),
 					{ label: 'Clear Recently Opened', disabled: state.recentFolders().length === 0, run: () => { state.save('recentFolders', []); } }
 				] }]),
-				'separator', item('workbench.save'), item('workbench.saveAll'), 'separator',
+				'separator', item('workbench.save'), item('file.saveAs'), item('workbench.saveAll'), 'separator',
 				item('workbench.closeEditor'),
 				...(remote() ? [] : [item('workbench.closeFolder')]), 'separator',
 				item('workbench.openSettings'), 'separator',

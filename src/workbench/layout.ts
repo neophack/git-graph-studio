@@ -62,7 +62,7 @@ export const layoutMethods: ThisType<Workbench> = {
 		// the wire refuses `open_folder` anyway, so the bar's bottom button would only ever
 		// answer with an error. The desktop app keeps it.
 		if (commands.activeProfile() !== 'remote') {
-			add('open', icon('folder-opened'), 'Open Folder... (Ctrl+O)', () => void this.pickFolder());
+			add('open', icon('folder-opened'), 'Open Folder... (Ctrl+K Ctrl+O)', () => void this.pickFolder());
 		}
 	},
 
@@ -259,6 +259,19 @@ export const layoutMethods: ThisType<Workbench> = {
 			this.sidebarSash.hidden = false;
 		}
 		if (restore?.panel) this.panel.show();
+	},
+
+	/** The dispose-time zen teardown: an Escape listener an active zen mode armed on
+	 *  document must not survive its workbench (the chrome it left hidden comes back with
+	 *  the next boot's applyLayout, which re-applies the persisted layout). */
+	disposeZenMode(): void {
+		if (zenEscapeListener) {
+			document.removeEventListener('keydown', zenEscapeListener);
+			zenEscapeListener = null;
+		}
+		zenEscapeAt = 0;
+		zenRestore = null;
+		document.body.classList.remove('zen');
 	},
 
 

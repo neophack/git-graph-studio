@@ -34,6 +34,17 @@ function remoteShell(): boolean {
 
 const DECORATION_CLASS: Record<string, string> = { M: 'git-modified', A: 'git-added', D: 'git-deleted', R: 'git-renamed', U: 'git-untracked', '!': 'git-conflict' };
 
+/** An absolute path (a drive letter, a UNC or a posix root): how a multi-root snapshot
+ *  spells its per-root expanded entries, next to a single root's repo-relative spellings. */
+function isAbsolutePath(path: string): boolean {
+	return /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\') || path.startsWith('/');
+}
+
+/** The depth of refresh reconciles in flight: their row moves detach and reattach the rows,
+ *  which the browser reports as a blur — an inline input mid-refresh holds its state (the
+ *  refresh re-anchors and re-focuses it) instead of settling as a commit or a cancel. */
+let reconcileDepth = 0;
+
 export class Explorer {
 	private readonly pane: HTMLElement;
 	private readonly header: HTMLElement;
@@ -151,10 +162,20 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 			this.setRoot(roots[0] ?? null, expanded);
 			return;
 		}
-		this.setRoot(roots[0], expanded);
+		// A multi-root snapshot keys each entry by its own root: absolute spellings restore
+		// under the root that holds them (a legacy snapshot's relative entries belong to the
+		// first root, as setRoot's one-root restore always assumed).
+		const absolute = expanded.filter((folder) => isAbsolutePath(folder));
+		this.setRoot(roots[0], expanded.filter((folder) => !isAbsolutePath(folder)));
 		// The roots sit on the virtual level, always expanded; their contents follow the
 		// same expanded-folders machinery as any folder.
 		for (const root of roots) this.expanded.add(root);
+		for (const folder of absolute) {
+			const owner = this.rootFor(folder);
+			if (!owner) continue;
+			// The snapshot spells paths with forward slashes; the rows use the OS's own.
+			this.expanded.add(owner.includes('\\') ? folder.replaceAll('/', '\\') : folder);
+		}
 		this.render();
 	}
 
@@ -201,9 +222,28 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 	private async refreshNow(): Promise<void> {
 		if (!this.rootPath) return;
 		const scrollTop = this.body.scrollTop;
-		this.cancelInlineInputs();
-		if (this.rootPaths.length > 1) await this.renderRoots();
-		else await this.renderLevel(this.tree, this.rootPath, 0);
+		// A refresh reconciles rows instead of dropping them, so a half-typed inline input
+		// survives the watcher burst the way VS Code's does: capture the live inputs, keep
+		// the ones still anchored (the reconcile reuses their rows), settle as cancelled
+		// only the ones whose anchor row vanished with the refresh.
+		const inputs = Array.from(this.tree.querySelectorAll<HTMLInputElement>('.inline-input'));
+		const focused = inputs.find((input) => document.activeElement === input) ?? null;
+		reconcileDepth++;
+		try {
+			if (this.rootPaths.length > 1) await this.renderRoots();
+			else await this.renderLevel(this.tree, this.rootPath, 0);
+		} finally {
+			reconcileDepth--;
+		}
+		for (const input of inputs) {
+			if (this.tree.contains(input)) continue;
+			// An explicit cancel, not a blur: the row is gone, so nothing would settle it.
+			input.dispatchEvent(new CustomEvent(INLINE_CANCEL_EVENT));
+		}
+		// The reconcile's row moves read as a blur to the browser; a suppressed one leaves
+		// the focus on the body, so the typing input takes it back. A focus the user moved
+		// during the listing is left alone.
+		if (focused && this.tree.contains(focused) && (document.activeElement === document.body || document.activeElement === null)) focused.focus();
 		this.body.scrollTop = scrollTop;
 		// Reconciliation keeps (or builds) rows without the clipboard's knowledge: the cut
 		// dim is re-painted over whatever rows now exist.
@@ -211,8 +251,9 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		this.repaintTypeFilter();
 	}
 
-	/** An inline new/rename input the tree is about to drop must settle (as cancelled), or the
-	 *  operation awaiting it hangs forever. */
+	/** An inline new/rename input must settle when the tree is rebuilt from scratch (a
+	 *  folder switch, a collapse), or the operation awaiting it hangs forever. A refresh
+	 *  takes the reconcile path instead (refreshNow), which keeps a still-anchored input. */
 	private cancelInlineInputs(): void {
 		for (const input of this.tree.querySelectorAll<HTMLInputElement>('.inline-input')) {
 			// An explicit cancel, not a blur: losing focus would commit a half-typed name.
@@ -221,13 +262,17 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		}
 	}
 
-	/** Expand the folders down to a file and select it (the "reveal" of an opened editor). */
+	/** Expand the folders down to a file and select it (the "reveal" of an opened editor).
+	 *  The walk starts at the entry's own root: a multi-root workspace's `relativeTo` against
+	 *  the first root returned the path unchanged and silently no-oped every other root. */
 	async reveal(path: string): Promise<void> {
 		if (!this.rootPath) return;
-		const relative = relativeTo(this.rootPath, path);
+		const root = this.rootFor(path);
+		if (!root) return;
+		const relative = relativeTo(root, path);
 		if (relative === path) return;
 		const parts = relative.split('/');
-		let current = this.rootPath;
+		let current = root;
 		for (const part of parts.slice(0, -1)) {
 			current = joinPath(current, part);
 			if (!this.expanded.has(current)) {
@@ -241,6 +286,23 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		this.rowFor(path)?.scrollIntoView({ block: 'nearest' });
 	}
 
+	/** The open root a path belongs to (the deepest match wins when roots nest), or null when
+	 *  the path is outside every open root. Either separator dialect compares posix-normalized. */
+	private rootFor(path: string): string | null {
+		const posix = toPosix(path);
+		let best: string | null = null;
+		let bestLength = -1;
+		for (const root of this.rootPaths) {
+			const normalized = toPosix(root).replace(/\/+$/, '');
+			if (posix !== normalized && !posix.startsWith(normalized + '/')) continue;
+			if (normalized.length > bestLength) {
+				best = root;
+				bestLength = normalized.length;
+			}
+		}
+		return best;
+	}
+
 	/* ---------- Rendering ---------- */
 
 	private render(): void {
@@ -252,13 +314,13 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		if (!this.rootPath) {
 			this.header.hidden = true;
 			const welcome = el('div', 'welcome-view', [
-				el('p', '', ['You have not yet opened a folder.']),
+				el('p', '', [t('explorer.noFolder')]),
 				(() => {
-					const button = el('button', 'button', ['Open Folder']);
+					const button = el('button', 'button', [t('explorer.openFolder')]);
 					button.addEventListener('click', () => this.onOpenFolder?.());
 					return button;
 				})(),
-				el('p', '', ['Opening a Git repository shows its history in the Git Graph tab, its changes in Source Control, and its files here.'])
+				el('p', '', [t('explorer.noFolderHint')])
 			]);
 			this.tree.appendChild(welcome);
 			return;
@@ -270,10 +332,10 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		);
 		this.header.title = this.rootPath;
 		const actions = el('div', 'actions', [
-			actionButton('new-file', 'New File...', () => void this.createInline(this.targetFolder(), false)),
-			actionButton('new-folder', 'New Folder...', () => void this.createInline(this.targetFolder(), true)),
-			actionButton('refresh', 'Refresh Explorer', () => void this.refresh()),
-			actionButton('collapse-all', 'Collapse Folders in Explorer', () => this.collapseAll())
+			actionButton('new-file', t('explorer.newFile'), () => void this.createInline(this.targetFolder(), false)),
+			actionButton('new-folder', t('explorer.newFolder'), () => void this.createInline(this.targetFolder(), true)),
+			actionButton('refresh', t('explorer.refresh'), () => void this.refresh()),
+			actionButton('collapse-all', t('explorer.collapseAll'), () => this.collapseAll())
 		]);
 		this.header.appendChild(actions);
 		if (!this.collapsed && this.rootPath) {
@@ -900,30 +962,30 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		const canCompare = withRow !== null && (withRow.dataset['dir'] === '1') === isDir;
 		showContextMenu(event.clientX, event.clientY, [
 			...(pair ? [
-				{ label: isDir ? 'Compare Two Folders' : 'Compare Two Files', run: () => this.onCompare?.(pair[0], pair[1], isDir) },
+				{ label: isDir ? t('explorer.compareFolders') : t('explorer.compareFiles'), run: () => this.onCompare?.(pair[0], pair[1], isDir) },
 				'separator'
 			] : []) as MenuEntry[],
 				...(isDir ? [] : [
 				// A Markdown file opens as its rendered preview, like VS Code's own
 				// explorer entries (the editor's toolbar button and Ctrl+Shift+V do the same).
 				...(/\.(md|markdown)$/i.test(path) ? [
-					{ label: 'Open Preview', run: () => this.onOpenMarkdownPreview?.(path, false) },
-					{ label: 'Open Preview to the Side', run: () => this.onOpenMarkdownPreview?.(path, true) }
+					{ label: t('explorer.openPreview'), run: () => this.onOpenMarkdownPreview?.(path, false) },
+					{ label: t('explorer.openPreviewSide'), run: () => this.onOpenMarkdownPreview?.(path, true) }
 				] as MenuEntry[] : []),
-				{ label: 'Open to the Right', run: () => this.onOpenInDirection?.(path, 'right') },
-				{ label: 'Open to the Left', run: () => this.onOpenInDirection?.(path, 'left') },
-				{ label: 'Open Below', run: () => this.onOpenInDirection?.(path, 'down') },
-				{ label: 'Open Above', run: () => this.onOpenInDirection?.(path, 'up') },
-				{ label: 'Open in Hex Viewer', run: () => this.onOpenHex?.(path) },
+				{ label: t('explorer.openToTheRight'), run: () => this.onOpenInDirection?.(path, 'right') },
+				{ label: t('explorer.openToTheLeft'), run: () => this.onOpenInDirection?.(path, 'left') },
+				{ label: t('explorer.openBelow'), run: () => this.onOpenInDirection?.(path, 'down') },
+				{ label: t('explorer.openAbove'), run: () => this.onOpenInDirection?.(path, 'up') },
+				{ label: t('explorer.openHex'), run: () => this.onOpenHex?.(path) },
 				'separator'
 			] as MenuEntry[]),
-			{ label: 'New File...', run: () => void this.createInline(folder, false) },
-			{ label: 'New Folder...', run: () => void this.createInline(folder, true) },
+			{ label: t('explorer.newFile'), run: () => void this.createInline(folder, false) },
+			{ label: t('explorer.newFolder'), run: () => void this.createInline(folder, true) },
 			'separator',
 			// "Reveal in File Explorer" opens the PC's own desktop Explorer: a browser page
 			// has no such place. Hidden on the remote shell (the opener shim's
 			// remote-picker fallback stays for anything else that reveals).
-			...(remoteShell() ? [] : [{ label: 'Reveal in File Explorer', run: () => void revealItemInDir(path).catch((e) => notify('error', String(e))) }] as MenuEntry[]),
+			...(remoteShell() ? [] : [{ label: t('explorer.revealInFileExplorer'), run: () => void revealItemInDir(path).catch((e) => notify('error', String(e))) }] as MenuEntry[]),
 			// File transfers are the remote session's own (K16, docs/remote-client-plan.md
 			// §11): a file downloads to the device, a folder downloads zipped and receives
 			// uploads — over the remote wire. The desktop app has no rows: copying between
@@ -931,10 +993,10 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 			...(remoteShell() ? transferMenuEntries(path, isDir) : []),
 			...(isDir ? [
 				{ label: t('explorer.findInFolder'), run: () => this.onFindInFolder?.(path) },
-				{ label: 'Module Analysis', run: () => this.onModuleAnalysis?.(this.selectedFolders(path)) }
+				{ label: t('explorer.moduleAnalysis'), run: () => this.onModuleAnalysis?.(this.selectedFolders(path)) }
 			] : []),
 			// A folder row opens the terminal in the folder; a file row in its containing one.
-			{ label: 'Open in Integrated Terminal', run: () => this.onOpenInTerminal?.(folder) },
+			{ label: t('explorer.openInTerminal'), run: () => this.onOpenInTerminal?.(folder) },
 			'separator',
 			// The Explorer clipboard (VS Code's group): the multi-selection is what Copy and
 			// Cut speak for (a lone row clips alone), Paste lands in the folder the menu was
@@ -944,14 +1006,14 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 			{ label: t('explorer.copy'), keybinding: 'Ctrl+C', run: () => this.clipSelection(group, false) },
 			// A multi-selection copies one path per line, in selection order (VS Code's
 			// behaviour); a lone entry copies alone.
-			{ label: 'Copy Path', keybinding: 'Shift+Alt+C', run: () => void writeText(group.join('\n')) },
-			{ label: 'Copy Relative Path', keybinding: 'Ctrl+K Ctrl+Shift+C', run: () => void writeText(group.map((p) => relativeTo(this.rootPath!, p)).join('\n')) },
+			{ label: t('explorer.copyPath'), keybinding: 'Shift+Alt+C', run: () => void writeText(group.join('\n')) },
+			{ label: t('explorer.copyRelativePath'), keybinding: 'Ctrl+K Ctrl+Shift+C', run: () => void writeText(group.map((p) => relativeTo(this.rootPath!, p)).join('\n')) },
 			{ label: t('explorer.paste'), keybinding: 'Ctrl+V', disabled: this.clipboard === null, run: () => void this.pasteInto(folder) },
 			{ label: t('explorer.duplicate'), disabled: isRoot, run: () => void this.duplicateSelection(group) },
 			'separator',
-			{ label: 'Select for Compare', disabled: this.compareWith === path, run: () => { this.compareWith = path; } },
+			{ label: t('explorer.selectForCompare'), disabled: this.compareWith === path, run: () => { this.compareWith = path; } },
 			...(canCompare ? [{
-				label: 'Compare with Selected',
+				label: t('explorer.compareWithSelected'),
 				run: () => {
 					const left = this.compareWith!;
 					this.compareWith = null;
@@ -959,8 +1021,8 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 				}
 			}] as MenuEntry[] : []),
 			'separator',
-			{ label: 'Rename...', keybinding: 'F2', disabled: isRoot, run: () => void this.renameInline(path) },
-			{ label: 'Delete', keybinding: 'Delete', disabled: isRoot, run: () => void this.delete(path) },
+			{ label: t('explorer.rename'), keybinding: 'F2', disabled: isRoot, run: () => void this.renameInline(path) },
+			{ label: t('explorer.delete'), keybinding: 'Delete', disabled: isRoot, run: () => void this.delete(path) },
 			// Extensions' `contributes.menus["explorer/context"]` entries, handed VS Code's
 			// arguments: the clicked resource as a Uri, then the whole selection as Uris (the
 			// clicked one alone when it is outside the selection).
@@ -1062,10 +1124,13 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		const deletable = targets.filter((target) => target !== this.rootPath);
 		if (deletable.length === 0) return;
 		const isDir = deletable.length === 1 && this.rowFor(deletable[0]!)?.dataset['dir'] === '1';
-		const what = deletable.length === 1 ? `'${basename(deletable[0]!)}'${isDir ? ' and its contents' : ''}` : `${deletable.length} entries`;
+		const what = deletable.length === 1
+			? tf(isDir ? 'explorer.deleteWhat.withContents' : 'explorer.deleteWhat.named', basename(deletable[0]!))
+			: tf('explorer.deleteWhat.entries', deletable.length);
+		const restorable = deletable.length === 1 ? t(isDir ? 'explorer.deleteRestoreFolder' : 'explorer.deleteRestoreFile') : t('explorer.deleteRestoreThem');
 		const confirmed = permanent
-			? await confirmDialog(`Are you sure you want to permanently delete ${what}? This action is irreversible!`, 'Delete Permanently')
-			: await confirmDialog(`Are you sure you want to delete ${what}? You can restore ${deletable.length === 1 ? `this ${isDir ? 'folder' : 'file'}` : 'them'} from the Recycle Bin.`, 'Move to Recycle Bin');
+			? await confirmDialog(tf('explorer.deletePermanentConfirm', what), t('explorer.deletePermanentButton'))
+			: await confirmDialog(tf('explorer.deleteConfirm', what, restorable), t('explorer.deleteRecycleButton'));
 		if (!confirmed) return;
 		for (const target of deletable) await this.deleteConfirmed(target, permanent);
 		await this.refresh();
@@ -1075,7 +1140,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 	 *  permanent-delete offer, the expanded set's rekey, the workbench's notification. */
 	private async deleteConfirmed(path: string, permanent: boolean): Promise<void> {
 		const isDir = this.rowFor(path)?.dataset['dir'] === '1';
-		const what = `'${basename(path)}'${isDir ? ' and its contents' : ''}`;
+		const what = tf(isDir ? 'explorer.deleteWhat.withContents' : 'explorer.deleteWhat.named', basename(path));
 		try {
 			await deletePath(path, permanent);
 		} catch (error) {
@@ -1085,7 +1150,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 			}
 			// The Recycle Bin refused (a network share, a path it cannot handle): offer the
 			// permanent delete instead, as VS Code does - one more confirmation, no re-prompt.
-			const retry = await confirmDialog(`Failed to delete ${what} using the Recycle Bin. Do you want to permanently delete instead?`, 'Delete Permanently', 'error');
+			const retry = await confirmDialog(tf('explorer.deleteRecycleFailed', what), t('explorer.deletePermanentButton'), 'error');
 			if (!retry) return;
 			try {
 				await deletePath(path, true);
@@ -1182,16 +1247,30 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 	}
 
 	private *childrenNames(folder: string): Iterable<string> {
-		const container = folder === this.rootPath ? this.tree : (this.rowFor(folder)?.nextElementSibling as HTMLElement | null);
+		// The rendered children of `folder`: the tree's own top level is the single root's
+		// listing, but a multi-root tree renders a virtual level there — even the first
+		// root's children sit in the root row's `.children` group.
+		let container: HTMLElement | null = null;
+		if (this.rootPaths.length <= 1 && folder === this.rootPath) {
+			container = this.tree;
+		} else {
+			const next = this.rowFor(folder)?.nextElementSibling as HTMLElement | null;
+			if (next?.classList.contains('children') && next.dataset['parent'] === folder) container = next;
+		}
 		if (!container) return;
 		for (const row of container.querySelectorAll<HTMLElement>(':scope > .row[data-path]')) {
 			yield basename(row.dataset['path']!);
 		}
 	}
 
-	/** Every folder currently expanded, spelled repo-relative, for callers that mirror the tree. */
+	/** Every folder currently expanded, spelled repo-relative, for callers that mirror the
+	 *  tree. A multi-root workspace keys each entry by its own root — the entry serializes
+	 *  as its absolute posix path (unambiguous per root), which `setRoots` routes back to
+	 *  its root; a single root keeps the repo-relative spelling. */
 	expandedFolders(): string[] {
-		return this.rootPath ? Array.from(this.expanded).map((p) => toPosix(relativeTo(this.rootPath!, p))) : [];
+		if (!this.rootPath) return [];
+		if (this.rootPaths.length > 1) return Array.from(this.expanded).map((p) => toPosix(p));
+		return Array.from(this.expanded).map((p) => toPosix(relativeTo(this.rootPath!, p)));
 	}
 }
 
@@ -1210,7 +1289,13 @@ function inlineInput(input: HTMLInputElement, validate: (name: string) => string
 			input.removeEventListener('blur', onBlur);
 			resolve(value);
 		};
-		const onBlur = () => finish(input.value.trim() !== '' && validate(input.value) === null ? input.value : null);
+			const onBlur = () => {
+			// A refresh's reconcile moves rows (detach + reattach), which the browser reports
+			// as a blur; while one runs, an input still in the tree holds its state — the
+			// refresh re-anchors and re-focuses it. Only the user's own blur settles.
+			if (reconcileDepth > 0 && input.isConnected) return;
+			finish(input.value.trim() !== '' && validate(input.value) === null ? input.value : null);
+		};
 		input.addEventListener('keydown', (event) => {
 			event.stopPropagation();
 			if (event.key === 'Enter') {

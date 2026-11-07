@@ -18,7 +18,7 @@ import { THEMES, syncExtensionThemes, updateSetting } from '../src/platform/sett
 // The frame half of the extension host, loaded for its window message listener: under jsdom the
 // frame's `parent` is this same window, so tests drive it with MessageEvents and read its posts.
 import '../src/hosts/extHostBoot';
-import { backend } from './tauriMock';
+import { backend, dialog } from './tauriMock';
 import { setRemoteEnv } from '../src/remote/session';
 import { installRemoteSessionHooks } from '../src/remote/desktopHooks';
 import { hook, provideHook } from '../src/platform/hooks';
@@ -781,6 +781,37 @@ describe('the VS Code API surface, round one (messages, picks, progress, status 
 		expect(requests[1]).toMatchObject({ method: 'webview.create', args: [2, 'demo.view', 'Demo', 3, true] });
 	});
 
+	it('a webview panel reveal carries its ViewColumn and preserveFocus to the host (VS Code\'s contract)', async () => {
+		const { api, requests } = shim();
+		const panel = api.window.createWebviewPanel('demo.view', 'Demo', undefined);
+		panel.reveal(); // the keep-its-column form (a re-focus of the panel)
+		panel.reveal(2); // an explicit column
+		panel.reveal(3, true); // an explicit column whose focus stays where it was
+		expect(requests.filter((request) => request.method === 'webview.reveal')).toEqual([
+			{ method: 'webview.reveal', args: [1, undefined, false] },
+			{ method: 'webview.reveal', args: [1, 2, false] },
+			{ method: 'webview.reveal', args: [1, 3, true] }
+		]);
+		// The requested column is the panel's own going forward, as VS Code's is.
+		expect(panel.viewColumn).toBe(3);
+	});
+
+	it('a terminal sendText crosses its addNewLine flag (false writes the text without Enter)', async () => {
+		const { api, requests } = shim();
+		const terminal = api.window.createTerminal('build');
+		// The default (and the explicit true) press Enter, as VS Code's sendText does.
+		terminal.sendText('cargo build');
+		terminal.sendText('cargo test', true);
+		// The false that once collapsed to the same wire line as the true: a typed-only
+		// text (the extension's own multi-line composing) must arrive without the Enter.
+		terminal.sendText('set CHOOSE=', false);
+		expect(requests.filter((request) => request.method === 'terminal.send')).toEqual([
+			{ method: 'terminal.send', args: ['cargo build', true] },
+			{ method: 'terminal.send', args: ['cargo test', true] },
+			{ method: 'terminal.send', args: ['set CHOOSE=', false] }
+		]);
+	});
+
 	it('a configChanged host event refreshes the settings and fires onDidChangeConfiguration', async () => {
 		const { api } = shim();
 		const fired: unknown[] = [];
@@ -1492,6 +1523,69 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		expect(disposed()).toEqual([7, 7]); // the close's own push, then the reveal's healing push
 	});
 
+	it('a reveal honors its ViewColumn and preserveFocus: the hook carries both, the re-open places through them', async () => {
+		const { host } = hostWithFrame();
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		const revealed: { tabId: string; placement: unknown; preserveFocus: boolean }[] = [];
+		const opened: { panelId: number; placement: unknown; focus: boolean }[] = [];
+		host.onOpenWebview = (panelId, title, extId, placement, focus) => {
+			opened.push({ panelId, placement, focus: focus !== false });
+			void group.openExtPage({ kind: 'extpage', id: host['webviewTabId'](extId, panelId), title, extId, pageId: 'webview' }, () => undefined);
+		};
+		host.onRevealWebviewTab = (tabId, placement, preserveFocus) => {
+			if (!group.hasEditor(tabId)) return false;
+			revealed.push({ tabId, placement, preserveFocus: preserveFocus === true });
+			group.activateById(tabId);
+			return true;
+		};
+
+		await host['serve']('webview.create', [8, 'chat.view', 'Chat'], 'acme.demo', {} as never);
+		// The live tab reveals with the column it asked for; preserveFocus asks the reveal
+		// to leave the current editor focused (the workbench wiring activates the tab
+		// without taking the group).
+		await host['serve']('webview.reveal', [8, 3, true], 'acme.demo', {} as never);
+		expect(revealed).toEqual([{ tabId: 'webview:acme.demo:8', placement: 3, preserveFocus: true }]);
+
+		// The tab is gone: the re-open runs the same placement a create's showOptions
+		// takes — Beside is -2 — and preserveFocus opens the tab without taking focus.
+		group.closeById('webview:acme.demo:8');
+		await host['serve']('webview.reveal', [8, -2, true], 'acme.demo', {} as never);
+		expect(opened.at(-1)).toEqual({ panelId: 8, placement: 'beside', focus: false });
+
+		// A bare reveal (the re-focus form): no placement, the tab comes forward focused.
+		group.closeById('webview:acme.demo:8');
+		await host['serve']('webview.reveal', [8], 'acme.demo', {} as never);
+		expect(opened.at(-1)).toEqual({ panelId: 8, placement: undefined, focus: true });
+	});
+
+	it('a folder showOpenDialog opens the dialog in directory mode (canSelectFolders reaches the backend)', async () => {
+		const { host } = hostWithFrame();
+		backend.dialog.openResult = '/ws/chosen';
+		const folderCalls = () => dialog.open.mock.calls.filter((call) => (call[0] as { directory?: boolean } | undefined)?.directory === true).length;
+		const beforeFolder = folderCalls();
+		const beforeAny = dialog.open.mock.calls.length;
+		await host['serve']('dialog.open', [{ canSelectFolders: true, canSelectMany: false }], 'acme.demo', {} as never);
+		// The flag the shim's options carried reached the backend open: the dialog opened
+		// for folders (once dropped, an extension could only ever offer files).
+		expect(folderCalls() - beforeFolder).toBe(1);
+		// A file picker stays a file picker: without the flag the dialog opens for files.
+		await host['serve']('dialog.open', [{ canSelectMany: true }], 'acme.demo', {} as never);
+		expect(folderCalls()).toBe(beforeFolder + 1);
+		expect(dialog.open.mock.calls.length).toBe(beforeAny + 2);
+	});
+
+	it('a terminal.send without Enter writes the text alone (sendText(text, false))', async () => {
+		const { host } = hostWithFrame();
+		const runs: { text: string; pressEnter: boolean }[] = [];
+		host.onRunInTerminal = (text, pressEnter) => runs.push({ text, pressEnter: pressEnter !== false });
+		await host['serve']('terminal.send', ['cargo build'], 'acme.demo', {} as never);
+		await host['serve']('terminal.send', ['set CHOOSE=', false], 'acme.demo', {} as never);
+		expect(runs).toEqual([
+			{ text: 'cargo build', pressEnter: true },
+			{ text: 'set CHOOSE=', pressEnter: false }
+		]);
+	});
+
 	it('ggs.claudeChat types a prompt into the session’s Claude Code tab — or a new one — and sends it from there', async () => {
 		const { host } = hostWithFrame();
 		host['declaredCommandIds'].set('acme.demo', ['claude-vscode.editor.open']);
@@ -1746,6 +1840,75 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		dispose();
 	});
 
+	it('webview postMessage answers the delivery verdict — false with no record, true to a live panel', async () => {
+		const { host } = hostWithFrame();
+		// No panel record: the message had nowhere to go — the extension's retry logic
+		// (claude-code's page handshake) reads the false and resends.
+		await expect(host['serve']('webview.postMessage', [9, { hi: 1 }], 'acme.demo', {} as never)).resolves.toBe(false);
+		await expect(host['serve']('webviewView.postMessage', ['acme.chat', { hi: 1 }], 'acme.demo', {} as never)).resolves.toBe(false);
+		// A live record: true, whether or not the page has mounted yet (the push queues).
+		await host['serve']('webview.create', [1, 'demo.view', 'Demo'], 'acme.demo', {} as never);
+		await expect(host['serve']('webview.postMessage', [1, { hi: 1 }], 'acme.demo', {} as never)).resolves.toBe(true);
+		await host['serve']('webviewView.register', ['acme.chat'], 'acme.demo', {} as never);
+		await expect(host['serve']('webviewView.postMessage', ['acme.chat', { hi: 1 }], 'acme.demo', {} as never)).resolves.toBe(true);
+	});
+
+	it('a webview view\'s runtime title and description render live on the section header', async () => {
+		const { host } = hostWithFrame();
+		// The section the workbench builds: a header carrying the manifest's name, over
+		// the pane the view's frame mounts into.
+		const section = document.body.appendChild(document.createElement('div'));
+		section.className = 'ext-view-section ext-webview-view-section';
+		const header = document.createElement('div');
+		header.className = 'sidebar-title';
+		const label = document.createElement('span');
+		label.className = 'label';
+		label.textContent = 'Chat';
+		header.appendChild(label);
+		section.appendChild(header);
+		const pane = document.createElement('div');
+		pane.className = 'view-pane';
+		section.appendChild(pane);
+		// The title that crossed before the section existed waits in the record.
+		await host['serve']('webviewView.setTitle', ['acme.chat', 'Signed in'], 'acme.demo', {} as never);
+		expect(host['webviewViews'].get('acme.chat')!.title).toBe('Signed in');
+		const dispose = host.mountWebviewView('acme.chat', 'acme.demo', pane);
+		try {
+			// The mount renders it; a later description joins the header beside the title.
+			expect(label.textContent).toBe('Signed in');
+			await host['serve']('webviewView.setDescription', ['acme.chat', '2 sessions'], 'acme.demo', {} as never);
+			expect(header.querySelector('.ext-tree-title-description')!.textContent).toBe('2 sessions');
+			// A live title change re-renders at once, and the revert ('' / undefined)
+			// restores the manifest's name.
+			await host['serve']('webviewView.setTitle', ['acme.chat', 'Acme Chat'], 'acme.demo', {} as never);
+			expect(label.textContent).toBe('Acme Chat');
+			await host['serve']('webviewView.setTitle', ['acme.chat', ''], 'acme.demo', {} as never);
+			expect(label.textContent).toBe('Chat');
+		} finally {
+			dispose();
+		}
+	});
+
+	it('a cancellable progress toast renders Cancel and pushes progressCancelled on the click', async () => {
+		const { host, sent } = hostWithFrame();
+		const handle = host['frames'].get('acme.demo')!;
+		await host['serve']('progress.begin', ['Sending', true], 'acme.demo', handle as never);
+		const cancel = document.querySelector('#notifications .notification button');
+		expect(cancel).not.toBeNull();
+		cancel!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		// The click crossed back to the extension (the shim resolves the token it handed
+		// the task) and took the toast away; the progress.end that follows settles the
+		// host's record quietly.
+		const push = sent.find((message) => (message as { event?: string }).event === 'progressCancelled') as { event: string; progressId: number } | undefined;
+		expect(push).toMatchObject({ event: 'progressCancelled', progressId: 1 });
+		expect(document.querySelector('#notifications .notification')).toBeNull();
+		await host['serve']('progress.end', [1], 'acme.demo', {} as never);
+		// A plain task renders no cancel button at all.
+		await host['serve']('progress.begin', ['Working'], 'acme.demo', handle as never);
+		expect(document.querySelector('#notifications .notification button')).toBeNull();
+		await host['serve']('progress.end', [2], 'acme.demo', {} as never);
+	});
+
 	it('a rebuilt sidebar section re-resolves its webview view — the chat never goes blank', async () => {
 		const { host, sent } = hostWithFrame();
 		// The manifest declares the chat view (a `type: "webview"` view in its container) —
@@ -1965,6 +2128,16 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		const { host } = hostWithFrame();
 		await host['serve']('state.update', ['global', 'lastOpen', 'file-a'], 'acme.demo', {} as never);
 		expect(JSON.parse(localStorage.getItem('ggstudio.extMemento.global.acme.demo')!)).toEqual({ lastOpen: 'file-a' });
+	});
+
+	it('a null state.update deletes the key (a memento delete crosses the JSON wire as null)', async () => {
+		const { host } = hostWithFrame();
+		await host['serve']('state.update', ['global', 'lastOpen', 'file-a'], 'acme.demo', {} as never);
+		// The process host's `globalState.update(key, undefined)` arrives here as null —
+		// JSON has no undefined — and the host must treat it as the delete it was sent
+		// as, or `keys()` would keep listing the deleted key forever.
+		await host['serve']('state.update', ['global', 'lastOpen', null], 'acme.demo', {} as never);
+		expect(JSON.parse(localStorage.getItem('ggstudio.extMemento.global.acme.demo')!)).toEqual({});
 	});
 });
 
@@ -2204,6 +2377,24 @@ describe('the extension host frame (src/extHostBoot.ts)', () => {
 		const call = callResults.get(43);
 		expect(call!.ok).toBe(true);
 		expect(call!.result).toEqual(['C:\\repo\\a.txt', 'function']);
+	});
+
+	it('restores a top-level null runCommand argument to the undefined the caller passed', async () => {
+		// JSON has no undefined: a placeholder argument the caller passed — the host's
+		// `executeCommand('id', undefined)` slot, claude-code's `editor.open` branching on
+		// `viewColumn !== void 0` (it threw on a null one) — crosses as null, and the
+		// dispatch restores it top-level only; a null inside an object is data.
+		bootExtension("const vscode = require('vscode'); exports.activate = () => { vscode.commands.registerCommand('demo.open', (...args) => [args.length, args[0] === undefined, args[0] === null, args[1] !== undefined && args[1].inner === null]); };");
+		await flush();
+		window.dispatchEvent(new MessageEvent('message', { data: {
+			type: '__studioExtCall', id: 44, method: 'runCommand',
+			// What the ggs-ext/1 wire delivers for `executeCommand('demo.open', undefined, { inner: null })`.
+			args: ['demo.open', [null, { inner: null }]]
+		} }));
+		await flush();
+		const call = callResults.get(44);
+		expect(call!.ok).toBe(true);
+		expect(call!.result).toEqual([2, true, false, true]);
 	});
 
 	it('executeCommand forwards its arguments to the handler living in the frame', async () => {
@@ -4267,6 +4458,42 @@ describe('VS Code API fidelity: value types, configuration, edits, diagnostics (
 		expect(prompts[0]!.args[2]).toMatchObject({ password: true });
 	});
 
+	it('a webview postMessage resolves the delivery verdict — false when the panel or view is gone', async () => {
+		// VS Code resolves false so an extension's retry logic can resend (claude-code's
+		// page handshake). An older host answering nothing still reads as delivered.
+		const { api } = shim({}, { 'webview.postMessage': () => false, 'webviewView.postMessage': () => false });
+		const panel = api.window.createWebviewPanel('demo.view', 'Demo');
+		await expect(panel.webview.postMessage({ hi: 1 })).resolves.toBe(false);
+		let view: { webview: { postMessage(message: unknown): Promise<boolean> } } | null = null;
+		api.window.registerWebviewViewProvider('acme.chat', {
+			resolveWebviewView: (resolved) => { view = resolved as typeof view; }
+		});
+		await api['__serveWebviewView'].resolve('acme.chat');
+		expect(view).not.toBeNull();
+		await expect(view!.webview.postMessage({ hi: 1 })).resolves.toBe(false);
+	});
+
+	it('a cancellable withProgress resolves its token on the host\'s progressCancelled push', async () => {
+		let release: () => void = () => undefined;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		const { api, requests } = shim({}, { 'progress.begin': () => 1 });
+		const running = api.window.withProgress({ title: 'Sending', cancellable: true }, async (_progress, token) => {
+			let fired = false;
+			token.onCancellationRequested(() => { fired = true; });
+			await gate;
+			return { cancelled: token.isCancellationRequested, fired };
+		});
+		await flush();
+		// The cancellable flag rode the begin — the host renders the Cancel affordance
+		// for it alone.
+		expect(requests.find((request) => request.method === 'progress.begin')!.args).toEqual(['Sending', true]);
+		api.handleHostEvent({ event: 'progressCancelled', progressId: 1 });
+		release();
+		expect(await running).toEqual({ cancelled: true, fired: true });
+		// The entry settled after the cancel: progress.end crossed last.
+		expect(requests.at(-1)!.method).toBe('progress.end');
+	});
+
 	it('showQuickPick serves canPickMany (toggle rounds) and keeps duplicate labels distinct', async () => {
 		const picks = ['1', '__ggs_done'];
 		const { api } = shim({}, { showQuickPick: () => picks.shift() });
@@ -4445,6 +4672,44 @@ describe('the extension host log', () => {
 		const failure = extLogEntries().find((entry) => entry.source === 'acme.broken' && entry.level === 'error');
 		expect(failure?.detail).toContain('extension.js:10:5');
 		expect(notifications().some((text) => text.includes('acme.broken'))).toBe(true);
+	});
+
+	it('an activation failure drops the dead frame record, so the next command re-activates', async () => {
+		resetExtLog();
+		const host = new ExtensionHost();
+		const handle = { frame: document.body.appendChild(document.createElement('iframe')), commandIds: new Set<string>(), pendingCalls: new Set<(error: Error) => void>(), send: () => undefined };
+		host['frames'].set('acme.broken', handle);
+		window.dispatchEvent(new MessageEvent('message', { data: { type: '__studioExtActivateFailed', extensionId: 'acme.broken', error: 'TypeError: boom' } }));
+		await flush();
+		// The record (and its iframe) is gone: `ensureActive`'s `frames.has` guard no
+		// longer short-circuits a dead activation, so the extension's next command wakes
+		// it again instead of dispatching into a frame with no handler forever.
+		expect(host['frames'].has('acme.broken')).toBe(false);
+		expect(handle.frame.isConnected).toBe(false);
+
+		// And the next ensureActive really activates again.
+		const activations: string[] = [];
+		(host as unknown as { activate: (ext: ExtInfo) => Promise<void> }).activate = (ext) => {
+			activations.push(ext.id);
+			return Promise.resolve();
+		};
+		(host as unknown as { installedExts: ExtInfo[] }).installedExts = [USER];
+		const pending = host['ensureActive']('acme.demo');
+		window.dispatchEvent(new MessageEvent('message', { data: { type: '__studioExtActivated', extensionId: 'acme.demo' } }));
+		await pending;
+		expect(activations).toEqual(['acme.demo']);
+	});
+
+	it('a declared command whose activation registered no handler reports the dead dispatch in the log', async () => {
+		resetExtLog();
+		withExtensions();
+		const host = new ExtensionHost();
+		(host as unknown as { ensureActive: (extId: string) => Promise<void> }).ensureActive = () => Promise.resolve();
+		host['declaredCommandIds'].set('acme.demo', ['acme.demo.ghost']);
+		await host['runRegistered']('acme.demo.ghost');
+		const entry = extLogEntries().find((candidate) => candidate.source === 'acme.demo' && candidate.level === 'warn');
+		expect(entry?.message).toContain('acme.demo.ghost');
+		expect(entry?.message).toContain('no handler');
 	});
 
 	it('writes batched lines to ~/.ggs/logs/ext-host.log through ext_log_append', async () => {

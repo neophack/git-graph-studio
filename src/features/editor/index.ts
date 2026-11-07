@@ -1,6 +1,11 @@
 // The Editor Suite module's facade: the module's public surface under one import path —
 // cross-feature imports resolve here (plan §5.3); the module's own files reach each
-// other directly.
+// other directly. The light half only: the CodeMirror-carrying modules (textEditor,
+// docEditView, editorExtras, autocomplete, expandSelection, comments, cmTheme, and the
+// provider views) stay behind lazy.ts's async seams — a static star-export here would
+// chain the whole editor suite (CodeMirror included) into the boot closure, and the
+// first paint parses what boot statically reaches. A test or tool needing a heavy
+// symbol imports its module directly.
 
 export * from './inputs';
 export * from './group';
@@ -18,20 +23,11 @@ import { dirtyMethods } from './dirty';
 
 Object.assign(EditorGroup.prototype, openMethods, mountMethods, tabsMethods, breadcrumbsMethods, navigateMethods, dirtyMethods);
 export * from './editorArea';
-export * from './textEditor';
-export * from './comments';
-export * from './docEditView';
 export * from './docFind';
-export * from './editorExtras';
-export * from './autocomplete';
 export * from './snippetRegistry';
 export * from './findWidget';
 export * from './bookmarks';
-export * from './cmTheme';
 export * from './types';
 export * from './editorCompletions';
 export * from './editorDecorations';
-export * from './editorDecorationsView';
 export * from './editorHovers';
-export * from './editorProviderViews';
-export * from './editorDiagnosticsView';

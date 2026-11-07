@@ -97,6 +97,62 @@ describe('call tree view', () => {
 		await waitFor(() => texts('.ct-row .label', container).includes('callerFn'));
 	});
 
+	it('an expanded node collapses on its twistie and re-expands from the cached level', async () => {
+		backend.on('workspace_symbols', () => [
+			{ kind: 'function', name: 'root', path: 'a.rs', line: 0 },
+			{ kind: 'function', name: 'callerFn', path: 'a.rs', line: 10 }
+		]);
+		backend.on('find_references', ({ name }) => name === 'root'
+			? [{ path: 'a.rs', matches: [{ line: 11, column: 1, length: 4, text: 'root();' }] }]
+			: []);
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		new CallTreeView(container, { kind: 'function', name: 'root', path: 'a.rs', line: 0 });
+		await waitFor(() => rowNamed(container, 'callerFn') !== undefined);
+
+		// Expand callerFn: its level loads, and the expanded branch keeps its own twistie
+		// (the old listener only mounted on the not-yet-expanded branch, so an open node
+		// had no way to fold back).
+		click(rowNamed(container, 'callerFn')!.querySelector('.twistie')!);
+		await waitFor(() => container.querySelector('.ct-children') !== null);
+
+		// The expanded twistie folds the level back...
+		click(rowNamed(container, 'callerFn')!.querySelector('.twistie')!);
+		expect(container.querySelector('.ct-children')).toBeNull();
+		// ...and it folds open again from the cached level — no second fetch for callerFn.
+		click(rowNamed(container, 'callerFn')!.querySelector('.twistie')!);
+		expect(container.querySelector('.ct-children')).not.toBeNull();
+		expect(backend.callsTo('find_references').filter((args) => args['name'] === 'callerFn')).toHaveLength(1);
+	});
+
+	it('a rapid direction switch drops the stale direction\'s level load', async () => {
+		backend.on('workspace_symbols', () => [
+			{ kind: 'function', name: 'root', path: 'a.rs', line: 0 },
+			{ kind: 'function', name: 'callerFn', path: 'a.rs', line: 10 },
+			{ kind: 'function', name: 'helper', path: 'a.rs', line: 20 }
+		]);
+		// The callers answer is slow: a direction switch while it is in flight must leave
+		// it on the floor instead of letting it overwrite the new direction's level.
+		backend.on('find_references', ({ name }) => name === 'root'
+			? new Promise((resolve) => setTimeout(() => resolve([{ path: 'a.rs', matches: [{ line: 11, column: 1, length: 4, text: 'root();' }] }]), 60))
+			: Promise.resolve([]));
+		const body = ['fn root() {', '    helper();', '}', ...Array.from({ length: 17 }, () => '//'), 'fn helper() {}'].join('\n');
+		backend.on('read_file', () => ({ contents: body, binary: false, size: body.length }));
+
+		const container = document.createElement('div');
+		document.body.appendChild(container);
+		new CallTreeView(container, { kind: 'function', name: 'root', path: 'a.rs', line: 0 });
+		await new Promise((resolve) => setTimeout(resolve, 10)); // the callers load is now in flight
+		const callees = Array.from(container.querySelectorAll<HTMLElement>('.ct-header button')).find((b) => b.textContent === 'Callees')!;
+		click(callees);
+		await waitFor(() => texts('.ct-row .label', container).includes('helper'));
+		// The stale callers answer lands after the callees tree settled; the tree must stay
+		// callees — the old code let it overwrite the level and re-render over it.
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		expect(texts('.ct-row .label', container)).toEqual(['helper']);
+		expect(container.querySelector('.ct-empty')?.textContent ?? '').not.toBe('Loading…');
+	});
+
 	it('does not expand a row at the depth cap', async () => {
 		backend.on('workspace_symbols', () => [0, 10, 20, 30, 40].map((line, i) => ({ kind: 'function', name: i === 0 ? 'root' : `c${i}`, path: 'a.rs', line })));
 		// Each function is called from the next one's body: root ← c1 ← c2 ← c3 ← c4.

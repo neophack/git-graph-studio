@@ -462,14 +462,16 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 	},
 
 	/** The delete/discard confirmation a single file's row asks (verbatim for the row menu
-	 *  and the sub-repo's, which differ only in where the confirmed write runs). */
+	 *  and the sub-repo's, which differ only in where the confirmed write runs). The
+	 *  untracked case carries no irreversible wording: its discard rides the same
+	 *  Recycle Bin engine the view's own "Delete File" uses, so the file is restorable. */
 	confirmDiscardOne(file: ScmChange): Promise<boolean> {
 		const label = basename(toPosix(file.path));
 		return confirmDialog(
 			file.untracked
-				? `Are you sure you want to DELETE ${label}?\nThis is IRREVERSIBLE!\nThis file will be FOREVER LOST if you proceed.`
+				? tf('scm.discardUntracked.confirm', label)
 				: `Are you sure you want to discard changes in ${label}?`,
-			file.untracked ? 'Delete file' : 'Discard Changes'
+			file.untracked ? t('scm.discardUntracked.action') : 'Discard Changes'
 		);
 	},
 

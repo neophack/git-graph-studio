@@ -255,7 +255,7 @@ describe('explorer', () => {
 		}
 	});
 
-	it('opens folders in the integrated terminal and settles inline inputs cancelled by a refresh', async () => {
+	it('opens folders in the integrated terminal and keeps an inline input across a refresh', async () => {
 		fileSystem({ [ROOT]: ['src/', 'README.md'], [`${ROOT}\\src`]: [] });
 		const explorer = new Explorer(document.getElementById('sidebar')!);
 		const terminals: string[] = [];
@@ -273,13 +273,39 @@ describe('explorer', () => {
 		click(menuItem('Open in Integrated Terminal'));
 		expect(terminals).toEqual([`${ROOT}\\src`, ROOT]);
 
-		// A refresh while an inline input is open must settle it as cancelled, not hang.
+		// A refresh while an inline input is open keeps the input — VS Code does not close a
+		// half-typed name box over a watcher burst — typed value and all; the user's own
+		// Escape is what settles it as cancelled.
+		const creating = explorer.newFile();
+		await flush();
+		const input = document.querySelector<HTMLInputElement>('.tree input.inline-input')!;
+		type(input, 'b.t');
+		await explorer.refresh();
+		await flush();
+		expect(document.querySelector('.tree input.inline-input')).toBe(input);
+		expect(input.value).toBe('b.t');
+		expect(backend.callsTo('create_file')).toHaveLength(0);
+		key(input, 'Escape');
+		await creating; // the user's own Escape settles it, as cancelled
+	});
+
+	it('a refresh settles an inline input whose anchor row vanished', async () => {
+		const tree: Record<string, string[]> = { [ROOT]: ['src/'], [`${ROOT}\\src`]: [] };
+		fileSystem(tree);
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoot(ROOT);
+		await flush();
+		click(document.querySelector('.tree .row')); // select and expand src: newFile lands in it
+		await flush();
 		const creating = explorer.newFile();
 		await flush();
 		expect(document.querySelector('.tree input.inline-input')).not.toBeNull();
+		// The anchor folder vanished from the disk: the refresh drops its row and the input
+		// with it, and the awaiting operation settles as cancelled instead of hanging.
+		tree[ROOT] = [];
 		await explorer.refresh();
-		const settled = await Promise.race([creating.then(() => 'settled'), new Promise((resolve) => setTimeout(() => 'timeout', 500))]);
-		expect(settled).toBe('settled');
+		await flush();
+		await creating;
 		expect(backend.callsTo('create_file')).toHaveLength(0);
 	});
 
@@ -598,6 +624,99 @@ describe('explorer renames and refreshes', () => {
 		expect(backend.callsTo('list_dir_page')).toHaveLength(0);
 		expect(document.querySelectorAll('.tree .row')).toHaveLength(1200);
 		expect(document.querySelector('.tree .row.load-more')).toBeNull();
+	});
+});
+
+describe('explorer multi-root workspaces', () => {
+	const ONE = `${ROOT}\\one`;
+	const TWO = `${ROOT}\\two`;
+
+	function multiRootFileSystem(): Record<string, string[]> {
+		const tree: Record<string, string[]> = {
+			[ONE]: ['src/'],
+			[`${ONE}\\src`]: ['a.ts'],
+			[TWO]: ['lib/'],
+			[`${TWO}\\lib`]: ['b.ts']
+		};
+		fileSystem(tree);
+		return tree;
+	}
+
+	it('reveals a second root\'s file (the walk runs from the entry\'s own root)', async () => {
+		multiRootFileSystem();
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoots([ONE, TWO]);
+		await flush();
+		// The virtual top level: each root row followed by its own listing.
+		expect(texts('.tree .row .label')).toEqual(['one', 'src', 'two', 'lib']);
+
+		// The old walk spelled the target relative to the first root, got the absolute path
+		// back and silently no-oped; now the second root's folder expands and the file is
+		// selected.
+		await explorer.reveal(`${TWO}\\lib\\b.ts`);
+		await flush();
+		expect(texts('.tree .row.selected .label')).toEqual(['b.ts']);
+		expect(texts('.tree .row .label')).toEqual(['one', 'src', 'two', 'lib', 'b.ts']);
+	});
+
+	it('round-trips every root\'s expanded state through the snapshot', async () => {
+		multiRootFileSystem();
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoots([ONE, TWO]);
+		await flush();
+		// One folder open under each root: one's src expands by click, two's lib by reveal.
+		click(document.querySelectorAll('.tree .row')[1]); // the src row of one
+		await flush();
+		await explorer.reveal(`${TWO}\\lib\\b.ts`);
+		await flush();
+		expect(texts('.tree .row .label')).toEqual(['one', 'src', 'a.ts', 'two', 'lib', 'b.ts']);
+
+		// The snapshot keys every entry by its own root (absolute posix spellings); a
+		// reopen rebuilds both roots' open folders — the old mapping folded the other
+		// roots' folders under the first root's path, where nothing matched.
+		const snapshot = explorer.expandedFolders();
+		expect(snapshot.sort()).toEqual(['C:/repo/one', 'C:/repo/one/src', 'C:/repo/two', 'C:/repo/two/lib']);
+		document.getElementById('sidebar')!.innerHTML = '';
+		const reopened = new Explorer(document.getElementById('sidebar')!);
+		reopened.setRoots([ONE, TWO], snapshot);
+		await flush();
+		expect(texts('.tree .row .label')).toEqual(['one', 'src', 'a.ts', 'two', 'lib', 'b.ts']);
+		expect(reopened.expandedFolders().sort()).toEqual(snapshot.sort());
+	});
+
+	it('validates a new name against the open root\'s own rendered children', async () => {
+		multiRootFileSystem();
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoots([ONE, TWO]);
+		await flush();
+		// The first root: its children live behind the root row's virtual group, and the
+		// old lookup read the tree's top level — the root rows — comparing against nothing.
+		// A right-click selects the root row without collapsing it (a click toggles it).
+		rightClick(document.querySelector('.tree .row')!);
+		key(document, 'Escape');
+		const creating = explorer.newFile();
+		await flush();
+		const input = document.querySelector<HTMLInputElement>('.tree input.inline-input')!;
+		type(input, 'src');
+		key(input, 'Enter');
+		expect(notifications().at(-1)).toContain('already exists');
+		key(input, 'Escape');
+		await creating;
+		expect(backend.callsTo('create_file')).toHaveLength(0);
+
+		// The second root answers the same way.
+		const twoRow = Array.from(document.querySelectorAll<HTMLElement>('.tree .row')).find((row) => row.dataset['path'] === TWO)!;
+		rightClick(twoRow);
+		key(document, 'Escape');
+		const second = explorer.newFile();
+		await flush();
+		const other = document.querySelector<HTMLInputElement>('.tree input.inline-input')!;
+		type(other, 'lib');
+		key(other, 'Enter');
+		expect(notifications().at(-1)).toContain('already exists');
+		key(other, 'Escape');
+		await second;
+		expect(backend.callsTo('create_file')).toHaveLength(0);
 	});
 });
 

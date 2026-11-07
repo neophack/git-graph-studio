@@ -383,8 +383,15 @@ mod tests {
         std::fs::write(dir.path().join("trace.asc"), &big).unwrap();
         let root = dir.path().display().to_string();
 
-        let outcome =
-            search_root(ggs_fs::walk_files(&root), &root, "needle", false, false, false).unwrap();
+        let outcome = search_root(
+            ggs_fs::walk_files(&root),
+            &root,
+            "needle",
+            false,
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(outcome.files.len(), 1);
         assert_eq!(outcome.files[0].path, "trace.asc");
         assert_eq!(outcome.files[0].matches.len(), 1);
@@ -414,8 +421,15 @@ mod tests {
         .unwrap();
         let root = dir.path().display().to_string();
 
-        let outcome =
-            search_root(ggs_fs::walk_files(&root), &root, "needle", false, false, false).unwrap();
+        let outcome = search_root(
+            ggs_fs::walk_files(&root),
+            &root,
+            "needle",
+            false,
+            false,
+            false,
+        )
+        .unwrap();
         let paths: Vec<&str> = outcome.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["ok.txt"]);
 
@@ -451,8 +465,8 @@ mod tests {
         std::fs::write(dir.path().join("b.txt"), &line).unwrap();
         std::fs::write(dir.path().join("c.txt"), "x\n").unwrap();
         let root = dir.path().display().to_string();
-        let outcome = search_root(ggs_fs::walk_files(&root), &root, "x", false, false, false)
-            .unwrap();
+        let outcome =
+            search_root(ggs_fs::walk_files(&root), &root, "x", false, false, false).unwrap();
         assert!(outcome.truncated);
         assert_eq!(
             outcome.files.iter().map(|f| f.matches.len()).sum::<usize>(),

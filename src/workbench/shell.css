@@ -523,7 +523,9 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 	position: fixed; z-index: 100; max-width: 260px; padding: 4px 8px;
 	background: var(--vscode-editorHoverWidget-background);
 	border: 1px solid var(--vscode-editorHoverWidget-border);
-	border-radius: 3px; color: var(--vscode-editorHoverWidget-foreground);
+	/* No theme defines the hover foreground - the fallback is the one the other hover
+	   surfaces carry, and the tooltip would otherwise render in the inherited colour. */
+	border-radius: 3px; color: var(--vscode-editorHoverWidget-foreground, #cccccc);
 	font-size: 12px; line-height: 1.3; pointer-events: none;
 	box-shadow: 0 2px 8px var(--vscode-widget-shadow);
 }

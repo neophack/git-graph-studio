@@ -1,5 +1,5 @@
-// Persisted app state (localStorage): the layout, the last/recent folders, the Git Graph view's
-// per-repository state, its global/workspace view state, and the settings changed through its
+// Persisted app state (localStorage): the layout, the last/recent folders, the command
+// palette's recently-run commands, the Git Graph view's per-repository state, its global/workspace view state, and the settings changed through its
 // Settings Widget - the split the extension makes between webview state and extension state,
 // with localStorage standing in for VS Code's Memento.
 
@@ -64,6 +64,27 @@ export function recentFolders(): string[] {
 
 export function forgetFolder(path: string): void {
 	save('recentFolders', recentFolders().filter((p) => p !== path));
+	// The recents entry and the last session's folder are one fact: a folder forgotten
+	// here (its open failed) must not stay as lastFolder, or every boot re-opens it and
+	// re-errors.
+	if (lastFolder() === path) save('lastFolder', null);
+}
+
+/* ---------- Command palette (the recently-run commands) ---------- */
+
+/** How many recently-run commands the palette remembers (VS Code's command MRU). */
+export const COMMAND_RECENTS = 20;
+
+export function commandRecents(): string[] {
+	return load<string[]>('commandRecents', []);
+}
+
+/** A command that just ran joins the front of the recents, each id once, the oldest dropped
+ *  past the cap — the palette's MRU-first ordering survives a restart like the folders' do. */
+export function rememberCommand(id: string): void {
+	const recent = commandRecents().filter((c) => c !== id);
+	recent.unshift(id);
+	save('commandRecents', recent.slice(0, COMMAND_RECENTS));
 }
 
 /* ---------- Workspace snapshots (what a relaunch restores) ---------- */

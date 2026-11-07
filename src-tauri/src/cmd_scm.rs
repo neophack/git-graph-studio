@@ -7,9 +7,9 @@
 
 use std::path::Path;
 
-use ggs_git::ops;
-use ggs_git::runner::Git;
 use ggs_base::workspace::WorkspaceRoots;
+use ggs_git::ops;
+use ggs_git::runner::{has_undecodable_name, run_chunked, Git};
 use tauri::State;
 
 /// The repository a command acts on: the one the view names (`repo`, a submodule's section
@@ -242,18 +242,47 @@ pub async fn git_init(roots: State<'_, WorkspaceRoots>) -> Result<String, String
     Ok(folder)
 }
 
+/// The batch writes' decode-replacement guard: git cannot address a file by the name it
+/// reported when that name carries U+FFFD ([`ggs_git::runner::has_undecodable_name`] —
+/// git's own lossy decode substituted it, so no pathspec matches the real file). The
+/// write is refused with the path called out instead of failing in git with a "pathspec
+/// did not match" that names nothing useful; the frontend raises the same refusal in the
+/// user's language before the spawn, this one catching every other way in.
+fn refuse_undecodable(action: &str, paths: &[String]) -> Result<(), String> {
+    if let Some(path) = paths.iter().find(|p| has_undecodable_name(p)) {
+        return Err(format!(
+            "{action} refused: \"{path}\" — the name contains U+FFFD, git's replacement for bytes \
+             it could not decode, so the file cannot be addressed by the reported name. Rename it, \
+             or act on it from a terminal with its original name."
+        ));
+    }
+    Ok(())
+}
+
+/// Stage the listed paths (`git add --all --`), in byte-bounded chunks — a selection of
+/// hundreds of paths keeps every spawn's command line under Windows' 32 767-character
+/// ceiling ([`ggs_git::runner::run_chunked`]; the runner's error-206 ladder cannot rescue
+/// argument length).
+pub(crate) fn stage_paths(git: &ggs_git::runner::Git, paths: &[String]) -> Result<(), String> {
+    refuse_undecodable("Stage", paths)?;
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    run_chunked(git, &["add", "--all", "--"], &refs)
+}
+
 #[tauri::command]
 pub async fn git_stage(
     roots: State<'_, WorkspaceRoots>,
     paths: Vec<String>,
     repo: Option<String>,
 ) -> Result<(), String> {
-    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
-    git(&roots, repo)?.run(&[&["add", "--all", "--"], &refs[..]].concat())
+    stage_paths(&git(&roots, repo)?, &paths)
 }
 
 #[tauri::command]
-pub async fn git_stage_all(roots: State<'_, WorkspaceRoots>, repo: Option<String>) -> Result<(), String> {
+pub async fn git_stage_all(
+    roots: State<'_, WorkspaceRoots>,
+    repo: Option<String>,
+) -> Result<(), String> {
     git(&roots, repo)?.run(&["add", "--all"])
 }
 
@@ -278,13 +307,16 @@ pub async fn git_stage_all_untracked(
 }
 
 pub(crate) fn unstage_paths(git: &ggs_git::runner::Git, paths: &[String]) -> Result<(), String> {
+    refuse_undecodable("Unstage", paths)?;
     let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
     // On an unborn HEAD `git reset HEAD` fails: the first commit does not exist yet, so the
-    // staged blob can only be removed from the index directly.
+    // staged blob can only be removed from the index directly. Both shapes are incremental,
+    // so the batch rides the byte-bounded chunks ([`ggs_git::runner::run_chunked`]) —
+    // hundreds of paths never overflow the Windows command-line ceiling.
     if git.run(&["rev-parse", "-q", "--verify", "HEAD"]).is_err() {
-        git.run(&[&["rm", "-q", "--cached", "--"], &refs[..]].concat())
+        run_chunked(git, &["rm", "-q", "--cached", "--"], &refs)
     } else {
-        git.run(&[&["reset", "-q", "HEAD", "--"], &refs[..]].concat())
+        run_chunked(git, &["reset", "-q", "HEAD", "--"], &refs)
     }
 }
 
@@ -352,8 +384,20 @@ pub async fn git_commit(
     commit_index(&git(&roots, repo)?, &message, amend, signoff == Some(true))
 }
 
-/// Discard a path's unstaged changes (`git restore`), or delete an untracked file — the
-/// destructive half is why the view confirms before calling this.
+/// Delete an untracked path through the same Recycle Bin / Trash engine the view's own
+/// "Delete File" (`delete_path`) uses — a discarded untracked file is restorable like any
+/// deleted one, where the platform keeps a trash. (The discard-all clean half still runs
+/// `git clean`, whose confirmation keeps its irreversible wording.)
+fn discard_untracked(path: &str, full: &Path) -> Result<(), String> {
+    // The metadata read keeps a missing path's own complaint before the trash is asked.
+    if let Err(e) = std::fs::symlink_metadata(full) {
+        return Err(format!("{path}: {e}"));
+    }
+    trash::delete(full).map_err(|e| format!("{path}: could not move to the Recycle Bin: {e}"))
+}
+
+/// Discard a path's unstaged changes (`git restore`), or send an untracked file to the
+/// Recycle Bin — the destructive half is why the view confirms before calling this.
 #[tauri::command]
 pub async fn git_discard(
     roots: State<'_, WorkspaceRoots>,
@@ -361,14 +405,12 @@ pub async fn git_discard(
     untracked: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
+    // The decode-replacement guard covers both halves: a trash delete of the mangled
+    // name would fail the same "no such file" way a restore would.
+    refuse_undecodable("Discard", std::slice::from_ref(&path))?;
     if untracked {
         let full = Path::new(&open_repo(&roots, repo)?).join(&path);
-        let meta = std::fs::symlink_metadata(&full).map_err(|e| format!("{path}: {e}"))?;
-        if meta.is_dir() {
-            std::fs::remove_dir_all(&full).map_err(|e| format!("{path}: {e}"))
-        } else {
-            std::fs::remove_file(&full).map_err(|e| format!("{path}: {e}"))
-        }
+        discard_untracked(&path, &full)
     } else {
         git(&roots, repo)?.run(&["restore", "--", &path])
     }
@@ -400,15 +442,18 @@ pub async fn git_discard_all(
 }
 
 /// Restore the listed tracked paths and delete the listed untracked ones (empty lists skip
-/// their half) — the path-limited form of discard-all.
+/// their half) — the path-limited form of discard-all. Both halves are incremental, so the
+/// batches ride the byte-bounded chunks ([`ggs_git::runner::run_chunked`]) and the same
+/// decode-replacement guard the other writes carry.
 pub(crate) fn discard_paths(git: &Git, restore: &[String], clean: &[String]) -> Result<(), String> {
+    refuse_undecodable("Discard", &[restore, clean].concat())?;
     if !restore.is_empty() {
         let refs: Vec<&str> = restore.iter().map(String::as_str).collect();
-        git.run(&[&["restore", "--"], &refs[..]].concat())?;
+        run_chunked(git, &["restore", "--"], &refs)?;
     }
     if !clean.is_empty() {
         let refs: Vec<&str> = clean.iter().map(String::as_str).collect();
-        git.run(&[&["clean", "-fdq", "--"], &refs[..]].concat())?;
+        run_chunked(git, &["clean", "-fdq", "--"], &refs)?;
     }
     Ok(())
 }
@@ -420,7 +465,10 @@ pub async fn scm_branches(
     roots: State<'_, WorkspaceRoots>,
     repo: Option<String>,
 ) -> Result<Vec<ops::BranchInfo>, String> {
-    ops::branches(&git(&roots, repo)?)
+    let git = git(&roots, repo)?;
+    tauri::async_runtime::spawn_blocking(move || ops::branches(&git))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -428,7 +476,10 @@ pub async fn scm_remotes(
     roots: State<'_, WorkspaceRoots>,
     repo: Option<String>,
 ) -> Result<Vec<ops::RemoteInfo>, String> {
-    ops::remotes(&git(&roots, repo)?)
+    let git = git(&roots, repo)?;
+    tauri::async_runtime::spawn_blocking(move || ops::remotes(&git))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -436,7 +487,10 @@ pub async fn scm_stashes(
     roots: State<'_, WorkspaceRoots>,
     repo: Option<String>,
 ) -> Result<Vec<ops::StashInfo>, String> {
-    ops::stashes(&git(&roots, repo)?)
+    let git = git(&roots, repo)?;
+    tauri::async_runtime::spawn_blocking(move || ops::stashes(&git))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -444,7 +498,10 @@ pub async fn scm_tags(
     roots: State<'_, WorkspaceRoots>,
     repo: Option<String>,
 ) -> Result<Vec<String>, String> {
-    ops::tags(&git(&roots, repo)?)
+    let git = git(&roots, repo)?;
+    tauri::async_runtime::spawn_blocking(move || ops::tags(&git))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -455,12 +512,15 @@ pub async fn scm_pull(
     rebase: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
-    ops::pull(
-        &git(&roots, repo)?,
-        remote.as_deref(),
-        branch.as_deref(),
-        rebase,
-    )
+    let git = git(&roots, repo)?;
+    // Pull/push/fetch wait on the network: off the async runtime's workers, the same way
+    // `scm_status` and `file_log` run their git (a blocking worker starves every other
+    // IPC command, the watcher-paced status refresh included).
+    tauri::async_runtime::spawn_blocking(move || {
+        ops::pull(&git, remote.as_deref(), branch.as_deref(), rebase)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -471,7 +531,12 @@ pub async fn scm_push(
     force: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
-    ops::push(&git(&roots, repo)?, remote.as_deref(), set_upstream, force)
+    let git = git(&roots, repo)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        ops::push(&git, remote.as_deref(), set_upstream, force)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -480,7 +545,10 @@ pub async fn scm_sync(
     rebase: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
-    ops::sync(&git(&roots, repo)?, rebase)
+    let git = git(&roots, repo)?;
+    tauri::async_runtime::spawn_blocking(move || ops::sync(&git, rebase))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -490,7 +558,10 @@ pub async fn scm_fetch(
     prune: bool,
     repo: Option<String>,
 ) -> Result<(), String> {
-    ops::fetch(&git(&roots, repo)?, remote.as_deref(), prune)
+    let git = git(&roots, repo)?;
+    tauri::async_runtime::spawn_blocking(move || ops::fetch(&git, remote.as_deref(), prune))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -586,10 +657,20 @@ pub async fn scm_push_tags(
     ops::push_tags(&git(&roots, repo)?, &remote)
 }
 
-/// Clone into `parent`; the new repository's path is returned for the app to open.
+/// Clone into `parent`; the new repository's path is returned for the app to open. The
+/// clone waits on the network — off the main thread, like every other blocking body in
+/// this file: a synchronous command freezes the window the whole transfer long.
 #[tauri::command]
-pub fn scm_clone(url: String, parent: String, name: Option<String>) -> Result<String, String> {
-    ops::clone(&url, Path::new(&parent), name.as_deref(), &[]).map(|p| p.display().to_string())
+pub async fn scm_clone(
+    url: String,
+    parent: String,
+    name: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ops::clone(&url, Path::new(&parent), name.as_deref(), &[]).map(|p| p.display().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -598,13 +679,20 @@ pub async fn gerrit_install_hook(
     remote: String,
     repo: Option<String>,
 ) -> Result<bool, String> {
-    let git = git(&roots, repo)?;
-    let url = ops::gerrit_hook_url(&git, &remote, "commit-msg")?;
-    let content = ureq::get(&url)
-        .call()
-        .and_then(|mut response| response.body_mut().read_to_string())
-        .map_err(|e| format!("Unable to download the commit-msg hook from {url}: {e}"))?;
-    ops::gerrit_install_hook_with(&git, "commit-msg", &content)
+    let repo_path = open_repo(&roots, repo)?;
+    // The hook download is network I/O on a blocking socket (ureq): off the async
+    // runtime's workers, like every other git-and-IO body in this file.
+    tauri::async_runtime::spawn_blocking(move || {
+        let git = Git::new(&repo_path);
+        let url = ops::gerrit_hook_url(&git, &remote, "commit-msg")?;
+        let content = ureq::get(&url)
+            .call()
+            .and_then(|mut response| response.body_mut().read_to_string())
+            .map_err(|e| format!("Unable to download the commit-msg hook from {url}: {e}"))?;
+        ops::gerrit_install_hook_with(&git, "commit-msg", &content)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -858,6 +946,139 @@ mod tests {
         assert!(!is_valid_commit_hash("abc"));
         assert!(!is_valid_commit_hash(&"a".repeat(65)));
         assert!(!is_valid_commit_hash(&"g".repeat(40)));
+    }
+
+    #[test]
+    fn an_untracked_discard_moves_the_path_to_the_trash_like_delete_file() {
+        let scratch = Scratch::new("discard-untracked-trash");
+        let git = scratch.repo("repo");
+        // A file and a folder both go through the Recycle Bin engine the view's own
+        // "Delete File" uses — never removed outright.
+        write(&git, "scratch.txt", "keepable\n");
+        let file = git.repo.join("scratch.txt");
+        discard_untracked("scratch.txt", &file).unwrap();
+        assert!(!file.exists(), "the path left the working tree");
+
+        std::fs::create_dir_all(git.repo.join("scratchdir")).unwrap();
+        write(&git, "scratchdir/nested.txt", "nested\n");
+        let dir = git.repo.join("scratchdir");
+        discard_untracked("scratchdir", &dir).unwrap();
+        assert!(!dir.exists(), "the folder went whole");
+
+        // A missing path keeps its own complaint.
+        assert!(discard_untracked("gone.txt", &git.repo.join("gone.txt")).is_err());
+    }
+
+    /// A stage batch of hundreds of paths splits into byte-bounded chunks
+    /// ([`ggs_git::runner::run_chunked`]) and still stages everything — one argument per
+    /// path on a single command line walked into Windows' 32 767-character CreateProcess
+    /// ceiling on exactly this shape, and the runner's error-206 ladder cannot rescue
+    /// argument length.
+    #[test]
+    fn a_stage_of_many_paths_chunks_the_spawn_and_stages_everything() {
+        let scratch = Scratch::new("stage-many-paths");
+        let git = scratch.repo("repo");
+        // 240 tracked-side edits whose names are long enough that the batch cannot fit
+        // one spawn's command line: each ~70 bytes, the whole listing several times past
+        // the 8 000-byte chunk budget — several spawns, one outcome.
+        let mut paths = Vec::new();
+        for i in 0..240 {
+            let name = format!("{}{i}.txt", "m".repeat(70));
+            write(&git, &name, "edited\n");
+            paths.push(name);
+        }
+        stage_paths(&git, &paths).unwrap();
+        let staged = git.output(&["diff", "--name-only", "--cached"]).unwrap();
+        for path in &paths {
+            assert!(staged.contains(path.as_str()), "{path} must be staged");
+        }
+        assert_eq!(staged.lines().count(), paths.len(), "nothing else joined");
+    }
+
+    /// The chunked unstage matches single-path semantics: one call over a batch leaves
+    /// the index exactly as unstaging every path one at a time would, and the working
+    /// tree keeps every file.
+    #[test]
+    fn a_chunked_unstage_matches_single_path_semantics() {
+        let scratch = Scratch::new("unstage-chunked");
+        let batch = scratch.repo("batch");
+        let singles = scratch.repo("singles");
+        // The same listing twice, each name long enough that one spawn cannot carry the
+        // whole batch (the chunk budget is byte-based; a name-heavy listing splits).
+        let mut paths = Vec::new();
+        for i in 0..120 {
+            let name = format!("{}{i}.txt", "n".repeat(70));
+            paths.push(name);
+        }
+        for git in [&batch, &singles] {
+            for path in &paths {
+                write(git, path, "staged\n");
+            }
+            stage_paths(git, &paths).unwrap();
+        }
+
+        // One unstage call over the whole batch…
+        unstage_paths(&batch, &paths).unwrap();
+        // …versus one call per path.
+        for path in &paths {
+            unstage_paths(&singles, std::slice::from_ref(path)).unwrap();
+        }
+
+        // Identical outcomes: nothing staged in either, and identical trees.
+        for (label, git) in [("batch", &batch), ("singles", &singles)] {
+            assert!(
+                git.output(&["diff", "--name-only", "--cached"])
+                    .unwrap()
+                    .trim()
+                    .is_empty(),
+                "{label}: nothing stays staged"
+            );
+            for path in &paths {
+                assert_eq!(
+                    std::fs::read_to_string(git.repo.join(path)).unwrap(),
+                    "staged\n",
+                    "{label}: the file keeps its working-tree content"
+                );
+            }
+        }
+    }
+
+    /// The decode-replacement guard: a path git cannot address by the name it reported
+    /// refuses every write that names it — the error says so and names the path — instead
+    /// of failing in git with a "pathspec did not match" that names nothing useful.
+    #[test]
+    fn the_batch_writes_refuse_a_path_git_cannot_decode() {
+        let scratch = Scratch::new("undecodable-guard");
+        let git = scratch.repo("repo");
+        write(&git, "good.txt", "keep\n");
+        git.run(&["add", "--", "good.txt"]).unwrap();
+
+        let mangled = format!("{}bad.txt", ggs_git::runner::REPLACEMENT_CHAR);
+        let error = stage_paths(&git, std::slice::from_ref(&mangled)).unwrap_err();
+        assert!(
+            error.contains("U+FFFD") && error.contains(&mangled),
+            "{error}"
+        );
+        assert!(unstage_paths(&git, std::slice::from_ref(&mangled))
+            .unwrap_err()
+            .contains("U+FFFD"));
+        assert!(discard_paths(&git, std::slice::from_ref(&mangled), &[])
+            .unwrap_err()
+            .contains("U+FFFD"));
+        assert!(discard_paths(&git, &[], std::slice::from_ref(&mangled))
+            .unwrap_err()
+            .contains("U+FFFD"));
+
+        // The good path next to the bad one keeps its own refusal too: a batch naming an
+        // unaddressable path aborts whole, it does not half-apply.
+        let error = stage_paths(&git, &["good.txt".to_owned(), mangled.clone()]).unwrap_err();
+        assert!(error.contains("U+FFFD"), "{error}");
+        let staged = git.output(&["diff", "--name-only", "--cached"]).unwrap();
+        assert_eq!(
+            staged.trim(),
+            "good.txt",
+            "the refusal fires before anything new is staged (the setup's own stage is all)"
+        );
     }
 }
 

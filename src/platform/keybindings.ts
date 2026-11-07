@@ -48,6 +48,15 @@ export function effectiveKeybinding(commandId: string): string | undefined | nul
 	return commands.get(commandId)?.keybinding;
 }
 
+/** Only the USER rule for a command — `undefined` when none exists, so the registry's
+ *  resolver seam (commands.ts's contract: undefined "the registry default") can tell a
+ *  user pick apart from the default it must beat. */
+export function userKeybindingFor(commandId: string): string | null | undefined {
+	const user = userBindings.find((binding) => binding.command === commandId);
+	if (!user) return undefined;
+	return user.key === '' ? null : user.key;
+}
+
 /** Set (or, with an empty key, clear) a command's binding; `undefined` resets to default by
  *  dropping the user entry. Writes the file. */
 export async function setUserKeybinding(commandId: string, key: string | undefined): Promise<void> {

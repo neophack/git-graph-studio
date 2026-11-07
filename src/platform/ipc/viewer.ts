@@ -36,11 +36,14 @@ export interface ViewerLinesResult {
 	tokensPending: boolean;
 }
 
-/** One window of `viewer_text`. */
+/** One window of `viewer_text`. `gen` is the reload generation the window was served
+ *  against: `viewer_reload` swaps the document wholesale (same docId) and advances it, so
+ *  a response naming an older generation is a predecessor's rows — the caller drops it. */
 export interface ViewerTextWindow {
 	startLine: number;
 	lineCount: number;
 	lines: string[];
+	gen: number;
 }
 
 /** What `viewer_edit` answers: the document's new length, and whether the rope is back at
@@ -57,10 +60,13 @@ export interface ViewerHistoryResult {
 	clean?: boolean;
 }
 
-/** `viewer_reload`: whether the file changed under the session. */
+/** `viewer_reload`: whether the file changed under the session — `gen` the document's
+ *  generation after the call, the new document's own when it swapped (the baseline any
+ *  in-flight window response is told stale against). */
 export interface ViewerReloadResult {
 	changed: boolean;
 	lineCount: number;
+	gen: number;
 }
 
 /** `viewer_replace`: how many replacements landed and where the first one sits. */
@@ -75,6 +81,13 @@ export interface ViewerReplaceResult {
 export interface ViewerSaveProgress {
 	written: number;
 	total: number;
+}
+
+/** The write's overrides a save may carry: Save with Encoding / the EOL pick. Absent keys
+ *  write the document's own choice. */
+export interface ViewerSaveOptions {
+	encoding?: string;
+	eol?: 'lf' | 'crlf';
 }
 
 export const viewerOpen = (path: string) => invoke<ViewerOpenInfo>('viewer_open', { path });
@@ -105,6 +118,7 @@ export const viewerReplace = (docId: number, spec: { query: string; caseSensitiv
 		fromCol: from ? from.startCol : 0,
 		max: all ? Number.MAX_SAFE_INTEGER : 1
 	});
-export const viewerSave = (docId: number, onProgress: Channel<ViewerSaveProgress>) => invoke<void>('viewer_save', { docId, onProgress });
+export const viewerSave = (docId: number, onProgress: Channel<ViewerSaveProgress>, options: ViewerSaveOptions = {}) =>
+	invoke<void>('viewer_save', { docId, onProgress, encoding: options.encoding, eol: options.eol });
 export const viewerBackup = (docId: number) => invoke<void>('viewer_backup', { docId });
 export const viewerSymbols = (docId: number) => invoke<ViewerOutlineSymbol[]>('viewer_symbols', { docId });

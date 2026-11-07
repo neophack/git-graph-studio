@@ -67,6 +67,10 @@ export const mountMethods: ThisType<import('./group').EditorGroup> = {
 		view.onStatusChange = () => this.emitActive();
 		view.onSaveProgress = (progress) => this.onSaveProgress?.(progress);
 		editor.doc = view;
+		// The open's detection rides the tab like the full editor's read does: a plain save
+		// writes it back, Save with Encoding / the EOL pick override it.
+		editor.encoding = view.encoding;
+		editor.eol = view.eol;
 		editor.languageName = view.languageName ?? undefined;
 		editor.onClose = () => editor.doc?.dispose();
 		return true;

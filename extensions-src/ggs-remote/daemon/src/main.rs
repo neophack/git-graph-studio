@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 //! `ggs-remote` — the GGS Remote daemon and its command line (docs/ggs-remote-plan.md §7.1).
 //!
 //! ```text
@@ -40,6 +42,7 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 }
 
 fn main() -> ExitCode {
+    attach_parent_console();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("run");
     let paths = match Paths::resolve() {
@@ -85,6 +88,76 @@ fn main() -> ExitCode {
         }
     }
 }
+
+/// A `windows_subsystem = "windows"` binary is started with no console and no std handles:
+/// the login start (the scheduled task, the Run key) therefore never opens the black
+/// console window that used to sit on the desktop for the daemon's whole life, at every
+/// boot. A run from a real terminal still needs its output, so when every std handle is
+/// null — the no-console launch, distinct from a spawn's pipes and NULs, which arrive as
+/// valid handles — attach to the parent's console and point CONIN$/CONOUT$ at the std
+/// handles. A parent without a console (Task Scheduler, Explorer) refuses the attach and
+/// the daemon stays windowless; `client::start`'s detached spawn passes NUL handles and
+/// never reaches the attach, so a closing terminal can never signal the daemon. Unconditional
+/// on Windows (no `debug_assertions` gate) so a dev build behaves like the installed one.
+#[cfg(windows)]
+fn attach_parent_console() {
+    use windows_sys::Win32::Foundation::{
+        GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+
+    unsafe {
+        let given = |handle: HANDLE| !handle.is_null() && handle != INVALID_HANDLE_VALUE;
+        if given(GetStdHandle(STD_INPUT_HANDLE))
+            || given(GetStdHandle(STD_OUTPUT_HANDLE))
+            || given(GetStdHandle(STD_ERROR_HANDLE))
+        {
+            return;
+        }
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return;
+        }
+        let open = |path: &[u16], access: u32| {
+            let handle = CreateFileW(
+                path.as_ptr(),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            );
+            if handle != INVALID_HANDLE_VALUE {
+                Some(handle)
+            } else {
+                None
+            }
+        };
+        if let Some(handle) = open(&wide("CONIN$"), GENERIC_READ) {
+            SetStdHandle(STD_INPUT_HANDLE, handle);
+        }
+        if let Some(handle) = open(&wide("CONOUT$"), GENERIC_READ | GENERIC_WRITE) {
+            SetStdHandle(STD_OUTPUT_HANDLE, handle);
+            SetStdHandle(STD_ERROR_HANDLE, handle);
+        }
+    }
+}
+
+/// A NUL-terminated UTF-16 path for `CreateFileW` (the crate ships no `CONIN$` constant —
+/// `$` is no Rust identifier — so the console device names are spelled here).
+#[cfg(windows)]
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(not(windows))]
+fn attach_parent_console() {}
 
 fn run(paths: &Paths, no_tray: bool) -> Result<(), String> {
     paths.ensure().map_err(|e| e.to_string())?;
@@ -291,4 +364,22 @@ fn pair(paths: &Paths) -> Result<(), String> {
     let value: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     let url = value["url"].as_str().ok_or("no pair url")?;
     ggs_remote::desk::open_url(url)
+}
+
+#[cfg(all(test, windows))]
+mod console_tests {
+    // cargo test always hands the test process real std handles (pipes under the harness),
+    // so the attach must bail before touching anything — calling it here asserts the no-op.
+    #[test]
+    fn attach_is_a_noop_when_std_handles_are_given() {
+        super::attach_parent_console();
+    }
+
+    #[test]
+    fn wide_terminates_with_a_nul() {
+        assert_eq!(
+            super::wide("CONIN$"),
+            [0x0043, 0x004F, 0x004E, 0x0049, 0x004E, 0x0024, 0x0000]
+        );
+    }
 }

@@ -255,6 +255,32 @@ describe('the Symbol Database page', () => {
 		expect(texts('.sd-row .label', host)).toEqual(['src', 'a.rs', 'gamma']);
 	});
 
+	it('reconciles rows instead of rebuilding them: a filter keeps unaffected rows\' elements', async () => {
+		backend.on('symbol_tree', () => outline);
+		const host = document.createElement('div');
+		document.body.appendChild(host);
+		const view = new SymbolDatabaseView(host);
+		await view.load();
+
+		// Grab the element of a row a filter does not touch: typing in the filter may drop
+		// the non-matching subtrees, but the unaffected visible rows keep their DOM identity
+		// (a whole-tree rebuild per keystroke re-created thousands of rows on a big index).
+		const gammaRow = Array.from(host.querySelectorAll<HTMLElement>('.sd-row')).find((row) => row.dataset['key'] === 'src/a.rs:9')!;
+
+		const filter = host.querySelector<HTMLInputElement>('.sd-filter')!;
+		filter.value = 'GAM';
+		filter.dispatchEvent(new Event('input', { bubbles: true }));
+		expect(texts('.sd-row .label', host)).toEqual(['src', 'a.rs', 'gamma']);
+		expect(host.querySelector<HTMLElement>('.sd-row[data-key="src/a.rs:9"]')).toBe(gammaRow);
+		expect(host.querySelector('.sd-row[data-key="top.rs"]')).toBeNull();
+
+		// Clearing the filter brings every row back; the survivor is still itself.
+		filter.value = '';
+		filter.dispatchEvent(new Event('input', { bubbles: true }));
+		expect(host.querySelectorAll('.sd-row')).toHaveLength(9);
+		expect(host.querySelector<HTMLElement>('.sd-row[data-key="src/a.rs:9"]')).toBe(gammaRow);
+	});
+
 	it('rebuilds through the command and reloads', async () => {
 		backend.on('symbol_tree', () => outline);
 		backend.on('symbols_rebuild', () => ({ state: 'ready', done: 3, total: 3, files: 3, symbols: 4 }));

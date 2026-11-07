@@ -8,8 +8,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::runner::has_undecodable_name;
 use crate::runner::is_safe_ref_name;
 use crate::runner::is_valid_commit_hash;
+use crate::runner::run_chunked;
 use crate::runner::Git;
 
 type Status = Result<(), String>;
@@ -78,7 +80,9 @@ pub fn remotes(git: &Git) -> Result<Vec<RemoteInfo>, String> {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StashInfo {
-    /// `refs/stash@{n}`, the selector the Git Graph view's stash actions take.
+    /// The entry's own commit hash — the selector the stash actions take. Git accepts the
+    /// hash for apply/pop/drop, and an index (`refs/stash@{n}`) would race any other
+    /// window that pushed or dropped a stash meanwhile: the wrong entry goes.
     pub selector: String,
     pub index: usize,
     pub message: String,
@@ -93,7 +97,7 @@ pub fn stashes(git: &Git) -> Result<Vec<StashInfo>, String> {
         .filter_map(|(index, line)| {
             let (hash, message) = line.split_once('\x1f')?;
             Some(StashInfo {
-                selector: format!("refs/stash@{{{index}}}"),
+                selector: hash.to_owned(),
                 index,
                 message: message.to_owned(),
                 hash: hash.to_owned(),
@@ -215,8 +219,13 @@ pub fn stage_all_tracked(git: &Git) -> Status {
 
 /// Stage only the untracked files — `git ls-files --others --exclude-standard` listed
 /// NUL-separated (quotepath off, so non-ASCII names pass through unquoted), then
-/// `git add --all --` over them, one argument each; the tracked files' changes stay
-/// unstaged ("Stage All Untracked Changes").
+/// `git add --all --` over them in byte-bounded chunks ([`run_chunked`]: a directory of
+/// hundreds of untracked files keeps every spawn's command line under the Windows
+/// ceiling); the tracked files' changes stay unstaged ("Stage All Untracked Changes").
+/// A path carrying the decode-replacement character cannot be addressed by any pathspec
+/// ([`has_undecodable_name`]) — not by this batch, not by anyone — so it is left out of
+/// the listing rather than failing the whole command with git's unhelpful complaint; its
+/// row stays in the view, and acting on that row alone carries the explanation.
 pub fn stage_all_untracked(git: &Git) -> Status {
     let listing = git.output(&[
         "-c",
@@ -226,11 +235,14 @@ pub fn stage_all_untracked(git: &Git) -> Status {
         "--exclude-standard",
         "-z",
     ])?;
-    let paths: Vec<&str> = listing.split('\0').filter(|p| !p.is_empty()).collect();
+    let paths: Vec<&str> = listing
+        .split('\0')
+        .filter(|p| !p.is_empty() && !has_undecodable_name(p))
+        .collect();
     if paths.is_empty() {
         return Ok(());
     }
-    git.run(&[&["add", "--all", "--"], &paths[..]].concat())
+    run_chunked(git, &["add", "--all", "--"], &paths)
 }
 
 /// One commit of a file's history, as the Timeline lists it (camelCase on the wire).
@@ -244,6 +256,9 @@ pub struct FileLogEntry {
     pub date: i64,
     /// The subject line.
     pub message: String,
+    /// The path the file carried at this commit — under `--follow`, the name it had
+    /// before a rename, which the row's diff and revision reads must open.
+    pub path: String,
 }
 
 /// The commits that touched `path`, newest first, following the path across renames — the
@@ -255,17 +270,36 @@ pub fn file_log(git: &Git, path: &str, limit: usize) -> Result<Vec<FileLogEntry>
         "log",
         &format!("-n{limit}"),
         "--follow",
+        // `--name-only` under `--follow` names the file as each commit has it: the
+        // commits before a rename report the path the file carried then, which is the
+        // one their revision side must read.
+        "--name-only",
         "--format=%H%x00%P%x00%an%x00%at%x00%s%x1e",
         "--",
         path,
     ])?;
-    let mut entries = Vec::new();
-    for record in output.split('\x1e') {
-        let record = record.trim_start_matches('\n');
-        if record.trim().is_empty() {
+    let mut entries: Vec<FileLogEntry> = Vec::new();
+    // `--format=` is tformat, so every record is `<fields>\x1e` followed by the
+    // tformat newline and the `--name-only` lines — which land at the START of the
+    // next `\x1e` piece. Each piece therefore carries the previous record's listing
+    // (a path never carries a NUL) and this record's fields, which begin at the
+    // first line holding one.
+    for piece in output.split('\x1e') {
+        let (listed, fields) = match piece.find('\0') {
+            Some(nul) => piece.split_at(piece[..nul].rfind('\n').map_or(0, |i| i + 1)),
+            None => (piece, ""),
+        };
+        // The lines in front of this record's fields are the previous record's
+        // listing; they name the path that record had the file under.
+        if let Some(entry) = entries.last_mut() {
+            if let Some(path) = listed.lines().map(str::trim).find(|line| !line.is_empty()) {
+                entry.path = path.to_owned();
+            }
+        }
+        if fields.is_empty() {
             continue;
         }
-        let mut fields = record.splitn(5, '\0');
+        let mut fields = fields.splitn(5, '\0');
         let (Some(hash), Some(parents), Some(author), Some(date), Some(message)) = (
             fields.next(),
             fields.next(),
@@ -281,6 +315,7 @@ pub fn file_log(git: &Git, path: &str, limit: usize) -> Result<Vec<FileLogEntry>
             author: author.to_owned(),
             date: date.trim().parse().unwrap_or(0),
             message: message.trim_end().to_owned(),
+            path: path.to_owned(),
         });
     }
     Ok(entries)
@@ -373,7 +408,8 @@ pub fn operation_state(git: &Git) -> Result<OperationState, String> {
 
 /// `git rev-parse -q --verify MERGE_HEAD` succeeding: a merge left its state in the index.
 pub fn merge_in_progress(git: &Git) -> bool {
-    git.output(&["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok()
+    git.output(&["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+        .is_ok()
 }
 
 /// The rebase's own state directories present in the git dir: `rebase-merge` (the merge
@@ -437,17 +473,43 @@ pub fn apply_stash(git: &Git, selector: &str, reinstate_index: bool) -> Status {
     git.run(&args)
 }
 
+/// `git stash pop` — apply, then remove the entry. Git refuses a bare commit hash for
+/// `stash pop` (only `apply` takes the stash-like commit), so the removal rides
+/// [`drop_stash`]'s hash-to-position resolution: the entry is dropped where the list
+/// holds it now, not where some earlier listing did.
 pub fn pop_stash(git: &Git, selector: &str, reinstate_index: bool) -> Status {
-    let mut args = vec!["stash", "pop"];
-    if reinstate_index {
-        args.push("--index");
-    }
-    args.push(selector);
-    git.run(&args)
+    apply_stash(git, selector, reinstate_index)?;
+    drop_stash(git, selector)
 }
 
+/// `git stash drop` the entry `selector` names. Git refuses a bare commit hash here
+/// (and `stash@{<hash>}` silently drops the wrong entry — it reads the braces as a
+/// date), so a hash selector resolves to the entry's CURRENT reflog position over a
+/// fresh `stash list`: the index a minutes-old listing carried would drop whatever
+/// sits there once any other window pushed or dropped meanwhile. A reflog-shaped
+/// selector (`stash@{n}`, the "latest stash" actions') passes through as-is.
 pub fn drop_stash(git: &Git, selector: &str) -> Status {
-    git.run(&["stash", "drop", selector])
+    let position = stash_drop_position(git, selector)?;
+    git.run(&["stash", "drop", &position])
+}
+
+/// The reflog reference `selector` names right now — the `refs/stash@{n}` a numeric
+/// reflog selector already carries, or the position a hash lookup finds.
+fn stash_drop_position(git: &Git, selector: &str) -> Result<String, String> {
+    for prefix in ["refs/stash@{", "stash@{"] {
+        if let Some(rest) = selector.strip_prefix(prefix) {
+            if let Some(digits) = rest.strip_suffix('}') {
+                if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                    return Ok(selector.to_owned());
+                }
+            }
+        }
+    }
+    stashes(git)?
+        .iter()
+        .find(|entry| entry.hash == selector)
+        .map(|entry| format!("refs/stash@{{{}}}", entry.index))
+        .ok_or_else(|| format!("'{selector}' is not a stash reference"))
 }
 
 /// Create a tag at `hash` — annotated when `message` names one, lightweight otherwise. An
@@ -541,11 +603,18 @@ pub fn push(git: &Git, remote: Option<&str>, set_upstream: bool, force: bool) ->
         args.push(remote.to_owned());
         args.push(branch);
     } else if upstream(git).is_none() {
-        // No upstream: push to the first remote and record it, as VS Code offers to.
-        let remote = remotes(git)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| "The repository has no remotes to push to.".to_owned())?;
+        // No upstream: a single remote publishes to it (and records the upstream, as VS
+        // Code offers to); several remotes refuse silently picking one — the frontend
+        // asks which server the branch belongs on and passes the name down.
+        let mut remotes = remotes(git)?.into_iter();
+        let Some(remote) = remotes.next() else {
+            return Err("The repository has no remotes to push to.".to_owned());
+        };
+        if remotes.next().is_some() {
+            return Err(
+                "The current branch has no upstream and the repository has several remotes; pick the remote to publish to.".to_owned(),
+            );
+        }
         return push(git, Some(&remote.name), true, force);
     }
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -718,10 +787,32 @@ fn head_subject(git: &Git) -> String {
         .unwrap_or_default()
 }
 
+/// A commit-ish the cherry-pick / revert / reset inputs take: a hash, a ref, or a revision
+/// expression ("HEAD~1", "HEAD^", "main@{yesterday}") — everything `git rev-parse`
+/// resolves to a commit, and what VS Code's own "Reset Current Branch to Commit" accepts.
+/// The ref-name validator cannot judge these (the expressions' `~`/`^`/`@{` parts are not
+/// ref-name legal), so a target is verified by asking git: `rev-parse --verify
+/// <expr>^{commit}` answers whether it names a commit, and git's own complaint travels
+/// back as the error when it names nothing. Only the shapes that could never be a
+/// revision are refused here without a spawn: an empty target, or a leading dash that
+/// would ride the spawn as git's own option.
+pub fn verify_commitish(git: &Git, target: &str) -> Status {
+    if target.trim().is_empty() {
+        return Err("A commit hash, branch or tag is required.".to_owned());
+    }
+    if target.starts_with('-') {
+        return Err(format!(
+            "Invalid revision expression was provided for \"target\" ({target})"
+        ));
+    }
+    let commitish = format!("{target}^{{commit}}");
+    git.run(&["rev-parse", "-q", "--verify", &commitish])
+}
+
 /// `git cherry-pick <ref>` — apply an existing commit's change as a new commit on top of
 /// HEAD. Returns the new HEAD's subject for the notification.
 pub fn cherry_pick(git: &Git, target: &str) -> Result<String, String> {
-    check_ref("target", target)?;
+    verify_commitish(git, target)?;
     conflict_aware_op(git, &["cherry-pick", target])?;
     Ok(head_subject(git))
 }
@@ -729,7 +820,7 @@ pub fn cherry_pick(git: &Git, target: &str) -> Result<String, String> {
 /// `git revert --no-edit <ref>` — undo an existing commit with a new inverse commit.
 /// Returns the new HEAD's subject for the notification.
 pub fn revert_commit(git: &Git, target: &str) -> Result<String, String> {
-    check_ref("target", target)?;
+    verify_commitish(git, target)?;
     conflict_aware_op(git, &["revert", "--no-edit", target])?;
     Ok(head_subject(git))
 }
@@ -768,8 +859,10 @@ impl ResetMode {
 }
 
 /// `git reset --<mode> <ref>` — move the current branch to `target` at the chosen depth.
+/// The target is a commit-ish a revision expression may spell ("HEAD~1"), resolved and
+/// verified against git ([`verify_commitish`]) before the reset runs.
 pub fn reset_ref(git: &Git, target: &str, mode: ResetMode) -> Status {
-    check_ref("target", target)?;
+    verify_commitish(git, target)?;
     git.run(&["reset", mode.flag(), target])
 }
 
@@ -1009,7 +1102,10 @@ mod tests {
         );
         let stashes = stashes(&git).unwrap();
         assert_eq!(stashes.len(), 1);
-        assert_eq!(stashes[0].selector, "refs/stash@{0}");
+        assert_eq!(
+            stashes[0].selector, stashes[0].hash,
+            "the hash is the selector"
+        );
         assert!(stashes[0].message.contains("WIP"));
         assert_eq!(tags(&git).unwrap(), vec!["v1".to_owned()]);
     }
@@ -1308,6 +1404,107 @@ mod tests {
             log.iter().any(|entry| entry.message == "first"),
             "--follow reaches the commits before the rename"
         );
+        // Every entry names the path the file had at its own commit: the commits before
+        // the rename carry a.txt, so the row's diff reads that side at a.txt.
+        assert_eq!(log[0].path, "b.txt");
+        assert_eq!(log[1].path, "a.txt");
+        assert_eq!(log[2].path, "a.txt");
+    }
+
+    #[test]
+    fn stash_apply_pop_and_drop_take_the_entry_hash_as_the_selector() {
+        let scratch = Scratch::new("scm-stash-hash");
+        let git = scratch.repo("repo");
+        write(&git, "README.md", "older\n");
+        push_stash(&git, "the older stash", false).unwrap();
+        write(&git, "README.md", "newer\n");
+        push_stash(&git, "the newer stash", false).unwrap();
+
+        let list = stashes(&git).unwrap();
+        assert_eq!(list.len(), 2);
+        // The list's selector is the entry's own commit hash: an index races any other
+        // window that pushes or drops a stash meanwhile.
+        assert_eq!(list[0].selector, list[0].hash);
+        assert_eq!(list[1].selector, list[1].hash);
+        assert!(list[0].message.contains("newer"));
+        assert!(list[1].message.contains("older"));
+        let older = list[1].hash.clone();
+
+        // A push after the listing shifts every index — a stale listing's index would
+        // now name the newer entry, the hash still names its own.
+        write(&git, "README.md", "third\n");
+        push_stash(&git, "the third stash", false).unwrap();
+
+        // Applying the older entry by its hash restores its content, however far the
+        // list has shifted.
+        apply_stash(&git, &older, false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(git.repo.join("README.md")).unwrap(),
+            "older\n"
+        );
+        // The tree returns to clean first: git refuses to overwrite a locally modified
+        // file with another stash entry's content.
+        git.run(&["checkout", "-q", "--", "README.md"]).unwrap();
+
+        // Dropping the older entry by hash removes exactly that one; the third and the
+        // newer survive.
+        drop_stash(&git, &older).unwrap();
+        let left = stashes(&git).unwrap();
+        assert_eq!(left.len(), 2);
+        assert!(left[0].message.contains("third"));
+        assert!(left[1].message.contains("newer"));
+
+        // Popping the newer by hash empties its place and restores its content.
+        pop_stash(&git, &left[1].selector, false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(git.repo.join("README.md")).unwrap(),
+            "newer\n"
+        );
+        let last = stashes(&git).unwrap();
+        assert_eq!(last.len(), 1);
+        assert!(last[0].message.contains("third"));
+
+        // An unknown hash refuses instead of dropping whatever sits at some index.
+        let error = drop_stash(&git, &"9".repeat(40)).unwrap_err();
+        assert!(error.contains("not a stash reference"), "{error}");
+        assert_eq!(stashes(&git).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn push_without_an_upstream_refuses_to_pick_among_several_remotes() {
+        let scratch = Scratch::new("scm-push-multi-remote");
+        let git = scratch.repo("repo");
+        let origin = scratch.bare("origin.git");
+        let mirror = scratch.bare("mirror.git");
+        git.run(&["remote", "add", "origin", &origin.display().to_string()])
+            .unwrap();
+        git.run(&["remote", "add", "mirror", &mirror.display().to_string()])
+            .unwrap();
+
+        // The silent "first remote" guess published the branch to the wrong server;
+        // choosing the remote is the frontend's pick, so several remotes fail loudly.
+        let error = push(&git, None, false, false).unwrap_err();
+        assert!(error.contains("several remotes"), "{error}");
+        assert!(
+            scratch
+                .git(&origin)
+                .output(&["rev-parse", "--verify", "main"])
+                .is_err(),
+            "nothing was pushed to the first remote"
+        );
+
+        // The chosen remote publishes and records the upstream, exactly as the single
+        // remote's own path does (the publish passes set_upstream).
+        push(&git, Some("mirror"), true, false).unwrap();
+        assert_eq!(upstream(&git).as_deref(), Some("mirror/main"));
+        assert_eq!(
+            scratch
+                .git(&mirror)
+                .output(&["rev-parse", "main"])
+                .unwrap()
+                .trim(),
+            head(&git)
+        );
     }
 
     #[test]
@@ -1362,8 +1559,10 @@ mod tests {
         // commit's own second — the replay onto this commit's parent would then mint a
         // byte-identical object and hash. Pinning this commit's committer date keeps the
         // pick's fresh stamp from ever matching it.
-        git.env
-            .push(("GIT_COMMITTER_DATE".into(), "2020-01-01T00:00:00 +0000".into()));
+        git.env.push((
+            "GIT_COMMITTER_DATE".into(),
+            "2020-01-01T00:00:00 +0000".into(),
+        ));
         let picked = commit(&git, "picked.txt", "picked\n", "The picked change");
         git.env.pop();
         git.run(&["checkout", "-q", "main"]).unwrap();
@@ -1397,7 +1596,10 @@ mod tests {
         // come back staged too).
         reset_ref(&git, &base, ResetMode::parse("soft").unwrap()).unwrap();
         assert_eq!(head(&git), base);
-        assert_eq!(std::fs::read_to_string(git.repo.join("a.txt")).unwrap(), "dirty\n");
+        assert_eq!(
+            std::fs::read_to_string(git.repo.join("a.txt")).unwrap(),
+            "dirty\n"
+        );
         assert!(git
             .output(&["diff", "--name-only", "--cached"])
             .unwrap()
@@ -1405,7 +1607,10 @@ mod tests {
 
         // Mixed resets the index but keeps the working tree's files.
         reset_ref(&git, &base, ResetMode::parse("mixed").unwrap()).unwrap();
-        assert_eq!(std::fs::read_to_string(git.repo.join("a.txt")).unwrap(), "dirty\n");
+        assert_eq!(
+            std::fs::read_to_string(git.repo.join("a.txt")).unwrap(),
+            "dirty\n"
+        );
         assert!(git
             .output(&["diff", "--name-only", "--cached"])
             .unwrap()
@@ -1414,11 +1619,157 @@ mod tests {
 
         // Hard resets the working tree too — the dirty state is gone.
         reset_ref(&git, &base, ResetMode::parse("hard").unwrap()).unwrap();
-        assert_eq!(std::fs::read_to_string(git.repo.join("a.txt")).unwrap(), "one\n");
+        assert_eq!(
+            std::fs::read_to_string(git.repo.join("a.txt")).unwrap(),
+            "one\n"
+        );
 
         // An unknown mode never reaches git.
         assert!(ResetMode::parse("weak").is_err());
         assert!(ResetMode::parse("").is_err());
+    }
+
+    /// A reset target may be a revision expression, exactly as VS Code's "Reset Current
+    /// Branch to Commit" accepts: the target is verified by asking git
+    /// (`rev-parse --verify <expr>^{commit}`) — the ref-name validator cannot judge the
+    /// expressions' `~`/`^`/`@{` parts. Only the shapes that could never be a revision are
+    /// refused without a spawn.
+    #[test]
+    fn a_reset_target_may_be_a_revision_expression() {
+        let scratch = Scratch::new("scm-reset-expression");
+        let git = scratch.repo("repo");
+        let base = commit(&git, "a.txt", "one\n", "base");
+        let second = commit(&git, "b.txt", "two\n", "second");
+
+        // The expressions resolve like the hashes do.
+        reset_ref(&git, "HEAD~1", ResetMode::parse("mixed").unwrap()).unwrap();
+        assert_eq!(head(&git), base);
+        // Mixed keeps the working tree's file, but the commit is gone from the branch.
+        assert!(
+            git.repo.join("b.txt").exists(),
+            "mixed keeps the working tree's file"
+        );
+        assert!(
+            git.output(&["ls-files", "--", "b.txt"])
+                .unwrap()
+                .trim()
+                .is_empty(),
+            "b.txt left the index"
+        );
+        assert!(
+            !git.output(&["log", "--format=%s", "-2"])
+                .unwrap()
+                .contains("second"),
+            "the second commit left the branch"
+        );
+        reset_ref(&git, &second, ResetMode::parse("hard").unwrap()).unwrap();
+        assert_eq!(head(&git), second);
+        reset_ref(&git, "HEAD^", ResetMode::parse("hard").unwrap()).unwrap();
+        assert_eq!(head(&git), base);
+
+        // verify_commitish: the acceptance and refusal edges, without a write.
+        assert!(verify_commitish(&git, "HEAD").is_ok());
+        assert!(verify_commitish(&git, "main").is_ok());
+        assert!(verify_commitish(&git, &base).is_ok());
+        assert!(verify_commitish(&git, "no-such-ref").is_err());
+        assert!(verify_commitish(&git, "").is_err());
+        assert!(verify_commitish(&git, "   ").is_err());
+        let error = verify_commitish(&git, "--hard").unwrap_err();
+        assert!(
+            error.contains("--hard"),
+            "the refusal names the target: {error}"
+        );
+        // …and the refusal is the validator's, not git's option parser eating one.
+        assert!(reset_ref(&git, "--hard", ResetMode::parse("soft").unwrap()).is_err());
+    }
+
+    /// A stage batch of hundreds of paths splits into byte-bounded chunks
+    /// ([`crate::runner::run_chunked`]) and still stages everything — one argument per
+    /// path on a single command line used to walk into Windows' 32 767-character
+    /// CreateProcess ceiling on exactly this shape.
+    #[test]
+    fn a_stage_of_many_untracked_files_chunks_the_spawn_and_stages_everything() {
+        let scratch = Scratch::new("scm-stage-many");
+        let git = scratch.repo("repo");
+        // 240 untracked files with names long enough that the batch cannot fit one
+        // spawn's command line: each name ~60 bytes, the whole listing well past the
+        // 8 000-byte chunk budget — several spawns, one outcome.
+        let mut names = Vec::new();
+        for i in 0..240 {
+            let name = format!("{}{i}.txt", "p".repeat(60));
+            write(&git, &name, "content\n");
+            names.push(name);
+        }
+        stage_all_untracked(&git).unwrap();
+        let staged = git.output(&["diff", "--name-only", "--cached"]).unwrap();
+        for name in &names {
+            assert!(staged.contains(name.as_str()), "{name} must be staged");
+        }
+        assert_eq!(staged.lines().count(), names.len(), "nothing else joined");
+    }
+
+    /// A name git itself cannot decode (verified live on this machine: an unpaired
+    /// surrogate is a legal NTFS name, and `git status --porcelain -z` reports it with
+    /// the bytes `EF BF BD` — U+FFFD — where the surrogate stood) cannot be addressed by
+    /// any pathspec. The batch stages the rest and leaves it unstaged, instead of
+    /// failing the whole command on git's "pathspec did not match".
+    #[cfg(windows)]
+    #[test]
+    fn stage_all_untracked_leaves_a_name_git_cannot_decode_unstaged() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+        let scratch = Scratch::new("scm-stage-undecodable");
+        let git = scratch.repo("repo");
+        write(&git, "good.txt", "staged\n");
+        // The surrogate-named file goes through the wide API directly — no &str can
+        // spell a lone surrogate (UTF-8 cannot encode it), which is exactly the point.
+        let mut wide: Vec<u16> = git.repo.as_os_str().encode_wide().collect();
+        wide.push('\\' as u16);
+        wide.push(0xD800);
+        wide.extend("bad.txt".encode_utf16());
+        let bad = std::ffi::OsString::from_wide(&wide);
+        std::fs::File::create(git.repo.join(&bad)).unwrap();
+
+        // The premise: git reports the name with the replacement character in it, and no
+        // pathspec matches the real file.
+        let listed = git
+            .output(&[
+                "-c",
+                "core.quotepath=false",
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ])
+            .unwrap();
+        assert!(
+            listed.contains('\u{FFFD}'),
+            "git lists the name lossily: {listed:?}"
+        );
+
+        stage_all_untracked(&git).unwrap();
+        let staged = git.output(&["diff", "--name-only", "--cached"]).unwrap();
+        assert!(
+            staged.contains("good.txt"),
+            "the representable path stages: {staged:?}"
+        );
+        assert!(
+            !staged.contains('\u{FFFD}'),
+            "the undecodable name stays out"
+        );
+        let still_untracked = git
+            .output(&[
+                "-c",
+                "core.quotepath=false",
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+            ])
+            .unwrap();
+        assert!(
+            still_untracked.contains('\u{FFFD}'),
+            "the file itself is untouched"
+        );
     }
 
     #[test]
@@ -1482,7 +1833,11 @@ mod tests {
         // not the checked-out one's.
         push_branch(&git, "origin", "main", false).unwrap();
         assert_eq!(
-            scratch.git(&bare).output(&["rev-parse", "main"]).unwrap().trim(),
+            scratch
+                .git(&bare)
+                .output(&["rev-parse", "main"])
+                .unwrap()
+                .trim(),
             rev(&git, "main")
         );
         assert_ne!(rev(&git, "main"), head(&git));
@@ -1561,7 +1916,10 @@ mod tests {
         let side_tip = head(&git);
         assert!(git.run(&["rebase", "main"]).is_err());
         assert!(operation_state(&git).unwrap().rebase);
-        assert!(!operation_state(&git).unwrap().merge, "rebase is not a merge");
+        assert!(
+            !operation_state(&git).unwrap().merge,
+            "rebase is not a merge"
+        );
         abort_rebase(&git).unwrap();
         assert!(!operation_state(&git).unwrap().rebase);
         assert_eq!(head(&git), side_tip);
@@ -1617,7 +1975,10 @@ mod tests {
         assert!(cached.contains("M\ta.txt"), "{cached}");
         assert!(cached.contains("D\tb.txt"), "{cached}");
         assert!(
-            git.output(&["ls-files", "--", "c.txt"]).unwrap().trim().is_empty(),
+            git.output(&["ls-files", "--", "c.txt"])
+                .unwrap()
+                .trim()
+                .is_empty(),
             "the untracked file is not staged"
         );
 
@@ -1633,7 +1994,10 @@ mod tests {
         // A clean tree's untracked half has nothing to do: the staged new file is gone with
         // the hard reset (it lived only in the index), so nothing is left to stage.
         git.run(&["reset", "-q", "--hard"]).unwrap();
-        assert!(!git.repo.join("c.txt").exists(), "the staged new file is gone");
+        assert!(
+            !git.repo.join("c.txt").exists(),
+            "the staged new file is gone"
+        );
         stage_all_untracked(&git).unwrap();
         assert!(git
             .output(&["diff", "--cached", "--name-only"])

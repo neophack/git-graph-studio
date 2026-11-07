@@ -144,9 +144,10 @@ export type TabGroupsSnapshot = TabGroupSnapshot[];
 /** An event the host pushed into the frame: a configuration change for this extension, a
  *  message from one of its webview panels, a panel going away, the active editor changing
  *  (with its document text when the document changed), a document being saved, a message
- *  from one of its webview views (sidebar), a view's visibility, or a theme change. */
+ *  from one of its webview views (sidebar), a view's visibility, a withProgress toast's
+ *  Cancel click, or a theme change. */
 export interface HostEvent {
-	event: 'configChanged' | 'webviewMessage' | 'webviewDisposed' | 'activeEditorChanged' | 'documentSaved' | 'webviewViewMessage' | 'webviewViewVisible' | 'themeChanged' | 'fsChanged' | 'documentChanged' | 'documentClosed' | 'workspaceFoldersChanged' | 'webviewViewState' | 'claudeTap' | 'tabsChanged';
+	event: 'configChanged' | 'webviewMessage' | 'webviewDisposed' | 'activeEditorChanged' | 'documentSaved' | 'webviewViewMessage' | 'webviewViewVisible' | 'themeChanged' | 'fsChanged' | 'documentChanged' | 'documentClosed' | 'workspaceFoldersChanged' | 'webviewViewState' | 'claudeTap' | 'tabsChanged' | 'progressCancelled';
 	/** The editor area's tab layout after a change (tabsChanged). */
 	tabs?: TabGroupsSnapshot;
 	/** A document edit (documentChanged): the document's whole new text. */
@@ -157,6 +158,8 @@ export interface HostEvent {
 	active?: boolean;
 	settings?: Record<string, unknown>;
 	panelId?: number;
+	/** The progress id whose toast the user cancelled (progressCancelled). */
+	progressId?: number;
 	message?: unknown;
 	/** The active editor as the host tracks it (null when no text editor is active). */
 	editor?: { path: string; languageId: string; text?: string; line: number; column: number; selected?: number } | null;

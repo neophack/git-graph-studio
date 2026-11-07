@@ -4,6 +4,7 @@
 // these, so one definition drives every entry point - and every entry point is testable.
 
 import { trText } from './i18n';
+import { rememberCommand } from './state';
 import type { MenuItem } from './ui';
 
 /** The shells a command belongs to (docs/remote-client-plan.md §3.2, K1–K4): the desktop
@@ -62,19 +63,33 @@ export function setKeybindingResolver(resolver: KeybindingResolver | null): void
 	keybindingResolver = resolver;
 }
 
-/** The key a command answers to: the user's binding, or the registry's default. */
+/** The key a command answers to: the user's binding, or the registry's default. The
+ *  resolver's `undefined` means "the registry default" (its contract), so the fallback
+ *  stands then; `null` is an explicit unbind and comes through as such. */
 export function effectiveBinding(commandId: string, fallback?: string): string | null | undefined {
-	if (keybindingResolver) return keybindingResolver(commandId);
+	if (keybindingResolver) {
+		const answer = keybindingResolver(commandId);
+		return answer === undefined ? fallback ?? undefined : answer;
+	}
 	return fallback ?? undefined;
 }
 
-/** The command a binding string ("Ctrl+Shift+P", or a chord "Ctrl+K Ctrl+S") runs. */
+/** The command a binding string ("Ctrl+Shift+P", or a chord "Ctrl+K Ctrl+S") runs.
+ *  A user rule beats every other command's default (VS Code's precedence), so rebinding
+ *  one command onto a key another claims by default still lands on the user's pick. */
 export function commandForBinding(binding: string): Command | undefined {
 	const wanted = binding.toLowerCase();
+	const answers = (command: Command, key: string | null): boolean => key !== null && key.toLowerCase() === wanted;
+	if (keybindingResolver) {
+		const user = commands.all().find((command) => {
+			const effective = keybindingResolver!(command.id);
+			return effective !== undefined && effective !== null && answers(command, effective);
+		});
+		if (user) return user;
+	}
 	return commands.all().find((command) => {
 		const effective = keybindingResolver ? keybindingResolver(command.id) : undefined;
-		const key = (effective === undefined ? command.keybinding : effective) ?? null;
-		return key !== null && key.toLowerCase() === wanted;
+		return answers(command, (effective === undefined ? command.keybinding : effective) ?? null);
 	});
 }
 
@@ -135,6 +150,10 @@ export class CommandRegistry {
 		const command = this.commands.get(id);
 		if (!command || !this.isEnabled(id)) return false;
 		await command.run();
+		// The palette's MRU: only a settled run records — a refused or failing one never
+		// becomes "recently used". Every entry point (palette, menus, keys, extensions)
+		// executes here, so one line covers them all.
+		rememberCommand(id);
 		return true;
 	}
 
@@ -152,9 +171,19 @@ export class CommandRegistry {
 		};
 	}
 
-	/** The command a key event triggers, if any (the first registered wins — and only one
-	 *  visible in the active shell: a remote page never keys the desktop-only opens). */
+	/** The command a key event triggers, if any. A user rule beats every other command's
+	 *  DEFAULT binding (VS Code's precedence — rebinding Ctrl+S to Save All must fire), so
+	 *  the resolver's own picks are matched first, the first-registered default wins only
+	 *  among the commands no rule names. Only one visible in the active shell: a remote
+	 *  page never keys the desktop-only opens. */
 	forKeyEvent(event: KeyboardEvent): Command | undefined {
+		if (keybindingResolver) {
+			for (const command of this.commands.values()) {
+				if (!this.visible(command.id)) continue;
+				const effective = keybindingResolver(command.id);
+				if (effective !== undefined && effective !== null && matchesKeybinding(event, effective)) return command;
+			}
+		}
 		for (const command of this.commands.values()) {
 			if (!this.visible(command.id)) continue;
 			const effective = keybindingResolver ? keybindingResolver(command.id) : undefined;

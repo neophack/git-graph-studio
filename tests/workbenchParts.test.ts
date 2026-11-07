@@ -59,6 +59,20 @@ describe('command registry', () => {
 		// The unshifted key itself still matches directly.
 		expect(matchesKeybinding(new KeyboardEvent('keydown', { key: '`', ctrlKey: true }), 'Ctrl+`')).toBe(true);
 	});
+
+	it('a settled run records the palette\'s MRU; a refused or failing one does not', async () => {
+		const registry = new CommandRegistry();
+		let enabled = true;
+		registry.register({ id: 'rec.a', title: 'Rec A', run: () => undefined });
+		registry.register({ id: 'rec.off', title: 'Rec Off', enabled: () => enabled, run: () => undefined });
+		registry.register({ id: 'rec.boom', title: 'Rec Boom', run: () => { throw new Error('no'); } });
+		await registry.execute('rec.a');
+		expect(state.commandRecents()).toEqual(['rec.a']);
+		enabled = false;
+		expect(await registry.execute('rec.off')).toBe(false);
+		await expect(registry.execute('rec.boom')).rejects.toThrow('no');
+		expect(state.commandRecents(), 'only the settled run is remembered').toEqual(['rec.a']);
+	});
 });
 
 describe('persisted state', () => {
@@ -77,6 +91,20 @@ describe('persisted state', () => {
 
 		// The Git Graph view's own state (repo settings, graph settings, code reviews) lives in
 		// the git-graph-rs plugin's mementos now; the workbench state carries folders and layout.
+	});
+
+	it('round-trips the command palette\'s MRU of executed commands', () => {
+		state.rememberCommand('test.alpha');
+		state.rememberCommand('test.beta');
+		state.rememberCommand('test.alpha'); // a re-run moves it back to the front, listed once
+		expect(state.commandRecents()).toEqual(['test.alpha', 'test.beta']);
+
+		// The oldest drops off past the cap, the newest stays at the front.
+		for (let i = 0; i < state.COMMAND_RECENTS; i++) state.rememberCommand(`test.fill.${i}`);
+		const recents = state.commandRecents();
+		expect(recents).toHaveLength(state.COMMAND_RECENTS);
+		expect(recents[0]).toBe(`test.fill.${state.COMMAND_RECENTS - 1}`);
+		expect(recents).not.toContain('test.beta');
 	});
 });
 
@@ -421,6 +449,105 @@ describe('file watcher events', () => {
 		backend.emit(FS_CHANGED_EVENT, { root: 'C:\\two', paths: ['src/x.ts'], truncated: false, gitChanged: false });
 		expect(reloaded).toEqual(['C:\\two\\src\\x.ts']);
 		workbench.dispose();
+	});
+
+	it('a truncated batch matches the root WITH its separator - a sibling whose name extends the root stays out', () => {
+		backend.on('boot_context', () => ({ file: null, actions: [], repo: null }));
+		backend.on('ext_list', () => []);
+		const workbench = new Workbench();
+		const reloaded: string[] = [];
+		(workbench as unknown as { repoPath: string }).repoPath = 'C:\\repo';
+		(workbench as unknown as { repoPaths: string[] }).repoPaths = ['C:\\repo'];
+		workbench.scheduleRefresh = () => undefined;
+		workbench.editors.reloadIfClean = async (path) => { reloaded.push(path); };
+		workbench.editors.openFilePaths = () => ['C:\\repo\\a.txt', 'C:\\repository\\b.txt'];
+
+		// "C:\\repository\\b.txt" starts with the bare prefix "C:\\repo": the match used to
+		// take it too. With the separator appended only the real child matches.
+		backend.emit(FS_CHANGED_EVENT, { root: 'C:\\repo', paths: ['x'], truncated: true, gitChanged: true });
+		expect(reloaded).toEqual(['C:\\repo\\a.txt']);
+		workbench.dispose();
+	});
+});
+
+describe('the indent picker', () => {
+	it('offers the tab sizes only - no dead Spaces/Tabs header row - and writes the pick', async () => {
+		backend.on('boot_context', () => ({ file: null, actions: [], repo: null }));
+		backend.on('ext_list', () => []);
+		const workbench = new Workbench();
+		void workbench.pickIndent();
+		await flush(4);
+		// The app has no insertSpaces setting: VS Code's Spaces/Tabs fork has nothing to
+		// switch, so the picker is the sizes directly.
+		const labels = texts('.quick-input .row .label');
+		expect(labels).toEqual(['2', '4', '8']);
+		const row = Array.from(document.querySelectorAll<HTMLElement>('.quick-input .row'))
+			.find((entry) => entry.querySelector('.label')?.textContent === '2')!;
+		click(row);
+		await flush(4);
+		expect(settings.tabSize).toBe(2);
+		updateSetting('tabSize', DEFAULT_SETTINGS.tabSize);
+		workbench.dispose();
+	});
+});
+
+describe('dispose drops the document-level registrations', () => {
+	/** Spy on document's listener bookkeeping for the duration of `run`. */
+	function withListenerSpy(run: () => void): { added: string[]; removed: string[] } {
+		const added: string[] = [];
+		const removed: string[] = [];
+		const realAdd = document.addEventListener.bind(document);
+		const realRemove = document.removeEventListener.bind(document);
+		document.addEventListener = ((type: string, handler: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
+			added.push(`${type}:${String(handler)}`);
+			return realAdd(type, handler, options);
+		}) as typeof document.addEventListener;
+		document.removeEventListener = ((type: string, handler: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions) => {
+			removed.push(`${type}:${String(handler)}`);
+			return realRemove(type, handler, options);
+		}) as typeof document.removeEventListener;
+		try {
+			run();
+		} finally {
+			document.addEventListener = realAdd;
+			document.removeEventListener = realRemove;
+		}
+		return { added, removed };
+	}
+
+	it('the panel and the status bar unregister what they registered, and the centre detaches', () => {
+		const { added, removed } = withListenerSpy(() => {
+			const panel = new Panel(document.getElementById('panel')!);
+			const bar = new StatusBar(document.getElementById('statusbar')!);
+			expect(document.querySelector('.notification-centre')).not.toBeNull();
+			panel.dispose();
+			bar.dispose();
+		});
+		expect(added.length).toBeGreaterThan(0);
+		const removedKeys = new Set(removed);
+		expect(added.filter((entry) => !removedKeys.has(entry))).toEqual([]);
+		// The centre panel lived on document.body, not the status bar's container.
+		expect(document.querySelector('.notification-centre')).toBeNull();
+	});
+
+	it('a workbench disposed inside zen mode drops the Escape listener and the zen class', () => {
+		backend.on('boot_context', () => ({ file: null, actions: [], repo: null }));
+		backend.on('ext_list', () => []);
+		const workbench = new Workbench();
+		let zenWasOn = false;
+		const { added, removed } = withListenerSpy(() => {
+			workbench.toggleZenMode();
+			zenWasOn = document.body.classList.contains('zen');
+			workbench.dispose();
+		});
+		expect(zenWasOn).toBe(true);
+		// The dispose-time teardown: the chrome the zen mode folded comes back with the
+		// next boot's applyLayout; the Escape listener must not survive the workbench.
+		expect(document.body.classList.contains('zen')).toBe(false);
+		const zenAdded = added.filter((entry) => entry.startsWith('keydown:'));
+		expect(zenAdded.length).toBeGreaterThan(0);
+		const removedKeys = new Set(removed);
+		expect(zenAdded.filter((entry) => !removedKeys.has(entry))).toEqual([]);
 	});
 });
 

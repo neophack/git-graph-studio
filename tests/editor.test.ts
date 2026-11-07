@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { EditorGroup, type Editor } from '../src/features/editor';
+import { workspaceFileCache } from '../src/features/editor/navigate';
 import { fileIcon } from '../src/platform/fileIcons';
+import { settings } from '../src/platform/settings';
 import { el } from '../src/platform/ui';
 import { backend } from './tauriMock';
 import { click, flush, key, menuItem, menuLabels, notificationButton, notifications, rightClick, texts } from './helpers';
@@ -164,6 +166,33 @@ describe('editor group', () => {
 		await group.openFile('C:\\repo\\a\\x.ts');
 		await group.openFile('C:\\repo\\b\\x.ts');
 		expect(texts('.tab .description')).toEqual(['a', 'b']);
+	});
+
+	it('a diff error that is not a missing side surfaces; a missing revision side reads empty', async () => {
+		backend.on('read_file_at', ({ path }) => {
+			if (String(path) === 'gone.ts') throw new Error('The file "gone.ts" does not exist in HEAD');
+			throw new Error('fatal: repository not found');
+		});
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		// A repository-level failure is not an empty side: it surfaces as an error, no tab.
+		await group.openDiff({
+			kind: 'diff', id: 'd1', title: 'a.ts (HEAD)',
+			left: { revision: 'HEAD', path: 'a.ts', label: 'HEAD', exists: true },
+			right: { revision: 'abc1234', path: 'a.ts', label: 'abc1234', exists: true }
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(notifications().some((n) => n.includes('repository not found'))).toBe(true);
+		expect(texts('.tab .label')).toEqual([]);
+
+		// A path absent at the revision (deleted between the two) still renders the empty side.
+		await group.openDiff({
+			kind: 'diff', id: 'd2', title: 'gone.ts (Deleted)',
+			left: { revision: 'HEAD', path: 'gone.ts', label: 'HEAD', exists: true },
+			right: { revision: 'abc1234', path: 'gone.ts', label: 'abc1234', exists: true }
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(texts('.tab .label')).toEqual(['gone.ts (Deleted)']);
 	});
 
 	it('the diff layout button toggles side-by-side and inline repeatedly', async () => {
@@ -527,6 +556,35 @@ describe('editor group', () => {
 		expect(group.navHistory.at(-1)?.input).toMatchObject({ kind: 'file', path: 'C:\\repo\\renamed.txt' });
 	});
 
+	it('a save that changes the file re-runs the outline against the saved content', async () => {
+		// The outline reads its symbols from a throwaway viewer open; before the save
+		// refresh, a save that added a function left the pane showing the open-time symbol
+		// set until the tab was reopened (VS Code's outline follows the save).
+		let symbols = [{ kind: 'function', name: 'before', line: 0 }];
+		backend.on('viewer_open', () => ({ docId: 77, lineCount: 1, language: 'ts', syntaxName: 'TypeScript', symbols }));
+		backend.on('viewer_close', () => null);
+		settings.showOutline = true;
+		files({ 'C:\\repo\\src\\main.ts': 'const a = 1;\n' });
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		try {
+			await group.openFile('C:\\repo\\src\\main.ts');
+			await flush();
+			expect(texts('.editor-outline-item')).toEqual(['before']);
+			// The save adds a function: the outline re-runs against the saved file.
+			group.activeView!.dispatch({ changes: { from: 0, insert: 'function after() {}\n' } });
+			symbols = [{ kind: 'function', name: 'before', line: 0 }, { kind: 'function', name: 'after', line: 1 }];
+			await group.save();
+			await flush();
+			expect(texts('.editor-outline-item')).toEqual(['before', 'after']);
+			// The outline's throwaway document was released again after the refresh.
+			expect(backend.callsTo('viewer_close')).toHaveLength(2);
+		} finally {
+			settings.showOutline = false;
+			await group.closeAll();
+		}
+	});
+
 	it('a pinned tab renders the pin marker, sorts ahead, and every bulk close skips it', async () => {
 		files({ 'C:\\repo\\a.txt': 'a', 'C:\\repo\\b.txt': 'b', 'C:\\repo\\c.txt': 'c' });
 		const group = new EditorGroup(document.getElementById('editorGroup')!);
@@ -769,6 +827,94 @@ describe('editor group', () => {
 		expect(texts('.tab .label')).toEqual(['Keyboard Shortcuts', 'Welcome']);
 		expect(document.querySelector('.tab.active .label')!.textContent).toBe('Keyboard Shortcuts');
 		expect(await group.closeAll()).toBe(true);
+	});
+
+	it('Save As pins the saved baseline before the write: an edit typed mid-write stays dirty', async () => {
+		files({ 'C:\\repo\\a.txt': 'a' });
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openFile('C:\\repo\\a.txt');
+		const view = group.activeView!;
+		view.dispatch({ changes: { from: 0, insert: 'x' } });
+		// The write hangs; the user keeps typing while it runs.
+		let release!: (value: unknown) => void;
+		backend.on('write_file', () => new Promise((resolve) => { release = resolve; }));
+		backend.dialog.saveResult = 'C:\\repo\\renamed.txt';
+		rightClick(document.querySelector('.tab.active')!);
+		click(menuItem('Save As...'));
+		await flush();
+		view.dispatch({ changes: { from: 0, insert: 'y' } });
+		release(null);
+		await flush();
+		// The mid-write edit is past what disk holds: the tab must say so, or closing it
+		// would silently lose the edit. The baseline is the buffer as the write took it.
+		expect(view.state.doc.toString()).toBe('yxa');
+		expect(group.hasDirtyEditors()).toBe(true);
+		// Closing asks; the edit is deliberately discarded.
+		const closing = group.close();
+		await flush();
+		click(notificationButton("Don't Save"));
+		await closing;
+	});
+
+	it('a silent reload never enters the undo stack', async () => {
+		const contents: Record<string, string | null> = { '/r/reload.txt': 'one' };
+		files(contents);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		await group.openFile('/r/reload.txt');
+		// The watcher's silent reload replaced the whole document: it is the disk's word,
+		// not the reader's edit, so Ctrl+Z must not resurrect the stale text as dirty —
+		// and a Ctrl+S after it would write that stale text back.
+		contents['/r/reload.txt'] = 'disk text';
+		await group.reloadIfClean('/r/reload.txt');
+		expect(group.activeView!.state.doc.toString()).toBe('disk text');
+		group.runEditorCommand('undo');
+		expect(group.activeView!.state.doc.toString()).toBe('disk text');
+		expect(group.hasDirtyEditors()).toBe(false);
+		// The replace still maps the history: a real edit on the reloaded text undoes
+		// exactly back to it.
+		group.activeView!.dispatch({ changes: { from: 0, insert: 'x' } });
+		expect(group.hasDirtyEditors()).toBe(true);
+		group.runEditorCommand('undo');
+		expect(group.activeView!.state.doc.toString()).toBe('disk text');
+		await group.closeAll();
+	});
+
+	it('an inactive open of an already-open file does not steal the view', async () => {
+		files({ 'C:\\repo\\a.txt': 'a\n', 'C:\\repo\\b.txt': 'b\n' });
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openFile('C:\\repo\\a.txt');
+		await group.openFile('C:\\repo\\b.txt');
+		expect(document.querySelector('.tab.active .label')!.textContent).toBe('b.txt');
+		// The remote mirror syncs the PC's tabs with {inactive: true}: an already-open file
+		// takes the open without moving the user's view.
+		await group.openFile('C:\\repo\\a.txt', { inactive: true });
+		expect(texts('.tab .label')).toEqual(['a.txt', 'b.txt']);
+		expect(document.querySelector('.tab.active .label')!.textContent).toBe('b.txt');
+		// The plain reopen still activates, as before.
+		await group.openFile('C:\\repo\\a.txt');
+		expect(document.querySelector('.tab.active .label')!.textContent).toBe('a.txt');
+		await group.closeAll();
+	});
+
+	it('saving a file drops its Go-to-Definition cache entry', async () => {
+		files({ 'C:\\repo\\cached.ts': 'let x = 1;\n' });
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openFile('C:\\repo\\cached.ts');
+		// The definition search read the file before the save (its whole-text cache).
+		workspaceFileCache.set('C:\\repo\\cached.ts', 'let x = 1;\n');
+		group.activeView!.dispatch({ changes: { from: 0, insert: 'let y = 2;\n' } });
+		await group.save();
+		// The write changed what disk holds: the stale text must not serve the next
+		// Go to Definition — and the mixed-separator spelling drops with it.
+		expect(workspaceFileCache.has('C:\\repo\\cached.ts')).toBe(false);
+		workspaceFileCache.set('C:\\repo/cached.ts', 'other spelling');
+		group.activeView!.dispatch({ changes: { from: 0, insert: 'let z = 3;\n' } });
+		await group.save();
+		expect(workspaceFileCache.has('C:\\repo/cached.ts')).toBe(false);
+		await group.closeAll();
 	});
 });
 

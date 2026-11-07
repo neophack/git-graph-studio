@@ -150,6 +150,18 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	deviceMode: 'auto'
 };
 
+/** The migration version stamped into every payload this release persists — the
+ *  `appSettings` store in localStorage and `~/.ggs/settings.json` alike. The legacy-default
+ *  migrations below cannot tell "an older release's shipped default" from "the same value
+ *  re-picked in today's Settings dialog" (sticky scroll on, a sensitivity of 1, the fast
+ *  scroll of 5 and GGS Bash are all selectable), so they may run only over a payload that
+ *  predates them: one without this stamp. A stamped store skips the pass, which is what
+ *  keeps a re-selected old default from being wiped again at every boot. */
+export const SETTINGS_VERSION = 1;
+
+/** A persisted payload's shape: the settings of its release plus the migration stamp. */
+export type StoredSettings = Partial<AppSettings> & { settingsVersion?: number };
+
 /** Any settings write persists the whole object, so a store from an older release pins the
  *  *default* of the day rather than a choice. The wheel sensitivities changed meaning with
  *  the Zed scroll model (a notch is the system's lines, not VS Code's 50 px): a value equal
@@ -160,9 +172,14 @@ export const DEFAULT_SETTINGS: AppSettings = {
  *  glide setting is gone — nothing eases any more — and a stored one is dropped. The
  *  Terminal Shell default moved from GGS Bash to Git Bash (2026-10-13, the owner's
  *  direction — GGS Bash stands in where no Git Bash is installed): a stored `ggsBash`
- *  equal to the old shipped default follows, the same rule. */
-export function migrateStoredSettings(stored: Partial<AppSettings>): Partial<AppSettings> {
-	const { smoothScrolling: _glide, ...rest } = stored as Partial<AppSettings> & { smoothScrolling?: boolean };
+ *  equal to the old shipped default follows, the same rule.
+ *
+ *  The pass is one-shot per payload (SETTINGS_VERSION above): a stamped payload — anything
+ *  this release wrote — has already been through it and skips it; only an unstamped store
+ *  from an older release goes through the one pass. */
+export function migrateStoredSettings(stored: StoredSettings): Partial<AppSettings> {
+	const { smoothScrolling: _glide, settingsVersion: _stamp, ...rest } = stored as StoredSettings & { smoothScrolling?: boolean };
+	if (_stamp === SETTINGS_VERSION) return rest;
 	const next: Partial<AppSettings> = { ...rest };
 	if ([1, 2, 3].includes(next.mouseWheelScrollSensitivity as number)) next.mouseWheelScrollSensitivity = DEFAULT_SETTINGS.mouseWheelScrollSensitivity;
 	if (next.fastScrollSensitivity === 5) next.fastScrollSensitivity = DEFAULT_SETTINGS.fastScrollSensitivity;
@@ -171,9 +188,26 @@ export function migrateStoredSettings(stored: Partial<AppSettings>): Partial<App
 	return next;
 }
 
-const storedSettings = load<Partial<AppSettings>>('appSettings', {});
+/** What a modern write persists: the settings plus the migration stamp, in localStorage
+ *  (`updateSetting`, the boot pass) and `~/.ggs/settings.json` (the file persist) alike —
+ *  the stamp is what keeps `migrateStoredSettings` to its single run. */
+function persisted(): StoredSettings {
+	return { ...settings, settingsVersion: SETTINGS_VERSION };
+}
+
+const storedSettings = load<StoredSettings>('appSettings', {});
 const migratedSettings = migrateStoredSettings(storedSettings);
 export const settings: AppSettings = { ...DEFAULT_SETTINGS, ...migratedSettings };
+// A payload the pass rewrote is written back with its stamp, so the pass never runs over
+// it again — only the stamp tells the next boot a `stickyScroll: true` apart from the old
+// shipped default it once was. A pass that changed nothing writes nothing: a fresh store
+// stays unwritten (a remote session's first-run device seeding must see it empty, §5.5),
+// and values the pass left alone are not old defaults — they survive unstamped, since a
+// no-op pass never erases anything.
+if (storedSettings.settingsVersion !== SETTINGS_VERSION) {
+	const { smoothScrolling: _glide, settingsVersion: _stamp, ...storedValues } = storedSettings as StoredSettings & { smoothScrolling?: boolean };
+	if (JSON.stringify(migratedSettings) !== JSON.stringify(storedValues)) save('appSettings', persisted());
+}
 // A migrated shell default must reach the backend file too: the spawn path reads
 // `~/.ggs/settings.json` (written only on setting changes), and a file still pinning
 // the old default would keep spawning the old shell. Fires once, at boot.
@@ -353,7 +387,13 @@ export function syncExtensionThemes(themes: { extId: string; label: string; kind
 	for (let at = THEMES.length - 1; at >= 0; at--) {
 		if (THEMES[at]!.id.startsWith('ext-theme:')) THEMES.splice(at, 1);
 	}
-	for (const [index, theme] of themes.entries()) {
+	const perExt = new Map<string, number>();
+	for (const theme of themes) {
+		// The index is per extension: a global one renumbers every later extension's themes
+		// whenever any extension's set changes, and the user's stored id would silently fall
+		// back to the default theme at the next apply.
+		const index = perExt.get(theme.extId) ?? 0;
+		perExt.set(theme.extId, index + 1);
 		THEMES.push({
 			id: `ext-theme:${theme.extId}:${index}`,
 			label: theme.label,
@@ -377,6 +417,12 @@ function dispatch(name: string, detail?: unknown): void {
 	// (the graph view host, the terminal) — a bubbling event reaches both from either target.
 	document.dispatchEvent(new CustomEvent(name, { detail, bubbles: true }));
 }
+
+/** The theme id applied last (the resolved one — `auto` resolves to its system pick).
+ *  THEME_EVENT rides the effective id's change, not only the stylesheet link's: a
+ *  same-href switch (an extension overlay theme to its base builtin, an overlay swap)
+ *  removes or rewrites variables the colour-reading consumers cached. */
+let appliedThemeId: string | null = null;
 
 /** Swap the theme stylesheet and the vscode-* classes on html/body. Fires THEME_EVENT once the
  *  new stylesheet has loaded, so anything that read computed colors can re-read them. */
@@ -406,13 +452,15 @@ export function applyTheme(id: string = settings.theme): void {
 		overlay?.remove();
 	}
 	if (!link || link.getAttribute('href') === theme.css) {
-		// Same base stylesheet: the change (if any) was the overlay alone — the color-reading
-		// consumers still need their re-read pass.
-		if (theme.overlay) dispatch(THEME_EVENT, theme.id);
+		// Same base stylesheet: the overlay alone changed, or the effective theme did —
+		// either way the color-reading consumers need their re-read pass, overlay or not.
+		if (theme.overlay || appliedThemeId !== theme.id) dispatch(THEME_EVENT, theme.id);
+		appliedThemeId = theme.id;
 		return;
 	}
 	link.addEventListener('load', () => dispatch(THEME_EVENT, theme.id), { once: true });
 	link.href = theme.css;
+	appliedThemeId = theme.id;
 }
 
 /** Change one setting: store it, apply its side effects, and notify the workbench. */
@@ -422,7 +470,7 @@ export function updateSetting<K extends keyof AppSettings>(key: K, value: AppSet
 	// must not fire the backend command.
 	if (JSON.stringify(settings[key]) === JSON.stringify(value)) return;
 	settings[key] = value;
-	save('appSettings', settings);
+	save('appSettings', persisted());
 	if (key === 'theme') applyTheme();
 	if (key === 'locale') setLocale(String(value));
 	if (key === 'fontSize') applyFontSize();
@@ -448,7 +496,7 @@ export function updateSetting<K extends keyof AppSettings>(key: K, value: AppSet
  *  up on their own; they read it at creation. */
 function applyTerminalShell(): void {
 	if (remoteSession()) return;
-	void settingsWrite(JSON.stringify(settings, null, '\t'))
+	void settingsWrite(JSON.stringify(persisted(), null, '\t'))
 		.catch(() => undefined)
 		.then(() => providersShellRefresh())
 		.catch(() => undefined);
@@ -504,7 +552,7 @@ export async function loadSettingsFile(): Promise<void> {
 		if (!text) return;
 		// The file is a store from an older release as much as localStorage is: the same
 		// migration applies (a wheel sensitivity that was only ever a shipped default).
-		const parsed = migrateStoredSettings(JSON.parse(text) as Partial<AppSettings>);
+		const parsed = migrateStoredSettings(JSON.parse(text) as StoredSettings);
 		// What this browser already picked for itself (R0): a remote session's device-scope
 		// keys stand — the file seeded them on the first run, and every later read would
 		// otherwise undo the device's own choices (a zh-cn pick reverted by an en PC file).
@@ -521,7 +569,7 @@ export async function loadSettingsFile(): Promise<void> {
 			}
 			(settings as unknown as Record<string, unknown>)[def.key] = parsed[def.key];
 		}
-		save('appSettings', settings);
+		save('appSettings', persisted());
 	} catch {
 		// No file, or one that does not parse: the stored settings stand.
 	}
@@ -532,7 +580,7 @@ export async function loadSettingsFile(): Promise<void> {
  *  session's scoped storage — `settings_write` is refused at the gate besides. */
 export function persistSettingsFile(): void {
 	if (remoteSession()) return;
-	void settingsWrite(JSON.stringify(settings, null, '\t')).catch(() => undefined);
+	void settingsWrite(JSON.stringify(persisted(), null, '\t')).catch(() => undefined);
 }
 
 /** The code editors' font size travels on a CSS variable, so a change is live everywhere. */

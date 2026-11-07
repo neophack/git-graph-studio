@@ -109,27 +109,50 @@ fn score_label(label: &str, query: &FuzzyQuery) -> Option<(i64, Vec<u32>)> {
 }
 
 /// Score one file for a query: the label tiers first, the path around the label as the
-/// lowest tier. The path tier's positions are shifted into label coordinates as an empty
-/// range set (the picker bolds label hits; a path-only hit keeps the row unbolded, as in
-/// the TS picker).
-fn score_file(path: &str, label_range: (usize, usize), query: &FuzzyQuery) -> Option<i64> {
+/// lowest tier. The ranges are the matched label characters in label coordinates — label
+/// hits carry their own positions, a path hit the characters landing inside the basename,
+/// shifted out of path coordinates (the TS fallback's rule, `fuzzy.ts`'s path branch), so
+/// the picker bolds the basename whichever scorer answered.
+fn score_file(
+    path: &str,
+    label_range: (usize, usize),
+    query: &FuzzyQuery,
+) -> Option<(i64, Vec<Range>)> {
     let label = &path[label_range.0..label_range.1];
-    if let Some((score, _)) = score_label(label, query) {
+    if let Some((score, positions)) = score_label(label, query) {
         // A query that prefixes the basename tops the label tier; the closer to the full
         // name, the better, so typing most of a filename prefers the shorter file.
         let label_lower: Vec<u16> = label.to_lowercase().encode_utf16().collect();
+        let ranges = merge_positions(&positions);
         if label_lower.starts_with(&query.lower) {
-            let boost = (query.lower.len() as f64 * 100.0 / label_lower.len() as f64).round() as i64;
-            return Some(LABEL_PREFIX_SCORE + boost + score);
+            let boost =
+                (query.lower.len() as f64 * 100.0 / label_lower.len() as f64).round() as i64;
+            return Some((LABEL_PREFIX_SCORE + boost + score, ranges));
         }
-        return Some(LABEL_SCORE + score);
+        return Some((LABEL_SCORE + score, ranges));
     }
-    // A path hit: the whole path is the target, at the lowest tier.
-    score_label(path, query).map(|(score, _)| score + PATH_SCORE)
+    // A path hit: the whole path is the target, at the lowest tier. Whole ranges whose
+    // start sits inside the basename shift into label coordinates, exactly as the TS
+    // fallback filters `[start, _)` by the label offset.
+    let (score, positions) = score_label(path, query)?;
+    let offset = (path.encode_utf16().count() - label.encode_utf16().count()) as u32;
+    let ranges = merge_positions(&positions)
+        .into_iter()
+        .filter(|(start, _)| *start >= offset)
+        .map(|(start, end)| (start - offset, end - offset))
+        .collect();
+    Some((score + PATH_SCORE, ranges))
 }
 
+/// A [start, end) bold range of the matched label, in UTF-16 code units.
+type Range = (u32, u32);
+
+/// One scored candidate: the tiered score, the walked list's index, and the label's
+/// bold ranges.
+type ScoredHit = (i64, usize, Vec<Range>);
+
 /// The [start, end) bold ranges of the matched label positions (adjacent positions merged).
-fn merge_positions(positions: &[u32]) -> Vec<(u32, u32)> {
+fn merge_positions(positions: &[u32]) -> Vec<Range> {
     let mut ranges: Vec<(u32, u32)> = Vec::new();
     for &position in positions {
         match ranges.last_mut() {
@@ -160,30 +183,33 @@ pub fn fuzzy_hits(files: &[String], query: &str, limit: usize) -> Vec<FuzzyFileH
     }
 
     let query = FuzzyQuery::new(trimmed);
-    let mut scored: Vec<(i64, usize)> = Vec::new();
+    let mut scored: Vec<ScoredHit> = Vec::new();
     for (index, path) in files.iter().enumerate() {
         let label_start = path.rfind('/').map(|at| at + 1).unwrap_or(0);
-        if let Some(score) = score_file(path, (label_start, path.len()), &query) {
-            scored.push((score, index));
+        if let Some((score, ranges)) = score_file(path, (label_start, path.len()), &query) {
+            scored.push((score, index, ranges));
         }
     }
-    // Best score first; equal scores keep the walk order (directories were walked in order).
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    // VS Code's compareItemsByFuzzyScore, reduced to the file case (`compareFileMatches` in
+    // fuzzy.ts): best score first, then the shorter path, then the lexicographically
+    // smaller one — the same order whether the backend or the TS fallback answered. Paths
+    // compare by their UTF-16 length, the picker's string index domain.
+    let utf16_len = |index: usize| files[index].encode_utf16().count();
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| utf16_len(a.1).cmp(&utf16_len(b.1)))
+            .then_with(|| files[a.1].cmp(&files[b.1]))
+    });
     scored.truncate(limit);
 
     scored
         .into_iter()
-        .map(|(_, index)| {
+        .map(|(_, index, ranges)| {
             let path = &files[index];
             let start = path.rfind('/').map(|at| at + 1).unwrap_or(0);
-            let label = &path[start..];
-            // The label hits carry their bold ranges; a path-only hit carries none.
-            let ranges = score_label(label, &query)
-                .map(|(_, positions)| merge_positions(&positions))
-                .unwrap_or_default();
             FuzzyFileHit {
                 path: path.clone(),
-                label: label.to_owned(),
+                label: path[start..].to_owned(),
                 ranges,
             }
         })
@@ -255,7 +281,7 @@ mod tests {
 
     fn score(path: &str, query: &str) -> Option<i64> {
         let start = path.rfind('/').map(|at| at + 1).unwrap_or(0);
-        score_file(path, (start, path.len()), &FuzzyQuery::new(query))
+        score_file(path, (start, path.len()), &FuzzyQuery::new(query)).map(|(value, _)| value)
     }
 
     #[test]
@@ -375,5 +401,34 @@ mod tests {
         assert_eq!(hits[0].path, "src/main.rs");
         assert_eq!(hits[1].path, "src/perm-mangle.rs");
         assert!(!hits[0].ranges.is_empty(), "label hits carry bold ranges");
+    }
+
+    #[test]
+    fn equal_scores_break_by_shorter_then_lexicographic_path() {
+        // The TS fallback (`compareFileMatches` in fuzzy.ts) breaks score ties by the
+        // shorter path, then the lexicographically smaller one; the backend answers the
+        // same order, never the walk order.
+        let files = vec![
+            "src/beta/ma.txt".to_owned(), // longer path: trails
+            "src/b/ma.txt".to_owned(),    // same length as a/, sorts after it
+            "src/a/ma.txt".to_owned(),    // shortest: leads
+        ];
+        let hits = fuzzy_hits(&files, "ma", 10);
+        assert_eq!(
+            hits.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(),
+            ["src/a/ma.txt", "src/b/ma.txt", "src/beta/ma.txt"]
+        );
+    }
+
+    #[test]
+    fn a_path_tier_hit_highlights_the_basenames_characters() {
+        // The TS fallback bolds the path match's characters that land inside the basename
+        // (`fuzzy.ts`'s path branch); the backend mirrors it, so the picker's bolding is
+        // identical whichever scorer answered.
+        let hits = fuzzy_hits(&["src/ma/other.txt".to_owned()], "mao", 10);
+        assert_eq!(hits.len(), 1);
+        // m/a match in the path's `ma/` directory segment, the o inside `other.txt`:
+        // only the basename character is bolded, at label offset 0.
+        assert_eq!(hits[0].ranges, vec![(0, 1)]);
     }
 }

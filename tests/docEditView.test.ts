@@ -219,6 +219,39 @@ describe('windowed editor keeps the backend document in step', () => {
 		await group.closeAll();
 	});
 
+	it('a save retires the still-queued hot-exit backup', async () => {
+		const { group, doc } = await openWindowed(SMALL);
+		// The edit schedules a backend-side backup 3 s out; the save writes and clears the
+		// backup — the queued callback must not run after it and resurrect a backup for a
+		// clean file (ghost hot-exit recovery on the next launch).
+		await edit(doc, 0, 0, '// ');
+		await group.save(group.open[0]!);
+		await new Promise((resolve) => setTimeout(resolve, 3_200)); // outlive the backup clock
+		await flush();
+		expect(backend.callsTo('viewer_backup')).toHaveLength(0);
+		expect(backend.callsTo('backup_clear').length).toBeGreaterThan(0);
+		await group.closeAll();
+	}, 15_000);
+
+	it('the save carries the tab\'s encoding and EOL choice to the backend', async () => {
+		const { group, doc } = await openWindowed(SMALL);
+		// The open's detection rode the tab (the mock's viewer_open answers utf8/lf), so a
+		// save passes the tab's choice through…
+		await edit(doc, 0, 0, '// ');
+		await group.save(group.open[0]!);
+		expect(backend.callsTo('viewer_save').at(-1)).toMatchObject({ encoding: 'utf8', eol: 'lf' });
+		// …and Save with Encoding / the EOL pick override the write from the windowed
+		// editor too — before, both commands refused a tab without an in-page view.
+		await group.saveWithEncoding('utf8bom');
+		expect(backend.callsTo('viewer_save').at(-1)).toMatchObject({ encoding: 'utf8bom', eol: 'lf' });
+		expect(group.open[0]!.dirty).toBe(false);
+		group.setEol('crlf');
+		await group.save(group.open[0]!);
+		expect(backend.callsTo('viewer_save').at(-1)).toMatchObject({ encoding: 'utf8bom', eol: 'crlf' });
+		expect(group.open[0]!.dirty).toBe(false);
+		await group.closeAll();
+	});
+
 	it('reloads a clean editor only when the disk really changed, keeping the cursor', async () => {
 		const { group, doc, rope } = await openWindowed(SMALL);
 		// A reveal inside the window moves the cursor (line and column) without a slide.
@@ -247,6 +280,33 @@ describe('windowed editor keeps the backend document in step', () => {
 		await flush();
 		expect(backend.callsTo('viewer_reload')).toHaveLength(2);
 		expect(shown(doc).startsWith('xline 0')).toBe(true);
+		await group.save(group.open[0]!);
+		await group.closeAll();
+	});
+
+	it('a window read that straddled a reload is dropped by its generation', async () => {
+		const { group, doc, rope } = await openWindowed(SMALL);
+		// `viewer_reload` swaps the backend document wholesale under the same docId, so a
+		// window read that cloned the predecessor answers with the old generation however
+		// long it ran past the swap. Writing its rows would leave the editor diffing every
+		// later edit against stale baseline lines.
+		rope.nextWindowGen = 0; // the stale response
+		rope.text = SMALL.replace('line 5', 'line 5 FROM DISK');
+		rope.diskChanged = true;
+		await group.reloadIfClean('C:\\repo\\big.log');
+		await flush();
+		// The reload's own fetch was made — and dropped: the editor never shows the
+		// predecessor's rows under the new generation.
+		const fetches = backend.callsTo('viewer_text').length;
+		expect(fetches).toBeGreaterThan(1);
+		expect(shown(doc)).not.toContain('FROM DISK');
+		expect(shown(doc)).toBe(SMALL);
+		// The next fetch names the current generation and lands: the disk text shows.
+		rope.diskChanged = true;
+		await group.reloadIfClean('C:\\repo\\big.log');
+		await flush();
+		expect(backend.callsTo('viewer_text').length).toBe(fetches + 1);
+		expect(shown(doc)).toContain('line 5 FROM DISK');
 		await group.save(group.open[0]!);
 		await group.closeAll();
 	});
@@ -331,6 +391,32 @@ describe('the whole-file find and replace (docFind.ts over viewer_find / viewer_
 		expect(call.max).toBe(1);
 		// After the replacement the current match is the remaining one.
 		expect(widget.querySelector('.cm-find-count')!.textContent).toBe('1 of 1');
+		await group.save(group.open[0]!);
+		await group.closeAll();
+	});
+
+	it('places the cursor past surrogate pairs on an astral line (the code-point column converted)', async () => {
+		const { group, doc } = await openWindowed('😀😀😀 beta one\n');
+		doc.openFind();
+		await flush();
+		const widget = bar(doc);
+		type(field(widget, '.cm-find-input'), 'beta');
+		await settle();
+		buttonByTitle(widget, 'Toggle Replace').click();
+		type(field(widget, '.cm-replace-row .cm-find-input'), 'X');
+		buttonByTitle(widget, 'Replace').click();
+		await settle();
+		// 'beta' starts 7 UTF-16 units into the line (three surrogate pairs and a space);
+		// passing the raw code-point column (4) parked the caret inside the third emoji.
+		const selection = doc.editorView!.state.selection.main;
+		const line = doc.editorView!.state.doc.line(1);
+		expect(selection.from - line.from).toBe(7);
+		// The reveal path converts the same way: the current match's selection covers
+		// exactly the query on the astral line.
+		type(field(widget, '.cm-find-input'), 'one');
+		await settle();
+		const revealed = doc.editorView!.state.selection.main;
+		expect(doc.editorView!.state.sliceDoc(revealed.from, revealed.to)).toBe('one');
 		await group.save(group.open[0]!);
 		await group.closeAll();
 	});

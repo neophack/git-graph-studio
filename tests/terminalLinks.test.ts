@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { TerminalView } from '../src/features/terminal';
 import { detectLinks, resolveTerminalPath } from '../src/features/terminal/links';
+import { toCellColumn } from '../src/features/terminal/wcwidth';
 import { DEFAULT_SETTINGS, SETTING_DEFS, updateSetting } from '../src/platform/settings';
 import { setLocale, t } from '../src/platform/i18n';
 import { backend } from './tauriMock';
@@ -100,6 +101,22 @@ describe('link detection (the pure scan)', () => {
 	});
 });
 
+describe('the cell-width walk (wcwidth.ts, the link range converter)', () => {
+	it('counts one cell for plain text, two for full-width characters, none for marks', () => {
+		expect(toCellColumn('abc', 3)).toBe(3);
+		expect(toCellColumn('错误', 2)).toBe(4);
+		expect(toCellColumn('错误 at', 5)).toBe(7);
+		expect(toCellColumn('\uFF21x', 3)).toBe(3); // fullwidth A paints two cells
+		expect(toCellColumn('e\u0301x', 3)).toBe(2); // a combining acute paints none
+		expect(toCellColumn('a\u200bb', 3)).toBe(2); // a zero-width space paints none
+	});
+
+	it('walks a surrogate pair whole — one emoji character, two cells', () => {
+		expect(toCellColumn('🚀x', 3)).toBe(3);
+		expect(toCellColumn('🚀x', 2)).toBe(2); // the half-pair index counts nothing
+	});
+});
+
 describe('path resolution (the wiring site\'s vocabulary)', () => {
 	it('unmaps the MSYS drive spelling, joins the workspace root, passes absolute paths as written', () => {
 		expect(resolveTerminalPath('/c/Users/me/proj/main.rs', null)).toBe('C:\\Users\\me\\proj\\main.rs');
@@ -123,6 +140,27 @@ describe('the link provider over the view', () => {
 		// Cell positions are 1-based over the line's chars: [start, end) covers start+1..end.
 		expect(links[0]!.range).toEqual({ start: { x: 10, y: 1 }, end: { x: 32, y: 1 } });
 		expect(links[1]!.text).toBe('https://example.com/docs');
+	});
+
+	it('cell ranges survive full-width characters before and inside the link', async () => {
+		const view = new TerminalView();
+		await view.shown();
+		const term = terms()[0]!;
+		term.lines[0] = '错误 at C:\\src\\main.rs:10';
+		const [link] = linksFor(term);
+		expect(link!.text).toBe('C:\\src\\main.rs:10');
+		// 错 and 误 paint two cells each: the path begins at string index 6 but cell
+		// column 8, so the 1-based underline covers cells 9..25 — exactly the path,
+		// not two cells to its left (the misalignment this fixes).
+		expect(link!.range).toEqual({ start: { x: 9, y: 1 }, end: { x: 25, y: 1 } });
+
+		term.lines[0] = '路径 /c/proj/测试.ts:2';
+		const [wide] = linksFor(term);
+		expect(wide!.text).toBe('/c/proj/测试.ts:2');
+		// The wide characters INSIDE the link text count too: five cells precede the
+		// link, and its 15 code units (测、试 two of them wide) paint 17 cells — 6..22.
+		expect(wide!.range).toEqual({ start: { x: 6, y: 1 }, end: { x: 22, y: 1 } });
+		await view.killActive();
 	});
 
 	it('a ctrl+clicked URL crosses the opener; a plain click opens nothing', async () => {

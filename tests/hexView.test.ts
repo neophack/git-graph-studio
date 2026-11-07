@@ -544,6 +544,88 @@ describe('hex view', () => {
 		expect(new Set(tops).size).toBe(2);
 	});
 
+	it('highlights every hit a row holds, not just the first', async () => {
+		const planted = new Uint8Array(64);
+		for (let i = 0; i < planted.length; i++) planted[i] = i;
+		planted.set([0xca, 0xfe], 4);
+		planted.set([0xca, 0xfe], 9); // a second hit in the SAME row (0..15)
+		backend.on('read_file_chunk', (args) => ({
+			size: planted.length,
+			base64: b64(planted.subarray(Number(args.offset), Number(args.offset) + Number(args.len)))
+		}));
+		const view = new HexView('/tmp/two.bin');
+		await view.load();
+		await flush();
+		const box = view.root.querySelector('.hex-search') as HTMLInputElement;
+		box.value = 'cafe';
+		keydown(box, 'Enter');
+		await flush(2);
+		const row = view.root.querySelector('.hex-scroller [data-row="0"]')!;
+		// Two bytes per occurrence, in both panes — the old single findNeedle call marked
+		// only the row's first hit.
+		expect(row.querySelectorAll('.hex-cell.hex-hit').length).toBe(4);
+		expect(row.querySelectorAll('.hex-ascii-cell.hex-hit').length).toBe(4);
+		expect(view.root.querySelector('.hex-search-count')!.textContent).toBe('1 of 2');
+		view.destroy();
+	});
+
+	it('a slab read still in flight at a save never lands its pre-save bytes back', async () => {
+		// 160 KiB: two slabs. The first cold read of slab 1 is held until after the save
+		// has cleared the caches — its bytes are the file's PRE-save content, and the old
+		// unconditional cache-write parked them back over the post-save refill.
+		const big = new Uint8Array(160 * 1024);
+		for (let i = 0; i < big.length; i++) big[i] = (i * 31 + 7) & 0xff;
+		const patched = big.slice(); // what the mock's disk reads as once the save wrote
+		patched[65536] = patched[65536]! ^ 0xff;
+		let written = false;
+		let releaseSecondSlab: (() => void) | null = null;
+		let heldSecondSlab: Promise<void> | null = null;
+		backend.on('read_file_chunk', (args) => {
+			const offset = Number(args.offset);
+			const len = Number(args.len);
+			const answer = () => ({ size: big.length, base64: b64((written ? patched : big).subarray(offset, offset + len)) });
+			if (offset >= 65536 && !heldSecondSlab) {
+				// Only the FIRST slab-1 read hangs; the post-save refill resolves at once.
+				// The held read's bytes are fixed at ISSUE time — what the file read back
+				// then — so its late resolution really carries the pre-save content.
+				const stale = b64(big.subarray(offset, offset + len));
+				heldSecondSlab = new Promise<void>((resolve) => { releaseSecondSlab = resolve; });
+				return heldSecondSlab.then(() => ({ size: big.length, base64: stale }));
+			}
+			return answer();
+		});
+		const view = new HexView('/tmp/slab.bin');
+		Object.defineProperty(view.root.querySelector('.hex-scroller')!, 'clientHeight', { configurable: true, get: () => 300 });
+		await view.load();
+		// The edit goes first, while slab 0 and the top of the file are current: committing
+		// the byte walks the cursor onto it, and the caret's reveal would drag the viewport
+		// back to row 0 if the edit came after the scroll into slab 1.
+		(view.root.querySelector('.hex-edit-toggle') as HTMLButtonElement).click();
+		keydown(view.root, 'f');
+		keydown(view.root, 'f');
+		expect(view.isDirty).toBe(true);
+		// Now scroll into slab 1: its cold read goes out and is held.
+		view.scroll.setTop(5000);
+		await flush();
+		// A save whose patch is itself held: the caches clear only past it.
+		let releasePatch: (() => void) | null = null;
+		backend.on('patch_file', () => new Promise<void>((resolve) => { releasePatch = resolve; }));
+		(view.root.querySelector('.hex-save') as HTMLButtonElement).click();
+		await flush(2); // save() is parked on the patch
+		expect(view.isDirty).toBe(true);
+		written = true;
+		releasePatch!();
+		await flush(); // the save lands: caches cleared, generation bumped, refetch fills
+		expect(view.isDirty).toBe(false);
+		const slabs = (view as unknown as { slabValues: Map<number, Uint8Array> }).slabValues;
+		expect(slabs.get(1)![0]).toBe(patched[65536]); // the post-save bytes are cached
+		// The held pre-save read finally resolves — stale, it must be dropped.
+		releaseSecondSlab!();
+		await flush();
+		expect(slabs.get(1)![0]).toBe(patched[65536]); // still the post-save bytes
+		view.destroy();
+	});
+
 	it('does not treat a hex letter as input while a shortcut modifier is held', async () => {
 		const view = new HexView('/tmp/blob.bin');
 		await view.load();

@@ -60,7 +60,10 @@ export class WebviewPanel {
 				self.htmlValue = value;
 				void self.bridge.request('webview.setHtml', [self.panelId, value]);
 			},
-			postMessage: (message: unknown) => bridge.request('webview.postMessage', [panelId, message]).then(() => true) as Promise<boolean>,
+			// VS Code's verdict crosses: true handed to a live panel, false when the panel
+			// is gone — an extension's retry logic (claude-code's page handshake) reads
+			// it. An older host that answers nothing still reads as delivered.
+			postMessage: (message: unknown) => bridge.request('webview.postMessage', [panelId, message]).then((verdict) => verdict !== false) as Promise<boolean>,
 			onDidReceiveMessage: this.messages.event,
 			asWebviewUri: (local: Uri | string): Uri => webviewUriFor(this.ctx, local),
 			cspSource: webviewCspSource(this.ctx)
@@ -100,8 +103,13 @@ export class WebviewPanel {
 	readonly onDidDispose = this.disposed.event;
 	readonly onDidChangeViewState = this.viewState.event;
 
-	reveal(): void {
-		if (!this.gone) void this.bridge.request('webview.reveal', [this.panelId]);
+	/** VS Code's `reveal(viewColumn?, preserveFocus?)`: the column places the panel (the
+	 *  same showOptions a create takes), preserveFocus reveals without stealing the
+	 *  current editor's focus. Both cross to the host, which owns the placement. */
+	reveal(viewColumn?: number, preserveFocus?: boolean): void {
+		if (this.gone) return;
+		if (typeof viewColumn === 'number') this.viewColumn = viewColumn;
+		void this.bridge.request('webview.reveal', [this.panelId, viewColumn, preserveFocus === true]);
 	}
 
 	dispose(): void {
@@ -160,7 +168,7 @@ export class WebviewView {
 				self.htmlValue = value;
 				void self.bridge.request('webviewView.setHtml', [self.viewType, value]);
 			},
-			postMessage: (message: unknown) => bridge.request('webviewView.postMessage', [viewType, message]).then(() => true) as Promise<boolean>,
+			postMessage: (message: unknown) => bridge.request('webviewView.postMessage', [viewType, message]).then((verdict) => verdict !== false) as Promise<boolean>,
 			onDidReceiveMessage: this.messages.event,
 			asWebviewUri: (local: Uri | string): Uri => webviewUriFor(this.ctx, local),
 			cspSource: webviewCspSource(this.ctx)

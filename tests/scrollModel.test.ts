@@ -135,6 +135,20 @@ describe('the scroll model', () => {
 			expect(small.top).toBe(51 + 1 - 4);
 		});
 
+		it('fit still brings the row into view when the viewport is shorter than one row', () => {
+			// A viewport under a row tall floors the half-viewport margin below zero; the
+			// negative keep used to push the row just OUTSIDE the edge it was brought to,
+			// and the both-margins case used to answer "no move" — the row stayed invisible.
+			// The fallback places it at the viewport's top (rowTop 0).
+			const m = new ScrollModel(19, 1000);
+			m.verticalScrollMargin = 0;
+			m.setViewport(15); // 15 / 19 ≈ 0.79 rows visible
+			m.setTop(99.2);
+			expect(m.autoscroll(99, 'fit')).toBe(true);
+			expect(m.top).toBe(99);
+			expect(m.rowTop(99)).toBe(0); // the row's own edge sits at the viewport's top
+		});
+
 		it('center, focused, top and bottom place the row where they say', () => {
 			const m = model(1000);
 			m.autoscroll(500, 'center');

@@ -12,6 +12,7 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import type { IBufferRange, ILink, ILinkProvider, Terminal } from '@xterm/xterm';
 import { notify } from '../../platform/ui/index';
 import { t } from '../../platform/i18n';
+import { toCellColumn } from './wcwidth';
 
 /** One detected link target within a buffer line. `target` is raw as printed — the MSYS
  *  `/c/...` spelling, a workspace-relative `src/foo.ts` — because the resolution is the
@@ -209,11 +210,16 @@ export function attachTerminalLinks(term: Terminal, actions: TerminalLinkActions
 			const text = row.translateToString(true);
 			const links: ILink[] = [];
 			for (const detected of detectLinks(text)) {
-				// Cell positions are 1-based for x and the absolute buffer row for y: chars
-				// [start, end) cover cells start+1 .. end (the range bounds are inclusive).
+				// Cell positions are 1-based for x and the absolute buffer row for y: the range
+				// bounds are inclusive, chars [start, end) covering cells start+1 .. end — in
+				// CELL columns, which `detectLinks`' string indices only equal while every
+				// character is one cell wide. The width walk (wcwidth.ts) converts both ends,
+				// so a link after a full-width character still lands its underline exactly over
+				// its own cells. (The reverse mapping is never needed: hover and activate read
+				// the link's own text/target, never the buffer's.)
 				const range: IBufferRange = {
-					start: { x: detected.start + 1, y: bufferLineNumber },
-					end: { x: detected.end, y: bufferLineNumber }
+					start: { x: toCellColumn(text, detected.start) + 1, y: bufferLineNumber },
+					end: { x: toCellColumn(text, detected.end), y: bufferLineNumber }
 				};
 				links.push({
 					text: detected.text,

@@ -8,7 +8,7 @@ import { EditorState } from '@codemirror/state';
 import { CompletionContext } from '@codemirror/autocomplete';
 
 import { EditorGroup } from '../src/features/editor';
-import { pathCompletion, snippetCompletionSource, wordCompletion, fileNameFacet } from '../src/features/editor';
+import { pathCompletion, snippetCompletionSource, wordCompletion, fileNameFacet } from '../src/features/editor/autocomplete';
 import { applyFontSize, updateSetting } from '../src/platform/settings';
 import { openSettingsPanel } from '../src/workbench/settingsPanel';
 import { backend } from './tauriMock';

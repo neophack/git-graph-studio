@@ -70,8 +70,13 @@ export const searchCancel = () => invoke<void>('search_cancel');
  *  scan is done (or cancelled — `searchCancel` makes the settle a no-error early return). */
 export const searchWorkspace = (matcher: SearchMatcher, repo: string | undefined, onEvent: Channel<SearchEvent>) =>
 	invoke<void>('search_workspace', { ...matcher, repo, onEvent });
-export const replaceInFiles = (matcher: SearchMatcher, replacement: string, repo: string | undefined) =>
-	invoke<{ files: number; replacements: number }>('replace_in_files', { ...matcher, replacement, repo });
+/** Replace every match of `matcher` across the workspace root (a multi-root workspace
+ *  calls it once per root), or — when `files` is given — exactly those workspace-relative
+ *  paths: the per-file replace's exact list, never a glob interpretation (a separator-free
+ *  include pattern would match the basename at any depth and rewrite every same-named
+ *  file). */
+export const replaceInFiles = (matcher: SearchMatcher, replacement: string, repo: string | undefined, files?: string[]) =>
+	invoke<{ files: number; replacements: number }>('replace_in_files', { ...matcher, replacement, repo, ...(files !== undefined && { files }) });
 /** Replace exactly one listed match — the row's own file, line and character column. The
  *  backend re-matches the query on that line, replaces the occurrence at the column, and
  *  answers the line's remaining matches recomputed, so the view updates the row locally

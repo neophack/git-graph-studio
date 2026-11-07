@@ -578,10 +578,14 @@ export class CanLogView {
 		this.rateBody.replaceChildren(
 			multiLineChart(seriesOf((b) => (b.durS > 0 ? b.frames / b.durS : 0)), { xUnit: 's', yUnit: 'fr/s', height: 160, fmtX: formatAxisSeconds, vbw })
 		);
+		// The backend answers one count per payload bin — the same 16 lengths this table
+		// labels, in order — and the chart maps them by index, so the last label ("64")
+		// reads the last bin. A short answer pads with zeros rather than shifting every
+		// column one place left.
 		const payloadSeries: ChartSeries[] = view.channels.map((c, i) => ({
 			name: `${t('can.channel')} ${c.channel}`,
 			cls: seriesStyle(i),
-			points: (dists.get(c.channel)?.counts ?? PAYLOAD_LABELS.map(() => 0)).map((y) => ({ x: 0, y }))
+			points: PAYLOAD_LABELS.map((_, bin) => ({ x: 0, y: dists.get(c.channel)?.counts[bin] ?? 0 }))
 		}));
 		this.payloadBody.replaceChildren(stackedBars([...PAYLOAD_LABELS], payloadSeries, { height: 170, vbw }));
 	}

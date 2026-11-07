@@ -296,6 +296,13 @@ export const framesMethods: ThisType<ExtensionHost> = {
 			this.activationWaiters.get(data.extensionId ?? '')?.();
 			this.activationWaiters.delete(data.extensionId ?? '');
 			this.reportActivationFailure(data.extensionId ?? 'extension', String(data.error ?? 'unknown error'), typeof data.stack === 'string' ? data.stack : null);
+			// The dead frame record must not stay: `ensureActive` answers resolved on it, so
+			// every later command of the extension dispatched into a frame with no handler
+			// and silently no-oped forever. The teardown (the same pass a deactivate runs,
+			// minus asking the dead frame to deactivate) drops the record and its iframe,
+			// unregisters what the failed activation managed to register, and the next
+			// `ensureActive` re-activates — VS Code's own retry-on-next-trigger shape.
+			if (this.frames.has(data.extensionId ?? '')) this.deactivate(data.extensionId ?? '');
 			return;
 		}
 

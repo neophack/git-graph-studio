@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { EditorGroup } from '../src/features/editor';
-import { EditableDocView } from '../src/features/editor';
+import { EditableDocView } from '../src/features/editor/docEditView';
 import { FastView } from '../src/features/viewers';
 import { backend } from './tauriMock';
 import { flush, notifications } from './helpers';

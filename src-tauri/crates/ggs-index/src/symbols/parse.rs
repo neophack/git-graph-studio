@@ -72,6 +72,11 @@ enum Lang {
     Go,
     JavaScript,
     TypeScript,
+    /// JSX-bearing TypeScript: the TS grammar has no JSX nodes, so a `.tsx` file parsed
+    /// with it turns every element into an ERROR node and the extraction misses the
+    /// declarations, calls and decisions inside — it parses with the TSX grammar (the
+    /// same crate, the same query shapes, JSX added).
+    Tsx,
     Java,
     C,
     Cpp,
@@ -84,7 +89,8 @@ fn lang_of(ext: &str) -> Option<Lang> {
         "py" => Lang::Python,
         "go" => Lang::Go,
         "js" | "jsx" => Lang::JavaScript,
-        "ts" | "tsx" => Lang::TypeScript,
+        "ts" => Lang::TypeScript,
+        "tsx" => Lang::Tsx,
         "java" => Lang::Java,
         "c" | "h" => Lang::C,
         "cpp" | "hpp" => Lang::Cpp,
@@ -114,6 +120,12 @@ fn language(lang: Lang) -> Option<Language> {
     #[cfg(feature = "grammar-typescript")]
     if lang == Lang::TypeScript {
         return Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into());
+    }
+    // One grammar crate serves both languages (LANGUAGE_TSX ships beside
+    // LANGUAGE_TYPESCRIPT), so the same `grammar-typescript` feature covers both.
+    #[cfg(feature = "grammar-typescript")]
+    if lang == Lang::Tsx {
+        return Some(tree_sitter_typescript::LANGUAGE_TSX.into());
     }
     #[cfg(feature = "grammar-java")]
     if lang == Lang::Java {
@@ -186,7 +198,8 @@ const JAVASCRIPT_QUERY: &str = r#"
 (new_expression constructor: (identifier) @call.new)
 "#;
 
-/// TypeScript and TSX share one grammar shape (both name classes with a type_identifier).
+/// TypeScript, TSX and the grammar shapes share one query (all name classes with a
+/// type_identifier; the TSX grammar adds JSX nodes the query does not touch).
 const TYPESCRIPT_QUERY: &str = r#"
 (function_declaration name: (identifier) @def.function)
 (generator_function_declaration name: (identifier) @def.function)
@@ -265,7 +278,7 @@ fn query_text(lang: Lang) -> &'static str {
         Lang::Python => PYTHON_QUERY,
         Lang::Go => GO_QUERY,
         Lang::JavaScript => JAVASCRIPT_QUERY,
-        Lang::TypeScript => TYPESCRIPT_QUERY,
+        Lang::TypeScript | Lang::Tsx => TYPESCRIPT_QUERY,
         Lang::Java => JAVA_QUERY,
         Lang::C => C_QUERY,
         Lang::Cpp => CPP_QUERY,
@@ -283,6 +296,7 @@ fn query(lang: Lang) -> Option<&'static Query> {
             Lang::Go,
             Lang::JavaScript,
             Lang::TypeScript,
+            Lang::Tsx,
             Lang::Java,
             Lang::C,
             Lang::Cpp,
@@ -572,9 +586,9 @@ fn container_of(lang: Lang, decl: Option<tree_sitter::Node>, text: &str) -> Opti
             | (Lang::JavaScript, "class_declaration")
             | (Lang::JavaScript, "abstract_class_declaration")
             | (Lang::JavaScript, "class_expression")
-            | (Lang::TypeScript, "class_declaration")
-            | (Lang::TypeScript, "abstract_class_declaration")
-            | (Lang::TypeScript, "class_expression")
+            | (Lang::TypeScript | Lang::Tsx, "class_declaration")
+            | (Lang::TypeScript | Lang::Tsx, "abstract_class_declaration")
+            | (Lang::TypeScript | Lang::Tsx, "class_expression")
             | (Lang::Java, "class_declaration")
             | (Lang::Java, "interface_declaration")
             | (Lang::Java, "enum_declaration")
@@ -612,7 +626,7 @@ fn exported_of(lang: Lang, decl: Option<tree_sitter::Node>, name: &str, text: &s
             .is_some_and(|first| first.kind() == "visibility_modifier"),
         Lang::Go => name.chars().next().is_some_and(char::is_uppercase),
         Lang::Python => !name.starts_with('_'),
-        Lang::JavaScript | Lang::TypeScript => {
+        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
             let parent = decl.parent();
             parent.is_some_and(|p| p.kind() == "export_statement")
                 || parent
@@ -733,7 +747,7 @@ fn is_control(lang: Lang, kind: &str) -> bool {
                 | "type_switch_statement"
                 | "select_statement"
         ),
-        Lang::JavaScript | Lang::TypeScript => matches!(
+        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => matches!(
             kind,
             "if_statement"
                 | "for_statement"
@@ -798,7 +812,9 @@ fn is_decision(lang: Lang, kind: &str) -> bool {
             kind,
             "expression_case" | "type_case" | "comm_clause" | "default_case"
         ),
-        Lang::JavaScript | Lang::TypeScript => matches!(kind, "case_clause" | "catch_clause"),
+        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
+            matches!(kind, "case_clause" | "catch_clause")
+        }
         Lang::Java => matches!(
             kind,
             "switch_block_statement_group" | "switch_rule" | "catch_clause"
@@ -829,7 +845,7 @@ fn is_nested_decl(lang: Lang, kind: &str) -> bool {
             kind,
             "function_declaration" | "method_declaration" | "type_declaration"
         ),
-        Lang::JavaScript | Lang::TypeScript => matches!(
+        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => matches!(
             kind,
             "function_declaration"
                 | "generator_function_declaration"
@@ -886,7 +902,7 @@ fn import_of(lang: Lang, node: tree_sitter::Node, text: &str) -> String {
             .trim()
             .to_owned(),
         Lang::Go => unquote(raw),
-        Lang::JavaScript | Lang::TypeScript | Lang::C | Lang::Cpp => unquote(raw),
+        Lang::JavaScript | Lang::TypeScript | Lang::Tsx | Lang::C | Lang::Cpp => unquote(raw),
         Lang::CSharp => raw
             .trim_start_matches("using ")
             .trim_end_matches(';')
@@ -1049,6 +1065,36 @@ macro_rules! sq { ($e:expr) => { $e * $e } }
             .iter()
             .any(|c| c.name == "other" && c.receiver.is_none()));
         assert_eq!(file.imports, vec!["./mod"]);
+    }
+
+    #[test]
+    fn tsx_parses_with_the_tsx_grammar_and_finds_components() {
+        // Under the plain TypeScript grammar every JSX element is an ERROR node; the
+        // declarations, the call inside render and the complexity must survive anyway.
+        let text = "import React from 'react';\n\
+                    export const Badge = (label: string) => <span>{label}</span>;\n\
+                    export class Panel extends React.Component {\n\
+                      render() { return <div>{this.label()}</div>; }\n\
+                      label(): string { return 'p'; }\n\
+                    }\n";
+        let file = parse_file(text, "tsx");
+        let names: Vec<(&str, &str)> = file
+            .symbols
+            .iter()
+            .map(|s| (s.kind, s.name.as_str()))
+            .collect();
+        assert!(names.contains(&("function", "Badge")), "{names:?}");
+        assert!(names.contains(&("class", "Panel")), "{names:?}");
+        assert!(names.contains(&("method", "render")), "{names:?}");
+        assert!(names.contains(&("method", "label")), "{names:?}");
+        assert!(file
+            .calls
+            .iter()
+            .any(|c| c.name == "label" && c.receiver.as_deref() == Some("this")));
+        let render = file.symbols.iter().find(|s| s.name == "render").unwrap();
+        assert_eq!(render.container.as_deref(), Some("Panel"));
+        assert_eq!(render.complexity, 1);
+        assert_eq!(file.imports, vec!["react"]);
     }
 
     #[test]

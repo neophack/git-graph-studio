@@ -23,6 +23,7 @@ import { readLocalDocProvider } from './bridge';
 
 import { LOG_RANK, resetShimLoggedOnce, setShimLogSink, setShimLogThreshold, shimLog } from './shimLog';
 import { rehydrateUris, setUriPlatform } from './types/uri';
+import { restoreWireArgs } from './util';
 import { CancellationTokenCancelled, CancellationTokenNone, silentEvent } from './types/events';
 import { createShimState } from './state';
 import { installFlushHook } from './registrations';
@@ -48,7 +49,7 @@ export { readLocalDocProvider, applyTextEditsToText } from './bridge';
 export type { HostBridge, HostContext, HostEvent, SerializableTextEdit } from './bridge';
 export { shimLog, shimLogOnce } from './shimLog';
 export type { ShimLogLevel } from './shimLog';
-export { watcherGlobMatches } from './util';
+export { watcherGlobMatches, restoreWireArgs } from './util';
 export { Position, Range, Location, Selection } from './types/position';
 export { setUriPlatform, Uri, rehydrateUris } from './types/uri';
 export { Disposable, EventEmitter, CancellationTokenSource } from './types/events';
@@ -431,9 +432,11 @@ export function serveExtensionHostCall(tables: HostCallTables, method: string, a
 	if (method === 'runCommand') {
 		const handler = tables.commands.get(String(args[0]));
 		if (!handler) throw new Error(`command ${String(args[0])} is no longer registered`);
-		// A menu's context crosses the wire as Uri-shaped data (the methods cannot cross the
-		// clone); the handler receives them as full Uris, as VS Code delivers.
-		return handler(...(rehydrateUris((args[1] as unknown[] | undefined) ?? []) as unknown[]));
+		// The top-level null placeholders the JSON wire carried come back as the undefined
+		// the caller passed (`restoreWireArgs`), and a menu's context crosses the wire as
+		// Uri-shaped data (the methods cannot cross the clone) — the handler receives them
+		// as full Uris, as VS Code delivers.
+		return handler(...(rehydrateUris(restoreWireArgs((args[1] as unknown[] | undefined) ?? [])) as unknown[]));
 	}
 	if (method === 'docProvider.provide') {
 		const provider = tables.docProviders.get(String((args[0] as { scheme?: unknown } | undefined)?.scheme ?? ''));

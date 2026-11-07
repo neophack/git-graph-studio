@@ -97,7 +97,7 @@ export class Transport {
 	private readonly listenSpecs = new Map<number, { event: string; target?: unknown }>();
 	private readonly windowsHandlers = new Set<(list: InstanceInfo[]) => void>();
 	private readonly noticeHandlers = new Set<(notice: Notice) => void>();
-	private readonly joiner = new Reassembler();
+	private readonly joiner = new Reassembler((reason) => console.warn(`[ggs] remote link: ${reason}`));
 	private inflateChain: Promise<void> = Promise.resolve();
 	private lastSeq = 0;
 	private consumed = 0;
@@ -453,12 +453,15 @@ export class Transport {
 			// Inflation is asynchronous: chain it so frames stay in sequence order — and
 			// catch, so one bad frame (a corrupt compressed payload, a throwing listener)
 			// is dropped instead of rejecting the chain and silently eating every later
-			// frame: RESULTs, events, CLOSE.
+			// frame: RESULTs, events, CLOSE. The failed frame's fragment chain is
+			// discarded with it — a fragment that did not inflate leaves nothing behind
+			// for its message's next fragment to complete into bytes missing a segment,
+			// and nothing for the next message on its key to append onto.
 			this.inflateChain = this.inflateChain.then(async () => {
 				try {
 					this.dispatch(frame.flags & FLAG.COMPRESSED ? await inflate(frame) : frame);
 				} catch {
-					/* one bad frame, dropped — never the session */
+					this.joiner.fail(frame);
 				}
 			});
 		}

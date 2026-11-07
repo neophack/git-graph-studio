@@ -21,7 +21,11 @@ struct PtySession {
     /// back must stay silent, or the two frontends would ping-pong resizes forever.
     cols: u16,
     rows: u16,
-    writer: Box<dyn Write + Send>,
+    /// The shell's stdin, behind its own lock: a `pty_write` blocks in `write_all` until the
+    /// child reads (a `more` pause, XOFF flow control), and that block must hold this
+    /// session's pipe alone — never the sessions' global lock every other pty command and
+    /// the reader threads' reaping need ([`pty_write`] runs it off the command thread).
+    writer: std::sync::Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn portable_pty::Child + Send>,
     /// Kept alive here: dropping the master closes the ConPTY, and a resize needs it.
     master: Box<dyn portable_pty::MasterPty + Send>,
@@ -102,6 +106,27 @@ pub struct PtyState {
     sessions: HashMap<u32, PtySession>,
 }
 
+/// Whether the session's shell is still running — `try_wait` answering `None`. A wait
+/// error reads as exited: the same reading [`close_session`] gives it, and the error
+/// must never strand an id as permanently unusable.
+fn session_is_alive(session: &mut PtySession) -> bool {
+    matches!(session.child.try_wait(), Ok(None))
+}
+
+/// The id-collision gate's decision: a create under an id that already holds a LIVE
+/// session is refused — that shell is another page's terminal, and an id collision
+/// must cost an error, never a killed shell (each page draws its ids from its own
+/// crypto base and skips `pty_list`'s live ids first, so this fires only on a genuine
+/// bug or a lost race). A session whose child already EXITED is the replace path's
+/// whole purpose: the half-dead map entry its reader still holds, whose generation
+/// keeps that reader silent while the newer session speaks.
+fn refuse_live_replacement(existing: Option<&mut PtySession>, id: u32) -> Result<(), String> {
+    if existing.map(session_is_alive).unwrap_or(false) {
+        return Err(format!("Terminal {id} is already owned by a running session"));
+    }
+    Ok(())
+}
+
 /// Spawn the shell in the open repository (the session's working directory), or in
 /// `cwd` when it names an existing folder — the Explorer's "Open in Integrated
 /// Terminal". `shell` is the Terminal Shell setting's value (`"gitBash"` the default,
@@ -127,6 +152,16 @@ pub fn pty_create(
         .unwrap_or_else(|| ".".to_string());
     let cwd = resolve_cwd(cwd.as_deref(), &workspace);
 
+    let state = app.state::<Mutex<PtyState>>();
+    // The gate, before anything is spawned: a refused create must not leak a pty or a
+    // shell. The check repeats under the insert lock below — the gap between here and
+    // there is the one window another create could win, and a shell this command has
+    // already spawned closes politely on the refusal rather than leaking.
+    {
+        let mut sessions = state.lock().unwrap();
+        refuse_live_replacement(sessions.sessions.get_mut(&id), id)?;
+    }
+
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -144,7 +179,9 @@ pub fn pty_create(
         .slave
         .spawn_command(command)
         .map_err(|e| format!("Could not start the shell: {e}"))?;
-    let writer = pair.master.take_writer().map_err(|e| format!("{e}"))?;
+    let writer = std::sync::Arc::new(Mutex::new(
+        pair.master.take_writer().map_err(|e| format!("{e}"))?,
+    ));
     let mut reader = pair
         .master
         .try_clone_reader()
@@ -153,30 +190,37 @@ pub fn pty_create(
     // read side from reporting EOF once the shell exits.
     drop(pair.slave);
 
-    let state = app.state::<Mutex<PtyState>>();
     // Insert (replacing any half-dead session left under this id) before spawning the reader
     // thread, so an instantly-exiting shell cannot remove the entry after this insert.
     static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let gen = GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tail = std::sync::Arc::new(Mutex::new(String::new()));
     let reader_tail = tail.clone();
+    let session = PtySession {
+        gen,
+        name: shell_name.clone(),
+        cols,
+        rows,
+        writer,
+        child,
+        master: pair.master,
+        tail,
+    };
     let replaced;
     {
         let mut sessions = state.lock().unwrap();
+        // The gate again, atomically with the insert: the pre-spawn check narrowed the
+        // race but cannot close it, and a live session that landed meanwhile is another
+        // page's shell — this create's own closes politely (its history flushes) off
+        // the command's back, and the live entry stays untouched.
+        if let Err(error) = refuse_live_replacement(sessions.sessions.get_mut(&id), id) {
+            drop(sessions);
+            let mut doomed = session;
+            std::thread::spawn(move || close_session(&mut doomed));
+            return Err(error);
+        }
         replaced = sessions.sessions.remove(&id);
-        sessions.sessions.insert(
-            id,
-            PtySession {
-                gen,
-                name: shell_name.clone(),
-                cols,
-                rows,
-                writer,
-                child,
-                master: pair.master,
-                tail,
-            },
-        );
+        sessions.sessions.insert(id, session);
     }
     if let Some(mut old) = replaced {
         std::thread::spawn(move || close_session(&mut old));
@@ -211,25 +255,28 @@ pub fn pty_create(
     });
     std::thread::spawn(move || {
         let event_name = format!("studio://pty-output-{id}");
+        let state = event_app.try_state::<Mutex<PtyState>>();
         let mut pending: Vec<u8> = Vec::new();
         let mut carry: Vec<u8> = Vec::new();
         let mut quiet = true;
         while gather_batch(&out_rx, &mut pending, &mut quiet) {
             let payload = decode_pty_chunk(&mut carry, &pending);
-            if !payload.is_empty() {
+            if !payload.is_empty() && may_speak_for(state.as_deref(), id, gen) {
                 push_tail(&reader_tail, &payload);
                 let _ = event_app.emit(event_name.as_str(), payload);
             }
             pending.clear();
         }
-        if !carry.is_empty() {
+        if !carry.is_empty() && may_speak_for(state.as_deref(), id, gen) {
             // Stream end: whatever incomplete sequence remains is terminal damage —
             // flush it lossily (one U+FFFD) rather than dropping it.
             let tail = String::from_utf8_lossy(&carry).into_owned();
             let _ = event_app.emit(event_name.as_str(), tail);
         }
-        let _ = event_app.emit(format!("studio://pty-exit-{id}").as_str(), ());
-        if let Some(state) = event_app.try_state::<Mutex<PtyState>>() {
+        if may_speak_for(state.as_deref(), id, gen) {
+            let _ = event_app.emit(format!("studio://pty-exit-{id}").as_str(), ());
+        }
+        if let Some(state) = state {
             let mut sessions = state.lock().unwrap();
             // Only reap this generation: a newer session may already own the id.
             if sessions
@@ -249,15 +296,50 @@ pub fn pty_create(
     Ok(shell_name)
 }
 
+/// Whether generation `gen` may still speak for `id` — its output events and its death.
+/// A replaced session keeps its reader (the OS's tty layer wants the master drained for
+/// the shell's own exit to land, see [`close_session`]) but must never reach the
+/// frontend now watching the newer session under the same id. An entry still naming
+/// this generation speaks; a newer one silences it; no entry at all — the id was
+/// killed — keeps speaking, because the reader's `pty-exit` announcement is the
+/// frontend's cue to retire a session it created (the session-set event retires only
+/// the adopted ones).
+fn may_speak_for(state: Option<&Mutex<PtyState>>, id: u32, gen: u64) -> bool {
+    let Some(state) = state else { return true };
+    let sessions = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    generation_may_speak(sessions.sessions.get(&id).map(|session| session.gen), gen)
+}
+
+/// The gate's pure half: the id's map entry generation, if any, decides.
+fn generation_may_speak(current: Option<u64>, gen: u64) -> bool {
+    match current {
+        Some(owned) => owned == gen,
+        None => true,
+    }
+}
+
+/// Write the shell's input. The pipe write runs off the command thread: a child that
+/// never reads its stdin (`more` paused, XOFF flow control) parks `write_all` until its
+/// buffer drains, and under the sessions' global lock that one write used to stop every
+/// other pty command and the reader threads' exit reaping. Only the session's own
+/// writer lock is held for the write; the global one, just long enough to clone the
+/// handle.
 #[tauri::command]
-pub fn pty_write(app: TauriAppHandle, id: u32, data: String) -> Result<(), String> {
-    with_session(&app, id, |session| {
-        session
-            .writer
+pub async fn pty_write(app: TauriAppHandle, id: u32, data: String) -> Result<(), String> {
+    let writer = with_session(&app, id, |session| Ok(std::sync::Arc::clone(&session.writer)))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut writer = writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        writer
             .write_all(data.as_bytes())
-            .and_then(|_| session.writer.flush())
+            .and_then(|_| writer.flush())
             .map_err(|e| format!("Could not write to the terminal: {e}"))
     })
+    .await
+    .map_err(|e| format!("Could not write to the terminal: {e}"))?
 }
 
 #[tauri::command]
@@ -402,8 +484,14 @@ const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 /// on CI), and a drain that died must not park this thread forever behind it. The reader
 /// thread announces the exit to the frontends exactly as before.
 fn close_session(session: &mut PtySession) {
-    let _ = session.writer.write_all(b"exit\r");
-    let _ = session.writer.flush();
+    // The polite `exit` takes the writer only when it is free: a pty_write parked on a
+    // shell that never reads its stdin holds the lock, and the pipe such a write blocked
+    // on is full — the `exit` could not be delivered anyway. The close falls straight to
+    // the bounded wait and the kill, never queues behind a parked writer.
+    if let Ok(mut writer) = session.writer.try_lock() {
+        let _ = writer.write_all(b"exit\r");
+        let _ = writer.flush();
+    }
     let deadline = std::time::Instant::now() + CLOSE_GRACE;
     loop {
         match session.child.try_wait() {
@@ -837,7 +925,7 @@ mod tests {
             name: "test".to_owned(),
             cols: 80,
             rows: 24,
-            writer,
+            writer: std::sync::Arc::new(std::sync::Mutex::new(writer)),
             child,
             master: pair.master,
             tail: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
@@ -845,6 +933,84 @@ mod tests {
         close_session(&mut session);
         let status = session.child.try_wait().unwrap();
         assert!(status.is_some(), "the shell outlived the close grace");
+    }
+
+    #[test]
+    fn a_replaced_generation_stays_silent_and_a_killed_one_still_announces() {
+        // The replacement gate (E1): when pty_create replaces a half-dead session, the OLD
+        // reader keeps draining its master (the OS's tty layer wants it for the shell's own
+        // exit to land) but must not speak on the id the newer session now owns — its
+        // residual output and its `pty-exit` would retire the NEW session's frontend copy.
+        // The gate decides from the map entry's generation: this generation speaks, a newer
+        // one silences, and NO entry keeps speaking — a killed session's reader announcement
+        // is the frontend's cue to retire a session it created (the three close/reap
+        // commits' semantics, kept).
+        assert!(super::generation_may_speak(None, 3), "no entry: the id is free to speak");
+        assert!(
+            super::generation_may_speak(Some(3), 3),
+            "this generation owns the id"
+        );
+        assert!(
+            !super::generation_may_speak(Some(4), 3),
+            "a newer generation owns the id: silence"
+        );
+    }
+
+    #[test]
+    fn a_live_session_refuses_a_second_create_and_a_dead_one_is_replaced() {
+        // The id-collision gate (E-2): the collision must cost an error, never a killed
+        // shell. A LIVE child under the id refuses the second create; after the polite
+        // close reaps the child, the DEAD entry is exactly what the replace path exists
+        // for — the half-dead map entry its reader still holds — and a create of that id
+        // may proceed.
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = if cfg!(windows) {
+            let mut c = CommandBuilder::new("powershell.exe");
+            c.arg("-NoLogo");
+            c
+        } else {
+            CommandBuilder::new("sh")
+        };
+        command.cwd(std::env::temp_dir());
+        let child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        // The master is drained for the shell's whole life, as the session's reader
+        // thread drains it in production — the close below must be able to land.
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while !matches!(reader.read(&mut buf), Ok(0) | Err(_)) {}
+        });
+        let mut session = PtySession {
+            gen: 0,
+            name: "test".to_owned(),
+            cols: 80,
+            rows: 24,
+            writer: std::sync::Arc::new(std::sync::Mutex::new(pair.master.take_writer().unwrap())),
+            child,
+            master: pair.master,
+            tail: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+        };
+        // Alive: the second create of this id errors, and names the id.
+        let refusal = super::refuse_live_replacement(Some(&mut session), 9);
+        assert!(refusal.is_err(), "a live session is never replaced");
+        assert!(refusal.unwrap_err().contains('9'), "the error names the id");
+        // No entry at all: the id is free.
+        assert!(super::refuse_live_replacement(None, 9).is_ok());
+        // Dead (the polite close reaps): the replace path's whole purpose.
+        close_session(&mut session);
+        assert!(
+            session.child.try_wait().unwrap().is_some(),
+            "the shell outlived the close grace"
+        );
+        assert!(super::refuse_live_replacement(Some(&mut session), 9).is_ok());
     }
 }
 

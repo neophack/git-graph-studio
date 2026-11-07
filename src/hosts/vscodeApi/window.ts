@@ -325,11 +325,15 @@ export function buildWindow(s: ShimState) {
 				return (picked?.item as { folder?: unknown } | undefined)?.folder;
 			},
 			withProgress: async <T>(options: { title?: string; location?: unknown; cancellable?: boolean }, task: (progress: { report: (value: { message?: string; increment?: number }) => void }, token: CancellationToken) => T | Promise<T>) => {
-				const id = (await s.bridge.request('progress.begin', [options?.title ?? s.ctx.extensionId])) as number;
+				// The cancellable flag rides the begin: the host renders the VS Code-shaped
+				// Cancel affordance only for it.
+				const id = (await s.bridge.request('progress.begin', [options?.title ?? s.ctx.extensionId, options?.cancellable === true])) as number;
 				let fraction = 0;
-				// The toast has no cancel button: the token exists (tasks read it) and never
-				// cancels.
+				// The token resolves through the host: a Cancel click arrives as a
+				// progressCancelled push and fires here, flipping isCancellationRequested —
+				// claude-code's send/interrupt path stops its in-flight work on it.
 				const source = new CancellationTokenSource();
+				s.progressCancels.set(id, source);
 				try {
 					return await task({
 						report: (value) => {
@@ -341,6 +345,7 @@ export function buildWindow(s: ShimState) {
 					shimLog('warn', `withProgress task "${options?.title ?? ''}" failed: ${String(error)}`, error);
 					throw error;
 				} finally {
+					s.progressCancels.delete(id);
 					source.dispose();
 					s.send('progress.end', [id]);
 				}
@@ -361,7 +366,9 @@ export function buildWindow(s: ShimState) {
 					state: { isInteractedWith: false },
 					shellIntegration: undefined,
 					sendText: (text: string, addNewLine = true) => {
-						s.send('terminal.send', [addNewLine === false ? text : text]);
+						// VS Code's `sendText(text, addNewLine)`: false writes the text without
+						// pressing Enter — the flag must cross, not collapse to a constant.
+						s.send('terminal.send', [text, addNewLine !== false]);
 					},
 					show: (_preserveFocus?: boolean) => s.send('terminal.show', []),
 					hide: () => undefined,

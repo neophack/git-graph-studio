@@ -150,6 +150,44 @@ describe('the boot sequence', () => {
 		expect(backend.callsTo('open_workspace')).toEqual([]);
 		expect(workbench.currentRepo).toBe(REPO_B);
 	});
+
+	it('a single-file and a workspace launch run the deferred services too', async () => {
+		// The `ggs <file>` and `ggs <workspace>` boots used to return before the idle block:
+		// extensions never activated and the panel never restored on those windows.
+		workbench.dispose();
+		backend.handlers.set('boot_context', () => ({ file: STANDALONE, actions: [], repo: null }));
+		workbench = new Workbench();
+		await workbench.boot();
+		await flush(10);
+		expect(backend.callsTo('ext_list').length).toBeGreaterThanOrEqual(1);
+		expect(backend.callsTo('boot_stage').some((args) => args.stage === 'single file shown')).toBe(true);
+
+		workbench.dispose();
+		backend.handlers.set('boot_context', () => ({ file: null, actions: [], repo: null, workspace: 'C:\\team.ggs-workspace', reloaded: false }));
+		workbench = new Workbench();
+		await workbench.boot();
+		await flush(10);
+		expect(backend.callsTo('open_workspace')).toEqual([{ path: 'C:\\team.ggs-workspace' }]);
+		expect(backend.callsTo('ext_list').length).toBeGreaterThanOrEqual(2);
+		// The backup recovery ran over the workspace's repository (a file launch has no
+		// repo to recover over, so only the folder-shaped boot asks for the list).
+		expect(backend.callsTo('backup_list').length).toBeGreaterThanOrEqual(1);
+	});
+
+	it('a folder that fails to open is dropped from the recents AND as the last folder', async () => {
+		// Removed from the recents but kept as lastFolder, a broken folder re-opened (and
+		// re-errored) at every boot.
+		workbench.dispose();
+		state.rememberFolder('C:\\broken');
+		expect(state.lastFolder()).toBe('C:\\broken');
+		backend.handlers.set('boot_context', () => ({ file: null, actions: [], repo: null }));
+		backend.handlers.set('open_folder', () => { throw new Error('gone'); });
+		workbench = new Workbench();
+		await workbench.boot();
+		await flush(6);
+		expect(state.lastFolder()).toBeNull();
+		expect(state.recentFolders()).not.toContain('C:\\broken');
+	});
 });
 
 
@@ -429,6 +467,19 @@ describe('chords', () => {
 		key(document, 's', { ctrlKey: true });
 		await flush();
 		expect(shortcuts).toBe(1);
+	});
+
+	it('spells a chord\'s Space second key "Space", not the bare character', async () => {
+		// The spacer branch ordered after the length check was dead code: the Space key IS a
+		// one-character string, so "Ctrl+K Space" never resolved.
+		const ran: string[] = [];
+		const { commands } = await import('../src/platform/commands');
+		commands.register({ id: 'test.chordSpace', title: 'Chord Space', keybinding: 'Ctrl+K Space', run: () => { ran.push('space'); } });
+
+		key(document, 'k', { ctrlKey: true });
+		key(document, ' ');
+		await flush();
+		expect(ran).toEqual(['space']);
 	});
 });
 

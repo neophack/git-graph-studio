@@ -757,9 +757,9 @@ describe('Search view: the VS Code widget details', () => {
 
 		click(view.container.querySelector('.search-file-head .file-replace')!);
 		await flush();
-		// The workspace replace ran with the file's own path as the include glob, in its root.
+		// The workspace replace ran with the file's own exact path list, in its root.
 		expect(replace).toHaveBeenCalledTimes(1);
-		expect(replace.mock.calls[0]![0]).toMatchObject({ query: 'x', include: 'src/a.rs', replacement: '', repo: 'C:\\repo' });
+		expect(replace.mock.calls[0]![0]).toMatchObject({ query: 'x', files: ['src/a.rs'], replacement: '', repo: 'C:\\repo' });
 		// The tree re-listed what remains after the write.
 		expect(texts('.search-file-head .badge', view.container)).toEqual(['1']);
 		expect(texts('.search-match .hit', view.container)).toEqual(['y']);
@@ -792,7 +792,169 @@ describe('Search view: the VS Code widget details', () => {
 		click(menuItem('Replace All'));
 		await flush();
 		expect(replaceAll).toHaveBeenCalledTimes(1);
-		expect(replaceAll.mock.calls[0]![0]).toMatchObject({ include: 'src/lib.rs' });
+		expect(replaceAll.mock.calls[0]![0]).toMatchObject({ files: ['src/lib.rs'] });
 		key(document, 'Escape');
+	});
+});
+
+describe('Search view: the replace safety gates', () => {
+	beforeEach(() => {
+		localStorage.clear();
+	});
+
+	/** A workspace with a README at the root and a same-named one one folder down: the
+	 *  regression's exact shape. Both stream as results; the re-search after a replace
+	 *  answers only what still matches. */
+	function readmeWorkspace(): void {
+		let pass = 0;
+		backend.on('search_workspace', async (args) => {
+			const channel = args.onEvent as Channel<SearchEvent>;
+			pass++;
+			const files = pass === 1
+				? [
+						{ path: 'README.md', matches: [{ line: 1, column: 1, length: 3, text: 'one' }] },
+						{ path: 'docs/README.md', matches: [{ line: 1, column: 1, length: 3, text: 'two' }] }
+					]
+				: [{ path: 'docs/README.md', matches: [{ line: 1, column: 1, length: 3, text: 'two' }] }];
+			channel.send({ kind: 'batch', files });
+			channel.send({ kind: 'done', scanned: 2, truncated: false, cancelled: false });
+			return null;
+		});
+		backend.on('search_cancel', () => null);
+	}
+
+	it('the per-file Replace All targets exactly that file — a root README.md never rewrites docs/README.md', async () => {
+		readmeWorkspace();
+		const replace = vi.fn(async () => ({ files: 1, replacements: 1 }));
+		backend.on('replace_in_files', replace);
+		const view = new SearchView(document.createElement('div'));
+		view.setRoots(['C:\\repo']);
+		click(view.container.querySelector('.search-replace-toggle')!);
+		type(view.container.querySelector('.query-row input') as HTMLInputElement, 'q');
+		await view.runSearch();
+
+		click(view.container.querySelectorAll('.search-file-head .file-replace')[0]);
+		await flush();
+		// The replace ran with the file's exact path (`files`), never the old include-glob
+		// shape: `include: 'README.md'` was a separator-free pattern matched against the
+		// basename at any depth, so the same-named file one folder down was rewritten too.
+		expect(replace).toHaveBeenCalledTimes(1);
+		expect(replace.mock.calls[0]![0]).toMatchObject({ files: ['README.md'], repo: 'C:\\repo' });
+		expect((replace.mock.calls[0]![0] as Record<string, unknown>).include).not.toBe('README.md');
+		// The tree re-listed what remains — the docs file was never touched.
+		expect(texts('.search-file-head .label', view.container)).toEqual(['README.md']);
+	});
+
+	it('a replace over an open-and-dirty file confirms first, naming it', async () => {
+		streams([[
+			{ path: 'src/a.rs', matches: [{ line: 1, column: 1, length: 2, text: 'fn main()' }] },
+			{ path: 'src/b.rs', matches: [{ line: 1, column: 1, length: 2, text: 'fn other()' }] }
+		]]);
+		const replace = vi.fn(async () => ({ files: 1, replacements: 1 }));
+		const one = vi.fn(async () => [{ line: 1, column: 1, length: 2, text: 'fn main()' }]);
+		backend.on('replace_in_files', replace);
+		backend.on('search_replace_one', one);
+		const view = new SearchView(document.createElement('div'));
+		view.setRoots(['C:\\repo']);
+		// The workbench wires the editor area in; here a.rs is open with unsaved changes.
+		view.dirtyFilePaths = () => ['C:\\repo\\src\\a.rs'];
+		type(view.container.querySelector('.query-row input') as HTMLInputElement, 'fn');
+		await view.runSearch();
+
+		// The per-file replace: one confirmation naming the dirty file, the write waiting.
+		click(view.container.querySelector('.search-file-head .file-replace')!);
+		await flush();
+		expect(replace).not.toHaveBeenCalled();
+		const message = notifications().at(-1)!;
+		expect(message).toContain('C:\\repo\\src\\a.rs');
+		expect(message).toContain('unsaved changes');
+		click(notificationButton('Replace')!);
+		await flush();
+		expect(replace).toHaveBeenCalledTimes(1);
+
+		// The per-result replace asks the same gate.
+		click(view.container.querySelector('.search-match .match-replace')!);
+		await flush();
+		expect(one).not.toHaveBeenCalled();
+		expect(notifications().at(-1)).toContain('C:\\repo\\src\\a.rs');
+		click(notificationButton('Replace')!);
+		await flush();
+		expect(one).toHaveBeenCalledTimes(1);
+
+		// A file that is not dirty (b.rs) replaces without asking.
+		const bGroup = Array.from(view.container.querySelectorAll<HTMLElement>('.search-file-head'))
+			.find((head) => head.textContent?.includes('b.rs'));
+		click(bGroup!.querySelector('.file-replace')!);
+		await flush();
+		expect(replace).toHaveBeenCalledTimes(2);
+	});
+
+	it('cancelling the dirty-file confirmation keeps the file untouched', async () => {
+		streams([[{ path: 'a.txt', matches: [{ line: 1, column: 1, length: 1, text: 'x' }] }]]);
+		const replace = vi.fn(async () => ({ files: 1, replacements: 1 }));
+		backend.on('replace_in_files', replace);
+		const view = new SearchView(document.createElement('div'));
+		view.setRoots(['C:\\repo']);
+		view.dirtyFilePaths = () => ['C:\\repo\\a.txt'];
+		type(view.container.querySelector('.query-row input') as HTMLInputElement, 'x');
+		await view.runSearch();
+		click(view.container.querySelector('.search-file-head .file-replace')!);
+		await flush();
+		click(notificationButton('Cancel')!);
+		await flush();
+		expect(replace).not.toHaveBeenCalled();
+	});
+
+	it('the workspace Replace All names its dirty targets in the one confirmation', async () => {
+		streams([[
+			{ path: 'a.txt', matches: [{ line: 1, column: 1, length: 1, text: 'x' }] },
+			{ path: 'b.txt', matches: [{ line: 1, column: 1, length: 1, text: 'x' }] }
+		]]);
+		const replace = vi.fn(async () => ({ files: 2, replacements: 2 }));
+		backend.on('replace_in_files', replace);
+		const view = new SearchView(document.createElement('div'));
+		view.setRoots(['C:\\repo']);
+		view.dirtyFilePaths = () => ['C:\\repo\\b.txt'];
+		type(view.container.querySelector('.query-row input') as HTMLInputElement, 'x');
+		type(view.container.querySelectorAll('.search-row input')[1] as HTMLInputElement, 'y');
+		await view.runSearch();
+		const replacing = view.replaceAll();
+		await flush();
+		// One dialog: the VS Code counts sentence with the dirty file named after it.
+		const message = notifications().at(-1)!;
+		expect(message).toContain("Replace 2 occurrences across 2 files with 'y'?");
+		expect(message).toContain('C:\\repo\\b.txt');
+		click(notificationButton('Replace')!);
+		await replacing;
+		expect(replace).toHaveBeenCalledTimes(1);
+	});
+
+	it('a per-result replace mid-debounce flushes the pending search: never the new query at old coordinates', async () => {
+		const answers: Record<string, FileMatches[]> = {
+			x: [{ path: 'a.txt', matches: [{ line: 1, column: 1, length: 1, text: 'x' }] }],
+			yy: [{ path: 'b.txt', matches: [{ line: 2, column: 1, length: 2, text: 'yy' }] }]
+		};
+		backend.on('search_workspace', async (args) => {
+			const channel = args.onEvent as Channel<SearchEvent>;
+			const files = answers[args.query as string] ?? [];
+			if (files.length > 0) channel.send({ kind: 'batch', files });
+			channel.send({ kind: 'done', scanned: 1, truncated: false, cancelled: false });
+			return null;
+		});
+		backend.on('search_cancel', () => null);
+		const one = vi.fn(async () => [] as { line: number; column: number; length: number; text: string }[]);
+		backend.on('search_replace_one', one);
+		const view = new SearchView(document.createElement('div'));
+		const query = view.container.querySelector('.search-row.query-row input') as HTMLInputElement;
+		type(query, 'x');
+		await view.runSearch(); // the list holds 'x''s one match in a.txt
+		type(query, 'yy'); // edited within the typing pause: the search sits on the debounce
+		// The stale row's replace button, clicked while the old listing is still on screen.
+		click(view.container.querySelector('.search-match .match-replace')!);
+		await flush();
+		// The flush re-listed 'yy' first: a.txt is no longer a result, so the backend never
+		// saw the new query's matcher against the old row's coordinates.
+		expect(one).not.toHaveBeenCalled();
+		expect(texts('.search-file-head .label', view.container)).toEqual(['b.txt']);
 	});
 });

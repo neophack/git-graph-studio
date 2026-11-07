@@ -37,3 +37,15 @@ export function planSessionSync<T extends SyncedSession>(held: T[], backend: Pty
 		retire: held.filter((session) => session.attached && !live.has(session.id))
 	};
 }
+
+/** This page's next session id: the page's random base, stepped past every id the
+ *  instance's live list holds. Two pages draw independent random bases, so they only
+ *  collide by astronomically unlikely chance — but a collision used to KILL the other
+ *  page's live shell (`pty_create` replaced the id), so the pick never lands on a
+ *  number the backend already runs. Pure, like the planner above. */
+export function pickSessionId(base: number, taken: Iterable<number>): number {
+	const live = new Set(taken);
+	let candidate = Number.isSafeInteger(base) && base >= 0 ? base : 0;
+	while (live.has(candidate)) candidate++;
+	return candidate;
+}

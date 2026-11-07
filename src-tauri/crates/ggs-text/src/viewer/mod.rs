@@ -65,6 +65,12 @@ pub struct DocHandle {
     /// Bumped by every mutation (edit, undo, redo, replace, reload, close): checkpoints may
     /// have been invalidated, so the background warmer stops and respawns on fresh demand.
     pub warm_gen: AtomicU64,
+    /// The reload generation this handle serves: `viewer_reload` swaps the slot for a
+    /// handle of the next generation, and a replaced handle is frozen at its own — a window
+    /// read that cloned it names the old generation however long the read runs past the
+    /// swap, which is what lets its response be told stale from a current one
+    /// (`viewer_text` carries it; the frontend compares against the reload's own answer).
+    pub gen: AtomicU64,
     /// Guards one warmer thread per document (`try_spawn_warmer`).
     pub warmer_running: AtomicBool,
     /// The tail build's completion gate, `Some` while the background thread owes a landing.
@@ -136,6 +142,7 @@ impl ViewerState {
             find_gen: AtomicU64::new(0),
             lines_gen: AtomicU64::new(0),
             warm_gen: AtomicU64::new(0),
+            gen: AtomicU64::new(0),
             warmer_running: AtomicBool::new(false),
             tail: Mutex::new(tail),
         });
@@ -144,6 +151,43 @@ impl ViewerState {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(doc_id, Arc::clone(&handle));
         handle
+    }
+
+    /// Swap the document behind an open id for a freshly built one — `viewer_reload`'s
+    /// wholesale replace. The id stays; the new handle carries the reload generation
+    /// forward (one past the replaced document's), and the replaced handle is left frozen
+    /// at its own: every read that cloned it names the old generation forever, so a
+    /// response that lands after the swap is tellable stale from a current one without
+    /// bumping anything under a reader. Answers the new generation and the new handle (a
+    /// staged tail spawns on it, off the lock).
+    pub fn replace_doc(
+        &self,
+        doc_id: u64,
+        doc: ViewerDoc,
+        tail: Option<Arc<TailGate>>,
+    ) -> Result<(u64, Arc<DocHandle>), String> {
+        let mut docs = self
+            .docs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let slot = docs
+            .get_mut(&doc_id)
+            .ok_or_else(|| format!("No open document {doc_id}"))?;
+        // The reloaded document replaces the old one's checkpoints wholesale; the old
+        // handle's warmer (it holds its own Arc) must not parse on against them.
+        slot.warm_gen.fetch_add(1, Ordering::Relaxed);
+        let generation = slot.gen.load(Ordering::Relaxed) + 1;
+        let handle = Arc::new(DocHandle {
+            doc: Mutex::new(doc),
+            find_gen: AtomicU64::new(0),
+            lines_gen: AtomicU64::new(0),
+            warm_gen: AtomicU64::new(0),
+            gen: AtomicU64::new(generation),
+            warmer_running: AtomicBool::new(false),
+            tail: Mutex::new(tail),
+        });
+        *slot = Arc::clone(&handle);
+        Ok((generation, handle))
     }
 
     pub fn with_doc<T>(
@@ -229,13 +273,17 @@ pub struct EditResult {
 }
 
 /// A plain-text window: the same range model as `LinesResult` without the highlight work —
-/// the editable windowed editor wants text to edit, not tokens.
+/// the editable windowed editor wants text to edit, not tokens. `gen` is the reload
+/// generation the window was served against: `viewer_reload` replaces the document behind
+/// the id wholesale and advances it, so a response naming an older generation is a
+/// predecessor's rows — the frontend drops it rather than writing stale lines.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextResult {
     pub start_line: usize,
     pub line_count: usize,
     pub lines: Vec<String>,
+    pub gen: u64,
 }
 
 /// What an undo or a redo changed: the 0-based line to re-window around.
@@ -251,12 +299,15 @@ pub struct UndoResult {
 
 /// What `viewer_reload` found: `changed` is false when the file on disk still matches the
 /// document (the common case is a save's own watcher echo), so the editor keeps its window
-/// and cursor exactly where they were.
+/// and cursor exactly where they were. `gen` is the document's generation after the call —
+/// the swapped document's own when `changed` is true, the baseline any window response
+/// still in flight is told stale against.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReloadResult {
     pub changed: bool,
     pub line_count: usize,
+    pub gen: u64,
 }
 
 /// A file's `size:mtime` stamp, the same shape `cmd_fs::file_fingerprint` reports.
@@ -1019,15 +1070,33 @@ pub fn edit_impl(
     end_col: usize,
     text: &str,
 ) -> Result<EditResult, String> {
-    state.with_doc(doc_id, |doc| {
-        let start = doc.offset_of(start_line, start_col);
-        let end = doc.offset_of(end_line, end_col);
-        let rehighlight_from = doc.edit(start, end, text);
-        EditResult {
-            line_count: doc.line_count(),
-            rehighlight_from,
-            clean: doc.at_saved_state(),
-        }
+    let handle = state
+        .doc_handle(doc_id)
+        .ok_or_else(|| format!("No open document {doc_id}"))?;
+    edit_handle(&handle, start_line, start_col, end_line, end_col, text)
+}
+
+/// The edit over an already-resolved handle: the async command resolves on its own thread
+/// and hands the blocking pass what it needs (the state is not `'static`).
+pub fn edit_handle(
+    handle: &DocHandle,
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+    text: &str,
+) -> Result<EditResult, String> {
+    let mut doc = handle
+        .doc
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let start = doc.offset_of(start_line, start_col);
+    let end = doc.offset_of(end_line, end_col);
+    let rehighlight_from = doc.edit(start, end, text);
+    Ok(EditResult {
+        line_count: doc.line_count(),
+        rehighlight_from,
+        clean: doc.at_saved_state(),
     })
 }
 
@@ -1044,11 +1113,13 @@ fn text_impl(
         .doc_handle(doc_id)
         .ok_or_else(|| format!("No open document {doc_id}"))?;
     ensure_lines(&handle, start)?;
-    state.with_doc(doc_id, |doc| text_of(doc, start, end))
+    let generation = handle.gen.load(Ordering::Relaxed);
+    state.with_doc(doc_id, |doc| text_of(doc, start, end, generation))
 }
 
-/// The plain-text window over an already-locked document.
-pub fn text_of(doc: &mut ViewerDoc, start: usize, end: usize) -> TextResult {
+/// The plain-text window over an already-locked document, carrying the caller's reload
+/// generation (the one the handle it resolved named — see [`TextResult::gen`]).
+pub fn text_of(doc: &mut ViewerDoc, start: usize, end: usize, gen: u64) -> TextResult {
     // The rope's own bounds clamp (the reported count may still be the staged estimate).
     let total = doc.rope_lines();
     let reported = doc.line_count();
@@ -1067,6 +1138,7 @@ pub fn text_of(doc: &mut ViewerDoc, start: usize, end: usize) -> TextResult {
         start_line: start,
         line_count: reported,
         lines,
+        gen,
     }
 }
 
@@ -1230,6 +1302,47 @@ pub fn write_doc(
         .map_err(|e| format!("{}: {e}", path.display()))?;
     reporter.done();
     Ok(())
+}
+
+/// `viewer_save`'s write plan resolved once: the caller's encoding/EOL choice (Save with
+/// Encoding, the EOL pick) overrides the document's own, with the document's standing in
+/// when the caller names none — plus the rope, its saved-state baseline clone and the
+/// file's path. All cheap clones, taken off the blocking pass.
+pub fn save_plan(
+    state: &ViewerState,
+    doc_id: u64,
+    encoding: Option<String>,
+    eol: Option<String>,
+) -> Result<(std::path::PathBuf, String, String, ropey::Rope, ropey::Rope), String> {
+    state.with_doc(doc_id, |doc| {
+        (
+            doc.path.clone(),
+            encoding.unwrap_or_else(|| doc.encoding.clone()),
+            eol.unwrap_or_else(|| doc.eol.clone()),
+            doc.rope.clone(),
+            doc.rope.clone(),
+        )
+    })
+}
+
+/// The written choice becomes the document's own (a later plain save must not silently
+/// write the old encoding back), the saved-state baseline is exactly what the write put on
+/// disk (an edit landing while the write ran still reads dirty against it), and `stamp` is
+/// the file's new fingerprint — the save's own watcher echo reads as "unchanged".
+pub fn save_adopt(
+    state: &ViewerState,
+    doc_id: u64,
+    encoding: String,
+    eol: String,
+    saved_rope: ropey::Rope,
+    stamp: String,
+) {
+    let _ = state.with_doc(doc_id, |doc| {
+        doc.encoding = encoding;
+        doc.eol = eol;
+        doc.fingerprint = stamp;
+        doc.saved_rope = saved_rope;
+    });
 }
 
 /// One save-progress report over the command's channel: bytes of the document streamed out
@@ -1525,6 +1638,46 @@ mod tests {
         std::fs::write(&doc.path, doc.full_text()).unwrap();
         doc.fingerprint = fingerprint(&doc.path);
         assert_eq!(fingerprint(&doc.path), doc.fingerprint);
+    }
+
+    #[test]
+    fn a_reload_swap_advances_the_generation_and_freezes_the_old_reads() {
+        let s = scratch();
+        let path = s.file("watched.rs", "fn one() {}\n");
+        let state = ViewerState::default();
+        let opened = open_impl(&state, &path).unwrap();
+        let doc_id = opened.doc_id;
+        // A fresh open serves generation 0, and a read's clone carries it.
+        let predecessor = state.doc_handle(doc_id).unwrap();
+        assert_eq!(predecessor.gen.load(Ordering::Relaxed), 0);
+        assert_eq!(text_impl(&state, doc_id, 0, 0).unwrap().gen, 0);
+        // The file changed on disk and `viewer_reload` swaps the document: the id stays,
+        // the generation advances by exactly one.
+        s.file("watched.rs", "fn one() {}\nfn two() {}\n");
+        let (generation, fresh) = state
+            .replace_doc(doc_id, open_doc(&path).unwrap(), None)
+            .unwrap();
+        assert_eq!(generation, 1);
+        assert_eq!(fresh.gen.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            state
+                .doc_handle(doc_id)
+                .unwrap()
+                .gen
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(text_impl(&state, doc_id, 0, 0).unwrap().gen, 1);
+        // The predecessor's handle is frozen at the old generation — a window read that
+        // cloned it before the swap names 0 however long the read runs past the swap,
+        // which is what lets the frontend drop its response as stale. (The gen must not
+        // be bumped on the old handle: a read that captured after such a bump would be
+        // indistinguishable from a current one.)
+        assert_eq!(predecessor.gen.load(Ordering::Relaxed), 0);
+        // And a swap against an id nobody holds refuses, like every other read.
+        assert!(state
+            .replace_doc(4242, open_doc(&path).unwrap(), None)
+            .is_err());
     }
 
     #[test]
@@ -1934,5 +2087,67 @@ mod tests {
         handle.find_gen.fetch_add(1, Ordering::Relaxed);
         let alive = || handle.find_gen.load(Ordering::Relaxed) == generation;
         assert!(find::scan_rope(&rope, &matcher, false, find::MAX_FIND_MATCHES, alive).is_err());
+    }
+
+    #[test]
+    fn the_save_honors_an_encoding_override() {
+        // Save with Encoding / the EOL pick override the document's own for the write and
+        // are adopted as the session's going forward — a later plain save must not
+        // silently write the open's original encoding back.
+        let s = scratch();
+        let path = s.file("override.txt", "héllo\n");
+        let state = ViewerState::default();
+        let opened = open_impl(&state, &path).unwrap();
+        assert_eq!(
+            state
+                .with_doc(opened.doc_id, |doc| (doc.encoding.clone(), doc.eol.clone()))
+                .unwrap(),
+            ("utf8".to_owned(), "lf".to_owned())
+        );
+        // The override plans a BOM and CRLF lines whatever the document opened with...
+        let (write_path, encoding, eol, rope, saved_rope) = save_plan(
+            &state,
+            opened.doc_id,
+            Some("utf8bom".to_owned()),
+            Some("crlf".to_owned()),
+        )
+        .unwrap();
+        write_doc(
+            std::path::Path::new(&write_path),
+            &rope,
+            &encoding,
+            &eol,
+            &|_, _| {},
+        )
+        .unwrap();
+        save_adopt(
+            &state,
+            opened.doc_id,
+            encoding,
+            eol,
+            saved_rope,
+            fingerprint(std::path::Path::new(&write_path)),
+        );
+        let bytes = std::fs::read(&write_path).unwrap();
+        assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF]);
+        assert!(bytes
+            .windows(2)
+            .any(|pair| pair[0] == b'\r' && pair[1] == b'\n'));
+        // ...and the document adopted both.
+        assert_eq!(
+            state
+                .with_doc(opened.doc_id, |doc| (doc.encoding.clone(), doc.eol.clone()))
+                .unwrap(),
+            ("utf8bom".to_owned(), "crlf".to_owned())
+        );
+        // A plain save now resolves to the adopted choice, and one on a fresh document to
+        // its own.
+        let (_, encoding, eol, _, _) = save_plan(&state, opened.doc_id, None, None).unwrap();
+        assert_eq!((encoding.as_str(), eol.as_str()), ("utf8bom", "crlf"));
+        let plain = s.file("plain.txt", "one\n");
+        let state2 = ViewerState::default();
+        let opened2 = open_impl(&state2, &plain).unwrap();
+        let (_, encoding, eol, _, _) = save_plan(&state2, opened2.doc_id, None, None).unwrap();
+        assert_eq!((encoding.as_str(), eol.as_str()), ("utf8", "lf"));
     }
 }

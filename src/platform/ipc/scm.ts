@@ -50,6 +50,9 @@ export interface HistoryEntry {
 	/** Seconds since the epoch. */
 	date: number;
 	message: string;
+	/** The path the file carried at this commit — under `--follow`, the name it had
+	 *  before a rename, which the row's diff and revision reads must open. */
+	path: string;
 }
 
 /** One line of `scm_blame`. */

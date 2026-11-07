@@ -463,7 +463,10 @@ pub fn run_metrics(
         }
         batch.par_iter_mut().for_each(|(path, rows)| {
             let ext = path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-            if let Ok(text) = std::fs::read_to_string(std::path::Path::new(root).join(path.as_str())) {
+            // Lossy: a non-UTF-8 file's ASCII identifiers survive the decode, so its
+            // functions still enrich instead of silently dropping out of the report.
+            if let Ok(bytes) = std::fs::read(std::path::Path::new(root).join(path.as_str())) {
+                let text = String::from_utf8_lossy(&bytes);
                 bca::enrich_file(ext, &text, rows);
             }
         });
@@ -534,10 +537,12 @@ pub fn run_security(
                 });
                 return;
             }
-            let Ok(text) = std::fs::read_to_string(std::path::Path::new(root).join(&file.path))
-            else {
+            // Secrets are usually ASCII: a non-UTF-8 file decodes lossily and stays
+            // scannable, instead of silently dropping out of the scan whole.
+            let Ok(bytes) = std::fs::read(std::path::Path::new(root).join(&file.path)) else {
                 continue;
             };
+            let text = String::from_utf8_lossy(&bytes);
             files += 1;
             let ext = file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
             let findings = security::scan_file(&file.path, ext, &text, &file.calls);
@@ -759,5 +764,37 @@ mod tests {
             security_sink.0.last(),
             Some(SecurityEvent::Done { .. })
         ));
+    }
+
+    #[test]
+    fn a_non_utf8_file_still_scans_for_secrets() {
+        use ggs_base::sink::VecSink;
+        let dir = tempfile::tempdir().unwrap();
+        // GBK bytes for "中文注释" — invalid as UTF-8, so the old read_to_string skipped
+        // the file whole and the ASCII secret inside it never reached the scanner. Lossy
+        // decoding keeps the ASCII line, and SEC-003 must report it.
+        let mut gbk = vec![0xD6, 0xD0, 0xCE, 0xC4, 0xD7, 0xA2, 0xCA, 0xCD, b'\n'];
+        gbk.extend_from_slice(b"API_KEY = 'super-secret-value-123'\n");
+        std::fs::write(dir.path().join("secret.rs"), &gbk).unwrap();
+        let index = Arc::new(AnalysisIndex::new());
+        let root = dir.path().display().to_string();
+        index.build_blocking(None, &root, None).unwrap();
+        let data = index.analysis(&root).unwrap();
+        assert_eq!(data.lock().unwrap().files().len(), 1, "the file is counted");
+
+        let mut sink = VecSink(Vec::new());
+        run_security(&index, &data, &root, &mut sink);
+        let findings: Vec<_> = sink
+            .0
+            .iter()
+            .flat_map(|event| match event {
+                SecurityEvent::Batch { findings } => findings.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert!(
+            findings.iter().any(|f| f.rule_id == "SEC-003"),
+            "{findings:?}"
+        );
     }
 }

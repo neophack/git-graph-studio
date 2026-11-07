@@ -7,7 +7,7 @@
 import type { HostBridge, HostContext, HostEvent, SerializableTextEdit } from './bridge';
 import { Position, Range, Selection } from './types/position';
 import { pathOf, Uri } from './types/uri';
-import { CancellationToken, Event, EventEmitter } from './types/events';
+import { CancellationToken, CancellationTokenSource, Event, EventEmitter } from './types/events';
 import { EndOfLine, TextEditorCursorStyle, TextEditorLineNumbersStyle, TextEditorSelectionChangeKind, ViewColumn } from './types/enums';
 import { snippetPlainText, SnippetString } from './types/values';
 import { plainDecorationRanges } from './util';
@@ -28,6 +28,10 @@ export interface ShimState {
 	webviewPanels: Map<number, WebviewPanel>;
 	webviewViews: Map<string, WebviewView>;
 	webviewViewProviders: Map<string, { resolveWebviewView: (view: unknown, context: unknown, token: unknown) => unknown }>;
+	/** The cancellation sources of the running `withProgress` tasks, by progress id: a
+	 *  cancellable toast's Cancel click arrives as a progressCancelled push and resolves
+	 *  the token its task holds (claude-code's send/interrupt path). */
+	progressCancels: Map<number, CancellationTokenSource>;
 	globalState: Memento;
 	workspaceState: Memento;
 	webviewSeq: number;
@@ -107,6 +111,7 @@ export function createShimState(ctx: HostContext, bridge: HostBridge): ShimState
 	s.webviewViews = new Map<string, WebviewView>();
 	/** The providers behind them, by view id (resolved at the view's first show). */
 	s.webviewViewProviders = new Map<string, { resolveWebviewView: (view: unknown, context: unknown, token: unknown) => unknown }>();
+	s.progressCancels = new Map<number, CancellationTokenSource>();
 	s.globalState = new Memento(s.ctx, s.bridge, 'global');
 	s.workspaceState = new Memento(s.ctx, s.bridge, 'workspace');
 	// Panel ids continue after the host's highest live one for this extension: a restart
@@ -437,6 +442,13 @@ export function createShimState(ctx: HostContext, bridge: HostBridge): ShimState
 		}
 		if (event.event === 'webviewViewVisible' && event.viewId !== undefined) {
 			s.webviewViews.get(event.viewId)?.setVisible(event.visible ?? false);
+			return;
+		}
+		if (event.event === 'progressCancelled' && event.progressId !== undefined) {
+			// The toast's Cancel click crossed back: the task's token flips and its
+			// onCancellationRequested listeners fire (VS Code's contract — the task
+			// decides what stopping means; the shim never rejects its promise).
+			s.progressCancels.get(event.progressId)?.cancel();
 			return;
 		}
 		if (event.event === 'themeChanged' && event.kind !== undefined) {

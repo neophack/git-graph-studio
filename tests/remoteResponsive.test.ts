@@ -1069,6 +1069,39 @@ describe('long press', () => {
 		stop();
 		vi.useRealTimers();
 	});
+
+	it('does not fire under a pinch: a second finger kills the first finger\'s timer', () => {
+		vi.useFakeTimers();
+		const row = document.createElement('div');
+		document.body.appendChild(row);
+		const menu = vi.fn();
+		row.addEventListener('contextmenu', () => menu());
+		const stop = installLongPress(document);
+		const finger = (id: number, type: string, x = 40) => {
+			const event = new MouseEvent(type, { bubbles: true, clientX: x, clientY: 20 }) as MouseEvent & { pointerType: string; pointerId: number };
+			Object.defineProperty(event, 'pointerType', { value: 'touch' });
+			Object.defineProperty(event, 'pointerId', { value: id });
+			row.dispatchEvent(event);
+		};
+		// One finger held: its timer is running.
+		finger(1, 'pointerdown');
+		// A second finger lands before the deadline — the pinch forms, and the held timer
+		// must die with it: no context menu, no vibration, at either finger's coordinates.
+		finger(2, 'pointerdown', 200);
+		vi.advanceTimersByTime(LONG_PRESS_MS + 10);
+		expect(menu).not.toHaveBeenCalled();
+		// The pinch itself never arms one: both fingers lift late, still nothing.
+		finger(1, 'pointerup');
+		finger(2, 'pointerup');
+		vi.advanceTimersByTime(LONG_PRESS_MS + 10);
+		expect(menu).not.toHaveBeenCalled();
+		// And the next sole finger long-presses as ever.
+		finger(3, 'pointerdown', 60);
+		vi.advanceTimersByTime(LONG_PRESS_MS + 10);
+		expect(menu).toHaveBeenCalledTimes(1);
+		stop();
+		vi.useRealTimers();
+	});
 });
 
 describe('terminal key row', () => {

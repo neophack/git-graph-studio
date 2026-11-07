@@ -130,12 +130,17 @@ export const openMethods: ThisType<EditorGroup> = {
 		// the Explorer's forward-slashed one).
 		const existing = this.open.find((e) => e.input.kind === 'file' && samePath(e.input.path, path));
 		if (existing) {
-			this.activate(existing);
-			if (options.line !== undefined) {
-				// A jump into a line of a CAN log (a search hit) lands in the text form — the
-				// raw frame view has no text lines to reveal.
-				if (existing.canraw) void this.swapCanRawToText(existing).then(() => this.revealIn(existing, options.line!, options.column ?? 1));
-				else this.revealIn(existing, options.line, options.column ?? 1);
+			// `{inactive: true}` only asks that the tab exist — an already-open file takes it
+			// without stealing the view (the remote mirror's sync opens this way), exactly
+			// like `show()` gates the new-tab path below.
+			if (!options.inactive) {
+				this.activate(existing);
+				if (options.line !== undefined) {
+					// A jump into a line of a CAN log (a search hit) lands in the text form — the
+					// raw frame view has no text lines to reveal.
+					if (existing.canraw) void this.swapCanRawToText(existing).then(() => this.revealIn(existing, options.line!, options.column ?? 1));
+					else this.revealIn(existing, options.line, options.column ?? 1);
+				}
 			}
 			return;
 		}
@@ -535,13 +540,16 @@ export const openMethods: ThisType<EditorGroup> = {
 		if (!side.exists) return { contents: '', binary: false, size: 0 };
 		if (side.content !== undefined) return { contents: side.content, binary: false, size: side.content.length };
 		if (side.local) return readFileRaw(side.path);
-			try {
-				return await readFileAt(side.revision, side.path, input.repo);
-			} catch (error) {
-				// A file missing on one side (deleted / added between the revisions) shows empty.
-				if (/not in|not found|no such|does not exist|cannot find/i.test(String(error))) return { contents: '', binary: false, size: 0 };
-				throw error;
-			}
+		try {
+			return await readFileAt(side.revision, side.path, input.repo);
+		} catch (error) {
+			// A file missing on one side (deleted / added between the revisions) shows empty —
+			// and only the backend's own absence wording ("does not exist in <revision>")
+			// means that. Any other failure (a repository not found, a refused spawn) surfaces
+			// as an error instead of passing as an empty side.
+			if (String(error).includes('does not exist in')) return { contents: '', binary: false, size: 0 };
+			throw error;
+		}
 		};
 		let left: FileContents, right: FileContents;
 		try {

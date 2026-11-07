@@ -182,6 +182,9 @@ export class HexView {
 	/** A scan is in flight for the current needle — the counter shows "Searching…" until
 	 *  it lands, instead of "No results" while the chunks are still streaming in. */
 	private searchRunning = false;
+	/** The slab cache's generation: a save() (and a destroy) bump it so a slab read still
+	 *  in flight never lands its pre-save bytes into the cleared cache. */
+	private slabGen = 0;
 	private hits: number[] = [];
 	private hitIndex = -1;
 	/* ---------- Editing ---------- */
@@ -372,6 +375,7 @@ export class HexView {
 		this.scrollbar.dispose();
 		window.removeEventListener('mouseup', this.onWindowMouseUp);
 		this.searchToken++;
+		this.slabGen++;
 		this.slabs.clear();
 		this.slabValues.clear();
 		this.root.remove();
@@ -464,6 +468,11 @@ export class HexView {
 		if (!promise) {
 			const offset = slabIndex * SLAB_BYTES;
 			if (offset >= this.size && this.size > 0) return Promise.resolve(null);
+			// The read is stamped with the cache generation: a save() bumps it while the
+			// chunk is in flight, and the bytes this read fetched are the file's PRE-save
+			// content — landing them would park stale bytes back into the freshly
+			// cleared cache.
+			const gen = this.slabGen;
 			promise = readFileChunk(this.path, offset, SLAB_BYTES)
 				.then((chunk) => {
 					this.size = chunk.size;
@@ -473,11 +482,13 @@ export class HexView {
 					// multi-gigabyte binary must not park the whole file in the
 					// webview. Beyond the limit the least-recently INSERTED slab
 					// drops (Map order); a dropped slab reloads on demand.
-					this.slabValues.set(slabIndex, bytes);
-					while (this.slabValues.size > SLAB_CACHE_LIMIT) {
-						const oldest = this.slabValues.keys().next().value;
-						if (oldest === undefined) break;
-						this.slabValues.delete(oldest);
+					if (gen === this.slabGen) {
+						this.slabValues.set(slabIndex, bytes);
+						while (this.slabValues.size > SLAB_CACHE_LIMIT) {
+							const oldest = this.slabValues.keys().next().value;
+							if (oldest === undefined) break;
+							this.slabValues.delete(oldest);
+						}
 					}
 					return bytes;
 				})
@@ -519,6 +530,11 @@ export class HexView {
 	 *  the read resolves. */
 	private draw(): void {
 		if (!this.rowHeight || !this.rows) return;
+		// The row width this pass laid its placeholders with: a resize between the
+		// placeholder and its asynchronous fill changes `bytesPerRow`, and a fill that
+		// re-read it would mix two row widths in one body — the fill stands down and the
+		// newer pass owns the row.
+		const bpr = this.bytesPerRow;
 		const { first, last } = this.scroll.visibleRange(8);
 		let body = this.sizer.querySelector<HTMLElement>('.hex-body');
 		if (!body) {
@@ -539,29 +555,32 @@ export class HexView {
 		}
 		for (let row = first; row <= last; row++) {
 			if (body.querySelector(`[data-row="${row}"]`)) continue;
-			const placeholder = hexRow(row * this.bytesPerRow, new Uint8Array(0), new Uint8Array(0), -1, undefined, this.bytesPerRow, this.offsetDigits);
+			const placeholder = hexRow(row * bpr, new Uint8Array(0), new Uint8Array(0), -1, undefined, bpr, this.offsetDigits);
 			placeholder.dataset.row = String(row);
 			// Zebra stripes by absolute row number, so the banding is stable as the virtual list scrolls.
 			if (row % 2) placeholder.classList.add('hex-row-odd');
 			// DOM order stays row order: insert before the first already-placed later row.
 			const after = Array.from(body.children).find((child) => Number((child as HTMLElement).dataset.row) > row);
 			body.insertBefore(placeholder, after ?? null);
-			void this.rowBytes(row * this.bytesPerRow).then((bytes) => {
-				if (!bytes || !body.contains(placeholder) || this.sizer.querySelector('.hex-body') !== body) return;
-				const rowBytes = this.displayBytes(bytes, row * this.bytesPerRow);
+			void this.rowBytes(row * bpr).then((bytes) => {
+				if (!bytes || bpr !== this.bytesPerRow || !body.contains(placeholder) || this.sizer.querySelector('.hex-body') !== body) return;
+				const rowBytes = this.displayBytes(bytes, row * bpr);
 				if (!rowBytes.length) return;
 				let highlight = new Uint8Array(0);
 				if (this.searchNeedle) {
 					highlight = new Uint8Array(rowBytes.length);
-					const pos = findNeedle(rowBytes, this.searchNeedle, 0);
-					if (pos >= 0) highlight.fill(1, pos, pos + this.searchNeedle.length);
+					// Every hit the row holds lights up, not just the first — a row of
+					// repeated needles is a real hex file's shape.
+					for (let pos = findNeedle(rowBytes, this.searchNeedle, 0); pos >= 0; pos = findNeedle(rowBytes, this.searchNeedle, pos + 1)) {
+						highlight.fill(1, pos, pos + this.searchNeedle.length);
+					}
 				}
-				const filled = hexRow(row * this.bytesPerRow, rowBytes, highlight, this.cursorIn(row * this.bytesPerRow, rowBytes.length), this.edits, this.bytesPerRow, this.offsetDigits, this.selectionRange());
+				const filled = hexRow(row * bpr, rowBytes, highlight, this.cursorIn(row * bpr, rowBytes.length), this.edits, bpr, this.offsetDigits, this.selectionRange());
 				filled.dataset.row = String(row);
 				if (row % 2) filled.classList.add('hex-row-odd');
 				// The address-jump flash lands on the row whenever its bytes arrive.
-				if (this.jumpTarget >= row * this.bytesPerRow && this.jumpTarget < row * this.bytesPerRow + rowBytes.length) {
-					const i = this.jumpTarget - row * this.bytesPerRow;
+				if (this.jumpTarget >= row * bpr && this.jumpTarget < row * bpr + rowBytes.length) {
+					const i = this.jumpTarget - row * bpr;
 					// Indexed by byte, not DOM position: the hex pane's group gaps are plain
 					// spacer spans interspersed between the .hex-cell bytes.
 					filled.querySelectorAll('.hex-cell')[i]?.classList.add('hex-jump');
@@ -1240,7 +1259,10 @@ export class HexView {
 		this.undoStack.length = 0;
 		this.stagedNibble = null;
 		this.markClean();
-		// What is on disk changed; drop the cached slabs and redraw from the file.
+		// What is on disk changed; drop the cached slabs and redraw from the file. The
+		// generation bump retires any slab read still in flight: its bytes are the
+		// file's PRE-save content and must not land in the cleared cache.
+		this.slabGen++;
 		this.slabs.clear();
 		this.slabValues.clear();
 		this.sizer.querySelector('.hex-body')?.remove();

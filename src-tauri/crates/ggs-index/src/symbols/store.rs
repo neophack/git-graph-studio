@@ -18,9 +18,9 @@ use std::time::UNIX_EPOCH;
 
 use rayon::prelude::*;
 
-use ggs_fs::walk_files;
 use crate::scan::is_symbol_source;
 use crate::symbols::WorkspaceSymbol;
+use ggs_fs::walk_files;
 
 /// The symbol kinds the parser layer produces, as ids on disk. The order is the format:
 /// a kind byte is an index into this table — new kinds are appended, never inserted.

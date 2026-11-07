@@ -2,11 +2,11 @@
 // on), theme switching (the stylesheet link and the vscode-* classes), the display-language
 // table, and the Settings dialog's categories and controls.
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { setLocale, t } from '../src/platform/i18n';
 import { provideHook } from '../src/platform/hooks';
-import { DEFAULT_SETTINGS, THEMES, applyTheme, loadSettingsFile, migrateStoredSettings, settings, updateSetting } from '../src/platform/settings';
+import { DEFAULT_SETTINGS, SETTINGS_VERSION, THEMES, applyTheme, loadSettingsFile, migrateStoredSettings, settings, syncExtensionThemes, updateSetting } from '../src/platform/settings';
 import { openSettingsPanel } from '../src/workbench/settingsPanel';
 import { EditorGroup } from '../src/features/editor';
 import { backend } from './tauriMock';
@@ -83,6 +83,47 @@ describe('settings store', () => {
 			settings.tabSize = held.tab;
 			settings.stickyScroll = held.sticky;
 		}
+	});
+
+	it('runs the old-defaults migration once - a re-picked old default survives every reload', async () => {
+		// The pass above runs over a legacy (unstamped) payload, whose "old shipped
+		// default" values are indistinguishable from what the user re-picks in today's
+		// dialog - stickyScroll true, a sensitivity of 1 or 5, GGS Bash are all offered.
+		// It therefore runs once per payload: every write stamps the store, and a stamped
+		// store skips the pass. The unversioned version of this code rewrote the re-pick
+		// to the default on every boot.
+		const held = { sticky: settings.stickyScroll, wrap: settings.wordWrap };
+		const store = () => JSON.parse(localStorage.getItem('ggstudio.appSettings')!);
+		try {
+			updateSetting('stickyScroll', true);
+			expect(store()).toMatchObject({ stickyScroll: true, settingsVersion: SETTINGS_VERSION });
+
+			// Reload 1 - the workbench boots over that store: the pick stands.
+			vi.resetModules();
+			let fresh = await import('../src/platform/settings');
+			expect(fresh.settings.stickyScroll).toBe(true);
+
+			// Another setting changes: both the pick and the stamp persist with it.
+			fresh.updateSetting('wordWrap', true);
+			expect(store()).toMatchObject({ stickyScroll: true, wordWrap: true, settingsVersion: SETTINGS_VERSION });
+
+			// Reload 2 - sticky scroll STILL on; the unversioned migration wiped it here.
+			vi.resetModules();
+			fresh = await import('../src/platform/settings');
+			expect(fresh.settings.stickyScroll).toBe(true);
+			expect(fresh.migrateStoredSettings(store())).toMatchObject({ stickyScroll: true, wordWrap: true });
+		} finally {
+			updateSetting('stickyScroll', held.sticky);
+			updateSetting('wordWrap', held.wrap);
+		}
+	});
+
+	it('a stamped payload never migrates, an unstamped one still does (the stamp decides)', () => {
+		// The same payload, stamped and not: only the stamp tells a re-pick apart from
+		// the old shipped default it happens to equal.
+		const rePicked = { stickyScroll: true, mouseWheelScrollSensitivity: 1, fastScrollSensitivity: 5, terminalShell: 'ggsBash' as const };
+		expect(migrateStoredSettings(rePicked)).toMatchObject({ stickyScroll: false, mouseWheelScrollSensitivity: 1, fastScrollSensitivity: 4, terminalShell: 'gitBash' });
+		expect(migrateStoredSettings({ ...rePicked, settingsVersion: SETTINGS_VERSION })).toMatchObject({ stickyScroll: true, mouseWheelScrollSensitivity: 1, fastScrollSensitivity: 5, terminalShell: 'ggsBash' });
 	});
 
 	it('persists a change and notifies the workbench', () => {
@@ -172,6 +213,42 @@ describe('settings store', () => {
 		expect(t('menu.file')).toBe('File');
 		// An unknown key falls back to itself rather than rendering blank.
 		expect(t('not.a.key' as 'menu.file')).toBe('not.a.key');
+	});
+
+	it('extension theme ids keep their per-extension index while another extension\'s set changes', () => {
+		const theme = (extId: string, label: string) => ({ extId, label, kind: 'vscode-dark' as const, colors: {}, tokenColors: [] as { scope: string | string[]; settings: { foreground?: string } }[] });
+		try {
+			syncExtensionThemes([theme('acme', 'Acme Dark'), theme('other', 'Other Dark')]);
+			expect(THEMES.find((entry) => entry.id.startsWith('ext-theme:acme'))!.id).toBe('ext-theme:acme:0');
+			// The other extension's uninstall (its themes leave the flattened list): the
+			// global index used to renumber acme's pick into a non-existent id, silently
+			// resetting the user's theme.
+			syncExtensionThemes([theme('acme', 'Acme Dark'), theme('acme', 'Acme Light')]);
+			expect(THEMES.filter((entry) => entry.id.startsWith('ext-theme:acme')).map((entry) => entry.id)).toEqual(['ext-theme:acme:0', 'ext-theme:acme:1']);
+		} finally {
+			syncExtensionThemes([]);
+		}
+		expect(THEMES.some((entry) => entry.id.startsWith('ext-theme:'))).toBe(false);
+	});
+
+	it('switching from an extension overlay theme to its base builtin re-fires the theme event', () => {
+		themeLink();
+		const heard: string[] = [];
+		const listener = (event: Event): void => heard.push(String((event as CustomEvent).detail));
+		document.addEventListener('app:theme-applied', listener);
+		try {
+			syncExtensionThemes([{ extId: 'acme', label: 'Acme Dark', kind: 'vscode-dark', colors: { 'editor.background': '#101010' }, tokenColors: [] }]);
+			updateSetting('theme', 'ext-theme:acme:0'); // the overlay applied over dark-modern's sheet
+			heard.length = 0;
+			// Same base stylesheet href, overlay dropped: the colour-reading consumers still
+			// need their re-read pass (the event used to ride the overlay's presence alone).
+			updateSetting('theme', 'dark-modern');
+			expect(heard).toContain('dark-modern');
+		} finally {
+			document.removeEventListener('app:theme-applied', listener);
+			syncExtensionThemes([]);
+			updateSetting('theme', 'dark-modern');
+		}
 	});
 });
 

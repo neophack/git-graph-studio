@@ -52,10 +52,14 @@ export class OutputFollow<T> {
 				window.clearTimeout(this.timer);
 				this.timer = null;
 			}
-			if (this.dropped) {
-				this.dropped = false;
-				for (const session of this.ops.sessions()) void this.ops.subscribe(session, true);
-			}
+			// Every return re-takes every session's subscription: the timer's actual drop
+			// needs the tail catch-up, and a session created (or adopted) INSIDE the grace
+			// window started without its subscription (§6.6 — shouldSubscribeNew was false
+			// at its birth) and missed everything since — with `dropped` still false it
+			// used to stay frozen forever. Subscribe answers no-op for the sessions that
+			// held their stream all along (it is guarded on the live listener).
+			for (const session of this.ops.sessions()) void this.ops.subscribe(session, true);
+			this.dropped = false;
 			return;
 		}
 		this.following = false;

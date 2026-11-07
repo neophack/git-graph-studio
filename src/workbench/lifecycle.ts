@@ -325,6 +325,12 @@ export const lifecycleMethods: ThisType<Workbench> = {
 		document.removeEventListener(SETTINGS_EVENT, this.onSettingsChangedBound);
 		window.removeEventListener('focus', this.onWindowFocusBound);
 		window.removeEventListener('blur', this.onWindowBlurBound);
+		// The parts' own document-level registrations (the panel's relabel, the status
+		// bar's indent re-render, outside-click close and centre panel, zen's Escape) go
+		// with the workbench that created them.
+		this.disposeZenMode();
+		this.panel.dispose();
+		this.statusBar.dispose();
 		for (const unlisten of this.unlisteners.splice(0)) unlisten();
 		// A pending debounce must not fire into the next workbench's session.
 		if (this.snapshotTimer !== null) {
@@ -372,8 +378,11 @@ export const lifecycleMethods: ThisType<Workbench> = {
 			// The batch names only some of what changed (a checkout, a build): every clean tab
 			// under that root re-reads its file, or a tab left behind shows the old contents
 			// the moment it is switched to. reloadIfClean skips the ones that did not change;
-			// the dirty ones fall to the conflict check.
-			const root = change.root.replace(/[\\/]+$/, '').toLowerCase();
+			// the dirty ones fall to the conflict check. The match carries the root's
+			// separator, the way recoverBackups spells it — a bare prefix would also take a
+			// sibling folder whose name merely extends this one (`C:\proj` vs `C:\project2`).
+			const separator = change.root.includes('\\') ? '\\' : '/';
+			const root = change.root.replace(/[\\/]+$/, '').toLowerCase() + separator;
 			for (const path of this.editors.openFilePaths()) {
 				if (path.toLowerCase().startsWith(root)) {
 					void this.editors.reloadIfClean(path);

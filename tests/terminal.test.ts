@@ -9,7 +9,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { TerminalView } from '../src/features/terminal';
-import { planSessionSync } from '../src/features/terminal/sessionSync';
+import { pickSessionId, planSessionSync } from '../src/features/terminal/sessionSync';
 import { backend } from './tauriMock';
 import { flush, until } from './helpers';
 
@@ -81,6 +81,16 @@ describe('the session-sync planner', () => {
 		expect(plan.retire).toEqual([]);
 		// A created session IS the backend's once the spawn lands; the exit event owns its end.
 		expect(planSessionSync(held, [{ id: 9, name: 'x' }]).adopt).toEqual([]);
+	});
+
+	it('the id pick skips every id the live list holds — a collision retires nothing', () => {
+		// Each page draws its own random id base; when it lands on a number another
+		// page's shell runs under, the pick steps past it instead of replacing (killing)
+		// that shell. E-2's other half is the backend's refusal of a live replacement.
+		expect(pickSessionId(100, [])).toBe(100);
+		expect(pickSessionId(100, [100, 101, 103])).toBe(102);
+		expect(pickSessionId(100, [99, 100, 101, 102])).toBe(103);
+		expect(pickSessionId(Number.NaN, [])).toBe(0); // a degenerate base stays a valid id
 	});
 });
 
@@ -209,5 +219,54 @@ describe('the page follow over adopted sessions (§6.6)', () => {
 		view.setOutputFollow(true);
 		await until(() => view.outputSubscribed(7));
 		expect(writtenOf(0)).toContain('the replayed tail');
+	});
+
+	it('a session adopted inside the grace window is taken on the return — never frozen', async () => {
+		// The grace-window hole: the timer never fired, `dropped` stayed false, and the
+		// return used to re-subscribe only "if dropped" — a terminal that appeared (and was
+		// born unsubscribed) mid-grace kept a null output listener forever.
+		pty.sessions = [{ id: 7, name: 'git-bash' }];
+		pty.tails.set(7, 'pc prompt');
+		const view = new TerminalView();
+		await view.shown();
+		view.setOutputFollow(false, 30_000); // the grace starts; nothing is dropped yet
+		pty.sessions.push({ id: 9, name: 'powershell' });
+		pty.tails.set(9, 'the adopted tail');
+		backend.emit('studio://pty-sessions-changed', undefined);
+		await until(() => view.sessionCount() === 2);
+		expect(view.outputSubscribed(9)).toBe(false); // born away, born unsubscribed
+		view.setOutputFollow(true); // inside the grace — the timer never fired
+		await until(() => view.outputSubscribed(9));
+		expect(view.outputSubscribed(7)).toBe(true); // the held session kept its stream
+		expect(writtenOf(1)).toContain('the adopted tail'); // it missed everything since birth
+		backend.emit('studio://pty-output-9', 'live after the return');
+		await flush();
+		expect(writtenOf(1)).toContain('live after the return');
+	});
+
+	it('a return subscribes before the tail fetch — nothing crosses the gap unheard', async () => {
+		// The catch-up used to fetch the tail first and subscribe after: whatever the shell
+		// printed while the snapshot was in flight was lost (a frozen stretch of output).
+		// Now the subscription goes up first, holds the events, and flushes after the tail.
+		pty.sessions = [{ id: 7, name: 'git-bash' }];
+		const view = new TerminalView();
+		await view.shown();
+		view.setOutputFollow(false, 0);
+		await flush();
+		expect(view.outputSubscribed(7)).toBe(false);
+		let release: (() => void) | null = null;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		backend.on('pty_tail', async () => {
+			await gate;
+			return 'the replayed tail';
+		});
+		view.setOutputFollow(true);
+		await flush(2); // the subscription is up; the tail snapshot is still in flight
+		expect(view.outputSubscribed(7)).toBe(true);
+		backend.emit('studio://pty-output-7', 'live in the gap');
+		release!();
+		await until(() => writtenOf(0).includes('live in the gap'));
+		// The tail repaints first, the held chunk follows — order and nothing lost.
+		expect(terms()[0]!.written).toEqual(['the replayed tail', 'live in the gap']);
 	});
 });

@@ -163,4 +163,62 @@ describe('folder compare header', () => {
 		expect(backend.callsTo('write_file')).toEqual([{ path: `${RIGHT}\\src/new/x.txt`, contents: 'x\n', encoding: 'utf8', eol: 'lf' }]);
 		expect(document.querySelectorAll('#notifications .notification')).toHaveLength(0);
 	});
+
+	it('a known-binary pair disables both copy entries and keeps delete', async () => {
+		backend.on('compare_dirs', () => [{ path: 'fw.bin', status: 'different', leftSize: 4, rightSize: 5 }]);
+		// The probes answer binary: the detail opens the hex comparison and the pair is
+		// remembered, so the context menu's Copy entries (which could only warn) disable.
+		backend.on('file_probe', () => ({ size: 5, binary: true }));
+		backend.on('read_file_chunk', ({ path, offset, len }) => {
+			const bytes = Buffer.from(String(path) === `${LEFT}\\fw.bin` ? [1, 2, 3, 4] : [5, 6, 7, 8, 9]);
+			const start = Math.min(Number(offset), bytes.length);
+			const end = Math.min(start + Number(len), bytes.length);
+			return { size: bytes.length, base64: bytes.subarray(start, end).toString('base64') };
+		});
+		const host = document.createElement('div');
+		document.body.appendChild(host);
+		const view = new FolderCompareView(host, { left: LEFT, right: RIGHT });
+		await flush();
+		click(host.querySelector('.fc-row')!);
+		await waitFor(() => host.querySelector('.fc-file-diff') !== null);
+
+		rightClick(host.querySelector('.fc-row')!);
+		expect(menuItem('Copy Left → Right')!.classList.contains('disabled')).toBe(true);
+		expect(menuItem('Copy Right → Left')!.classList.contains('disabled')).toBe(true);
+		expect(menuItem('Delete Left File')!.classList.contains('disabled')).toBe(false);
+		expect(menuItem('Delete Right File')!.classList.contains('disabled')).toBe(false);
+		view.dispose();
+	});
+
+	it('repeated refreshes coalesce: one walk in flight, one queued', async () => {
+		// Each walk parks on its compare_dirs until the test releases it.
+		const gates: (() => void)[] = [];
+		backend.on('compare_dirs', () => new Promise((resolve) => {
+			gates.push(() => resolve([{ path: 'a.txt', status: 'same', leftSize: 1, rightSize: 1 }]));
+		}));
+		const host = document.createElement('div');
+		document.body.appendChild(host);
+		const view = new FolderCompareView(host, { left: LEFT, right: RIGHT });
+		await flush();
+		expect(gates).toHaveLength(1); // the constructor's walk is in flight
+
+		// Two more refreshes while the first still runs: they join one queued run, they
+		// never stack a second and third concurrent full walk on the backend.
+		const second = view.refresh();
+		const third = view.refresh();
+		await flush();
+		expect(gates).toHaveLength(1);
+		expect(backend.callsTo('compare_dirs')).toHaveLength(1);
+
+		gates[0]!();
+		// The queued walk starts only after the in-flight one finished; both callers'
+		// promises settle with it (they share the one queued run).
+		await flush();
+		expect(gates).toHaveLength(2);
+		expect(backend.callsTo('compare_dirs')).toHaveLength(2);
+		gates[1]!();
+		await second;
+		await third;
+		view.dispose();
+	});
 });

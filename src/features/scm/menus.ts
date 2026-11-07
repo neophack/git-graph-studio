@@ -387,7 +387,9 @@ export const menusMethods: ThisType<SourceControlView> = {
 							const message = await quickInput({ title: 'Create Tag', placeholder: 'Message (leave empty for a lightweight tag)' });
 							if (message === null) return;
 							const head = await repoHead(repo);
-							run(() => gitOp('scm_add_tag', { tagName: name.trim(), commitHash: head.shortHash, message, force: false }));
+							// The full hash, never the 7-character display prefix: a short form
+							// is ambiguous in a large repository.
+							run(() => gitOp('scm_add_tag', { tagName: name.trim(), commitHash: head.hash || head.shortHash, message, force: false }));
 						})()
 					},
 					{

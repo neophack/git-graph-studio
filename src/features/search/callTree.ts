@@ -106,6 +106,9 @@ export class CallTreeView {
 	private loading = true;
 	private levels = new Map<string, CallNode[]>(); // node key -> children
 	private expanded = new Set<string>();
+	/** Bumped by every direction switch: a level load that started under an older
+	 *  direction never lands in (or renders over) the newer one's tree. */
+	private generation = 0;
 	/** depth cap so a click-through cannot walk the whole program. */
 	private maxDepth = 3;
 	/** The workspace index, fetched once per tree: a static cache outlived the folder it was
@@ -141,29 +144,38 @@ export class CallTreeView {
 	}
 
 	private async reload(): Promise<void> {
+		const generation = ++this.generation;
 		this.loading = true;
 		this.levels.clear();
 		this.expanded.clear();
 		const symbols = await this.symbols().catch(() => [] as WsSymbol[]);
-		await this.loadLevel(this.root, symbols);
+		// A rapid Callers/Callees switch started a newer reload while this one waited on
+		// the index: the newer one owns the tree, this one drops out before it can clear
+		// or fill anything.
+		if (generation !== this.generation) return;
+		await this.loadLevel(this.root, symbols, generation);
+		if (generation !== this.generation) return;
 		this.loading = false;
 	}
 
-	private async loadLevel(symbol: WsSymbol, symbols: WsSymbol[]): Promise<void> {
+	private async loadLevel(symbol: WsSymbol, symbols: WsSymbol[], generation: number): Promise<void> {
+		const key = `${symbol.path}:${symbol.line}`;
 		if (this.direction === 'callers') {
 			const references = await findReferences(symbol.name).catch(() => [] as RefFile[]);
-			this.levels.set(`${symbol.path}:${symbol.line}`, computeCallers(symbol, symbols, references));
+			if (generation !== this.generation) return; // a stale direction's answer never lands
+			this.levels.set(key, computeCallers(symbol, symbols, references));
 			return;
 		}
 		// Callees need the body: read the file and take the lines to the next symbol.
 		const file = await readFile(absolute(symbol.path)).catch(() => null);
+		if (generation !== this.generation) return;
 		if (!file || file.contents === null) {
-			this.levels.set(`${symbol.path}:${symbol.line}`, []);
+			this.levels.set(key, []);
 			return;
 		}
 		const lines = file.contents.split('\n');
 		const next = symbols.filter((s) => s.path === symbol.path && s.line > symbol.line).map((s) => s.line)[0] ?? lines.length;
-		this.levels.set(`${symbol.path}:${symbol.line}`, computeCallees(symbol, symbols, lines.slice(symbol.line, next).join('\n'), symbol.line));
+		this.levels.set(key, computeCallees(symbol, symbols, lines.slice(symbol.line, next).join('\n'), symbol.line));
 	}
 
 	/* The workspace symbols are repo-relative; opening needs the root, injected by the host. */
@@ -198,15 +210,26 @@ export class CallTreeView {
 				const children = el('div', 'ct-children');
 				this.renderLevel(children, this.levels.get(`${node.path}:${node.line}`) ?? [], key, depth + 1);
 				container.appendChild(children);
-			} else if (depth < this.maxDepth) {
-				// At the depth cap the circle-filled twistie is an end marker, not a button.
+			}
+			if (depth < this.maxDepth) {
+				// Below the cap the twistie folds an expanded level back (the old listener
+				// only mounted on the not-yet-expanded branch, so an open node had no way to
+				// close) and expands a closed one, loading its children once. At the cap the
+				// circle-filled twistie is an end marker, not a button.
 				row.querySelector('.twistie')?.addEventListener('click', (event) => {
 					event.stopPropagation();
 					void (async () => {
+						if (this.expanded.has(key)) {
+							this.expanded.delete(key);
+							this.render();
+							return;
+						}
+						const generation = this.generation;
 						this.expanded.add(key);
 						if (!this.levels.has(`${node.path}:${node.line}`)) {
 							const symbols = await this.symbols().catch(() => [] as WsSymbol[]);
-							await this.loadLevel({ name: node.name, path: node.path, line: node.line, kind: 'function' }, symbols);
+							if (generation !== this.generation) return; // the direction switched mid-load
+							await this.loadLevel({ name: node.name, path: node.path, line: node.line, kind: 'function' }, symbols, generation);
 						}
 						this.render();
 					})();

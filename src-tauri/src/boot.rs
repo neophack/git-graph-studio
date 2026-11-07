@@ -76,6 +76,156 @@ async fn open_folder_impl(folders: &FolderSwitch<'_>, path: &str) -> Result<Open
 /// The event the frontend listens to for external file changes; its payload is a `FsChange`.
 const FS_CHANGED_EVENT: &str = "studio://fs-changed";
 
+/// One watcher batch folded into the persistent indexes. A complete batch updates file by
+/// file (and persists). A truncated batch (more paths changed than the batch lists — a
+/// branch switch, a large checkout) drops the resident stores outright and announces the
+/// `Empty` status, exactly as the idle release does: updating with the partial list would
+/// leave the index silently wrong until the idle release let the next query repair it, and
+/// a resident store is never resumed (`ensure_blocking` early-returns on one) — dropping it
+/// sends the next query through the resume path, whose fingerprint pass repairs the gap
+/// from disk.
+fn apply_index_changes(
+    index: &std::sync::Arc<ggs_index::symbols::index::SymbolIndex>,
+    analysis: &std::sync::Arc<ggs_analysis::index::AnalysisIndex>,
+    sink: std::sync::Arc<dyn ggs_base::sink::EventSink>,
+    root: &str,
+    change: &crate::watcher::FsChange,
+) {
+    if change.truncated {
+        index.remove(root);
+        if let Ok(payload) = serde_json::to_value(index.status(root)) {
+            sink.emit(ggs_index::symbols::index::SYMBOL_INDEX_EVENT, payload);
+        }
+        analysis.remove(root);
+        if let Ok(payload) = serde_json::to_value(analysis.status(root)) {
+            sink.emit(ggs_analysis::index::ANALYSIS_INDEX_EVENT, payload);
+        }
+        return;
+    }
+    index.apply_changes(Some(std::sync::Arc::clone(&sink)), root, change.paths.clone());
+    analysis.apply_changes(Some(sink), root, change.paths.clone());
+}
+
+#[cfg(test)]
+mod index_changes_tests {
+    use super::*;
+    use crate::watcher::FsChange;
+    use ggs_base::sink::EventSink;
+    use ggs_index::symbols::index::IndexState;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Recorded(Mutex<Vec<(String, serde_json::Value)>>);
+
+    impl Clone for Recorded {
+        fn clone(&self) -> Self {
+            Recorded(Mutex::new(self.0.lock().unwrap().clone()))
+        }
+    }
+
+    impl EventSink for Recorded {
+        fn emit(&self, event: &str, payload: serde_json::Value) {
+            self.0.lock().unwrap().push((event.to_owned(), payload));
+        }
+    }
+
+    fn seeded(
+        root_dir: &std::path::Path,
+        home: &std::path::Path,
+    ) -> (
+        Arc<ggs_index::symbols::index::SymbolIndex>,
+        Arc<ggs_analysis::index::AnalysisIndex>,
+        String,
+    ) {
+        std::fs::write(root_dir.join("a.rs"), "fn alpha() { beta(); }\n").unwrap();
+        std::fs::write(root_dir.join("b.rs"), "fn beta() {}\n").unwrap();
+        let root = root_dir.display().to_string();
+        let index = Arc::new(ggs_index::symbols::index::SymbolIndex::with_home(
+            home.to_path_buf(),
+        ));
+        index.build_blocking(None, &root, None).unwrap();
+        let analysis = Arc::new(ggs_analysis::index::AnalysisIndex::new());
+        analysis.ensure_blocking(None, &root).unwrap();
+        (index, analysis, root)
+    }
+
+    /// A truncated batch (>200 paths: a branch switch, a large checkout) must not leave the
+    /// resident indexes stale: the store drops outright and the `Empty` status is announced,
+    /// so the next Go-to-Definition resumes from disk and repairs the gap — instead of the
+    /// old shape, where the batch was skipped outright and `ensure_blocking` early-returned
+    /// on the resident store until the five-minute idle release.
+    #[test]
+    fn a_truncated_batch_drops_the_resident_indexes_and_announces_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let (index, _analysis, root) = seeded(dir.path(), home.path());
+        let sink = Arc::new(Recorded::default());
+        apply_index_changes(
+            &index,
+            &_analysis,
+            std::sync::Arc::clone(&sink) as Arc<dyn EventSink>,
+            &root,
+            &FsChange {
+                truncated: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(index.status(&root).state, IndexState::Empty);
+        assert!(
+            index.lookup(&root, "alpha").is_none(),
+            "the stale store left memory"
+        );
+        let events = sink.0.lock().unwrap();
+        let names: Vec<&str> = events.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                ggs_index::symbols::index::SYMBOL_INDEX_EVENT,
+                ggs_analysis::index::ANALYSIS_INDEX_EVENT
+            ]
+        );
+        assert!(events.iter().all(|(_, payload)| payload["state"] == "empty"));
+        drop(events);
+        // The next query resumes and repairs: the index is never stale for minutes.
+        index.ensure_blocking(None, &root).unwrap();
+        assert_eq!(index.lookup(&root, "alpha").unwrap().len(), 1);
+    }
+
+    /// A complete batch still updates the index file by file — the truncated branch is the
+    /// only path that changed.
+    #[test]
+    fn a_complete_batch_updates_the_index_file_by_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let (index, _analysis, root) = seeded(dir.path(), home.path());
+        std::fs::write(dir.path().join("a.rs"), "fn alpha2() { beta(); }\n").unwrap();
+        apply_index_changes(
+            &index,
+            &_analysis,
+            Arc::new(Recorded::default()),
+            &root,
+            &FsChange {
+                paths: vec!["a.rs".to_owned()],
+                ..Default::default()
+            },
+        );
+        // apply_changes is a background thread; wait for it to land.
+        let mut landed = false;
+        for _ in 0..100 {
+            if index
+                .lookup(&root, "alpha2")
+                .is_some_and(|hits| !hits.is_empty())
+            {
+                landed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(landed, "the watcher batch reached the index");
+        assert_eq!(index.lookup(&root, "alpha").unwrap().len(), 0);
+    }
+}
+
 fn start_watcher(
     app: &tauri::AppHandle,
     file_list: &std::sync::Arc<ggs_fs::FileListCache>,
@@ -98,14 +248,8 @@ fn start_watcher(
         if change.paths.iter().any(|p| ggs_index::scan::is_symbol_source(p)) || change.truncated {
             symbols.invalidate();
         }
-        // The persistent index and the Code Analysis update file by file (a truncated
-        // batch only drops the legacy cache above; the next open's resume repairs the
-        // index in full).
-        if !change.truncated {
-            let sink = std::sync::Arc::new(crate::events::TauriEvents(app.clone()));
-            index.apply_changes(Some(sink.clone()), &watch_root, change.paths.clone());
-            analysis.apply_changes(Some(sink), &watch_root, change.paths.clone());
-        }
+        let sink = std::sync::Arc::new(crate::events::TauriEvents(app.clone()));
+        apply_index_changes(&index, &analysis, sink, &watch_root, &change);
         let _ = app.emit(FS_CHANGED_EVENT, change);
     })
 }

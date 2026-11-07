@@ -201,7 +201,10 @@ export class ScrollModel {
 		switch (strategy) {
 			case 'fit':
 			case 'newest': {
-				const keep = Math.min(margin, this.verticalScrollMargin);
+				// A margin never goes negative: a viewport shorter than one row floors the
+				// half-viewport bound below zero, and a negative keep would push the row
+				// just OUTSIDE the edge it was brought to.
+				const keep = Math.max(0, Math.min(margin, this.verticalScrollMargin));
 				const top = Math.max(0, target - keep);
 				const bottom = targetBottom + keep;
 				const start = this.topRow;
@@ -210,6 +213,12 @@ export class ScrollModel {
 				const needsDown = bottom >= end;
 				if (needsUp && !needsDown) return this.setTop(top, reason);
 				if (!needsUp && needsDown) return this.setTop(bottom - visible, reason);
+				if (needsUp && needsDown) {
+					// A viewport shorter than the row and its two margins wants both
+					// directions at once; leaving the row out of view is not an answer —
+					// place it at the viewport's top (the clamp bounds the document).
+					return this.setTop(top, reason);
+				}
 				return false;
 			}
 			case 'center':
