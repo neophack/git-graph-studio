@@ -22,9 +22,9 @@ where node >nul 2>nul
 if errorlevel 1 goto :nonode
 
 rem The installer packs the extension packages: the marketplace ones (Open VSX downloads,
-rem scripts\fetch-marketplace-extensions.mjs) — git-graph-rs rides in every build,
-rem claude-code does not (the Extensions view installs it from the marketplace on
-rem demand; set GGS_BUNDLE_CLAUDE_CODE=1 to pack it into this build) — plus
+rem scripts\fetch-marketplace-extensions.mjs) — git-graph-rs and claude-code ride in
+rem every build (set GGS_BUNDLE_CLAUDE_CODE=0 to leave claude-code out of this build;
+rem the Extensions view then installs it on demand) — plus
 rem claude-remote, packed from its local source (extensions-src\claude-remote) into
 rem every build (GGS_BUNDLE_CLAUDE_REMOTE=0 leaves it out; it needs no fetch and
 rem packs offline too). A selected marketplace package the fetch cannot serve fails

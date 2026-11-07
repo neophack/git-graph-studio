@@ -114,9 +114,10 @@ test('two remote users: the Claude Code and Git Graph entries, each user\'s page
 	testInfo.skip(!process.env.GGS_REMOTE_E2E_FULL, 'set GGS_REMOTE_E2E_FULL=1 (needs the built app and the Vite dev server)');
 	if (!existsSync(appExe)) testInfo.skip(true, `app binary missing: ${appExe}`);
 	// The spec asserts the Claude Code entry exists: it only runs against a build that packs
-	// it (the default packs none — the Extensions view installs it online instead).
+	// it (the default packs it; GGS_BUNDLE_CLAUDE_CODE=0 — or an unchecked release-form box
+	// — leaves it out, the Extensions view installing it online instead).
 	if (!existsSync(resolve(root, 'target/studio/bundled/app-resources/extensions/claude-code.vsix'))) {
-		testInfo.skip(true, 'this build bundles no claude-code (build with GGS_BUNDLE_CLAUDE_CODE=1 to run this spec)');
+		testInfo.skip(true, 'this build bundles no claude-code (GGS_BUNDLE_CLAUDE_CODE=0 left it out)');
 	}
 	test.setTimeout(240_000);
 	const home = homeFor('two-users');

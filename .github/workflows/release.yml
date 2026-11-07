@@ -11,10 +11,9 @@
 # commit. Check `full` to also build the macOS x64 dmg.
 #
 # The extension checkboxes decide which packages are packed INTO the installers
-# (studio.yml's GGS_BUNDLE_* env): `bundle-git-graph` checked by default,
-# `bundle-claude-code` unchecked by default (its 100+ MB platform VSIX stays out of
-# the installers; the Extensions view's marketplace row installs it on demand).
-# A pushed tag takes the same defaults.
+# (studio.yml's GGS_BUNDLE_* env): both checked by default (2026-11-07, the owner's
+# direction — claude-code rode in none by default until then, the Extensions view's
+# marketplace row installing it on demand). A pushed tag takes the same defaults.
 #
 # Artifacts per release: windows NSIS setup exe (the one Windows format; the MSI was
 # dropped 2026-10-14 at the owner's direction), deb x64 and arm64 (Ubuntu 22.04-26.04 /
@@ -52,7 +51,7 @@ on:
       bundle-claude-code:
         description: 'Pack claude-code into the installers'
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions:
@@ -102,10 +101,12 @@ jobs:
     with:
       full: ${{ inputs.full == true }}
       studio-version: ${{ needs.resolve-tag.outputs.version }}
-      # `!= false` / `== true` so a tag push (no dispatch inputs at all) falls through
-      # to studio.yml's own defaults: git-graph-rs packed, claude-code not.
-      bundle-git-graph: ${{ inputs.bundle-git-graph != false }}
-      bundle-claude-code: ${{ inputs.bundle-claude-code == true }}
+      # A pushed tag carries no dispatch inputs at all, and a null input reads as false
+      # against the loose == (both null and false cast to 0) — so the push branch passes
+      # the checked-by-default booleans straight through; a dispatch run forwards its
+      # checkboxes as-is (studio.yml's call defaults stand behind them).
+      bundle-git-graph: ${{ github.event_name == 'push' && true || inputs.bundle-git-graph }}
+      bundle-claude-code: ${{ github.event_name == 'push' && true || inputs.bundle-claude-code }}
 
   # The Hub's container image (ggs-remote-plan.md §20.9 / M9.9): the same Dockerfile
   # hub/deploy/ serves locally, pushed to GHCR for both server architectures under the

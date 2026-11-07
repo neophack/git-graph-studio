@@ -22,11 +22,10 @@ tree), the view's
 write path, its webview page and its comparison pages — lives in the **git-graph-rs** plugin
 (its own standard VSIX build), and the app's own
 git reads and writes run the `git` CLI with no plugin installed. The installers carry the
-marketplace's per-architecture builds of the extension packages a release chose to pack:
-**git-graph-rs** rides in every build (installed on first launch, like VS Code's bundled
-extensions); **claude-code** rides in none by default — it installs from the Extensions
-view's marketplace row on demand (a release form checkbox or `GGS_BUNDLE_CLAUDE_CODE=1`
-can pack it). The Claude sidebar carries an **AI provider switcher**: run the official
+marketplace's per-architecture builds of the extension packages: **git-graph-rs** and
+**claude-code** ride in every build (installed on first launch, like VS Code's bundled
+extensions; a release form checkbox or `GGS_BUNDLE_CLAUDE_CODE=0` leaves claude-code
+out, and the Extensions view's marketplace row then installs it on demand). The Claude sidebar carries an **AI provider switcher**: run the official
 Claude service or any Anthropic-compatible endpoint — DeepSeek, Zhipu GLM, Moonshot Kimi,
 a custom gateway — with the API key AES-256-GCM sealed at rest under `~/.ggs/` and
 decrypted only when the active provider is applied to Claude's redirected settings

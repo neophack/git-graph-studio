@@ -13,12 +13,12 @@
 // checkboxes (release.yml / studio.yml forward them as env):
 //
 //   GGS_BUNDLE_GIT_GRAPH      default 1 — pack git-graph-rs
-//   GGS_BUNDLE_CLAUDE_CODE    default 0 — claude-code never rides in an
-//                             installer by default (2026-09-28, the owner's
-//                             direction: it is a 100+ MB download the Extensions
-//                             view serves on demand); CI's release form can
-//                             still check it back in, and a local build opts
-//                             in with GGS_BUNDLE_CLAUDE_CODE=1
+//   GGS_BUNDLE_CLAUDE_CODE    default 1 — claude-code rides in every installer
+//                             (2026-11-07, the owner's direction; it was out
+//                             by default from 2026-09-28, the Extensions view's
+//                             marketplace row then serving the 100+ MB package
+//                             on demand); GGS_BUNDLE_CLAUDE_CODE=0 — or CI's
+//                             release form unchecking its box — leaves it out
 //   ... =1/true to pack, =0/false to leave the package out of the installer
 //
 // Caching: downloads land under <target>/studio/marketplace-cache/ keyed by
@@ -34,6 +34,10 @@
 //
 //   GGS_MARKETPLACE_URL        override the registry origin (tests, mirrors)
 //   GGS_MARKETPLACE_CACHE_HOURS  TTL of the cache in hours (default 12; 0 = always re-check)
+//   GGS_MARKETPLACE_DOWNLOAD_STALL_MS  abort a download that receives no bytes
+//                              for this long (default 120000 = 2 min) — the
+//                              only download deadline that matters; a slow
+//                              but flowing download runs to completion
 //   GGS_REQUIRE_MARKETPLACE=1  a SELECTED package that cannot be fetched fails
 //                              the build (CI sets this implicitly through CI=true)
 //   GGS_SKIP_MARKETPLACE_FETCH=1  no network at all: only fresh cache is used
@@ -53,13 +57,13 @@ export const DEFAULT_GALLERY = process.env.GGS_MARKETPLACE_URL || 'https://open-
 // row installs it on demand).
 export const MARKETPLACE_PACKAGES = [
 	{ slug: 'git-graph-rs', env: 'GGS_BUNDLE_GIT_GRAPH', namespace: 'neophack', name: 'git-graph-rs', engineRequired: true, defaultSelected: true },
-	{ slug: 'claude-code', env: 'GGS_BUNDLE_CLAUDE_CODE', namespace: 'Anthropic', name: 'claude-code', engineRequired: false, defaultSelected: false }
+	{ slug: 'claude-code', env: 'GGS_BUNDLE_CLAUDE_CODE', namespace: 'Anthropic', name: 'claude-code', engineRequired: false, defaultSelected: true }
 ];
 
-/// The package's `env` switch as a boolean, on its spec's default. git-graph-rs
-/// rides in every installer unless told not to; claude-code never does unless a
-/// build explicitly asks for it (the Extensions view's marketplace row installs
-/// it on demand, so the 100+ MB package stays out of the default download).
+/// The package's `env` switch as a boolean, on its spec's default. Both packages
+/// ride in every installer unless a build tells them not to (a `=0` env, or CI's
+/// release form unchecking the box); the Extensions view's marketplace row still
+/// installs a left-out package on demand.
 export function bundleSelected(spec, env = process.env) {
 	const value = env[spec.env];
 	if (value === undefined || value === '') return spec.defaultSelected ?? true;
@@ -188,15 +192,49 @@ async function lookup(base, spec, targetPlatform) {
 	return { id: `${spec.namespace}.${spec.name}`, version: entry.version, url };
 }
 
+/* The download's budget is the connection's liveliness, not a total wall clock:
+ * claude-code's 165 MB on a slow link needs whatever time it needs as long as
+ * bytes keep arriving (the first version's flat 10-minute cap aborted exactly
+ * such a download and failed the build), while a dead connection must fail —
+ * two minutes of silence does it (GGS_MARKETPLACE_DOWNLOAD_STALL_MS). The
+ * ceiling behind the stall guard is the drip-feed backstop: a server sending
+ * one byte a minute would otherwise hold the build forever. */
+const STALLED = Symbol('stalled');
+const DOWNLOAD_STALL_MS = 120_000;
+
 async function download(url, tmpPath) {
-	const response = await fetch(url, { signal: AbortSignal.timeout(10 * 60_000) });
+	const response = await fetch(url, { signal: AbortSignal.timeout(30 * 60_000) });
 	if (!response.ok) throw new Error(`download answered ${response.status}`);
-	const bytes = Buffer.from(await response.arrayBuffer());
-	if (bytes.length < 100 * 1024) {
-		throw new Error(`download is only ${bytes.length} bytes — not a package`);
+	const stallMs = Number(process.env.GGS_MARKETPLACE_DOWNLOAD_STALL_MS ?? DOWNLOAD_STALL_MS);
+	const reader = response.body.getReader();
+	const chunks = [];
+	let bytes = 0;
+	try {
+		for (;;) {
+			let timer;
+			const step = await Promise.race([
+				reader.read(),
+				new Promise((resolve) => {
+					timer = setTimeout(() => resolve(STALLED), stallMs);
+				})
+			]);
+			clearTimeout(timer);
+			if (step === STALLED) {
+				throw new Error(`download stalled — no bytes for ${stallMs / 1000}s after ${bytes} bytes`);
+			}
+			if (step.done) break;
+			chunks.push(step.value);
+			bytes += step.value.length;
+		}
+	} catch (reason) {
+		await reader.cancel().catch(() => {});
+		throw reason;
+	}
+	if (bytes < 100 * 1024) {
+		throw new Error(`download is only ${bytes} bytes — not a package`);
 	}
 	rmSync(tmpPath, { force: true });
-	writeFileSync(tmpPath, bytes);
+	writeFileSync(tmpPath, Buffer.concat(chunks));
 	return tmpPath;
 }
 

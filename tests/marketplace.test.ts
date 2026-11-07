@@ -16,7 +16,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 
-import { fetchMarketplacePackages, MARKETPLACE_PACKAGES, validatePackage } from '../scripts/fetch-marketplace-extensions.mjs';
+import { bundleSelected, fetchMarketplacePackages, MARKETPLACE_PACKAGES, validatePackage } from '../scripts/fetch-marketplace-extensions.mjs';
 
 const REGISTRY = 'https://open-vsx.test';
 const PLATFORM = 'linux-x64';
@@ -92,14 +92,40 @@ const registryEntry = (version: string, url: string) => ({
 	json: async () => ({ downloadable: true, version, downloads: { [PLATFORM]: url } })
 });
 
+/** The bytes the download's chunk reader consumes: real chunks in order, then the
+ * stream ends — or hangs forever on 'stall', a connection that stops sending. */
+const splitInto = (bytes: Buffer, count: number): Uint8Array[] => {
+	const size = Math.ceil(bytes.length / count);
+	const chunks: Uint8Array[] = [];
+	for (let at = 0; at < bytes.length; at += size) chunks.push(bytes.subarray(at, at + size));
+	return chunks;
+};
+
+const bodyMock = (chunks: (Uint8Array | 'stall')[], delayMs = 0) => {
+	let at = 0;
+	return {
+		getReader: () => ({
+			read: async (): Promise<{ done: true } | { done: false; value: Uint8Array }> => {
+				const entry = chunks[at++];
+				if (entry === undefined) return { done: true };
+				if (entry === 'stall') return new Promise(() => undefined);
+				if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+				return { done: false, value: entry };
+			},
+			cancel: async () => undefined
+		})
+	};
+};
+
 const fileResponse = (bytes: Buffer) => ({
 	ok: true,
 	status: 200,
-	arrayBuffer: async () => bytes
+	body: bodyMock(splitInto(bytes, 3))
 });
 
 afterEach(() => {
 	vi.unstubAllGlobals();
+	vi.unstubAllEnvs();
 });
 
 describe('the marketplace fetch cache (module 15)', () => {
@@ -177,6 +203,52 @@ describe('the marketplace fetch cache (module 15)', () => {
 		expect(result['git-graph-rs']).toMatchObject({ selected: true, version: '1.0.0', fromCache: true, stale: true });
 		expect(warn).toHaveBeenCalledWith(expect.stringContaining('stale cache'));
 	});
+
+	// The download's budget is the connection's liveliness (2026-11-07: the flat
+	// 10-minute wall clock aborted claude-code's 165 MB on a slow link and failed
+	// the build): bytes that keep arriving take whatever time they need, a dead
+	// connection fails on its silence.
+	it('a slow but flowing download completes — no total wall clock', async () => {
+		const cacheDir = primeCache();
+		const newer = makeVsix();
+		vi.stubEnv('GGS_MARKETPLACE_DOWNLOAD_STALL_MS', '1000');
+		vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+			if (url === `${REGISTRY}/api/neophack/git-graph-rs`) {
+				return registryEntry('1.1.0', `${REGISTRY}/file/git-graph-rs-1.1.0.vsix`);
+			}
+			return { ok: true, status: 200, body: bodyMock(splitInto(newer, 3), 30) };
+		}));
+
+		const result = await fetchMarketplacePackages({
+			base: REGISTRY, cacheDir, targetPlatform: PLATFORM,
+			ttlHours: 0, require: false, skip: false, select: selectGitGraph
+		});
+
+		expect(result['git-graph-rs']).toMatchObject({ selected: true, version: '1.1.0', fromCache: false });
+		validatePackage(result['git-graph-rs']!.path!, gitGraphSpec);
+	});
+
+	it('a stalled download fails on its silence and serves the stale cache, never silently', async () => {
+		const cacheDir = primeCache();
+		const newer = makeVsix();
+		const firstChunk = splitInto(newer, 2)[0]!;
+		vi.stubEnv('GGS_MARKETPLACE_DOWNLOAD_STALL_MS', '50');
+		vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+			if (url === `${REGISTRY}/api/neophack/git-graph-rs`) {
+				return registryEntry('1.1.0', `${REGISTRY}/file/git-graph-rs-1.1.0.vsix`);
+			}
+			return { ok: true, status: 200, body: bodyMock([firstChunk, 'stall']) };
+		}));
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+		const result = await fetchMarketplacePackages({
+			base: REGISTRY, cacheDir, targetPlatform: PLATFORM,
+			ttlHours: 0, require: false, skip: false, select: selectGitGraph
+		});
+
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining('stalled'));
+		expect(result['git-graph-rs']).toMatchObject({ selected: true, version: '1.0.0', fromCache: true, stale: true });
+	});
 });
 
 describe('the build wiring (module 15)', () => {
@@ -184,6 +256,17 @@ describe('the build wiring (module 15)', () => {
 		const conf = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri', 'tauri.conf.json'), 'utf8'));
 		expect(conf.build.beforeBuildCommand).toContain('prepare.mjs --build');
 		expect(conf.build.beforeDevCommand).not.toContain('--build');
+	});
+
+	// The packing policy (2026-11-07, the owner's direction: both packages in every
+	// installer) — the defaults here are what a build with no GGS_BUNDLE_* set packs.
+	it('both marketplace packages default to packed; an explicit 0/false opts a build out', () => {
+		for (const spec of MARKETPLACE_PACKAGES) {
+			expect(bundleSelected(spec), `${spec.slug} default`).toBe(true);
+			expect(bundleSelected(spec, { [spec.env]: '0' }), `${spec.env}=0`).toBe(false);
+			expect(bundleSelected(spec, { [spec.env]: 'false' }), `${spec.env}=false`).toBe(false);
+			expect(bundleSelected(spec, { [spec.env]: '1' }), `${spec.env}=1`).toBe(true);
+		}
 	});
 });
 

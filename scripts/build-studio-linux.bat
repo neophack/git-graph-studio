@@ -62,14 +62,16 @@ if "%~1"=="shell" (
 
 echo [2/2] Building the %BUNDLES% installers in the %BASE% container
 rem GGS_REQUIRE_MARKETPLACE: the installer packs the marketplace extension packages (Open
-rem VSX downloads, scripts/fetch-marketplace-extensions.mjs): git-graph-rs rides in every
-rem build, claude-code does not (the Extensions view installs it from the marketplace on
-rem demand; pass GGS_BUNDLE_CLAUDE_CODE=1 through to pack it). A selected package the
+rem VSX downloads, scripts/fetch-marketplace-extensions.mjs): git-graph-rs and claude-code
+rem ride in every build (pass GGS_BUNDLE_CLAUDE_CODE=0 through to leave claude-code out;
+rem the Extensions view then installs it on demand). A selected package the
 rem fetch cannot serve fails the build. GGS_SKIP_MARKETPLACE_FETCH=1 builds fully
 rem offline without either package.
 set MARKETPLACE_REQUIRE=GGS_REQUIRE_MARKETPLACE=1
 if defined GGS_SKIP_MARKETPLACE_FETCH set MARKETPLACE_REQUIRE=GGS_SKIP_MARKETPLACE_FETCH=1
-docker run --rm -v "%cd%:/repo" -v ggs-studio-linux-cache:/cache -e BUNDLES=%BUNDLES% -e OUT_DIR=%OUT_DIR% -e %MARKETPLACE_REQUIRE% %TAG% bash /repo/scripts/docker/studio-linux-build.sh
+set "BUNDLE_CLAUDE="
+if defined GGS_BUNDLE_CLAUDE_CODE set "BUNDLE_CLAUDE=-e GGS_BUNDLE_CLAUDE_CODE=%GGS_BUNDLE_CLAUDE_CODE%"
+docker run --rm -v "%cd%:/repo" -v ggs-studio-linux-cache:/cache -e BUNDLES=%BUNDLES% -e OUT_DIR=%OUT_DIR% -e %MARKETPLACE_REQUIRE% %BUNDLE_CLAUDE% %TAG% bash /repo/scripts/docker/studio-linux-build.sh
 if errorlevel 1 goto :fail
 
 echo.

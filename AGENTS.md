@@ -643,11 +643,13 @@ local source; a selected package the fetch cannot serve from cache leaves the bu
 unpacked, or fails it in require mode) — into `extensions/`
 beside the app. The first launch installs whatever sits there like
 VS Code's bundled extensions (`cmd_ext::install_missing_bundled`; a deliberate uninstall
-stays uninstalled). Which packages ride is one policy everywhere (2026-09-28, the owner's
-direction): git-graph-rs in every build, claude-code in none by default — the Extensions
-view's marketplace row installs it online on demand. The `GGS_BUNDLE_GIT_GRAPH` /
+stays uninstalled). Which packages ride is one policy everywhere (2026-11-07, the owner's
+direction; claude-code rode in none by default from 2026-09-28 until then): git-graph-rs
+and claude-code in every build — the Extensions view's marketplace row still installs a
+left-out package online on demand. The `GGS_BUNDLE_GIT_GRAPH` /
 `GGS_BUNDLE_CLAUDE_CODE` env are the switches (CI's release form forwards its
-checkboxes; `GGS_BUNDLE_CLAUDE_CODE=1` opts a build back in).
+checkboxes, both checked by default; `GGS_BUNDLE_CLAUDE_CODE=0` or an unchecked box
+opts a build out).
 A marketplace package a build left out still installs from
 the Extensions view's marketplace row. **Install means run**: the boot
 pass starts every installed package that declares a backend
@@ -1410,8 +1412,9 @@ Everything that turns the source tree into installers: asset assembly into
   marketplace builds — `scripts/fetch-marketplace-extensions.mjs` downloads them from
   Open VSX per architecture and packs exactly what the build selected:
   `GGS_BUNDLE_GIT_GRAPH` / `GGS_BUNDLE_CLAUDE_CODE`, the release form's checkboxes in CI —
-  git-graph-rs packed in every build, claude-code in none by default (the Extensions view's
-  marketplace row installs it online; `GGS_BUNDLE_CLAUDE_CODE=1` opts a build back in);
+  both packed in every build by default (claude-code rode in none by default until
+  2026-11-07; the Extensions view's marketplace row installs a left-out package online;
+  `GGS_BUNDLE_CLAUDE_CODE=0` or an unchecked box opts a build out);
   there is no local source for either package — in require mode a fetch a selected package
   cannot serve fails the build. A build pass re-checks the registry
   even when the cache is

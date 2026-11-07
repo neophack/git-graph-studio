@@ -63,13 +63,13 @@
 # published (`full` adds the niche macOS x64 platform).
 #
 # Which extension packages are packed INTO the installers is one policy everywhere
-# (2026-09-28, the owner's direction): git-graph-rs rides in every build, claude-code
-# in none by default — the Extensions view's marketplace row installs it on demand.
-# The release form's checkboxes reach the build as
-# GGS_BUNDLE_GIT_GRAPH / GGS_BUNDLE_CLAUDE_CODE
+# (2026-11-07, the owner's direction): git-graph-rs and claude-code ride in every build
+# by default (claude-code was out by default until then, the Extensions view's
+# marketplace row installing it on demand). The release form's checkboxes reach the
+# build as GGS_BUNDLE_GIT_GRAPH / GGS_BUNDLE_CLAUDE_CODE
 # (scripts/fetch-marketplace-extensions.mjs and scripts/prepare.mjs), and a pushed tag
-# or a plain push to main takes the same defaults (`GGS_BUNDLE_CLAUDE_CODE=1` opts a
-# build back in).
+# or a plain push to main takes the same defaults (a `=0` env or an unchecked box
+# opts a build out).
 
 name: Studio
 
@@ -97,7 +97,7 @@ on:
       bundle-claude-code:
         description: 'Pack claude-code into the installers'
         required: false
-        default: false
+        default: true
         type: boolean
   workflow_call:
     inputs:
@@ -115,7 +115,7 @@ on:
         type: boolean
       bundle-claude-code:
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions:
@@ -502,9 +502,12 @@ jobs:
     if: github.event_name != 'pull_request'
     env:
       # The release form's checkboxes (see the header note): GGS_BUNDLE_* answers "is
-      # this package packed into the installers" for every prepare.mjs run below.
-      GGS_BUNDLE_GIT_GRAPH: ${{ inputs.bundle-git-graph == false && '0' || '1' }}
-      GGS_BUNDLE_CLAUDE_CODE: ${{ inputs.bundle-claude-code == true && '1' || '0' }}
+      # this package packed into the installers" for every prepare.mjs run below. A
+      # push to main carries no inputs at all, and a null input reads as false against
+      # the loose == (both null and false cast to 0), so the push branch answers the
+      # checkbox defaults directly: both packages packed.
+      GGS_BUNDLE_GIT_GRAPH: ${{ github.event_name == 'push' && '1' || inputs.bundle-git-graph == false && '0' || '1' }}
+      GGS_BUNDLE_CLAUDE_CODE: ${{ github.event_name == 'push' && '1' || inputs.bundle-claude-code == false && '0' || '1' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -675,8 +678,8 @@ jobs:
     env:
       # The release form's checkboxes, as in the Windows job (the deb leg's native
       # prepare and the container build read the same answer).
-      GGS_BUNDLE_GIT_GRAPH: ${{ inputs.bundle-git-graph == false && '0' || '1' }}
-      GGS_BUNDLE_CLAUDE_CODE: ${{ inputs.bundle-claude-code == true && '1' || '0' }}
+      GGS_BUNDLE_GIT_GRAPH: ${{ github.event_name == 'push' && '1' || inputs.bundle-git-graph == false && '0' || '1' }}
+      GGS_BUNDLE_CLAUDE_CODE: ${{ github.event_name == 'push' && '1' || inputs.bundle-claude-code == false && '0' || '1' }}
     strategy:
       fail-fast: false
       matrix:
@@ -816,8 +819,8 @@ jobs:
     if: github.event_name != 'pull_request'
     env:
       # The release form's checkboxes, as in the Windows job.
-      GGS_BUNDLE_GIT_GRAPH: ${{ inputs.bundle-git-graph == false && '0' || '1' }}
-      GGS_BUNDLE_CLAUDE_CODE: ${{ inputs.bundle-claude-code == true && '1' || '0' }}
+      GGS_BUNDLE_GIT_GRAPH: ${{ github.event_name == 'push' && '1' || inputs.bundle-git-graph == false && '0' || '1' }}
+      GGS_BUNDLE_CLAUDE_CODE: ${{ github.event_name == 'push' && '1' || inputs.bundle-claude-code == false && '0' || '1' }}
     strategy:
       fail-fast: false
       matrix:

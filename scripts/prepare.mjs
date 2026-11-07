@@ -25,8 +25,8 @@
 // local source, so a fetch that cannot be served from cache leaves the package unpacked —
 // or fails the build in require mode). Which packages ride in the installer is a build-time
 // choice (GGS_BUNDLE_GIT_GRAPH / GGS_BUNDLE_CLAUDE_CODE — CI's release form forwards its
-// checkboxes): git-graph-rs rides in every build, claude-code in none by default (the
-// Extensions view installs it from the marketplace on demand). The first launch installs
+// checkboxes): both ride in every build by default (2026-11-07, the owner's direction;
+// GGS_BUNDLE_*=0 or an unchecked box leaves a package out). The first launch installs
 // whatever was packed, like VS Code's bundled extensions.
 import { checkSeams } from './check-seams.mjs';
 import { fetchMarketplacePackages } from './fetch-marketplace-extensions.mjs';
@@ -233,8 +233,8 @@ const packGitGraph = Boolean(externalVsix) || gitGraphMarketplace?.selected !== 
  *
  *      extensions/git-graph-rs.vsix   the marketplace's build (or the --vsix
  *                                     substitution, verbatim)
- *      extensions/claude-code.vsix    the marketplace's build, only when a build
- *                                     explicitly selected it
+ *      extensions/claude-code.vsix    the marketplace's build (packed by default; a
+ *                                     build that leaves it out ships none)
  *
  *    The directory is rebuilt from nothing every run (a stale file here would ship: the
  *    mapping packs whatever sits in it). `--vsix <path>` (or GGS_BUNDLED_VSIX) substitutes
@@ -254,10 +254,10 @@ if (externalVsix) {
 	console.warn('git-graph-rs: marketplace fetch unavailable — not packed (the Extensions view installs it from the marketplace)');
 }
 
-/* claude-code is left out by the same build-time choice, and its default is out
- * (2026-09-28, the owner's direction: the Extensions view's marketplace row
- * installs it on demand, so the default download stays small); only
- * GGS_BUNDLE_CLAUDE_CODE=1 — or CI's release form checking its box — packs it. */
+/* claude-code rides by the same build-time choice, and its default is in
+ * (2026-11-07, the owner's direction: every installer carries it); only
+ * GGS_BUNDLE_CLAUDE_CODE=0 — or CI's release form unchecking its box — leaves
+ * it out (the Extensions view's marketplace row then installs it on demand). */
 const claudeCode = marketplace['claude-code'];
 if (claudeCode?.path) {
 	copyFileSync(claudeCode.path, join(bundledDir, 'claude-code.vsix'));

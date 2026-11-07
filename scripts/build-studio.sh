@@ -36,9 +36,9 @@ command -v node >/dev/null 2>&1 || {
 }
 
 # The installer packs the extension packages: the marketplace ones (Open VSX downloads,
-# scripts/fetch-marketplace-extensions.mjs) - git-graph-rs rides in every build,
-# claude-code does not (the Extensions view installs it from the marketplace on
-# demand; set GGS_BUNDLE_CLAUDE_CODE=1 to pack it into this build) - plus
+# scripts/fetch-marketplace-extensions.mjs) - git-graph-rs and claude-code ride in
+# every build (set GGS_BUNDLE_CLAUDE_CODE=0 to leave claude-code out of this build;
+# the Extensions view then installs it on demand) - plus
 # claude-remote, packed from its local source (extensions-src/claude-remote) into
 # every build (GGS_BUNDLE_CLAUDE_REMOTE=0 leaves it out; it needs no fetch and
 # packs offline too). A selected marketplace package the fetch cannot serve fails
