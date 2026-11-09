@@ -2401,11 +2401,18 @@ body.resizing iframe { pointer-events: none; }
 .prov-notes { max-width: 760px; display: flex; flex-direction: column; gap: 3px; margin-top: 14px; }
 .prov-notes div { font-size: 10.5px; color: color-mix(in srgb, var(--vscode-descriptionForeground, #8b8b8b) 85%, transparent); }
 .prov-empty { max-width: 760px; padding: 10px 2px; font-size: 12px; color: var(--vscode-descriptionForeground); }
-/* The Claude tweaks: the complaint-list switches, one checkbox per row, flowing in
-   columns inside the page width. */
-.prov-tweaks { max-width: 760px; display: flex; flex-direction: column; gap: 2px; }
-.prov-tweaks-subtitle { font-size: 11px; color: color-mix(in srgb, var(--vscode-descriptionForeground, #8b8b8b) 85%, transparent); margin: 2px 0 6px; }
+/* The Claude tweaks: the complaint-list switches, one checkbox per item, laid out
+   in multiple columns inside the page width (a narrow page falls back to fewer
+   columns and finally one). */
+.prov-tweaks {
+	max-width: 760px;
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+	gap: 2px 10px;
+}
+.prov-tweaks-subtitle { grid-column: 1 / -1; font-size: 11px; color: color-mix(in srgb, var(--vscode-descriptionForeground, #8b8b8b) 85%, transparent); margin: 2px 0 6px; }
 .prov-tweak { padding: 2px 4px; border-radius: 4px; }
+.prov-tweak span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .prov-tweak:hover { background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 6%, transparent); }
 
 /* The add / edit form: a flat two-column card inside the page's width. */
