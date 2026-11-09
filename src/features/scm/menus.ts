@@ -127,7 +127,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 					{ label: 'Commit (Signed Off)', run: () => void this.subCommit(sub, { signoff: true }) },
 					{ label: 'Commit Staged (Signed Off)', run: () => void this.subCommit(sub, { signoff: true, stagedOnly: true }) },
 					'separator',
-					{ label: 'Undo Last Commit', run: () => run(() => gitOp('scm_undo_last_commit', {})) }
+					{ label: 'Undo Last Commit', run: () => void this.subUndoCommit(sub) }
 				]
 			},
 			{

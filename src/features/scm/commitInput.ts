@@ -2,7 +2,7 @@
 
 
 import { invoke } from '../../platform/ipc/core';
-import { gitCommit, gitStageAll, scmRemotes, type RemoteInfo } from '../../platform/ipc/scm';
+import { gitCommit, gitStageAll, scmRemotes, scmUndoLastCommit, type RemoteInfo } from '../../platform/ipc/scm';
 import { confirmDialog, el, icon, notify, quickPick, showContextMenu } from '../../platform/ui/index';
 import { SubRepoState } from './view';
 import type { SourceControlView } from './view';
@@ -170,6 +170,18 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 		if (followUp) await followUp();
 	},
 
+	/** Undo Last Commit: soft-reset past it and carry its message back into the box — the
+	 *  commit stands ready to re-word and re-commit, VS Code's undo behaviour. */
+	async undoCommit(): Promise<void> {
+		try {
+			this.message = await scmUndoLastCommit();
+		} catch (error) {
+			notify('error', String(error));
+		}
+		await this.refresh();
+		this.onChanged?.();
+	},
+
 	subCommitBox(sub: SubRepoState): HTMLElement {
 		const box = el('div', 'scm-input');
 		const input = el('textarea', 'input');
@@ -280,6 +292,16 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 		await this.refresh();
 		this.onChanged?.();
 		if (followUp) await followUp();
+	},
+
+	async subUndoCommit(sub: SubRepoState): Promise<void> {
+		try {
+			sub.message = await scmUndoLastCommit(sub.repoPath);
+		} catch (error) {
+			notify('error', String(error));
+		}
+		await this.refresh();
+		this.onChanged?.();
 	},
 
 	placeholder(): string {

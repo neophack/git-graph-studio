@@ -53,7 +53,8 @@ describe('source control view', () => {
 			openFolder: async () => undefined,
 			showOutput: () => undefined,
 			graphSettings: () => ({}),
-			commit: (options) => view.commit(options)
+			commit: (options) => view.commit(options),
+			undoCommit: () => view.undoCommit()
 		};
 		registerGitCommands(registry, host);
 		// The "..." menu's Amend/Gerrit entries come from the extension's own manifest
@@ -355,6 +356,29 @@ describe('source control view', () => {
 		await view.commit({ all: true });
 		expect(backend.callsTo('git_stage_all')).toHaveLength(2);
 		expect(backend.callsTo('git_commit').at(-1)).toEqual({ message: 'All', amend: false });
+	});
+
+	it('refills the commit box with the undone commit\'s message after Undo Last Commit', async () => {
+		const { view } = setup([change('a.txt', { staged: 'modified' })]);
+		view.setRepo(REPO);
+		await view.refresh();
+		// The backend's answer is the undone commit's message; the box renders it (the
+		// refresh re-renders the input), ready to re-word and re-commit.
+		backend.on('scm_undo_last_commit', () => 'Fix the leak');
+		await view.undoCommit();
+		expect(backend.callsTo('scm_undo_last_commit')).toEqual([{}]);
+		expect(view.message).toBe('Fix the leak');
+		expect(document.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('Fix the leak');
+	});
+
+	it('routes the palette\'s Undo Last Commit through the view that owns the commit box', async () => {
+		const { view, registry } = setup([change('a.txt', { staged: 'modified' })]);
+		view.setRepo(REPO);
+		await view.refresh();
+		backend.on('scm_undo_last_commit', () => 'Redo me');
+		await registry.execute('git.undoCommit');
+		expect(backend.callsTo('scm_undo_last_commit')).toEqual([{}]);
+		expect(document.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('Redo me');
 	});
 
 	it('offers the "..." menu VS Code offers, with submenus, tree view and sorting', async () => {
@@ -1028,6 +1052,19 @@ describe('submodule sections', () => {
 		expect(backend.callsTo('git_commit')).toEqual([{ message: 'Update dep', amend: false, repo: SUB }]);
 	});
 
+	it('refills the submodule\'s commit box with the undone commit\'s message', async () => {
+		const { view } = setup();
+		view.setRepo(REPO);
+		await view.refresh();
+
+		backend.on('scm_undo_last_commit', (args) => (args['repo'] === SUB ? 'Bump dep' : 'Main'));
+		const sub = view.subRepos[0]!;
+		await view.subUndoCommit(sub);
+		expect(backend.callsTo('scm_undo_last_commit')).toEqual([{ repo: SUB }]);
+		expect(sub.message).toBe('Bump dep');
+		expect(document.querySelector('.scm-repo')!.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('Bump dep');
+	});
+
 	it('turns the submodule\'s button into Publish Branch once its tree is clean and the branch is unpublished', async () => {
 		const { view, setSubChanges } = setup({ subUpstream: null });
 		setSubChanges([]);
@@ -1159,16 +1196,18 @@ describe('git commands', () => {
 	function setup() {
 		const registry = new CommandRegistry();
 		const commits: Record<string, unknown>[] = [];
+		const undos: number[] = [];
 		const host: GitCommandHost = {
 			repoPath: () => REPO,
 			repoChanged: () => undefined,
 			openFolder: async () => undefined,
 			showOutput: () => undefined,
 			graphSettings: () => ({}),
-			commit: async (options) => { commits.push(options ?? {}); }
+			commit: async (options) => { commits.push(options ?? {}); },
+			undoCommit: async () => { undos.push(undos.length); }
 		};
 		registerGitCommands(registry, host);
-		return { registry, commits };
+		return { registry, commits, undos };
 	}
 
 	it('checkouts branches and tags picked from one list, excluding the current branch', async () => {
@@ -1617,5 +1656,11 @@ describe('git commands', () => {
 		await registry.execute('git.stageAllUntracked');
 		expect(backend.callsTo('git_stage_all_tracked')).toEqual([{}]);
 		expect(backend.callsTo('git_stage_all_untracked')).toEqual([{}]);
+	});
+
+	it('undo last commit routes through the view that owns the commit box', async () => {
+		const { registry, undos } = setup();
+		await registry.execute('git.undoCommit');
+		expect(undos).toHaveLength(1);
 	});
 });

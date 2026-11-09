@@ -105,6 +105,8 @@ export const scmRevertCommit = (target: string, repo?: string) => invoke<string>
 /** Reset the current branch to `target` at `mode`'s depth — `soft` | `mixed` | `hard`
  *  (anything else the backend rejects before git runs). */
 export const scmResetRef = (target: string, mode: 'soft' | 'mixed' | 'hard', repo?: string) => invoke<void>('scm_reset_ref', withRepo({ target, mode }, repo));
+/** Soft-reset past the last commit; the answer is its message, for the commit input to refill. */
+export const scmUndoLastCommit = (repo?: string) => invoke<string>('scm_undo_last_commit', withRepo({}, repo));
 /** Whether a branch's tip is reachable from HEAD (`git merge-base --is-ancestor`): the
  *  delete confirmation's merged/unmerged fact. */
 export const scmBranchMerged = (branchName: string, repo?: string) => invoke<boolean>('scm_branch_merged', withRepo({ branchName }, repo));

@@ -22,6 +22,8 @@ export interface GitCommandHost {
 	showOutput(): void;
 	/** The staged/unstaged state the SCM view knows, for the commit commands. */
 	commit(options: { amend?: boolean; all?: boolean; stagedOnly?: boolean; signoff?: boolean }): Promise<void>;
+	/** Undo Last Commit through the view, so the undone message refills its commit box. */
+	undoCommit(): Promise<void>;
 }
 
 /** Run one mutating backend command against the open repository; git's own complaint travels
@@ -481,7 +483,8 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 	commands.register({ id: 'git.commitAllSignedOff', title: 'Commit All (Signed Off)', category, enabled: hasRepo, run: () => host.commit({ signoff: true, all: true }) });
 	commands.register({ id: 'git.commitAmendSignedOff', title: 'Commit (Amend, Signed Off)', category, enabled: hasRepo, run: () => host.commit({ signoff: true, amend: true }) });
 	commands.register({ id: 'git.commitStagedAmendSignedOff', title: 'Commit Staged (Amend, Signed Off)', category, enabled: hasRepo, run: () => host.commit({ signoff: true, amend: true, stagedOnly: true }) });
-	add('git.undoCommit', 'Undo Last Commit', () => gitOp('scm_undo_last_commit', {}));
+	// Through the view: the undone commit's message refills its commit box.
+	commands.register({ id: 'git.undoCommit', title: 'Undo Last Commit', category, enabled: hasRepo, run: () => host.undoCommit() });
 
 	commands.register({ id: 'git.showOutput', title: 'Show Git Output', category, run: () => host.showOutput() });
 }

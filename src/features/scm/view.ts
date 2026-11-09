@@ -649,6 +649,8 @@ export class SourceControlView {
 
 	declare commit: (options?: { amend?: boolean; all?: boolean; stagedOnly?: boolean; signoff?: boolean }, followUp?: (() => Promise<void>) | null) => Promise<void> ;
 
+	declare undoCommit: () => Promise<void> ;
+
 	declare discard: (file: ScmChange) => Promise<void> ;
 
 	declare confirmDiscardOne: (file: ScmChange) => Promise<boolean> ;
@@ -707,6 +709,8 @@ export class SourceControlView {
 	declare subOpenChange: (sub: SubRepoState, file: ScmChange, key: ScmGroup, letter: string) => void ;
 
 	declare subCommit: (sub: SubRepoState, options?: { amend?: boolean; all?: boolean; stagedOnly?: boolean; signoff?: boolean }, followUp?: (() => Promise<void>) | null) => Promise<void> ;
+
+	declare subUndoCommit: (sub: SubRepoState) => Promise<void> ;
 
 	declare subDiscard: (sub: SubRepoState, file: ScmChange) => Promise<void> ;
 

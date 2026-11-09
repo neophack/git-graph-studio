@@ -221,11 +221,12 @@ pub async fn scm_delete_tag(
     ops::delete_tag(&git(&roots, repo)?, &tag_name)
 }
 
+/// The undone commit's message travels back, so the commit input can carry it.
 #[tauri::command]
 pub async fn scm_undo_last_commit(
     roots: State<'_, WorkspaceRoots>,
     repo: Option<String>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     ops::undo_last_commit(&git(&roots, repo)?)
 }
 

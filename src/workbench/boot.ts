@@ -321,7 +321,8 @@ export const bootMethods: ThisType<Workbench> = {
 			repoChanged: () => this.scheduleRefresh(0),
 			openFolder: (path) => this.openFolder(path),
 			showOutput: () => this.panel.show('output'),
-			commit: (options) => this.scm.commit(options)
+			commit: (options) => this.scm.commit(options),
+			undoCommit: () => this.scm.undoCommit()
 		});
 	},
 

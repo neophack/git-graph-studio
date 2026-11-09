@@ -539,8 +539,14 @@ pub fn delete_tag(git: &Git, name: &str) -> Status {
     check_ref("tagName", name).and_then(|_| git.run(&["tag", "--delete", name]))
 }
 
-pub fn undo_last_commit(git: &Git) -> Status {
-    git.run(&["reset", "--soft", "HEAD^"])
+/// `git reset --soft HEAD^` — the undone commit's message travels back as the answer, so the
+/// commit input can carry it (the commit is read before the reset moves HEAD off it).
+pub fn undo_last_commit(git: &Git) -> Result<String, String> {
+    let message = git
+        .output(&["log", "-1", "--format=%B", "HEAD"])
+        .map(|m| m.trim_end().to_owned())
+        .unwrap_or_default();
+    git.run(&["reset", "--soft", "HEAD^"]).map(|_| message)
 }
 
 fn current_branch(git: &Git) -> Option<String> {
@@ -1584,7 +1590,9 @@ mod tests {
 
         git.run(&["branch", "side"]).unwrap();
         merge(&git, "side").unwrap();
-        undo_last_commit(&git).unwrap();
+        // The undone commit's own message rides back, for the commit input to refill.
+        let undone = undo_last_commit(&git).unwrap();
+        assert_eq!(undone, "init");
         // `repo()` made the initial commit before the test's own "init" one; undo drops the
         // latter (its changes stay staged).
         assert_eq!(subject(&git, "HEAD"), "Initial commit");
