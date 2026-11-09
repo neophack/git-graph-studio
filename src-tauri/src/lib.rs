@@ -328,6 +328,7 @@ mod desktop {
             .manage(ggs_text::viewer::ViewerState::default())
             .manage(ggs_text::viewer::indexed::IndexedState::default())
             .manage(ggs_can::CanLogState::default())
+            .manage(ext_gallery::GalleryInstallState::default())
             // A clone of the app's one host (`ext_process::host()`), not a second,
             // independent `ExtHost`: the folder-open paths and the provider bridge's
             // restarts reach the same running backends through `host()` directly, with no
@@ -699,6 +700,7 @@ mod desktop {
                 ext_gallery::ext_gallery_search,
                 ext_gallery::ext_gallery_asset,
                 ext_gallery::ext_gallery_install,
+                ext_gallery::ext_gallery_install_cancel,
                 ext_process::ext_process_start,
                 ext_process::ext_process_run,
                 ext_process::ext_process_stop,

@@ -5,9 +5,25 @@
 //! VSIX path.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use ggs_ext::ExtInfo;
-use ggs_ext::gallery::{download_vsix, gallery_url, get, lookup, search, GalleryEntry, GallerySearch, ASSET_CAP, FEATURED};
+use tauri::ipc::Channel;
+
+use ggs_ext::gallery::{
+    download_vsix, gallery_url, get, lookup, search, GalleryEntry, GalleryProgress, GallerySearch,
+    ASSET_CAP, FEATURED,
+};
+
+/// The in-flight marketplace download's cancel flag: the install toast's Cancel sets it
+/// through `ext_gallery_install_cancel`, the download loop reads it on every progress
+/// report, and the next install resets it. The view refuses a second marketplace install
+/// while one runs, so the flag can only ever name the download in flight.
+#[derive(Clone, Default)]
+pub struct GalleryInstallState {
+    cancelled: Arc<AtomicBool>,
+}
 
 #[tauri::command]
 pub fn ext_gallery_featured() -> Vec<String> {
@@ -61,20 +77,32 @@ pub async fn ext_gallery_asset(gallery: Option<String>, url: String) -> Result<S
 /// the ordinary install path (manifest validation, forward-only upgrade, the
 /// unhostable-`.node` door) — and with the same backend stop-first an explicit VSIX
 /// install performs, so an upgraded process package's old exe is never replaced while
-/// it runs.
+/// it runs. The download streams [`GalleryProgress`] ticks over `on_progress`, and the
+/// install toast's Cancel stops it mid-body through the shared flag.
 #[tauri::command]
 pub async fn ext_gallery_install(
     app: tauri::AppHandle,
     state: tauri::State<'_, ggs_ext::process::ExtHost>,
+    cancel: tauri::State<'_, GalleryInstallState>,
     gallery: Option<String>,
     download_url: String,
+    on_progress: Channel<GalleryProgress>,
 ) -> Result<ExtInfo, String> {
     let base = gallery_url(gallery)?;
+    // A fresh install clears a stale cancel — a Cancel pressed on a finished download
+    // must not kill the next one — then the flag rides into the blocking task.
+    cancel.cancelled.store(false, Ordering::Relaxed);
+    let cancelled = Arc::clone(&cancel.cancelled);
     // Download and read the manifest off the UI thread; the backend stop and the install
     // follow once the id is known (the two things that touch shared state).
     let (package, ext_id) =
         tauri::async_runtime::spawn_blocking(move || -> Result<(PathBuf, String), String> {
-            let package = download_vsix(&base, &download_url)?;
+            let package = download_vsix(&base, &download_url, &mut |tick| {
+                if cancelled.load(Ordering::Relaxed) {
+                    return false;
+                }
+                on_progress.send(tick).is_ok()
+            })?;
             let manifest = ggs_ext::read_vsix_manifest(&package).inspect_err(|_| {
                 let _ = std::fs::remove_file(&package); // an unreadable package leaves no temp copy
             })?;
@@ -93,4 +121,11 @@ pub async fn ext_gallery_install(
     .await
     .map_err(|e| format!("the install was cancelled: {e}"))?;
     installed
+}
+
+/// The install toast's Cancel: the in-flight download stops at its next progress report
+/// and its half-written package is removed. Nothing else touches the flag.
+#[tauri::command]
+pub fn ext_gallery_install_cancel(cancel: tauri::State<'_, GalleryInstallState>) {
+    cancel.cancelled.store(true, Ordering::Relaxed);
 }

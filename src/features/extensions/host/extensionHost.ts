@@ -20,8 +20,8 @@ import { ActivationPolicy } from './sharedTypes';
 
 import { type ExtInfo, type StudioManifest } from '../../../platform/ipc/ext';
 import { type ExtProcessInfo, extProcessHostRespond } from '../../../platform/ipc/extProcess';
-import { type GalleryEntry } from '../../../platform/ipc/gallery';
-import { listen } from '../../../platform/ipc/core';
+import { type GalleryEntry, type GalleryProgress } from '../../../platform/ipc/gallery';
+import { listen, type Channel } from '../../../platform/ipc/core';
 import { commands } from '../../../platform/commands';
 import { type ManifestContributes } from '../contributions';
 import { extLog, flushExtLog, setExtLogOutput } from '../extLog';
@@ -379,9 +379,9 @@ export class ExtensionHost {
 
 	declare galleryIcon: (url: string) => Promise<string | null> ;
 
-	declare installFromGallery: (entry: GalleryEntry) => Promise<ExtInfo> ;
+	declare installFromGallery: (entry: GalleryEntry, onProgress?: Channel<GalleryProgress>) => Promise<ExtInfo> ;
 
-	declare installDependencies: (info: ExtInfo, seen?: Set<string>) => Promise<ExtInfo[]>;
+	declare installDependencies: (info: ExtInfo, seen?: Set<string>, onProgress?: Channel<GalleryProgress>) => Promise<ExtInfo[]>;
 
 	declare installBundled: (extId: string) => Promise<ExtInfo> ;
 

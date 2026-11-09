@@ -9,7 +9,8 @@ import type { ExtensionHost } from './extensionHost';
 import { extChildStopFor } from '../../../platform/ipc/extChild';
 import { type ExtInfo, extInstallBundled, extInstallFromVsix, extList, extUninstall } from '../../../platform/ipc/ext';
 import { type ExtProcessInfo, extProcessStart, extProcessStatus, extProcessStop } from '../../../platform/ipc/extProcess';
-import { type GalleryEntry, extGalleryAsset, extGalleryFeatured, extGalleryInstall, extGalleryLookup } from '../../../platform/ipc/gallery';
+import { Channel } from '../../../platform/ipc/core';
+import { type GalleryEntry, type GalleryProgress, extGalleryAsset, extGalleryFeatured, extGalleryInstall, extGalleryLookup } from '../../../platform/ipc/gallery';
 import { removeContributions } from '../contributions';
 import { extLog } from '../extLog';
 import { tf } from '../../../platform/i18n';
@@ -72,13 +73,15 @@ export const storeMethods: ThisType<ExtensionHost> = {
 		return pending;
 	},
 
-	async installFromGallery(entry: GalleryEntry): Promise<ExtInfo> {
-		const info = await extGalleryInstall(MARKETPLACE_URL, entry.downloadUrl);
+	/** `onProgress` carries the download's ticks (the Extensions view's install toast);
+	 *  without one the install runs the same way over a channel nobody reads. */
+	async installFromGallery(entry: GalleryEntry, onProgress?: Channel<GalleryProgress>): Promise<ExtInfo> {
+		const info = await extGalleryInstall(MARKETPLACE_URL, entry.downloadUrl, onProgress ?? new Channel<GalleryProgress>());
 		await this.reload(info.id);
 		return info;
 	},
 
-	async installDependencies(info: ExtInfo, seen = new Set<string>()): Promise<ExtInfo[]> {
+	async installDependencies(info: ExtInfo, seen = new Set<string>(), onProgress?: Channel<GalleryProgress>): Promise<ExtInfo[]> {
 		seen.add(info.id.toLowerCase());
 		const installed: ExtInfo[] = [];
 		const wanted = [...(info.extensionDependencies ?? []), ...(info.extensionPack ?? [])];
@@ -88,10 +91,10 @@ export const storeMethods: ThisType<ExtensionHost> = {
 			seen.add(key);
 			if (this.installedExts.some((ext) => ext.id.toLowerCase() === key && ext.format !== 'bundled')) continue;
 			try {
-				const added = await this.installFromGallery(await this.lookupGallery(dependency));
+				const added = await this.installFromGallery(await this.lookupGallery(dependency), onProgress);
 				extLog('info', info.id, `installed dependency ${added.id} ${added.version}`);
 				notify('info', tf('extensions.dependencyInstalled', added.id, info.id));
-				installed.push(added, ...(await this.installDependencies(added, seen)));
+				installed.push(added, ...(await this.installDependencies(added, seen, onProgress)));
 			} catch (error) {
 				extLog('warn', info.id, `dependency ${dependency} could not be installed: ${String(error)}`);
 				notify('warning', tf('extensions.dependencyInstallFailed', dependency, info.id, String(error)));

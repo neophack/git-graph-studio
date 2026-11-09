@@ -6,7 +6,9 @@
 //! exact id for THIS machine's target platform. The commands, all network-confined:
 //! `ext_gallery_featured` / `ext_gallery_lookup` resolve ids to entries,
 //! `ext_gallery_search` queries, `ext_gallery_asset` fetches an entry's icon (base64,
-//! capped), and `ext_gallery_install` downloads the `.vsix` and hands it to
+//! capped), and `ext_gallery_install` downloads the `.vsix` — streaming its progress
+//! (bytes received, total, the recent speed, the remaining time) to the caller through a
+//! [`GalleryProgress`] report, cancellable mid-body — and hands it to
 //! [`crate::cmd_ext`]'s ordinary install path — the same manifest validation,
 //! forward-only upgrades and unhostable-`.node` rejection a picked file meets.
 //!
@@ -17,8 +19,10 @@
 //! override so a self-hosted registry can be pointed at later.
 
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The default marketplace: the public Open VSX registry.
 pub const DEFAULT_GALLERY: &str = "https://open-vsx.org";
@@ -43,6 +47,15 @@ const DOWNLOAD_BODY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// The icon cap: an extension icon is a few KB; anything megabyte-sized is not an icon.
 pub const ASSET_CAP: usize = 2 * 1024 * 1024;
+/// How often a download reports: one tick per 64 KiB chunk would flood the IPC wire —
+/// the toast moves every 200 ms instead, plus one final tick with the complete size.
+const REPORT_CADENCE: Duration = Duration::from_millis(200);
+/// The speed window: the displayed speed and ETA come from the last few seconds'
+/// samples, so a link that slows down moves the estimate instead of averaging it away.
+const SPEED_WINDOW: Duration = Duration::from_secs(5);
+/// The download's cancel answer: the report callback refused — the receiver is gone, or
+/// the toast's Cancel ran — and the half-written package was removed.
+const CANCELLED_MESSAGE: &str = "the download was cancelled";
 
 /// One marketplace search result, as the Extensions view renders it.
 #[derive(Serialize, Clone, Debug)]
@@ -72,6 +85,75 @@ pub struct GallerySearch {
     /// The registry's total match count (the view shows "of N").
     pub total_size: u64,
     pub entries: Vec<GalleryEntry>,
+}
+
+/// One download's progress tick, as the Extensions view's toast renders it.
+#[derive(Serialize, Clone, Copy, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct GalleryProgress {
+    /// Bytes written to the temp copy so far.
+    pub received: u64,
+    /// The body's total size (the answer's Content-Length), when the server sent one —
+    /// null on a chunked answer, where the toast runs without a total.
+    pub total: Option<u64>,
+    /// The recent speed in bytes per second — the last [`SPEED_WINDOW`]'s samples, not
+    /// the whole download's average. Zero while the window holds a single sample.
+    pub bps: u64,
+    /// Seconds left at the recent speed, when the total is known and something remains.
+    pub eta_secs: Option<u64>,
+}
+
+/// The download loop's reporting brain: it keeps one `(instant, received)` sample per
+/// report — a tick at most every [`REPORT_CADENCE`], the first chunk's own included —
+/// and reads the speed off the last [`SPEED_WINDOW`] of those samples and the ETA off
+/// that speed. A landing between reports is answered nothing and kept by nothing.
+#[derive(Default)]
+pub(crate) struct ProgressMeter {
+    /// `(instant, bytes received)` samples, the ones past the window dropped.
+    samples: VecDeque<(Instant, u64)>,
+    last_report: Option<Instant>,
+}
+
+impl ProgressMeter {
+    /// Feed one chunk's landing. `Some` when a report is due — the first chunk's own
+    /// tick included, so the bar starts moving at once.
+    fn sample(&mut self, now: Instant, received: u64, total: Option<u64>) -> Option<GalleryProgress> {
+        if !self.last_report.is_none_or(|at| now.duration_since(at) >= REPORT_CADENCE) {
+            return None;
+        }
+        self.last_report = Some(now);
+        Some(self.tick(now, received, total))
+    }
+
+    /// The final tick: the complete size, whatever the cadence says.
+    fn finish(&mut self, now: Instant, received: u64, total: Option<u64>) -> GalleryProgress {
+        self.tick(now, received, total)
+    }
+
+    fn tick(&mut self, now: Instant, received: u64, total: Option<u64>) -> GalleryProgress {
+        self.samples.push_back((now, received));
+        while matches!(self.samples.front(), Some(&(at, _)) if now.duration_since(at) > SPEED_WINDOW) {
+            self.samples.pop_front();
+        }
+        let bps = match (self.samples.front(), self.samples.back()) {
+            (Some(&(start, from)), Some(&(end, to))) if end > start => {
+                ((to - from) as f64 / end.duration_since(start).as_secs_f64()) as u64
+            }
+            _ => 0,
+        };
+        let eta_secs = match (total, bps) {
+            (Some(total), bps) if total > received && bps > 0 => {
+                Some((((total - received) as f64) / (bps as f64)).ceil() as u64)
+            }
+            _ => None,
+        };
+        GalleryProgress {
+            received,
+            total,
+            bps,
+            eta_secs,
+        }
+    }
 }
 
 /* ---------- Open VSX's wire shapes ---------- */
@@ -332,10 +414,16 @@ pub fn lookup(base: &str, id: &str) -> Result<GalleryEntry, String> {
 }
 
 /// Download the `.vsix` `download_url` names into a temp file (confined to the gallery
-/// origin — nothing else on the network is reachable through this path). The body
-/// streams to disk under the download ceilings, never whole in memory; a failed read
-/// leaves no half-written package behind.
-pub fn download_vsix(base: &str, download_url: &str) -> Result<PathBuf, String> {
+/// origin — nothing else on the network is reachable through this path). The body streams
+/// to disk in chunks under the download ceilings, never whole in memory; `report` answers
+/// at most every [`REPORT_CADENCE`] plus one final tick carrying the complete size, and a
+/// `false` from it — the receiver gone, or the toast's Cancel run — stops the download,
+/// removing the half-written package.
+pub fn download_vsix(
+    base: &str,
+    download_url: &str,
+    report: &mut dyn FnMut(GalleryProgress) -> bool,
+) -> Result<PathBuf, String> {
     let url = confined(base, download_url)?;
     let name = download_url
         .rsplit('/')
@@ -347,11 +435,40 @@ pub fn download_vsix(base: &str, download_url: &str) -> Result<PathBuf, String> 
         .get(&url)
         .call()
         .map_err(|e| format!("request to the marketplace failed: {e}"))?;
+    let total = response
+        .headers()
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
     let mut file =
         std::fs::File::create(&path).map_err(|e| format!("write the downloaded package: {e}"))?;
-    if let Err(e) = std::io::copy(&mut response.body_mut().as_reader(), &mut file) {
+    let mut body = response.body_mut().as_reader();
+    let mut meter = ProgressMeter::default();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut received: u64 = 0;
+    loop {
+        let read = body.read(&mut buffer).map_err(|e| {
+            let _ = std::fs::remove_file(&path);
+            format!("read the marketplace answer: {e}")
+        })?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read]).map_err(|e| {
+            let _ = std::fs::remove_file(&path);
+            format!("write the downloaded package: {e}")
+        })?;
+        received += read as u64;
+        if let Some(tick) = meter.sample(Instant::now(), received, total) {
+            if !report(tick) {
+                let _ = std::fs::remove_file(&path);
+                return Err(CANCELLED_MESSAGE.to_owned());
+            }
+        }
+    }
+    if !report(meter.finish(Instant::now(), received, total)) {
         let _ = std::fs::remove_file(&path);
-        return Err(format!("read the marketplace answer: {e}"));
+        return Err(CANCELLED_MESSAGE.to_owned());
     }
     Ok(path)
 }
@@ -491,22 +608,37 @@ mod tests {
     }
 
     /// The live download of the largest featured package — claude-code's multi-megabyte
-    /// `.vsix` — under the download ceilings (network — run with
-    /// `cargo test --all-features -- --ignored claude_code_vsix_downloads_live`). This
-    /// is the path a shared 20 s global timeout once killed mid-body.
+    /// `.vsix` — under the download ceilings, reporting progress as it goes (network —
+    /// run with `cargo test --all-features -- --ignored claude_code_vsix_downloads_live`).
+    /// This is the path a shared 20 s global timeout once killed mid-body.
     #[test]
     #[ignore]
     fn claude_code_vsix_downloads_live() {
         let entry = lookup(DEFAULT_GALLERY, "Anthropic.claude-code").unwrap();
         let started = std::time::Instant::now();
-        let package = download_vsix(DEFAULT_GALLERY, &entry.download_url).unwrap();
+        let mut ticks = Vec::new();
+        let package = download_vsix(DEFAULT_GALLERY, &entry.download_url, &mut |tick| {
+            ticks.push(tick);
+            true
+        })
+        .unwrap();
         let size = package.metadata().unwrap().len();
         let _ = std::fs::remove_file(&package);
         assert!(size > 1024 * 1024, "claude-code's package is {size} bytes");
+        // The stream reported as it went, ending at the complete size.
+        assert!(
+            ticks.len() > 1,
+            "a hundred-megabyte download reported {} ticks",
+            ticks.len()
+        );
+        let last = ticks.last().unwrap();
+        assert_eq!(last.received, size);
+        assert!(last.total.is_none_or(|total| total >= size));
         eprintln!(
-            "claude-code's .vsix: {} KB in {:.1}s",
+            "claude-code's .vsix: {} KB in {:.1}s, {} ticks",
             size / 1024,
-            started.elapsed().as_secs_f32()
+            started.elapsed().as_secs_f32(),
+            ticks.len()
         );
     }
 
@@ -562,6 +694,90 @@ mod tests {
         assert_eq!(download.global, Some(DOWNLOAD_TIMEOUT));
         assert!(download.recv_body.unwrap() > REQUEST_TIMEOUT * 10);
         assert!(download.global.unwrap() > download.recv_body.unwrap());
+    }
+
+    /* ---------- The download's progress reports ---------- */
+
+    /// The wire shape the Extensions view's toast reads: camelCase, every field.
+    #[test]
+    fn progress_ticks_cross_camel_case() {
+        let json = serde_json::to_value(GalleryProgress {
+            received: 1,
+            total: Some(2),
+            bps: 3,
+            eta_secs: Some(4),
+        })
+        .unwrap();
+        assert_eq!(json["received"], 1);
+        assert_eq!(json["total"], 2);
+        assert_eq!(json["bps"], 3);
+        assert_eq!(json["etaSecs"], 4);
+    }
+
+    #[test]
+    fn the_meter_reports_on_the_cadence_with_recent_speed_and_eta() {
+        let start = Instant::now();
+        let size = 100 * 1024 * 1024u64;
+        let total = Some(size);
+        let mut meter = ProgressMeter::default();
+        // The first chunk reports at once — the toast starts moving within the
+        // first-batch budget, without a speed yet (one sample is no window).
+        let first = meter.sample(start, 1024, total).unwrap();
+        assert_eq!(first.received, 1024);
+        assert_eq!(first.bps, 0);
+        assert_eq!(first.eta_secs, None);
+        // Inside the cadence: sampled, not reported — and a sample is only a report
+        // moment, so the 4 KiB landing never enters the window.
+        assert!(meter.sample(start + Duration::from_millis(50), 4096, total).is_none());
+        // Past the cadence: the window's (10 MiB - 1 KiB) over 2 s decides the speed
+        // (the first tick's 1 KiB against this tick's 10 MiB), and the ETA is what is
+        // left at that speed.
+        let second = meter
+            .sample(start + Duration::from_secs(2), 10 * 1024 * 1024, total)
+            .unwrap();
+        assert_eq!(second.bps, (10 * 1024 * 1024 - 1024) / 2);
+        assert_eq!(second.eta_secs, Some(19)); // 90 MiB left at ~5.0 MiB/s, ceil
+        // The complete download lands on the final tick, whatever the cadence says.
+        let done = meter.finish(start + Duration::from_secs(3), size, total);
+        assert_eq!(done.received, size);
+        assert_eq!(done.eta_secs, None); // nothing left
+    }
+
+    #[test]
+    fn the_speed_window_drops_samples_past_five_seconds() {
+        let start = Instant::now();
+        let mut meter = ProgressMeter::default();
+        meter.sample(start, 0, None);
+        meter.sample(start + Duration::from_secs(6), 1024 * 1024, None);
+        // The t=0 sample is out of the window now: the speed is the last second's MiB.
+        let tick = meter
+            .sample(start + Duration::from_secs(7), 2 * 1024 * 1024, None)
+            .unwrap();
+        assert_eq!(tick.bps, 1024 * 1024);
+        // No total: no ETA, whatever the speed says.
+        assert_eq!(tick.eta_secs, None);
+    }
+
+    #[test]
+    fn a_total_without_a_speed_yet_carries_no_eta() {
+        let start = Instant::now();
+        let mut meter = ProgressMeter::default();
+        let tick = meter
+            .sample(start, 1024, Some(10 * 1024 * 1024))
+            .unwrap();
+        assert_eq!(tick.bps, 0);
+        assert_eq!(tick.eta_secs, None);
+    }
+
+    /// A stalled window — no bytes across the whole window — answers speed 0 rather
+    /// than a division by a zero duration.
+    #[test]
+    fn a_single_sample_window_answers_speed_zero() {
+        let start = Instant::now();
+        let mut meter = ProgressMeter::default();
+        meter.sample(start, 1024, None);
+        let tick = meter.sample(start + Duration::from_secs(6), 1024, None).unwrap();
+        assert_eq!(tick.bps, 0);
     }
 }
 

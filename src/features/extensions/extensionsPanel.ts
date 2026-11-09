@@ -16,14 +16,16 @@
 // offline offer is what a featured row falls back to when the marketplace is unreachable.
 
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import { listen } from '../../platform/ipc/core';
+import { listen, Channel } from '../../platform/ipc/core';
 
 import type { ExtInfo, ExtProcessInfo, ExtensionHost, GalleryEntry } from './host';
+import type { GalleryProgress } from '../../platform/ipc/gallery';
+import { extGalleryInstallCancel } from '../../platform/ipc/gallery';
 import { extFileDataUrl } from '../../platform/extAssets';
 import { extIconRelPath as iconRelPath, extTitle } from './host';
 import { renderMarkdown } from '../../platform/markdown';
 import { t, tf } from '../../platform/i18n';
-import { actionButton, confirmDialog, el, icon, liveSidebarTitle, notify } from '../../platform/ui/index';
+import { actionButton, confirmDialog, el, formatBytes, icon, liveSidebarTitle, notify, progressToast } from '../../platform/ui/index';
 
 /** One featured id's marketplace half: in flight, its entry, or why there is none. */
 type MarketState = { status: 'loading' } | { status: 'ok'; entry: GalleryEntry } | { status: 'error'; error: string };
@@ -40,6 +42,10 @@ export class ExtensionsPanel {
 	private readonly market = new Map<string, MarketState>();
 	/** Gallery entry ids with an install in flight (their rows show the busy state). */
 	private readonly installing = new Set<string>();
+	/** The in-flight installs' busy tags, keyed by the lower-cased id: the download's
+	 *  ticks update the live percent here without a full re-render (render rebuilds the
+	 *  rows and re-registers whatever tag exists then). */
+	private readonly busyTags = new Map<string, HTMLElement>();
 	/** The in-flight marketplace pass, so overlapping refreshes share one. */
 	private marketPass: Promise<void> | null = null;
 
@@ -141,6 +147,7 @@ export class ExtensionsPanel {
 	}
 
 	private render(): void {
+		this.busyTags.clear();
 		this.list.replaceChildren();
 		const featured = this.featured ?? [];
 		const featuredKeys = new Set(featured.map((id) => id.toLowerCase()));
@@ -265,11 +272,12 @@ export class ExtensionsPanel {
 	}
 
 	/** Install (or, over an older install, Update to the marketplace's version) — a busy
-	 *  line while that install is in flight. */
+	 *  line while that install is in flight, its percent fed live by the download. */
 	private galleryAction(entry: GalleryEntry, update: boolean): HTMLElement {
 		if (this.installing.has(entry.id.toLowerCase())) {
 			const busy = el('span', 'ext-installed-tag', [t('extensions.marketplaceInstalling')]);
 			busy.classList.add('busy');
+			this.busyTags.set(entry.id.toLowerCase(), busy);
 			return busy;
 		}
 		return update
@@ -277,26 +285,64 @@ export class ExtensionsPanel {
 			: actionButton('cloud-download', t('extensions.installFromMarketplace'), () => void this.installGallery(entry));
 	}
 
-	/** Download and install one marketplace entry: the busy state on its row, the ordinary
-	 *  install notification on success, and the list refreshed either way (a finished
-	 *  install changes the row's action). A second click while one is in flight is a no-op. */
+	/** Download and install one marketplace entry: the busy state on its row, the
+	 *  install toast fed live by the backend's progress ticks (bytes, total, the recent
+	 *  speed, the remaining time — its Cancel stops the download mid-body), and the list
+	 *  refreshed either way (a finished install changes the row's action). A second click
+	 *  while one is in flight is a no-op. */
 	private async installGallery(entry: GalleryEntry): Promise<void> {
-		if (this.installing.has(entry.id.toLowerCase())) return;
-		this.installing.add(entry.id.toLowerCase());
+		const id = entry.id.toLowerCase();
+		if (this.installing.has(id)) return;
+		this.installing.add(id);
 		this.render();
+		// The toast lives from the click on: indeterminate until the backend's first
+		// progress tick fills it (≤ one report cadence later), its Cancel stopping the
+		// download mid-body.
+		let cancelled = false;
+		const toast = progressToast(tf('extensions.marketplaceDownloading', entry.displayName ?? entry.name), () => {
+			cancelled = true;
+			void extGalleryInstallCancel();
+		});
+		const channel = new Channel<GalleryProgress>();
+		channel.onmessage = (tick) => {
+			toast.update(this.installPercent(tick), this.installMessage(entry, tick));
+			const tag = this.busyTags.get(id);
+			const percent = this.installPercent(tick);
+			if (tag && percent !== null) tag.textContent = `${t('extensions.marketplaceInstalling')} ${percent}%`;
+		};
 		try {
-			const info = await this.host.installFromGallery(entry);
+			const info = await this.host.installFromGallery(entry, channel);
 			notify('info', tf('extensions.installedOk', info.id, info.version));
 			// What the package declares it needs arrives with it (VS Code installs a
-			// package's dependencies and pack members at the same time).
-			await this.host.installDependencies(info);
+			// package's dependencies and pack members at the same time); their downloads
+			// report into the same toast.
+			await this.host.installDependencies(info, new Set(), channel);
 			this.onChanged?.();
 		} catch (error) {
-			notify('error', tf('extensions.marketplaceInstallFailed', String(error)));
+			// The user's own Cancel is not a failure — the toast said so.
+			if (cancelled) notify('info', t('extensions.installCancelled'));
+			else notify('error', tf('extensions.marketplaceInstallFailed', String(error)));
 		} finally {
-			this.installing.delete(entry.id.toLowerCase());
+			toast.done();
+			this.installing.delete(id);
 		}
 		await this.refresh();
+	}
+
+	/** One tick's toast message: the bytes so far against the total, the recent speed
+	 *  and the remaining time — or, on a chunked answer without a Content-Length, the
+	 *  bytes and the speed alone. */
+	private installMessage(entry: GalleryEntry, tick: GalleryProgress): string {
+		const speed = `${formatBytes(tick.bps)}/s`;
+		const stats = tick.total !== null
+			? tf('extensions.downloadStats', formatBytes(tick.received), formatBytes(tick.total), speed, tick.etaSecs === null ? '–' : formatEta(tick.etaSecs))
+			: tf('extensions.downloadStatsNoLength', formatBytes(tick.received), speed);
+		return `${tf('extensions.marketplaceDownloading', entry.displayName ?? entry.name)} · ${stats}`;
+	}
+
+	/** One tick's percent of the total, when the server sent a Content-Length. */
+	private installPercent(tick: GalleryProgress): number | null {
+		return tick.total !== null && tick.total > 0 ? Math.floor((tick.received / tick.total) * 100) : null;
 	}
 
 	/** The extension's detail page (VS Code's extension editor), mounted into the editor tab
@@ -470,6 +516,18 @@ export class ExtensionsPanel {
 		}
 		await this.refresh();
 	}
+}
+
+/** A download's remaining time, in the download manager's shape: seconds under a minute,
+ *  minutes with the leftover seconds beyond, hours with the leftover minutes. */
+function formatEta(secs: number): string {
+	if (secs < 60) return `${secs}s`;
+	const minutes = Math.floor(secs / 60);
+	if (minutes < 60) {
+		const rest = secs % 60;
+		return rest > 0 ? `${minutes}m ${rest}s` : `${minutes}m`;
+	}
+	return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
 /** Numeric x.y.z comparison (the backend's install rule): anything unparseable sorts below. */

@@ -222,7 +222,9 @@ describe('ExtensionsPanel', () => {
 		// claude-code is absent: Install downloads this platform's build.
 		click(rows[0]!.querySelector<HTMLElement>('.action-btn')!);
 		await flush();
-		expect(backend.callsTo('ext_gallery_install')).toEqual([{ gallery: 'https://open-vsx.org', downloadUrl: CLAUDE.downloadUrl }]);
+		expect(backend.callsTo('ext_gallery_install')).toEqual([
+			{ gallery: 'https://open-vsx.org', downloadUrl: CLAUDE.downloadUrl, onProgress: expect.anything() }
+		]);
 		expect(notifications().join()).toContain('Anthropic.claude-code v2.1.283');
 		state.list = [installedClaude, GRAPH_INSTALLED];
 		await panel.refresh();
