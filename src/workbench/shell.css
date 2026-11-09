@@ -161,6 +161,8 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .actions { display: flex; align-items: center; gap: 2px; flex: none; }
 .pane-header .actions, .row .actions { visibility: hidden; }
 .pane-header:hover .actions, .pane-header:focus-within .actions, .row:hover .actions, .row.selected .actions { visibility: visible; }
+/* The SCM repository headers' actions stay visible at all times (not hover-revealed). */
+.scm-main-header .actions, .scm-repo-header .actions { visibility: visible; }
 .action-btn {
 	display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px;
 	border: none; border-radius: 5px; background: transparent; color: var(--vscode-icon-foreground); padding: 0;
