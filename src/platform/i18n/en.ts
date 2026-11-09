@@ -910,7 +910,6 @@ export const en = {
 	'remote.folders.recent': 'Recent',
 	'remote.folders.home': 'Home',
 	'remote.folders.drive': 'Drive',
-	'remote.folders.sandbox': 'Sandbox',
 	'remote.folders.truncated': 'Only the first 2000 folders are listed — type a path to go further',
 	'remote.folders.desktopOnly': "Open Folder is the desktop app's own — open one there, or switch windows",
 	'remote.folders.failed': 'Could not list this folder: {0}',

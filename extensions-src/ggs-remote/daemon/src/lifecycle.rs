@@ -52,14 +52,11 @@ pub fn refresh_states(daemon: &Arc<Daemon>) {
     }
 }
 
-/// SPAWN (R12): start a new instance and answer its id once it registered. With the
-/// security sandbox enabled (§23) the instance starts inside the OS sandbox instead —
-/// and a folder outside the sandbox root is refused here, before anything runs.
+/// SPAWN (R12): start a new instance and answer its id once it registered.
 pub async fn spawn(
     daemon: &Arc<Daemon>,
     folder: Option<String>,
     visible: Option<bool>,
-    via_remote: bool,
 ) -> Result<String, String> {
     let live = latest_launch(daemon);
     let config = daemon.config();
@@ -67,16 +64,7 @@ pub async fn spawn(
         .ok_or("no GGS installation is known yet — open Git Graph Studio on this PC once")?;
     let visible = visible.unwrap_or(config.spawn_visible);
     let waiter = daemon.registry.wait_for_registration(REGISTER_WAIT);
-    // Only a remote session's spawn is sandboxed: the tray and the admin API act for the
-    // user at the PC, whose windows are full-trust and simply not listed for remote
-    // sessions while the sandbox is on.
-    if config.sandbox.enabled && via_remote {
-        let plan = crate::sandbox::plan(&config, &daemon.paths);
-        crate::sandbox::ensure_listener(daemon);
-        crate::sandbox::launch(daemon, &plan, &spec, folder.as_deref(), visible)?;
-    } else {
-        crate::spawn::launch(&spec, folder.as_deref(), visible)?;
-    }
+    crate::spawn::launch(&spec, folder.as_deref(), visible)?;
     waiter
         .await
         .ok_or_else(|| "the new window did not register within 30 s".to_owned())
@@ -138,19 +126,12 @@ fn kill_registered(daemon: &Arc<Daemon>, instance: &str, pid: u32) {
 }
 
 /// INSTANCE_RESTART (R20): terminate, relaunch with the same launch spec and folders, and
-/// answer the new instance's id once it registered. A sandboxed instance restarts
-/// sandboxed, under the sandbox the config asks for now.
+/// answer the new instance's id once it registered.
 pub async fn restart(daemon: &Arc<Daemon>, instance: &str) -> Result<String, String> {
-    let (pid, launch, folders, spawned, sandboxed) = daemon
+    let (pid, launch, folders, spawned) = daemon
         .registry
         .with(instance, |i| {
-            (
-                i.pid,
-                i.launch.clone(),
-                i.info.folders.clone(),
-                i.info.spawned,
-                i.info.sandboxed,
-            )
+            (i.pid, i.launch.clone(), i.info.folders.clone(), i.info.spawned)
         })
         .ok_or("that window is gone")?;
     kill_registered(daemon, instance, pid);
@@ -158,19 +139,7 @@ pub async fn restart(daemon: &Arc<Daemon>, instance: &str) -> Result<String, Str
     let spec = crate::spawn::pick_spec(Some(launch), &config)
         .ok_or("no launch command is known for that window")?;
     let waiter = daemon.registry.wait_for_registration(REGISTER_WAIT);
-    if sandboxed && config.sandbox.enabled {
-        let plan = crate::sandbox::plan(&config, &daemon.paths);
-        crate::sandbox::ensure_listener(daemon);
-        crate::sandbox::launch(
-            daemon,
-            &plan,
-            &spec,
-            folders.first().map(String::as_str),
-            !spawned,
-        )?;
-    } else {
-        crate::spawn::launch(&spec, folders.first().map(String::as_str), !spawned)?;
-    }
+    crate::spawn::launch(&spec, folders.first().map(String::as_str), !spawned)?;
     waiter
         .await
         .ok_or_else(|| "the restarted window did not register within 30 s".to_owned())
@@ -245,7 +214,6 @@ mod tests {
                 visible: !spawned,
                 remote_host: spawned, // register() maps this onto the registry's spawned
                 launch: Default::default(),
-                sandboxed: false,
             },
             tx,
         );

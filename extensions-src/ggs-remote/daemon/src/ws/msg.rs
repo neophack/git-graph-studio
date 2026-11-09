@@ -93,8 +93,6 @@ pub struct InstanceInfo {
     pub summary: Summary,
     /// Spawned by the daemon (`--remote-host`), not by a desktop launch.
     pub spawned: bool,
-    /// Running inside the security sandbox (§23): its whole world is the sandbox root.
-    pub sandboxed: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -151,8 +149,7 @@ pub struct InstanceRestart {
 /// INSTANCE_DISPLAY (docs/remote-client-plan.md §17.4): a session's "close / open the
 /// window on the PC" — `visible: false` hides the desktop window (the instance, its
 /// backends and its extension pages keep running; the remote session stays), `true` shows
-/// it again. The same boundary as ATTACH applies: with the sandbox on, only a sandboxed
-/// instance is a session's to touch.
+/// it again.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct InstanceDisplay {

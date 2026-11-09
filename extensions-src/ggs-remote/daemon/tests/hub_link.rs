@@ -21,7 +21,8 @@ use ggs_remote::paths::Paths;
 use ggs_remote::state::Daemon;
 use ggs_remote::ws::frame::{ty, Frame};
 use ggs_remote::ws::msg::HelloAck;
-use interprocess::local_socket::tokio::{prelude::*, RecvHalf, SendHalf, Stream};
+use interprocess::local_socket::tokio::Stream;
+use interprocess::local_socket::traits::tokio::Stream as _;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1052,8 +1053,8 @@ async fn await_close(ws: &mut Ws) -> u16 {
 /// A fake GGS instance on the control channel — the asset source of a joint PC. Heartbeat
 /// pings are answered on the way through every read.
 struct FakeInstance {
-    rx: RecvHalf,
-    tx: SendHalf,
+    rx: tokio::io::ReadHalf<Stream>,
+    tx: tokio::io::WriteHalf<Stream>,
 }
 
 impl FakeInstance {
@@ -1070,7 +1071,7 @@ impl FakeInstance {
             endpoint.as_str().to_fs_name::<GenericFilePath>().unwrap()
         };
         let stream = Stream::connect(name).await.unwrap();
-        let (rx, tx) = stream.split();
+        let (rx, tx) = tokio::io::split(stream);
         let mut fake = FakeInstance { rx, tx };
         fake.send(&FromInstance::Register {
             instance_id: id.into(),
@@ -1081,8 +1082,6 @@ impl FakeInstance {
             visible: true,
             remote_host: false,
             launch: LaunchSpec::default(),
-            sandboxed: false,
-            control_token: String::new(),
         })
         .await;
         match fake.recv().await {

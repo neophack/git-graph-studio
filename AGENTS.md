@@ -1804,9 +1804,8 @@ explicit `?mirror=1`. A session NEVER opens folders, files or new windows (K4):
 device, never written to the PC's file), the window switcher lost its "new window" row,
 and the daemon's `GET /api/browse` endpoint is deleted. **The picker page keeps its typed
 folder-path row** (2026-10-16, the owner's direction: 网页上"此 PC 上的窗口"上面输入文件夹路径打开
-ggs 的要保留): the row above the window list sends `SPAWN` — the one remote spawn door,
-`via_remote=true` so the sandbox confines it when on, the `folderInput` setting and the
-sandbox's own open entry riding `api/session` as before; the remote WORKBENCH still never
+ggs 的要保留): the row above the window list sends `SPAWN` — the one remote spawn door, the
+`folderInput` setting hiding it when off; the remote WORKBENCH still never
 spawns and the recent list's tap spawns only from the picker. The remote's folder restore rides `boot_context`'s new `roots` /
 `workspaceFile` answer instead of an `open_folder` invoke. The frame codec falls back to
 fflate where `CompressionStream('deflate-raw')` is missing (C0 — Safari 16.0–16.3 and
@@ -1943,26 +1942,6 @@ instance's — module 11's sessionSync (`sessionSync.ts`, above): the page adopt
 terminals instead of spawning private shells beside them (the 2026-10-18 fix), and the
 terminal the phone opens reaches the PC's open terminal page over the same mirror.
 
-- **The security sandbox** (2026-10-12, the owner's direction, plan §23): when enabled, every
-  instance a remote session opens runs OS-sandboxed — the engine is Microsoft's open-source
-  mxc (`mxc-sdk`, MIT — Copilot local sandboxing's GA runtime; ProcessContainer on Windows,
-  bubblewrap on Linux, Seatbelt on macOS) applied to the spawned process and its whole tree.
-  Filesystem deny-by-default with the sandbox root (`~/.ggs/remote/sandbox`, configurable) as
-  the instance's whole world — the real `~/.ggs` and the rest of the disk are unreadable;
-  network is a three-level setting (off / intranet / internet; hosts whose tier cannot
-  express CIDR rules degrade intranet to off, flagged). The instance's `GGS_HOME` is
-  relocated inside the root (settings, extensions, provider keys, Claude state start empty
-  in the sandbox). The control channel gets a second, sandbox endpoint — Windows a pipe
-  created through the GGS-patched vendored `../vendor/interprocess`
-  (`ListenerOptions::security_descriptor_sddl`, the Boa vendoring precedent) with an
-  ALL APPLICATION PACKAGES DACL; every spawn carries a one-shot registration token
-  (`GGS_REMOTE_CONTROL_TOKEN`) the Register must present. `Register`/`InstanceInfo` carry
-  `sandboxed`/`controlToken`; the app's `remote_host.rs` honours `GGS_REMOTE_CONTROL`.
-  Only remote-driven SPAWNs are sandboxed (tray/admin act for the user at the PC); with the
-  sandbox on, WINDOWS lists sandboxed instances only and ATTACH to a desktop window answers
-  INSTANCE_GONE. `daemon/src/sandbox.rs` is the module; the Remote page carries the
-  "Security sandbox" section and the picker an "open a sandboxed window" entry; the real
-  e2e is `cargo test --test integration sandbox_launch -- --ignored` on a capable host.
 - **The 2026-10-13 security pass** (plan §23.6): three directed audits (daemon attack
   surface, the public Hub, app-side remote + web) and their fixes, all tested. The
   remote-session file boundary lives in the Relay (`src/remote/pathGate.ts`): path-carrying
@@ -2015,9 +1994,9 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   (`tests/remotePageBench.test.ts`'s frozen-backend cycle), and the real-engine numbers
   live in `tests/e2e/remote/page-bench.spec.ts` (WebKit: every tab tap settles the DOM in
   ~1 ms). The daemon
-  gained: the sandbox guard on INSTANCE_CLOSE/RESTART, an Argon2 concurrency semaphore,
+  gained: an Argon2 concurrency semaphore,
   a session gate on `/sw.js`, instance-keyed asset cache, rightmost-XFF + a single tunnel
-  bucket for login limiting, expiring sandbox tokens, Register/Update field caps, control
+  bucket for login limiting, Register/Update field caps, control
   chars stripped from device names, and `hub.settings` behind the unlock. The Hub gained:
   link-keyed asset cache (no cross-PC poisoning), `trusted_proxies` CIDR config +
   rightmost-hop XFF + proxy-aware handshake limiting, an empty-join_key startup warning,
@@ -2405,7 +2384,7 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   PC-level `remoteHideNotice` setting, and silently skipped wherever the OS refuses) and
   tells the presence table at once (`noteWindowHidden` — the gate closes before the
   page's own visibility event lands). The remotes' side of the lifecycle: the browser's
-  `INSTANCE_DISPLAY` frame (same `remote_may_drive` sandbox boundary as ATTACH) becomes
+  `INSTANCE_DISPLAY` frame becomes
   `ToInstance::Hide` / `Show` on the control channel — "close the window on the PC" hides
   it, the session stays attached; the window switcher and the daemon's picker page badge
   minimized (`FromInstance::Update.minimized`, `main_minimized` + a Resized-event

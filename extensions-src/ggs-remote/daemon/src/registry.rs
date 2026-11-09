@@ -131,8 +131,6 @@ pub struct Registration {
     pub visible: bool,
     pub remote_host: bool,
     pub launch: LaunchSpec,
-    /// Registered over the sandbox endpoint with a valid one-shot token (§23).
-    pub sandboxed: bool,
 }
 
 impl Registry {
@@ -162,7 +160,6 @@ impl Registry {
                 last_seen: now,
                 summary: Summary::default(),
                 spawned: reg.remote_host,
-                sandboxed: reg.sandboxed,
             },
             pid: reg.pid,
             launch: reg.launch,
@@ -350,7 +347,6 @@ mod tests {
             visible: true,
             remote_host: false,
             launch: LaunchSpec::default(),
-            sandboxed: false,
         }
     }
 

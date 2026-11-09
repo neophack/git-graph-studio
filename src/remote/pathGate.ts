@@ -251,7 +251,7 @@ export const PATH_GATED: Record<
  *     open of an arbitrary folder would make everything under it "the open workspace") — a
  *     session's roots arrive with ATTACH and `boot_context`, never through its own invoke;
  *     `app_new_instance` would spawn a sibling process the session then cannot name. Opening
- *     NEW windows is what the picker's sandboxed SPAWN is for.
+ *     NEW windows is what the picker's SPAWN is for.
  *  2. The PC's machine-level integrations, which a browser session must never reach: the
  *     settings file (`settings_write` — a session's settings are its device's own), the OS
  *     "open with" registrations (`assoc_apply`, `context_menu_apply`) and the bridged
@@ -376,7 +376,7 @@ export async function gateInvokeCanonical(
 		if (form === null) continue;
 		if (rule.sameRootOnly || rule.prefixTowardRoot) {
 			throw new Error(
-				'a remote session cannot open new folders on this PC — open one from the PC, or spawn a sandboxed window'
+				'a remote session cannot open new folders on this PC — open one from the PC, or spawn a new window from the picker'
 			);
 		}
 		throw new Error(`${command}: ${record[name] as string} resolves to ${form}, outside the folders this window has open`);
@@ -424,7 +424,7 @@ export function gateInvoke(
 				if (rule.prefixTowardRoot && towardRoot(item, allowed)) continue;
 				if (rule.sameRootOnly || rule.prefixTowardRoot) {
 					throw new Error(
-						'a remote session cannot open new folders on this PC — open one from the PC, or spawn a sandboxed window'
+						'a remote session cannot open new folders on this PC — open one from the PC, or spawn a new window from the picker'
 					);
 				}
 				throw new Error(`${command}: ${item} is outside the folders this window has open`);

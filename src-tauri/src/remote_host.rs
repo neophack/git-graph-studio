@@ -57,16 +57,6 @@ pub fn remote_root() -> Option<PathBuf> {
     Some(ggs.join("remote"))
 }
 
-/// The endpoint this instance actually connects to: `GGS_REMOTE_CONTROL` when the
-/// daemon set it (a sandboxed spawn — its relocated `GGS_HOME` would derive a different
-/// endpoint and never find the daemon), the derivation otherwise.
-pub fn control_endpoint(root: &Path) -> String {
-    match std::env::var_os("GGS_REMOTE_CONTROL") {
-        Some(endpoint) => endpoint.to_string_lossy().into_owned(),
-        None => endpoint_name(root),
-    }
-}
-
 /// The control endpoint's name — the daemon's derivation exactly: a named pipe from
 /// sha256(user name ‖ 0 ‖ root path) on Windows, a socket file under the root elsewhere.
 pub fn endpoint_name(root: &Path) -> String {
@@ -169,7 +159,7 @@ pub fn start(app: &AppHandle, remote_host_only: bool) {
         .remote_host_only
         .store(remote_host_only, Ordering::Relaxed);
     let Some(root) = remote_root() else { return };
-    let endpoint = control_endpoint(&root);
+    let endpoint = endpoint_name(&root);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let mut delay = RECONNECT_FIRST;
@@ -264,10 +254,6 @@ async fn session(
             visible: main_visible(app),
             remote_host: remote_host_only(),
             launch: launch_spec(),
-            sandboxed: std::env::var_os("GGS_SANDBOX").is_some_and(|v| v == "1"),
-            control_token: std::env::var_os("GGS_REMOTE_CONTROL_TOKEN")
-                .map(|v| v.to_string_lossy().into_owned())
-                .unwrap_or_default(),
         })
         .ok();
     *link().tx.lock().unwrap() = Some(out_tx.clone());
@@ -1092,26 +1078,6 @@ pub fn remote_host_status(app: AppHandle) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Env mutation is process-wide: the override test holds the lock so a parallel
-    /// endpoint test never races the variable away.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[test]
-    fn the_control_endpoint_env_override_wins() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let derived = control_endpoint(Path::new("/home/u/.ggs/remote"));
-        assert_eq!(derived, endpoint_name(Path::new("/home/u/.ggs/remote")));
-        // SAFETY: single-threaded under the lock; restored before return.
-        unsafe {
-            std::env::set_var("GGS_REMOTE_CONTROL", "ggsr1-sbx-abcdef");
-        }
-        let overridden = control_endpoint(Path::new("/home/u/.ggs/remote"));
-        unsafe {
-            std::env::remove_var("GGS_REMOTE_CONTROL");
-        }
-        assert_eq!(overridden, "ggsr1-sbx-abcdef");
-    }
 
     #[test]
     fn reconnects_quickly_and_never_waits_past_the_cap() {

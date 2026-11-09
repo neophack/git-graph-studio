@@ -64,7 +64,7 @@
 >
 > - 取代 [remote-linkage-and-settings-plan.md](remote-linkage-and-settings-plan.md) 的 §3–§8。该文件中的 §5.5（设置作用域）和 §9（PC 设置编辑器重写）继续有效，本文 §13 的阶段表引用它们。
 > - 取代 [remote-ui-redesign-plan.md](remote-ui-redesign-plan.md) 的 §4–§8。它在 P0 中落地的"远程打开文件夹"按所有者 2026-10-15 的新要求撤回（本文 §3.3）；P0 的守护进程路径门禁加固保留。
-> - [ggs-remote-plan.md](ggs-remote-plan.md) 的守护进程、协议帧、Hub 与沙箱不变。本文只在既有事件通道上新增消息类型（§8.2、§9），并收紧远程会话可调用的命令（§3.3）。
+> - [ggs-remote-plan.md](ggs-remote-plan.md) 的守护进程、协议帧与 Hub 不变（安全沙箱已于 2026-11-09 移除，见 ggs-remote-plan.md §23）。本文只在既有事件通道上新增消息类型（§8.2、§9），并收紧远程会话可调用的命令（§3.3）。
 > - 遵守 [ggs-development-plan.md](ggs-development-plan.md) §3：不用前端框架，DOM 用 `el()` 手写；每个新动作都是带标题、启用条件和 i18n 键的命令；后端的长任务可以取消，并且以流的形式返回。
 
 ## 所有者的要求（2026-10-15）
@@ -208,7 +208,7 @@
 
 - **删除**：`src/remote/openOnPc.ts`、`src/remote/folderBrowser.ts` 中只供远程使用的部分、`desktopHooks.ts` 中会话版的 `folderOpen`、`windowSwitcher.ts` 的"新窗口…"，以及守护进程 `GET /api/browse`。（2026-10-16 修订：原同在此列的"窗口选择页的 `folderInput` 输入行"按所有者第四轮指示**恢复**——见顶部落地记录。）
 - **门禁**：`pathGate.ts` 的 `REFUSED_COMMANDS` 新增 `open_folder`、`app_new_instance`、`settings_write`、`assoc_apply`、`context_menu_apply`、`user_path_apply`、`providers_shell_refresh`。`open_folder` 今天已有专门的拒绝规则，并入这张表。
-- 守护进程的 `SPAWN` 保留给托盘与管理 API（PC 前的用户）；远程侧唯一使用它的是窗口选择页的路径输入行（2026-10-16 恢复，`via_remote=true`——沙箱开着时 spawn 落在沙箱根内、根外文件夹拒绝）。**远程工作台**（remote.html 会话）发起的 `SPAWN` 仍然不存在——远程应用从不发这一帧。
+- 守护进程的 `SPAWN` 保留给托盘与管理 API（PC 前的用户）；远程侧唯一使用它的是窗口选择页的路径输入行（2026-10-16 恢复；其 `via_remote` 沙箱分支随安全沙箱于 2026-11-09 移除——spawn 就是普通启动）。**远程工作台**（remote.html 会话）发起的 `SPAWN` 仍然不存在——远程应用从不发这一帧。
 
 ## 4. 设备分类与自适应
 
@@ -758,7 +758,7 @@ type ChatDown =
 | **S1 同步策略** | §7.0 的活跃前端、门控、在场表、追平与多远程同步；§7.2：删除 `view` / `sidebar` 消息；§7.3 保存冲突；SCM 行按需拉取；流量预算测试 | `workbenchSync.ts`、`remote/presence.ts`（新）、`workbench/lifecycle.ts`、`features/editor/dirty.ts` | `remoteWorkbenchSync.test.ts` 改写：只有一个活跃前端时零消息；三个前端（PC 加两个远程）两两同步；追平取并集、不关标签、活动标签取最近活跃方；侧栏切换不再跨端，打开与活动标签仍然跨端；保存冲突信息条的三种处理；`remoteTraffic.test.ts` 覆盖 §7.4 的每一行 |
 | **S2 Claude 会话桥** | ~~§8 全部内容；§10.2 第 8、10 项~~ **已撤回**(2026-10-16 所有者第五轮指示,见顶部落地记录——远程 Claude 使用原始界面) | — | — |
 | **S3 Git Graph 滚动所有权** | §9.2；其余沿用现有代码 | `mirror/replay.ts`、`mirror/webviewShare.ts` | 只有一端在看时，它的滚动驱动面板（回归今天的行为）；两端同时看时，非所有者的滚动被忽略，提示条出现，3 秒后所有权可以转移；PC 用户滚动时远程不会把他的画面拽走；打开、关闭、活动标签照常跨端 |
-| **L1 PC 窗口生命周期** | §17：关闭改为隐藏、远程显示或隐藏 PC 窗口的帧、列表徽标、托盘的"退出 GGS" | `workbench/boot.ts`、`remote_host.rs`、`lib.rs`、守护进程 `ws` / `control.rs` / `registry.rs` / `tray`、`web/picker.js`、`remote/windowSwitcher.ts` | Rust：`Hide` / `Show` 的处理、`visible` 在 1 秒内送达；守护进程集成测试：会话持有者才能发送显示或隐藏的帧，沙箱实例的规则不变；vitest：有远程会话连着时关闭窗口只隐藏 |
+| **L1 PC 窗口生命周期** | §17：关闭改为隐藏、远程显示或隐藏 PC 窗口的帧、列表徽标、托盘的"退出 GGS" | `workbench/boot.ts`、`remote_host.rs`、`lib.rs`、守护进程 `ws` / `control.rs` / `registry.rs` / `tray`、`web/picker.js`、`remote/windowSwitcher.ts` | Rust：`Hide` / `Show` 的处理、`visible` 在 1 秒内送达；守护进程集成测试：会话持有者才能发送显示或隐藏的帧；vitest：有远程会话连着时关闭窗口只隐藏 |
 | **L2 生命周期与插件稳定性测试** | §18 全部内容 | `scripts/probes/remote-lifecycle-check.mjs`（新）、`tests/e2e/remote/lifecycle.spec.ts`（新）、`tests/remoteLifecycle.test.ts`（新） | §18.4 的发布门槛 |
 | **Q 兼容矩阵与视觉基线** | §14 的 Playwright 项目；真机检查；每种形态的视觉基线 | `playwright.remote.config.ts`、`tests/e2e/remote/*` | 矩阵全绿；真机检查表签字（§14.2） |
 | **D 文档** | AGENTS.md 模块 3、9、19；ggs-remote-plan.md 的 §11 与 §22；两份旧计划的状态行 | | 评审 |
@@ -862,7 +862,7 @@ type ChatDown =
 
 | 方向 | 帧或字段 | 说明 |
 | ---- | -------- | ---- |
-| 浏览器 → 守护进程 | `INSTANCE_DISPLAY { id, visible }` | 需要会话。安全沙箱开启时，只能作用于沙箱实例（与 `ATTACH` 的规则相同） |
+| 浏览器 → 守护进程 | `INSTANCE_DISPLAY { id, visible }` | 需要会话 |
 | 守护进程 → 实例 | `ToInstance::Hide` | 隐藏窗口，然后回送 `Update { visible: false }` |
 | 守护进程 → 实例 | `ToInstance::Sessions { count }` | 有会话连上或断开时推送。`keepRunningHidden()` 以它为准 |
 | `WINDOWS` 中的每个窗口 | 新增 `minimized: bool`、`sessions: number` | 列表显示"PC 上已最小化"和"2 台设备在用" |
@@ -958,7 +958,7 @@ type ChatDown =
 - **基础**：现有的 `scripts/probes/claude-code-sandbox.mjs` 提供假 Claude 服务器、假 git 远端和隔离的 `GGS_HOME`；新的 `scripts/probes/remote-lifecycle-check.mjs` 在此基础上启动应用（`tauri dev`，带 `GGS_TEST_HOOKS=1`），再用 Playwright 打开一个或多个浏览器上下文作为远程端。
 - **驱动 PC 端**：显示、隐藏、最小化和点 × 都通过测试命令触发，不依赖鼠标。网络断开用 Playwright 的离线模式模拟，守护进程重启通过它的管理 API 完成。
 - **结果**：写入 `target/studio/remote-lifecycle-report.{md,json}`，记录每个场景、每一步、每条不变式的结果和耗时。
-- **单元层**：`tests/remoteLifecycle.test.ts`（vitest）覆盖 `keepRunningHidden` 的判断、门控、追平合并和在场表超时；Rust 覆盖 `Hide`、`Sessions` 的处理和 `main_visible` 的最小化判断；守护进程的集成测试覆盖 `INSTANCE_DISPLAY` 的权限与沙箱规则。
+- **单元层**：`tests/remoteLifecycle.test.ts`（vitest）覆盖 `keepRunningHidden` 的判断、门控、追平合并和在场表超时；Rust 覆盖 `Hide`、`Sessions` 的处理和 `main_visible` 的最小化判断；守护进程的集成测试覆盖 `INSTANCE_DISPLAY` 的权限规则。
 
 ### 18.8 发布门槛
 

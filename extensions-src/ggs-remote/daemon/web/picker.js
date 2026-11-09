@@ -7,10 +7,10 @@
 // window's card above — never re-listed here), each row with its open button. The
 // typed-path row above the window list is
 // KEPT at the owner's 2026-10-16 direction ("此 PC 上的窗口"上面输入文件夹路径打开 ggs 的要保留):
-// it spawns a new (by default invisible) window for the path — the sandbox confines the
-// spawn when on. What K4 still means: the remote WORKBENCH a session drives never opens
-// folders, files or new windows; this landing page is the one door. Plus this device's
-// settings: the device list and the password change; sign-out sits in the header.
+// it spawns a new (by default invisible) window for the path. What K4 still means: the
+// remote WORKBENCH a session drives never opens folders, files or new windows; this
+// landing page is the one door. Plus this device's settings: the device list and the
+// password change; sign-out sits in the header.
 import { t, translate, el, postJson } from './i18n.js';
 import { T, encodeFrame, decodeFrames } from './wire.js';
 
@@ -95,7 +95,6 @@ function card(info, now) {
 	const tabs = summary.tabs ?? [];
 	const badges = [];
 	if (info.state === 'unresponsive') badges.push(el('span', { class: 'badge bad' }, t('unresponsive')));
-	if (info.sandboxed) badges.push(el('span', { class: 'badge' }, t('sandboxed')));
 	if (info.minimized) badges.push(el('span', { class: 'badge' }, t('minimized')));
 	if (!info.visible) badges.push(el('span', { class: 'badge' }, t('hidden')));
 	if (info.remoteSessions) badges.push(el('span', { class: 'badge' }, t('sessions', { n: info.remoteSessions })));
@@ -203,19 +202,11 @@ async function connect() {
 	}
 	if (session.status === 401) return toLogin();
 	if (!session.ok) return reconnectLater();
-	const { csrf, folderInput, sandbox } = await session.json();
+	const { csrf, folderInput } = await session.json();
 	// The folder-path row is a setting (2026-10-12): off hides it, the recent list stays.
-	// The sandbox (§24) hides it too — a typed path outside the sandbox root could never
-	// open; everything a remote session opens lives under the root.
-	if (folderInput === false || (sandbox && sandbox.enabled)) {
+	if (folderInput === false) {
 		document.getElementById('open-row').hidden = true;
 	}
-	// The sandbox's own open button (§24): with the typed-path row hidden there is no
-	// other entry into an empty sandbox, and every spawn lands inside the root.
-	document.getElementById('sandbox-row').hidden = !(sandbox && sandbox.enabled);
-	document.getElementById('sandbox-open').addEventListener('click', () => {
-		send(T.SPAWN, { folder: null, visible: false });
-	});
 	const url = new URL('ws', document.baseURI);
 	url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
 	ws = new WebSocket(url);

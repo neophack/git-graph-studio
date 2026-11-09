@@ -14,14 +14,14 @@ export interface FolderListing {
 	parent: string | null;
 	dirs: { name: string; path: string }[];
 	truncated?: boolean;
-	places?: { kind: 'home' | 'drive' | 'root' | 'sandbox'; path: string }[];
+	places?: { kind: 'home' | 'drive' | 'root'; path: string }[];
 }
 
 /** One directory's sub-folders; rejects with a user-readable message. */
 export type FolderSource = (path: string) => Promise<FolderListing>;
 
 export interface BrowseOptions {
-	/** Where to start; empty asks the source for its default (home, or the sandbox root). */
+	/** Where to start; empty asks the source for its default (home). */
 	start?: string;
 	/** Folders offered before the listing (the PC's recent ones). */
 	recent?: string[];
@@ -31,12 +31,11 @@ export interface BrowseOptions {
 const OPEN = '\u0000open';
 const UP = '\u0000up';
 
-const PLACE_ICON: Record<string, string> = { home: 'home', drive: 'server', root: 'root-folder', sandbox: 'shield' };
+const PLACE_ICON: Record<string, string> = { home: 'home', drive: 'server', root: 'root-folder' };
 const PLACE_LABEL: Record<string, () => string> = {
 	home: () => t('remote.folders.home'),
 	drive: () => t('remote.folders.drive'),
-	root: () => '/',
-	sandbox: () => t('remote.folders.sandbox')
+	root: () => '/'
 };
 
 function isAbsolute(path: string): boolean {

@@ -909,7 +909,6 @@ export const zhCn: typeof en = {
 	'remote.folders.recent': '最近',
 	'remote.folders.home': '主目录',
 	'remote.folders.drive': '磁盘',
-	'remote.folders.sandbox': '沙箱',
 	'remote.folders.truncated': '只列出前 2000 个文件夹——输入路径可直达',
 	'remote.folders.desktopOnly': '打开文件夹属于 PC 桌面端 — 请在 PC 上打开,或切换窗口',
 	'remote.folders.failed': '无法列出此文件夹：{0}',

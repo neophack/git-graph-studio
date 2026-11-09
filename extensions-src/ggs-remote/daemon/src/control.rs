@@ -4,7 +4,7 @@
 //! A dropped connection unregisters the instance and sends its remote sessions back to the
 //! window picker.
 
-use interprocess::local_socket::tokio::{prelude::*, RecvHalf, SendHalf};
+use interprocess::local_socket::tokio::Stream;
 use interprocess::local_socket::ListenerOptions;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,8 +16,14 @@ use crate::control_msg::{decode, encode, FromInstance, ToInstance};
 use crate::registry::{Registration, ReplyChunk};
 use crate::state::Daemon;
 
+/// The control channel's two halves (tokio's generic split — interprocess's own `split`
+/// and its half types are deprecated in 2.4).
+type RecvHalf = tokio::io::ReadHalf<Stream>;
+type SendHalf = tokio::io::WriteHalf<Stream>;
+
 /// Bind the control endpoint and accept instances until shutdown.
 pub async fn serve(daemon: Arc<Daemon>) -> std::io::Result<()> {
+    use interprocess::local_socket::traits::tokio::Listener;
     let endpoint = daemon.paths.control_endpoint();
     let listener = bind(&endpoint)?;
     crate::info!("control channel listening at {endpoint}");
@@ -32,8 +38,8 @@ pub async fn serve(daemon: Arc<Daemon>) -> std::io::Result<()> {
         };
         let daemon = daemon.clone();
         tokio::spawn(async move {
-            let (rx, tx) = stream.split();
-            if let Err(e) = serve_instance(daemon, rx, tx, false).await {
+            let (rx, tx) = tokio::io::split(stream);
+            if let Err(e) = serve_instance(daemon, rx, tx).await {
                 crate::warn!("control connection ended: {e}");
             }
         });
@@ -66,7 +72,6 @@ pub(crate) async fn serve_instance(
     daemon: Arc<Daemon>,
     mut rx: RecvHalf,
     mut tx: SendHalf,
-    sandbox_channel: bool,
 ) -> std::io::Result<()> {
     let first = tokio::time::timeout(Duration::from_secs(10), read_message(&mut rx))
         .await
@@ -82,7 +87,6 @@ pub(crate) async fn serve_instance(
         visible,
         remote_host,
         launch,
-        control_token,
         ..
     } = decode::<FromInstance>(&first).map_err(std::io::Error::other)?
     else {
@@ -90,16 +94,6 @@ pub(crate) async fn serve_instance(
             "the first control message must be Register",
         ));
     };
-    // The sandbox endpoint serves instances the daemon itself spawned into a sandbox —
-    // a Register is accepted only with an unconsumed one-shot token (§23). The main
-    // endpoint ignores the field entirely: a sandboxed process cannot reach it (the
-    // sandbox token cannot open the default DACL), so there is nothing to check.
-    let sandboxed = sandbox_channel && crate::sandbox::take_token(&daemon, &control_token);
-    if sandbox_channel && !sandboxed {
-        return Err(std::io::Error::other(
-            "a sandboxed instance must register with the token it was issued",
-        ));
-    }
     if instance_id.is_empty()
         || instance_id.len() > 64
         || !instance_id
@@ -140,7 +134,6 @@ pub(crate) async fn serve_instance(
             visible,
             remote_host,
             launch,
-            sandboxed,
         },
         ctl_tx.clone(),
     );

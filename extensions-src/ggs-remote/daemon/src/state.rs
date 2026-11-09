@@ -120,9 +120,6 @@ pub struct Daemon {
     pub recent: Mutex<crate::recent::Recent>,
     /// Resource tokens of the `ggs` file paths (§12.2): token → (session hash, instance).
     pub resource_tokens: Mutex<HashMap<String, (String, String)>>,
-    /// One-shot registration tokens issued to sandboxed spawns (§23): consumed by the
-    /// Register that presents them, and expired by `sandbox::TOKEN_TTL`.
-    pub sandbox_tokens: Mutex<HashMap<String, std::time::Instant>>,
     pub kicks: broadcast::Sender<Kick>,
     pub tray: watch::Sender<TrayState>,
     pub admin_token: String,
@@ -175,7 +172,6 @@ impl Daemon {
             next_conn: AtomicU32::new(1),
             tickets: Mutex::new(Tickets::default()),
             recent: Mutex::new(crate::recent::Recent::load(&paths)),
-            sandbox_tokens: Mutex::new(HashMap::new()),
             resource_tokens: Mutex::new(HashMap::new()),
             kicks: broadcast::channel(64).0,
             tray: watch::channel(TrayState::Stopped).0,

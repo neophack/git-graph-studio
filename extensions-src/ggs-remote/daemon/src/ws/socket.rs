@@ -258,53 +258,12 @@ fn hello_ack(conn: &Conn, resumed: bool) -> Vec<u8> {
     .encode()
 }
 
-/// Whether a remote session may drive this instance: with the sandbox on (§23), only
-/// sandboxed instances are a remote session's to touch — attach, close or restart alike.
-fn remote_may_drive(daemon: &Daemon, instance: &str) -> bool {
-    !daemon.config().sandbox.enabled
-        || daemon
-            .registry
-            .with(instance, |i| i.info.sandboxed)
-            .unwrap_or(false)
-}
-
 pub fn windows_frame(daemon: &Daemon) -> Frame {
-    // With the sandbox enabled (§23) a remote session sees sandboxed instances only:
-    // the desktop windows stay the user's own. The recent list narrows with them.
-    let sandbox = daemon.config().sandbox.enabled;
-    let (instances, recent) = if sandbox {
-        let root = crate::sandbox::effective_root(&daemon.config(), &daemon.paths);
-        (
-            daemon
-                .registry
-                .snapshot()
-                .into_iter()
-                .filter(|info| info.sandboxed)
-                .collect(),
-            daemon
-                .recent
-                .lock()
-                .unwrap()
-                .list()
-                .iter()
-                .filter(|folder| {
-                    std::path::Path::new(folder.as_str()).starts_with(&root)
-                        || crate::sandbox::folder_in_root(std::path::Path::new(folder), &root)
-                })
-                .cloned()
-                .collect(),
-        )
-    } else {
-        (
-            daemon.registry.snapshot(),
-            daemon.recent.lock().unwrap().list().to_vec(),
-        )
-    };
     Frame::msgpack(
         ty::WINDOWS,
         &Windows {
-            instances,
-            recent_folders: recent,
+            instances: daemon.registry.snapshot(),
+            recent_folders: daemon.recent.lock().unwrap().list().to_vec(),
         },
     )
 }
@@ -330,10 +289,6 @@ pub fn handle(daemon: &Arc<Daemon>, conn: &Arc<Conn>, mut frame: Frame) {
             let daemon = daemon.clone();
             let conn = conn.clone();
             tokio::spawn(async move {
-                if !remote_may_drive(&daemon, &attach.instance) {
-                    conn.close(code::INSTANCE_GONE, "instance-exited");
-                    return;
-                }
                 match crate::router::attach(&daemon, &conn, &attach.instance).await {
                     Ok(attached) => conn.push(Frame::msgpack(ty::ATTACHED, &attached)),
                     Err(crate::router::AttachError::NoInstance) => {
@@ -377,15 +332,14 @@ pub fn handle(daemon: &Arc<Daemon>, conn: &Arc<Conn>, mut frame: Frame) {
         }
         ty::SPAWN => {
             // The picker page's own open (kept at the owner's 2026-10-16 direction — the
-            // typed folder-path row above the window list): via_remote sandboxes the spawn
-            // when the sandbox is on (§23), and lifecycle confines the folder to the root.
-            // What K4 still bars is a WORKBENCH session opening folders or new windows —
-            // the remote app never sends this frame; only the picker does.
+            // typed folder-path row above the window list). What K4 still bars is a
+            // WORKBENCH session opening folders or new windows — the remote app never
+            // sends this frame; only the picker does.
             let spawn = frame.decode_msgpack::<Spawn>().unwrap_or_default();
             let (daemon, conn) = (daemon.clone(), conn.clone());
             tokio::spawn(async move {
                 let visible = if spawn.visible { Some(true) } else { None };
-                match crate::lifecycle::spawn(&daemon, spawn.folder, visible, true).await {
+                match crate::lifecycle::spawn(&daemon, spawn.folder, visible).await {
                     Ok(instance) => conn.push(Frame::msgpack(ty::SPAWNED, &Spawned { instance })),
                     Err(message) => notice(
                         &conn,
@@ -403,18 +357,6 @@ pub fn handle(daemon: &Arc<Daemon>, conn: &Arc<Conn>, mut frame: Frame) {
             };
             let (daemon, conn) = (daemon.clone(), conn.clone());
             tokio::spawn(async move {
-                // The same boundary as ATTACH (2026-10-13 audit F1): a desktop window is
-                // not a remote session's to close or force-kill either.
-                if !remote_may_drive(&daemon, &close.instance) {
-                    notice(
-                        &conn,
-                        Notice {
-                            instance: Some(close.instance.clone()),
-                            ..Notice::kind("instance-exited")
-                        },
-                    );
-                    return;
-                }
                 match crate::lifecycle::close(&daemon, &close.instance, close.force).await {
                     crate::lifecycle::CloseOutcome::Blocked(dirty) => notice(
                         &conn,
@@ -441,16 +383,6 @@ pub fn handle(daemon: &Arc<Daemon>, conn: &Arc<Conn>, mut frame: Frame) {
             };
             let (daemon, conn) = (daemon.clone(), conn.clone());
             tokio::spawn(async move {
-                if !remote_may_drive(&daemon, &restart.instance) {
-                    notice(
-                        &conn,
-                        Notice {
-                            instance: Some(restart.instance.clone()),
-                            ..Notice::kind("restart-failed")
-                        },
-                    );
-                    return;
-                }
                 match crate::lifecycle::restart(&daemon, &restart.instance).await {
                     Ok(instance) => conn.push(Frame::msgpack(ty::SPAWNED, &Spawned { instance })),
                     Err(message) => notice(
@@ -466,25 +398,13 @@ pub fn handle(daemon: &Arc<Daemon>, conn: &Arc<Conn>, mut frame: Frame) {
         }
         // A session showing or hiding the PC's window (§17.4): the window goes away or
         // comes back, the instance itself never stops — and the session that asked stays
-        // attached either way. The same boundary as ATTACH and INSTANCE_CLOSE: with the
-        // sandbox on, a desktop window is not a remote session's to touch.
+        // attached either way.
         ty::INSTANCE_DISPLAY => {
             let Some(display) = frame.decode_msgpack::<InstanceDisplay>() else {
                 return;
             };
             let (daemon, conn) = (daemon.clone(), conn.clone());
             tokio::spawn(async move {
-                if !remote_may_drive(&daemon, &display.instance) {
-                    notice(
-                        &conn,
-                        Notice {
-                            instance: Some(display.instance.clone()),
-                            message: Some("that window is not a remote session's to touch".into()),
-                            ..Notice::kind("display-failed")
-                        },
-                    );
-                    return;
-                }
                 let message = if display.visible {
                     ToInstance::Show
                 } else {

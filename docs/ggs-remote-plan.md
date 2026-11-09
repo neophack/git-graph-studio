@@ -1941,53 +1941,21 @@ M9 依赖 M2（认证）和 M3（多窗口），可与 M5（响应式）并行�
 
 结果：手机打开 Git Graph，得到的是手机宽度的原生页面——原生滚动、原生输入、无租约、无回放；PC 的页面不动（除非 html 真的换了）。`tests/extensions.test.ts` 三个新测试（自有页挂载与登记、定向流量与免 resolve、桌面不登记）与 `tests/remote.test.ts` 的定向转发测试守着这些边界；`routing.rs` 的单测守着策划集、登记表与日志回放。
 
-## 23. 安全沙箱：远程会话只驱动被操作系统隔离的窗口
+## 23. 远程安全（2026-10-13 审计；安全沙箱已于 2026-11-09 移除）
 
-2026-10-12（所有者的方向："remote 增加权限设置，增加安全沙箱功能，ggs 运行在沙箱里面，不能获取 ~/.ggs 的内容，所有文件在沙箱里，claude 只能访问沙箱里的文件内容，沙箱可以设置访问内网权限，访问外网权限……不要自己实现沙箱，要使用开源跨平台的沙箱方案"）。沙箱**不自研**：执行引擎是微软的开源 [mxc](https://github.com/microsoft/mxc)（Microsoft eXecution Container，MIT，GitHub Copilot 本地沙箱的 GA 引擎；Rust crate `mxc-sdk` 直接连进 daemon）——策略驱动的操作系统原生进程隔离（Windows ProcessContainer / Linux bubblewrap / macOS Seatbelt），作用于被包裹进程**及其整棵子树**。选型时对比过 Anthropic 的 sandbox-runtime（srt）：npm-only、Windows 需一次性管理员安装且以另一个用户运行、Linux 上网络命名空间整体移除 + AF_UNIX 默认封锁——无法包裹一个 GUI 工作台；mxc 在三平台上都无需每次提权。
-
-### 23.1 策略模型（daemon 只出策略，不自己强制）
-
-| 面 | 做法 |
-| ---- | ---- |
-| 文件系统 | deny-by-default。沙箱根（默认 `~/.ggs/remote/sandbox`，可配）是实例的全部世界：根内读写；真实 `~/.ggs`（设置、AI 供应商密钥、Claude 状态、扩展库）与主目录其余部分、磁盘其余位置**不可读**。除程序自身安装目录（只读执行）外不授任何系统目录——Windows 的系统目录与 Program Files 自带 ALL APPLICATION PACKAGES 读 ACE，AppContainer 令牌直接读得到（mxc 自己的授权过滤会跳过它们；显式授予反而要求用户没有的 write-DACL，实测 2026-10-12） |
-| 网络 | 三档单选：`off`（默认拒绝，什么都不通）/ `intranet`（私网段：10/8、172.16/12、192.168/16、100.64/10、169.254/16、127/8）/ `internet`（全通）。沙箱自身的回环在每档都通——智能体的本地服务器不受影响（实测：断网档下 bind+connect 127.0.0.1 正常）。macOS 的 Seatbelt 只有开关没有 CIDR，Windows 的 AppContainer 层拒绝 CIDR 规则（mxc 会以 `policy_validation` 拒绝它无法忠实执行的策略）——这两类主机上 `intranet` 降级为 `off`，状态 JSON 里 `degraded: true`，页面如实标注 |
-| 状态重定位 | 实例的 `GGS_HOME` 指向 `<root>/home`：设置、扩展、供应商密钥、Claude 状态从空白开始，全部落在沙箱里；`HOME`/`USERPROFILE`/`TEMP`/`TMP`、`WEBVIEW2_USER_DATA_FOLDER`、`XDG_*` 一并重定位。控制通道走专用沙箱端点（env `GGS_REMOTE_CONTROL`） |
-| UI | `ui.disable: false`——工作台要建窗口画 webview；剪贴板与输入注入保持默认拒绝 |
-
-### 23.2 控制通道：第二条端点 + 一次性令牌
-
-沙箱实例的令牌（Windows AppContainer）打不开默认 DACL 的主控制管道（实测 os error 5）。做法：
-
-- 主端点一切不变（桌面实例照旧，无令牌）。
-- 新增**沙箱端点**（`daemon/src/sandbox.rs::control_endpoint`：Windows 是名字带 `ggsr1-sbx-` 前缀的第二个管道，经 GGS 补丁的 `../vendor/interprocess` 以 SDDL `D:P(A;;GA;;;S-1-15-2-1)(A;;GA;;;OW)` 创建——ALL APPLICATION PACKAGES 可连、属主全权、其他人一概不行；Unix 是 `<root>/sandbox-sock/control.sock`，目录 0700、策略单独授予 rw）。daemon 每次 spawn 生成 32 字节一次性令牌（env `GGS_REMOTE_CONTROL_TOKEN`），Register 带上、daemon 验后即焚——端点 DACL 放宽了，注册仍只有 daemon 自己发出去的实例能完成（实测：无令牌被拒、有效令牌得 Welcome、重放被拒）。
-- `Register` 增 `sandboxed` / `controlToken` 两字段（serde default，向前兼容；两侧向量 `tests/vectors/control.json` 已同步）。app 侧 `remote_host.rs` 优先读 env `GGS_REMOTE_CONTROL`（重定位后的 `GGS_HOME` 推导不出真端点，daemon 显式下发）。
-
-### 23.3 权限面（谁能看到什么）
-
-- 沙箱开启时，WINDOWS 只列 `sandboxed` 实例，recent 只留沙箱根内的路径；直接 ATTACH 桌面实例按 INSTANCE_GONE 回（拿到密码的人不能绕过沙箱去连主窗口）。SPAWN 的目录必须在沙箱根内，空则默认 `<root>/workspace`。
-- **只有远程会话触发的 SPAWN 走沙箱**：托盘与管理 API 代表 PC 跟前的用户，开的是全信任窗口（沙箱开启时它们不出现在远程列表里）。重启沙箱实例仍走沙箱。
-- 配置（`config.json` 的 `sandbox` 段，页面与 `PUT /admin/config` 同一通道）：`enabled`、`network`、`root`。状态 JSON 带 `sandbox` 段：所配、所能（`supported`/`backend`/`tier`/`intranetSupported`/`degraded`）。默认关闭——关着时一切与从前一致。
-- 窗口页（picker）：沙箱开启时路径输入框隐藏（根外的路径本来就打不开），新增"打开沙箱窗口"按钮（空沙箱的唯一入口）；沙箱窗口带"沙箱中"徽标。Remote 页新增"安全沙箱"区块：开关、网络三档（此电脑不支持的档位禁用并标注）、根目录设置、后端/层级与如实说明。
-
-### 23.4 实现位置
-
-- `daemon/src/sandbox.rs`：支持探测（`platform_support`/`available_backends`/intranet 可达性）、`plan`（root + 有效网络档，含降级）、目录校验（lenient canonicalize 前缀）、`launch`（argv → mxc 引用规则序列化（`mxc_common::cmdline`，Windows CreateProcess / POSIX shell 各按其规）、env 重定位、fs/net/ui 策略、`v1::spawn` + 后台收割）、令牌发放/核销、沙箱端点绑定与 serve、状态 JSON。
-- `lifecycle.rs::spawn/restart` 路由（`via_remote`）；`control.rs::serve_instance` 带 `sandbox_channel`；`registry`/`ws::msg` 的 `sandboxed` 贯通；`server.rs` 开机按配置起沙箱端点；`http/api.rs` 会话 extras 带沙箱事实给 picker。
-- macOS 的 `open -n <bundle> --args` 启动形态在沙箱内换成 bundle 自身的可执行文件（`resolve_program`）——`open` 会把启动递回沙箱外。
-- 依赖与补丁：daemon 直接依赖 `mxc-sdk = "1.0"`；`[patch.crates-io] interprocess = { path = "../vendor/interprocess" }`（Boa 的 vendoring 先例：仅新增 `ListenerOptions::security_descriptor_sddl` 一个方法，其余不动；另删了一行本地工具链不认识的 lint 名）。
-
-### 23.5 实测（本机 Windows 11，AppContainer 层）
-
-- 默认拒绝读沙箱外文件 ✓；断网档 ✓；`egress.default=Allow` 即 internet 档 ✓；AppContainer 层拒绝 CIDR 规则（`policy_validation`）✓；沙箱内 bind+connect 自身回环 ✓；带 AAP ACE 的管道可连可交换字节 ✓（默认 DACL 拒绝 ✓）；`sandbox::launch` 端到端 ✓（`cargo test --test integration sandbox_launch -- --ignored`，CI 中忽略——需要宿主沙箱）。
-- **如实残余**（页面上同样写着）：环境变量被继承（隔离的是文件与网络，不是环境）；构建工具（npm、cargo…）按所选网络档联网；沙箱窗口的设置/扩展/AI 供应商从空白开始，须在沙箱内配置；非内核强制的文档说明——OS 沙箱由 mxc 的各平台后端执行，Windows 的 AppContainer 层是其"降级层"（PSEC/BaseContainer 层的机器获得同策略的更强执行）。
-
+2026-10-12 曾按所有者的方向引入"安全沙箱"（远程会话只驱动被操作系统隔离的窗口，引擎为
+Microsoft mxc）：策略模型、沙箱控制端点与一次性令牌、权限面、`daemon/src/sandbox.rs`
+实现与实测记录见当时的 §23.1–§23.5。**2026-11-09 功能整体移除**（所有者的方向）：`mxc-sdk`
+依赖、vendored interprocess 补丁、`Register` 的 `sandboxed`/`controlToken` 字段、`config`
+的 `sandbox` 段、远程页的"安全沙箱"区块与 picker 的沙箱入口全部删除，远程会话恢复为驱动
+PC 上的普通窗口。§23.6/§23.7 的审计与信任模型不受影响。
 
 ### 23.6 安全审计（2026-10-13）与修复
 
 三个方向的定向审计（daemon 攻击面 / 公网 Hub / app 侧与网页）后的修复，全部有测试：
 
 **app 侧（远程会话的文件边界）**
-- **Relay invoke 门禁**（`src/remote/pathGate.ts` + `relay.ts`）：远程会话的路径类 invoke（读写、搜索、比较、viewer、file_log/repo 等）只能落在**打开的文件夹**（+ 单文件启动）内；`open_folder`/`open_workspace` 直接拒绝（打开新目录是 picker 的沙箱 SPAWN 的事）。roots 经新命令 `remote_paths_policy` 由 Relay 本地取（带 3 s 缓存，仅门禁命令才取）。修复的攻击链：伪造 workbenchSync `open` + 未设防的 `read_file` → 读取 `~/.ggs/keys/ai-providers.key` 与密封的 API key → 离线解密全部供应商密钥。
+- **Relay invoke 门禁**（`src/remote/pathGate.ts` + `relay.ts`）：远程会话的路径类 invoke（读写、搜索、比较、viewer、file_log/repo 等）只能落在**打开的文件夹**（+ 单文件启动）内；`open_folder`/`open_workspace` 直接拒绝（打开新目录是 picker 的 SPAWN 的事）。roots 经新命令 `remote_paths_policy` 由 Relay 本地取（带 3 s 缓存，仅门禁命令才取）。修复的攻击链：伪造 workbenchSync `open` + 未设防的 `read_file` → 读取 `~/.ggs/keys/ai-providers.key` 与密封的 API key → 离线解密全部供应商密钥。
   唯一的例外是 `ext_fs`：它还可以落在扩展平台自己的三块区域（`remote_ext_roots`：已装包的文件 `~/.ggs/extensions`、扩展存储 `~/.ggs/extension-data`、扩展日志 `~/.ggs/logs/extensions`）——与后端 `ext_fs` 契约放行的 roots 一致（扩展宿主本就把它们作为调用的 roots 传入）；扩展激活时读自己安装目录里的文件（Python 复制 `pythonrc.py` 是第一例）是正常流量而非越界，此前这类激活在浏览器会话里全部失败。`~/.ggs` 的其余部分（设置、密钥、Claude 状态）仍在边界之外，且该例外只扩 `ext_fs` 一个命令。
 - **规范形复检**（2026-10-15，§23.4 词法门禁的符号链接缺口）：上面的比较全是词法的，而读写本身跟随符号链接与 junction——仓库里一个指向 `~/.ggs`（provider 密钥库、设置）的链接能通过词法检查，读取却落在界外。修复：每个被门禁的 invoke 在词法通过后做第二道规范形复检（`gateInvokeCanonical`）——参数**连同策略 roots** 一起经新命令 `remote_canonical_paths` 解析（`ggs-fs` 的 `canonical_display`：`fs::canonicalize` 的规范形剥掉 Windows `\\?\` 前缀；lenient 行走，未创建文件的符号链接**祖先**同样解析到真实目标），包含关系按规范形对规范形比较（经 junction 打开的工作区仍包含其成员的规范形）。命令的答案只发给边界自身区域内的路径（打开的文件夹、单文件启动、扩展三区域）——它永远不是全盘的存在性探测器；规范化失败即拒绝（fail-closed）。`null` 形（边界外的探测、完全不可解析）保留词法答案。PC 端 workbenchSync 接收侧的远程 open 也经同一命令复检（`installWorkbenchSync` 的 `canonicalPath`）；上传（`upload_allowed`）与下载（`download_allowed`）两条路原本就在服务端规范化，不变。
 - **规范形缓存表**（2026-10-16，响应延迟收口）：上面的复检原本是每个带路径 invoke 一次**额外**的完整 Tauri IPC（`spawn_blocking` + 每路径一次 `fs::canonicalize`，roots 也每次重算），串行挡在真 invoke 前——LAN 上约 5–15 ms，Windows 上 canonicalize 是每路径一次 CreateFile。现在 Relay 引擎内建缓存表（`relay.ts`）：命中零往返（纯 JS 比较），未命中合并为一次往返——同波次（共享同一次策略取回的并发 invoke）的缺项聚成一批、飞行中去重，起飞前让一个微任务让位给同波次的后来者入批；代数计数让失效竞态下的飞行只应答其等待者、不再回填已作废的表。失效点三处：观察者 `studio://fs-changed` 批次（Relay 终身一条全局监听，外部变化落地即清）、`FS_WRITING` 集合命令完成时（文件系统可能被移动——watcher 批次有 100 ms 去抖，`scm_checkout` 类命令物化符号链接的竞态在源头关闭：写完成即清表，被拒/失败的写也清——代价只是一次回填批，永不是错误答案）、roots 变化（`open_workspace`/`open_single_file` 连策略一起清，策略刷新发现 roots 移动同样清表）。策略取回本身改 stale-while-revalidate（3 s 新鲜期：期内直接返回，过期返回旧值并后台单飞刷新，失败保留旧值继续服务；首取阻塞、失败即拒——fail-closed 语义不变），`startRelay` 时预热策略与 roots 的规范形，首个会话的第一个带路径 invoke 也不付等待。安全性按最坏情况审视：终端会话本就能直接 `cat ~/.ggs`（路径门禁从不约束终端），克隆/checkout 物化链接的路径被 FS_WRITING 清表覆盖，剩余的窗口只有 watcher 去抖内外部（非会话驱动）的变化——不构成会话可驾驶的攻击面。`tests/remote.test.ts`：命中不重取、写命令与 watcher 批次后重取、并发缺项一次往返。
@@ -1997,12 +1965,10 @@ M9 依赖 M2（认证）和 M3（多窗口），可与 M5（响应式）并行�
 - **镜像副本的外域 URL 丢弃**（`protocol.ts`）：副本只加载 app/ggs 令牌根与 `data:`/`blob:`——PC 页面里的外来 http(s) URL 不再是手机端的外泄/追踪通道。
 
 **daemon**
-- 沙箱边界覆盖 `INSTANCE_CLOSE`/`INSTANCE_RESTART`（此前只有 ATTACH 有守卫——远程可强杀/重启桌面窗口）。
 - Argon2 验证并发信号量（2×核数）：并发的垃圾登录不再能把内存打到 ~4 GB。
 - `/sw.js` 会话门禁：未认证的 LAN 对端不能再让 daemon 为它缓冲+压缩实例资产。
 - 资产缓存键带实例 id（同版本重装的实例不再共享/污染条目）。
 - `client_ip`：XFF 取**最右**一跳（可信代理追加的那个），经隧道来的登录全部落一个"tunnel"桶——恶意 Hub 不能再铸造每请求一个的限流桶。
-- 沙箱 spawn 令牌 5 分钟过期；容器名不再嵌 daemon HMAC 密钥切片。
 - Register/Update 字段上限（title/version/folders/launch/summary）；设备名剥控制字符（日志伪造）；`hub.settings`（含 joinKey）挪到解锁之后（无密码状态除外——配对页需要预填）。
 
 **Hub（公网面）**

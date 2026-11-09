@@ -3,7 +3,7 @@
 // summary and state badge, switch (a full page load — the other window may run another
 // version), close (unsaved files confirmed first) and restart. No "new window": a browser
 // session switches between the windows the PC already opened — spawning is the picker's
-// sandboxed SPAWN, never a session's (K4). The picker page (`/windows`) is reachable as the
+// SPAWN, never a session's (K4). The picker page (`/windows`) is reachable as the
 // switcher's own last row and the `remote.windowsPage` command — navigation there, not a
 // spawn from here. Fed by the transport's live WINDOWS pushes.
 import { quickInput, confirmDialog, type QuickPickItem } from '../platform/ui';
