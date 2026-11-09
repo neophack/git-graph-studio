@@ -114,3 +114,77 @@ describe('markdown', () => {
 		expect(requested).toBe(`${REPO}\\b.md`);
 	});
 });
+
+describe('markdown links', () => {
+	it('gives headings their GitHub slugs and scrolls anchors in place, never to the browser', () => {
+		const article = document.createElement('article');
+		article.innerHTML = '<h2>Product summary</h2><h2>Module map</h2><h2>Product summary</h2><a href="#product-summary">up</a><a href="mailto:x@y.z">mail</a>';
+		sanitizeMarkdown(article);
+		const headings = article.querySelectorAll('h2');
+		expect(headings[0]!.id).toBe('product-summary');
+		expect(headings[1]!.id).toBe('module-map');
+		expect(headings[2]!.id).toBe('product-summary-1');
+		const anchor = article.querySelectorAll('a')[0]!;
+		// No target attribute: one would open a new window - the webview forwards that to
+		// the system browser, the `http://tauri.localhost/#...` page the user saw.
+		expect(anchor.target).toBe('');
+		let scrolled = '';
+		const original = Element.prototype.scrollIntoView;
+		Element.prototype.scrollIntoView = function (this: Element) { scrolled = this.id; };
+		try {
+			click(anchor);
+		} finally {
+			Element.prototype.scrollIntoView = original;
+		}
+		expect(scrolled).toBe('product-summary');
+		expect(window.location.hash).toBe('');
+		// mailto: stays inert, its target shown as the tooltip.
+		const mail = article.querySelectorAll('a')[1]!;
+		expect(mail.title).toBe('mailto:x@y.z');
+	});
+
+	it('hands a relative link to the caller\'s opener and stays inert without one', () => {
+		const opened: string[] = [];
+		const article = document.createElement('article');
+		article.innerHTML = '<a href="docs/plan.md#L7">plan</a><a href="mailto:x@y.z">mail</a>';
+		sanitizeMarkdown(article, { openRelative: (href) => opened.push(href) });
+		click(article.querySelectorAll('a')[0]);
+		expect(opened).toEqual(['docs/plan.md#L7']);
+		// No opener (the extension README page): inert with its target as the tooltip.
+		const plain = document.createElement('article');
+		plain.innerHTML = '<a href="docs/plan.md">plan</a>';
+		sanitizeMarkdown(plain);
+		const anchor = plain.querySelector('a')!;
+		expect(anchor.target).toBe('');
+		expect(anchor.title).toBe('docs/plan.md');
+	});
+
+	it('opens a preview\'s relative link in the editor, the #L line riding along', async () => {
+		// A fresh module registry, so this test's markdown-it stub (a link renderer) is
+		// what the earlier preview's cached loader is replaced by.
+		vi.resetModules();
+		const stub = {
+			render: (text: string) => text.replace(/\[([^\]]*)\]\(([^)]*)\)/g, '<a href="$2">$1</a>')
+		};
+		const globals = window as unknown as Record<string, unknown>;
+		globals.markdownit = stub;
+		globals.markdownIt = stub;
+		const { EditorGroup: FreshGroup } = await import('../src/features/editor');
+		const files: Record<string, string> = {
+			[`${REPO}\\docs\\guide.md`]: '[plan](plan.md#L3)\n',
+			[`${REPO}\\docs\\plan.md`]: 'one\ntwo\nthree\n'
+		};
+		backend.on('read_file', ({ path }) => ({ contents: files[path as string] ?? '', binary: false, size: 1, encoding: 'utf8', eol: 'lf' }));
+		backend.on('file_fingerprint', () => '1:1');
+		backend.on('backup_write', () => null);
+		backend.on('backup_clear', () => null);
+		const group = new FreshGroup(document.getElementById('editorGroup')!);
+		group.setRoot(REPO);
+		await group.openFile(`${REPO}\\docs\\guide.md`);
+		await group.openMarkdownPreview();
+		await flush();
+		click(document.querySelector('.markdown-preview-body a'));
+		await flush();
+		expect(group.activeInput).toEqual({ kind: 'file', path: `${REPO}\\docs\\plan.md` });
+	});
+});

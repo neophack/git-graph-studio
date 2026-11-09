@@ -432,6 +432,30 @@ export const openMethods: ThisType<EditorGroup> = {
 				// A markdown link is spelled with forward slashes; the file system path is the folder's.
 				const full = joinPath(folder, folder.includes('\\') ? relative.replaceAll('/', '\\') : relative);
 				return readFileBase64(full).then((data) => `data:${mime};base64,${data}`, () => null);
+			}, {
+				// A relative link opens its file in the editor, resolved against this file's
+				// folder; `#L<n>` (GitHub's line spelling) rides along as the target line.
+				openRelative: (href) => {
+					const hashAt = href.indexOf('#');
+					const target = hashAt === -1 ? href : href.slice(0, hashAt);
+					const hash = hashAt === -1 ? '' : href.slice(hashAt + 1);
+					let clean = target;
+					try {
+						clean = decodeURIComponent(target);
+					} catch {
+						// A malformed %-escape keeps the raw form.
+					}
+					const segments: string[] = [];
+					for (const segment of clean.split('/')) {
+						if (segment === '' || segment === '.') continue;
+						if (segment === '..') segments.pop();
+						else segments.push(segment);
+					}
+					if (segments.length === 0) return;
+					const full = joinPath(folder, segments.join(folder.includes('\\') ? '\\' : '/'));
+					const line = /^L(\d+)$/.exec(hash);
+					void this.openFile(full, line ? { line: Number(line[1]) } : undefined);
+				}
 			});
 			if (!rendered) article.textContent = text;
 		};

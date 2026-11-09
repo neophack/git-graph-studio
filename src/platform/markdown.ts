@@ -1,7 +1,8 @@
 // Markdown rendering for the workbench (the Markdown preview, the extension detail page's
 // README): markdown-it - the same bundle the Git Graph webview ships, exposed as the
 // workbench's own vendor asset by scripts/prepare.mjs - loaded once on first use, its output
-// sanitised (no scripts, styles, frames or handler attributes; links open externally), and
+// sanitised (no scripts, styles, frames or handler attributes; external links open in the
+// browser, in-page anchors scroll, relative file links go to the caller's opener), and
 // relative images resolved by the caller.
 
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -70,9 +71,11 @@ function annotateSourceLines(renderer: MarkdownIt): MarkdownIt {
 
 /** Strip the markup rendered markdown must never run inside the workbench: scripts, styles,
  *  event handler attributes and iframes. markdown-it escapes source text, but raw HTML passes
- *  through. Links: http(s) open in the system browser, in-page anchors scroll, anything else
- *  is inert (its target shown as the tooltip). */
-export function sanitizeMarkdown(article: HTMLElement): void {
+ *  through. Links: http(s) open in the system browser, in-page anchors scroll to their
+ *  heading (the slugs are assigned here - markdown-it generates none), a relative file link
+ *  opens through `links.openRelative` when the caller can serve one (the workbench preview)
+ *  and is inert otherwise, and a scheme'd non-http link (mailto:) is inert either way. */
+export function sanitizeMarkdown(article: HTMLElement, links: { openRelative?: (href: string) => void } = {}): void {
 	// A <link>, <base> or <meta http-equiv="refresh"> pasted through raw HTML would load a
 	// stylesheet, retarget every relative link of the page, or navigate the webview to an
 	// arbitrary URL - none has a place in a rendered document.
@@ -84,32 +87,79 @@ export function sanitizeMarkdown(article: HTMLElement): void {
 			if (attribute.name.toLowerCase().startsWith('on')) element.removeAttribute(attribute.name);
 		}
 	}
+	assignHeadingIds(article);
 	for (const anchor of Array.from(article.querySelectorAll('a'))) {
 		const href = anchor.getAttribute('href') ?? '';
-		anchor.target = '_blank';
-		anchor.rel = 'noopener';
 		if (/^https?:/i.test(href)) {
+			anchor.target = '_blank';
+			anchor.rel = 'noopener';
 			anchor.addEventListener('click', (event) => {
 				event.preventDefault();
 				void openUrl(href);
 			});
 		} else if (href.startsWith('#')) {
-			// In-page anchor: let the browser scroll the rendered article.
-		} else {
+			// In-page anchor: scroll the article to its heading ourselves. The default
+			// action is unusable here: an anchor that carries a target attribute opens a
+			// new window - which the webview forwards to the system browser - and a
+			// plain one jumps the whole page's URL hash instead of the article's pane.
+			anchor.addEventListener('click', (event) => {
+				event.preventDefault();
+				let id = href.slice(1);
+				try {
+					id = decodeURIComponent(id);
+				} catch {
+					// A malformed %-escape keeps the raw form.
+				}
+				for (const candidate of article.querySelectorAll('[id]')) {
+					if (candidate.id === id) {
+						candidate.scrollIntoView({ block: 'start' });
+						break;
+					}
+				}
+			});
+		} else if (/^[a-z][a-z0-9+.-]*:/i.test(href) || !links.openRelative) {
+			// A scheme'd link nothing here opens (mailto:) or a relative one without an
+			// opener (the extension README page): inert, its target shown as the tooltip.
 			anchor.title = href;
 			anchor.addEventListener('click', (event) => event.preventDefault());
+		} else {
+			anchor.addEventListener('click', (event) => {
+				event.preventDefault();
+				links.openRelative!(href);
+			});
 		}
 	}
 }
 
+/** Give every heading without an id its GitHub-style slug, so a document's own `#anchor`
+ *  links have a target: markdown-it generates none and the vendored bundle carries no
+ *  anchor plugin. Duplicate slugs number `-1`, `-2`, the way GitHub spells them; ids raw
+ *  HTML brought along are kept and counted. */
+function assignHeadingIds(article: HTMLElement): void {
+	const used = new Set<string>();
+	for (const element of Array.from(article.querySelectorAll('[id]'))) used.add(element.id);
+	for (const heading of Array.from(article.querySelectorAll('h1, h2, h3, h4, h5, h6'))) {
+		if (heading.id) continue;
+		const slug = heading.textContent!.trim().toLowerCase()
+			.replace(/[^\p{L}\p{N}\p{M}\s-]/gu, '')
+			.replace(/\s+/g, '-');
+		if (!slug) continue;
+		let id = slug;
+		for (let n = 1; used.has(id); n++) id = `${slug}-${n}`;
+		heading.id = id;
+		used.add(id);
+	}
+}
+
 /** Render markdown into `article` (cleared first), sanitised, then resolve relative images
- *  through `resolveImage` (a data URL, or null to hide the image). Returns false when the
- *  renderer is unavailable, so the caller can show the source instead. */
-export async function renderMarkdown(text: string, article: HTMLElement, resolveImage?: (relative: string) => Promise<string | null>): Promise<boolean> {
+ *  through `resolveImage` (a data URL, or null to hide the image) and relative file links
+ *  through `links.openRelative`. Returns false when the renderer is unavailable, so the
+ *  caller can show the source instead. */
+export async function renderMarkdown(text: string, article: HTMLElement, resolveImage?: (relative: string) => Promise<string | null>, links: { openRelative?: (href: string) => void } = {}): Promise<boolean> {
 	const renderer = await loadMarkdownIt();
 	if (!renderer) return false;
 	article.innerHTML = renderer.render(text);
-	sanitizeMarkdown(article);
+	sanitizeMarkdown(article, links);
 	if (resolveImage) {
 		for (const image of Array.from(article.querySelectorAll('img'))) {
 			const src = image.getAttribute('src') ?? '';
