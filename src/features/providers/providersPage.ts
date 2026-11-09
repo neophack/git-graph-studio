@@ -15,6 +15,7 @@ import { t, tf } from '../../platform/i18n';
 import { actionButton, confirmDialog, el, icon, notify, quickPick } from '../../platform/ui/index';
 import { mountUsagePanel } from './providerUsageView';
 import {
+	CLAUDE_TWEAKS,
 	PROVIDERS_CHANGED_EVENT,
 	activateProvider,
 	cachedProviders,
@@ -27,6 +28,7 @@ import {
 	loadProviders,
 	saveProvider,
 	scanCcSwitch,
+	setTweaks,
 	testGatewayConnection,
 	type ConnectionReport,
 	type ProviderDraft,
@@ -49,6 +51,59 @@ const PRESET_LABELS: Record<string, () => string> = {
 function presetLabel(preset: ProviderPreset): string {
 	return (PRESET_LABELS[preset.id] ?? (() => preset.label))();
 }
+
+/** The Claude tweaks' display labels, static-keyed (the catalogue's ids ride
+ *  `CLAUDE_TWEAKS`; the strict key typing wants the stems spelled out). */
+const TWEAK_LABELS: Record<string, () => string> = {
+	commitAttribution: () => t('providers.tweaks.commitAttribution'),
+	costWarnings: () => t('providers.tweaks.costWarnings'),
+	spinnerTips: () => t('providers.tweaks.spinnerTips'),
+	progressBar: () => t('providers.tweaks.progressBar'),
+	terminalTitle: () => t('providers.tweaks.terminalTitle'),
+	todoList: () => t('providers.tweaks.todoList'),
+	mouseMode: () => t('providers.tweaks.mouseMode'),
+	autoUpdater: () => t('providers.tweaks.autoUpdater'),
+	telemetry: () => t('providers.tweaks.telemetry'),
+	errorReporting: () => t('providers.tweaks.errorReporting'),
+	growthbook: () => t('providers.tweaks.growthbook'),
+	autoCompact: () => t('providers.tweaks.autoCompact'),
+	checkpointing: () => t('providers.tweaks.checkpointing'),
+	autoMemory: () => t('providers.tweaks.autoMemory'),
+	interleavedThinking: () => t('providers.tweaks.interleavedThinking'),
+	proactivity: () => t('providers.tweaks.proactivity'),
+	ideAutoInstall: () => t('providers.tweaks.ideAutoInstall'),
+	bugCommand: () => t('providers.tweaks.bugCommand'),
+	feedbackSurvey: () => t('providers.tweaks.feedbackSurvey'),
+	installChecks: () => t('providers.tweaks.installChecks'),
+	promptCaching: () => t('providers.tweaks.promptCaching'),
+	webFetch: () => t('providers.tweaks.webFetch')
+};
+
+/** The tweaks' hover hints, keyed the same way. */
+const TWEAK_HINTS: Record<string, () => string> = {
+	commitAttribution: () => t('providers.tweaks.commitAttribution.hint'),
+	costWarnings: () => t('providers.tweaks.costWarnings.hint'),
+	spinnerTips: () => t('providers.tweaks.spinnerTips.hint'),
+	progressBar: () => t('providers.tweaks.progressBar.hint'),
+	terminalTitle: () => t('providers.tweaks.terminalTitle.hint'),
+	todoList: () => t('providers.tweaks.todoList.hint'),
+	mouseMode: () => t('providers.tweaks.mouseMode.hint'),
+	autoUpdater: () => t('providers.tweaks.autoUpdater.hint'),
+	telemetry: () => t('providers.tweaks.telemetry.hint'),
+	errorReporting: () => t('providers.tweaks.errorReporting.hint'),
+	growthbook: () => t('providers.tweaks.growthbook.hint'),
+	autoCompact: () => t('providers.tweaks.autoCompact.hint'),
+	checkpointing: () => t('providers.tweaks.checkpointing.hint'),
+	autoMemory: () => t('providers.tweaks.autoMemory.hint'),
+	interleavedThinking: () => t('providers.tweaks.interleavedThinking.hint'),
+	proactivity: () => t('providers.tweaks.proactivity.hint'),
+	ideAutoInstall: () => t('providers.tweaks.ideAutoInstall.hint'),
+	bugCommand: () => t('providers.tweaks.bugCommand.hint'),
+	feedbackSurvey: () => t('providers.tweaks.feedbackSurvey.hint'),
+	installChecks: () => t('providers.tweaks.installChecks.hint'),
+	promptCaching: () => t('providers.tweaks.promptCaching.hint'),
+	webFetch: () => t('providers.tweaks.webFetch.hint')
+};
 
 /** Mount the page into its editor tab's pane. Returns the disposer the tab's close
  *  runs (the store-change listener and the usage panel must not outlive the page). */
@@ -273,8 +328,43 @@ class ProvidersPage {
 		}
 		this.body.appendChild(el('div', 'prov-section-label', [t('providers.section.profiles')]));
 		for (const profile of this.list.profiles) this.body.appendChild(this.renderRow(profile));
-const notes = (['providers.note.state', 'providers.note.key', 'providers.note.restart'] as const).map((key) => el('div', '', [t(key)]));
+		// The Claude tweaks: the complaint list's switches, machine-level, applied to
+		// the sessions the restarted backend opens.
+		this.body.appendChild(el('div', 'prov-section-label', [t('providers.tweaks.title')]));
+		this.body.appendChild(this.renderTweaks());
+		const notes = (['providers.note.state', 'providers.note.key', 'providers.note.restart'] as const).map((key) => el('div', '', [t(key)]));
 		this.body.appendChild(el('div', 'prov-notes', notes));
+	}
+
+	/** The tweaks section: one checkbox per catalogue entry, checked from the store's
+	 *  enabled set. Toggling sends the whole set (the command replaces it) and the
+	 *  answer's set becomes the new truth — a refused id would leave the checkbox
+	 *  honest only through the re-render, which the announce drives. */
+	private renderTweaks(): HTMLElement {
+		const enabled = new Set(this.list?.tweaks ?? []);
+		const wrap = el('div', 'prov-tweaks');
+		wrap.appendChild(el('div', 'prov-tweaks-subtitle', [t('providers.tweaks.subtitle')]));
+		for (const id of CLAUDE_TWEAKS) {
+			const row = el('label', 'providers-check prov-tweak');
+			row.title = TWEAK_HINTS[id]?.() ?? id;
+			const box = el('input') as HTMLInputElement;
+			box.type = 'checkbox';
+			box.checked = enabled.has(id);
+			box.addEventListener('change', () => {
+				const next = new Set(this.list?.tweaks ?? []);
+				if (box.checked) next.add(id);
+				else next.delete(id);
+				void this.applyTweaks([...next]);
+			});
+			row.append(box, el('span', '', [TWEAK_LABELS[id]?.() ?? id]));
+			wrap.appendChild(row);
+		}
+		return wrap;
+	}
+
+	private async applyTweaks(tweaks: string[]): Promise<void> {
+		const list = await setTweaks(tweaks);
+		if (list !== null) notify('info', t('providers.tweaks.applied'));
 	}
 
 	private renderRow(profile: ProviderProfile): HTMLElement {

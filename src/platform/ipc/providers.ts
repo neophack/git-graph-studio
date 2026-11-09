@@ -40,6 +40,10 @@ export interface ProviderList {
 	/** The extension ids whose backends run under the active provider — the UI's
 	 *  switcher affordances key on this, so the frontend names no extension id. */
 	bridgedExtIds: string[];
+	/** The enabled Claude tweaks' ids (the complaint list: commit attribution, cost
+	 *  warnings, telemetry, …) — the page's switches pre-check from this; the labels
+	 *  are this table's own i18n keys. */
+	tweaks: string[];
 }
 
 /** One save's payload. `apiKey` is the only secret-bearing field and it travels once,
@@ -113,6 +117,11 @@ export const providerFetchModels = (baseUrl: string, apiKey: string, profileId: 
 export const providerTestConnection = (baseUrl: string, apiKey: string, model: string, profileId: string | null) =>
 	invoke<ConnectionReport>('provider_test_connection', { baseUrl, apiKey, model, profileId });
 export const providerUsage = () => invoke<UsageHour[] | null>('provider_usage');
+/** Set the enabled Claude tweaks (the page sends its whole checkbox state): the
+ *  backend validates, writes the store, lands the settings-backed keys and restarts
+ *  the running bridged backends. */
+export const providerSetTweaks = (tweaks: string[]) =>
+	invoke<ProviderList | null>('provider_set_tweaks', { tweaks });
 /** A Terminal Shell change rides this: the shell keys re-applied and the running
  *  bridged backends restarted onto them. */
 export const providersShellRefresh = () => invoke<void>('providers_shell_refresh');

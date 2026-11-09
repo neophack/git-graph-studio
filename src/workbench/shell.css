@@ -2401,6 +2401,12 @@ body.resizing iframe { pointer-events: none; }
 .prov-notes { max-width: 760px; display: flex; flex-direction: column; gap: 3px; margin-top: 14px; }
 .prov-notes div { font-size: 10.5px; color: color-mix(in srgb, var(--vscode-descriptionForeground, #8b8b8b) 85%, transparent); }
 .prov-empty { max-width: 760px; padding: 10px 2px; font-size: 12px; color: var(--vscode-descriptionForeground); }
+/* The Claude tweaks: the complaint-list switches, one checkbox per row, flowing in
+   columns inside the page width. */
+.prov-tweaks { max-width: 760px; display: flex; flex-direction: column; gap: 2px; }
+.prov-tweaks-subtitle { font-size: 11px; color: color-mix(in srgb, var(--vscode-descriptionForeground, #8b8b8b) 85%, transparent); margin: 2px 0 6px; }
+.prov-tweak { padding: 2px 4px; border-radius: 4px; }
+.prov-tweak:hover { background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 6%, transparent); }
 
 /* The add / edit form: a flat two-column card inside the page's width. */
 .providers-form-wrap { max-width: 640px; }

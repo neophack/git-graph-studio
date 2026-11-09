@@ -32,6 +32,16 @@ fn withdraw_claude_provider_env() {
     }
 }
 
+/// The tweaks' settings pass over Claude's redirected settings (the settings-backed
+/// switches — the commit attribution above all), logged the same way. Idempotent: a
+/// file that already agrees is never rewritten.
+fn apply_claude_tweaks() {
+    if let Err(error) = ggs_providers::apply_claude_tweaks_inner() {
+        eprintln!("[providers] claude tweaks: {error}");
+        ggs_ext::log_extensions(&format!("claude tweaks: {error}"));
+    }
+}
+
 /// The spawn-time environment source the composition root registers onto
 /// `ggs_ext::process`'s sources (`lib.rs`'s `run`): the bridged backend's provider
 /// environment. An explicit `CLAUDE_CONFIG_DIR` in the app's own environment wins (the
@@ -76,6 +86,7 @@ pub fn backend_env(ext_id: &str) -> Vec<(String, String)> {
 #[tauri::command]
 pub fn providers_shell_refresh(app: tauri::AppHandle) -> Result<(), String> {
     withdraw_claude_provider_env();
+    apply_claude_tweaks();
     restart_bridged_backends(&app);
     Ok(())
 }
@@ -187,6 +198,7 @@ pub fn provider_save(app: tauri::AppHandle, profile: ProviderInput) -> Result<Pr
     );
     if change.env_changed {
         withdraw_claude_provider_env();
+        apply_claude_tweaks();
         restart_bridged_backends(&app);
     }
     if change.store_changed {
@@ -219,6 +231,7 @@ pub fn provider_delete(app: tauri::AppHandle, id: String) -> Result<ProviderList
     );
     if change.env_changed {
         withdraw_claude_provider_env();
+        apply_claude_tweaks();
         restart_bridged_backends(&app);
     }
     if change.store_changed {
@@ -252,6 +265,7 @@ pub fn provider_activate(app: tauri::AppHandle, id: String) -> Result<ProviderLi
     let change = provider_change(&before, &store, &home, choice_before.as_deref(), Some(&id));
     if change.env_changed {
         withdraw_claude_provider_env();
+        apply_claude_tweaks();
         restart_bridged_backends(&app);
     }
     if change.store_changed {
@@ -334,6 +348,7 @@ pub fn provider_import_ccswitch(
     );
     if change.env_changed {
         withdraw_claude_provider_env();
+        apply_claude_tweaks();
         restart_bridged_backends(&app);
     }
     if change.store_changed {
@@ -346,6 +361,42 @@ pub fn provider_import_ccswitch(
 pub fn provider_usage() -> Result<Vec<ProviderUsageHour>, String> {
     let home = ggs_home()?;
     Ok(usage_answer(&home, std::time::SystemTime::now()))
+}
+
+/// Set the enabled Claude tweaks (2026-11-07, the owner's direction — the complaint
+/// list: the commit attribution, cost warnings, telemetry, …): the page sends its
+/// whole checkbox state, the ids validate against the catalogue (an unknown one is an
+/// error, never a silent no-op), the store carries the set, the settings-backed pass
+/// lands the `settings.json` keys in THIS window's active Claude state dir, and the
+/// running bridged backends restart — the fresh process spawns with the env-backed
+/// switches, and the settings-backed ones hold for the sessions it opens. These are
+/// machine-level (how Claude Code behaves here, not which provider a window runs),
+/// so one toggle pushes to every window. A no-op set (same ids, same order) writes
+/// nothing and restarts nothing.
+#[tauri::command]
+pub fn provider_set_tweaks(
+    app: tauri::AppHandle,
+    tweaks: Vec<String>,
+) -> Result<ProviderList, String> {
+    let normalized = ggs_providers::normalize_tweaks(&tweaks)?;
+    let _guard = STORE_LOCK.lock().unwrap();
+    let home = ggs_home()?;
+    let mut store = read_store(&home)?;
+    let changed = store.tweaks != normalized;
+    store.tweaks = normalized;
+    // A no-op set (same ids, same order) writes nothing — the store file is untouched.
+    if changed {
+        write_store(&home, &store)?;
+    }
+    drop(_guard);
+    let choice = effective_choice(&store);
+    let answer = list_answer(&store, choice.as_deref());
+    if changed {
+        apply_claude_tweaks();
+        restart_bridged_backends(&app);
+        let _ = tauri::Emitter::emit(&app, PROVIDERS_EVENT, ());
+    }
+    Ok(answer)
 }
 
 #[tauri::command]

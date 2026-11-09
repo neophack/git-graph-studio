@@ -695,6 +695,7 @@ mod desktop {
                 cmd_providers::provider_test_connection,
                 cmd_providers::provider_ccswitch_scan,
                 cmd_providers::provider_import_ccswitch,
+                cmd_providers::provider_set_tweaks,
                 ext_gallery::ext_gallery_featured,
                 ext_gallery::ext_gallery_lookup,
                 ext_gallery::ext_gallery_search,

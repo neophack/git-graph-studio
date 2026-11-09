@@ -909,3 +909,58 @@ describe('the gateway tools and the cc-switch import', () => {
 		expect(backend.callsTo('provider_import_ccswitch')).toEqual([]);
 	});
 });
+
+describe('the Claude tweaks (2026-11-07, the complaint list)', () => {
+	beforeEach(async () => {
+		await modules();
+		resetProviderCacheForTests();
+		backend.on('provider_list', () => providerListAnswer());
+		backend.on('provider_usage', () => []);
+	});
+
+	function tweakBoxes(root: ParentNode): HTMLInputElement[] {
+		return [...root.querySelectorAll<HTMLInputElement>('.prov-tweak input[type=checkbox]')];
+	}
+
+	it('renders the whole catalogue unchecked on a store without tweaks', async () => {
+		const root = host();
+		mountProvidersPage(root);
+		await flush();
+		const boxes = tweakBoxes(root);
+		expect(boxes.length).toBe(22);
+		expect(boxes.every((box) => !box.checked)).toBe(true);
+		// The commit-attribution switch rides first — the complaint the section exists
+		// for — and carries its hint.
+		expect(root.querySelector('.prov-tweak')!.getAttribute('title')).toContain('Co-authored-by');
+	});
+
+	it('pre-checks from the store answer and sends the whole set on a toggle', async () => {
+		const answer = providerListAnswer();
+		answer['tweaks'] = ['commitAttribution'];
+		backend.on('provider_list', () => answer);
+		backend.on('provider_set_tweaks', ({ tweaks }) => {
+			const next = providerListAnswer();
+			next['tweaks'] = tweaks;
+			return next;
+		});
+		const root = host();
+		mountProvidersPage(root);
+		await flush();
+		expect(tweakBoxes(root)[0]!.checked).toBe(true);
+		// Switching a second one on sends the full set — the command replaces the
+		// store's, it does not patch it.
+		click(tweakBoxes(root)[2]!);
+		await flush();
+		expect(backend.callsTo('provider_set_tweaks')).toEqual([
+			{ tweaks: ['commitAttribution', 'spinnerTips'] }
+		]);
+		// The answer's set is the new truth: both switches now checked.
+		expect(tweakBoxes(root)[0]!.checked && tweakBoxes(root)[2]!.checked).toBe(true);
+		expect(notifications().some((message) => message.includes('Applied'))).toBe(true);
+
+		// And off again: the set without it.
+		click(tweakBoxes(root)[0]!);
+		await flush();
+		expect(backend.callsTo('provider_set_tweaks')[1]).toEqual({ tweaks: ['spinnerTips'] });
+	});
+});

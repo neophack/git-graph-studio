@@ -12,7 +12,7 @@
 // management page), and the `bridgedExtIds` knowledge — the app here names no
 // extension id, the backend's answer says whose sidebar sections get the chip.
 
-import { type CcSwitchCandidate, type ConnectionReport, type ProviderDraft, type ProviderList, type ProviderPreset, type ProviderProfile, providerActivate, providerCcswitchScan, providerDelete, providerFetchModels, providerImportCcswitch, providerList, providerSave, providerTestConnection } from '../../platform/ipc/providers';
+import { type CcSwitchCandidate, type ConnectionReport, type ProviderDraft, type ProviderList, type ProviderPreset, type ProviderProfile, providerActivate, providerCcswitchScan, providerDelete, providerFetchModels, providerImportCcswitch, providerList, providerSave, providerSetTweaks, providerTestConnection } from '../../platform/ipc/providers';
 export type { CcSwitchCandidate, ConnectionReport, ProviderDraft, ProviderList, ProviderPreset, ProviderProfile } from '../../platform/ipc/providers';
 import { listen } from '../../platform/ipc/core';
 
@@ -37,7 +37,7 @@ const BACKEND_PROVIDERS_EVENT = 'providers-changed';
 /** A defaulting test layer (or a degraded backend) answers null — an empty store, not
  *  a render crash. */
 function providersOrEmpty(list: ProviderList | null): ProviderList {
-	return list ?? { activeId: null, profiles: [], presets: [], bridgedExtIds: [] };
+	return list ?? { activeId: null, profiles: [], presets: [], bridgedExtIds: [], tweaks: [] };
 }
 
 let cache: ProviderList | null = null;
@@ -127,10 +127,35 @@ export async function activateProvider(id: string): Promise<ProviderList | null>
 
 /** An official account (2026-11-07): an official-preset profile that is not the
  *  seeded shared one — its own Claude login, history and settings under
- *  `~/.ggs/claude-accounts/<id>`, signed into once inside the Claude view. The id
+ *  ~/.ggs/claude-accounts/<id>, signed into once inside the Claude view. The id
  *  mirror of the backend's `claude_dir_for` rule. */
 export function isOfficialAccount(profile: ProviderProfile): boolean {
 	return profile.preset === 'official' && profile.id !== 'official';
+}
+
+/** The Claude tweaks' catalogue, in the page's display order — the forum complaint
+ *  list the switches answer, every id one the backend validates. The backend owns the
+ *  sinks (spawn env or the Claude settings file); this table is display order and the
+ *  i18n key stems only. */
+export const CLAUDE_TWEAKS: readonly string[] = [
+	'commitAttribution', 'costWarnings', 'spinnerTips', 'progressBar', 'terminalTitle',
+	'todoList', 'mouseMode', 'autoUpdater', 'telemetry', 'errorReporting', 'growthbook',
+	'autoCompact', 'checkpointing', 'autoMemory', 'interleavedThinking', 'proactivity',
+	'ideAutoInstall', 'bugCommand', 'feedbackSurvey', 'installChecks', 'promptCaching', 'webFetch'
+];
+
+/** Set the enabled Claude tweaks (2026-11-07): the whole set replaces the store's,
+ *  the settings-backed keys land in the Claude state dir, and the running bridged
+ *  backends restart — new sessions carry the switches at once. */
+export async function setTweaks(tweaks: string[]): Promise<ProviderList | null> {
+	try {
+		const list = await providerSetTweaks(tweaks);
+		announce(providersOrEmpty(list));
+		return cache;
+	} catch (error) {
+		notify('error', t('providers.tweaks.failed') + String(error));
+		return null;
+	}
 }
 
 /** The chip's label: the active profile's name — an official account under its own

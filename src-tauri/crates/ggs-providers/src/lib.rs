@@ -158,6 +158,14 @@ pub struct ProviderStore {
     pub active_id: Option<String>,
     #[serde(default)]
     pub profiles: Vec<ProviderProfile>,
+    /// The enabled Claude tweaks (2026-11-07, the owner's direction — the complaint
+    /// list: commit attribution, cost warnings, telemetry, …): the ids of
+    /// [`claude_tweaks()`] the user switched on, defaulting to empty so a store from
+    /// before the feature — and every fresh install — runs Claude's own defaults.
+    /// Machine-level, not per window: these are how Claude Code behaves on this
+    /// machine, the same shape the Terminal Shell setting takes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tweaks: Vec<String>,
 }
 
 /// What `provider_save` takes from the frontend. `api_key` is the one secret-bearing
@@ -296,6 +304,7 @@ fn seeded_store() -> ProviderStore {
         version: 1,
         active_id: Some("official".to_owned()),
         profiles: Vec::new(),
+        tweaks: Vec::new(),
     };
     for preset in presets() {
         // The gateway and custom presets have no fixed shape to seed — the Add flow
@@ -374,6 +383,95 @@ pub fn write_store(home: &Path, store: &ProviderStore) -> Result<(), String> {
     let text =
         serde_json::to_string_pretty(store).map_err(|e| format!("serialize providers: {e}"))?;
     std::fs::write(&path, text + "\n").map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/* ---------- The Claude tweaks ---------- */
+
+/// One switch over a Claude Code behaviour the forum complaint list names (2026-11-07,
+/// the owner's direction: 定制 Claude 的难用功能). Every entry was read off the installed
+/// package itself — the env vars out of the CLI binary's own `env::var` names, the
+/// settings keys out of its bundled `claude-code-settings.schema.json` — so a switch
+/// names a control Claude Code actually reads, not a wish. A tweak rides one of two
+/// sinks: an environment variable injected into the bridged backend's spawn (the
+/// provider configuration's sink — nothing lands in a file), or a top-level
+/// `settings.json` key in the active Claude state dir (the behaviours Claude Code only
+/// reads from settings — the commit attribution above all), written and removed by
+/// [`apply_claude_tweaks_inner`]'s idempotent pass. Both values are the OFF switch
+/// (`=1` / `false`): every tweak defaults to off, Claude's own behaviour unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClaudeTweak {
+    /// The store id (and the i18n key stem `providers.tweaks.<id>` the frontend
+    /// renders from).
+    pub id: &'static str,
+    /// The environment variable set to `1` in the backend's spawn when on.
+    pub env_key: Option<&'static str>,
+    /// The `settings.json` top-level key set to `false` when on.
+    pub settings_key: Option<&'static str>,
+}
+
+/// The catalogue, in the page's display order: the git complaint the owner named
+/// first, then the noise, privacy, behaviour and tooling groups.
+pub fn claude_tweaks() -> &'static [ClaudeTweak] {
+    &[
+        // "Co-authored-by: Claude" + "🤖 Generated with Claude Code" in every commit
+        // and PR body — the single most-complained-about behaviour; `attribution:
+        // false` is the schema's documented hide-all form (the deprecated
+        // `includeCoAuthoredBy` answers the same key).
+        ClaudeTweak { id: "commitAttribution", env_key: None, settings_key: Some("attribution") },
+        ClaudeTweak { id: "costWarnings", env_key: Some("DISABLE_COST_WARNINGS"), settings_key: None },
+        ClaudeTweak { id: "spinnerTips", env_key: None, settings_key: Some("spinnerTipsEnabled") },
+        ClaudeTweak { id: "progressBar", env_key: None, settings_key: Some("terminalProgressBarEnabled") },
+        ClaudeTweak { id: "terminalTitle", env_key: Some("CLAUDE_CODE_DISABLE_TERMINAL_TITLE"), settings_key: None },
+        ClaudeTweak { id: "todoList", env_key: None, settings_key: Some("todoFeatureEnabled") },
+        ClaudeTweak { id: "mouseMode", env_key: Some("CLAUDE_CODE_DISABLE_MOUSE"), settings_key: None },
+        ClaudeTweak { id: "autoUpdater", env_key: Some("DISABLE_AUTOUPDATER"), settings_key: None },
+        ClaudeTweak { id: "telemetry", env_key: Some("DISABLE_TELEMETRY"), settings_key: None },
+        ClaudeTweak { id: "errorReporting", env_key: Some("DISABLE_ERROR_REPORTING"), settings_key: None },
+        ClaudeTweak { id: "growthbook", env_key: Some("DISABLE_GROWTHBOOK"), settings_key: None },
+        ClaudeTweak { id: "autoCompact", env_key: Some("DISABLE_AUTO_COMPACT"), settings_key: None },
+        ClaudeTweak { id: "checkpointing", env_key: Some("CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING"), settings_key: None },
+        ClaudeTweak { id: "autoMemory", env_key: None, settings_key: Some("autoMemoryEnabled") },
+        ClaudeTweak { id: "interleavedThinking", env_key: Some("DISABLE_INTERLEAVED_THINKING"), settings_key: None },
+        ClaudeTweak { id: "proactivity", env_key: Some("CLAUDE_CODE_DISABLE_PROACTIVITY"), settings_key: None },
+        ClaudeTweak { id: "ideAutoInstall", env_key: Some("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL"), settings_key: None },
+        ClaudeTweak { id: "bugCommand", env_key: Some("DISABLE_BUG_COMMAND"), settings_key: None },
+        ClaudeTweak { id: "feedbackSurvey", env_key: Some("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"), settings_key: None },
+        ClaudeTweak { id: "installChecks", env_key: Some("DISABLE_INSTALLATION_CHECKS"), settings_key: None },
+        ClaudeTweak { id: "promptCaching", env_key: Some("DISABLE_PROMPT_CACHING"), settings_key: None },
+        ClaudeTweak { id: "webFetch", env_key: Some("CLAUDE_CODE_DISABLE_WEB_FETCH"), settings_key: None },
+    ]
+}
+
+/// Every tweak id the store accepts (`provider_set_tweaks` validates against this).
+fn tweak_known(id: &str) -> bool {
+    claude_tweaks().iter().any(|tweak| tweak.id == id)
+}
+
+/// Validate and normalize the store's tweak set: unknown ids are refused (a typo'd id
+/// would silently do nothing), duplicates fold.
+pub fn normalize_tweaks(tweaks: &[String]) -> Result<Vec<String>, String> {
+    let mut normalized: Vec<String> = Vec::new();
+    for id in tweaks {
+        let id = id.trim();
+        if !tweak_known(id) {
+            return Err(format!("unknown tweak {id:?}"));
+        }
+        if !normalized.iter().any(|known| known == id) {
+            normalized.push(id.to_owned());
+        }
+    }
+    Ok(normalized)
+}
+
+/// The spawn-environment half of the enabled tweaks: one `=1` pair per env-backed
+/// tweak, in the catalogue's order. Pure — the exact bytes a backend sees are
+/// testable.
+pub fn tweak_env_vars(tweaks: &[String]) -> Vec<(String, String)> {
+    claude_tweaks()
+        .iter()
+        .filter(|tweak| tweaks.iter().any(|id| id == tweak.id))
+        .filter_map(|tweak| tweak.env_key.map(|key| (key.to_owned(), "1".to_owned())))
+        .collect()
 }
 
 /* ---------- The key sealing ---------- */
@@ -675,6 +773,11 @@ pub fn backend_env_for(ext_id: &str, home: &Path, instance: Option<&str>) -> Vec
     )];
     if let Some(active) = active {
         env.extend(provider_env_vars(active, home));
+    }
+    // The enabled tweaks ride every spawn, official and third-party alike (they shape
+    // Claude Code's behaviour, not the provider): one `=1` pair per env-backed switch.
+    if let Some(store) = store.as_ref() {
+        env.extend(tweak_env_vars(&store.tweaks));
     }
     env.extend(claude_shell_env(home));
     env
@@ -1362,6 +1465,82 @@ pub fn withdraw_claude_provider_env_inner() -> Result<(), String> {
     Ok(())
 }
 
+/// The settings-backed tweaks' pass over Claude's redirected settings: every enabled
+/// settings-backed tweak's key set to `false` (the schema's documented off value —
+/// `attribution: false` hides the commit/PR trailer wholesale), every disabled one
+/// removed — but only when the value is exactly `false`, ours: a hand-set
+/// `attribution` object with the user's own trailer text, or any non-`false` value,
+/// survives whatever the switches say. Everything else in the file is preserved
+/// verbatim; the answer is `None` when the file already agrees (the pass is
+/// idempotent and free to run often); an unparseable or wrongly-shaped file fails
+/// rather than being replaced. This pass never carries a secret — the provider
+/// configuration's no-disk-write rule (2026-10-13) is about the key, and these are
+/// the behaviour settings Claude Code only reads from settings.
+pub fn claude_tweaks_settings(existing: Option<&str>, enabled: &[String]) -> Result<Option<String>, String> {
+    let mut settings: serde_json::Value = match existing {
+        Some(text) if text.trim().is_empty() => serde_json::json!({}),
+        Some(text) => serde_json::from_str(text).map_err(|e| {
+            format!("the existing Claude settings are not valid JSON — not overwriting them: {e}")
+        })?,
+        None => serde_json::json!({}),
+    };
+    if !settings.is_object() {
+        return Err(
+            "the existing Claude settings are not a JSON object — not overwriting them".to_owned(),
+        );
+    }
+    let object = settings.as_object_mut().expect("checked above");
+    let mut changed = false;
+    for tweak in claude_tweaks() {
+        let Some(key) = tweak.settings_key else { continue };
+        let on = enabled.iter().any(|id| id == tweak.id);
+        match (on, object.get(key)) {
+            (true, Some(value)) if *value == serde_json::Value::Bool(false) => {}
+            (true, _) => {
+                object.insert(key.to_owned(), serde_json::Value::Bool(false));
+                changed = true;
+            }
+            // Off removes only our own `false` — the user's own value of any other
+            // shape (a trailer object above all) is theirs and stays.
+            (false, Some(serde_json::Value::Bool(false))) => {
+                object.remove(key);
+                changed = true;
+            }
+            (false, _) => {}
+        }
+    }
+    if !changed {
+        return Ok(None);
+    }
+    Ok(Some(
+        serde_json::to_string_pretty(&settings)
+            .map_err(|e| format!("serialize the Claude settings: {e}"))?
+            + "\n",
+    ))
+}
+
+/// [`claude_tweaks_settings`]'s IO body over THIS window's active Claude state dir
+/// (the shared dir, or an official account's own one — the same dir resolution the
+/// MCP registration uses, so a switched-to account gets the switches beside its
+/// registration on the next boot or folder change).
+pub fn apply_claude_tweaks_inner() -> Result<(), String> {
+    let home = ggs_home()?;
+    let store = read_store(&home).ok();
+    let active = store.as_ref().and_then(|store| {
+        let choice = effective_choice(store);
+        resolve_active(store, choice.as_deref())
+    });
+    let dir = claude_dir_for(active, &home);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let path = dir.join("settings.json");
+    let existing = std::fs::read_to_string(&path).ok();
+    let enabled = store.map(|store| store.tweaks.clone()).unwrap_or_default();
+    if let Some(text) = claude_tweaks_settings(existing.as_deref(), &enabled)? {
+        std::fs::write(&path, &text).map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
 
 
 /// A profile as the UI sees it: every field but the key (a `hasKey` flag and the last
@@ -1409,6 +1588,9 @@ pub struct ProviderList {
     /// The extension ids whose backends run under the active provider: the UI's
     /// switcher affordances key on this, so the frontend names no extension id.
     pub bridged_ext_ids: Vec<String>,
+    /// The enabled Claude tweaks' ids — the page's switches pre-check from this (the
+    /// catalogue's labels are the frontend's own i18n tables').
+    pub tweaks: Vec<String>,
 }
 
 pub fn list_answer(store: &ProviderStore, active_id: Option<&str>) -> ProviderList {
@@ -1417,6 +1599,7 @@ pub fn list_answer(store: &ProviderStore, active_id: Option<&str>) -> ProviderLi
         profiles: store.profiles.iter().map(ProviderView::from).collect(),
         presets: presets(),
         bridged_ext_ids: BRIDGED_EXT_IDS.iter().map(|id| id.to_string()).collect(),
+        tweaks: store.tweaks.clone(),
     }
 }
 
@@ -1927,14 +2110,16 @@ pub fn apply_claude_mcp(folders: &[String], command: Option<&Path>) -> Result<()
 }
 
 /// [`apply_claude_integration`]'s injectable core (the executable path is a test seam):
-/// the MCP registration first, then the provider-keys withdrawal — two passes over the
-/// redirected state, each a no-op when the file already agrees.
+/// the MCP registration first, then the provider-keys withdrawal, then the tweaks'
+/// settings pass — three passes over the redirected state, each a no-op when the file
+/// already agrees.
 pub fn apply_claude_integration(
     folders: &[String],
     command: Option<&Path>,
 ) -> Result<(), String> {
     apply_claude_mcp(folders, command)?;
-    withdraw_claude_provider_env_inner()
+    withdraw_claude_provider_env_inner()?;
+    apply_claude_tweaks_inner()
 }
 
 /// What the MCP Server page reports about the automatic Claude integration.
@@ -2109,6 +2294,7 @@ mod tests {
             version: 1,
             active_id: Some("deepseek".to_owned()),
             profiles: vec![official_profile(), deepseek_profile()],
+            tweaks: Vec::new(),
         }
     }
 
@@ -2594,6 +2780,218 @@ mod tests {
             withdraw_provider_settings(Some(r#"{"env": {"SHELL": "/usr/bin/fish"}}"#)).unwrap(),
             None
         );
+    }
+
+    /* ---------- The Claude tweaks (2026-11-07, the complaint list) ---------- */
+
+    /// The set validates against the catalogue (a typo'd id would silently do
+    /// nothing), folds duplicates, and the catalogue itself is whole: every tweak
+    /// rides exactly one sink, the env-backed ones name a real variable shape, and
+    /// the commit-attribution complaint the owner named rides the settings key the
+    /// schema documents.
+    #[test]
+    fn tweaks_validate_against_the_catalogue() {
+        let known = |id: &str| normalize_tweaks(&[id.to_owned()]).is_ok();
+        assert!(known("commitAttribution"));
+        assert!(known("costWarnings"));
+        assert!(normalize_tweaks(&["no-such-tweak".to_owned()]).is_err());
+
+        let folded = normalize_tweaks(&[
+            "costWarnings".to_owned(),
+            "costWarnings".to_owned(),
+            "autoCompact".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(folded, ["costWarnings", "autoCompact"]);
+
+        for tweak in claude_tweaks() {
+            assert!(
+                tweak.env_key.is_some() ^ tweak.settings_key.is_some(),
+                "{} rides neither or both sinks: {tweak:?}",
+                tweak.id
+            );
+            assert!(!tweak.id.is_empty());
+        }
+        let attribution = claude_tweaks()
+            .iter()
+            .find(|tweak| tweak.id == "commitAttribution")
+            .unwrap();
+        assert_eq!(attribution.settings_key, Some("attribution"));
+        assert_eq!(attribution.env_key, None);
+    }
+
+    /// The spawn half: only the enabled env-backed tweaks materialize, one `=1` pair
+    /// each, settings-backed ones never ride the environment.
+    #[test]
+    fn tweak_env_vars_materialize_only_enabled_pairs() {
+        let env = tweak_env_vars(&["costWarnings".to_owned(), "commitAttribution".to_owned()]);
+        assert_eq!(
+            env,
+            vec![("DISABLE_COST_WARNINGS".to_owned(), "1".to_owned())],
+            "the settings-backed attribution never rides the env: {env:?}"
+        );
+        assert!(tweak_env_vars(&[]).is_empty());
+        let all = tweak_env_vars(&[
+            "costWarnings".to_owned(),
+            "autoUpdater".to_owned(),
+            "telemetry".to_owned(),
+            "errorReporting".to_owned(),
+            "growthbook".to_owned(),
+            "autoCompact".to_owned(),
+            "checkpointing".to_owned(),
+            "interleavedThinking".to_owned(),
+            "proactivity".to_owned(),
+            "ideAutoInstall".to_owned(),
+            "bugCommand".to_owned(),
+            "feedbackSurvey".to_owned(),
+            "installChecks".to_owned(),
+            "promptCaching".to_owned(),
+            "webFetch".to_owned(),
+            "terminalTitle".to_owned(),
+            "mouseMode".to_owned(),
+        ]);
+        assert_eq!(all.len(), 17, "{all:?}");
+        for (key, value) in &all {
+            assert_eq!(value, "1", "{key}");
+        }
+    }
+
+    /// The tweaks ride every bridged spawn — official and third-party alike (they
+    /// shape Claude Code's behaviour, not the provider) — and an empty set changes
+    /// nothing: a store from before the feature runs Claude's own defaults.
+    #[test]
+    fn the_spawn_env_carries_enabled_tweaks_on_every_provider() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let mut store = third_party_store();
+        store.active_id = Some("official".to_owned());
+        store.tweaks = vec!["costWarnings".to_owned(), "autoMemory".to_owned()];
+        write_store(&home, &store).unwrap();
+        let official_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, None);
+        let official = env_map(&official_env);
+        assert_eq!(official.get("DISABLE_COST_WARNINGS").copied(), Some("1"));
+        assert!(
+            !official.contains_key("autoMemoryEnabled"),
+            "the settings-backed key never rides the env: {official:?}"
+        );
+        // The official profile gains no provider vars beside them.
+        assert!(!official.contains_key("ANTHROPIC_BASE_URL"), "{official:?}");
+
+        store.active_id = Some("deepseek".to_owned());
+        store.profiles[1].base_url = Some("https://api.deepseek.com/anthropic".to_owned());
+        write_store(&home, &store).unwrap();
+        let deepseek_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, None);
+        let deepseek = env_map(&deepseek_env);
+        assert_eq!(deepseek.get("DISABLE_COST_WARNINGS").copied(), Some("1"));
+        assert_eq!(
+            deepseek["ANTHROPIC_BASE_URL"],
+            "https://api.deepseek.com/anthropic"
+        );
+
+        // Off is off: nothing but the redirect and the provider pairs.
+        store.tweaks = Vec::new();
+        write_store(&home, &store).unwrap();
+        let bare_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, None);
+        let bare = env_map(&bare_env);
+        assert!(!bare.contains_key("DISABLE_COST_WARNINGS"), "{bare:?}");
+    }
+
+    /// The settings half (pure): on writes `false`, off removes exactly our own
+    /// `false`, the user's own values of any other shape survive untouched, the
+    /// agreeing file is a no-op, and an unparseable file fails rather than being
+    /// replaced.
+    #[test]
+    fn the_tweaks_settings_pass_writes_false_and_removes_only_its_own_false() {
+        let enabled = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+
+        // A file Claude's own writer could have left: everything else preserved.
+        let existing = r#"{"model":"sonnet","env":{"MY_VAR":"x"},"attribution":{"commit":"Co-Authored-By: Me <m@example.com>"}}"#;
+        let text = claude_tweaks_settings(
+            Some(existing),
+            &enabled(&["commitAttribution", "spinnerTips"]),
+        )
+        .unwrap()
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["attribution"], serde_json::json!(false), "{json}");
+        assert_eq!(json["spinnerTipsEnabled"], serde_json::json!(false));
+        assert_eq!(json["model"], "sonnet");
+        assert_eq!(json["env"]["MY_VAR"], "x");
+
+        // Off removes exactly our own `false` — it cannot resurrect the trailer the
+        // switch replaced (that is the switch's meaning). A trailer the switch never
+        // touched survives a pass with the switch off.
+        let off = claude_tweaks_settings(Some(&text), &enabled(&["spinnerTips"]))
+            .unwrap()
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&off).unwrap();
+        assert!(json.get("attribution").is_none(), "{json}");
+        assert_eq!(json["spinnerTipsEnabled"], serde_json::json!(false));
+
+        // Fully off: our own `false`s go, and the pass that agrees answers None.
+        let cleaned = claude_tweaks_settings(Some(&off), &enabled(&[])).unwrap().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&cleaned).unwrap();
+        assert!(json.get("spinnerTipsEnabled").is_none(), "{json}");
+        assert!(claude_tweaks_settings(Some(&cleaned), &enabled(&[])).unwrap().is_none());
+        assert!(
+            claude_tweaks_settings(Some(&text), &enabled(&["commitAttribution", "spinnerTips"]))
+                .unwrap()
+                .is_none(),
+            "the agreeing file is never rewritten"
+        );
+
+        // A fresh file gains the enabled keys alone; an unparseable one fails.
+        let fresh = claude_tweaks_settings(None, &enabled(&["autoMemory"])).unwrap().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&fresh).unwrap();
+        assert_eq!(json["autoMemoryEnabled"], serde_json::json!(false));
+        assert!(claude_tweaks_settings(Some("{not json"), &enabled(&[])).is_err());
+        assert!(claude_tweaks_settings(Some("[1,2]"), &enabled(&[])).is_err());
+    }
+
+    /// The IO pass lands in THIS window's active Claude state dir — the shared dir,
+    /// or an official account's own one (the same resolution the MCP registration
+    /// uses) — and follows the switch.
+    #[test]
+    fn the_tweaks_pass_lands_in_the_active_state_dir() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let mut store = seeded_store();
+        let mut account = official_profile();
+        account.id = "official-work".to_owned();
+        account.label = "Work account".to_owned();
+        store.profiles.push(account);
+        store.active_id = Some("official-work".to_owned());
+        store.tweaks = vec!["commitAttribution".to_owned()];
+        write_store(&home, &store).unwrap();
+        set_instance_choice("official-work");
+
+        apply_claude_tweaks_inner().unwrap();
+        let account_settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                home.join("claude-accounts").join("official-work").join("settings.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            account_settings["attribution"],
+            serde_json::json!(false),
+            "{account_settings}"
+        );
+        // The shared dir was never this window's target.
+        assert!(!home.join("claude").join("settings.json").exists());
+
+        // Back on the shared profile: the pass lands there, the account's own file
+        // stands.
+        store.active_id = Some("official".to_owned());
+        write_store(&home, &store).unwrap();
+        set_instance_choice("official");
+        apply_claude_tweaks_inner().unwrap();
+        let shared_settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join("claude").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(shared_settings["attribution"], serde_json::json!(false));
     }
 
     /// The switch's gate: a real switch reports the environment the window's backend
