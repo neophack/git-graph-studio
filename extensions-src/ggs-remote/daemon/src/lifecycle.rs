@@ -131,7 +131,12 @@ pub async fn restart(daemon: &Arc<Daemon>, instance: &str) -> Result<String, Str
     let (pid, launch, folders, spawned) = daemon
         .registry
         .with(instance, |i| {
-            (i.pid, i.launch.clone(), i.info.folders.clone(), i.info.spawned)
+            (
+                i.pid,
+                i.launch.clone(),
+                i.info.folders.clone(),
+                i.info.spawned,
+            )
         })
         .ok_or("that window is gone")?;
     kill_registered(daemon, instance, pid);
