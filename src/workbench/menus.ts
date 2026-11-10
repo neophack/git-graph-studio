@@ -81,7 +81,7 @@ export const menusMethods: ThisType<Workbench> = {
 				item('help.welcome'),
 				// A phone has no keyboard to bind — the shortcuts page is a desktop read.
 				...(hook('navigation').phoneShell() ? [] : [item('help.shortcuts')]),
-				item('help.selfTest'), ...((import.meta.env.DEV && !import.meta.env.VITEST) ? [item('help.devHarness')] : []), 'separator', item('help.repository'), 'separator',
+				item('help.selfTest'), ...((import.meta.env.DEV && !import.meta.env.VITEST) ? [item('help.devHarness')] : []), 'separator', item('help.checkForUpdates'), item('help.repository'), 'separator',
 				// Opens the PC's own (hidden relay) devtools — a desktop-profile command
 				// invisible to a browser user.
 				...(commands.visible('help.openDevTools') ? [item('help.openDevTools')] : []),

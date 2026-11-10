@@ -345,6 +345,35 @@
         assert!(list_installed(&exts).unwrap().is_empty());
     }
 
+    /// The bug of 2026-11-09: an uninstall whose `remove_dir_all` lost to a transient
+    /// Windows lock left a half-deleted `{id}-{version}` directory behind, and every later
+    /// install of the package then refused with "already installed" — the extension was
+    /// missing forever. A directory without a readable manifest is not an install: the
+    /// reinstall sweeps it out of the way.
+    #[test]
+    fn a_failed_uninstalls_leftover_does_not_block_reinstall() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let vsix = make_vsix(tmp.path(), "demo", "acme", "1.0.0", false);
+        install_from_vsix_into(&exts, &vsix, false).unwrap();
+
+        // A failed uninstall half-deleted the install: the version directory survives
+        // without its manifest — what the listing already calls a leftover.
+        let leftover = exts.join("acme.demo-1.0.0");
+        std::fs::remove_file(leftover.join("package.json")).unwrap();
+        assert!(list_installed(&exts).unwrap().is_empty());
+
+        // The same package reinstalls over the leftover instead of refusing.
+        install_from_vsix_into(&exts, &vsix, false).unwrap();
+        assert!(leftover.join("package.json").is_file());
+        assert_eq!(list_installed(&exts).unwrap().len(), 1);
+
+        // And the uninstall then removes the directory for real.
+        uninstall(&exts, "acme.demo").unwrap();
+        assert!(!leftover.exists());
+    }
+
     /// The uninstall marker is the boot pass's auto-install handbrake: a completed uninstall
     /// writes it (and nothing else sees it — the listing stays empty), a refused builtin
     /// uninstall does not, and the next explicit install clears it.

@@ -387,8 +387,16 @@ pub fn install_missing_bundled_in(
         let Some(id) = manifest_id(&manifest) else {
             continue;
         };
+        // Installed means a version directory that still reads as an extension: a leftover
+        // of a failed uninstall — a directory with no readable manifest, the listing's own
+        // definition of invisible — is not one, and must never stop the package from
+        // installing again (the install sweeps the leftover out of the way).
         if find_installed(dir, &id)
-            .map(|versions| !versions.is_empty())
+            .map(|versions| {
+                versions
+                    .iter()
+                    .any(|v| read_manifest(&dir.join(format!("{id}-{v}"))).is_some())
+            })
             .unwrap_or(false)
         {
             continue;
@@ -715,6 +723,16 @@ pub fn install_from_vsix_into(dir: &Path, vsix: &Path, builtin: bool) -> Result<
     let id = format!("{}.{}", manifest.publisher, manifest.name);
     let target = dir.join(format!("{id}-{}", manifest.version));
     for existing in find_installed(dir, &id)? {
+        let existing_dir = dir.join(format!("{id}-{existing}"));
+        // A version directory whose manifest does not read is a leftover of a failed
+        // uninstall or upgrade — never an install (the listing already calls it invisible).
+        // Sweep it out of the way so the fresh unpack lands under its own name; counting it
+        // as installed blocked every later install of the package forever.
+        if read_manifest(&existing_dir).is_none() {
+            remove_dir_all_retrying(&existing_dir)
+                .map_err(|e| removal_error(&existing_dir, &e))?;
+            continue;
+        }
         match compare_versions(&existing, &manifest.version) {
             std::cmp::Ordering::Greater => {
                 return Err(format!(
@@ -726,7 +744,7 @@ pub fn install_from_vsix_into(dir: &Path, vsix: &Path, builtin: bool) -> Result<
                 return Err(format!("{id} {existing} is already installed"))
             }
             std::cmp::Ordering::Less => {
-                std::fs::remove_dir_all(dir.join(format!("{id}-{existing}")))
+                remove_dir_all_retrying(&existing_dir)
                     .map_err(|e| format!("remove old {id} {existing}: {e}"))?;
             }
         }
@@ -824,7 +842,7 @@ pub fn uninstall(dir: &Path, ext_id: &str) -> Result<(), String> {
                 "{ext_id} is built into Git Graph Studio and cannot be uninstalled"
             ));
         }
-        std::fs::remove_dir_all(&path).map_err(|e| removal_error(&path, &e))?;
+        remove_dir_all_retrying(&path).map_err(|e| removal_error(&path, &e))?;
     }
     Ok(())
 }
@@ -839,6 +857,27 @@ fn removal_error(path: &Path, error: &std::io::Error) -> String {
             "{base} — another Git Graph Studio window may be running this extension's backend; close it and try again"
         ),
         _ => base,
+    }
+}
+
+/// A directory removal that outwaits a transient Windows lock — the backend's grandchildren
+/// still exiting, the indexer or the virus scanner holding a just-closed file — the same
+/// few-second patience `replace_install` gives its renames: a single un-retried delete is
+/// what used to leave half-deleted installs behind, and such a leftover blocked every later
+/// install of the package. A persistent lock still fails (with the hint `removal_error`
+/// spells out), and an already-gone directory reads as removed.
+fn remove_dir_all_retrying(path: &Path) -> Result<(), std::io::Error> {
+    let mut attempt = 0;
+    loop {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) if attempt < 20 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            Err(e) => return Err(e),
+        }
     }
 }
 

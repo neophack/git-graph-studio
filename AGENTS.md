@@ -172,8 +172,15 @@ guarantees the window is never a blank dark rectangle.
   drag, a 250 ms quiet decay ends it, and the workbench's scheduled refreshes defer for as
   long as the mark lives — git processes never start against the OS's move loop),
   `src/platform/state.ts`
-  (localStorage persistence), `src/workbench/shell.css`
+  (localStorage persistence), `src/workbench/shell.css`, `src/workbench/appUpdate.ts` +
+  `src/platform/ipc/update.ts` (the app's own update flow, module 12's GitHub channel and
+  mirror setting reused: Help → Check for App Updates, the `help.checkForUpdates` command)
 - Backend: `src-tauri/src/lib.rs` / `main.rs` (crate inventory and app entry),
+  `src-tauri/src/app_update.rs` (the app update's backend: the repository's newest
+  release as an offer, this platform's installer picked off Tauri's own bundle
+  spellings, the streaming download through the marketplace engine's ceilings, then
+  launched (Windows exits so it can replace the running exe; a dev run keeps running) or
+  mounted/revealed — macOS and Linux keep their manual step),
   `src-tauri/src/cmd_app.rs` (the app-instance domain: File → New Window's
   `app_new_instance` spawns a sibling process — the multi-open entry every platform
   shares, optionally carrying a folder (`open -n <bundle> --args <path>` on a packaged
@@ -605,7 +612,18 @@ up by exact id as THIS machine's platform build (the registry's bare listing ans
 arbitrary platform), over `ext_gallery.rs`'s commands (featured ids, lookup, icon,
 download-and-install), every URL confined to the gallery's own origin, and
 a marketplace package installs through exactly the path a picked `.vsix` takes (forward-
-only upgrades, the unhostable-`.node` door). Frame-host extensions run under `extHost.ts` +
+only upgrades, the unhostable-`.node` door). The extension packages download from
+nowhere else — the registry and the installer's bundled packages only (2026-11-10, the
+owner's direction: a `ggs-remote.vsix` downloaded beside the installers could mismatch
+the running app it speaks `ggs-remote/1` to, so the plugins stay on the version-locked
+bundled mechanism, whose boot-pass refresh upgrades an installed one with every app
+build); GitHub serves THIS APPLICATION's updates instead — Help → Check for App Updates
+(`app_update.rs`, module 1) reads the repository's newest release, offers a strictly
+newer one, downloads this platform's installer (Tauri's own bundle spellings: NSIS /
+DMG / deb) through the same progress stream, optionally through the `githubMirror`
+setting's mirror prefix (the ghproxy URL-prefix convention, the free-CDN acceleration),
+then launches it (Windows exits so the update replaces the running exe) or
+mounts/reveals it. Frame-host extensions run under `extHost.ts` +
 `vscodeApi.ts` with a growing `vscode` API surface: commands, configuration (with
 `onDidChangeConfiguration` pushed in), message toasts with MessageItem, quick picks (string
 and object items), `withProgress` toasts, output channels (the Output view's channel

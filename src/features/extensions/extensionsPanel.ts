@@ -8,7 +8,11 @@
 // names (ext_gallery.rs's FEATURED — the owner's direction, 2026-09-27), each row merging its
 // Open VSX entry (this machine's platform build) with its installed state: Install when
 // absent, Update when the registry is ahead, the installed tag when current. A marketplace
-// package installs through exactly the path a picked VSIX takes. Anything else installed
+// package installs through exactly the path a picked VSIX takes — download progress, speed
+// and remaining time riding the install toast. The extension packages download from nowhere
+// else: a GitHub-released vsix could mismatch the running app, so the plugins ride the
+// registry and the installer's bundled packages only (2026-11-10, the owner's direction);
+// GitHub serves THIS APPLICATION's updates (workbench/appUpdate.ts). Anything else installed
 // (a picked VSIX, an older install) lists under "Other installed", so it stays removable.
 // Nothing is installed by default: the packages the installer ships beside the app (the Git
 // Graph engine view) lists from its manifest until one-click installed

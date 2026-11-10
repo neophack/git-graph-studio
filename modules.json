@@ -30,6 +30,7 @@
 				"src-tauri/src/state.rs",
 				"src-tauri/src/events.rs",
 				"src-tauri/src/cmd_app.rs",
+				"src-tauri/src/app_update.rs",
 				"src-tauri/src/test_git_helpers.rs",
 				"src-tauri/src/test_isolated_store.rs",
 				"src-tauri/crates/ggs-base/",
@@ -41,7 +42,8 @@
 				"tests/workbenchLifecycle.test.ts",
 				"tests/uiSweep.test.ts",
 				"tests/ui.test.ts",
-				"tests/uiHarness.test.ts"
+				"tests/uiHarness.test.ts",
+				"tests/appUpdate.test.ts"
 			]
 		},
 		{

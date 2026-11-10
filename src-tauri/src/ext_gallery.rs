@@ -11,10 +11,7 @@ use std::sync::Arc;
 use ggs_ext::ExtInfo;
 use tauri::ipc::Channel;
 
-use ggs_ext::gallery::{
-    download_vsix, gallery_url, get, lookup, search, GalleryEntry, GalleryProgress, GallerySearch,
-    ASSET_CAP, FEATURED,
-};
+use ggs_ext::gallery::{download_vsix, gallery_url, get, lookup, search, GalleryEntry, GalleryProgress, GallerySearch, ASSET_CAP, FEATURED};
 
 /// The in-flight marketplace download's cancel flag: the install toast's Cancel sets it
 /// through `ext_gallery_install_cancel`, the download loop reads it on every progress
@@ -95,32 +92,48 @@ pub async fn ext_gallery_install(
     let cancelled = Arc::clone(&cancel.cancelled);
     // Download and read the manifest off the UI thread; the backend stop and the install
     // follow once the id is known (the two things that touch shared state).
-    let (package, ext_id) =
-        tauri::async_runtime::spawn_blocking(move || -> Result<(PathBuf, String), String> {
-            let package = download_vsix(&base, &download_url, &mut |tick| {
-                if cancelled.load(Ordering::Relaxed) {
-                    return false;
-                }
-                on_progress.send(tick).is_ok()
-            })?;
-            let manifest = ggs_ext::read_vsix_manifest(&package).inspect_err(|_| {
-                let _ = std::fs::remove_file(&package); // an unreadable package leaves no temp copy
-            })?;
-            Ok((package, manifest.extension_id()))
-        })
-        .await
-        .map_err(|e| format!("the download was cancelled: {e}"))??;
-    // The old install's backend cannot outlive the directory its exe lives in.
+    let downloaded = tauri::async_runtime::spawn_blocking(move || -> Result<(PathBuf, String), String> {
+        let package = download_vsix(&base, &download_url, &mut |tick| {
+            if cancelled.load(Ordering::Relaxed) {
+                return false;
+            }
+            on_progress.send(tick).is_ok()
+        })?;
+        package_with_id(package)
+    })
+    .await
+    .map_err(|e| format!("the download was cancelled: {e}"))?;
+    install_verified(app, state, downloaded).await
+}
+
+/// The downloaded temp copy as `(path, extension id)`: the manifest read off it names
+/// the id; an unreadable package leaves no temp copy behind.
+fn package_with_id(package: PathBuf) -> Result<(PathBuf, String), String> {
+    let ext_id = ggs_ext::read_vsix_manifest(&package)
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&package); // an unreadable package leaves no temp copy
+        })?
+        .extension_id();
+    Ok((package, ext_id))
+}
+
+/// The old install's backend dies first — its exe lives inside the directory being
+/// replaced — then the ordinary install path runs, and the temp copy never outlives it.
+async fn install_verified(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ggs_ext::process::ExtHost>,
+    downloaded: Result<(PathBuf, String), String>,
+) -> Result<ExtInfo, String> {
+    let (package, ext_id) = downloaded.map_err(|e| format!("the download was cancelled: {e}"))?;
     let _ = state.stop(&ext_id);
     let dir = crate::cmd_ext::extensions_dir(&app)?;
-    let installed = tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || {
         let result = ggs_ext::install_from_vsix_into(&dir, &package, false);
         let _ = std::fs::remove_file(&package); // the temp copy never outlives the install
         result
     })
     .await
-    .map_err(|e| format!("the install was cancelled: {e}"))?;
-    installed
+    .map_err(|e| format!("the install was cancelled: {e}"))?
 }
 
 /// The install toast's Cancel: the in-flight download stops at its next progress report

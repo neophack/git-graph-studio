@@ -25,6 +25,10 @@ mod test_isolated_store;
 pub mod events;
 pub mod can_commands;
 pub mod viewer_commands;
+/// The app's own update channel (2026-11-10): the repository's newest release, this
+/// platform's installer downloaded through the marketplace's streaming progress and
+/// mirror setting, then launched (Windows) or mounted/revealed (macOS/Linux).
+pub mod app_update;
 pub mod cmd_analysis;
 /// The app-instance domain: "New Window" spawns another GGS — the multi-open entry every
 /// platform shares (macOS needs it most: activating a bundled app's icon only focuses the
@@ -70,6 +74,7 @@ mod desktop {
         can_commands, viewer_commands, cmd_analysis, cmd_app, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_providers,
         cmd_scm, cmd_search, cmd_symbols, ext_child, ext_gallery, ext_process, mcp, measure,
         pty, remote_debug, remote_host,
+        app_update,
     };
     use ggs_base::workspace::WorkspaceRoots;
     use crate::cli::{cli_help, launch_path_of, parse_startup_actions, wants_help};
@@ -329,6 +334,7 @@ mod desktop {
             .manage(ggs_text::viewer::indexed::IndexedState::default())
             .manage(ggs_can::CanLogState::default())
             .manage(ext_gallery::GalleryInstallState::default())
+            .manage(app_update::AppUpdateState::default())
             // A clone of the app's one host (`ext_process::host()`), not a second,
             // independent `ExtHost`: the folder-open paths and the provider bridge's
             // restarts reach the same running backends through `host()` directly, with no
@@ -702,6 +708,9 @@ mod desktop {
                 ext_gallery::ext_gallery_asset,
                 ext_gallery::ext_gallery_install,
                 ext_gallery::ext_gallery_install_cancel,
+                app_update::app_update_check,
+                app_update::app_update_install,
+                app_update::app_update_install_cancel,
                 ext_process::ext_process_start,
                 ext_process::ext_process_run,
                 ext_process::ext_process_stop,

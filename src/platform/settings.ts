@@ -120,13 +120,18 @@ export interface AppSettings {
 	 *  stops; flip back and extensions re-ask). */
 	claudeTapAccess: 'ask' | 'deny';
 	/** Whether closing the PC window while remote sessions keep the instance running
-	 * also raises the OS notification that says so (§17.2, K15) — the "don't tell me
-	 * again" of that notice, as a setting. PC device-level; never crosses to a remote. */
+	also raises the OS notification that says so (§17.2, K15) — the "don't tell me
+	again" of that notice, as a setting. PC device-level; never crosses to a remote. */
 	remoteHideNotice: boolean;
 	/** The window's device mode (`deviceShell.ts` reads it): `auto` keeps the desktop
 	 * workbench; `phone` / `tablet` wear the remote app's touch layouts in this window —
 	 * the portrait/landscape spelling follows the window's aspect, live without a restart. */
 	deviceMode: DeviceMode;
+	/** The download mirror for GitHub-hosted marketplace packages (2026-11-10, the
+	 * owner's direction — the free-CDN acceleration question): the ghproxy URL-prefix
+	 * convention, `https://mirror.example/https://github.com/...`. Empty downloads
+	 * straight from github.com. */
+	githubMirror: string;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -147,7 +152,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	extensionLogLevel: 'info',
 	claudeTapAccess: 'ask',
 	remoteHideNotice: true,
-	deviceMode: 'auto'
+	deviceMode: 'auto',
+	githubMirror: ''
 };
 
 /** The migration version stamped into every payload this release persists — the
@@ -226,12 +232,14 @@ export type SettingCategory = 'general' | 'appearance' | 'editor' | 'search';
 export interface SettingDef {
 	key: keyof AppSettings;
 	category: SettingCategory;
-	kind: 'boolean' | 'number' | 'enum' | 'theme' | 'locale' | 'extensionList';
+	kind: 'boolean' | 'number' | 'enum' | 'theme' | 'locale' | 'extensionList' | 'string';
 	options?: { value: string; label: string }[];
 	min?: number;
 	max?: number;
 	step?: number;
 	windowsOnly?: boolean;
+	/** A `string` row's placeholder (the input hints at the expected shape). */
+	placeholder?: string;
 }
 
 /** Every setting the workbench owns, in the order the Settings dialog lists them. The label
@@ -252,6 +260,7 @@ export const SETTING_DEFS: SettingDef[] = [
 		{ value: 'deny', label: 'settings.claudeTapAccess.deny' }
 	] },
 	{ key: 'remoteHideNotice', category: 'general', kind: 'boolean' },
+	{ key: 'githubMirror', category: 'general', kind: 'string', placeholder: 'https://your-mirror.example' },
 	{ key: 'terminalShell', category: 'general', kind: 'enum', windowsOnly: true, options: [
 		{ value: 'powershell', label: 'settings.terminalShell.powershell' },
 		{ value: 'ggsBash', label: 'settings.terminalShell.ggsBash' },

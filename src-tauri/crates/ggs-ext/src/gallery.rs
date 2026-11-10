@@ -11,6 +11,11 @@
 //! [`GalleryProgress`] report, cancellable mid-body — and hands it to
 //! [`crate::cmd_ext`]'s ordinary install path — the same manifest validation,
 //! forward-only upgrades and unhostable-`.node` rejection a picked file meets.
+//! The extension packages download from nowhere else: a GitHub-released `.vsix` beside
+//! the installers could mismatch the running app, so the plugins ride the registry and
+//! the installer's bundled packages only (2026-11-10, the owner's direction) — GitHub
+//! serves THIS APPLICATION's updates, and this module lends the app update its raw
+//! release fetch, its mirror rewrite and the streaming download below.
 //!
 //! Every URL a command touches is confined to the gallery's own origin (same scheme,
 //! same host): the commands can neither fetch nor install from anywhere else, so a
@@ -30,6 +35,12 @@ pub const DEFAULT_GALLERY: &str = "https://open-vsx.org";
 /// entries it shows. Named here, beside `cmd_ext`'s bundled-package registry, so the
 /// frontend names no plugin id (plan §3.2).
 pub const FEATURED: &[&str] = &["Anthropic.claude-code", "neophack.git-graph-rs"];
+/// The GitHub REST API the app's own update check rides (`repos/{repo}/releases/latest`).
+/// The extension packages themselves download from nowhere but the registry and the
+/// installer's bundled packages (2026-11-10, the owner's direction: ggs-remote.vsix
+/// downloaded beside the installers could mismatch the running app — the plugin ships
+/// only with the installer, whose boot pass upgrades it in lockstep).
+pub const GITHUB_API: &str = "https://api.github.com";
 /// The search page size — enough to fill the Extensions view without a second page.
 const SEARCH_SIZE: u32 = 20;
 /// One metadata request's ceiling — a search, a lookup, an icon: answers small enough
@@ -413,6 +424,106 @@ pub fn lookup(base: &str, id: &str) -> Result<GalleryEntry, String> {
     ))
 }
 
+/* ---------- GitHub releases: the second update channel ---------- */
+
+/// One GitHub release's wire shape — public because the app's own update check (the
+/// installer for this platform off the same repository's releases) maps the same answer.
+#[derive(Deserialize, Debug, Clone)]
+pub struct GithubRelease {
+    #[serde(rename = "tag_name", default)]
+    pub tag_name: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(rename = "published_at", default)]
+    pub published_at: String,
+    #[serde(default)]
+    pub assets: Vec<GithubAsset>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct GithubAsset {
+    #[serde(default)]
+    pub name: String,
+    #[serde(rename = "browser_download_url", default)]
+    pub browser_download_url: String,
+}
+
+/// A download mirror's usable form: trimmed https origin, or None for empty/absent —
+/// the ghproxy URL-prefix convention (`{mirror}/{original-url}`); a plain-http mirror
+/// would let anything on the wire stand in for the package, exactly like a plain-http
+/// marketplace would.
+pub fn github_mirror(mirror: Option<String>) -> Result<Option<String>, String> {
+    let Some(raw) = mirror else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim().trim_end_matches('/').to_owned();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if !trimmed.starts_with("https://") || trimmed.len() == "https://".len() {
+        return Err(format!("the download mirror must be https: {raw}"));
+    }
+    Ok(Some(trimmed))
+}
+
+/// The URL a GitHub download fetches: the release asset itself — the only shape this
+/// path accepts (`/{owner}/{repo}/releases/download/{tag}/{file}` on github.com) — or,
+/// with a mirror configured, the mirror carrying the whole original URL as its path.
+pub fn github_download_url(mirror: Option<&str>, url: &str) -> Result<String, String> {
+    let url = url.trim();
+    let rest = url
+        .strip_prefix("https://github.com/")
+        .ok_or_else(|| format!("refusing a non-github URL: {url}"))?;
+    if !rest.contains("/releases/download/") {
+        return Err(format!("refusing a URL that is not a release asset: {url}"));
+    }
+    match mirror {
+        None => Ok(url.to_owned()),
+        Some(mirror) => Ok(format!("{mirror}/{url}")),
+    }
+}
+
+/// The repo's newest release, as the raw wire shape the app update maps (its installer
+/// pick lives in the app's `app_update.rs`; the extension packages never download from
+/// GitHub — see [`GITHUB_API`]).
+pub fn github_release_raw(api_base: &str, repo: &str) -> Result<GithubRelease, String> {
+    if !github_repo_shape_ok(repo) {
+        return Err(format!("not a GitHub repository: {repo}"));
+    }
+    let url = format!("{api_base}/repos/{repo}/releases/latest");
+    let bytes = agent()
+        .get(&url)
+        .call()
+        .map_err(|e| format!("request to GitHub failed: {e}"))
+        .and_then(|mut response| {
+            response
+                .body_mut()
+                .read_to_vec()
+                .map_err(|e| format!("read GitHub's answer: {e}"))
+        })?;
+    serde_json::from_slice(&bytes).map_err(|e| format!("GitHub's answer is not valid JSON: {e}"))
+}
+
+/// The `owner/repo` shape a release path accepts.
+pub fn github_repo_shape_ok(repo: &str) -> bool {
+    repo.split_once('/')
+        .is_some_and(|(owner, repo)| {
+            !owner.is_empty()
+                && !repo.is_empty()
+                && owner.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && repo
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+        })
+}
+
+/// The tag as a version: a leading `v`/`V` stripped, and it has to carry a digit.
+pub fn version_of_tag(tag: &str) -> Option<String> {
+    let version = tag.trim().strip_prefix(['v', 'V']).unwrap_or(tag.trim());
+    (!version.is_empty() && version.bytes().any(|b| b.is_ascii_digit()))
+        .then(|| version.to_owned())
+}
+
 /// Download the `.vsix` `download_url` names into a temp file (confined to the gallery
 /// origin — nothing else on the network is reachable through this path). The body streams
 /// to disk in chunks under the download ceilings, never whole in memory; `report` answers
@@ -430,9 +541,20 @@ pub fn download_vsix(
         .next()
         .filter(|stem| stem.ends_with(".vsix"))
         .unwrap_or("extension.vsix");
+    download_to_temp(&url, name, report)
+}
+
+/// The streaming half both download channels share: GET `url` (already resolved and
+/// origin-checked by the caller's channel) into a temp file under the download ceilings,
+/// reporting through `report`.
+pub fn download_to_temp(
+    url: &str,
+    name: &str,
+    report: &mut dyn FnMut(GalleryProgress) -> bool,
+) -> Result<PathBuf, String> {
     let path = std::env::temp_dir().join(format!("ggs-gallery-{}-{name}", std::process::id()));
     let mut response = download_agent()
-        .get(&url)
+        .get(url)
         .call()
         .map_err(|e| format!("request to the marketplace failed: {e}"))?;
     let total = response
@@ -585,6 +707,54 @@ mod tests {
         assert!(split_id("ns.").is_err());
         assert!(split_id("ns.a/../b").is_err());
         assert!(split_id("ns.a?b").is_err());
+    }
+
+    /* ---------- The app update's GitHub halves (the release fetch, the mirror) ---------- */
+
+    #[test]
+    fn tags_strip_their_v_and_versions_need_a_digit() {
+        assert_eq!(version_of_tag("v1.1.2").as_deref(), Some("1.1.2"));
+        assert_eq!(version_of_tag(" 1.2.3 ").as_deref(), Some("1.2.3"));
+        assert_eq!(version_of_tag("release-2026-11").as_deref(), Some("release-2026-11"));
+        assert!(version_of_tag("v").is_none());
+        assert!(version_of_tag("").is_none());
+    }
+
+    #[test]
+    fn the_mirror_must_be_https_and_the_rewrite_carries_the_whole_url() {
+        assert_eq!(github_mirror(None).unwrap(), None);
+        assert_eq!(github_mirror(Some(String::new())).unwrap(), None);
+        assert_eq!(github_mirror(Some("   ".into())).unwrap(), None);
+        assert_eq!(
+            github_mirror(Some("https://ghfast.top/".into())).unwrap().as_deref(),
+            Some("https://ghfast.top")
+        );
+        assert!(github_mirror(Some("http://ghfast.top".into())).is_err());
+
+        let asset = "https://github.com/neophack/git-graph-studio/releases/download/v0.2.0/ggs_0.2.0_x64-setup.exe";
+        assert_eq!(github_download_url(None, asset).unwrap(), asset);
+        assert_eq!(
+            github_download_url(Some("https://ghfast.top"), asset).unwrap(),
+            "https://ghfast.top/https://github.com/neophack/git-graph-studio/releases/download/v0.2.0/ggs_0.2.0_x64-setup.exe"
+        );
+        // Only a github.com release asset rides this path — never another host, never
+        // another corner of github.com.
+        assert!(github_download_url(None, "https://evil.example/a.vsix").is_err());
+        assert!(github_download_url(None, "https://github.com/neophack/git-graph-studio/archive/refs/tags/v0.2.0.zip").is_err());
+        assert!(github_download_url(None, "not a url").is_err());
+    }
+
+    /// The release fetch refuses a repository that is not `owner/repo`, before any
+    /// network — the app update names its own repository, but the shape stays a gate.
+    #[test]
+    fn a_release_fetch_refuses_a_bad_repository_shape() {
+        assert!(github_repo_shape_ok("neophack/git-graph-studio"));
+        assert!(!github_repo_shape_ok("neophack"));
+        assert!(!github_repo_shape_ok("/repo"));
+        assert!(!github_repo_shape_ok("owner/"));
+        assert!(!github_repo_shape_ok("ow?ner/repo"));
+        let error = github_release_raw(GITHUB_API, "not-a-repo").unwrap_err();
+        assert!(error.contains("not a GitHub repository"), "{error}");
     }
 
     /// The live registry: each featured id resolves to THIS platform's build (network —

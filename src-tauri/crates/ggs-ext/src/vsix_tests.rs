@@ -120,6 +120,29 @@
             .unwrap_or(false));
     }
 
+    /// A failed uninstall leaves the version directory without its manifest; the boot
+    /// pass must install the bundled package over it — not read the leftover as installed
+    /// and leave the extension missing after the app is reinstalled.
+    #[test]
+    fn the_bundled_auto_install_replaces_a_failed_uninstalls_leftover() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let vsix = make_vsix(tmp.path(), "demo", "acme", "1.0.0");
+
+        let leftover = exts.join("acme.demo-1.0.0");
+        std::fs::create_dir_all(leftover.join("out")).unwrap();
+        std::fs::write(leftover.join("out").join("extension.js"), b"stray").unwrap();
+
+        let outcomes = install_missing_bundled_in(&exts, &[vsix]);
+        assert_eq!(outcomes.len(), 1, "the leftover must not be read as installed");
+        assert!(outcomes[0].is_ok(), "{outcomes:?}");
+        assert!(
+            leftover.join("package.json").is_file(),
+            "the fresh install replaced the leftover"
+        );
+    }
+
     /// A `.vsix` carrying `extension/package.json` + a compiled entry bundle, plus the OPC
     /// root files real packages ship (which the extractor must skip).
     fn make_vsix(dir: &Path, name: &str, publisher: &str, version: &str) -> PathBuf {

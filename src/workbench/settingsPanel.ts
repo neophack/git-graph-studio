@@ -150,6 +150,14 @@ function controlFor(def: SettingDef): HTMLElement {
 			return select(String(settings[def.key]), def.options ?? [], (value) => applyEnumSetting(def, value));
 		case 'number':
 			return numberInput(settings[def.key] as number, (value) => updateSetting(def.key, value as never), def.min ?? 0, def.max ?? 10000, def.step);
+		case 'string': {
+			const input = el('input', 'settings-input settings-input-wide') as HTMLInputElement;
+			input.type = 'text';
+			input.value = String(settings[def.key] ?? '');
+			input.placeholder = def.placeholder ?? '';
+			input.addEventListener('change', () => updateSetting(def.key, input.value.trim() as never));
+			return input;
+		}
 		default:
 			return checkbox(settings[def.key] as boolean, (value) => updateSetting(def.key, value as never));
 	}

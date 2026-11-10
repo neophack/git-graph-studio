@@ -19,6 +19,7 @@ import { registerGitCommands } from '../features/scm';
 import { registerZhCnText, t, tf } from '../platform/i18n';
 import { hook } from '../platform/hooks';
 import { openSettingsPanel } from './settingsPanel';
+import { checkForAppUpdate } from './appUpdate';
 import { settings, updateSetting } from '../platform/settings';
 import * as state from '../platform/state';
 import { basename, notify, relativeTo, toPosix } from '../platform/ui/index';
@@ -305,6 +306,11 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'help.selfTest', title: 'Run Module Self-Tests', category: 'Help', run: () => this.editors.openSelfTest() });
 		register({ id: 'ai.providers', title: 'Manage Model Providers', category: 'AI', run: () => this.editors.openProviders() });
 		register({ id: 'help.repository', title: 'Report Issue / Project Page', category: 'Help', run: () => void openUrl('https://github.com/neophack/git-graph-studio') });
+		// The app's own update check (2026-11-10, the owner's direction: 软件本身可以 github
+		// 下载): the repository's newest release, this platform's installer downloaded
+		// through the streaming progress toast, then launched (Windows) or revealed.
+		registerZhCnText({ 'Check for App Updates': '检查应用更新' });
+		register({ id: 'help.checkForUpdates', title: 'Check for App Updates', category: 'Help', run: () => void checkForAppUpdate() });
 		register({ id: 'help.about', title: 'About', category: 'Help', run: () => notify('info', `Git Graph Studio ${__APP_VERSION__} - a standalone workbench whose views arrive as plugins.`) });
 		register({ ...desktopOnly, id: 'help.openDevTools', title: 'Open Developer Tools', category: 'Help', run: () => void openDevtools().catch((e) => console.error('open_devtools failed:', e)) });
 		// Dev builds only (vite strips the branch from the bundle; vitest is excluded so the

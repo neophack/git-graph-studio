@@ -104,10 +104,10 @@ describe('ExtensionsPanel', () => {
 		const panel = mountedPanel();
 		await panel.refresh();
 		// The sample row: its badge and its one-click install button.
-		expect([...document.querySelectorAll('.ext-builtin')].map((b) => b.textContent)).toEqual(['built-in', 'sample']);
+		expect([...document.querySelectorAll('.ext-builtin')].map((b) => b.textContent)).toEqual(['built-in', 'bundled']);
 		const sampleRow = document.querySelectorAll<HTMLElement>('.ext-row')[1]!;
 		const button = sampleRow.querySelector<HTMLElement>('.action-btn')!;
-		expect(button.title).toContain('Install the bundled sample');
+		expect(button.title).toContain('Install the bundled package');
 		button.click();
 		await flush();
 		expect(backend.callsTo('ext_install_bundled')).toEqual([{ extId: 'ggs.ext-demo' }]);
@@ -231,7 +231,7 @@ describe('ExtensionsPanel', () => {
 		// Installed and current: the ordinary installed row — no Install, no Update.
 		const claudeRow = document.querySelectorAll<HTMLElement>('.ext-row')[0]!;
 		const titles = [...claudeRow.querySelectorAll<HTMLElement>('.action-btn')].map((b) => b.title).join('|');
-		expect(titles).toContain('Uninstall Anthropic.claude-code');
+			expect(titles).toContain('Uninstall Anthropic.claude-code');
 		expect(titles).not.toContain('Update');
 		expect(titles).not.toContain('Install from the Marketplace');
 	});
