@@ -182,7 +182,10 @@ pub struct UpdateInstallOutcome {
 }
 
 /// The downloaded installer's platform tail (see [`app_update_install`]).
-fn finish_update(app: &tauri::AppHandle, path: &std::path::Path) -> Result<UpdateInstallOutcome, String> {
+fn finish_update(
+    #[cfg_attr(not(windows), allow(unused_variables))] app: &tauri::AppHandle,
+    path: &std::path::Path,
+) -> Result<UpdateInstallOutcome, String> {
     let shown = path.to_string_lossy().into_owned();
     // Windows, packaged: launch the NSIS installer detached and step the app out of its
     // way — the update replaces the running exe. A dev run keeps running.
