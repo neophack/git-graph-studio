@@ -45,9 +45,20 @@ export function clearAllNotifications(): void {
 	for (const listener of centreListeners) listener(centre.length);
 }
 
-/** Post a toast. `onDismiss` runs whenever the toast goes away - the close button, an action
- *  button, or the auto-timeout - so callers can treat "dismissed without choosing" as cancel.
- *  The notification also joins the centre, where it stays until cleared. */
+/** How long an unimportant (info, no buttons) toast stays before the countdown closes it.
+ *  Warning and error toasts — and any toast with buttons — are important: they keep until
+ *  the user closes them. */
+export const INFO_TOAST_MS = 8000;
+/** The countdown's redraw cadence; the bar is what makes the closing visible. */
+const COUNTDOWN_TICK_MS = 100;
+
+/** Post a toast. Unimportant ones (info, no buttons) show a countdown bar and close
+ *  themselves when it runs out — paused while the pointer is over the toast or the user
+ *  holds a selection inside it, so reading and copying are never interrupted. Important
+ *  ones (warning, error, any toast with buttons) keep until the user closes them.
+ *  `onDismiss` runs whenever the toast goes away - the close button, an action button, or
+ *  the countdown - so callers can treat "dismissed without choosing" as cancel. The
+ *  notification also joins the centre, where it stays until cleared. */
 export function notify(kind: NotificationKind, message: string, actions: NotificationAction[] = [], onDismiss?: () => void): void {
 	centre.push({ id: centreSeq++, kind, message, at: Date.now() });
 	if (centre.length > 100) centre.shift(); // bounded, like the session log
@@ -71,24 +82,60 @@ export function notify(kind: NotificationKind, message: string, actions: Notific
 	}
 	toast.querySelector<HTMLElement>('.body')!.style.flex = '1';
 	toast.querySelector<HTMLElement>('.body')!.style.minWidth = '0';
-	container.appendChild(toast);
-	let timer: number | null = kind === 'info' && actions.length === 0 ? window.setTimeout(() => dismiss(), 8000) : null;
+	// The unimportant toast's countdown: a draining bar at the bottom edge. The tick holds
+	// the clock (no time counted) while the pointer is over the toast or the user holds a
+	// selection inside it — a toast the user is copying from must not close under them —
+	// or while the page is hidden, and resumes by itself once they let go.
+	const countsDown = kind === 'info' && actions.length === 0;
+	let bar: HTMLElement | null = null;
+	let remaining = INFO_TOAST_MS;
+	let lastTick = 0;
+	let ticking: number | null = null;
+	let hovered = false;
+	const selectionHeld = (): boolean => {
+		const selection = document.getSelection();
+		if (!selection || selection.isCollapsed) return false;
+		const node = selection.anchorNode;
+		return node !== null && toast.contains(node);
+	};
+	const tick = (): void => {
+		const now = Date.now();
+		if (hovered || selectionHeld() || document.hidden) {
+			lastTick = now;
+			return;
+		}
+		remaining -= now - lastTick;
+		lastTick = now;
+		if (remaining <= 0) {
+			dismiss();
+			return;
+		}
+		if (bar) bar.style.width = `${Math.max(0, (remaining / INFO_TOAST_MS) * 100)}%`;
+	};
 	function dismiss(): void {
-		if (timer !== null) window.clearTimeout(timer);
-		timer = null;
+		if (ticking !== null) window.clearInterval(ticking);
+		document.removeEventListener('visibilitychange', onVisibility);
 		toast.remove();
 		onDismiss?.();
 	}
-	// Keep an info toast while the pointer is over it, then resume the auto-dismiss countdown.
-	toast.addEventListener('mouseenter', () => {
-		if (timer !== null) window.clearTimeout(timer);
-		timer = null;
-	});
-	toast.addEventListener('mouseleave', () => {
-		if (timer === null && kind === 'info' && actions.length === 0) {
-			timer = window.setTimeout(() => dismiss(), 8000);
-		}
-	});
+	function onVisibility(): void {
+		lastTick = Date.now();
+	}
+	if (countsDown) {
+		bar = el('div', 'countdown');
+		bar.style.width = '100%';
+		toast.appendChild(bar);
+		toast.addEventListener('mouseenter', () => {
+			hovered = true;
+		});
+		toast.addEventListener('mouseleave', () => {
+			hovered = false;
+		});
+		document.addEventListener('visibilitychange', onVisibility);
+		lastTick = Date.now();
+		ticking = window.setInterval(tick, COUNTDOWN_TICK_MS);
+	}
+	container.appendChild(toast);
 }
 
 /** A modal confirmation, drawn as a notification with buttons; resolves with the chosen label. */
