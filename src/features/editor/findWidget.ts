@@ -73,9 +73,10 @@ let openWithReplace = false;
 const replaceToggles = new WeakMap<EditorView, (focus: boolean) => void>();
 
 /** VS Code's Ctrl+H: the find widget with its replace row expanded and the replace field
- *  focused (the widget opens first when it is not showing). */
+ *  focused (the widget opens first when it is not showing). A read-only editor has no
+ *  replace row to offer — the find widget alone opens, like VS Code's greyed replace. */
 export function openReplacePanel(view: EditorView): boolean {
-	if (view.state.readOnly) return false;
+	if (view.state.readOnly) return openSearchPanel(view);
 	const toggle = replaceToggles.get(view);
 	if (toggle) {
 		toggle(true);
@@ -153,8 +154,13 @@ export function createFindPanel(view: EditorView): Panel {
 				: state.index !== null ? tf('find.resultCount', state.index, state.count) : `${state.count}`;
 	};
 
+	/** The search text this panel last pushed itself: an echo of the panel's own apply is
+	 *  not an external query, and must not resync the field the user is typing in. */
+	let appliedSearch: string | null = null;
+
 	const apply = (): void => {
 		// The panel's update hook sees the setSearchQuery effect and refreshes the count.
+		appliedSearch = input.value;
 		view.dispatch({ effects: setSearchQuery.of(query()) });
 	};
 
@@ -270,6 +276,13 @@ export function createFindPanel(view: EditorView): Panel {
 	return {
 		dom,
 		top: true,
+		// VS Code's widget opens with the cursor in the search field (its text selected):
+		// without this, Ctrl+F left the focus in the editor and the first keystrokes went
+		// into the code — or, on a read-only pane, nowhere at all.
+		mount(): void {
+			input.focus();
+			input.select();
+		},
 		update(update: ViewUpdate): void {
 			// An external setSearchQuery (the keymap's Ctrl+F on a selection) resyncs the fields.
 			// Such a transaction touches neither the doc nor the selection, so it must refresh
@@ -277,7 +290,9 @@ export function createFindPanel(view: EditorView): Panel {
 			const requery = update.transactions.some((tr) => tr.effects.some((effect) => effect.is(setSearchQuery)));
 			if (requery) {
 				const current = getSearchQuery(update.state);
-				if (current.search !== input.value && document.activeElement !== input) input.value = current.search;
+				// An external query (the opener's seed, a caller) takes the field; the panel's
+				// own echo leaves it alone while the user types.
+				if (current.search !== input.value && current.search !== appliedSearch) input.value = current.search;
 			}
 			if (requery || update.docChanged || update.selectionSet) refreshCount();
 		},

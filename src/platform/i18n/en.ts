@@ -42,6 +42,8 @@ export const en = {
 	'editor.conflict.diskSide': 'Disk',
 	'editor.conflict.mineSide': 'Mine',
 	'editor.conflict.reloaded': 'Updated on another device',
+	'editor.conflict.saveBlocked': '{0} changed on disk while this diff held unsaved changes — reload the diff first.',
+	'diff.saveBeforeIgnore': 'Save the changes before ignoring whitespace or case.',
 	'editor.saveAs.alreadyOpen': 'A tab already holds {0}; the file was written, that tab shows it.',
 	'merge.acceptCurrent': 'Accept Current Change',
 	'merge.acceptIncoming': 'Accept Incoming Change',

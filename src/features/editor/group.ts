@@ -161,7 +161,10 @@ export class EditorGroup {
 	}
 
 	get activeView(): EditorView | null {
-		return this.active?.view ?? null;
+		// A merge (diff) view exposes its modified pane as the working view, so the palette's
+		// find/undo family and the status bar speak for the side the user edits — VS Code's
+		// own diff editor behaves the same.
+		return this.active?.view ?? this.active?.merge?.b ?? null;
 	}
 
 	get seedableView(): EditorView | null {
@@ -303,6 +306,12 @@ export class EditorGroup {
 		toolbar.onSave = () => void this.save(editor);
 		toolbar.attach(editor.view, editor.input.path);
 		editor.mergeToolbar = toolbar;
+		// The toolbar's conflict ruler observes the pane; release it with the tab.
+		const previousOnClose = editor.onClose;
+		editor.onClose = () => {
+			previousOnClose?.();
+			toolbar.dispose();
+		};
 	}
 
 	declare openFolderCompare: (input: Extract<EditorInput, { kind: 'folders' }>) => Promise<void> ;
@@ -475,7 +484,7 @@ export class EditorGroup {
 
 	declare attachTextServices: (editor: Editor) => void ;
 
-	declare textMenu: (editor: Editor, pos: number | null) => MenuEntry[] ;
+	declare textMenu: (editor: Editor, pos: number | null, pane: EditorView | null) => MenuEntry[] ;
 
 	declare goToDefinition: (editor?: Editor | null, pos?: number | null) => Promise<void>;
 

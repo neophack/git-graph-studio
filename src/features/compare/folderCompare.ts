@@ -278,7 +278,10 @@ export class FolderCompareView {
 				read(joinPath(this.left, entry.path)),
 				read(joinPath(this.right, entry.path))
 			]);
-			const [{ MergeView }, { readOnlyExtensions }] = await Promise.all([loadMerge(), loadTextEditor()]);
+			const [{ MergeView }, { readOnlyExtensions, attachOverviewRuler, chunkOverviewMarks }] = await Promise.all([
+				loadMerge(),
+				loadTextEditor()
+			]);
 			if (stale()) return;
 			const host = el('div', 'cm-merge-view fc-file-diff');
 			detail.appendChild(host);
@@ -290,6 +293,11 @@ export class FolderCompareView {
 				highlightChanges: true,
 				gutter: true
 			});
+			// The scrollbar change map (VS Code's overview ruler): red at the left side's
+			// deletions, green at the right side's insertions. The panes never edit here, so
+			// one build serves the diff's life.
+			attachOverviewRuler(merge.a, () => chunkOverviewMarks(merge.chunks, 'a', merge.a.state.doc));
+			attachOverviewRuler(merge.b, () => chunkOverviewMarks(merge.chunks, 'b', merge.b.state.doc));
 			this.fileDiff = { path: entry.path, left: left.contents ?? '', right: right.contents ?? '', merge, host };
 		})();
 		return detail;

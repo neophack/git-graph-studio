@@ -220,6 +220,98 @@ describe('editor group', () => {
 		expect(document.querySelectorAll('.cm-mergeView .cm-editor')).toHaveLength(2);
 	});
 
+	it('a working-tree diff is editable and saves back; a staged diff stays read-only', async () => {
+		const store: Record<string, string> = { 'C:\\repo\\a.ts': 'worktree text\n' };
+		// The working-tree side (`*`) reads through read_file_at as the backend does — the
+		// repo-relative path joined under the repository root; the staged side (:index) is
+		// its own text, so the two diffs stay distinguishable.
+		backend.on('read_file_at', ({ revision, path }) => revision === '*'
+			? { contents: store[`C:\\repo\\${String(path)}`] ?? '', binary: false, size: 20, encoding: 'utf8', eol: 'lf' }
+			: { contents: `${revision}:${String(path)}\n`, binary: false, size: 20, encoding: 'utf8', eol: 'lf' });
+		files(store);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		let saved: string[] = [];
+		group.onFileSaved = (p) => saved.push(p);
+		// The working tree (revision *): the modified pane is the editor, the base pane is not.
+		await group.openDiff({
+			kind: 'diff', id: 'w1', title: 'a.ts (Working Tree)',
+			left: { revision: 'HEAD', path: 'a.ts', label: 'HEAD', exists: true },
+			right: { revision: '*', path: 'a.ts', label: 'Working Tree', exists: true }
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		const worktree = (group as unknown as { open: Editor[] }).open.find((e) => e.input.kind === 'diff')!;
+		expect(worktree.merge!.a.state.readOnly).toBe(true);
+		expect(worktree.merge!.b.state.readOnly).toBe(false);
+		expect(worktree.diffSavePath).toBe('C:\\repo\\a.ts');
+
+		// Typing in the modified pane dirties the tab; Ctrl+S's save writes the working file.
+		worktree.merge!.b.dispatch({ changes: { from: 0, insert: 'edited ' } });
+		expect(group.hasDirtyEditors()).toBe(true);
+		expect(document.querySelector('.tab.active')!.classList.contains('dirty')).toBe(true);
+		await group.save();
+		expect(store['C:\\repo\\a.ts']).toBe('edited worktree text\n');
+		expect(group.hasDirtyEditors()).toBe(false);
+		expect(saved).toEqual(['C:\\repo\\a.ts']);
+
+		// A staged diff (the index side) has no working file behind it: both panes read-only.
+		await group.openDiff({
+			kind: 'diff', id: 's1', title: 'a.ts (Index)',
+			left: { revision: 'HEAD', path: 'a.ts', label: 'HEAD', exists: true },
+			right: { revision: ':index', path: 'a.ts', label: 'Index', exists: true }
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		const staged = (group as unknown as { open: Editor[] }).open.find((e) => e.input.kind === 'diff' && e.input.id === 's1')!;
+		expect(staged.merge!.b.state.readOnly).toBe(true);
+		expect(staged.merge!.b.state.doc.eq(worktree.merge!.b.state.doc)).toBe(false);
+		expect(group.hasDirtyEditors()).toBe(false);
+
+		// A working file that moved under a dirty diff pane is never overwritten silently.
+		worktree.merge!.b.dispatch({ changes: { from: 0, insert: 'more ' } });
+		store['C:\\repo\\a.ts'] = 'changed elsewhere\n';
+		await group.save(worktree);
+		expect(store['C:\\repo\\a.ts']).toBe('changed elsewhere\n');
+		expect(group.hasDirtyEditors()).toBe(true);
+		expect(notifications().some((n) => n.includes('changed on disk'))).toBe(true);
+	});
+
+	it('the diff layout rebuild carries an unsaved buffer and refuses the ignore toggles while dirty', async () => {
+		const store: Record<string, string> = { 'C:\\repo\\a.ts': 'worktree line\n' };
+		backend.on('read_file_at', ({ revision, path }) => revision === '*'
+			? { contents: store[`C:\\repo\\${String(path)}`] ?? '', binary: false, size: 15, encoding: 'utf8', eol: 'lf' }
+			: { contents: 'base line\n', binary: false, size: 10, encoding: 'utf8', eol: 'lf' });
+		files(store);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openDiff({
+			kind: 'diff', id: 'w1', title: 'a.ts (Working Tree)',
+			left: { revision: 'HEAD', path: 'a.ts', label: 'HEAD', exists: true },
+			right: { revision: '*', path: 'a.ts', label: 'Working Tree', exists: true }
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		const editor = (group as unknown as { open: Editor[] }).open[0]!;
+		editor.merge!.b.dispatch({ changes: { from: 0, insert: 'keep ' } });
+		expect(group.hasDirtyEditors()).toBe(true);
+		// The ignore toggles wait for the save while a buffer is unsaved.
+		const wh = [...document.querySelectorAll<HTMLButtonElement>('.diff-toolbar button')].find((b) => b.textContent === 'Wh')!;
+		click(wh);
+		expect(wh.classList.contains('active')).toBe(false);
+		expect(editor.merge!.b.state.readOnly).toBe(false);
+		// The layout switch rebuilds the panes and carries the unsaved buffer over.
+		const layoutButton = [...document.querySelectorAll<HTMLButtonElement>('.diff-toolbar button')].find((b) => b.title.startsWith('Switch between'))!;
+		click(layoutButton);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(editor.merge).toBeUndefined();
+		expect(editor.view).toBeDefined();
+		expect(editor.view!.state.doc.toString()).toBe('keep worktree line\n');
+		expect(group.hasDirtyEditors()).toBe(true);
+		// The clean tab may ignore whitespace again (the pane goes read-only for the review).
+		await group.save();
+		click(wh);
+		expect(wh.classList.contains('active')).toBe(true);
+		expect(editor.view!.state.readOnly).toBe(true);
+	});
+
 	it('back/forward navigation lands on an open revision tab', async () => {
 		backend.on('read_file_at', () => ({ contents: 'rev contents\n', binary: false, size: 2 }));
 		files({ 'C:\\repo\\a.txt': 'a\n', 'C:\\repo\\b.txt': 'b\n' });

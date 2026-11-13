@@ -360,11 +360,28 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .ext-page-frame, .webview-panel-frame, .editor-pane iframe { color-scheme: normal; }
 .editor-pane .cm-editor { flex: 1; min-height: 0; height: 100%; }
 .editor-pane .cm-merge-view { display: flex; flex: 1; min-height: 0; }
-/* @codemirror/merge's own root is the scroll container of the side-by-side view (its panes'
-   scrollers are overflow:visible by the package's design) and carries no height of its own:
-   it fills the app's host. Without the bound it grows to its content and no wheel can scroll
-   the diff. */
+/* @codemirror/merge's outer root carries no height of its own: it fills the app's host.
+   Without the bound it grows to its content and no wheel can scroll the diff. */
 .cm-merge-view > .cm-mergeView { height: 100%; }
+/* The merge view's panes scroll themselves, VS Code's diff: the package's own design
+   (`height: auto !important` and `overflow-y: visible !important` on every pane) parks each
+   pane at its whole-content height inside an outer scroller, which puts the pane's
+   horizontal scrollbar at the bottom of the *entire document* — screens away on a long
+   file. Binding each pane's scroller to its viewport puts both scrollbars where the user
+   is looking; both layouts' specificity outranks the package's `!important` defaults. */
+.cm-merge-view > .cm-mergeView > .cm-mergeViewEditors { height: 100%; }
+.cm-merge-view > .cm-mergeView > .cm-mergeViewEditors > .cm-mergeViewEditor > .cm-editor { height: 100% !important; }
+.cm-merge-view > .cm-mergeView > .cm-mergeViewEditors > .cm-mergeViewEditor > .cm-editor > .cm-scroller { height: 100% !important; overflow-y: auto !important; }
+/* The diff overview ruler (VS Code's scrollbar change map): a narrow strip at each pane's
+   right edge where every changed region shows as a green (inserted) or red (deleted) mark,
+   heightmap-mapped so collapsed ranges compress it like the content. The click centres the
+   spot; the strip rides over the native scrollbar's inner edge, which keeps dragging. */
+.cm-overview-ruler { position: absolute; top: 0; bottom: 0; right: 1px; width: 5px; z-index: 6; cursor: pointer; }
+.cm-overview-mark { position: absolute; left: 0; width: 4px; border-radius: 1px; }
+/* The per-chunk revert controls (VS Code's "Revert Change" arrows) in the column between
+   the diff panes: theme colours, a hover highlight, the package's glyph kept. */
+.cm-merge-revert button { color: var(--vscode-editor-foreground); opacity: 0.7; border-radius: 3px; }
+.cm-merge-revert button:hover { background: var(--vscode-toolbar-hoverBackground); opacity: 1; }
 .editor-pane iframe { flex: 1; border: none; width: 100%; height: 100%; background: var(--vscode-editor-background); }
 /* The Git Graph host: the extension's own generated page in its frame. */
 .graph-host { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }

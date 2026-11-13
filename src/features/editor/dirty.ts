@@ -74,6 +74,44 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 			this.renderTabs();
 			return;
 		}
+		// An editable diff writes its modified pane back to the working file the diff was
+		// opened against (the same file, encoding and line endings it was read with). A file
+		// that moved under the tab — saved in its own editor tab, edited elsewhere — is
+		// never overwritten silently: the pane refuses until it is reloaded.
+		if (editor.input.kind === 'diff') {
+			const view = editor.view ?? editor.merge?.b;
+			const path = editor.diffSavePath;
+			if (!view || !path) return;
+			const savedDoc = view.state.doc;
+			let disk: FileContents | null = null;
+			try {
+				disk = await readFileRaw(path);
+			} catch {
+				// Unreadable (or gone): the write below surfaces the real error.
+			}
+			if (disk?.contents !== null && disk?.contents !== undefined && disk.contents.replace(/\r\n?/g, '\n') !== editor.savedDoc?.toString()) {
+				notify('warning', tf('editor.conflict.saveBlocked', basename(path)));
+				return;
+			}
+			try {
+				await writeFile(path, savedDoc.toString(), editor.encoding ?? 'utf8', editor.eol ?? 'lf');
+			} catch (error) {
+				notify('error', `Failed to save '${editor.label}': ${String(error)}`);
+				return;
+			}
+			editor.savedDoc = savedDoc;
+			const dirty = !this.bufferAtSavedState(editor);
+			if (dirty !== editor.dirty) {
+				editor.dirty = dirty;
+				this.renderTabs();
+			}
+			this.flashSavedTab(editor);
+			// The write changed the file on disk: Go to Definition must not jump by the text
+			// the definition search cached there before it.
+			invalidateWorkspaceFileCache(path);
+			this.onFileSaved?.(path);
+			return;
+		}
 		// A windowed editor's document lives in the backend: the save writes it from there,
 		// so nothing the size of the file ever crosses the IPC. The tab's encoding and EOL
 		// choice (Save with Encoding, the EOL pick) ride along as the write's override.
@@ -421,8 +459,10 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 	},
 
 	bufferAtSavedState(editor: Editor): boolean {
-		if (!editor.view || editor.savedDoc === undefined) return false;
-		return editor.view.state.doc.eq(editor.savedDoc)
+		// A merge (diff) view's buffer is its modified pane.
+		const doc = editor.view?.state.doc ?? editor.merge?.b.state.doc;
+		if (!doc || editor.savedDoc === undefined) return false;
+		return doc.eq(editor.savedDoc)
 			&& (editor.eol ?? 'lf') === (editor.savedEol ?? 'lf')
 			&& (editor.encoding ?? 'utf8') === (editor.savedEncoding ?? 'utf8');
 	},

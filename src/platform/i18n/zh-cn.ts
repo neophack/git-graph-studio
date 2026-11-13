@@ -42,6 +42,8 @@ export const zhCn: typeof en = {
 	'editor.conflict.diskSide': '磁盘',
 	'editor.conflict.mineSide': '我的版本',
 	'editor.conflict.reloaded': '已在另一台设备上更新',
+	'editor.conflict.saveBlocked': '{0} 在此对比页有未保存更改期间已在磁盘上变化——请先重新打开该对比。',
+	'diff.saveBeforeIgnore': '请先保存更改，再忽略空白或大小写。',
 	'editor.saveAs.alreadyOpen': '已有标签页打开了 {0}；文件已写入，由那个标签页显示。',
 	'merge.acceptCurrent': '采用当前更改',
 	'merge.acceptIncoming': '采用传入的更改',

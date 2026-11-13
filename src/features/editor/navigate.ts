@@ -61,8 +61,11 @@ function looksLikeCode(path: string): boolean {
 export const navigateMethods: ThisType<EditorGroup> = {
 	async goToDefinition(editor?: Editor | null, pos?: number | null): Promise<void> {
 		if (editor === undefined) editor = this.active;
-		if (!editor?.view) return;
-		const view = editor.view;
+		if (!editor) return;
+		// A merge (diff) view keeps its modified pane in `merge.b`: the navigation speaks
+		// for whichever whole-document view the editor exposes.
+		const view = editor.view ?? editor.merge?.b ?? null;
+		if (!view) return;
 		const at = pos ?? view.state.selection.main.head;
 		const word = view.state.wordAt(at) ?? view.state.wordAt(view.state.selection.main.head);
 		if (!word) return;

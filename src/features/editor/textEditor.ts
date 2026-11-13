@@ -24,6 +24,9 @@ import { icon } from '../../platform/ui/index';
 
 export { EditorState, EditorView, keymap, openSearchPanel, openReplacePanel, redo, selectAll, undo, completionExtension, expandSelection, shrinkSelection };
 export { addCursorAbove, addCursorBelow, copyLineDown, copyLineUp, cursorMatchingBracket, deleteLine, moveLineDown, moveLineUp };
+// The diff overview ruler rides the text-editor chunk: compare modules (merge toolbar,
+// folder compare) reach it through this module (lazy.ts), never across module files (R2).
+export { attachOverviewRuler, chunkOverviewMarks, type OverviewMark } from './editorExtras';
 
 /** The phone's read-only open's reconfigure point (src/remote/editLock.ts): the locked
  *  configuration is editor state, lifted and restored in place by the app bar's lock toggle. */
@@ -283,10 +286,7 @@ function commentBindings(path: string): KeyBinding[] {
  *  geometry change, so it follows the window size.
  */
 export function pastEndPadding(view: EditorView): void {
-	// Inside a merge view the pane's scroller is full-content-height by the package's design:
-	// the viewport the user actually scrolls is the outer `.cm-mergeView`.
-	const viewport = view.dom.closest<HTMLElement>('.cm-mergeView') ?? view.scrollDOM;
-	const pad = Math.max(0, viewport.clientHeight - view.defaultLineHeight);
+	const pad = Math.max(0, view.scrollDOM.clientHeight - view.defaultLineHeight);
 	const current = parseFloat(view.contentDOM.style.paddingBottom || '0');
 	if (Math.abs(current - pad) > 0.5) view.contentDOM.style.paddingBottom = `${pad}px`;
 }
@@ -327,8 +327,10 @@ export function baseExtensions(readOnly: boolean, path = ''): Extension[] {
 		wheelExtension(),
 		...(readOnly ? [] : [bracketColorsExtension(), stickyScrollExtension(), minimapExtension()]),
 		vscodeHighlighting,
-		EditorState.readOnly.of(readOnly),
-		EditorView.editable.of(!readOnly)
+		// Read-only stays VS Code's read-only editor: the content DOM keeps its focusability
+		// (`editable: false` would drop it, and no key — Ctrl+C, Ctrl+F — would ever reach
+		// the pane again); `readOnly` alone refuses every input, paste, drop and edit command.
+		EditorState.readOnly.of(readOnly)
 	];
 }
 
@@ -343,10 +345,12 @@ export function reconfigureEditorSettings(view: EditorView): void {
 	});
 }
 
-/** Read-only extensions for a comparison pane that is never edited or navigated. The wheel
- *  glide rides along: a comparison is browsed exactly like the file it came from. */
+/** Read-only extensions for a comparison pane that is browsed and copied but never edited.
+ *  The pane keeps VS Code's read-only-editor behaviour (focusable, navigable, the keys
+ *  work; `readOnly` refuses the input itself), and the wheel glide rides along: a
+ *  comparison is browsed exactly like the file it came from. */
 export function readOnlyExtensions(): Extension[] {
-	return [EditorState.readOnly.of(true), EditorView.editable.of(false), pastEndExtension(), wheelExtension()];
+	return [EditorState.readOnly.of(true), pastEndExtension(), wheelExtension()];
 }
 
 /* ---------- The bookmark gutter ---------- */

@@ -1,5 +1,7 @@
 import type { Extension } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
+import type { Chunk } from '@codemirror/merge';
+import type { OverviewMark } from './editorExtras';
 import { type FileContents, type FileProbe, fileProbe, readFileBase64 } from '../../platform/ipc/fs';
 import { materializeRevisionFile, readFileAt } from '../../platform/ipc/revision';
 import { scmBlame } from '../../platform/ipc/scm';
@@ -66,6 +68,43 @@ const DIFF_SPLIT_MIN_WIDTH = 720;
  *  read. The tablet landscape and the desktop browser keep the width rule. */
 function diffInlineShell(): boolean {
 	return typeof document !== 'undefined' && document.documentElement.hasAttribute('data-page-stack');
+}
+
+/** The writable file behind a diff side, if one backs it: an absolute local path stands as
+ *  it is; a working-tree revision (`*`, repo-relative) resolves under the diff's repository
+ *  — the same resolution `read_file_at` performs — falling back to the group's root for the
+ *  open repository, which the requests name only when they mean another one. Revision and
+ *  supplied-content sides have no writable file. */
+function resolveDiffSavePath(side: DiffSide, repo: string | undefined, rootPath: string | null): string | null {
+	if (side.content !== undefined || !side.exists) return null;
+	if (side.local) return side.path;
+	if (side.revision !== '*') return null;
+	const root = repo ?? rootPath;
+	return root ? joinPath(root, side.path) : null;
+}
+
+/** The diff sides' vertical scroll coupling (VS Code's): one pane's wheel moves both, by
+ *  proportion of each side's own scrollable range. A short lock breaks the mirror's own
+ *  scroll event from bouncing back. The scroll listeners die with the panes; the detach
+ *  exists so a layout rebuild never leaves a mirror onto destroyed views. */
+function attachScrollSync(a: EditorView, b: EditorView): () => void {
+	let lock = 0;
+	const mirror = (from: EditorView, to: EditorView) => () => {
+		if (Date.now() < lock) return;
+		const range = from.scrollDOM.scrollHeight - from.scrollDOM.clientHeight;
+		const other = to.scrollDOM.scrollHeight - to.scrollDOM.clientHeight;
+		if (range <= 0 || other <= 0) return;
+		lock = Date.now() + 50;
+		to.scrollDOM.scrollTop = (from.scrollDOM.scrollTop / range) * other;
+	};
+	const aToB = mirror(a, b);
+	const bToA = mirror(b, a);
+	a.scrollDOM.addEventListener('scroll', aToB);
+	b.scrollDOM.addEventListener('scroll', bToA);
+	return () => {
+		a.scrollDOM.removeEventListener('scroll', aToB);
+		b.scrollDOM.removeEventListener('scroll', bToA);
+	};
 }
 
 
@@ -604,16 +643,29 @@ export const openMethods: ThisType<EditorGroup> = {
 			return;
 		}
 		const name = basename(input.right.path || input.left.path);
+		// VS Code's rule: the diff editor is editable when the modified side is a real file —
+		// the working tree (a `*` revision resolved under the diff's repository) or a plain
+		// local file — and read-only when both sides are revisions or supplied text (a staged
+		// or committed compare edits nothing). The writable side's absolute path is resolved
+		// once here: the save writes there.
+		const savePath = resolveDiffSavePath(input.right, input.repo, this.rootPath);
 		const editor: Editor = {
 			input,
 			id: 'diff:' + input.id,
 			label: input.title,
 			iconClass: 'diff',
 			pane: el('div', 'editor-pane'),
-			dirty: false
+			dirty: false,
+			diffSavePath: savePath ?? undefined
 		};
+		// A writable right side carries the file's encoding and line endings, so the save
+		// writes back exactly the shape the file was read with.
+		editor.encoding = right.encoding ?? 'utf8';
+		editor.eol = right.eol ?? 'lf';
 		// The diff's ignore options: both texts are normalised before they reach the merge
-		// view, and a toggle rebuilds it (the views are cheap to rebuild).
+		// view, and a toggle rebuilds it (the views are cheap to rebuild). An ignored
+		// whitespace or case would make the shown text a rewrite of the file's own, so an
+		// editable pane refuses them (the toggle below guards a dirty buffer).
 		const ignore = { whitespace: false, case: false };
 		const normalize = (text: string): string => {
 			let out = text.replace(/\r\n?/g, '\n');
@@ -654,6 +706,13 @@ export const openMethods: ThisType<EditorGroup> = {
 			const button = el('button', 'action-btn toggle' + (ignore[key] ? ' active' : ''), [label]);
 			button.title = label === 'Aa' ? 'Ignore case' : 'Ignore whitespace';
 			button.addEventListener('click', () => {
+				// Turning an ignore option on goes read-only (the shown text is then a rewrite
+				// of the file's own), which an unsaved buffer may not be discarded for — the
+				// toggle waits for the save.
+				if (!ignore[key] && savePath && editor.dirty) {
+					notify('info', t('diff.saveBeforeIgnore'));
+					return;
+				}
 				ignore[key] = !ignore[key];
 				button.classList.toggle('active', ignore[key]);
 				rebuild?.(lastSplit);
@@ -741,35 +800,88 @@ export const openMethods: ThisType<EditorGroup> = {
 		};
 		// VS Code's diff-editor keys: F7 / Shift+F7 step through the changes.
 		const diffKeys = keymap.of([{ key: 'F7', run: () => (stepChange(1), true), shift: () => (stepChange(-1), true) }]);
+		// The side-by-side panes' scroll coupling (attachScrollSync), torn down with each
+		// rebuild so no mirror survives onto destroyed views.
+		let detachScrollSync: (() => void) | null = null;
+		// The overview rulers (the green/red scrollbar change map), likewise rebuilt per
+		// layout and refreshed whenever a pane's edits move the changes.
+		const { attachOverviewRuler, chunkOverviewMarks } = await import('./editorExtras');
+		let overviews: { refresh: () => void; detach: () => void }[] = [];
+		const refreshOverviews = (): void => {
+			for (const overview of overviews) overview.refresh();
+		};
+		const detachOverviews = (): void => {
+			for (const overview of overviews) overview.detach();
+			overviews = [];
+		};
 		// Wide panes get the classic side-by-side view; narrow ones a single-column inline
 		// view - unless the layout button pinned one. A ResizeObserver rebuilds the editors
-		// whenever the pane crosses the threshold.
+		// whenever the pane crosses the threshold. The right side is the editable one (VS
+		// Code's rule); the rebuilds a layout switch triggers carry an unsaved buffer over,
+		// so a toggle never wipes what the user typed.
 		const render = (split: boolean) => {
 			lastSplit = split;
+			const buffer = editor.dirty ? editor.view?.state.doc.toString() ?? editor.merge?.b.state.doc.toString() : undefined;
+			detachScrollSync?.();
+			detachScrollSync = null;
+			detachOverviews();
 			editor.merge?.destroy();
 			editor.merge = undefined;
 			editor.view?.destroy();
 			editor.view = undefined;
 			host.textContent = '';
 			editor.pane.classList.toggle('diff-inline', !split);
+			// Ignoring whitespace or case would show a rewrite of the file's text, so the
+			// pane edits only while both ignore options are off (the toggle guards a dirty
+			// buffer, and a clean pane loses nothing by going read-only).
+			const editable = savePath !== null && !ignore.whitespace && !ignore.case;
+			// The modified pane's extensions: the counter rides every layout; an editable
+			// pane tracks the dirty mark against its saved baseline and takes Ctrl+S.
+			const bExtensions = [
+				...baseExtensions(!editable),
+				languageSlot.of(languageSupport ?? []),
+				diffKeys,
+				EditorView.updateListener.of((update) => {
+					updateCounter();
+					// An edit moves the changes: the ruler marks and the counter follow.
+					refreshOverviews();
+					if (!editable) return;
+					if (update.docChanged) {
+						const dirty = !this.bufferAtSavedState(editor);
+						if (dirty !== editor.dirty) {
+							editor.dirty = dirty;
+							this.renderTabs();
+						}
+					}
+					if (update.selectionSet || update.docChanged) this.emitActive();
+				}),
+				...(editable ? [keymap.of([{ key: 'Mod-s', run: () => (void this.save(editor), true) }])] : [])
+			];
 			if (split) {
 				editor.merge = new MergeView({
 					a: { doc: normalize(left.contents ?? ''), extensions: [...baseExtensions(true), languageSlot.of(languageSupport ?? []), diffKeys, EditorView.updateListener.of(() => updateCounter())] },
-					b: { doc: normalize(right.contents ?? ''), extensions: [...baseExtensions(true), languageSlot.of(languageSupport ?? []), diffKeys, EditorView.updateListener.of(() => updateCounter())] },
+					b: { doc: normalize(buffer ?? right.contents ?? ''), extensions: bExtensions },
 					parent: host,
 					collapseUnchanged: { margin: 3, minSize: 4 },
 					highlightChanges: true,
-					gutter: true
+					gutter: true,
+					// VS Code's per-chunk revert arrows, only where the pane edits: the read-only
+					// sides have nothing to revert. The controls rewrite the modified pane's
+					// chunk with the base side's text (the package's direction spelling).
+					revertControls: editable ? 'a-to-b' : undefined
 				});
+				detachScrollSync = attachScrollSync(editor.merge.a, editor.merge.b);
+				const chunks = (): readonly Chunk[] => editor.merge!.chunks;
+				overviews.push(
+					attachOverviewRuler(editor.merge.a, () => chunkOverviewMarks(chunks(), 'a', editor.merge!.a.state.doc)),
+					attachOverviewRuler(editor.merge.b, () => chunkOverviewMarks(chunks(), 'b', editor.merge!.b.state.doc))
+				);
 			} else {
 				editor.view = new EditorView({
 					state: EditorState.create({
-						doc: normalize(right.contents ?? ''),
+						doc: normalize(buffer ?? right.contents ?? ''),
 						extensions: [
-							...baseExtensions(true),
-							languageSlot.of(languageSupport ?? []),
-							diffKeys,
-							EditorView.updateListener.of(() => updateCounter()),
+							...bExtensions,
 							unifiedMergeView({
 								original: normalize(left.contents ?? ''),
 								collapseUnchanged: { margin: 3, minSize: 4 },
@@ -781,6 +893,36 @@ export const openMethods: ThisType<EditorGroup> = {
 					}),
 					parent: host
 				});
+				// The inline view's ruler: green at the insertions, red at each deletion's
+				// landing point, rebuilt against the current buffer on every refresh.
+				const aDoc = EditorState.create({ doc: normalize(left.contents ?? '') }).doc;
+				const inlineMarks = (): OverviewMark[] => {
+					const doc = editor.view!.state.doc;
+					const chunks = Chunk.build(aDoc, doc);
+					const marks = chunkOverviewMarks(chunks, 'b', doc);
+					for (const chunk of chunks) {
+						for (const change of chunk.changes) {
+							if (change.toA <= change.fromA) continue;
+							const at = doc.lineAt(Math.min(chunk.fromB + change.fromB, doc.length)).number;
+							marks.push({ from: at, to: at, color: 'var(--vscode-editorGutter-deletedBackground)' });
+						}
+					}
+					return marks;
+				};
+				overviews.push(attachOverviewRuler(editor.view, inlineMarks));
+			}
+			refreshOverviews();
+			if (editable) {
+				// The saved baseline is the loaded text — kept across a rebuild (an unsaved
+				// buffer must stay dirty against it), replaced by the buffer itself when clean.
+				const pane = editor.view ?? editor.merge?.b;
+				if (pane && (!editor.dirty || editor.savedDoc === undefined)) {
+					editor.savedDoc = pane.state.doc;
+					editor.savedEol = editor.eol;
+					editor.savedEncoding = editor.encoding;
+				}
+				editor.dirty = !this.bufferAtSavedState(editor);
+				this.renderTabs();
 			}
 			refreshChangeInfo();
 		};
@@ -818,6 +960,10 @@ export const openMethods: ThisType<EditorGroup> = {
 			if (editor.view) editor.view.dispatch({ effects: effect });
 			this.emitActive();
 		});
+		// The pane context menu (Copy on the read-only panes included — the browser's own
+		// menu is suppressed app-wide, so without this a right-click offers nothing) and the
+		// Ctrl+click navigation, resolving against whichever pane was clicked.
+		this.attachTextServices(editor);
 		this.add(editor, true, intent);
 	},
 
@@ -1134,8 +1280,8 @@ export const openMethods: ThisType<EditorGroup> = {
 	},
 
 
-	textMenu(editor: Editor, pos: number | null): MenuEntry[] {
-		const view = editor.view;
+	textMenu(editor: Editor, pos: number | null, pane: EditorView | null = editor.view ?? editor.merge?.b ?? null): MenuEntry[] {
+		const view = pane;
 		const readOnly = !!view && view.state.readOnly;
 		// Cut and copy speak for the cursor's whole line when the selection is empty — the
 		// linewise form the native Ctrl+X / Ctrl+C already have through CodeMirror's
@@ -1205,7 +1351,7 @@ export const openMethods: ThisType<EditorGroup> = {
 			{ label: 'Go Back', keybinding: 'Alt+Left', disabled: !this.canGoBack(), run: () => this.goBack() },
 			{ label: 'Go Forward', keybinding: 'Alt+Right', disabled: !this.canGoForward(), run: () => this.goForward() },
 			'separator',
-			{ label: currentLine !== null && hasBookmark(editor.input.kind === 'file' ? editor.input.path : '', currentLine) ? 'Remove Bookmark' : 'Toggle Bookmark', keybinding: 'Ctrl+Alt+B', disabled: currentLine === null, run: () => this.toggleBookmarkAt(editor, currentLine!) },
+			{ label: currentLine !== null && editor.input.kind === 'file' && hasBookmark(editor.input.path, currentLine) ? 'Remove Bookmark' : 'Toggle Bookmark', keybinding: 'Ctrl+Alt+B', disabled: currentLine === null || editor.input.kind !== 'file', run: () => this.toggleBookmarkAt(editor, currentLine!) },
 			'separator',
 			{ label: 'Change All Occurrences', keybinding: 'Ctrl+F2', disabled: !view || readOnly, run: () => { if (view) editorState.cm?.changeAllOccurrences(view); } },
 			'separator',

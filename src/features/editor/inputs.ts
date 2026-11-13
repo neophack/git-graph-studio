@@ -72,6 +72,10 @@ export interface Editor {
 	view?: EditorView;
 	merge?: MergeView;
 	diffObserver?: ResizeObserver;
+	/** An editable diff's working file (the modified side's absolute path): the pane edits
+	 *  like VS Code's diff editor and Ctrl+S writes back there. The input stays untouched —
+	 *  the tab summaries the remote workbench syncs carry the input verbatim. */
+	diffSavePath?: string;
 	/** The extension's own Binary Compare page — a binary file between two revisions. */
 	folderCompare?: FolderCompareView;
 	/** An address-aligned hex comparison of two binary files on disk. */

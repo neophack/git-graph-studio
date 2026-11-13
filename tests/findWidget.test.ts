@@ -7,7 +7,7 @@ import { EditorSelection, EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
 import { SearchQuery, openSearchPanel, setSearchQuery } from '@codemirror/search';
 
-import { countMatches, createFindPanel } from '../src/features/editor';
+import { countMatches, createFindPanel, openReplacePanel } from '../src/features/editor';
 import { findOptions } from '../src/platform/find/findOptions';
 import { FindHistory, HistoryRecall } from '../src/platform/find/findHistory';
 import { settings } from '../src/platform/settings';
@@ -290,6 +290,45 @@ describe('the widget', () => {
 		} finally {
 			settings.searchSmartCase = held;
 		}
+	});
+
+	it('opening the widget puts the cursor in the search field, text selected', () => {
+		const view = viewOf(DOC, 0);
+		view.focus();
+		openSearchPanel(view);
+		const input = view.dom.querySelector('.cm-find-widget .cm-find-input') as HTMLInputElement;
+		expect(document.activeElement).toBe(input);
+		expect(input.selectionStart).toBe(0);
+		expect(input.selectionEnd).toBe(input.value.length);
+		// Re-opening (already showing) lands in the field again after the field loses focus.
+		input.blur();
+		openSearchPanel(view);
+		expect(document.activeElement).toBe(input);
+		view.destroy();
+	});
+
+	it('a read-only editor opens the find widget (no replace row) on Ctrl+H', () => {
+		const host = document.createElement('div');
+		document.body.appendChild(host);
+		const view = new EditorView({
+			state: EditorState.create({
+				doc: DOC,
+				extensions: [EditorState.readOnly.of(true), search({ top: true, createPanel: createFindPanel })]
+			}),
+			parent: host
+		});
+		expect(openReplacePanel(view)).toBe(true);
+		const widget = view.dom.querySelector('.cm-find-widget') as HTMLElement;
+		expect(widget).not.toBeNull();
+		expect(document.activeElement).toBe(widget.querySelector('.cm-find-input'));
+		expect((widget.querySelector('.cm-replace-row') as HTMLElement).classList.contains('open')).toBe(false);
+		// The editable editor expands the replace row instead and focuses the replace field.
+		const editable = viewOf(DOC, 0);
+		expect(openReplacePanel(editable)).toBe(true);
+		const editableWidget = editable.dom.querySelector('.cm-find-widget') as HTMLElement;
+		expect((editableWidget.querySelector('.cm-replace-row') as HTMLElement).classList.contains('open')).toBe(true);
+		editable.destroy();
+		view.destroy();
 	});
 });
 

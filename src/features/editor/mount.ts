@@ -8,6 +8,7 @@ import { loadCanViews, loadEditorExtensions, loadFastView, loadHexView, loadImag
 import { t } from '../../platform/i18n';
 import { settings } from '../../platform/settings';
 import { basename, el, icon, notify, showContextMenu } from '../../platform/ui/index';
+import type { EditorView } from '@codemirror/view';
 import { hook } from '../../platform/hooks';
 import { readFileRaw } from './shared';
 import { WHOLE_FILE_EDITOR_BYTES, WINDOWED_EDIT_BYTES, loadDocEdit, textEditor } from './open';
@@ -324,22 +325,30 @@ export const mountMethods: ThisType<import('./group').EditorGroup> = {
 	},
 
 	attachTextServices(editor: Editor): void {
-		const posAt = (event: MouseEvent): number | null => {
-			if (!editor.view) return null;
+		// The CodeMirror view under the cursor — a merge (diff) view has two, and the menu's
+		// copy/edit rows must speak for the pane that was clicked, never the other side.
+		const paneAt = (event: MouseEvent): { view: EditorView; pos: number | null } | null => {
+			const host = (event.target instanceof Element ? event.target : null)?.closest('.cm-editor') ?? null;
+			const views = [editor.view, editor.merge?.a, editor.merge?.b].filter((view): view is EditorView => !!view);
+			const view = views.find((candidate) => candidate.dom === host) ?? editor.view ?? editor.merge?.b ?? null;
+			if (!view) return null;
 			try {
-				return editor.view.posAtCoords({ x: event.clientX, y: event.clientY });
+				return { view, pos: view.posAtCoords({ x: event.clientX, y: event.clientY }) };
 			} catch {
-				return null; // no layout yet (the tests' jsdom): fall back to the selection
+				return { view, pos: null }; // no layout yet (the tests' jsdom): fall back to the selection
 			}
 		};
 		editor.pane.addEventListener('contextmenu', (event) => {
 			event.preventDefault();
-			showContextMenu(event.clientX, event.clientY, this.textMenu(editor, posAt(event)));
+			const at = paneAt(event);
+			showContextMenu(event.clientX, event.clientY, this.textMenu(editor, at?.pos ?? null, at?.view ?? null));
 		});
 		editor.pane.addEventListener('mousedown', (event) => {
-			if ((event.ctrlKey || event.metaKey) && event.button === 0 && editor.view) {
+			if ((event.ctrlKey || event.metaKey) && event.button === 0) {
+				const at = paneAt(event);
+				if (!at) return;
 				event.preventDefault();
-				void this.goToDefinition(editor, posAt(event));
+				void this.goToDefinition(editor, at.pos);
 			}
 		});
 	},

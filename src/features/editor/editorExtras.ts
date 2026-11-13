@@ -3,9 +3,10 @@
 // text editor's async chunk), read the settings live, and degrade to no-ops in environments
 // without layout or canvas (jsdom) rather than throwing.
 
-import { RangeSetBuilder, StateEffect, StateField, type Extension } from '@codemirror/state';
+import { RangeSetBuilder, StateEffect, StateField, type Extension, type Text } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import { syntaxTree } from '@codemirror/language';
+import type { Chunk } from '@codemirror/merge';
 
 import { SETTINGS_EVENT, THEME_EVENT, settings } from '../../platform/settings';
 import { deltaToPixels, OngoingScroll, wheelToDelta } from '../../scroll/wheel';
@@ -432,26 +433,14 @@ export function minimapExtension(): Extension {
 
 /* ---------- The wheel ---------- */
 
-/** The scroll container of a merge view's pane: CodeMirror's merge package scrolls its outer
- *  `.cm-mergeView` (the panes' scrollers are `overflow: visible` by its design), so a pane's
- *  wheel and underhang must drive that element. `null` outside a merge view — a plain editor,
- *  the unified diff included, scrolls its own scroller. */
-function mergeScroller(view: EditorView): HTMLElement | null {
-	return view.dom.closest<HTMLElement>('.cm-mergeView');
-}
-
 /** Zed's wheel for every CodeMirror surface (the same arithmetic the row-model viewers
  *  use, scroll/wheel.ts): a mouse notch is the system's lines per notch times the line
  *  height, a trackpad's pixels pass through with their axis locked, the sensitivity scales
  *  the distance (Alt the fast one), and the scroller moves at once — no easing. Attached to
  *  the view's scroll DOM, alive exactly as long as the view. A plugin — not a
  *  `domEventHandlers` entry — so the listener covers the gutters too and CodeMirror's own
- *  destroy unmounts it with the editor.
- *
- *  Inside a side-by-side merge view the panes' scrollers are `overflow: visible` by the
- *  package's own design — the outer `.cm-mergeView` is the scroll container — so the wheel
- *  drives that outer element there (a plain editor, the unified diff included, scrolls
- *  itself). */
+ *  destroy unmounts it with the editor. Every surface scrolls its own scroller — a merge
+ *  view's panes included, whose scrollers shell.css makes viewport-bound. */
 export function wheelExtension(): Extension {
 	return ViewPlugin.fromClass(class {
 		private readonly gesture = new OngoingScroll();
@@ -464,9 +453,8 @@ export function wheelExtension(): Extension {
 			event.preventDefault();
 			const speed = Math.max(0.01, event.altKey ? settings.fastScrollSensitivity : settings.mouseWheelScrollSensitivity);
 			const px = deltaToPixels(delta, this.view.defaultLineHeight, this.view.defaultCharacterWidth);
-			const scroll = mergeScroller(this.view) ?? this.view.scrollDOM;
-			if (px.y !== 0) scroll.scrollTop += px.y * speed;
-			if (px.x !== 0) scroll.scrollLeft += px.x * speed;
+			if (px.y !== 0) this.view.scrollDOM.scrollTop += px.y * speed;
+			if (px.x !== 0) this.view.scrollDOM.scrollLeft += px.x * speed;
 		};
 
 		constructor(private readonly view: EditorView) {
@@ -477,4 +465,97 @@ export function wheelExtension(): Extension {
 			this.view.scrollDOM.removeEventListener('wheel', this.onWheel);
 		}
 	});
+}
+
+/* ---------- Diff overview ruler ---------- */
+
+/** One marked region of the overview ruler, by 1-based lines of the pane's own document. */
+export interface OverviewMark {
+	from: number;
+	to: number;
+	/** The mark's colour, as a CSS value (a theme variable or literal). */
+	color: string;
+}
+
+/** The overview ruler's marks for one side of a diff — VS Code's green/red scrollbar map:
+ *  every change the side gained lines on shows green, every one it lost lines on red. The
+ *  chunk's changes are chunk-relative (the package stores them against the chunk's own
+ *  start), so their offsets ride on the chunk's start position. */
+export function chunkOverviewMarks(chunks: readonly Chunk[], side: 'a' | 'b', doc: Text): OverviewMark[] {
+	const added = 'var(--vscode-editorGutter-addedBackground)';
+	const deleted = 'var(--vscode-editorGutter-deletedBackground)';
+	const marks: OverviewMark[] = [];
+	for (const chunk of chunks) {
+		const base = side === 'a' ? chunk.fromA : chunk.fromB;
+		for (const change of chunk.changes) {
+			const from = side === 'a' ? change.fromA : change.fromB;
+			const to = side === 'a' ? change.toA : change.toB;
+			if (to <= from) continue;
+			const clamped = (at: number): number => doc.lineAt(Math.min(Math.max(at, 0), doc.length)).number;
+			marks.push({ from: clamped(base + from), to: clamped(base + to - 1), color: side === 'a' ? deleted : added });
+		}
+	}
+	return marks;
+}
+
+/** VS Code's diff overview ruler: the narrow strip at the pane's right edge where every
+ *  changed region shows as a green (insertions) or red (deletions) mark — the scrollbar's
+ *  map of where the changes sit, so a glance finds them in a thousand-line file. The marks
+ *  sit on the heightmap's own geometry (a collapsed unchanged range compresses them like it
+ *  compresses the content), a click centres that spot, and the strip redraws when the pane
+ *  resizes or the caller says the marks changed. */
+export function attachOverviewRuler(
+	pane: EditorView,
+	marks: () => OverviewMark[],
+	options: { clickable?: boolean } = {},
+): { refresh: () => void; detach: () => void } {
+	const ruler = document.createElement('div');
+	ruler.className = 'cm-overview-ruler';
+	pane.dom.appendChild(ruler);
+	const draw = scheduled(() => {
+		ruler.textContent = '';
+		const doc = pane.state.doc;
+		const height = pane.scrollDOM.scrollHeight;
+		const rulerHeight = ruler.clientHeight;
+		if (rulerHeight <= 0 || height <= 0) return;
+		for (const mark of marks()) {
+			if (mark.from > doc.lines) continue;
+			// Heightmap geometry, not line fractions: collapsed ranges, wrapped lines and the
+			// scroll-past-end padding all shift where a change really sits on the strip.
+			const from = doc.line(Math.min(Math.max(mark.from, 1), doc.lines));
+			const to = doc.line(Math.min(Math.max(mark.to, 1), doc.lines));
+			const top = pane.lineBlockAt(from.from).top;
+			const bottom = pane.lineBlockAt(to.to).bottom;
+			const el = document.createElement('div');
+			el.className = 'cm-overview-mark';
+			el.style.top = `${Math.max(0, (top / height) * rulerHeight)}px`;
+			el.style.height = `${Math.max(3, ((bottom - top) / height) * rulerHeight)}px`;
+			el.style.background = mark.color;
+			ruler.appendChild(el);
+		}
+	});
+	const refresh = draw;
+	// A pane resize (window, panel sash, group split) rescales the strip's mapping.
+	const resize = new ResizeObserver(refresh);
+	resize.observe(pane.scrollDOM);
+	const onClick = options.clickable === false
+		? null
+		: (event: MouseEvent): void => {
+			const rulerHeight = ruler.clientHeight;
+			const height = pane.scrollDOM.scrollHeight;
+			if (rulerHeight <= 0 || height <= 0) return;
+			const at = ((event.clientY - ruler.getBoundingClientRect().top) / rulerHeight) * height;
+			const view = pane.scrollDOM.clientHeight;
+			pane.scrollDOM.scrollTop = Math.max(0, Math.min(at - view / 2, height - view));
+		};
+	if (onClick) ruler.addEventListener('click', onClick);
+	refresh();
+	return {
+		refresh,
+		detach: (): void => {
+			resize.disconnect();
+			if (onClick) ruler.removeEventListener('click', onClick);
+			ruler.remove();
+		}
+	};
 }

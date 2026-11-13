@@ -9,6 +9,7 @@ import { StateField, type Extension, type Text } from '@codemirror/state';
 import { gitStage } from '../../platform/ipc/scm';
 import { type FileContents, readFile, writeFile } from '../../platform/ipc/fs';
 import { t } from '../../platform/i18n';
+import { loadTextEditor } from '../../platform/lazy';
 
 import { el, icon, notify } from '../../platform/ui/index';
 
@@ -191,6 +192,9 @@ export class MergeToolbar {
 	private path: string | null = null;
 	private conflicts: Conflict[] = [];
 	private activeIndex = 0;
+	/** The overview ruler's conflict marks (VS Code shows the conflict regions at the
+	 *  scrollbar too): rebuilt per attach, refreshed on every re-parse. */
+	private overview: { refresh: () => void; detach: () => void } | null = null;
 	/** The file once had markers: a conflict-free document then means "resolved", and the bar
 	 *  offers Mark Resolved (a file that never had conflicts keeps the bar hidden). */
 	private hadConflicts = false;
@@ -216,6 +220,8 @@ export class MergeToolbar {
 		this.path = path;
 		this.hadConflicts = false;
 		this.staged = false;
+		this.overview?.detach();
+		this.overview = null;
 		this.update();
 	}
 
@@ -227,7 +233,29 @@ export class MergeToolbar {
 			this.staged = false;
 		}
 		if (this.activeIndex >= this.conflicts.length) this.activeIndex = 0;
+		// The conflict ruler rides only while markers exist: a plain editor gains no strip.
+		// The factory lives in the text-editor chunk (the lazy seam), so the first
+		// conflict resolves it; the strip lands a tick later and refreshes from there.
+		if (this.conflicts.length > 0 && this.view && !this.overview) {
+			void loadTextEditor().then(({ attachOverviewRuler }) => {
+				if (!this.view || this.overview || this.conflicts.length === 0) return;
+				this.overview = attachOverviewRuler(this.view, () => this.conflicts.map((conflict) => ({
+					from: conflict.start,
+					to: conflict.end,
+					color: 'var(--vscode-editorGutter-modifiedBackground)'
+				})), { clickable: true });
+				this.overview.refresh();
+			});
+		}
+		this.overview?.refresh();
 		this.render();
+	}
+
+	/** The editor closed: release the ruler's observation of the (destroyed) pane. */
+	dispose(): void {
+		this.overview?.detach();
+		this.overview = null;
+		this.view = null;
 	}
 
 	get conflictCount(): number {
