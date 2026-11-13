@@ -46,6 +46,7 @@ export const zhCn: typeof en = {
 	'diff.saveBeforeIgnore': '请先保存更改，再忽略空白或大小写。',
 	'diff.action.openFile': '打开文件',
 	'diff.action.accessibleViewer': '可访问差异查看器（F7）',
+	'diff.action.collapseUnchanged': '折叠未更改区域',
 	'diff.viewer.difference': '第 {0} 个差异，共 {1} 个',
 	'diff.viewer.empty': '没有可查看的差异。',
 	'diff.viewer.moreLines': '… 还有 {0} 行',

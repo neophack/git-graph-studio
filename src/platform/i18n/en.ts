@@ -46,6 +46,7 @@ export const en = {
 	'diff.saveBeforeIgnore': 'Save the changes before ignoring whitespace or case.',
 	'diff.action.openFile': 'Open File',
 	'diff.action.accessibleViewer': 'Accessible Diff Viewer (F7)',
+	'diff.action.collapseUnchanged': 'Collapse Unchanged Regions',
 	'diff.viewer.difference': 'Difference {0} of {1}',
 	'diff.viewer.empty': 'There are no changes to review.',
 	'diff.viewer.moreLines': '… {0} more lines',

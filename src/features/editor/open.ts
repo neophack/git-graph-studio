@@ -665,6 +665,10 @@ export const openMethods: ThisType<EditorGroup> = {
 		 *  editor's extra ignore options. `manualSplit` (undefined = follow the pane width)
 		 *  persists per tab for the diff's lifetime. */
 		let manualSplit: boolean | undefined;
+		/** The unchanged stretches between changes: shown whole by default (the toolbar
+		 *  button folds them), the choice persisting per tab through the rebuilds a layout
+		 *  switch or an ignore toggle makes. */
+		let collapsedUnchanged = false;
 		const counter = el('span', 'diff-count');
 		/** Set once the diff's views exist (the text-diff branch below). */
 		let stepChange: (direction: 1 | -1) => void = () => undefined;
@@ -700,6 +704,16 @@ export const openMethods: ThisType<EditorGroup> = {
 			openFileButton.addEventListener('click', () => void this.openFile(savePath));
 			toolbar.appendChild(openFileButton);
 		}
+		// The unchanged-regions toggle: off, every line of both sides shows; on, the merge
+		// views fold the long unchanged stretches between changes into "… N lines" bars.
+		const collapseButton = el('button', 'action-btn toggle', [icon('collapse-all')]);
+		collapseButton.title = t('diff.action.collapseUnchanged');
+		collapseButton.addEventListener('click', () => {
+			collapsedUnchanged = !collapsedUnchanged;
+			collapseButton.classList.toggle('active', collapsedUnchanged);
+			rebuild?.(lastSplit);
+		});
+		toolbar.appendChild(collapseButton);
 		const toggle = (label: string, key: 'whitespace' | 'case') => {
 			const button = el('button', 'action-btn toggle' + (ignore[key] ? ' active' : ''), [label]);
 			button.title = label === 'Aa' ? 'Ignore case' : 'Ignore whitespace';
@@ -965,7 +979,7 @@ export const openMethods: ThisType<EditorGroup> = {
 					a: { doc: normalize(left.contents ?? ''), extensions: [...baseExtensions(true), languageSlot.of(languageSupport ?? []), diffKeys, EditorView.updateListener.of(() => { updateCounter(); scheduleRevertArrows(); })] },
 					b: { doc: normalize(buffer ?? right.contents ?? ''), extensions: bExtensions },
 					parent: host,
-					collapseUnchanged: { margin: 3, minSize: 4 },
+					collapseUnchanged: collapsedUnchanged ? { margin: 3, minSize: 4 } : undefined,
 					highlightChanges: true,
 					gutter: true,
 					// VS Code's per-chunk revert arrows, only where the pane edits: the read-only
@@ -1001,7 +1015,7 @@ export const openMethods: ThisType<EditorGroup> = {
 							...bExtensions,
 							unifiedMergeView({
 								original: normalize(left.contents ?? ''),
-								collapseUnchanged: { margin: 3, minSize: 4 },
+								collapseUnchanged: collapsedUnchanged ? { margin: 3, minSize: 4 } : undefined,
 								highlightChanges: true,
 								gutter: true,
 								mergeControls: false

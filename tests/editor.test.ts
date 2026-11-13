@@ -221,6 +221,39 @@ describe('editor group', () => {
 		expect(document.querySelectorAll('.cm-mergeView .cm-editor')).toHaveLength(2);
 	});
 
+	it('the diff shows unchanged lines whole by default; the toolbar button folds them in both layouts', async () => {
+		// One change over line 1 with a long unchanged stretch behind it: folded
+		// (margin 3, minSize 4), the tail compresses into a "… N lines" bar; unfolded,
+		// every line shows and no bar renders anywhere.
+		const filler = Array.from({ length: 12 }, (_, i) => `pad ${i + 1}`).join('\n');
+		backend.on('read_file_at', ({ revision }) => ({ contents: `${revision === 'HEAD' ? 'old' : 'new'}\n${filler}\n`, binary: false, size: 60 }));
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openDiff({
+			kind: 'diff', id: 'd1', title: 'a.ts (Working Tree)',
+			left: { revision: 'HEAD', path: 'a.ts', label: 'HEAD', exists: true },
+			right: { revision: '*', path: 'a.ts', label: 'Working Tree', exists: true }
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20)); // the first render waits a frame
+		// Default unfolded: no collapse bars in either pane.
+		expect(document.querySelectorAll('.cm-collapsedLines')).toHaveLength(0);
+		const collapseButton = [...document.querySelectorAll<HTMLButtonElement>('.diff-toolbar button')]
+			.find((b) => b.title === 'Collapse Unchanged Regions')!;
+		click(collapseButton);
+		expect(collapseButton.classList.contains('active')).toBe(true);
+		// Both sides of the split view fold their shared unchanged stretch.
+		expect(document.querySelectorAll('.cm-collapsedLines').length).toBeGreaterThan(0);
+		// The choice rides the rebuild a layout switch makes: the inline view folds too…
+		const layoutButton = [...document.querySelectorAll<HTMLButtonElement>('.diff-toolbar button')]
+			.find((b) => b.title.startsWith('Switch between'))!;
+		click(layoutButton);
+		expect(document.querySelector('.editor-pane')!.classList.contains('diff-inline')).toBe(true);
+		expect(document.querySelectorAll('.cm-collapsedLines').length).toBeGreaterThan(0);
+		// …and toggling the fold off there shows every line again.
+		click(collapseButton);
+		expect(document.querySelectorAll('.cm-collapsedLines')).toHaveLength(0);
+	});
+
 	it('a working-tree diff is editable and saves back; a staged diff stays read-only', async () => {
 		const store: Record<string, string> = { 'C:\\repo\\a.ts': 'worktree text\n' };
 		// The working-tree side (`*`) reads through read_file_at as the backend does — the
