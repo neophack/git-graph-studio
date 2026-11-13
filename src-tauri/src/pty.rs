@@ -89,7 +89,7 @@ const OUTPUT_FLUSH_BYTES: usize = 32 * 1024;
 
 /// Append output to a tail buffer, dropping the oldest text past the cap (at a char boundary).
 fn push_tail(tail: &Mutex<String>, text: &str) {
-    let mut tail = tail.lock().unwrap();
+    let mut tail = tail.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     tail.push_str(text);
     if tail.len() > TAIL_BYTES {
         let mut cut = tail.len() - TAIL_BYTES;
@@ -104,6 +104,14 @@ fn push_tail(tail: &Mutex<String>, text: &str) {
 #[derive(Default)]
 pub struct PtyState {
     sessions: HashMap<u32, PtySession>,
+}
+
+/// The sessions lock, poison-tolerant: one panicking thread while it is held (a resize
+/// into a portable-pty quirk, an allocation failure) must not wedge every later pty
+/// command behind a poisoned mutex — the "every terminal fails until the app restarts"
+/// signature. The map itself is always consistent enough for these short sections.
+fn lock_sessions(state: &Mutex<PtyState>) -> std::sync::MutexGuard<'_, PtyState> {
+    state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Whether the session's shell is still running — `try_wait` answering `None`. A wait
@@ -158,7 +166,7 @@ pub fn pty_create(
     // there is the one window another create could win, and a shell this command has
     // already spawned closes politely on the refusal rather than leaking.
     {
-        let mut sessions = state.lock().unwrap();
+        let mut sessions = lock_sessions(&state);
         refuse_live_replacement(sessions.sessions.get_mut(&id), id)?;
     }
 
@@ -208,7 +216,7 @@ pub fn pty_create(
     };
     let replaced;
     {
-        let mut sessions = state.lock().unwrap();
+        let mut sessions = lock_sessions(&state);
         // The gate again, atomically with the insert: the pre-spawn check narrowed the
         // race but cannot close it, and a live session that landed meanwhile is another
         // page's shell — this create's own closes politely (its history flushes) off
@@ -277,7 +285,7 @@ pub fn pty_create(
             let _ = event_app.emit(format!("studio://pty-exit-{id}").as_str(), ());
         }
         if let Some(state) = state {
-            let mut sessions = state.lock().unwrap();
+            let mut sessions = lock_sessions(&state);
             // Only reap this generation: a newer session may already own the id.
             if sessions
                 .sessions
@@ -376,9 +384,7 @@ pub fn pty_resize(app: TauriAppHandle, id: u32, cols: u16, rows: u16) -> Result<
 #[tauri::command]
 pub fn pty_list(app: TauriAppHandle) -> Vec<PtySessionInfo> {
     let state = app.state::<Mutex<PtyState>>();
-    let mut sessions: Vec<PtySessionInfo> = state
-        .lock()
-        .unwrap()
+    let mut sessions: Vec<PtySessionInfo> = lock_sessions(&state)
         .sessions
         .iter()
         .map(|(id, session)| PtySessionInfo {
@@ -395,9 +401,9 @@ pub fn pty_list(app: TauriAppHandle) -> Vec<PtySessionInfo> {
 #[tauri::command]
 pub fn pty_tail(app: TauriAppHandle, id: u32, bytes: Option<usize>) -> Result<String, String> {
     let state = app.state::<Mutex<PtyState>>();
-    let sessions = state.lock().unwrap();
+    let sessions = lock_sessions(&state);
     let session = sessions.sessions.get(&id).ok_or("no such terminal")?;
-    let tail = session.tail.lock().unwrap();
+    let tail = session.tail.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let want = bytes.unwrap_or(TAIL_BYTES).min(TAIL_BYTES);
     let mut start = tail.len().saturating_sub(want);
     while !tail.is_char_boundary(start) {
@@ -409,7 +415,7 @@ pub fn pty_tail(app: TauriAppHandle, id: u32, bytes: Option<usize>) -> Result<St
 /// How many terminals run in this instance (the Remote Access summary, R21).
 pub fn session_count(app: &TauriAppHandle) -> u32 {
     app.try_state::<Mutex<PtyState>>()
-        .map(|state| state.lock().unwrap().sessions.len() as u32)
+        .map(|state| lock_sessions(&state).sessions.len() as u32)
         .unwrap_or(0)
 }
 
@@ -455,15 +461,28 @@ fn gather_batch(
 }
 
 /// The session's working directory: the requested folder when it exists (the Explorer's
-/// "Open in Integrated Terminal"), else the open workspace unchanged — the plain
-/// new-terminal behavior this command always had.
+/// "Open in Integrated Terminal"), else the open workspace — and when even the workspace
+/// is gone from the disk (renamed, deleted, a drive not mounted yet), the user's home
+/// directory. ConPTY refuses to spawn into a working directory that does not exist, so
+/// a stale workspace used to fail EVERY new terminal until a valid folder was opened.
 fn resolve_cwd(requested: Option<&str>, workspace: &str) -> String {
-    match requested {
-        Some(folder) if std::fs::metadata(folder).map(|m| m.is_dir()).unwrap_or(false) => {
-            folder.to_string()
+    let is_dir = |path: &str| std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false);
+    if let Some(folder) = requested {
+        if is_dir(folder) {
+            return folder.to_string();
         }
-        _ => workspace.to_string(),
     }
+    if is_dir(workspace) {
+        return workspace.to_string();
+    }
+    home_dir().unwrap_or_else(|| ".".to_string())
+}
+
+/// The user's home directory — the last resort a terminal's working directory has.
+fn home_dir() -> Option<String> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// How long a close waits for the polite exit to land before the hard kill.
@@ -520,7 +539,7 @@ fn close_session(session: &mut PtySession) {
 pub fn pty_kill(app: TauriAppHandle, id: u32) -> Result<(), String> {
     let session = {
         let state = app.state::<Mutex<PtyState>>();
-        let mut guard = state.lock().unwrap();
+        let mut guard = lock_sessions(&state);
         guard.sessions.remove(&id)
     };
     if let Some(mut session) = session {
@@ -589,7 +608,7 @@ fn with_session<T>(
     work: impl FnOnce(&mut PtySession) -> Result<T, String>,
 ) -> Result<T, String> {
     let state = app.state::<Mutex<PtyState>>();
-    let mut guard = state.lock().unwrap();
+    let mut guard = lock_sessions(&state);
     match guard.sessions.get_mut(&id) {
         Some(session) => work(session),
         None => Err("The terminal has exited".to_string()),
@@ -871,7 +890,10 @@ mod tests {
     fn the_spawn_cwd_is_the_requested_folder_when_it_exists_and_the_workspace_otherwise() {
         // "Open in Integrated Terminal" names the folder; a path the disk lost (a deleted
         // directory, another machine's drive) falls back to the open workspace unchanged —
-        // the plain new-terminal behavior.
+        // the plain new-terminal behavior. A workspace the disk lost too (renamed, deleted
+        // after it was opened) falls back to the home directory: ConPTY refuses a working
+        // directory that does not exist, and a stale workspace used to fail EVERY new
+        // terminal until a valid folder was opened.
         let workspace = tempfile::TempDir::new().unwrap();
         let folder = tempfile::TempDir::new().unwrap();
         let ws = workspace.path().to_str().unwrap().to_owned();
@@ -883,6 +905,13 @@ mod tests {
         assert_eq!(resolve_cwd(Some("Z:\\no-such-folder-ggs"), &ws), ws);
         // A file is not a folder: the workspace stands in.
         assert_eq!(resolve_cwd(Some(&file), &ws), ws);
+        // Even the workspace is gone: the home directory keeps the terminal usable.
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|p| p.to_string_lossy().into_owned())
+            .expect("a home directory exists on every CI host");
+        assert_eq!(resolve_cwd(None, "Z:\\no-such-workspace-ggs"), home);
+        assert_eq!(resolve_cwd(Some("Z:\\no-such-folder-ggs"), "Z:\\no-such-workspace-ggs"), home);
     }
 
     #[test]
