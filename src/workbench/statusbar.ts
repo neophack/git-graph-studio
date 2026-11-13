@@ -7,6 +7,7 @@
 // every toast ever shown stays listed there until cleared).
 
 import { type HeadInfo, repoHead } from '../platform/ipc/revision';
+import type { WatcherReport } from '../platform/ipc/fs';
 
 import { ENCODING_LABELS } from '../features/editor';
 import { t, tf } from '../platform/i18n';
@@ -56,6 +57,11 @@ export class StatusBar {
 	private readonly saveItem: HTMLElement;
 	private readonly saveFill: HTMLElement;
 	private readonly saveLabel: HTMLElement;
+	/** The file watcher's dot (M3's automatic-refresh infrastructure): green while every
+	 *  open root's watch answers, red once one is refused or degraded — the state where
+	 *  only the Refresh actions keep the views current. */
+	private readonly watcherItem: HTMLElement;
+	private readonly watcherDot: HTMLElement;
 	private readonly positionItem: HTMLElement;
 	private readonly indentItem: HTMLElement;
 	private readonly encodingItem: HTMLElement;
@@ -130,9 +136,12 @@ export class StatusBar {
 		this.saveFill = el('i');
 		this.saveLabel = el('span');
 		this.saveItem.append(el('div', 'status-save-track', [this.saveFill]), this.saveLabel);
+		this.watcherDot = el('i', 'watcher-dot');
+		this.watcherItem = el('div', 'status-item status-watcher', [this.watcherDot]);
+		this.watcherItem.hidden = true;
 		this.extLeft = el('div', 'status-ext');
 		this.extRight = el('div', 'status-ext');
-		this.left.append(this.repoItem, this.branchItem, this.syncItem, this.conflictsItem, this.symbolsItem, this.saveItem, this.extLeft);
+		this.left.append(this.repoItem, this.branchItem, this.syncItem, this.conflictsItem, this.symbolsItem, this.saveItem, this.watcherItem, this.extLeft);
 
 		this.positionItem = el('div', 'status-item static');
 		this.indentItem = el('div', 'status-item', ['Spaces: 4']);
@@ -285,6 +294,32 @@ export class StatusBar {
 			this.saveFill.style.width = '';
 		}
 		this.saveItem.title = t('status.saving');
+	}
+
+	/** The file watcher's dot: one entry per open root from the backend (`fs_watcher_status`
+	 *  and its `studio://watcher-status` pushes). Green while every watch answers; red once
+	 *  one is refused or degraded, the tooltip naming the cause; dim while the installs are
+	 *  still starting. Null, or an empty list (no open folder, or a backend without the
+	 *  command — an older daemon behind a remote session), hides the dot. */
+	setWatcherStatus(reports: WatcherReport[] | null): void {
+		if (!reports || reports.length === 0) {
+			this.watcherItem.hidden = true;
+			return;
+		}
+		this.watcherItem.hidden = false;
+		const broken = reports.filter((report) => report.error);
+		const leaf = (path: string) => path.replaceAll('\\', '/').split('/').filter(Boolean).pop() ?? path;
+		this.watcherItem.classList.remove('watcher-ok', 'watcher-starting', 'watcher-error');
+		if (broken.length > 0) {
+			this.watcherItem.classList.add('watcher-error');
+			this.watcherItem.title = `${t('status.watcherError')}\n${broken.map((report) => `${leaf(report.root)}: ${report.error}`).join('\n')}`;
+		} else if (reports.every((report) => report.running)) {
+			this.watcherItem.classList.add('watcher-ok');
+			this.watcherItem.title = t('status.watcherRunning');
+		} else {
+			this.watcherItem.classList.add('watcher-starting');
+			this.watcherItem.title = t('status.watcherStarting');
+		}
 	}
 
 	setRepo(hasRepo: boolean): void {

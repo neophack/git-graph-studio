@@ -6,9 +6,15 @@
 //!
 //! The batch is handed to a callback; `main.rs` forwards it to the webview as the
 //! `studio://fs-changed` event and drops the caches it invalidates (file list, symbols).
+//! Each watcher also carries a live status cell (`fs_watcher_status` /
+//! `studio://watcher-status`): the status bar's dot reads whether the watch still answers,
+//! because a refused or degraded watch is exactly the state where the automatic refreshes
+//! stop and only the Refresh actions remain.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use notify::{RecursiveMode, Watcher as _};
@@ -105,31 +111,98 @@ pub(crate) fn fold_path(batch: &mut FsChange, root: &Path, path: &Path) {
     }
 }
 
+/// The live fact one `FolderWatcher` reports the status bar's dot: whether the OS watch
+/// still answers, and what stopped it.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WatcherStatus {
+    /// The watched folder, the spelling the app opened it with.
+    pub root: String,
+    /// The watch is installed and no error has arrived.
+    pub running: bool,
+    /// Present only while not running: the install refusal, or the mid-watch error.
+    pub error: Option<String>,
+}
+
+/// The shared half of one watcher's status: the notify callback flips it, the status
+/// query reads it. `running` starts true — the cell exists only after the watch installed
+/// — and only ever falls; the first error wins, the later reports of a dead watch repeat.
+#[derive(Debug)]
+pub(crate) struct StatusCell {
+    root: String,
+    running: AtomicBool,
+    error: Mutex<Option<String>>,
+}
+
+impl StatusCell {
+    fn new(root: &str) -> Self {
+        Self { root: root.to_owned(), running: AtomicBool::new(true), error: Mutex::new(None) }
+    }
+
+    /// Record a watch failure; answers whether this was the first one, so the caller
+    /// pushes the status event on the transition and not on every repeat.
+    pub(crate) fn mark_degraded(&self, error: String) -> bool {
+        let mut slot = self.error.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(error);
+        drop(slot);
+        self.running.store(false, Ordering::SeqCst);
+        true
+    }
+
+    fn snapshot(&self) -> WatcherStatus {
+        WatcherStatus {
+            root: self.root.clone(),
+            running: self.running.load(Ordering::SeqCst),
+            error: self.error.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone(),
+        }
+    }
+}
+
 /// A live watch on one folder. Dropping it stops the watcher thread.
 pub struct FolderWatcher {
     _watcher: notify::RecommendedWatcher,
     stop: mpsc::Sender<()>,
+    /// The live status the status query reads; shared with the notify callback, so a
+    /// mid-watch error (a buffer overflow, the watched tree removed) marks the watch
+    /// degraded. The OS delivers that failure as an `Err` event, which the fold must not
+    /// lose: it is the moment the automatic refreshes stop.
+    pub(crate) cell: std::sync::Arc<StatusCell>,
 }
 
 impl FolderWatcher {
     /// Watch `root` recursively, calling `on_change` with each debounced batch from a
-    /// background thread. Returns an error when the OS refuses the watch (the app then falls
-    /// back to its command-driven refreshes, exactly as before the watcher existed).
+    /// background thread, and `on_degrade` once if the watch fails after installing (the
+    /// caller pushes the news to the status bar's dot). Returns an error when the OS
+    /// refuses the watch (the app then falls back to its command-driven refreshes,
+    /// exactly as before the watcher existed).
     pub fn new(
         root: &str,
         on_change: impl Fn(FsChange) + Send + 'static,
+        on_degrade: impl Fn(WatcherStatus) + Send + 'static,
     ) -> Result<FolderWatcher, String> {
+        let cell = std::sync::Arc::new(StatusCell::new(root));
+        let degrade_cell = std::sync::Arc::clone(&cell);
         let (raw_tx, raw_rx) = mpsc::channel::<PathBuf>();
         let (stop, stopped) = mpsc::channel::<()>();
         let mut watcher =
             notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-                if let Ok(event) = result {
-                    // Pure reads (`Access`) are not changes; everything else is.
-                    if matches!(event.kind, notify::EventKind::Access(_)) {
-                        return;
+                match result {
+                    Ok(event) => {
+                        // Pure reads (`Access`) are not changes; everything else is.
+                        if matches!(event.kind, notify::EventKind::Access(_)) {
+                            return;
+                        }
+                        for path in event.paths {
+                            let _ = raw_tx.send(path);
+                        }
                     }
-                    for path in event.paths {
-                        let _ = raw_tx.send(path);
+                    Err(error) => {
+                        if degrade_cell.mark_degraded(format!("{error}")) {
+                            on_degrade(degrade_cell.snapshot());
+                        }
                     }
                 }
             })
@@ -166,7 +239,13 @@ impl FolderWatcher {
         Ok(FolderWatcher {
             _watcher: watcher,
             stop,
+            cell,
         })
+    }
+
+    /// The watch's live status, for the status query's fold over the open roots.
+    pub fn status(&self) -> WatcherStatus {
+        self.cell.snapshot()
     }
 }
 
@@ -351,9 +430,13 @@ mod tests {
         // recursive watch on Linux. That gap is `notify`'s, not what this test checks.
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         let (tx, rx) = mpsc::channel();
-        let watcher = FolderWatcher::new(&root, move |change| {
-            let _ = tx.send(change);
-        })
+        let watcher = FolderWatcher::new(
+            &root,
+            move |change| {
+                let _ = tx.send(change);
+            },
+            |_| {},
+        )
         .unwrap();
         // The OS watch is registered asynchronously on some platforms; give it a moment.
         std::thread::sleep(Duration::from_millis(200));
@@ -393,9 +476,13 @@ mod tests {
         std::os::unix::fs::symlink(dir.path(), &link_path).unwrap();
         let root = link_path.display().to_string();
         let (tx, rx) = mpsc::channel();
-        let watcher = FolderWatcher::new(&root, move |change| {
-            let _ = tx.send(change);
-        })
+        let watcher = FolderWatcher::new(
+            &root,
+            move |change| {
+                let _ = tx.send(change);
+            },
+            |_| {},
+        )
         .unwrap();
         // The OS watch is registered asynchronously on some platforms; give it a moment.
         std::thread::sleep(Duration::from_millis(200));
@@ -472,5 +559,20 @@ mod tests {
         stop_tx.send(()).ok();
         let _ = watcher.join();
         let _ = writer.join();
+    }
+
+    #[test]
+    fn the_status_cell_reports_running_then_the_first_failure_alone() {
+        let cell = StatusCell::new("C:\\repo");
+        // A watch that installed answers, with nothing to report.
+        assert!(cell.snapshot().running);
+        assert_eq!(cell.snapshot().error, None);
+        // The first failure degrades; the repeats of a dead watch change nothing — the
+        // caller pushes the event on the transition, not on every report.
+        assert!(cell.mark_degraded("buffer overflow".into()));
+        assert!(!cell.mark_degraded("again".into()));
+        let status = cell.snapshot();
+        assert!(!status.running);
+        assert_eq!(status.error.as_deref(), Some("buffer overflow"));
     }
 }

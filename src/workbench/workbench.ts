@@ -944,6 +944,8 @@ export class Workbench {
 
 	declare recheckSwallowedBatch: () => void ;
 
+	declare refreshWatcherStatus: () => Promise<void> ;
+
 	hiddenRefreshQueued = false;
 
 	declare scheduleRefresh: (delay: number) => void ;

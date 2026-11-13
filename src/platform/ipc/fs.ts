@@ -92,3 +92,15 @@ export const backupList = () => invoke<BackupEntry[]>('backup_list');
 export const backupRead = (path: string) => invoke<string>('backup_read', { path });
 export const backupClear = (path: string) => invoke<void>('backup_clear', { path });
 
+
+/** One open root's file-watcher state (`fs_watcher_status`): the status bar's dot. The
+ *  error is present only while the watch is refused or degraded — the state where the
+ *  automatic refreshes have stopped; `starting` marks an install still deferred or in
+ *  flight (never an error to act on). */
+export interface WatcherReport {
+	root: string;
+	running: boolean;
+	error?: string | null;
+	starting?: boolean;
+}
+export const fsWatcherStatus = (): Promise<WatcherReport[]> => invoke('fs_watcher_status');

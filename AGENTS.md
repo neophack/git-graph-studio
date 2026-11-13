@@ -157,7 +157,10 @@ guarantees the window is never a blank dark rectangle.
   `src/workbench/lifecycle.ts` (folder open/close, snapshots, fs-change refreshes),
   `src/workbench/index.ts` (the facade that Object.assigns the concerns onto the prototype —
   import the directory, not the file),
-  `src/workbench/titlebar.ts`, `src/workbench/statusbar.ts`, `src/workbench/panel.ts` (panel chrome; its Output view is
+  `src/workbench/titlebar.ts`, `src/workbench/statusbar.ts` (the status bar's items include
+  the file watcher's dot — green while every open root's watch answers, red once one is
+  refused or degraded, the state where only the Refresh actions keep the views current),
+  `src/workbench/panel.ts` (panel chrome; its Output view is
   the Git channel), `src/platform/ui/` (shared DOM kit: dom, codicon, notify, progress,
   contextMenu, quickInput, globalContextMenu under one facade — codicons, notifications,
   context menus, quick input, and the app-wide fallback context menu (Copy/Paste/Select
@@ -279,7 +282,10 @@ no-clobber copy — not a transfer) stay.
   never clobbers what exists: it lands beside it as a " (copy)" sibling; the shared
   `zip_tree` the remote download path packs through; the confined chunked upload writes),
   `src-tauri/src/watcher.rs` (one recursive `notify` watch,
-  debounced `FsChange` batches — external changes appear by themselves)
+  debounced `FsChange` batches — external changes appear by themselves; each watch also
+  carries a live status cell, and a refused install is recorded, so `fs_watcher_status` and
+  the `studio://watcher-status` pushes can show the status bar's dot where the automatic
+  refreshes do not exist or have stopped)
 - Tests: `tests/explorer.test.ts` (the tree, the menus, the drops, the transfer rows'
   environments), `tests/transfer.test.ts` (the wire half over the tauriMock recording —
   the picker-to-upload flow, the no-wire desktop's empty answers), `ggs-fs`'s copy tests

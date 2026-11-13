@@ -313,6 +313,53 @@ pub fn remote_paths_policy(roots: State<'_, WorkspaceRoots>, launch: State<'_, c
     open
 }
 
+/// One open root's file-watcher state, the status bar's dot: green while the watch
+/// answers — external changes reach the views by themselves — red once refused or
+/// degraded, the point where only the Refresh actions keep the views current, and dim
+/// while the install is still deferred or in flight (never an error to act on).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WatcherReport {
+    pub root: String,
+    pub running: bool,
+    pub error: Option<String>,
+    pub starting: bool,
+}
+
+/// The watcher-status push (`studio://fs-changed`'s sibling): the full report list after
+/// an install, a refusal or a degrade, so the dot flips without a query.
+pub(crate) const WATCHER_STATUS_EVENT: &str = "studio://watcher-status";
+
+/// Fold the watchers' live statuses over the open roots: a root with an answering watch
+/// runs; one with a refusal or a degraded watch carries its cause; anything else — the
+/// install still recorded for the first painted frame, or its thread in flight — is
+/// starting. Pure, so the fold is unit-tested without a Tauri app.
+pub(crate) fn watcher_reports(switch: &crate::state::FolderSwitch<'_>) -> Vec<WatcherReport> {
+    let live = switch.watchers.status();
+    switch
+        .roots
+        .list()
+        .into_iter()
+        .map(|root| match live.iter().find(|status| status.root == root) {
+            Some(status) if status.running => WatcherReport { root, running: true, error: None, starting: false },
+            Some(status) => WatcherReport {
+                root,
+                running: false,
+                error: Some(status.error.clone().unwrap_or_else(|| "the file watcher stopped".to_owned())),
+                starting: false,
+            },
+            None => WatcherReport { root, running: false, error: None, starting: true },
+        })
+        .collect()
+}
+
+/// The status bar's watcher dot: one entry per open root. The frontend refreshes it at
+/// every folder open and on the `studio://watcher-status` pushes between them.
+#[tauri::command]
+pub fn fs_watcher_status(app: tauri::AppHandle) -> Vec<WatcherReport> {
+    watcher_reports(&crate::state::FolderSwitch::from_app(&app))
+}
+
 /// The extension-platform roots a remote session's `ext_fs` may ALSO reach, beyond the open
 /// folders (§23.4): the installed packages' own files, the extensions' storage area and
 /// their own log directory — exactly the surfaces the desktop's `ext_fs` contract already
@@ -1120,5 +1167,68 @@ mod revision_read_tests {
             Ok(_) => panic!("a missing path must not answer contents"),
         };
         assert!(error.contains("does not exist in HEAD"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod watcher_status_tests {
+    use super::watcher_reports;
+    use crate::state::StateSet;
+    use crate::watcher::{FolderWatcher, WatcherStatus};
+
+    #[test]
+    fn the_dot_reports_starting_running_and_refused_per_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().display().to_string();
+        let other = tempfile::tempdir().unwrap();
+        let other_root = other.path().display().to_string();
+        let state = StateSet::default();
+        // No open root, no report: the dot stays hidden.
+        assert!(watcher_reports(&state.switch()).is_empty());
+        // Both installs wait for the first painted frame: starting, never an error.
+        state.roots.set(vec![root.clone(), other_root.clone()]);
+        state.deferred.record(vec![root.clone(), other_root.clone()]);
+        let reports = watcher_reports(&state.switch());
+        assert_eq!(reports.len(), 2);
+        assert!(
+            reports.iter().all(|report| report.starting && !report.running && report.error.is_none()),
+            "{reports:?}"
+        );
+        // One watch installed, one refused: the refused root carries the cause, the
+        // installed one runs, neither is starting any more.
+        let watcher = FolderWatcher::new(&root, |_| {}, |_| {}).unwrap();
+        assert!(watcher.status().running);
+        state.watchers.push(watcher);
+        state.deferred.take();
+        state.watchers.record_refusal(WatcherStatus {
+            root: other_root.clone(),
+            running: false,
+            error: Some("too many watches".to_owned()),
+        });
+        let reports = watcher_reports(&state.switch());
+        assert_eq!(reports.len(), 2);
+        let installed = reports.iter().find(|report| report.root == root).unwrap();
+        assert!(installed.running && !installed.starting && installed.error.is_none(), "{reports:?}");
+        let refused = reports.iter().find(|report| report.root == other_root).unwrap();
+        assert!(!refused.running && !refused.starting);
+        assert_eq!(refused.error.as_deref(), Some("too many watches"));
+    }
+
+    #[test]
+    fn a_watch_that_degrades_mid_life_reports_its_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().display().to_string();
+        let state = StateSet::default();
+        state.roots.set(vec![root.clone()]);
+        let watcher = FolderWatcher::new(&root, |_| {}, |_| {}).unwrap();
+        let cell = watcher.cell.clone();
+        state.watchers.push(watcher);
+        assert!(watcher_reports(&state.switch())[0].running);
+        // The notify callback's failure path (a buffer overflow, the tree removed): the
+        // same watcher now answers not running with the cause, and the fold says so.
+        assert!(cell.mark_degraded("the watched tree was removed".into()));
+        let report = &watcher_reports(&state.switch())[0];
+        assert!(!report.running && !report.starting);
+        assert_eq!(report.error.as_deref(), Some("the watched tree was removed"));
     }
 }

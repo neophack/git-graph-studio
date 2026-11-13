@@ -6,6 +6,7 @@
 
 use ggs_base::workspace::{find_repo_root, WorkspaceRoots};
 
+use crate::cmd_fs::{watcher_reports, WATCHER_STATUS_EVENT};
 use crate::state::{FolderSwitch, LaunchState, StartupAction};
 #[cfg(test)]
 use crate::state::StateSet;
@@ -241,17 +242,29 @@ fn start_watcher(
     let index = std::sync::Arc::clone(index);
     let analysis = std::sync::Arc::clone(analysis);
     let watch_root = root.to_owned();
-    crate::watcher::FolderWatcher::new(root, move |change| {
-        // The caches are stale the moment anything changed; the next Quick Open / search /
-        // Go to Definition re-walks. The webview decides what to refresh from the batch.
-        file_list.invalidate();
-        if change.paths.iter().any(|p| ggs_index::scan::is_symbol_source(p)) || change.truncated {
-            symbols.invalidate();
-        }
-        let sink = std::sync::Arc::new(crate::events::TauriEvents(app.clone()));
-        apply_index_changes(&index, &analysis, sink, &watch_root, &change);
-        let _ = app.emit(FS_CHANGED_EVENT, change);
-    })
+    let degrade_app = app.clone();
+    crate::watcher::FolderWatcher::new(
+        root,
+        move |change| {
+            // The caches are stale the moment anything changed; the next Quick Open / search /
+            // Go to Definition re-walks. The webview decides what to refresh from the batch.
+            file_list.invalidate();
+            if change.paths.iter().any(|p| ggs_index::scan::is_symbol_source(p)) || change.truncated {
+                symbols.invalidate();
+            }
+            let sink = std::sync::Arc::new(crate::events::TauriEvents(app.clone()));
+            apply_index_changes(&index, &analysis, sink, &watch_root, &change);
+            let _ = app.emit(FS_CHANGED_EVENT, change);
+        },
+        move |_| {
+            // The watch died mid-life (a buffer overflow, the tree removed): the automatic
+            // refreshes stop at exactly this moment, and the status bar's dot flips then.
+            let _ = degrade_app.emit(
+                WATCHER_STATUS_EVENT,
+                watcher_reports(&FolderSwitch::from_app(&degrade_app)),
+            );
+        },
+    )
 }
 
 #[cfg(test)]
@@ -361,7 +374,7 @@ use crate::test_git_helpers::ScratchGit;
 /// heaviest memory the app holds, so they load on the first query that needs them (the
 /// command adapters' `ensure_*`) and `index_lease` releases them once idle.
 fn start_root_services(app: &tauri::AppHandle, root: &str) {
-    use tauri::Manager;
+    use tauri::{Emitter, Manager};
     let symbol_index = app
         .state::<std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>()
         .inner()
@@ -385,6 +398,11 @@ fn start_root_services(app: &tauri::AppHandle, root: &str) {
     let analysis = analysis_index;
     let watch_root = root.to_owned();
     std::thread::spawn(move || {
+        // The status bar's dot rides every transition: the install's answer (running or
+        // refused) is its flip away from starting, a degrade pushes its own.
+        let emit_status = |app: &tauri::AppHandle| {
+            let _ = app.emit(WATCHER_STATUS_EVENT, watcher_reports(&FolderSwitch::from_app(app)));
+        };
         match start_watcher(&app, &file_list, &symbols, &index, &analysis, &watch_root) {
             Ok(watch) => {
                 // Only the watcher of a root that is still open survives a rapid reopen;
@@ -392,9 +410,23 @@ fn start_root_services(app: &tauri::AppHandle, root: &str) {
                 let switch = FolderSwitch::from_app(&app);
                 if switch.roots.list().contains(&watch_root) {
                     switch.watchers.push(watch);
+                    emit_status(&app);
                 }
             }
-            Err(error) => eprintln!("[watcher] {error}"),
+            Err(error) => {
+                eprintln!("[watcher] {error}");
+                // A refusal for a root that was switched away while the install was in
+                // flight records nothing: it would name a folder nobody has open.
+                let switch = FolderSwitch::from_app(&app);
+                if switch.roots.list().contains(&watch_root) {
+                    switch.watchers.record_refusal(crate::watcher::WatcherStatus {
+                        root: watch_root.clone(),
+                        running: false,
+                        error: Some(error),
+                    });
+                    emit_status(&app);
+                }
+            }
         }
     });
 }

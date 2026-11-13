@@ -575,6 +575,7 @@ mod desktop {
                 cmd_fs::backup_clear,
                 cmd_fs::backup_list,
                 cmd_fs::backup_read,
+                cmd_fs::fs_watcher_status,
                 can_commands::can_log_stats,
                 can_commands::can_intervals,
                 can_commands::convert_can_log,

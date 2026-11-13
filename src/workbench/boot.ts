@@ -4,7 +4,7 @@ import type { Workbench } from './workbench';
 
 import { listen } from '../platform/ipc/core';
 import { appNewInstance, bootContext, type BootContext, openDevtools, windowCloseAck } from '../platform/ipc/app';
-import { backupList, backupRead, type BackupEntry } from '../platform/ipc/fs';
+import { backupList, backupRead, type BackupEntry, type WatcherReport } from '../platform/ipc/fs';
 import { type SymbolIndexStatus } from '../platform/ipc/symbols';
 import { type RemoteHostStatus, remoteHostHideMain, remoteHostStatus } from '../platform/ipc/remote';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
@@ -493,6 +493,9 @@ export const bootMethods: ThisType<Workbench> = {
 		// External changes arrive from the backend's file watcher; the focus refresh stays as
 		// the fallback for the filesystems the watcher cannot cover.
 		void listen<FsChange>(FS_CHANGED_EVENT, (event) => this.onFsChanged(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
+		// The status bar's watcher dot follows the backend's own pushes (an install's
+		// answer, a refusal, a mid-life degrade) between the folder opens' queries.
+		void listen<WatcherReport[]>('studio://watcher-status', (event) => this.statusBar.setWatcherStatus(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
 		// The symbol index's builds report from the backend (an open's resume, a watcher's
 		// incremental update, this command's own rebuild): the status item follows them all.
 		void listen<SymbolIndexStatus>('studio://symbol-index', (event) => this.statusBar.setSymbols(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);

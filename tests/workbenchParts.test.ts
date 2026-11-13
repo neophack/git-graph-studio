@@ -287,6 +287,44 @@ describe('status bar', () => {
 		bar.setConflicts(0);
 		expect(item.hidden).toBe(true);
 	});
+
+	it('shows the file watcher as a dot: green while it answers, red once it stops, hidden with no folder', () => {
+		const bar = new StatusBar(document.getElementById('statusbar')!);
+		const dot = () => document.querySelector<HTMLElement>('.status-left .status-watcher')!;
+		// No open folder (an empty answer), or a backend without the command (null): no dot.
+		bar.setWatcherStatus([]);
+		expect(dot().hidden).toBe(true);
+		bar.setWatcherStatus(null);
+		expect(dot().hidden).toBe(true);
+		// Every root's watch answers: the green dot with the running tooltip.
+		bar.setWatcherStatus([{ root: 'C:\\repo', running: true, error: null, starting: false }]);
+		expect(dot().hidden).toBe(false);
+		expect(dot().classList.contains('watcher-ok')).toBe(true);
+		expect(dot().title).toBe(t('status.watcherRunning'));
+		// One root refused: the error state names the cause in the tooltip.
+		bar.setWatcherStatus([
+			{ root: 'C:\\repo', running: true, error: null, starting: false },
+			{ root: 'C:\\other', running: false, error: 'too many watches', starting: false },
+		]);
+		expect(dot().classList.contains('watcher-error')).toBe(true);
+		expect(dot().title).toContain('too many watches');
+		// The installs still deferred (a folder just opened, before its first painted
+		// frame): dim, and never an error.
+		bar.setWatcherStatus([{ root: 'C:\\repo', running: false, error: null, starting: true }]);
+		expect(dot().classList.contains('watcher-starting')).toBe(true);
+		expect(dot().title).toBe(t('status.watcherStarting'));
+		// Both language tables carry the dot's three tooltips.
+		for (const key of ['status.watcherRunning', 'status.watcherStarting', 'status.watcherError'] as const) {
+			expect(t(key)).not.toBe(key);
+		}
+		setLocale('zh-cn');
+		try {
+			expect(t('status.watcherRunning')).toBe('文件监视器运行中 - 外部改动自动刷新');
+			expect(t('status.watcherError')).toBe('文件监视器不可用 - 请使用刷新操作更新视图');
+		} finally {
+			setLocale('en');
+		}
+	});
 });
 
 describe('file watcher events', () => {
@@ -336,6 +374,14 @@ describe('file watcher events', () => {
 		(workbench as unknown as { lastRefreshAt: number }).lastRefreshAt = performance.now() - 5000;
 		backend.emit(FS_CHANGED_EVENT, { root: 'C:\\repo', paths: [], truncated: false, gitChanged: true });
 		expect(refreshes).toBe(4);
+
+		// The backend's watcher-status push drives the status bar's dot: a degrade flips it
+		// red the moment the automatic refreshes stop, the install's answer flips it back.
+		backend.emit('studio://watcher-status', [{ root: 'C:\\repo', running: false, error: 'the watched tree was removed', starting: false }]);
+		expect(document.querySelector<HTMLElement>('.status-watcher')!.classList.contains('watcher-error')).toBe(true);
+		expect(document.querySelector<HTMLElement>('.status-watcher')!.title).toContain('the watched tree was removed');
+		backend.emit('studio://watcher-status', [{ root: 'C:\\repo', running: true, error: null, starting: false }]);
+		expect(document.querySelector<HTMLElement>('.status-watcher')!.classList.contains('watcher-ok')).toBe(true);
 	});
 
 	it('refreshes immediately while the window is hidden - background timers are throttled', async () => {

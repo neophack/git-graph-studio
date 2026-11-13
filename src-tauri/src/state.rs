@@ -98,20 +98,53 @@ impl LaunchState {
 /// The watches on the open folders; empty when no folder is open or the OS refused it.
 /// One watcher per open root: a plain folder keeps one, a multi-root workspace one per
 /// root.
+/// The open roots' file watchers, plus the installs the OS refused. A refused install
+/// never produces a `FolderWatcher`, so its refusal is recorded here to keep the status
+/// bar's dot honest — that is the state where the automatic refreshes do not exist at all.
 #[derive(Default)]
-pub struct Watchers(Mutex<Vec<FolderWatcher>>);
+pub struct Watchers(Mutex<Vec<FolderWatcher>>, Mutex<Vec<crate::watcher::WatcherStatus>>);
 
 impl Watchers {
     /// End every watch (a folder close, or the window before a new folder installs its
     /// own: a refused start_watcher, or a reopen racing the install, must not leave the
-    /// old folder emitting `studio://fs-changed`).
+    /// old folder emitting `studio://fs-changed`). The refusals go with them: they name
+    /// the closed folder's roots.
     pub fn clear(&self) {
-        self.0.lock().unwrap().clear();
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+        self.1.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
     }
 
-    /// Install one root's watch.
+    /// Install one root's watch. A refusal recorded earlier for the same root (the
+    /// workspace reopened after the OS once refused the watch) is superseded by it.
     pub fn push(&self, watcher: FolderWatcher) {
-        self.0.lock().unwrap().push(watcher);
+        let root = watcher.status().root;
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(watcher);
+        self.1
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|status| status.root != root);
+    }
+
+    /// Record one refused install (the OS answered the watch request with an error). A
+    /// second record for the same root replaces the first — only the latest cause shows.
+    pub fn record_refusal(&self, status: crate::watcher::WatcherStatus) {
+        let mut refused = self.1.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        refused.retain(|entry| entry.root != status.root);
+        refused.push(status);
+    }
+
+    /// Every watch's live status: the installed watchers' cells, then the refused
+    /// installs. The status query folds this over the open roots.
+    pub fn status(&self) -> Vec<crate::watcher::WatcherStatus> {
+        let mut all: Vec<_> = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|watcher| watcher.status())
+            .collect();
+        all.extend(self.1.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().cloned());
+        all
     }
 }
 
@@ -168,6 +201,46 @@ mod deferred_services_tests {
         pending.record(vec!["a".to_owned()]);
         pending.clear();
         assert!(pending.take().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod watchers_tests {
+    use super::Watchers;
+    use crate::watcher::{FolderWatcher, WatcherStatus};
+
+    fn refusal(root: &str, error: &str) -> WatcherStatus {
+        WatcherStatus { root: root.to_owned(), running: false, error: Some(error.to_owned()) }
+    }
+
+    #[test]
+    fn a_refusal_rides_until_the_same_root_installs_or_the_switch_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().display().to_string();
+        let watchers = Watchers::default();
+        // The OS refused the watch: the refusal is all the status has, and it shows.
+        watchers.record_refusal(refusal(&root, "too many watches"));
+        let statuses = watchers.status();
+        assert_eq!(statuses.len(), 1);
+        assert!(!statuses[0].running);
+        assert_eq!(statuses[0].error.as_deref(), Some("too many watches"));
+        // The workspace reopened and this time the watch installed: it supersedes the
+        // refusal, one entry per root.
+        let watcher = FolderWatcher::new(&root, |_| {}, |_| {}).unwrap();
+        assert!(watcher.status().running);
+        watchers.push(watcher);
+        let statuses = watchers.status();
+        assert_eq!(statuses.len(), 1);
+        assert!(statuses[0].running);
+        assert_eq!(statuses[0].error, None);
+        // A second refusal for the same root replaces the first (only the latest shows).
+        watchers.record_refusal(refusal(&root, "first"));
+        watchers.record_refusal(refusal(&root, "second"));
+        let statuses = watchers.status();
+        assert_eq!(statuses.len(), 2, "the installed watch and the refusal both list");
+        // The folder switch drops everything, refusals included: they name closed roots.
+        watchers.clear();
+        assert!(watchers.status().is_empty());
     }
 }
 

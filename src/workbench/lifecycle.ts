@@ -13,6 +13,7 @@ import * as state from '../platform/state';
 import { isWindowDragging } from '../platform/windowDrag';
 import { basename, notify } from '../platform/ui/index';
 import { FsChange, OpenedPaths, REFRESH_ECHO_MS, joinRepo, whenIdle } from './workbench';
+import { fsWatcherStatus } from '../platform/ipc/fs';
 
 /** The lifecycle concern of Workbench — assigned onto the prototype by the module facade (index.ts). */
 export const lifecycleMethods: ThisType<Workbench> = {
@@ -134,6 +135,7 @@ export const lifecycleMethods: ThisType<Workbench> = {
 		this.search.setRoots([]);
 		this.scm.setRepo(null);
 		this.statusBar.setRepo(false);
+		this.statusBar.setWatcherStatus([]); // no folder: no watcher to indicate
 		this.extensionHost.noteWorkspaceChanged([]);
 		// The window is the file: hide the side bar and the terminal, like a single-file editor.
 		state.layout.sidebarVisible = false;
@@ -200,6 +202,9 @@ export const lifecycleMethods: ThisType<Workbench> = {
 		this.editors.setRoot(root);
 		this.scm.setRepo(root, anyRepo);
 		this.statusBar.setRepo(anyRepo); // a plain folder shows no repository items
+		// The watcher dot: the backend's roots are already the new ones (the open command
+		// set them), so the answer says starting until the install's push flips it green.
+		void this.refreshWatcherStatus();
 		// The graph view starts loading now, in parallel: its iframe boot and its first data
 		// request run on their own while the SCM view and the status bar settle below. A
 		// folder that is not a repository gets the placeholder with the Initialize button.
@@ -253,6 +258,7 @@ export const lifecycleMethods: ThisType<Workbench> = {
 		this.editors.setRoot(null);
 		this.scm.setRepo(null);
 		this.statusBar.setRepo(false);
+		this.statusBar.setWatcherStatus([]); // no open folder: no watcher to indicate
 		this.extensionHost.noteWorkspaceChanged([]);
 		ExtensionHost.workspaceFolders = [];
 	},
@@ -417,6 +423,19 @@ export const lifecycleMethods: ThisType<Workbench> = {
 				this.recheckInFlight = false;
 				if (differs) this.scheduleRefresh(0);
 			});
+	},
+
+	/** The status bar's watcher dot: the backend's live report, queried at every folder
+	 *  open (and once at boot through the restored folder's open). The backend's own
+	 *  install / refusal / degrade pushes carry the flips between, so there is no polling.
+	 *  A backend without the command — an older daemon behind a remote session — leaves
+	 *  the dot off. */
+	async refreshWatcherStatus(): Promise<void> {
+		try {
+			this.statusBar.setWatcherStatus(await fsWatcherStatus());
+		} catch {
+			this.statusBar.setWatcherStatus(null);
+		}
 	},
 
 	scheduleRefresh(delay: number): void {

@@ -661,6 +661,14 @@ body.resizing iframe { pointer-events: none; }
 .status-save-track { width: 40px; height: 3px; border-radius: 2px; overflow: hidden; background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 15%, transparent); }
 .status-save-track i { display: block; height: 100%; width: 0%; background: var(--vscode-progressBar-background, #0e70c0); transition: width 0.2s ease; }
 .status-save-track i.indeterminate { width: 40%; transition: none; animation: search-progress-slide 1.3s ease-in-out infinite; }
+/* The file watcher's dot (M3): the automatic-refresh infrastructure's one light - green
+ * while every open root's watch answers, red once one is refused or degraded (the state
+ * where only the Refresh actions keep the views current), dim while the install starts. */
+.status-watcher { cursor: default; }
+.status-watcher:hover { background: transparent; }
+.status-watcher .watcher-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--vscode-charts-green, #89d185); }
+.status-watcher.watcher-error .watcher-dot { background: var(--vscode-errorForeground, #f85149); }
+.status-watcher.watcher-starting .watcher-dot { background: var(--vscode-descriptionForeground, #9d9d9d); opacity: 0.6; }
 /* The extension host's status bar cluster: items VS Code's createStatusBarItem adds, left
  * of the app's own right-hand items, after its own left-hand ones. */
 .status-ext { display: flex; align-items: center; }

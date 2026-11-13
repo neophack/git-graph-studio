@@ -1102,6 +1102,21 @@
 						await waitFor(() => document.querySelectorAll('#explorer *').length > 0, 15000);
 						return fullParams.get('workspace').split('/').pop() + ' opened programmatically';
 					});
+					// The status bar's watcher dot (M3): the opened folder's install answers, so
+					// the dot reaches its green state (the install's push flips it from dim).
+					// A refused watch would sit red here — the state where only the Refresh
+					// actions keep the views current. jsdom asserts the rendering; this one
+					// asserts the real backend's live answer.
+					await check('workbench', 'the file watcher dot shows the live watch', async () => {
+						const wb = (await import('/src/workbench/workbench.ts')).currentWorkbench;
+						await wb.refreshWatcherStatus();
+						await waitFor(() => {
+							const dot = document.querySelector('.status-left .status-watcher');
+							return dot && !dot.hidden && dot.classList.contains('watcher-ok');
+						}, 20000);
+						const dot = document.querySelector('.status-left .status-watcher');
+						return dot.className + ' - ' + dot.title.split('\n')[0];
+					});
 				}
 
 				/* ---------- Phase 1: every module's self-tests (the all-buttons sweep) ---------- */
