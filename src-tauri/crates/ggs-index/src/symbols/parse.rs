@@ -236,6 +236,8 @@ const C_QUERY: &str = r#"
 (struct_specifier name: (type_identifier) @def.struct)
 (enum_specifier name: (type_identifier) @def.enum)
 (type_definition declarator: (type_identifier) @def.type)
+(preproc_def name: (identifier) @def.macro)
+(preproc_function_def name: (identifier) @def.macro)
 (call_expression function: (identifier) @call)
 (preproc_include path: (string_literal) @import)
 "#;
@@ -251,6 +253,8 @@ const CPP_QUERY: &str = r#"
 (class_specifier name: (type_identifier) @def.class)
 (enum_specifier name: (type_identifier) @def.enum)
 (type_definition declarator: (type_identifier) @def.type)
+(preproc_def name: (identifier) @def.macro)
+(preproc_function_def name: (identifier) @def.macro)
 (call_expression function: (identifier) @call)
 (call_expression function: (field_expression field: (field_identifier) @call))
 (call_expression function: (qualified_identifier) @call)
@@ -539,7 +543,19 @@ fn symbol_of(
         let p = name_node.start_position();
         (p.row, p.column)
     };
-    let end_line = scope.map(|d| d.end_position().row).unwrap_or(line);
+    // A preprocessor directive's node includes its trailing newline: an end at column 0
+    // of the next row means the directive's own last row is one above (`#define` and its
+    // `\` continuations all report the line after them otherwise).
+    let end_line = scope
+        .map(|d| {
+            let end = d.end_position();
+            if end.column == 0 {
+                end.row.saturating_sub(1)
+            } else {
+                end.row
+            }
+        })
+        .unwrap_or(line);
     let params = decl
         .and_then(|d| d.child_by_field_name("parameters"))
         .map(|p| p.named_child_count())
@@ -1160,6 +1176,42 @@ macro_rules! sq { ($e:expr) => { $e * $e } }
         assert!(file.symbols[3].exported);
         assert_eq!(file.imports, vec!["local.h"]);
         assert!(file.calls.iter().any(|c| c.name == "helper"));
+    }
+
+    #[test]
+    fn c_macros_index_object_function_and_multiline_defines() {
+        // A define's declaration spans its whole directive: a `\`-continued function-like
+        // macro ends on its last continuation line, so a hover can slice the value off.
+        let text = "#define MAX_SIZE 100\n#define CLAMP(x) ((x) < 0 ? 0 : (x))\n#define MULTI(a) \\\n    step(a); \\\n    step(a + 1)\n#define FEATURE\nstatic int helper(void) { return MAX_SIZE; }\n";
+        let file = parse_file(text, "c");
+        assert_eq!(
+            kinds(&file),
+            vec![
+                ("macro", "MAX_SIZE"),
+                ("macro", "CLAMP"),
+                ("macro", "MULTI"),
+                ("macro", "FEATURE"),
+                ("function", "helper")
+            ]
+        );
+        let max_size = &file.symbols[0];
+        assert_eq!((max_size.line, max_size.end_line), (0, 0));
+        assert_eq!(max_size.signature, "#define MAX_SIZE 100");
+        assert!(max_size.exported, "a #define is not static");
+        let multi = &file.symbols[2];
+        assert_eq!((multi.line, multi.end_line), (2, 4), "the continuations ride along");
+        let feature = &file.symbols[3];
+        assert_eq!(feature.signature, "#define FEATURE", "a bare define has no value");
+    }
+
+    #[test]
+    fn cpp_macros_index_too() {
+        let text = "#define GROW(n) ((n) * 2)\nclass Widget { void go(); };\nvoid Widget::go() { srv.call(); helper(); }\n";
+        let file = parse_file(text, "cpp");
+        assert_eq!(
+            kinds(&file),
+            vec![("macro", "GROW"), ("class", "Widget"), ("method", "go")]
+        );
     }
 
     #[test]

@@ -13,6 +13,9 @@ import { buildTree, subtreeCounts, SymbolDatabaseView } from '../src/features/se
 import { fileSymbolItems, workspaceSymbolItems } from '../src/workbench';
 import { backend } from './tauriMock';
 import { click, flush, key, texts } from './helpers';
+import { macroHoverDom, macroHoverEntries, macroHoverFor, macroValueAt, resetMacroHoverCache, type MacroHoverSource } from '../src/features/editor/editorProviderViews';
+import type { WsSymbol } from '../src/platform/ipc/search';
+import type { EditorView } from '@codemirror/view';
 
 const REPO = 'C:\\repo';
 
@@ -323,5 +326,102 @@ describe('the M7 polish that landed beside it', () => {
 		expect(kind).toBe('vscode-light');
 		expect(['Dark Modern', 'Light Modern']).toContain(document.body.dataset['vscodeThemeName']);
 		expect(kind === 'vscode-dark' ? 'Dark Modern' : 'Light Modern').toBe(document.body.dataset['vscodeThemeName']);
+	});
+});
+
+describe('the macro hover', () => {
+	beforeEach(() => resetMacroHoverCache());
+
+	const CONF_H = 'C:/repo/inc/conf.h';
+	const MAIN_C = 'C:/repo/src/main.c';
+	const files: Record<string, string> = {
+		[CONF_H]: '#pragma once\n\n#define MAX_LEN 256\n#define GROW(n) ((n) * 2)\n#define WIDE(a) \\\n    step(a); \\\n    step(a + 1)\n',
+		[MAIN_C]: 'int other(void) { return 1; }\n'
+	};
+
+	/** A source over the files above; `defs` are what its index answers for a name. */
+	function source(defs: WsSymbol[]): MacroHoverSource & { lookups: string[] } {
+		const lookups: string[] = [];
+		return {
+			lookups,
+			root: () => 'C:\\repo',
+			lookup: async (name: string) => {
+				lookups.push(name);
+				return defs;
+			},
+			read: async (path: string) => {
+				const posix = path.split('\\').join('/');
+				const text = files[posix];
+				return text === undefined ? null : text;
+			}
+		};
+	}
+
+	it('slices the directive a definition names, continuations included', () => {
+		const text = files[CONF_H]!;
+		expect(macroValueAt(text, 2, 2)).toBe('#define MAX_LEN 256');
+		expect(macroValueAt(text, 4, 6)).toBe('#define WIDE(a) \\\n    step(a); \\\n    step(a + 1)');
+		expect(macroValueAt('short\n', 0, 400)).toBe('short', 'an end line past the file clamps to the last line');
+	});
+
+	it('lists every definition of the name with its own directive text', async () => {
+		const macros = source([
+			{ kind: 'macro', name: 'MAX_LEN', path: 'inc/conf.h', line: 2 },
+			{ kind: 'macro', name: 'MAX_LEN', path: 'src/other.h', line: 0 },
+			{ kind: 'function', name: 'MAX_LEN', path: 'src/main.c', line: 9 }
+		]);
+		const entries = await macroHoverEntries(macros, 'MAX_LEN');
+		expect(entries.map((entry) => [entry.path, entry.line, entry.text])).toEqual([
+			['inc/conf.h', 2, '#define MAX_LEN 256'],
+			['src/other.h', 0, '']
+		]);
+	});
+
+	it('answers nothing without a folder, an index, or a macro', async () => {
+		const noRoot = source([]);
+		noRoot.root = () => null;
+		expect(await macroHoverEntries(noRoot, 'MAX_LEN')).toEqual([]);
+
+		const failing = source([]);
+		failing.lookup = async () => {
+			throw new Error('index gone');
+		};
+		expect(await macroHoverEntries(failing, 'MAX_LEN')).toEqual([]);
+
+		expect(await macroHoverEntries(source([{ kind: 'function', name: 'other', path: 'src/main.c', line: 0 }]), 'other')).toEqual([]);
+	});
+
+	it('re-uses a lookup answer for a while instead of asking per hover', async () => {
+		const macros = source([{ kind: 'macro', name: 'MAX_LEN', path: 'inc/conf.h', line: 2 }]);
+		await macroHoverEntries(macros, 'MAX_LEN');
+		await macroHoverEntries(macros, 'MAX_LEN');
+		await macroHoverEntries(macros, 'OTHER');
+		expect(macros.lookups).toEqual(['MAX_LEN', 'OTHER']);
+	});
+
+	it('resolves the word under the pointer and renders one entry per definition', async () => {
+		const view = {
+			state: {
+				wordAt: () => ({ from: 10, to: 17 }),
+				sliceDoc: (from: number, to: number) => (from === 10 ? 'MAX_LEN' : '')
+			}
+		} as unknown as EditorView;
+		const macros = source([{ kind: 'macro', name: 'MAX_LEN', path: 'inc/conf.h', line: 2 }]);
+		expect(await macroHoverFor(macros, view, 12)).toEqual([{ path: 'inc/conf.h', line: 2, text: '#define MAX_LEN 256' }]);
+		const noWord = { state: { wordAt: () => null, sliceDoc: () => '' } } as unknown as EditorView;
+		expect(await macroHoverFor(macros, noWord, 12)).toBeNull();
+
+		const dom = macroHoverDom('MAX_LEN', (await macroHoverFor(macros, view, 12))!);
+		expect(dom.querySelector('.ggs-symbol-hover-head')!.textContent).toBe('MAX_LEN');
+		expect(dom.querySelector('.ggs-symbol-hover-loc')!.textContent).toBe('inc/conf.h:3');
+		expect(dom.querySelector('.ggs-symbol-hover-code')!.textContent).toBe('#define MAX_LEN 256');
+
+		const several = macroHoverDom('MAX_LEN', [
+			{ path: 'inc/conf.h', line: 2, text: '#define MAX_LEN 256' },
+			{ path: 'src/other.h', line: 0, text: '' }
+		]);
+		expect(several.querySelector('.ggs-symbol-hover-head')!.textContent).toContain('2');
+		expect(several.querySelectorAll('.ggs-symbol-hover-loc')).toHaveLength(2);
+		expect(several.querySelectorAll('.ggs-symbol-hover-code')).toHaveLength(1, 'an unread file shows its location only');
 	});
 });

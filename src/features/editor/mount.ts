@@ -3,6 +3,7 @@
 // orchestration (open.ts), split out so neither file outgrows the other.
 
 import { type FileContents, type FileProbe, fileProbe } from '../../platform/ipc/fs';
+import { symbolLookup } from '../../platform/ipc/symbols';
 import { declaredLanguageName } from '../extensions';
 import { loadCanViews, loadEditorExtensions, loadFastView, loadHexView, loadImageView, loadMergeEditor } from '../../platform/lazy';
 import { t } from '../../platform/i18n';
@@ -249,7 +250,7 @@ export const mountMethods: ThisType<import('./group').EditorGroup> = {
 
 	async mountTextEditor(editor: Editor, contents: string, parent: HTMLElement = editor.pane): Promise<void> {
 		const { EditorView, EditorState, baseExtensions, completionExtension, bookmarkGutter, languageSlot, blameSlot, keymap, loadLanguage, editLockSlot, editLockedExtensions } = await textEditor();
-		const [{ diagnosticsExtension }, { extensionDecorationsExtension }, { extensionProviderExtensions }] = await loadEditorExtensions();
+		const [{ diagnosticsExtension }, { extensionDecorationsExtension }, { extensionProviderExtensions, symbolHoverExtension }] = await loadEditorExtensions();
 		// The merge-conflict decorations ride every text editor: the extension stays inert
 		// (one substring check per edit) until the document actually carries conflict
 		// markers, then paints them — including on the silent reload that brings markers
@@ -270,7 +271,19 @@ export const mountMethods: ThisType<import('./group').EditorGroup> = {
 					...(editLocked ? [editLockSlot.of(editLockedExtensions())] : []),
 					...baseExtensions(false, editor.input.kind === 'file' ? editor.input.path : editor.label),
 					...completionExtension(editor.input.kind === 'file' ? editor.input.path : editor.label),
-					...(editor.input.kind === 'file' ? [diagnosticsExtension(editor.input.path), extensionDecorationsExtension(editor.input.path), extensionProviderExtensions(editor.input.path)] : []),
+					...(editor.input.kind === 'file' ? [
+						diagnosticsExtension(editor.input.path),
+						extensionDecorationsExtension(editor.input.path),
+						extensionProviderExtensions(editor.input.path),
+						// The workbench's own macro hover: the group supplies the root and the
+						// cached file read (a save invalidates it), so a hovered #define shows
+						// the text that is on disk now.
+						symbolHoverExtension({
+							root: () => this.rootPath,
+							lookup: (name) => symbolLookup(name),
+							read: (path) => this.cachedRead(path)
+						})
+					] : []),
 					conflictDecorations(),
 					bookmarkGutter(editor.input.kind === 'file' ? editor.input.path : ''),
 					languageSlot.of([]),
