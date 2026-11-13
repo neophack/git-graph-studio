@@ -59,6 +59,7 @@ function moduleGraphAnswer(): Record<string, unknown> {
 			] }
 		],
 		totalCalls: 8,
+		totalModuleEdges: 2,
 		totalFileEdges: 3
 	};
 }
@@ -487,6 +488,7 @@ describe('the graph pages', () => {
 			edges: [{ from: 'src', to: 'src', calls: 3, files: 2 }],
 			fileEdges: [{ from: 'src/a.ts', to: 'src/b.ts', calls: 3, sites: [] }],
 			totalCalls: 3,
+			totalModuleEdges: 1,
 			totalFileEdges: 2
 		}));
 		backend.on('analysis_module_diagram', () => diagramAnswer());
@@ -495,6 +497,24 @@ describe('the graph pages', () => {
 		await flush(8);
 		(root.querySelectorAll<HTMLElement>('.an-toggle')[1]).click();
 		expect(texts('.an-more', root)[0]).toBe('showing 1 of 2 file dependencies');
+	});
+
+	it('module analysis says how many module dependencies the cap hid', async () => {
+		await modules();
+		backend.on('analysis_module_graph', () => ({
+			modules: [{ name: 'src', files: 2, symbols: 4 }],
+			edges: [{ from: 'src', to: 'src', calls: 3, files: 2 }],
+			fileEdges: [],
+			totalCalls: 3,
+			totalModuleEdges: 5,
+			totalFileEdges: 0
+		}));
+		backend.on('analysis_module_diagram', () => diagramAnswer());
+		const root = host();
+		createAnalysisPage('modules', root);
+		await flush(8);
+		(root.querySelectorAll<HTMLElement>('.an-toggle')[1]).click();
+		expect(texts('.an-more', root)[0]).toBe('showing 1 of 5 module dependencies');
 	});
 
 	it('module analysis shows its empty state when no file calls another', async () => {

@@ -35,23 +35,29 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use std::collections::BinaryHeap;
+
+use ggs_analysis::deadcode::DeadFilter;
 use ggs_analysis::imports::import_graph;
-use ggs_analysis::metrics::enriched_rows;
-use ggs_analysis::modules::{module_graph, module_of, FileDep, ModuleEdge, ModuleGraph};
+use ggs_analysis::metrics::{rows_for_file, MetricRow};
+use ggs_analysis::modules::{module_edge_summary, ModuleEdge};
 use ggs_analysis::security::{scan_file, Finding, Severity};
-use ggs_analysis::{deadcode, AnalysisData, Direction};
+use ggs_analysis::{AnalysisData, Direction};
 use ggs_analysis::index::AnalysisIndex;
 use ggs_fs::walk_files;
-use ggs_index::search::search_literal;
-use ggs_index::symbols::index::{scan_references, SymbolIndex};
-use ggs_index::symbols::WorkspaceSymbol;
+use ggs_index::scan::build_matcher;
+use ggs_index::search::search_files;
+use ggs_index::symbols::index::{scan_references_bounded, SymbolIndex};
 
 /// The protocol revision we speak; a client asking for another is echoed its own (the
 /// tool surface here is stable across the revisions clients ship today).
 const PROTOCOL_VERSION: &str = "2025-06-18";
-/// The hard ceiling every list tool's `limit` clamps to — one answer must never flood
-/// the model's context; paging (`offset`) reaches the rest.
-const LIST_LIMIT_MAX: u64 = 400;
+/// The hard ceiling every list tool's `limit` clamps to — an answer carries at most
+/// the first 100 rows (the caller's pick, or the default), and paging (`offset`)
+/// reaches deeper windows from the same bounded fold. One answer must never flood
+/// the model's context, and the fold behind it must never hold a large workspace's
+/// whole result set to show a page.
+const LIST_LIMIT_MAX: u64 = 100;
 /// Rows a list tool shows when the caller passes no `limit` (some tools override with
 /// a default of their own where rows are heavy).
 const LIST_LIMIT_DEFAULT: usize = 50;
@@ -321,13 +327,13 @@ impl McpServer {
             .replace('\\', "/");
         let (limit, offset) = Self::page_args(args, REFERENCES_LIMIT_DEFAULT);
         let narrow = self.index.files_containing(&self.root, &name);
-        let files = scan_references(&self.root, &name, narrow)
-            .map_err(|error| (-32603, format!("reference scan failed: {error}")))?;
-        let total: usize = files
-            .iter()
-            .filter(|file| prefix.is_empty() || file.path.starts_with(&prefix))
-            .map(|file| file.matches.len())
-            .sum();
+        // The scan stores only the first `offset + limit` hits (one page by the
+        // ceiling) and counts the rest as they stream past: a common name on a huge
+        // tree costs the page, never the whole match set. The prefix narrows inside
+        // the scan, so a prefixed total stays exact and single-pass.
+        let (files, total) =
+            scan_references_bounded(&self.root, &name, narrow, offset + limit, &prefix)
+                .map_err(|error| (-32603, format!("reference scan failed: {error}")))?;
         if total == 0 {
             return Ok(format!(
                 "No whole-word occurrences of '{name}'{} in the workspace's code files.",
@@ -346,17 +352,11 @@ impl McpServer {
         let mut out = format!("{total} occurrence(s) of '{name}'{scope}:");
         let mut shown = 0usize;
         let mut skipped = 0usize;
-        'hits: for file in files {
-            if !prefix.is_empty() && !file.path.starts_with(&prefix) {
-                continue;
-            }
+        'hits: for file in &files {
             for hit in &file.matches {
                 if skipped < offset {
                     skipped += 1;
                     continue;
-                }
-                if shown >= limit {
-                    break 'hits;
                 }
                 out.push_str(&format!(
                     "{n}{path}:{line}:{column}",
@@ -366,6 +366,9 @@ impl McpServer {
                     column = hit.column
                 ));
                 shown += 1;
+                if shown >= limit {
+                    break 'hits;
+                }
             }
         }
         if offset + shown < total {
@@ -480,14 +483,14 @@ impl McpServer {
             }
             Ok(data) => {
                 let data = data.lock().unwrap();
-                let graph = module_graph(&data, &[]);
+                let graph = module_edge_summary(&data, &[]);
                 if graph.edges.is_empty() {
                     out.push_str("\nmodule graph: no cross-file calls");
                 } else {
                     out.push_str(&format!(
                         "{n}module graph: {modules} module(s), {pairs} file pair(s), {calls} cross-file call(s) — heaviest edges (analysis_module_graph lists all):",
                         n = '\n',
-                        modules = graph.modules.len(),
+                        modules = graph.modules,
                         pairs = graph.total_file_edges,
                         calls = graph.total_calls
                     ));
@@ -504,7 +507,7 @@ impl McpServer {
                 out.push_str(&format!(
                     "{n}dead code: {dead} candidate(s) (analysis_dead_code lists them)",
                     n = '\n',
-                    dead = deadcode::dead_rows(&data, false).len()
+                    dead = ggs_analysis::deadcode::dead_count(&data, false)
                 ));
             }
         }
@@ -609,27 +612,39 @@ impl McpServer {
             .map(str::to_owned)
             .filter(|kind| !kind.is_empty());
         let (limit, offset) = Self::page_args(args, LIST_LIMIT_DEFAULT);
-        let symbols = self.index.all_symbols(&self.root).unwrap_or_default();
-        let hits: Vec<&WorkspaceSymbol> = symbols
+        // The store answers with the top-100 matches — the name table is scanned once,
+        // at most one hundred hits copied out, never the whole workspace's symbols
+        // materialized to show a page. `offset` pages inside that window; deeper than
+        // it, the answer says to narrow rather than fetch.
+        let fetched = self
+            .index
+            .matching(&self.root, &query, LIST_LIMIT_MAX as usize)
+            .unwrap_or_default();
+        let filtered: Vec<_> = fetched
             .iter()
-            .filter(|symbol| {
-                symbol.name.to_lowercase().contains(&query)
-                    && kind.as_deref().is_none_or(|want| symbol.kind == want)
-            })
+            .filter(|symbol| kind.as_deref().is_none_or(|want| symbol.kind == want))
             .collect();
+        let hits: Vec<_> = filtered.iter().skip(offset).take(limit).collect();
         if hits.is_empty() {
             let kind_note = kind
                 .as_deref()
                 .map(|kind| format!(" of kind '{kind}'"))
                 .unwrap_or_default();
+            if offset >= filtered.len() && fetched.len() == LIST_LIMIT_MAX as usize {
+                return Ok(format!(
+                    "The top-{max} window holds no page at offset {offset} for '{query}'{kind_note} — narrow the query.",
+                    max = LIST_LIMIT_MAX
+                ));
+            }
             return Ok(format!("No symbol name contains '{query}'{kind_note}."));
         }
-        let mut out = format!("{} symbol(s) matching '{query}':", hits.len());
-        let mut shown = 0usize;
-        for hit in hits.iter().skip(offset) {
-            if shown >= limit {
-                break;
-            }
+        let count = if fetched.len() == LIST_LIMIT_MAX as usize {
+            format!("{LIST_LIMIT_MAX}+")
+        } else {
+            fetched.len().to_string()
+        };
+        let mut out = format!("{count} symbol(s) matching '{query}':");
+        for hit in &hits {
             out.push_str(&format!(
                 "{n}{kind} {hit_name} — {path}:{line}",
                 n = '\n',
@@ -638,10 +653,9 @@ impl McpServer {
                 path = hit.path,
                 line = hit.line + 1
             ));
-            shown += 1;
         }
-        if offset + shown < hits.len() {
-            out.push_str(&Self::more_trailer(hits.len(), offset, shown));
+        if offset + hits.len() < filtered.len() {
+            out.push_str(&Self::more_trailer(filtered.len(), offset, hits.len()));
         }
         Ok(out)
     }
@@ -758,43 +772,49 @@ impl McpServer {
             .into_iter()
             .filter(|file| prefix.is_empty() || file.starts_with(&prefix))
             .collect();
-        let outcome = search_literal(&files, &self.root, &query)
+        // The streaming scan emits file batches; the collector keeps only the page's
+        // window (at most `limit` rows, one page by the ceiling) and counts the rest
+        // as they pass, so a common query on a huge tree never holds its whole match
+        // set. The total stays exact within the search's own match cap.
+        let matcher = build_matcher(&query, false, false, false)
             .map_err(|error| (-32603, format!("search failed: {error}")))?;
-        let total: usize = outcome.files.iter().map(|file| file.matches.len()).sum();
+        let mut window: Vec<(String, usize, String)> = Vec::new(); // (path, line, text)
+        let mut skipped = 0usize;
+        let mut total = 0usize;
+        let outcome = search_files(&files, &self.root, &matcher, |batch| {
+            for file in batch {
+                for hit in file.matches {
+                    total += 1;
+                    if skipped < offset {
+                        skipped += 1;
+                        continue;
+                    }
+                    if window.len() < limit {
+                        window.push((file.path.clone(), hit.line, hit.text));
+                    }
+                }
+            }
+        }, || false);
+        let (scanned, truncated, _) = outcome;
         if total == 0 {
             return Ok(format!(
-                "No occurrences of '{query}' in {} scanned file(s).",
-                outcome.scanned
+                "No occurrences of '{query}' in {scanned} scanned file(s)."
             ));
         }
-        let mut out = format!(
-            "{total} occurrence(s) of '{query}' in {} file(s):",
-            outcome.files.len()
-        );
-        let mut skipped = 0usize;
-        let mut shown = 0usize;
-        'files: for file in &outcome.files {
-            for hit in &file.matches {
-                if skipped < offset {
-                    skipped += 1;
-                    continue;
-                }
-                if shown >= limit {
-                    break 'files;
-                }
-                out.push_str(&format!(
-                    "{n}{path}:{line}: {text}",
-                    n = '\n',
-                    path = file.path,
-                    line = hit.line,
-                    text = hit.text.trim_end_matches('\r')
-                ));
-                shown += 1;
-            }
+        let mut out = format!("{total} occurrence(s) of '{query}' in {scanned} scanned file(s):");
+        for (path, line, text) in &window {
+            out.push_str(&format!(
+                "{n}{path}:{line}: {text}",
+                n = '\n',
+                path = path,
+                line = line,
+                text = text.trim_end_matches('\r')
+            ));
         }
-        if offset + shown < total {
-            out.push_str(&Self::more_trailer(total, offset, shown));
+        if offset + window.len() < total {
+            out.push_str(&Self::more_trailer(total, offset, window.len()));
         }
+        let _ = truncated;
         Ok(out)
     }
 
@@ -807,16 +827,19 @@ impl McpServer {
             .map(str::to_owned);
         let (limit, offset) = Self::page_args(args, MODULE_EDGES_LIMIT_DEFAULT);
         let data = self.analysis_data()?;
-        let graph: ModuleGraph = {
+        // The bounded summary fold: module edges and the exact totals, without the
+        // file-pair ranking or site lists the page's answer carries — a few megabytes
+        // on any workspace, where the full graph holds tens on the extreme ones.
+        let summary = {
             let data = data.lock().unwrap();
-            module_graph(&data, &[])
+            module_edge_summary(&data, &[])
         };
-        if graph.edges.is_empty() {
+        if summary.edges.is_empty() {
             return Ok("No cross-file calls in the analysis.".to_owned());
         }
         // The edges arrive ranked by call count — the architecture's busiest routes
         // first, so a page of them is the most informative page there is.
-        let edges: Vec<&ModuleEdge> = graph
+        let edges: Vec<&ModuleEdge> = summary
             .edges
             .iter()
             .filter(|edge| {
@@ -825,20 +848,11 @@ impl McpServer {
                     .is_none_or(|want| edge.from == want || edge.to == want)
             })
             .collect();
-        // The top file pairs under each module edge, so one answer sketches the shape of
-        // the dependency; the per-site detail stays with `analysis_call_graph`.
-        let mut by_module: HashMap<(&str, &str), Vec<&FileDep>> = HashMap::new();
-        for dep in &graph.file_edges {
-            by_module
-                .entry((module_of(&dep.from), module_of(&dep.to)))
-                .or_default()
-                .push(dep);
-        }
         let mut out = format!(
             "{modules} module(s), {pairs} file dependency pair(s), {calls} cross-file call(s); {shown} of {total} module edge(s):",
-            modules = graph.modules.len(),
-            pairs = graph.total_file_edges,
-            calls = graph.total_calls,
+            modules = summary.modules,
+            pairs = summary.total_file_edges,
+            calls = summary.total_calls,
             shown = edges.len().min(offset + limit).saturating_sub(offset),
             total = edges.len()
         );
@@ -856,23 +870,16 @@ impl McpServer {
                 files = edge.files
             ));
             shown += 1;
-            for dep in by_module
-                .get(&(edge.from.as_str(), edge.to.as_str()))
-                .into_iter()
-                .flatten()
-                .take(3)
-            {
-                out.push_str(&format!(
-                    "{n}  {from} → {to}  {calls} call(s)",
-                    n = '\n',
-                    from = dep.from,
-                    to = dep.to,
-                    calls = dep.calls
-                ));
-            }
         }
         if offset + shown < edges.len() {
             out.push_str(&Self::more_trailer(edges.len(), offset, shown));
+        } else if summary.total_module_edges > summary.edges.len() {
+            out.push_str(&format!(
+                "{n}… the listing keeps the busiest {kept} of {all_edges} module edges — the totals above count every one",
+                n = '\n',
+                kept = summary.edges.len(),
+                all_edges = summary.total_module_edges
+            ));
         }
         Ok(out)
     }
@@ -989,26 +996,37 @@ impl McpServer {
             .get("limit")
             .and_then(Value::as_u64)
             .unwrap_or(20)
-            .clamp(1, 200) as usize;
+            .clamp(1, LIST_LIMIT_MAX) as usize;
         let prefix = args
             .get("path")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .replace('\\', "/");
         let data = self.analysis_data()?;
+        // The answer is the ranked top `limit` — selected while the files stream, one
+        // file's rows in memory at a time (enriched by the big-code-analysis engine as
+        // each file passes). The whole workspace's rows are never materialized to
+        // rank them: a min-heap of the worst survivors does the selection.
         let rows = {
             let data = data.lock().unwrap();
-            enriched_rows(&data, &|_| 0, data.root())
+            let mut best = TopRows::new(limit);
+            for file in data.files() {
+                if !prefix.is_empty() && !file.path.starts_with(&prefix) {
+                    continue;
+                }
+                let mut rows = rows_for_file(&data, file, &|_| 0);
+                let ext = file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+                if let Ok(text) =
+                    std::fs::read_to_string(std::path::Path::new(data.root()).join(&file.path))
+                {
+                    ggs_analysis::bca::enrich_file(ext, &text, &mut rows);
+                }
+                for row in rows {
+                    best.offer(row);
+                }
+            }
+            best.into_sorted()
         };
-        let mut rows = rows;
-        // The hotspot ranking is repository-wide by design; `path` scopes it when the
-        // task is one area's hotspots, not the whole world's.
-        rows.retain(|row| prefix.is_empty() || row.path.starts_with(&prefix));
-        rows.sort_by(|a, b| {
-            b.hotspot
-                .cmp(&a.hotspot)
-                .then(b.complexity.cmp(&a.complexity))
-        });
         if rows.is_empty() {
             let scope = if prefix.is_empty() {
                 String::new()
@@ -1023,11 +1041,10 @@ impl McpServer {
             format!(" under '{prefix}'")
         };
         let mut out = format!(
-            "Top {shown} of {total} function(s){scope} by hotspot (complexity × references):",
-            shown = limit.min(rows.len()),
-            total = rows.len()
+            "Top {shown} function(s){scope} by hotspot (complexity × references):",
+            shown = rows.len()
         );
-        for row in rows.iter().take(limit) {
+        for row in &rows {
             let container = row
                 .container
                 .as_deref()
@@ -1068,15 +1085,32 @@ impl McpServer {
             .replace('\\', "/");
         let (limit, offset) = Self::page_args(args, LIST_LIMIT_DEFAULT);
         let data = self.analysis_data()?;
-        let rows = {
+        // The rule filter walks the files once under the lock; only the page's window
+        // (at most `limit` rows) is built while every candidate is counted — a large
+        // workspace's whole dead list never sits in memory to show a page of it.
+        let (rows, total) = {
             let data = data.lock().unwrap();
-            deadcode::dead_rows(&data, include_exported)
+            let filter = DeadFilter::new(&data, include_exported);
+            let mut total = 0usize;
+            let mut rows: Vec<_> = Vec::new();
+            for file in data.files() {
+                if !prefix.is_empty() && !file.path.starts_with(&prefix) {
+                    continue;
+                }
+                for sym in &file.symbols {
+                    if !filter.is_dead(sym) {
+                        continue;
+                    }
+                    let index = total;
+                    total += 1;
+                    if index >= offset && rows.len() < limit {
+                        rows.push(filter.row(&file.path, sym));
+                    }
+                }
+            }
+            (rows, total)
         };
-        let rows: Vec<_> = rows
-            .into_iter()
-            .filter(|row| prefix.is_empty() || row.path.starts_with(&prefix))
-            .collect();
-        if rows.is_empty() {
+        if total == 0 {
             let scope = if prefix.is_empty() {
                 String::new()
             } else {
@@ -1094,13 +1128,8 @@ impl McpServer {
         };
         let mut out = format!(
             "{total} declaration(s) no call site in this repository spells{scope}:",
-            total = rows.len()
         );
-        let mut shown = 0usize;
-        for row in rows.iter().skip(offset) {
-            if shown >= limit {
-                break;
-            }
+        for row in &rows {
             out.push_str(&format!(
                 "{n}{kind} {name} — {path}:{line}  ({lines} lines{exported})",
                 n = '\n',
@@ -1111,10 +1140,9 @@ impl McpServer {
                 lines = row.lines,
                 exported = if row.exported { ", exported" } else { "" }
             ));
-            shown += 1;
         }
-        if offset + shown < rows.len() {
-            out.push_str(&Self::more_trailer(rows.len(), offset, shown));
+        if offset + rows.len() < total {
+            out.push_str(&Self::more_trailer(total, offset, rows.len()));
         }
         Ok(out)
     }
@@ -1141,42 +1169,56 @@ impl McpServer {
             .unwrap_or_default();
         let (limit, offset) = Self::page_args(args, LIST_LIMIT_DEFAULT);
         let data = self.analysis_data()?;
+        // Two bounded passes over the files (the scan is cheap regex work): the first
+        // counts each severity's findings, the second keeps only the ranked page's
+        // window — errors first, then warnings, then info, file order within, the old
+        // stable sort's exact order — so the whole workspace's findings never sit in
+        // memory to show one page.
+        let class_of = |severity: Severity| match severity {
+            Severity::Error => 0usize,
+            Severity::Warning => 1,
+            Severity::Info => 2,
+        };
+        let mut counts = [0usize; 3];
         let mut findings: Vec<Finding> = Vec::new();
         {
             let data = data.lock().unwrap();
-            for file in data.files() {
-                // Secrets are usually ASCII: a non-UTF-8 file decodes lossily and stays
-                // scannable, instead of silently dropping out of the answer whole.
-                let Ok(bytes) =
-                    std::fs::read(std::path::Path::new(&self.root).join(&file.path))
-                else {
-                    continue;
-                };
-                let text = String::from_utf8_lossy(&bytes);
-                let ext = file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-                for finding in scan_file(&file.path, ext, &text, &file.calls) {
-                    if severity.is_none_or(|want| finding.severity == want) {
-                        findings.push(finding);
+            for pass_collects in [false, true] {
+                let mut seen = [0usize; 3];
+                for file in data.files() {
+                    // Secrets are usually ASCII: a non-UTF-8 file decodes lossily and
+                    // stays scannable, instead of silently dropping out of the answer.
+                    let Ok(bytes) =
+                        std::fs::read(std::path::Path::new(&self.root).join(&file.path))
+                    else {
+                        continue;
+                    };
+                    let text = String::from_utf8_lossy(&bytes);
+                    let ext = file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+                    for finding in scan_file(&file.path, ext, &text, &file.calls, data.names()) {
+                        if severity.is_none_or(|want| finding.severity == want) {
+                            let class = class_of(finding.severity);
+                            if !pass_collects {
+                                counts[class] += 1;
+                                continue;
+                            }
+                            let before: usize = counts[..class].iter().sum();
+                            let position = before + seen[class];
+                            seen[class] += 1;
+                            if position >= offset && position < offset + limit {
+                                findings.push(finding);
+                            }
+                        }
                     }
                 }
             }
         }
-        if findings.is_empty() {
+        let total = counts.iter().sum();
+        if total == 0 {
             return Ok(format!("No security rule findings{scope}."));
         }
-        // Errors first, then warnings, then info — the page's order, and the order an
-        // AI should triage in; within a severity the file order stays deterministic.
-        findings.sort_by_key(|finding| match finding.severity {
-            Severity::Error => 0,
-            Severity::Warning => 1,
-            Severity::Info => 2,
-        });
-        let mut out = format!("{total} finding(s){scope}:", total = findings.len());
-        let mut shown = 0usize;
-        for finding in findings.iter().skip(offset) {
-            if shown >= limit {
-                break;
-            }
+        let mut out = format!("{total} finding(s){scope}:");
+        for finding in &findings {
             out.push_str(&format!(
                 "{n}[{severity}] {message} ({rule}, {cwe}) — {path}:{line}",
                 n = '\n',
@@ -1189,10 +1231,9 @@ impl McpServer {
                 path = finding.path,
                 line = finding.line + 1
             ));
-            shown += 1;
         }
-        if offset + shown < findings.len() {
-            out.push_str(&Self::more_trailer(findings.len(), offset, shown));
+        if offset + findings.len() < total {
+            out.push_str(&Self::more_trailer(total, offset, findings.len()));
         }
         Ok(out)
     }
@@ -1500,7 +1541,7 @@ fn tool_catalogue() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "query": { "type": "string" },
                 "kind": { "type": "string", "description": "Only this symbol kind" },
-                "limit": { "type": "number", "description": "Hits per page (1-400, default 50)" },
+                "limit": { "type": "number", "description": "Hits per page (1-100, default 50)" },
                 "offset": { "type": "number", "description": "Skip this many hits (paging)" }
             }, "required": ["query"] }
         },
@@ -1515,7 +1556,7 @@ fn tool_catalogue() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "query": { "type": "string" },
                 "path": { "type": "string", "description": "Repo-relative path prefix to narrow to" },
-                "limit": { "type": "number", "description": "Hits per page (1-400, default 50)" },
+                "limit": { "type": "number", "description": "Hits per page (1-100, default 50)" },
                 "offset": { "type": "number", "description": "Skip this many hits (paging)" }
             }, "required": ["query"] }
         },
@@ -1557,7 +1598,7 @@ fn tool_catalogue() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "includeExported": { "type": "boolean", "description": "Also list exported declarations (default false)" },
                 "path": { "type": "string", "description": "Repo-relative path prefix to scope to" },
-                "limit": { "type": "number", "description": "Rows per page (1-400, default 50)" },
+                "limit": { "type": "number", "description": "Rows per page (1-100, default 50)" },
                 "offset": { "type": "number", "description": "Skip this many rows (paging)" }
             } }
         },
@@ -1566,7 +1607,7 @@ fn tool_catalogue() -> Value {
             "description": "The rule-based security scan: hardcoded secrets, dangerous and weak-crypto APIs, each finding with severity and CWE — errors first. Optional `severity` filters (error, warning, info); `limit`/`offset` page.",
             "inputSchema": { "type": "object", "properties": {
                 "severity": { "type": "string", "enum": ["error", "warning", "info"], "description": "Only this severity" },
-                "limit": { "type": "number", "description": "Rows per page (1-400, default 50)" },
+                "limit": { "type": "number", "description": "Rows per page (1-100, default 50)" },
                 "offset": { "type": "number", "description": "Skip this many rows (paging)" }
             } }
         },
@@ -1575,7 +1616,7 @@ fn tool_catalogue() -> Value {
             "description": "The full file dependency graph — every import resolved to a workspace file, as from → to edges (import statements, not calls; analysis_module_graph maps the calls). Optional `path` prefix narrows; `limit`/`offset` page.",
             "inputSchema": { "type": "object", "properties": {
                 "path": { "type": "string", "description": "Repo-relative path prefix to narrow to" },
-                "limit": { "type": "number", "description": "Edges per page (1-400, default 50)" },
+                "limit": { "type": "number", "description": "Edges per page (1-100, default 50)" },
                 "offset": { "type": "number", "description": "Skip this many edges (paging)" }
             } }
         },
@@ -1583,7 +1624,7 @@ fn tool_catalogue() -> Value {
             "name": "analysis_import_cycles",
             "description": "The file dependency graph's strongly-connected components — every import cycle, as chains of file names. `limit`/`offset` page.",
             "inputSchema": { "type": "object", "properties": {
-                "limit": { "type": "number", "description": "Cycles per page (1-400, default 25)" },
+                "limit": { "type": "number", "description": "Cycles per page (1-100, default 25)" },
                 "offset": { "type": "number", "description": "Skip this many cycles (paging)" }
             } }
         }
@@ -1592,6 +1633,74 @@ fn tool_catalogue() -> Value {
 
 fn error_response(id: Value, code: i64, message: &str) -> String {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }).to_string()
+}
+
+/// The bounded top-N selection behind `analysis_metrics`: rows are offered one at a
+/// time (a workspace streams them file by file) and only the best `limit` survive.
+/// Ordering matches the old full sort — hotspot first, complexity breaking ties, and
+/// the earlier row winning a full tie — without ever holding the whole set.
+struct TopRows {
+    limit: usize,
+    /// A min-heap of the survivors under the ranking: the root is always the worst
+    /// row kept, the one a full heap drops.
+    heap: BinaryHeap<RankedRow>,
+    seq: usize,
+}
+
+struct RankedRow {
+    row: MetricRow,
+    seq: usize,
+}
+
+impl PartialEq for RankedRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+impl Eq for RankedRow {}
+impl Ord for RankedRow {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // "Greater" is the WORSE row, so the heap's root stays the worst survivor.
+        // The full-tie break prefers the earlier row (the stable sort's answer).
+        other
+            .row
+            .hotspot
+            .cmp(&self.row.hotspot)
+            .then_with(|| other.row.complexity.cmp(&self.row.complexity))
+            .then_with(|| other.seq.cmp(&self.seq))
+    }
+}
+impl PartialOrd for RankedRow {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl TopRows {
+    fn new(limit: usize) -> TopRows {
+        TopRows {
+            limit,
+            heap: BinaryHeap::new(),
+            seq: 0,
+        }
+    }
+
+    fn offer(&mut self, row: MetricRow) {
+        let seq = self.seq;
+        self.seq += 1;
+        self.heap.push(RankedRow { row, seq });
+        if self.heap.len() > self.limit {
+            self.heap.pop();
+        }
+    }
+
+    fn into_sorted(mut self) -> Vec<MetricRow> {
+        let mut rows: Vec<RankedRow> = self.heap.drain().collect();
+        // Ascending in the ranking order (where "greater" is the worse row) — the
+        // answer reads best first, full ties back in stream order.
+        rows.sort();
+        rows.into_iter().map(|ranked| ranked.row).collect()
+    }
 }
 
 /// The workflow guidance the initialize handshake hands the model: what this server
@@ -2109,10 +2218,12 @@ mod tests {
         let modules = call(&server, "analysis_module_graph", json!({}));
         // The bare recursive `alpha()` in other.rs resolves to both declarations of the
         // name, so its lib.rs target counts as a cross-file call too — the same honest
-        // fan-out the per-symbol walk shows.
+        // fan-out the per-symbol walk shows. The MCP answer carries the module edges
+        // and the exact totals (the file pairs are the app page's detail); the bounded
+        // summary fold never ranks pairs to show edges.
         assert!(modules.contains("2 file dependency pair(s)"), "{modules}");
         assert!(modules.contains("src → src"), "{modules}");
-        assert!(modules.contains("src/caller.rs → src/lib.rs"), "{modules}");
+        assert!(!modules.contains("caller.rs → lib.rs"), "{modules}");
         let narrowed = call(
             &server,
             "analysis_module_graph",
@@ -2121,12 +2232,14 @@ mod tests {
         assert!(narrowed.contains("0 of 0 module edge(s)"), "{narrowed}");
 
         let metrics = call(&server, "analysis_metrics", json!({ "limit": 10 }));
-        assert!(metrics.contains("of 5 function(s)"), "{metrics}");
+        // The answer is the ranked top-`limit` itself — the header names the page, the
+        // selection never held the workspace's whole row set to rank it.
+        assert!(metrics.contains("Top 5 function(s) by hotspot"), "{metrics}");
         assert!(metrics.contains("function alpha"), "{metrics}");
         // The path filter scopes the ranking to one area.
         let scoped = call(&server, "analysis_metrics", json!({ "path": "other.rs" }));
         assert!(
-            scoped.contains("of 1 function(s) under 'other.rs'"),
+            scoped.contains("Top 1 function(s) under 'other.rs'"),
             "{scoped}"
         );
 
@@ -2260,27 +2373,32 @@ mod tests {
         assert!(narrowed.contains("src/hot.rs:"), "{narrowed}");
         assert!(!narrowed.contains("quiet.rs"), "{narrowed}");
 
-        // The paging contract holds for search_symbols too: total in the header,
-        // continuation in the trailer, exact pickup on the offset.
+        // The top-100 window contract for search_symbols: the store fetches at most
+        // the first hundred matches, `limit` shows a page of them, `offset` pages
+        // inside the window — deeper than it, narrow the query.
         let symbols = call(
             &server,
             "search_symbols",
             json!({ "query": "caller", "limit": 50 }),
         );
         assert!(
-            symbols.starts_with("420 symbol(s) matching 'caller':"),
+            symbols.starts_with("100+ symbol(s) matching 'caller':"),
             "{symbols}"
         );
-        assert!(
-            symbols.contains("+370 more — repeat with offset = 50"),
-            "{symbols}"
+        assert!(symbols.contains("+50 more — repeat with offset = 50"), "{symbols}");
+        let second = call(
+            &server,
+            "search_symbols",
+            json!({ "query": "caller", "limit": 50, "offset": 50 }),
         );
+        assert!(second.contains("caller51"), "{second}");
+        assert!(second.contains("caller100"), "{second}");
+        assert!(!second.contains("caller101"), "{second}");
         let last = call(
             &server,
             "search_symbols",
             json!({ "query": "caller", "offset": 419 }),
         );
-        assert!(last.contains("caller420"), "{last}");
-        assert!(!last.contains("more — repeat with offset"), "{last}");
+        assert!(last.contains("holds no page at offset 419"), "{last}");
     }
 }

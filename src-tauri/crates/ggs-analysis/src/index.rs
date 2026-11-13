@@ -424,35 +424,21 @@ fn ready_status(data: &AnalysisData) -> AnalysisStatus {
 
 /* ---------- The streaming report runners ---------- */
 
-/// Every function and method with its measured shape, streamed in batches. The hotspot
-/// column blends the symbol index's occurrence counts in when they have landed (`refs`);
-/// the big-code-analysis columns (cognitive complexity, Halstead, LLOC, MI) enrich each
-/// batch outside the analysis lock — a re-read per report, the security scan's rhythm.
+/// Every function and method with its measured shape, streamed in batches. The batch
+/// is a slice of files: the rows build under the lock, the big-code-analysis columns
+/// enrich outside it (a re-read per report, the security scan's rhythm), and each
+/// batch drops before the next — a large tree's whole row set never sits in memory.
 pub fn run_metrics(
     index: &AnalysisIndex,
     data: &Arc<Mutex<AnalysisData>>,
     root: &str,
-    refs: &HashMap<String, usize>,
+    refs_of: &dyn Fn(&str) -> usize,
     sink: &mut dyn BatchSink<MetricsEvent>,
 ) {
     let run = index.begin_run();
-    // Base rows under the lock (the index already measured the shape); the
-    // enrichment parses outside it, so the analysis keeps serving queries.
-    let mut files: Vec<(String, Vec<MetricRow>)> = {
-        let data = data.lock().unwrap();
-        data.files()
-            .iter()
-            .map(|file| {
-                (
-                    file.path.clone(),
-                    crate::metrics::rows_for_file(file, &|name| refs.get(name).copied().unwrap_or(0)),
-                )
-            })
-            .collect()
-    };
-    let file_count = files.len();
+    let file_count = data.lock().unwrap().file_count();
     let mut functions = 0usize;
-    for batch in files.chunks_mut(REPORT_BATCH) {
+    for start in (0..file_count).step_by(REPORT_BATCH) {
         if !index.is_current_run(run) {
             let _ = sink.send(MetricsEvent::Done {
                 files: 0,
@@ -461,19 +447,30 @@ pub fn run_metrics(
             });
             return;
         }
-        batch.par_iter_mut().for_each(|(path, rows)| {
+        let end = (start + REPORT_BATCH).min(file_count);
+        // Rows for this batch of files, under the lock (the index already measured
+        // the shape).
+        let mut files: Vec<(String, Vec<MetricRow>)> = {
+            let data = data.lock().unwrap();
+            data.files()[start..end]
+                .iter()
+                .map(|file| (file.path.clone(), crate::metrics::rows_for_file(&data, file, refs_of)))
+                .collect()
+        };
+        // Enrichment parses outside the lock, so the analysis keeps serving queries.
+        // Lossy: a non-UTF-8 file's ASCII identifiers survive the decode, so its
+        // functions still enrich instead of silently dropping out of the report.
+        files.par_iter_mut().for_each(|(path, rows)| {
             let ext = path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-            // Lossy: a non-UTF-8 file's ASCII identifiers survive the decode, so its
-            // functions still enrich instead of silently dropping out of the report.
             if let Ok(bytes) = std::fs::read(std::path::Path::new(root).join(path.as_str())) {
                 let text = String::from_utf8_lossy(&bytes);
                 bca::enrich_file(ext, &text, rows);
             }
         });
-        functions += batch.iter().map(|(_, rows)| rows.len()).sum::<usize>();
-        let rows: Vec<MetricRow> = batch
-            .iter()
-            .flat_map(|(_, rows)| rows.iter().cloned())
+        functions += files.iter().map(|(_, rows)| rows.len()).sum::<usize>();
+        let rows: Vec<MetricRow> = files
+            .into_iter()
+            .flat_map(|(_, rows)| rows.into_iter())
             .collect();
         let _ = sink.send(MetricsEvent::Batch { rows });
     }
@@ -484,7 +481,9 @@ pub fn run_metrics(
     });
 }
 
-/// Declarations no call site in the workspace spells, streamed in batches.
+/// Declarations no call site in the workspace spells, streamed in batches. The rule
+/// filter walks the files under the lock and each batch crosses as it fills — no
+/// whole-report row list.
 pub fn run_dead_code(
     index: &AnalysisIndex,
     data: &Arc<Mutex<AnalysisData>>,
@@ -492,24 +491,45 @@ pub fn run_dead_code(
     sink: &mut dyn BatchSink<DeadCodeEvent>,
 ) {
     let run = index.begin_run();
-    let rows = {
+    let mut found = 0usize;
+    let mut batch: Vec<DeadRow> = Vec::with_capacity(REPORT_BATCH);
+    {
         let data = data.lock().unwrap();
-        crate::deadcode::dead_rows(&data, include_exported)
-    };
-    for batch in rows.chunks(REPORT_BATCH) {
-        if !index.is_current_run(run) {
-            let _ = sink.send(DeadCodeEvent::Done {
-                found: 0,
-                cancelled: true,
-            });
-            return;
+        let filter = crate::deadcode::DeadFilter::new(&data, include_exported);
+        for file in data.files() {
+            for sym in &file.symbols {
+                if !filter.is_dead(sym) {
+                    continue;
+                }
+                if batch.len() >= REPORT_BATCH {
+                    if !index.is_current_run(run) {
+                        let _ = sink.send(DeadCodeEvent::Done {
+                            found: 0,
+                            cancelled: true,
+                        });
+                        return;
+                    }
+                    let _ = sink.send(DeadCodeEvent::Batch {
+                        rows: std::mem::take(&mut batch),
+                    });
+                }
+                found += 1;
+                batch.push(filter.row(&file.path, sym));
+            }
         }
-        let _ = sink.send(DeadCodeEvent::Batch {
-            rows: batch.to_vec(),
+    }
+    if !index.is_current_run(run) {
+        let _ = sink.send(DeadCodeEvent::Done {
+            found: 0,
+            cancelled: true,
         });
+        return;
+    }
+    if !batch.is_empty() {
+        let _ = sink.send(DeadCodeEvent::Batch { rows: batch });
     }
     let _ = sink.send(DeadCodeEvent::Done {
-        found: rows.len(),
+        found,
         cancelled: false,
     });
 }
@@ -528,6 +548,7 @@ pub fn run_security(
     let mut total = 0usize;
     {
         let data = data.lock().unwrap();
+        let names = data.names();
         for file in data.files() {
             if !index.is_current_run(run) {
                 let _ = sink.send(SecurityEvent::Done {
@@ -545,7 +566,7 @@ pub fn run_security(
             let text = String::from_utf8_lossy(&bytes);
             files += 1;
             let ext = file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-            let findings = security::scan_file(&file.path, ext, &text, &file.calls);
+            let findings = security::scan_file(&file.path, ext, &text, &file.calls, names);
             total += findings.len();
             if !findings.is_empty() {
                 let _ = sink.send(SecurityEvent::Batch { findings });
@@ -744,7 +765,7 @@ mod tests {
         let data = index.analysis(&root).unwrap();
 
         let mut metrics_sink = VecSink(Vec::new());
-        run_metrics(&index, &data, &root, &HashMap::new(), &mut metrics_sink);
+        run_metrics(&index, &data, &root, &|_| 0, &mut metrics_sink);
         assert!(metrics_sink.0.len() >= 2);
         assert!(matches!(
             metrics_sink.0.last(),

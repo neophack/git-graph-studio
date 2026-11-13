@@ -7,6 +7,18 @@
 //! It lives only for the session (a restart rebuilds; parse speed makes persistence
 //! unnecessary), updated file-by-file from the same watcher batches the symbol index eats.
 //!
+//! The model is compact by construction (module `model`): every string interns to a
+//! `u32` over one shared table, each declaration and call site is one fixed-size
+//! record, and the call resolution the engine used to materialize as per-edge rows —
+//! the caller table and the callee table, each entry carrying a cloned file path — is
+//! not stored at all. A call site stores how its name resolved (one [`ResolveClass`]
+//! byte, decided once at derive time with the same pecking order the old resolver
+//! walked), and both graph directions re-derive the targets from that record at query
+//! time: the unique or receiver-narrowed target set is a slice of the name index, and
+//! membership tests are O(1). On the corpus that used to take ~3.8 GB resident and
+//! ~15 GB at the Module Analysis peak, the same analysis now sits in the tens of
+//! megabytes and the reports stream in bounded batches.
+//!
 //! Resolution is honest about what it is: name matching with receiver hints, not type
 //! inference. A call edge exists when a call site's spelling matches a declaration —
 //! preferring methods whose container matches the receiver, and `self`/`this` receivers
@@ -16,13 +28,17 @@
 
 pub mod bca;
 pub mod deadcode;
-pub mod index;
 pub mod diagram;
 pub mod imports;
+pub mod index;
 pub mod metrics;
+pub mod model;
 pub mod modules;
 pub mod security;
 
+pub use model::{Call, Names, ResolveClass, Sym, SymKind, NONE};
+
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
@@ -31,27 +47,54 @@ use rayon::prelude::*;
 
 use ggs_fs::walk_files;
 use ggs_index::scan::is_symbol_source;
-use ggs_index::symbols::parse::{self, CallSite, ParsedFile, ParsedSymbol};
+use ggs_index::symbols::parse::{self, ParsedFile};
 
 /// Files per progress batch; also the cancellation checkpoint (the symbol store's rhythm).
 pub const BUILD_BATCH: usize = 256;
 
-/// One file's analysis content plus the fingerprint it was parsed at.
+/// One file's analysis content plus the fingerprint it was parsed at. The records are
+/// compact (module `model`): names are [`Names`] ids and the call sites carry their
+/// owner and resolution class. The owner table (`owner_heads`/`owner_order`) is the
+/// per-file CSR from declaration to its call sites, in document order.
 pub struct FileAnalysis {
     pub path: String,
     pub mtime_ms: u64,
     pub size: u64,
-    pub symbols: Vec<ParsedSymbol>,
-    pub calls: Vec<CallSite>,
-    pub imports: Vec<String>,
+    pub symbols: Vec<Sym>,
+    pub calls: Vec<Call>,
+    pub imports: Vec<u32>,
+    pub owner_heads: Vec<u32>,
+    pub owner_order: Vec<u32>,
+}
+
+impl FileAnalysis {
+    /// The file's call sites owned by symbol `symbol_index`, in document order.
+    pub fn calls_of(&self, symbol_index: u32) -> &[u32] {
+        let start = self.owner_heads[symbol_index as usize] as usize;
+        let end = self.owner_heads[symbol_index as usize + 1] as usize;
+        &self.owner_order[start..end]
+    }
 }
 
 /// A declaration's address: the file's index in `files` and the symbol's index in the
 /// file's `symbols`. Only meaningful inside one `AnalysisData`.
 pub type DefKey = (u32, u32);
 
-/// The "no enclosing declaration" symbol index (a call outside any function body).
-const NO_ENCLOSING: u32 = u32::MAX;
+/// A declaration decoded for reading: the interned strings as slices, the shape as
+/// measured. Everything the reports and the graph nodes show.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SymView<'a> {
+    pub name: &'a str,
+    pub container: Option<&'a str>,
+    pub kind: SymKind,
+    pub exported: bool,
+    pub params: u16,
+    pub complexity: u16,
+    pub nesting: u8,
+    pub line: u32,
+    pub end_line: u32,
+    pub signature: &'a str,
+}
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -96,19 +139,6 @@ pub struct CallGraph {
     pub ambiguous: usize,
 }
 
-/// One resolved call whose caller and callee sit in different files — the Module
-/// Analysis report's material. A call site that resolved to several declarations
-/// contributes one record per target, exactly as the per-symbol walk draws its fan-out.
-pub struct CrossFileCall {
-    pub from_file: String,
-    pub to_file: String,
-    /// Display spellings: `container.name` when the declaration has a container.
-    pub from_name: String,
-    pub to_name: String,
-    pub line: usize,
-    pub column: usize,
-}
-
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Direction {
@@ -116,20 +146,32 @@ pub enum Direction {
     Callees,
 }
 
-/// The workspace analysis of one root: the parsed files plus the derived name index and
-/// call edges.
+/// The workspace analysis of one root: the compact parsed files plus the derived name
+/// index. The call graph itself is never materialized — it is re-derived from the call
+/// sites' resolution classes on demand (see the module doc).
 pub struct AnalysisData {
     root: String,
+    names: Names,
+    /// Every declaration's signature, one arena (offsets live in the [`Sym`] records).
+    sigs: String,
     /// Sorted by path.
     files: Vec<FileAnalysis>,
-    /// name → every declaration of it, in file order.
-    by_name: HashMap<String, Vec<DefKey>>,
-    /// Declaration → what it (may) call, one entry per resolution.
-    callees: HashMap<DefKey, Vec<(DefKey, String, usize, usize)>>,
-    /// Declaration → what (may) call it (the transpose, same sites).
-    callers: HashMap<DefKey, Vec<(DefKey, String, usize, usize)>>,
-    /// Every name any call site spells, resolved or not — the dead-code escape hatch.
-    called_names: HashSet<String>,
+    /// Global call-id bases: file `i`'s calls are ids `call_bases[i]..call_bases[i+1]`.
+    call_bases: Vec<u32>,
+    /// Declarations CSR by name id: `decls[decl_heads[name]..decl_heads[name + 1]]`,
+    /// file order then declaration order within a name.
+    decl_heads: Vec<u32>,
+    decls: Vec<DefKey>,
+    /// Every container id any declaration names — the receiver-narrowing gate.
+    containers: HashSet<u32>,
+    /// Name ids at least one call site spells (the dead-code shield), one bit per name.
+    called: Vec<u64>,
+    /// Call sites CSR by name id: global call ids grouped by `call.name`, file order
+    /// then document order within a name — what the callers direction walks.
+    site_heads: Vec<u32>,
+    site_order: Vec<u32>,
+    symbols_total: usize,
+    calls_total: usize,
 }
 
 impl AnalysisData {
@@ -137,11 +179,18 @@ impl AnalysisData {
     pub fn empty(root: &str) -> AnalysisData {
         AnalysisData {
             root: root.to_owned(),
+            names: Names::new(),
+            sigs: String::new(),
             files: Vec::new(),
-            by_name: HashMap::new(),
-            callees: HashMap::new(),
-            callers: HashMap::new(),
-            called_names: HashSet::new(),
+            call_bases: vec![0],
+            decl_heads: vec![0],
+            decls: Vec::new(),
+            containers: HashSet::new(),
+            called: Vec::new(),
+            site_heads: vec![0],
+            site_order: Vec::new(),
+            symbols_total: 0,
+            calls_total: 0,
         }
     }
 
@@ -149,71 +198,123 @@ impl AnalysisData {
         &self.root
     }
 
+    /// The interned string table (the reports decode call-site names through it).
+    pub fn names(&self) -> &Names {
+        &self.names
+    }
+
+    pub fn name(&self, id: u32) -> &str {
+        self.names.get(id)
+    }
+
     pub fn file_count(&self) -> usize {
         self.files.len()
     }
 
     pub fn symbol_count(&self) -> usize {
-        self.files.iter().map(|f| f.symbols.len()).sum()
+        self.symbols_total
     }
 
     pub fn call_count(&self) -> usize {
-        self.files.iter().map(|f| f.calls.len()).sum()
+        self.calls_total
     }
 
     pub fn files(&self) -> &[FileAnalysis] {
         &self.files
     }
 
+    /// One declaration, decoded.
+    pub fn symbol(&self, key: DefKey) -> SymView<'_> {
+        let file = &self.files[key.0 as usize];
+        self.decode_sym(&file.symbols[key.1 as usize])
+    }
+
+    /// One raw record decoded with its file path already at hand.
+    pub(crate) fn symbol_of_raw(&self, sym: &Sym) -> SymView<'_> {
+        self.decode_sym(sym)
+    }
+
+    fn decode_sym(&self, sym: &Sym) -> SymView<'_> {
+        SymView {
+            name: self.names.get(sym.name),
+            container: (sym.container != NONE).then(|| self.names.get(sym.container)),
+            kind: sym.kind,
+            exported: sym.exported,
+            params: sym.params,
+            complexity: sym.complexity,
+            nesting: sym.nesting,
+            line: sym.line,
+            end_line: sym.end_line,
+            signature: self.signature_of(sym),
+        }
+    }
+
+    /// Whether any call site in the workspace spells the interned `name` id.
+    pub(crate) fn called_id(&self, name: u32) -> bool {
+        let (word, bit) = (name / 64, name % 64);
+        self.called
+            .get(word as usize)
+            .is_some_and(|word| word & (1u64 << bit) != 0)
+    }
+
+    pub(crate) fn signature_of(&self, sym: &Sym) -> &str {
+        let start = sym.sig_off as usize;
+        &self.sigs[start..start + sym.sig_len as usize]
+    }
+
     /// Every declaration of exactly `name`, with its file path.
-    pub fn lookup(&self, name: &str) -> Vec<(String, &ParsedSymbol)> {
-        self.by_name
-            .get(name)
-            .map(|keys| {
-                keys.iter()
-                    .map(|&(file, symbol)| {
-                        let entry = &self.files[file as usize];
-                        (entry.path.clone(), &entry.symbols[symbol as usize])
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+    pub fn lookup(&self, name: &str) -> Vec<(String, DefKey)> {
+        let Some(id) = self.names.find(name) else {
+            return Vec::new();
+        };
+        self.decl_range(id)
+            .iter()
+            .map(|&key| (self.files[key.0 as usize].path.clone(), key))
+            .collect()
     }
 
     /// How many call sites resolve to any declaration of `name`.
     pub fn incoming_count(&self, name: &str) -> usize {
-        self.by_name
-            .get(name)
-            .map(|keys| {
-                keys.iter()
-                    .filter_map(|key| self.callers.get(key))
-                    .map(|list| list.len())
-                    .sum()
+        let Some(id) = self.names.find(name) else {
+            return 0;
+        };
+        self.site_range(id)
+            .iter()
+            .map(|&gid| {
+                let call = self.call(gid);
+                self.resolved_len(call, self.file_of_call(gid))
             })
-            .unwrap_or(0)
+            .sum()
     }
 
     /// Whether any call site in the workspace spells `name` (resolved or not).
     pub fn called_anywhere(&self, name: &str) -> bool {
-        self.called_names.contains(name)
+        let Some(id) = self.names.find(name) else {
+            return false;
+        };
+        let (word, bit) = (id / 64, id % 64);
+        self.called
+            .get(word as usize)
+            .is_some_and(|word| word & (1u64 << bit) != 0)
     }
 
     /// The names every interface declares — dead code skips their methods (dynamic
     /// dispatch makes "no callers" meaningless there).
-    pub fn interface_containers(&self) -> HashSet<String> {
+    pub fn interface_containers(&self) -> HashSet<u32> {
         self.files
             .iter()
             .flat_map(|f| f.symbols.iter())
-            .filter(|s| s.kind == "interface")
-            .map(|s| s.name.clone())
+            .filter(|s| s.kind == SymKind::Interface)
+            .map(|s| s.name)
             .collect()
     }
 
     /* ---------- Building ---------- */
 
-    /// The full build: parse every source file under `root`, then derive the name index
-    /// and the call edges. `report` fires once per batch; `cancelled` is honoured between
-    /// batches. `None` means cancelled — nothing is installed.
+    /// The full build: parse every source file under `root` (parallel), intern into the
+    /// compact records (per batch, serial), then derive the tables. `report` fires once
+    /// per batch; `cancelled` is honoured between batches. `None` means cancelled —
+    /// nothing is installed.
     pub fn build(
         root: &str,
         threads: usize,
@@ -230,151 +331,271 @@ impl AnalysisData {
                 .filter(|p| is_symbol_source(p))
                 .collect();
             let total = paths.len();
-            let mut parsed: Vec<FileAnalysis> = Vec::with_capacity(total);
+            let mut data = AnalysisData::empty(root);
             for batch in paths.chunks(BUILD_BATCH) {
                 if cancelled() {
                     return None;
                 }
-                let mut part: Vec<FileAnalysis> = batch
+                let mut parsed: Vec<ParsedOne> = batch
                     .par_iter()
-                    .filter_map(|relative| parse_one(root, relative))
+                    .filter_map(|relative| read_one(root, relative))
                     .collect();
-                parsed.append(&mut part);
-                report(parsed.len(), total);
+                // The interning pass is serial on purpose: one shared table, no lock,
+                // and the strings never outlive this loop.
+                for one in parsed.drain(..) {
+                    data.files.push(convert(&mut data.names, &mut data.sigs, one));
+                }
+                report(data.files.len(), total);
             }
-            parsed.sort_by(|a, b| a.path.cmp(&b.path));
-            Some(Self::from_files(root, parsed))
+            data.files.sort_by(|a, b| a.path.cmp(&b.path));
+            data.derive();
+            Some(data)
         })
     }
 
-    /// Assemble the derived tables over already-parsed files (files must be path-sorted).
-    fn from_files(root: &str, files: Vec<FileAnalysis>) -> AnalysisData {
-        let mut data = AnalysisData::empty(root);
-        data.files = files;
-        data.derive();
-        data
-    }
-
-    /// Recompute the name index and the call edges over the current files (after a build
-    /// or an incremental change).
+    /// Recompute the derived tables over the current files (after a build or an
+    /// incremental change): the name CSR, the call sites' owner and resolution class,
+    /// the called-name bitset — and nothing else. The call graph is derived on demand.
     fn derive(&mut self) {
-        self.by_name.clear();
-        self.callees.clear();
-        self.callers.clear();
-        self.called_names.clear();
-        for (file_id, file) in self.files.iter().enumerate() {
-            for (symbol_id, symbol) in file.symbols.iter().enumerate() {
-                self.by_name
-                    .entry(symbol.name.clone())
-                    .or_default()
-                    .push((file_id as u32, symbol_id as u32));
+        self.call_bases.clear();
+        self.call_bases.push(0u32);
+        let mut running = 0u32;
+        for file in &self.files {
+            running += file.calls.len() as u32;
+            self.call_bases.push(running);
+        }
+        self.symbols_total = self.files.iter().map(|f| f.symbols.len()).sum();
+        self.calls_total = running as usize;
+
+        let name_count = self.names.len() as u32;
+        self.decl_heads = vec![0u32; name_count as usize + 1];
+        self.site_heads = vec![0u32; name_count as usize + 1];
+        self.called = vec![0u64; name_count.div_ceil(64) as usize];
+        self.containers.clear();
+        self.decls.clear();
+        self.site_order.clear();
+
+        // Pass 1: counts — declarations per name, call sites per name, the called
+        // bitset, the container set.
+        for file in &self.files {
+            for symbol in &file.symbols {
+                self.decl_heads[symbol.name as usize + 1] += 1;
+                if symbol.container != NONE {
+                    self.containers.insert(symbol.container);
+                }
+            }
+            for call in &file.calls {
+                self.site_heads[call.name as usize + 1] += 1;
+                let (word, bit) = (call.name / 64, call.name % 64);
+                self.called[word as usize] |= 1u64 << bit;
             }
         }
-        let containers: HashSet<String> = self
+        for i in 0..name_count as usize {
+            self.decl_heads[i + 1] += self.decl_heads[i];
+            self.site_heads[i + 1] += self.site_heads[i];
+        }
+        self.decls = vec![(0u32, 0u32); self.symbols_total];
+        self.site_order = vec![0u32; self.calls_total];
+        // Pass 2: placement — files iterate in path order and symbols in document
+        // order, so each name's slice is (file, declaration) ordered, and each call
+        // name's slice is (file, position) ordered — the graph walks' stable output
+        // order.
+        let mut decl_cursor = self.decl_heads[..name_count as usize].to_vec();
+        let mut site_cursor = self.site_heads[..name_count as usize].to_vec();
+        for (file_idx, file) in self.files.iter().enumerate() {
+            let file_idx = file_idx as u32;
+            for (symbol_idx, symbol) in file.symbols.iter().enumerate() {
+                let at = decl_cursor[symbol.name as usize] as usize;
+                self.decls[at] = (file_idx, symbol_idx as u32);
+                decl_cursor[symbol.name as usize] += 1;
+            }
+            let base = self.call_bases[file_idx as usize];
+            for (call_idx, call) in file.calls.iter().enumerate() {
+                let at = site_cursor[call.name as usize] as usize;
+                self.site_order[at] = base + call_idx as u32;
+                site_cursor[call.name as usize] += 1;
+            }
+        }
+
+        // Pass 3: per call site — which declaration owns it, and how its name
+        // resolved. The sweep attributes owners in O(1) amortized per call (the
+        // first-containing declaration in document order, the rule the old linear
+        // scan applied); the classification is the old resolver's pecking order,
+        // decided once here. The tables the classification reads were snapshotted
+        // above, so the pass holds disjoint borrows from the `files` it mutates.
+        for file in &mut self.files {
+            let mut cursor = 0usize;
+            for call in file.calls.iter_mut() {
+                call.owner = enclosing_sweep(&file.symbols, &mut cursor, call.line);
+            }
+        }
+        // The classification reads every candidate declaration's container, in any
+        // file — one flat snapshot of the container ids keeps the pass below free of
+        // aliasing with the mutable call records.
+        let mut sym_bases = Vec::with_capacity(self.files.len() + 1);
+        let mut running = 0u32;
+        for file in &self.files {
+            sym_bases.push(running);
+            running += file.symbols.len() as u32;
+        }
+        sym_bases.push(running);
+        let containers_by_def: Vec<u32> = self
             .files
             .iter()
-            .flat_map(|f| f.symbols.iter())
-            .filter_map(|s| s.container.clone())
+            .flat_map(|file| file.symbols.iter().map(|sym| sym.container))
             .collect();
-        for (file_id, file) in self.files.iter().enumerate() {
-            let file_id = file_id as u32;
-            for call in &file.calls {
-                self.called_names.insert(call.name.clone());
-                let caller = match enclosing_symbol(file, call.line) {
-                    Some(symbol_id) => (file_id, symbol_id),
-                    None => (file_id, NO_ENCLOSING),
-                };
-                for target in self.resolve(call, file_id, &containers) {
-                    if caller.1 != NO_ENCLOSING {
-                        self.callees.entry(caller).or_default().push((
-                            target,
-                            file.path.clone(),
-                            call.line,
-                            call.column,
-                        ));
-                    }
-                    self.callers.entry(target).or_default().push((
-                        caller,
-                        file.path.clone(),
-                        call.line,
-                        call.column,
-                    ));
-                }
+        let container_of =
+            |key: DefKey| containers_by_def[sym_bases[key.0 as usize] as usize + key.1 as usize];
+        let (decl_heads, decls, containers, names) =
+            (&self.decl_heads, &self.decls, &self.containers, &self.names);
+        for file in &mut self.files {
+            // Field-precise borrows: the classification reads the symbols while the
+            // calls are being written.
+            let FileAnalysis { symbols, calls, .. } = file;
+            for call in calls.iter_mut() {
+                call.class = classify_call(
+                    call,
+                    symbols,
+                    decl_heads,
+                    decls,
+                    containers,
+                    names,
+                    &container_of,
+                );
             }
-        }
-        // The no-enclosing pseudo-declaration never appears as a caller in `callees`
-        // (guarded above), but `callers` may carry it; drop those keys so graph walks
-        // only ever meet real declarations.
-        let stray: Vec<DefKey> = self
-            .callers
-            .iter()
-            .filter(|(key, _)| key.1 == NO_ENCLOSING)
-            .map(|(key, _)| *key)
-            .collect();
-        for key in stray {
-            self.callers.remove(&key);
+            // The owner CSR: calls grouped by their declaration, document order
+            // within each.
+            let mut counts = vec![0u32; file.symbols.len() + 1];
+            for call in &file.calls {
+                let owner = if call.owner == NONE {
+                    file.symbols.len()
+                } else {
+                    call.owner as usize
+                };
+                counts[owner] += 1;
+            }
+            let mut heads = Vec::with_capacity(counts.len() + 1);
+            let mut running = 0u32;
+            for &count in &counts {
+                heads.push(running);
+                running += count;
+            }
+            heads.push(running);
+            let mut order = vec![0u32; file.calls.len()];
+            let mut cursor = heads[..counts.len()].to_vec();
+            for (call_idx, call) in file.calls.iter().enumerate() {
+                let owner = if call.owner == NONE {
+                    file.symbols.len()
+                } else {
+                    call.owner as usize
+                };
+                order[cursor[owner] as usize] = call_idx as u32;
+                cursor[owner] += 1;
+            }
+            file.owner_heads = heads;
+            file.owner_order = order;
         }
     }
 
-    /// Resolve one call site to the declarations it (may) name. See the module doc for
-    /// the pecking order; the empty answer means "external or unresolvable".
-    fn resolve(
-        &self,
-        call: &CallSite,
-        home_file: u32,
-        containers: &HashSet<String>,
-    ) -> Vec<DefKey> {
-        let Some(candidates) = self.by_name.get(call.name.as_str()) else {
-            return Vec::new();
-        };
-        if candidates.len() == 1 {
-            return candidates.clone();
-        }
-        let container_of = |key: DefKey| {
-            self.files[key.0 as usize].symbols[key.1 as usize]
-                .container
-                .as_deref()
-        };
-        if let Some(receiver) = call.receiver.as_deref() {
-            // `obj.method()` with obj naming a known type: that type's methods. Also
-            // covers static/namespace calls like `Y.z()` (Java) and `fmt.Println` (Go).
-            let by_container: Vec<DefKey> = candidates
-                .iter()
-                .copied()
-                .filter(|&key| container_of(key) == Some(receiver))
-                .collect();
-            if !by_container.is_empty() && containers.contains(receiver) {
-                return by_container;
-            }
-            // `self.x()` / `this.x()`: the enclosing type's methods win.
-            if receiver == "self" || receiver == "this" {
-                if let Some(container) = self.enclosing_container(home_file, call.line) {
-                    let same_type: Vec<DefKey> = candidates
+    /* ---------- Lazy resolution ---------- */
+
+    fn decl_range(&self, name: u32) -> &[DefKey] {
+        let start = self.decl_heads[name as usize] as usize;
+        let end = self.decl_heads[name as usize + 1] as usize;
+        &self.decls[start..end]
+    }
+
+    fn site_range(&self, name: u32) -> &[u32] {
+        let start = self.site_heads[name as usize] as usize;
+        let end = self.site_heads[name as usize + 1] as usize;
+        &self.site_order[start..end]
+    }
+
+    /// One declaration's container id (`NONE` when it has none) without a decode.
+    fn container_of(&self, key: DefKey) -> u32 {
+        self.files[key.0 as usize].symbols[key.1 as usize].container
+    }
+
+    /// One global call id decoded to its record.
+    pub(crate) fn call(&self, id: u32) -> &Call {
+        let file_idx = self.file_of_call(id);
+        &self.files[file_idx as usize].calls[(id - self.call_bases[file_idx as usize]) as usize]
+    }
+
+    /// One global call id decoded to its file.
+    pub(crate) fn file_of_call(&self, id: u32) -> u32 {
+        self.call_bases
+            .partition_point(|&base| base <= id)
+            .saturating_sub(1) as u32
+    }
+
+    /// Every declaration a call site (may) reach: the name index's slice for the
+    /// unambiguous classes, a filtered Vec for the narrowed ones (small, transient —
+    /// one allocation per queried site, never stored).
+    fn resolved_targets(&self, call: &Call, file_idx: u32) -> Cow<'_, [DefKey]> {
+        let candidates = self.decl_range(call.name);
+        match call.class {
+            ResolveClass::Unique | ResolveClass::AllCandidates => Cow::Borrowed(candidates),
+            ResolveClass::ByContainer => {
+                let wanted = call.receiver;
+                Cow::Owned(
+                    candidates
                         .iter()
                         .copied()
-                        .filter(|&key| container_of(key) == Some(container.as_str()))
-                        .collect();
-                    if !same_type.is_empty() {
-                        return same_type;
-                    }
-                }
+                        .filter(|&key| self.container_of(key) == wanted)
+                        .collect(),
+                )
+            }
+            ResolveClass::SelfType => {
+                let wanted = self.self_target_of(call, file_idx);
+                Cow::Owned(
+                    candidates
+                        .iter()
+                        .copied()
+                        .filter(|&key| self.container_of(key) == wanted)
+                        .collect(),
+                )
             }
         }
-        candidates.clone()
     }
 
-    /// The type of the declaration whose body contains `line` in file `home_file`: its
-    /// container when it has one (a method's class), itself otherwise (a free function
-    /// is its own scope).
-    fn enclosing_container(&self, home_file: u32, line: usize) -> Option<String> {
-        let file = self.files.get(home_file as usize)?;
-        enclosing_symbol(file, line).map(|symbol_id| {
-            let symbol = &file.symbols[symbol_id as usize];
-            symbol
-                .container
-                .clone()
-                .unwrap_or_else(|| symbol.name.clone())
-        })
+    /// How many declarations a call site (may) reach.
+    fn resolved_len(&self, call: &Call, file_idx: u32) -> usize {
+        match call.class {
+            ResolveClass::Unique | ResolveClass::AllCandidates => {
+                self.decl_range(call.name).len()
+            }
+            ResolveClass::ByContainer | ResolveClass::SelfType => {
+                self.resolved_targets(call, file_idx).len()
+            }
+        }
+    }
+
+    /// Whether the call's resolution reaches `target` — O(1) by the stored class.
+    fn resolves_to(&self, call: &Call, target: DefKey, file_idx: u32) -> bool {
+        match call.class {
+            ResolveClass::Unique => self.decl_range(call.name) == [target],
+            ResolveClass::AllCandidates => true,
+            ResolveClass::ByContainer => self.container_of(target) == call.receiver,
+            ResolveClass::SelfType => {
+                self.container_of(target) == self.self_target_of(call, file_idx)
+            }
+        }
+    }
+
+    /// The container id a `self`/`this` call resolves through: its owner declaration's
+    /// container, or the declaration itself when it has none (a free function is its
+    /// own scope). `NONE` when the call has no owner.
+    fn self_target_of(&self, call: &Call, file_idx: u32) -> u32 {
+        if call.owner == NONE {
+            return NONE;
+        }
+        let owner = &self.files[file_idx as usize].symbols[call.owner as usize];
+        if owner.container != NONE {
+            owner.container
+        } else {
+            owner.name
+        }
     }
 
     /* ---------- Incremental updates ---------- */
@@ -422,7 +643,11 @@ impl AnalysisData {
         }
         let mut reparsed: Vec<FileAnalysis> = to_parse
             .iter()
-            .filter_map(|path| parse_one(&root, path))
+            .filter_map(|path| {
+                read_one(&root, path).map(|one| {
+                    convert(&mut self.names, &mut self.sigs, one)
+                })
+            })
             .collect();
         files.append(&mut reparsed);
         files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -445,11 +670,11 @@ impl AnalysisData {
         let max_depth = max_depth.clamp(1, 8);
         let roots: Vec<DefKey> = match exact {
             Some((path, line)) => self.find_at(path, line).into_iter().collect(),
-            None => self.by_name.get(name).cloned().unwrap_or_default(),
-        };
-        let adjacency: &HashMap<DefKey, Vec<(DefKey, String, usize, usize)>> = match direction {
-            Direction::Callees => &self.callees,
-            Direction::Callers => &self.callers,
+            None => self
+                .names
+                .find(name)
+                .map(|id| self.decl_range(id).to_vec())
+                .unwrap_or_default(),
         };
         // BFS outward from the roots, collecting each node once and every edge once. A
         // call site that resolved to several declarations fans out; the ambiguity count
@@ -463,53 +688,63 @@ impl AnalysisData {
         for depth in 0..max_depth {
             let mut next: Vec<DefKey> = Vec::new();
             for key in &frontier {
-                let Some(list) = adjacency.get(key) else {
-                    continue;
-                };
-                let mut by_site: HashMap<(String, usize, usize), Vec<DefKey>> = HashMap::new();
-                for (target, path, line, column) in list {
-                    by_site
-                        .entry((path.clone(), *line, *column))
-                        .or_default()
-                        .push(*target);
-                }
-                // Call order (line, then column) — the same order the sites appear in
-                // the file, so the graph is stable across runs.
-                let mut sites: Vec<((String, usize, usize), Vec<DefKey>)> =
-                    by_site.into_iter().collect();
-                sites.sort_by_key(|(site, _)| (site.1, site.2));
-                for ((path, line, column), targets) in sites {
-                    ambiguous += targets.len().saturating_sub(1);
-                    for target in targets {
-                        if seen.insert(target) {
-                            nodes.push(self.node_of(&target, depth + 1));
-                            if nodes.len() >= MAX_NODES {
-                                return CallGraph {
-                                    nodes,
-                                    edges,
-                                    ambiguous,
-                                };
+                match direction {
+                    Direction::Callees => {
+                        let file = &self.files[key.0 as usize];
+                        for &call_idx in file.calls_of(key.1) {
+                            let call = &file.calls[call_idx as usize];
+                            let targets = self.resolved_targets(call, key.0);
+                            ambiguous += targets.len().saturating_sub(1);
+                            for &target in targets.iter() {
+                                if seen.insert(target) {
+                                    nodes.push(self.node_of(&target, depth + 1));
+                                    if nodes.len() >= MAX_NODES {
+                                        return CallGraph {
+                                            nodes,
+                                            edges,
+                                            ambiguous,
+                                        };
+                                    }
+                                    next.push(target);
+                                }
+                                edges.push(GraphEdge {
+                                    from: self.endpoint_of(key),
+                                    to: self.endpoint_of(&target),
+                                    call_path: file.path.clone(),
+                                    call_line: call.line as usize,
+                                    call_column: call.column as usize,
+                                });
                             }
-                            next.push(target);
                         }
-                        edges.push(match direction {
-                            // The site tuple's path is the file the call happens in —
-                            // the caller's file, whichever way the graph walks.
-                            Direction::Callees => GraphEdge {
-                                from: self.endpoint_of(key),
-                                to: self.endpoint_of(&target),
-                                call_path: path.clone(),
-                                call_line: line,
-                                call_column: column,
-                            },
-                            Direction::Callers => GraphEdge {
-                                from: self.endpoint_of(&target),
+                    }
+                    Direction::Callers => {
+                        let name_id = self.files[key.0 as usize].symbols[key.1 as usize].name;
+                        for &gid in self.site_range(name_id) {
+                            let call = self.call(gid);
+                            let caller_file = self.file_of_call(gid);
+                            if call.owner == NONE || !self.resolves_to(call, *key, caller_file) {
+                                continue;
+                            }
+                            let caller = (caller_file, call.owner);
+                            if seen.insert(caller) {
+                                nodes.push(self.node_of(&caller, depth + 1));
+                                if nodes.len() >= MAX_NODES {
+                                    return CallGraph {
+                                        nodes,
+                                        edges,
+                                        ambiguous,
+                                    };
+                                }
+                                next.push(caller);
+                            }
+                            edges.push(GraphEdge {
+                                from: self.endpoint_of(&caller),
                                 to: self.endpoint_of(key),
-                                call_path: path.clone(),
-                                call_line: line,
-                                call_column: column,
-                            },
-                        });
+                                call_path: self.files[caller_file as usize].path.clone(),
+                                call_line: call.line as usize,
+                                call_column: call.column as usize,
+                            });
+                        }
                     }
                 }
             }
@@ -525,48 +760,38 @@ impl AnalysisData {
         }
     }
 
-    /// Every resolved cross-file call, in caller order (file, then declaration, then
-    /// call line) — the Module Analysis report's material.
-    pub fn cross_file_calls(&self) -> Vec<CrossFileCall> {
-        let mut calls: Vec<CrossFileCall> = Vec::new();
-        for (file_id, file) in self.files.iter().enumerate() {
-            // The callees table is keyed by declaration; walking each file's symbols in
-            // order keeps the output deterministic (HashMap iteration is not).
-            for (symbol_id, _) in file.symbols.iter().enumerate() {
-                let Some(list) = self.callees.get(&(file_id as u32, symbol_id as u32)) else {
-                    continue;
-                };
-                let mut sites = list.clone();
-                sites.sort_by_key(|(_, _, line, column)| (*line, *column));
-                for (target, _, line, column) in sites {
-                    if target.0 as usize == file_id {
-                        continue; // the module report is the cross-file view
+    /// Every resolved cross-file call, streamed to `visit` in caller order (file, then
+    /// declaration, then call position) — the Module Analysis report's material. The
+    /// report folds pairs as they stream instead of ever holding the whole set (the
+    /// ambiguity fan-out used to make that set the engine's largest allocation).
+    /// Calls from top-level code (no owning declaration) do not stream, exactly as the
+    /// caller table never carried them.
+    pub(crate) fn walk_resolved(
+        &self,
+        mut visit: impl FnMut(u32, u32, &Call, DefKey),
+    ) {
+        for (file_idx, file) in self.files.iter().enumerate() {
+            let file_idx = file_idx as u32;
+            for sym_idx in 0..file.symbols.len() as u32 {
+                for &call_idx in file.calls_of(sym_idx) {
+                    let call = &file.calls[call_idx as usize];
+                    for target in self.resolved_targets(call, file_idx).iter() {
+                        visit(file_idx, sym_idx, call, *target);
                     }
-                    let caller = &file.symbols[symbol_id];
-                    let callee_file = &self.files[target.0 as usize];
-                    let callee = &callee_file.symbols[target.1 as usize];
-                    calls.push(CrossFileCall {
-                        from_file: file.path.clone(),
-                        to_file: callee_file.path.clone(),
-                        from_name: display_name(caller),
-                        to_name: display_name(callee),
-                        line,
-                        column,
-                    });
                 }
             }
         }
-        calls
     }
 
     /// A shortest callee chain between any declaration of `from` and any declaration of
     /// `to` (a direct `from == to` identity is not a chain).
     pub fn call_path(&self, from: &str, to: &str) -> Option<Vec<GraphNode>> {
-        let starts = self.by_name.get(from)?.clone();
-        let goals: HashSet<DefKey> = self.by_name.get(to)?.iter().copied().collect();
+        let (start_id, goal_id) = (self.names.find(from)?, self.names.find(to)?);
+        let starts = self.decl_range(start_id);
+        let goals: HashSet<DefKey> = self.decl_range(goal_id).iter().copied().collect();
         let mut parent: HashMap<DefKey, DefKey> = HashMap::new();
         let mut queue: VecDeque<DefKey> = VecDeque::new();
-        for &start in &starts {
+        for &start in starts {
             queue.push_back(start);
         }
         let mut goal = None;
@@ -575,8 +800,10 @@ impl AnalysisData {
                 goal = Some(key);
                 break;
             }
-            if let Some(list) = self.callees.get(&key) {
-                for (target, _, _, _) in list {
+            let file = &self.files[key.0 as usize];
+            for &call_idx in file.calls_of(key.1) {
+                let call = &file.calls[call_idx as usize];
+                for target in self.resolved_targets(call, key.0).iter() {
                     if !parent.contains_key(target) && !starts.contains(target) {
                         parent.insert(*target, key);
                         queue.push_back(*target);
@@ -605,56 +832,105 @@ impl AnalysisData {
     fn find_at(&self, path: &str, line: usize) -> Option<DefKey> {
         let file_id = self.files.iter().position(|f| f.path == path)? as u32;
         let file = &self.files[file_id as usize];
-        let symbol_id = file
-            .symbols
-            .iter()
-            .position(|s| s.line == line || (s.line..=s.end_line).contains(&line))?;
-        Some((file_id, symbol_id as u32))
+        let line = line as u32;
+        let mut cursor = 0usize;
+        let symbol_id = match enclosing_sweep(&file.symbols, &mut cursor, line) {
+            NONE => None,
+            id => Some(id),
+        }?;
+        Some((file_id, symbol_id))
     }
 
     fn node_of(&self, key: &DefKey, depth: u32) -> GraphNode {
-        let file = &self.files[key.0 as usize];
-        let symbol = &file.symbols[key.1 as usize];
+        let view = self.symbol(*key);
         GraphNode {
-            kind: symbol.kind.to_owned(),
-            name: symbol.name.clone(),
-            container: symbol.container.clone(),
-            path: file.path.clone(),
-            line: symbol.line,
-            complexity: symbol.complexity,
-            signature: symbol.signature.clone(),
+            kind: view.kind.as_str().to_owned(),
+            name: view.name.to_owned(),
+            container: view.container.map(str::to_owned),
+            path: self.files[key.0 as usize].path.clone(),
+            line: view.line as usize,
+            complexity: u32::from(view.complexity),
+            signature: view.signature.to_owned(),
             depth,
         }
     }
 
     fn endpoint_of(&self, key: &DefKey) -> GraphEndpoint {
-        let file = &self.files[key.0 as usize];
-        let symbol = &file.symbols[key.1 as usize];
+        let view = self.symbol(*key);
         GraphEndpoint {
-            name: symbol.name.clone(),
-            path: file.path.clone(),
-            line: symbol.line,
+            name: view.name.to_owned(),
+            path: self.files[key.0 as usize].path.clone(),
+            line: view.line as usize,
         }
     }
 }
 
-/// The symbol whose body spans `line` in `file`, if one does. The first containing
-/// declaration wins: two symbols that start on the same line are declaration order
-/// (`impl A { fn go… fn step… }` puts a call on that line inside `go`, not `step`).
-fn enclosing_symbol(file: &FileAnalysis, line: usize) -> Option<u32> {
-    file.symbols
-        .iter()
-        .position(|s| s.line <= line && line <= s.end_line)
-        .map(|id| id as u32)
+/// How a call's spelling resolves — the old resolver's pecking order, once:
+/// one declaration wins outright; otherwise a receiver naming a known type takes
+/// its methods; otherwise `self`/`this` takes the enclosing type's; otherwise
+/// every declaration of the name stands (the visible ambiguity). A free function
+/// over the derived tables and the container snapshot, so the derive pass can call
+/// it while mutating the call records.
+fn classify_call(
+    call: &Call,
+    file_symbols: &[Sym],
+    decl_heads: &[u32],
+    decls: &[DefKey],
+    containers: &HashSet<u32>,
+    names: &Names,
+    container_of: &dyn Fn(DefKey) -> u32,
+) -> ResolveClass {
+    let start = decl_heads[call.name as usize] as usize;
+    let end = decl_heads[call.name as usize + 1] as usize;
+    let candidates = &decls[start..end];
+    if candidates.len() <= 1 {
+        return ResolveClass::Unique;
+    }
+    if call.receiver != NONE
+        && containers.contains(&call.receiver)
+        && candidates
+            .iter()
+            .any(|&key| container_of(key) == call.receiver)
+    {
+        return ResolveClass::ByContainer;
+    }
+    if call.receiver != NONE
+        && matches!(names.get(call.receiver), "self" | "this")
+        && call.owner != NONE
+    {
+        let owner = &file_symbols[call.owner as usize];
+        let enclosing = if owner.container != NONE {
+            owner.container
+        } else {
+            owner.name
+        };
+        if candidates.iter().any(|&key| container_of(key) == enclosing) {
+            return ResolveClass::SelfType;
+        }
+    }
+    ResolveClass::AllCandidates
 }
 
-/// A declaration's display spelling: `container.name` when it has a container.
-fn display_name(symbol: &ParsedSymbol) -> String {
-    symbol
-        .container
-        .as_deref()
-        .map(|container| format!("{container}.{}", symbol.name))
-        .unwrap_or_else(|| symbol.name.clone())
+/// The first declaration whose span contains `line` (document order wins on ties), with
+/// an O(1)-amortized cursor: a declaration whose end passed the line can never contain
+/// a later line, so the cursor only ever moves forward. Calls stream in document order,
+/// so one sweep per file assigns every owner.
+fn enclosing_sweep(symbols: &[Sym], cursor: &mut usize, line: u32) -> u32 {
+    while *cursor < symbols.len() && symbols[*cursor].end_line < line {
+        *cursor += 1;
+    }
+    match symbols.get(*cursor) {
+        Some(sym) if sym.line <= line => *cursor as u32,
+        _ => NONE,
+    }
+}
+
+/// A file read and parsed by a build worker — everything `convert` needs to intern.
+pub(crate) struct ParsedOne {
+    pub(crate) path: String,
+    pub(crate) mtime_ms: u64,
+    pub(crate) size: u64,
+    pub(crate) parsed: ParsedFile,
 }
 
 /// Read and parse one file. `None` when it is gone. Non-UTF-8 bytes decode lossily — the
@@ -662,7 +938,7 @@ fn display_name(symbol: &ParsedSymbol) -> String {
 /// declarations and stays scannable instead of silently dropping out of the `files`
 /// count — and an extension-less name parses under the outline fallback (its extension
 /// table answers nothing) rather than being skipped.
-fn parse_one(root: &str, relative: &str) -> Option<FileAnalysis> {
+fn read_one(root: &str, relative: &str) -> Option<ParsedOne> {
     let path = std::path::Path::new(root).join(relative);
     let (mtime_ms, size) = file_stat(&path)?;
     let bytes = std::fs::read(&path).ok()?;
@@ -671,19 +947,79 @@ fn parse_one(root: &str, relative: &str) -> Option<FileAnalysis> {
         .rsplit_once('.')
         .map(|(_, extension)| extension)
         .unwrap_or("");
-    let ParsedFile {
-        symbols,
-        calls,
-        imports,
-    } = parse::parse_file(&text, ext);
-    Some(FileAnalysis {
+    let parsed = parse::parse_file(&text, ext);
+    Some(ParsedOne {
         path: relative.to_owned(),
+        mtime_ms,
+        size,
+        parsed,
+    })
+}
+
+/// Intern one parsed file into the compact records. The parse layer's shapes clamp to
+/// the record's fields (a declaration with 70 000 parameters is a generated oddity, not
+/// a number the reports need exactly).
+pub(crate) fn convert(names: &mut Names, sigs: &mut String, one: ParsedOne) -> FileAnalysis {
+    let ParsedOne {
+        path,
+        mtime_ms,
+        size,
+        parsed,
+    } = one;
+    let mut symbols = Vec::with_capacity(parsed.symbols.len());
+    for s in parsed.symbols {
+        let sig_off = sigs.len() as u32;
+        let sig_len = s.signature.len().min(u16::MAX as usize) as u16;
+        sigs.push_str(&s.signature[..sig_len as usize]);
+        symbols.push(Sym {
+            name: names.intern(&s.name),
+            container: s
+                .container
+                .as_deref()
+                .map(|c| names.intern(c))
+                .unwrap_or(NONE),
+            kind: SymKind::of_capture(s.kind),
+            exported: s.exported,
+            params: s.params.min(u16::MAX as usize) as u16,
+            complexity: s.complexity.min(u16::MAX as u32) as u16,
+            nesting: s.nesting.min(u8::MAX as u32) as u8,
+            line: s.line as u32,
+            end_line: s.end_line as u32,
+            sig_off,
+            sig_len,
+        });
+    }
+    let calls = parsed
+        .calls
+        .into_iter()
+        .map(|c| Call {
+            name: names.intern(&c.name),
+            receiver: c
+                .receiver
+                .as_deref()
+                .map(|r| names.intern(r))
+                .unwrap_or(NONE),
+            line: c.line as u32,
+            column: c.column as u32,
+            owner: NONE,
+            class: ResolveClass::Unique,
+        })
+        .collect();
+    let imports = parsed
+        .imports
+        .iter()
+        .map(|import| names.intern(import))
+        .collect();
+    FileAnalysis {
+        path,
         mtime_ms,
         size,
         symbols,
         calls,
         imports,
-    })
+        owner_heads: Vec::new(),
+        owner_order: Vec::new(),
+    }
 }
 
 fn file_stat(path: &std::path::Path) -> Option<(u64, u64)> {
@@ -815,5 +1151,42 @@ mod tests {
         assert_eq!(graph.edges.len(), 2);
         assert_eq!(graph.nodes.len(), 3);
         assert_eq!(graph.ambiguous, 1);
+    }
+
+    #[test]
+    fn a_top_level_call_never_panics_the_callers_walk() {
+        // A call outside any declaration body used to land in the caller table as a
+        // pseudo-declaration the walk then dereferenced; the compact model skips it,
+        // like the callee table always did.
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "main.js",
+            "function boot() {}\nboot();\n",
+        );
+        let root = dir.path().display().to_string();
+        let data = built(&root);
+        let graph = data.call_graph("boot", None, Direction::Callers, 1);
+        assert_eq!(graph.nodes.len(), 1, "no caller is recorded for top-level code");
+        assert_eq!(graph.edges.len(), 0);
+    }
+
+    #[test]
+    fn the_name_index_stays_compact_and_correct() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "a.rs",
+            "fn shared() {}\npub struct Svc;\nimpl Svc { fn shared(&self) {} }\nfn user() { shared(); shared(); }\n",
+        );
+        let root = dir.path().display().to_string();
+        let data = built(&root);
+        assert_eq!(data.lookup("shared").len(), 2);
+        // Two call sites, each fanning to both declarations.
+        assert_eq!(data.incoming_count("shared"), 4);
+        assert!(data.called_anywhere("shared"));
+        assert!(!data.called_anywhere("never"));
+        assert_eq!(data.call_count(), 2);
+        assert_eq!(data.symbol_count(), 4);
     }
 }

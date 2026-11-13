@@ -278,6 +278,17 @@ impl SymbolStore {
         )
     }
 
+    /// How many files contain `name` — the trusted occurrence list's length, read in
+    /// place: the metrics report asks this per function name, and a query that
+    /// materializes every file list (as `occurrence_counts` does for the whole table)
+    /// would put a large workspace's answer table in memory just to keep one number.
+    /// `None` when the name is unknown or its list is untrusted — the same honesty
+    /// that sends those references to a full scan.
+    pub fn ref_count(&self, name: &str) -> Option<usize> {
+        let id = self.names.binary_search_by(|n| n.as_str().cmp(name)).ok()?; // names stay sorted
+        self.refs.get(id)?.as_ref().map(|files| files.len())
+    }
+
     /* ---------- Aggregates (the MCP server's progressive disclosure) ---------- */
 
     /// Every indexed file with its declaration count, path-sorted — one pass, no symbol

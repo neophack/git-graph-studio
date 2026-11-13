@@ -8,7 +8,7 @@
 //! and a collapsible tree (module edges open into file pairs and call sites). Both
 //! views cap what they draw; the totals stay honest about what was capped away.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
@@ -17,8 +17,22 @@ use super::AnalysisData;
 /// File dependencies itemised (also per module edge); pairs beyond this are counted in
 /// the module edges and `total_file_edges` but not listed.
 const MAX_FILE_EDGES: usize = 5000;
+/// Module dependencies itemised; module edges beyond this are counted in
+/// `total_module_edges` but not listed (the drawing caps itself far below anyway).
+const MAX_MODULE_EDGES: usize = 5000;
 /// Call sites listed under one file pair.
 const SITES_PER_EDGE: usize = 50;
+/// How many file pairs and module edges the aggregation tracks with their counts
+/// before the spillover takes over: a workspace with more distinct pairs than this
+/// keeps exact totals (every call and every new pair is counted as it streams) while
+/// the listing covers the tracked ones — beyond the cap ANY bounded listing is a
+/// sample, and the honest numbers are the totals. ~80 MB of tracked state, bounded
+/// regardless of the workspace's shape.
+const PAIR_TRACK_CAP: usize = 2_000_000;
+
+/// One kept pair's capped site records: (line, column, owner symbol, callee name id).
+type SiteList = Vec<(u32, u32, u32, u32)>;
+type SiteLists = HashMap<(u32, u32), SiteList>;
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -66,13 +80,16 @@ pub struct FileDep {
 pub struct ModuleGraph {
     /// Every directory with source files, sorted by name.
     pub modules: Vec<ModuleInfo>,
-    /// Module dependencies sorted by calls, most first.
+    /// Module dependencies sorted by calls, most first, capped at
+    /// [`MAX_MODULE_EDGES`].
     pub edges: Vec<ModuleEdge>,
-    /// File dependencies sorted by calls, most first.
+    /// File dependencies sorted by calls, most first, capped at [`MAX_FILE_EDGES`].
     pub file_edges: Vec<FileDep>,
-    /// The workspace totals before the caps above.
+    /// The workspace totals before the caps above (and, past the tracking cap, the
+    /// spillover's exact counts).
     pub total_calls: usize,
     pub total_file_edges: usize,
+    pub total_module_edges: usize,
 }
 
 /// Build the module graph of an analysis. An empty `scope` aggregates the whole
@@ -80,22 +97,38 @@ pub struct ModuleGraph {
 /// with both ends under them) aggregate — a folder-picked report counts exactly
 /// what those folders carry, and the listing caps prune inside the scope
 /// instead of the scope's edges being crowded out by the rest of the workspace.
+///
+/// The resolved calls stream through twice instead of ever materializing: pass one
+/// counts the file pairs and lifts them to module edges (the ambiguity fan-out made
+/// the old full row set the engine's largest allocation); pass two re-walks to fill
+/// the capped site lists of the pairs the listing keeps. A pair's sites arrive in
+/// document order, which is call order — the cap keeps the earliest.
 pub fn module_graph(data: &AnalysisData, scope: &[String]) -> ModuleGraph {
-    let mut modules: HashMap<String, (u32, u32)> = HashMap::new();
-    for file in data
-        .files()
-        .iter()
-        .filter(|file| in_scope(&file.path, scope))
-    {
-        let entry = modules.entry(module_of(&file.path).to_owned()).or_default();
+    // The modules themselves: every in-scope directory with its file and symbol
+    // counts (cheap — file-level). The per-file directory rides alongside for the
+    // module-edge lift.
+    let mut dirs: Vec<&str> = Vec::with_capacity(data.file_count());
+    let mut modules: HashMap<&str, (u32, u32)> = HashMap::new();
+    for file in data.files() {
+        let dir = module_of(&file.path);
+        dirs.push(dir);
+        if !in_scope(&file.path, scope) {
+            continue;
+        }
+        let entry = modules.entry(dir).or_default();
         entry.0 += 1;
         entry.1 += file.symbols.len() as u32;
     }
+    let in_scope_file: Vec<bool> = data
+        .files()
+        .iter()
+        .map(|file| in_scope(&file.path, scope))
+        .collect();
     let modules: Vec<ModuleInfo> = {
         let mut list: Vec<ModuleInfo> = modules
             .into_iter()
             .map(|(name, (files, symbols))| ModuleInfo {
-                name,
+                name: name.to_owned(),
                 files,
                 symbols,
             })
@@ -103,39 +136,99 @@ pub fn module_graph(data: &AnalysisData, scope: &[String]) -> ModuleGraph {
         list.sort_by(|a, b| a.name.cmp(&b.name));
         list
     };
-    // Group every cross-file call under its file pair, then lift the pairs to modules —
-    // the module aggregation runs over the full pairs so its counts never depend on the
-    // listing caps. A scope keeps only the pairs it covers on both ends: a pair that
-    // leaves the folders belongs to the workspace's story, not the folders' report.
-    let mut pairs: HashMap<(String, String), Vec<CallSiteRow>> = HashMap::new();
-    for call in data.cross_file_calls() {
-        if !(in_scope(&call.from_file, scope) && in_scope(&call.to_file, scope)) {
-            continue;
+
+    // Pass one: count every resolved cross-file call per file pair inside the scope,
+    // and lift the pairs to module edges as they land. Past the tracking cap the
+    // counts go to the exact totals only (see [`PAIR_TRACK_CAP`]); the tracked ones
+    // still rank.
+    let mut pair_counts: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut module_edges: HashMap<(&str, &str), (u32, u32)> = HashMap::new(); // (calls, files)
+    let mut total_calls = 0usize;
+    let mut spilled_pairs = 0usize;
+    let mut spilled_module_edges = 0usize;
+    data.walk_resolved(|from_file, _owner, _call, target| {
+        if target.0 == from_file {
+            return; // the module report is the cross-file view
         }
-        pairs
-            .entry((call.from_file, call.to_file))
-            .or_default()
-            .push(CallSiteRow {
-                from: call.from_name,
-                to: call.to_name,
-                line: call.line,
-                column: call.column,
-            });
-    }
-    let total_file_edges = pairs.len();
-    let total_calls: usize = pairs.values().map(Vec::len).sum();
-    let mut file_edges: Vec<FileDep> = pairs
-        .into_iter()
-        .map(|((from, to), mut sites)| {
+        if !in_scope_file[from_file as usize] || !in_scope_file[target.0 as usize] {
+            return; // an end outside the scope: the pair is the workspace's story
+        }
+        total_calls += 1;
+        let pair = (from_file, target.0);
+        let edge_pair = (dirs[from_file as usize], dirs[target.0 as usize]);
+        let new_pair = !pair_counts.contains_key(&pair);
+        if new_pair && pair_counts.len() >= PAIR_TRACK_CAP {
+            spilled_pairs += 1;
+        } else {
+            *pair_counts.entry(pair).or_default() += 1;
+        }
+        let new_module_edge =
+            new_pair && !module_edges.contains_key(&edge_pair);
+        if new_module_edge && module_edges.len() >= PAIR_TRACK_CAP {
+            spilled_module_edges += 1;
+        } else {
+            let edge = module_edges.entry(edge_pair).or_default();
+            edge.0 += 1;
+            if new_pair {
+                edge.1 += 1; // the pair counts once toward its module edge
+            }
+        }
+    });
+    let total_file_edges = pair_counts.len() + spilled_pairs;
+    let total_module_edges = module_edges.len() + spilled_module_edges;
+
+    // The listings keep the busiest edges; the tiebreak is the file order for pairs
+    // (which is the path order — `files` is path-sorted) and the path order for
+    // modules — the old string compares, without the strings where ids serve.
+    let mut ranked: Vec<((u32, u32), u32)> = pair_counts.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    ranked.truncate(MAX_FILE_EDGES);
+    let kept: HashSet<(u32, u32)> = ranked.iter().map(|&(pair, _)| pair).collect();
+
+    // Pass two: the kept pairs' first sites in call order, ids only — strings decode
+    // when the answer assembles.
+    let mut sites: SiteLists = HashMap::new();
+    data.walk_resolved(|from_file, owner, call, target| {
+        if target.0 == from_file {
+            return;
+        }
+        let pair = (from_file, target.0);
+        if !kept.contains(&pair) {
+            return;
+        }
+        let list = sites.entry(pair).or_default();
+        if list.len() < SITES_PER_EDGE {
+            let to_name = data.files()[target.0 as usize].symbols[target.1 as usize].name;
+            list.push((call.line, call.column, owner, to_name));
+        }
+    });
+
+    // Assemble the answer: strings decode only here, for what the report carries.
+    let mut file_edges: Vec<FileDep> = ranked
+        .iter()
+        .map(|&((from, to), calls)| {
+            let mut rows: Vec<CallSiteRow> = sites
+                .get(&(from, to))
+                .map(|list| {
+                    list.iter()
+                        .map(|&(line, column, from_sym, to_name)| CallSiteRow {
+                            from: display_of(data, from, from_sym),
+                            to: data.name(to_name).to_owned(),
+                            line: line as usize,
+                            column: column as usize,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             // Call order inside the caller file; the name tiebreak keeps it total.
-            sites.sort_by(|a, b| {
+            rows.sort_by(|a, b| {
                 (a.line, a.column, &a.from, &a.to).cmp(&(b.line, b.column, &b.from, &b.to))
             });
             FileDep {
-                from,
-                to,
-                calls: sites.len() as u32,
-                sites,
+                from: data.files()[from as usize].path.clone(),
+                to: data.files()[to as usize].path.clone(),
+                calls,
+                sites: rows,
             }
         })
         .collect();
@@ -144,38 +237,134 @@ pub fn module_graph(data: &AnalysisData, scope: &[String]) -> ModuleGraph {
             .cmp(&a.calls)
             .then((&a.from, &a.to).cmp(&(&b.from, &b.to)))
     });
-    let mut edges: HashMap<(String, String), ModuleEdge> = HashMap::new();
-    for dep in &file_edges {
-        let entry = edges
-            .entry((
-                module_of(&dep.from).to_owned(),
-                module_of(&dep.to).to_owned(),
-            ))
-            .or_insert_with(|| ModuleEdge {
-                from: module_of(&dep.from).to_owned(),
-                to: module_of(&dep.to).to_owned(),
-                calls: 0,
-                files: 0,
-            });
-        entry.calls += dep.calls;
-        entry.files += 1;
-    }
-    let mut edges: Vec<ModuleEdge> = edges.into_values().collect();
+
+    let mut edges: Vec<ModuleEdge> = module_edges
+        .into_iter()
+        .map(|((from, to), (calls, files))| ModuleEdge {
+            from: from.to_owned(),
+            to: to.to_owned(),
+            calls,
+            files,
+        })
+        .collect();
     edges.sort_by(|a, b| {
         b.calls
             .cmp(&a.calls)
             .then((&a.from, &a.to).cmp(&(&b.from, &b.to)))
     });
-    for dep in &mut file_edges {
-        dep.sites.truncate(SITES_PER_EDGE);
-    }
-    file_edges.truncate(MAX_FILE_EDGES);
+    edges.truncate(MAX_MODULE_EDGES);
+
     ModuleGraph {
         modules,
         edges,
         file_edges,
         total_calls,
         total_file_edges,
+        total_module_edges,
+    }
+}
+
+/// The caller's display spelling, `container.name` when its declaration has a
+/// container — what the page prints under a pair's sites.
+fn display_of(data: &AnalysisData, from_file: u32, owner: u32) -> String {
+    let view = data.symbol((from_file, owner));
+    match view.container {
+        Some(container) => format!("{container}.{}", view.name),
+        None => view.name.to_owned(),
+    }
+}
+
+/// The Module Analysis aggregation the MCP server reads: module edges and the exact
+/// totals, without the file-pair ranking or the site lists the page's answer carries.
+/// A bounded distinct-pair set keeps every count exact below [`SUMMARY_PAIR_CAP`];
+/// beyond it the totals stay exact (each new pair is counted as it spills) while a
+/// module edge's `files` reads as the tracked floor — the fold holds a few megabytes
+/// on any workspace, where the full graph's pair ranking holds tens on the extreme
+/// ones.
+pub const SUMMARY_PAIR_CAP: usize = 200_000;
+
+pub struct ModuleEdgeSummary {
+    /// How many distinct directories carry in-scope files.
+    pub modules: u32,
+    /// Module edges ranked by calls, most first, capped at [`MAX_MODULE_EDGES`].
+    pub edges: Vec<ModuleEdge>,
+    pub total_calls: usize,
+    pub total_file_edges: usize,
+    pub total_module_edges: usize,
+}
+
+/// The one-pass fold behind [`ModuleEdgeSummary`] — `module_graph`'s pass one with a
+/// seen-pair set instead of per-pair counts (the MCP answer never ranks file pairs)
+/// and no second pass.
+pub fn module_edge_summary(data: &AnalysisData, scope: &[String]) -> ModuleEdgeSummary {
+    let mut dirs: Vec<&str> = Vec::with_capacity(data.file_count());
+    let mut dir_count: HashMap<&str, ()> = HashMap::new();
+    let mut in_scope_dirs: HashMap<&str, ()> = HashMap::new();
+    let mut in_scope_file: Vec<bool> = Vec::with_capacity(data.file_count());
+    for file in data.files() {
+        let dir = module_of(&file.path);
+        let scoped = in_scope(&file.path, scope);
+        dirs.push(dir);
+        in_scope_file.push(scoped);
+        dir_count.entry(dir).or_insert(());
+        if scoped {
+            in_scope_dirs.entry(dir).or_insert(());
+        }
+    }
+    let mut seen: HashSet<(u32, u32)> = HashSet::new();
+    let mut module_edges: HashMap<(&str, &str), (u32, u32)> = HashMap::new(); // (calls, files)
+    let mut total_calls = 0usize;
+    let mut spilled_pairs = 0usize;
+    let mut spilled_module_edges = 0usize;
+    data.walk_resolved(|from_file, _owner, _call, target| {
+        if target.0 == from_file {
+            return;
+        }
+        if !in_scope_file[from_file as usize] || !in_scope_file[target.0 as usize] {
+            return;
+        }
+        total_calls += 1;
+        let pair = (from_file, target.0);
+        let new_pair = !seen.contains(&pair);
+        if new_pair && seen.len() >= SUMMARY_PAIR_CAP {
+            spilled_pairs += 1;
+        } else {
+            seen.insert(pair);
+        }
+        let edge_pair = (dirs[from_file as usize], dirs[target.0 as usize]);
+        let new_edge = new_pair && !module_edges.contains_key(&edge_pair);
+        if new_edge && module_edges.len() >= SUMMARY_PAIR_CAP {
+            spilled_module_edges += 1;
+        } else {
+            let edge = module_edges.entry(edge_pair).or_default();
+            edge.0 += 1;
+            if new_pair {
+                edge.1 += 1;
+            }
+        }
+    });
+    let tracked_module_edges = module_edges.len();
+    let mut edges: Vec<ModuleEdge> = module_edges
+        .into_iter()
+        .map(|((from, to), (calls, files))| ModuleEdge {
+            from: from.to_owned(),
+            to: to.to_owned(),
+            calls,
+            files,
+        })
+        .collect();
+    edges.sort_by(|a, b| {
+        b.calls
+            .cmp(&a.calls)
+            .then((&a.from, &a.to).cmp(&(&b.from, &b.to)))
+    });
+    edges.truncate(MAX_MODULE_EDGES);
+    ModuleEdgeSummary {
+        modules: in_scope_dirs.len() as u32,
+        edges,
+        total_calls,
+        total_file_edges: seen.len() + spilled_pairs,
+        total_module_edges: tracked_module_edges + spilled_module_edges,
     }
 }
 

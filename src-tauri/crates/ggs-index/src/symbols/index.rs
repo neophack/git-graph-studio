@@ -251,6 +251,18 @@ impl SymbolIndex {
         Some((symbols, counts))
     }
 
+    /// One name's file count straight from the trusted occurrence list — the metrics
+    /// report's hotspot query, asked per name as rows stream. The whole-table
+    /// `occurrence_counts` would hold every name and count of a large workspace in a
+    /// map for the report's whole run; this answers one name in one binary search.
+    /// `None` when nothing is indexed for the root, the name is unknown, or its list
+    /// is untrusted — the caller reads 0, exactly what an empty map answered.
+    pub fn ref_count(&self, root: &str, name: &str) -> Option<usize> {
+        let store = self.store(root)?;
+        let count = store.lock().unwrap().ref_count(name);
+        count
+    }
+
     /// The per-name occurrence counts alone — the metrics report's hotspot column, which
     /// has no use for the materialized symbols `symbols_with_refs` also copies out.
     pub fn occurrence_counts(&self, root: &str) -> Option<HashMap<String, usize>> {
@@ -529,10 +541,30 @@ pub fn scan_references(
     name: &str,
     narrow: Option<Vec<String>>,
 ) -> Result<Vec<FileMatches>, String> {
+    let (files, _) = scan_references_bounded(root, name, narrow, usize::MAX, "")?;
+    Ok(files)
+}
+
+/// The bounded scan behind the MCP server's `symbol_references`: the same
+/// whole-word matches in the same path order, but only the first `keep` hits are
+/// stored — the rest are counted as they stream past (the scan runs file batches in
+/// parallel and folds each batch sequentially), so a common name on a huge tree pays
+/// the window, never the whole match set. `path_prefix` narrows every phase — the
+/// non-matching files never scan, the total counts the prefix's matches only — so a
+/// prefixed answer is exact and single-pass, like the unprefixed one. The total stays
+/// exact either way.
+pub fn scan_references_bounded(
+    root: &str,
+    name: &str,
+    narrow: Option<Vec<String>>,
+    keep: usize,
+    path_prefix: &str,
+) -> Result<(Vec<FileMatches>, usize), String> {
     let matcher = build_matcher(name, false, true, true)?;
     let files: Vec<(String, PathBuf)> = match narrow {
         Some(files) => files
             .into_iter()
+            .filter(|relative| relative.starts_with(path_prefix))
             .map(|relative| {
                 let path = PathBuf::from(root).join(&relative);
                 (relative, path)
@@ -540,27 +572,45 @@ pub fn scan_references(
             .collect(),
         None => ggs_fs::walk_files(root)
             .into_iter()
-            .filter(|file| is_symbol_source(file))
+            .filter(|file| is_symbol_source(file) && file.starts_with(path_prefix))
             .map(|relative| {
                 let path = PathBuf::from(root).join(&relative);
                 (relative, path)
             })
             .collect(),
     };
-    let found: Vec<Option<FileMatches>> = files
-        .into_par_iter()
-        .map(|(relative, path)| {
-            let (text, _) = read_searchable(&path)?;
-            let matches = scan_text(&text, &matcher);
-            (!matches.is_empty()).then_some(FileMatches {
-                path: relative,
-                matches,
+    let mut kept: Vec<FileMatches> = Vec::new();
+    let mut stored = 0usize;
+    let mut total = 0usize;
+    for batch in files.chunks(256) {
+        let found: Vec<Option<FileMatches>> = batch
+            .par_iter()
+            .map(|(relative, path)| {
+                let (text, _) = read_searchable(path)?;
+                let matches = scan_text(&text, &matcher);
+                (!matches.is_empty()).then_some(FileMatches {
+                    path: relative.clone(),
+                    matches,
+                })
             })
-        })
-        .collect();
-    let mut files: Vec<FileMatches> = found.into_iter().flatten().collect();
-    files.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(files)
+            .collect();
+        for mut file in found.into_iter().flatten() {
+            total += file.matches.len();
+            if stored < keep {
+                let room = keep - stored;
+                if file.matches.len() > room {
+                    file.matches.truncate(room);
+                }
+                stored += file.matches.len();
+                kept.push(file);
+            }
+        }
+    }
+    debug_assert!(
+        kept.iter().map(|f| f.matches.len()).sum::<usize>() == stored,
+        "the kept window matches the stored count"
+    );
+    Ok((kept, total))
 }
 
 /* ---------- The Symbol Database page's tree ---------- */
@@ -633,6 +683,53 @@ mod tests {
         let root = root_dir.path().display().to_string();
         index.build_blocking(None, &root, None).unwrap();
         (root_dir, home, index, root)
+    }
+
+    #[test]
+    fn ref_count_answers_one_name_without_the_table() {
+        let (_root_dir, _home, index, root) = seeded_index();
+        // One file mentions alpha; the count reads the occurrence list in place.
+        assert_eq!(index.ref_count(&root, "alpha"), Some(1));
+        assert_eq!(index.ref_count(&root, "beta"), Some(2));
+        assert_eq!(index.ref_count(&root, "missing"), None);
+    }
+
+    #[test]
+    fn the_bounded_reference_scan_keeps_the_window_and_the_exact_total() {
+        let dir = tempfile::tempdir().unwrap();
+        // hot.rs: 400 whole-word hits of the name; quiet.rs: one, alphabetically after.
+        let mut hot = String::new();
+        for line in 1..=400 {
+            hot.push_str(&format!("fn line{line}() {{ alpha + {line}; }}
+"));
+        }
+        write(dir.path(), "hot.rs", &hot);
+        write(dir.path(), "quiet.rs", "fn alpha() {}
+");
+        let root = dir.path().display().to_string();
+
+        // The window stores the prefix of the stream; the total counts every hit.
+        let (files, total) =
+            scan_references_bounded(&root, "alpha", None, 100, "").unwrap();
+        assert_eq!(total, 401);
+        let stored: usize = files.iter().map(|f| f.matches.len()).sum();
+        assert_eq!(stored, 100);
+        assert_eq!(files[0].path, "hot.rs", "path order survives the window");
+        // SearchMatch lines are 1-based; the stream's head is hot.rs's first line.
+        assert_eq!(files[0].matches[0].line, 1, "the window is the stream's head");
+
+        // The prefix narrows every phase: only the prefixed files scan and count.
+        let (files, total) =
+            scan_references_bounded(&root, "alpha", None, usize::MAX, "quiet").unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "quiet.rs");
+
+        // The unbounded wrapper is the whole set, path-ordered.
+        let files = scan_references(&root, "alpha", None).unwrap();
+        let all: usize = files.iter().map(|f| f.matches.len()).sum();
+        assert_eq!(all, 401);
+        assert!(files.windows(2).all(|pair| pair[0].path <= pair[1].path));
     }
 
     #[test]

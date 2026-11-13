@@ -42,24 +42,33 @@ pub struct MetricRow {
     pub mi: Option<u32>,
 }
 
-/// One file's rows, in line order.
-pub fn rows_for_file(file: &FileAnalysis, refs_of: &dyn Fn(&str) -> usize) -> Vec<MetricRow> {
+/// One file's rows, in line order. The row strings decode out of the analysis's
+/// interned table as they are built — the rows themselves are the report's output,
+/// never stored in the index.
+pub fn rows_for_file(
+    data: &AnalysisData,
+    file: &FileAnalysis,
+    refs_of: &dyn Fn(&str) -> usize,
+) -> Vec<MetricRow> {
     file.symbols
         .iter()
-        .filter(|symbol| symbol.kind == "function" || symbol.kind == "method")
+        .filter(|symbol| symbol.kind.is_function())
         .map(|symbol| {
-            let refs = refs_of(&symbol.name);
+            let name = data.name(symbol.name);
+            let refs = refs_of(name);
+            let complexity = u32::from(symbol.complexity);
             MetricRow {
                 path: file.path.clone(),
-                name: symbol.name.clone(),
-                kind: symbol.kind.to_owned(),
-                container: symbol.container.clone(),
-                line: symbol.line,
-                lines: symbol.end_line.saturating_sub(symbol.line) + 1,
-                params: symbol.params,
-                complexity: symbol.complexity,
-                nesting: symbol.nesting,
-                hotspot: symbol.complexity * refs.max(1) as u32,
+                name: name.to_owned(),
+                kind: symbol.kind.as_str().to_owned(),
+                container: (symbol.container != super::model::NONE)
+                    .then(|| data.name(symbol.container).to_owned()),
+                line: symbol.line as usize,
+                lines: symbol.end_line.saturating_sub(symbol.line) as usize + 1,
+                params: symbol.params as usize,
+                complexity,
+                nesting: u32::from(symbol.nesting),
+                hotspot: complexity * refs.max(1) as u32,
                 refs,
                 cognitive: None,
                 halstead: None,
@@ -75,7 +84,7 @@ pub fn rows_for_file(file: &FileAnalysis, refs_of: &dyn Fn(&str) -> usize) -> Ve
 pub fn metric_rows(data: &AnalysisData, refs_of: &dyn Fn(&str) -> usize) -> Vec<MetricRow> {
     data.files()
         .iter()
-        .flat_map(|file| rows_for_file(file, refs_of))
+        .flat_map(|file| rows_for_file(data, file, refs_of))
         .collect()
 }
 
@@ -89,7 +98,7 @@ pub fn enriched_rows(
 ) -> Vec<MetricRow> {
     let mut rows = Vec::new();
     for file in data.files() {
-        let mut part = rows_for_file(file, refs_of);
+        let mut part = rows_for_file(data, file, refs_of);
         let ext = file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
         if let Ok(text) = std::fs::read_to_string(std::path::Path::new(root).join(&file.path)) {
             bca::enrich_file(ext, &text, &mut part);
@@ -115,7 +124,8 @@ mod tests {
         .unwrap();
         let data =
             AnalysisData::build(&root.display().to_string(), 4, &|_, _| {}, &|| false).unwrap();
-        let rows = metric_rows(&data, &|name| if name == "wide" { 3 } else { 1 });
+        let file = &data.files()[0];
+        let rows = rows_for_file(&data, file, &|name| if name == "wide" { 3 } else { 1 });
         assert_eq!(rows.len(), 2);
         let wide = &rows[0];
         assert_eq!(
@@ -149,6 +159,7 @@ mod tests {
         assert!(deep.lloc.is_some_and(|l| l > 0));
         assert!(deep.mi.is_some_and(|m| (1..=100).contains(&m)));
         // The plain path stays unmeasured — its callers opt in.
-        assert_eq!(metric_rows(&data, &|_| 0)[0].cognitive, None);
+        let plain = metric_rows(&data, &|_| 0);
+        assert_eq!(plain[0].cognitive, None);
     }
 }

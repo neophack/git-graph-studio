@@ -27,7 +27,8 @@ pub fn import_graph(data: &AnalysisData) -> ImportGraph {
     let mut edges: Vec<(String, String)> = Vec::new();
     for file in data.files() {
         let ext = file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-        for import in &file.imports {
+        for &import_id in &file.imports {
+            let import = data.name(import_id);
             if let Some(target) = resolve_import(&file.path, ext, import, &paths) {
                 if target != file.path {
                     edges.push((file.path.clone(), target));

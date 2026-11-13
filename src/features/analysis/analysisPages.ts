@@ -44,8 +44,16 @@ export function createAnalysisPage(tool: AnalysisToolId, container: HTMLElement,
 /** A page that streams `batch` / `done` rows over a channel, with a filter, a rerun
  *  action and the loading / empty / error states every report shares. Rows render into
  *  one flat list; subclasses decide what a row and a match are. */
+/** How many streamed rows a report page retains: the page sorts and filters the
+ *  retained window, and counts every row the backend sent — on a workspace whose
+ *  report has more rows than this, the window keeps the renderer's memory flat and
+ *  the footer says so (the totals stay exact). */
+const RETAIN_ROWS = 20_000;
+
 abstract class ReportPage<T> implements AnalysisPageView {
 	protected rows: T[] = [];
+	/** Every row the stream carried, retained or not — the honest total. */
+	protected streamed = 0;
 	protected filter = '';
 	protected error: string | null = null;
 	protected running = false;
@@ -107,6 +115,7 @@ abstract class ReportPage<T> implements AnalysisPageView {
 	protected async start(): Promise<void> {
 		const run = ++this.runId;
 		this.rows = [];
+		this.streamed = 0;
 		this.error = null;
 		this.summary = '';
 		this.running = true;
@@ -126,6 +135,13 @@ abstract class ReportPage<T> implements AnalysisPageView {
 		return run === this.runId;
 	}
 
+	/** Count a batch and keep its rows while the window has room. */
+	protected retain(incoming: T[]): void {
+		this.streamed += incoming.length;
+		const room = RETAIN_ROWS - this.rows.length;
+		if (room > 0) this.rows.push(...incoming.slice(0, room));
+	}
+
 	render(): void {
 		this.progress.classList.toggle('running', this.running);
 		this.title.textContent = this.running
@@ -143,6 +159,9 @@ abstract class ReportPage<T> implements AnalysisPageView {
 		for (const row of visible.slice(0, cap)) this.list.appendChild(this.renderRow(row));
 		if (visible.length > cap) {
 			this.list.appendChild(el('div', 'an-more', [tf('analysis.page.more', visible.length - cap)]));
+		}
+		if (this.streamed > this.rows.length) {
+			this.list.appendChild(el('div', 'an-more', [tf('analysis.page.retained', this.rows.length, this.streamed)]));
 		}
 	}
 }
@@ -196,7 +215,7 @@ class MetricsPage extends ReportPage<MetricRow> {
 			if (event.kind === 'batch') {
 				// Batches render in arrival order — sorting every batch would hold the
 				// UI thread for the whole stream; `resort` orders the rows once at the end.
-				this.rows.push(...event.rows);
+				this.retain(event.rows);
 				this.render();
 			} else {
 				this.summary = tf('analysis.metrics.summary', event.functions);
@@ -279,7 +298,7 @@ class DeadCodePage extends ReportPage<DeadRow> {
 		onEvent.onmessage = (event) => {
 			if (!this.isCurrent(run)) return;
 			if (event.kind === 'batch') {
-				this.rows.push(...event.rows);
+				this.retain(event.rows);
 				this.render();
 			} else {
 				this.summary = tf('analysis.deadcode.summary', event.found);
@@ -329,7 +348,7 @@ class SecurityPage extends ReportPage<Finding> {
 		onEvent.onmessage = (event) => {
 			if (!this.isCurrent(run)) return;
 			if (event.kind === 'batch') {
-				this.rows.push(...event.findings);
+				this.retain(event.findings);
 				this.render();
 			} else {
 				this.summary = tf('analysis.security.summary', event.findings);
@@ -800,6 +819,9 @@ class ModulePage implements AnalysisPageView {
 			return;
 		}
 		this.body.appendChild(el('div', 'an-section', [tf('analysis.modules.dependencies', visible.length)]));
+		if (data.edges.length < data.totalModuleEdges) {
+			this.body.appendChild(el('div', 'an-more', [tf('analysis.modules.truncatedEdges', data.edges.length, data.totalModuleEdges)]));
+		}
 		if (data.fileEdges.length < data.totalFileEdges) {
 			this.body.appendChild(el('div', 'an-more', [tf('analysis.modules.truncated', data.fileEdges.length, data.totalFileEdges)]));
 		}

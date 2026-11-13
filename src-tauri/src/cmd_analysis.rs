@@ -7,7 +7,6 @@
 //! rows over a channel through the ggs-base push seam — the search view's rhythm (plan
 //! §3.4).
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use tauri::ipc::Channel;
@@ -142,16 +141,18 @@ pub async fn analysis_metrics(
     let root = resolve_root(roots.inner(), repo)?;
     let data = analysis_of(&app, analysis_index.inner(), root.clone()).await?;
     let index = std::sync::Arc::clone(analysis_index.inner());
+    let symbols = std::sync::Arc::clone(symbol_index.inner());
     // Without the counts the hotspot column reads zero, still a report: a failed symbol
     // load does not fail the page.
     let _ = crate::cmd_symbols::ensure_symbols(&app, symbol_index.inner(), root.clone()).await;
-    let refs: HashMap<String, usize> = symbol_index
-        .inner()
-        .occurrence_counts(&root)
-        .unwrap_or_default();
+    // The hotspot column asks per name as rows stream: one binary search into the
+    // store's occurrence lists, never the whole name-to-count table a large workspace
+    // would put in memory for the report's run.
     tauri::async_runtime::spawn_blocking(move || {
+        let refs_root = root.clone();
+        let refs_of = move |name: &str| symbols.ref_count(&refs_root, name).unwrap_or(0);
         let mut sink = crate::events::ChannelSink(on_event);
-        run_metrics(&index, &data, &root, &refs, &mut sink);
+        run_metrics(&index, &data, &root, &refs_of, &mut sink);
     })
     .await
     .map_err(|e| e.to_string())

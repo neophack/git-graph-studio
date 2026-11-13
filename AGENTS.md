@@ -1330,7 +1330,18 @@ workspace text search), `index_status` — plus module 17's analysis tools
 `analysis_metrics`, `analysis_dead_code`, `analysis_security`, `analysis_import_graph`,
 `analysis_import_cycles`). Every list-shaped tool speaks one paging contract: `limit` +
 `offset`, the exact total in the header, a trailer naming the continuation; the filters
-(`path`, `kind`, `severity`, `pathPrefix`) narrow before totals are computed. Every call
+(`path`, `kind`, `severity`, `pathPrefix`) narrow before totals are computed — and no
+tool answers a flood (2026-11-14, the owner's direction: MCP returns the top 100, never
+a large result): `limit` clamps at 100, and each tool's fold is bounded to the page it
+serves — `search_symbols` fetches the store's top-100 matches (the workspace's symbols
+are never materialized to show a page), `symbol_references` stores only the window and
+counts the rest as they stream (`scan_references_bounded`, prefix-narrowed inside the
+scan), `search_text` collects the window from the streaming scan, `analysis_metrics`
+selects the ranked top-`limit` through a min-heap while the files stream (one file's
+rows plus the big-code-analysis columns in memory at a time), `analysis_dead_code` and
+`analysis_security` walk their filters once or twice counting everything and building
+only the page's window, and `analysis_module_graph` folds the bounded
+`module_edge_summary` (module edges and exact totals, no pair ranking). Every call
 is logged as one JSON line to `~/.ggs/logs/mcp.log` (rotated past 1 MB), which the
 in-app MCP Server page shows. stderr is logs; stdout is protocol only.
 
@@ -1416,12 +1427,35 @@ viewport (pan, zoom, states) around it.
   Analysis drawing: mermaid + ELK rendering of `analysis_module_diagram`'s source,
   gitdiagram's viewport around it — pan/zoom, the zoom toolbar, the delegated
   selection states)
-- Backend: the `ggs-analysis` crate (`src-tauri/crates/ggs-analysis/`) — `lib.rs` the
-  engine and the per-symbol call graph, `index.rs` the per-root `AnalysisIndex` (built
+- Backend: the `ggs-analysis` crate (`src-tauri/crates/ggs-analysis/`) — `model.rs` the
+  compact vocabulary (`Names`, the interned string table; the fixed-size `Sym` and `Call`
+  records; the per-site `ResolveClass`), `lib.rs` the engine and the per-symbol call
+  graph — the workspace model holds every string interned and **no materialized call
+  edges**: a call site stores how its name resolved (one class byte, the old resolver's
+  pecking order decided once at derive time) and both graph directions re-derive the
+  targets from that record at query time, so the memory a large tree costs is tens of
+  bytes per symbol and call site (the materialized caller/callee tables with their
+  per-edge path strings and ambiguity fan-out used to be ~95 % of the resident index —
+  3.79 GB on the `windows-0.62.2` corpus, now 86 MB; the Module Analysis pass used to
+  materialize every cross-file row into `CrossFileCall` and peaked at 15.4 GB of
+  process memory, now the calls stream through a bounded two-pass fold at ~200 MB —
+  `examples/analysis_mem.rs`, the memory bench, measures it all: build, every report,
+  the release, per phase's live/peak heap and process private bytes),
+  `index.rs` the per-root `AnalysisIndex` (built
   by the first analysis command, never on a folder open — `ensure_blocking` — and
   released once idle, `release_idle`, through module 5's `index_lease.rs`) and the
-  streaming report runners, `metrics.rs`, `deadcode.rs`, `security.rs`, `modules.rs` the
-  Module Analysis aggregation, `diagram.rs` the Module Analysis drawing — the
+  streaming report runners (each batch builds, enriches, sends and drops — a large
+  tree's whole row set never sits in memory; the hotspot column asks the symbol
+  index per name — `ref_count`, one binary search into the trusted occurrence
+  list — where `occurrence_counts` would hold every name and count of the
+  workspace in a map for the report's whole run),
+  `metrics.rs`, `deadcode.rs`, `security.rs`, `modules.rs` the
+  Module Analysis aggregation (a bounded two-pass streaming fold: pass one counts file
+  pairs and lifts them to module edges, past the `PAIR_TRACK_CAP` spillover the counts
+  go to the exact totals only, pass two fills the capped site lists of the pairs the
+  listing keeps; the answer caps at `MAX_FILE_EDGES`/`MAX_MODULE_EDGES` with honest
+  totals),
+  `diagram.rs` the Module Analysis drawing — the
   architecture-only curation, gitdiagram's caps, tone
   palette, group roll-up and fold, and the mermaid source (classDefs included) behind
   `analysis_module_diagram`,
@@ -1431,6 +1465,8 @@ viewport (pan, zoom, states) around it.
   module 5's `ggs-index` crate (`symbols::parse`) — behind the
   `src-tauri/src/cmd_analysis.rs` command adapters (the `#[tauri::command]` halves;
   progress crosses the ggs-base push seams)
+- Bench: `examples/analysis_mem.rs` (the Code Analysis memory bench — `analysis_mem
+  <root> [phase]` against any tree; the harness runs it on a many-thousand-file corpus)
 - Tests: `tests/analysis.test.ts`, the crate's `#[cfg(test)]`
 
 ### 15. Build & Release Pipeline

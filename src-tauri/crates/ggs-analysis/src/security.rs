@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde::Serialize;
 
-use ggs_index::symbols::parse::CallSite;
+use super::model::{Call, Names, NONE};
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -357,8 +357,9 @@ fn rules_for(ext: &str) -> Vec<&'static Rule> {
         .collect()
 }
 
-/// Scan one parsed file. `text` is the file as read; `calls` are its call sites.
-pub fn scan_file(path: &str, ext: &str, text: &str, calls: &[CallSite]) -> Vec<Finding> {
+/// Scan one parsed file. `text` is the file as read; `calls` are its compact call
+/// records, decoded through `names` (the analysis's interned table).
+pub fn scan_file(path: &str, ext: &str, text: &str, calls: &[Call], names: &Names) -> Vec<Finding> {
     let mut findings = Vec::new();
     static PATTERNS: OnceLock<Vec<(&'static Rule, Regex)>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| {
@@ -391,21 +392,19 @@ pub fn scan_file(path: &str, ext: &str, text: &str, calls: &[CallSite]) -> Vec<F
         }
     }
     for rule in rules_for(ext) {
-        let RuleKind::Calls { names, receivers } = rule.kind else {
+        let RuleKind::Calls { names: wanted, receivers } = rule.kind else {
             continue;
         };
         for call in calls {
             if findings.len() >= MAX_FINDINGS_PER_FILE {
                 return findings;
             }
-            if !names.contains(&call.name.as_str()) {
+            let spelled = names.get(call.name);
+            if !wanted.contains(&spelled) {
                 continue;
             }
             if !receivers.is_empty()
-                && call
-                    .receiver
-                    .as_deref()
-                    .is_none_or(|r| !receivers.contains(&r))
+                && (call.receiver == NONE || !receivers.contains(&names.get(call.receiver)))
             {
                 continue;
             }
@@ -414,8 +413,8 @@ pub fn scan_file(path: &str, ext: &str, text: &str, calls: &[CallSite]) -> Vec<F
                 severity: rule.severity,
                 message: rule.message.to_owned(),
                 path: path.to_owned(),
-                line: call.line,
-                column: call.column,
+                line: call.line as usize,
+                column: call.column as usize,
                 cwe: rule.cwe.to_owned(),
             });
         }
@@ -431,7 +430,19 @@ mod tests {
 
     fn scan(path: &str, ext: &str, text: &str) -> Vec<Finding> {
         let parsed = ggs_index::symbols::parse::parse_file(text, ext);
-        scan_file(path, ext, text, &parsed.calls)
+        let mut names = Names::new();
+        let mut sigs = String::new();
+        let file = crate::convert(
+            &mut names,
+            &mut sigs,
+            crate::ParsedOne {
+                path: path.to_owned(),
+                mtime_ms: 0,
+                size: 0,
+                parsed,
+            },
+        );
+        scan_file(path, ext, text, &file.calls, &names)
     }
 
     #[test]

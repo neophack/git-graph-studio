@@ -741,6 +741,7 @@ mod tests {
             file_edges,
             total_calls: 0,
             total_file_edges: 0,
+            total_module_edges: 0,
         }
     }
 

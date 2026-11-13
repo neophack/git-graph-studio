@@ -53,10 +53,12 @@ export interface CallSiteRow { from: string; to: string; line: number; column: n
 export interface FileDep { from: string; to: string; calls: number; sites: CallSiteRow[] }
 export interface ModuleGraphData {
 	modules: ModuleInfo[];
+	/** Capped at the backend's listing limit; `totalModuleEdges` counts them all. */
 	edges: ModuleEdge[];
 	fileEdges: FileDep[];
 	totalCalls: number;
 	totalFileEdges: number;
+	totalModuleEdges: number;
 }
 
 export interface DiagramNode {
