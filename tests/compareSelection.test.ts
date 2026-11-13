@@ -134,8 +134,8 @@ describe('explorer multi-selection compare', () => {
 		expect(backend.callsTo('read_file').map((c) => c['path'])).toEqual([`${ROOT}\\a.txt`, `${ROOT}\\b.txt`]);
 		expect(backend.callsTo('read_file_at')).toHaveLength(0);
 		expect(document.querySelectorAll('.cm-mergeView .cm-editor')).toHaveLength(2);
-		// A local side's label is its path, shown once - not "path (path)".
-		expect(texts('.diff-header > span:not(.diff-stats)')).toEqual([`${ROOT}\\a.txt`, `${ROOT}\\b.txt`]);
+		// A local side's label is its path, shown once on its own side header - not "path (path)".
+		expect(texts('.diff-side-header')).toEqual([`${ROOT}\\a.txt`, `${ROOT}\\b.txt`]);
 		expect(document.querySelector('.diff-stats')!.textContent).toMatch(/^\+1−1/);
 		expect(document.querySelector('.tab.active .label')!.textContent).toBe('a.txt ↔ b.txt');
 	});

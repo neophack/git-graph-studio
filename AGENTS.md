@@ -349,7 +349,9 @@ colouring, sticky scroll, minimap, bookmarks, markdown preview.
   `src/features/editor/textEditor.ts` (CodeMirror host), `src/features/editor/expandSelection.ts` (the selection ladder: expand/shrink climbs word → bracket-pair content → bracket pair → indentation block, shrinking back down the remembered path), `src/features/editor/comments.ts` (VS Code's comment toggles),
   `src/features/editor/docEditView.ts` (windowed large-file editor, scrolling on module 7's `src/scroll/`),
   `src/features/editor/docFind.ts` (the whole-file find/replace bar the windowed editor and the Fast Viewer
-  serve, over `viewer_find` / `viewer_replace`), `src/features/editor/editorExtras.ts`, `src/features/editor/autocomplete.ts`,
+  serve, over `viewer_find` / `viewer_replace`), `src/features/editor/diffViewer.ts` (the diff editor's
+  accessible viewer — VS Code's F7 surface: every change as one overlay row with a +/− preview,
+  walked by F7/Shift+F7/arrows, Enter jumping to the change, Escape closing), `src/features/editor/editorExtras.ts`, `src/features/editor/autocomplete.ts`,
   `src/features/editor/snippetRegistry.ts`, `src/features/editor/findWidget.ts`, `src/platform/find/findOptions.ts` (options shared with
   Workspace Search), `src/platform/find/findHistory.ts` (the find and search fields' query history — the
   Up/Down recall — shared with Workspace Search), `src/features/editor/bookmarks.ts`, `src/features/editor/cmTheme.ts`,

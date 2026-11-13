@@ -43,4 +43,21 @@ describe('diff decoration styles outweigh the merge view base theme', () => {
 		expect(rules).toContain('.editor-pane .cm-editor.cm-merge-b .cm-deletedChunk .cm-deletedText');
 		expect(css).toMatch(/\.cm-changedText[^{]*\{\s*text-decoration:\s*none/);
 	});
+
+	it('the inline diff editor keeps its pane width — the find widget never lands outside the window', () => {
+		// Single-column diff: the lone .cm-editor sits directly in .cm-merge-view's row flex,
+		// and without min-width: 0 CodeMirror's content minimum (a `pre` line, no shrink)
+		// widens it past the pane — the find widget anchored to its right edge is then
+		// clipped by the window. Split mode needs nothing: each pane's wrapper hides overflow.
+		expect(selectors()).toContain('.editor-pane .cm-merge-view > .cm-editor');
+		expect(css).toMatch(/\.editor-pane \.cm-merge-view > \.cm-editor\s*\{[^}]*min-width:\s*0/);
+	});
+
+	it('the merge container never scrolls — no ghost scrollbar at the diff\u2019s far right', () => {
+		// The panes scroll themselves; the container's overflow-y: auto once let the revert
+		// arrows' document-offset tops (thousands of px in a tall file) stretch its
+		// scrollable range into a third scrollbar at the diff's right edge.
+		expect(css).toMatch(/\.cm-merge-view \.cm-mergeView\s*\{[^}]*overflow:\s*hidden/);
+		expect(css).toMatch(/\.cm-merge-view \.cm-merge-revert\s*\{[^}]*overflow:\s*hidden/);
+	});
 });

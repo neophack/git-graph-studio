@@ -1,6 +1,7 @@
-import type { Extension } from '@codemirror/state';
+import type { Extension, Text } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 import type { Chunk } from '@codemirror/merge';
+import { mountAccessibleDiffViewer, PREVIEW_CAP as VIEWER_PREVIEW_CAP, type DiffViewerChange, type DiffViewerHandle } from './diffViewer';
 import type { OverviewMark } from './editorExtras';
 import { type FileContents, type FileProbe, fileProbe, readFileBase64 } from '../../platform/ipc/fs';
 import { materializeRevisionFile, readFileAt } from '../../platform/ipc/revision';
@@ -21,7 +22,7 @@ import type { EditorCommandName } from './types';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import type { EditorGroup } from './group';
 import { editorState } from './editorState';
-import { notice, readFileRaw } from './shared';
+import { attachScrollSync, notice, readFileRaw } from './shared';
 import type { Editor, EditorInput } from './inputs';
 import { ANALYSIS_PAGE_ICONS, ANALYSIS_PAGE_LABELS } from './inputs';
 import type * as TextEditor from './textEditor';
@@ -83,30 +84,6 @@ function resolveDiffSavePath(side: DiffSide, repo: string | undefined, rootPath:
 	return root ? joinPath(root, side.path) : null;
 }
 
-/** The diff sides' vertical scroll coupling (VS Code's): one pane's wheel moves both, by
- *  proportion of each side's own scrollable range. A short lock breaks the mirror's own
- *  scroll event from bouncing back. The scroll listeners die with the panes; the detach
- *  exists so a layout rebuild never leaves a mirror onto destroyed views. */
-function attachScrollSync(a: EditorView, b: EditorView): () => void {
-	let lock = 0;
-	const mirror = (from: EditorView, to: EditorView) => () => {
-		if (Date.now() < lock) return;
-		const range = from.scrollDOM.scrollHeight - from.scrollDOM.clientHeight;
-		const other = to.scrollDOM.scrollHeight - to.scrollDOM.clientHeight;
-		if (range <= 0 || other <= 0) return;
-		lock = Date.now() + 50;
-		to.scrollDOM.scrollTop = (from.scrollDOM.scrollTop / range) * other;
-	};
-	const aToB = mirror(a, b);
-	const bToA = mirror(b, a);
-	a.scrollDOM.addEventListener('scroll', aToB);
-	b.scrollDOM.addEventListener('scroll', bToA);
-	return () => {
-		a.scrollDOM.removeEventListener('scroll', aToB);
-		b.scrollDOM.removeEventListener('scroll', bToA);
-	};
-}
-
 
 /** Every open Markdown preview, across groups: a source's edits refresh its preview wherever
  *  the preview tab lives, and the scroll sync finds its pair without caring which group
@@ -163,7 +140,7 @@ export const openMethods: ThisType<EditorGroup> = {
 		this.add(editor, true, intent);
 	},
 
-	async openFile(path: string, options: { line?: number; column?: number; inactive?: boolean } = {}): Promise<void> {
+	async openFile(path: string, options: { line?: number; column?: number; inactive?: boolean; restore?: boolean } = {}): Promise<void> {
 		const intent = this.beginOpen();
 		// Any spelling of an open file reveals its tab (an extension's backslashed path is
 		// the Explorer's forward-slashed one).
@@ -284,7 +261,10 @@ export const openMethods: ThisType<EditorGroup> = {
 		try {
 			file = await readFileRaw(path);
 		} catch (error) {
-			notify('error', String(error));
+			// A session restore naming a file the disk lost (deleted, moved, an unmounted
+			// drive) skips quietly: the restore prunes the path from the snapshot, and one
+			// boot must not raise a sticky toast per vanished file.
+			if (!options.restore) notify('error', String(error));
 			return;
 		}
 		if (file.binary || file.contents === null) {
@@ -585,6 +565,10 @@ export const openMethods: ThisType<EditorGroup> = {
 		const intent = this.beginOpen();
 		const existing = this.open.find((e) => e.input.kind === 'diff' && e.input.id === input.id);
 		if (existing) {
+			// The row's second click re-reads a clean diff's sides first: the comparison
+			// shows what the disk holds now, not what it held when the tab opened. A dirty
+			// buffer keeps the pane — the activation alone, as VS Code's does.
+			if (!existing.dirty) await existing.diffReload?.();
 			this.activate(existing);
 			return;
 		}
@@ -676,15 +660,24 @@ export const openMethods: ThisType<EditorGroup> = {
 		const toolbar = el('div', 'diff-toolbar');
 		let lastSplit = true;
 		let rebuild: ((split: boolean) => void) | null = null;
-		/** Xcode's version editor keeps its change navigation beside the ignore options: the
-		 *  prev/next arrows, the "n of m changes" counter, the +A/−D statistics, and a manual
-		 *  layout switch. `manualSplit` (undefined = follow the pane width) persists per tab
-		 *  for the diff's lifetime. */
+		/** VS Code's diff editor keeps its actions in its title bar, in its order: the layout
+		 *  toggle, the prev/next change arrows, the accessible viewer, Open File — then this
+		 *  editor's extra ignore options. `manualSplit` (undefined = follow the pane width)
+		 *  persists per tab for the diff's lifetime. */
 		let manualSplit: boolean | undefined;
 		const counter = el('span', 'diff-count');
 		/** Set once the diff's views exist (the text-diff branch below). */
 		let stepChange: (direction: 1 | -1) => void = () => undefined;
+		/** Set once the viewer can open (the text-diff branch below). */
+		let toggleViewer: () => void = () => undefined;
 		const stats = el('span', 'diff-stats');
+		const layoutButton = el('button', 'action-btn toggle', [icon('arrow-both')]);
+		layoutButton.title = 'Switch between side-by-side and inline view (follows the pane width until set)';
+		layoutButton.addEventListener('click', () => {
+			manualSplit = !lastSplit;
+			rebuild?.(manualSplit);
+		});
+		toolbar.appendChild(layoutButton);
 		const navButton = (iconName: string, title: string, direction: 1 | -1) => {
 			const button = el('button', 'action-btn', [icon(iconName)]);
 			button.title = title;
@@ -695,13 +688,18 @@ export const openMethods: ThisType<EditorGroup> = {
 		navButton('arrow-up', 'Previous Change', -1);
 		navButton('arrow-down', 'Next Change', 1);
 		toolbar.appendChild(counter);
-		const layoutButton = el('button', 'action-btn toggle', [icon('split-horizontal')]);
-		layoutButton.title = 'Switch between side-by-side and inline (follows the pane width until set)';
-		layoutButton.addEventListener('click', () => {
-			manualSplit = !lastSplit;
-			rebuild?.(manualSplit);
-		});
-		toolbar.appendChild(layoutButton);
+		const viewerButton = el('button', 'action-btn', [icon('list-flat')]);
+		viewerButton.title = t('diff.action.accessibleViewer');
+		viewerButton.addEventListener('click', () => toggleViewer());
+		toolbar.appendChild(viewerButton);
+		// VS Code's Open File action, present only where it has a file to open: the working
+		// file behind the modified side. A committed/staged compare edits nothing and has none.
+		if (savePath) {
+			const openFileButton = el('button', 'action-btn', [icon('go-to-file')]);
+			openFileButton.title = t('diff.action.openFile');
+			openFileButton.addEventListener('click', () => void this.openFile(savePath));
+			toolbar.appendChild(openFileButton);
+		}
 		const toggle = (label: string, key: 'whitespace' | 'case') => {
 			const button = el('button', 'action-btn toggle' + (ignore[key] ? ' active' : ''), [label]);
 			button.title = label === 'Aa' ? 'Ignore case' : 'Ignore whitespace';
@@ -721,15 +719,12 @@ export const openMethods: ThisType<EditorGroup> = {
 		};
 		toggle('Wh', 'whitespace');
 		toggle('Aa', 'case');
-		// A local-file compare labels its sides with the full paths; "C:\a.txt (C:\a.txt)" would
-		// just repeat itself, so a label that equals the path shows the path alone.
+		// VS Code's side headers: each pane carries its own slim label — `path (revision)` —
+		// above it, injected into the merge view's pane wrappers on every render. A
+		// local-file compare whose label equals the path shows the path alone.
 		const sideText = (side: DiffSide): string => side.label === side.path ? side.path : `${side.path} (${side.label})`;
-		editor.pane.appendChild(el('div', 'diff-header', [
-			el('span', '', [sideText(input.left)]),
-			el('span', '', [sideText(input.right)]),
-			toolbar,
-			stats
-		]));
+		const sideHeader = (side: DiffSide): HTMLElement => el('div', 'diff-side-header', [sideText(side)]);
+		editor.pane.appendChild(el('div', 'diff-header', [toolbar, stats]));
 		editor.languageName = 'Plain Text';
 		// Space-separated: shell.css bounds the diff host through the `.cm-merge-view`
 		// class (flex sizing and the merge view's height bound) — a dotted single class
@@ -757,10 +752,21 @@ export const openMethods: ThisType<EditorGroup> = {
 			}
 			return Math.min(index, chunks.length);
 		};
-		const refreshChangeInfo = (): void => {
+		/** The live chunk list — the statistics, the accessible viewer and the Copy
+		 *  Deleted/Changed menu rows all read it. A split rebuild exposes the merge view's
+		 *  own list (which updates itself as the user types), an inline rebuild derives from
+		 *  the two documents; `editor.diffChunks` mirrors it for the concerns outside this
+		 *  closure (the context menu), recomputed on every render and every edit. */
+		const recomputeChunks = (): void => {
 			const aDoc = EditorState.create({ doc: normalize(left.contents ?? '') }).doc;
 			const bDoc = editor.view?.state.doc ?? editor.merge?.b.state.doc ?? EditorState.create({ doc: normalize(right.contents ?? '') }).doc;
 			chunks = editor.merge?.chunks ?? Chunk.build(aDoc, bDoc);
+			editor.diffChunks = chunks;
+		};
+		const refreshChangeInfo = (): void => {
+			recomputeChunks();
+			const aDoc = EditorState.create({ doc: normalize(left.contents ?? '') }).doc;
+			const bDoc = editor.view?.state.doc ?? editor.merge?.b.state.doc ?? EditorState.create({ doc: normalize(right.contents ?? '') }).doc;
 			let additions = 0;
 			let deletions = 0;
 			for (const chunk of chunks) {
@@ -798,14 +804,90 @@ export const openMethods: ThisType<EditorGroup> = {
 			view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y: 'center' }) });
 			updateCounter();
 		};
-		// VS Code's diff-editor keys: F7 / Shift+F7 step through the changes.
-		const diffKeys = keymap.of([{ key: 'F7', run: () => (stepChange(1), true), shift: () => (stepChange(-1), true) }]);
+		// The accessible diff viewer (module 6's diffViewer, VS Code's F7 surface): the
+		// change list as an overlay, each row jumping to its change. F7 opens it and walks
+		// it while it is open; Escape closes; Enter jumps and closes.
+		let viewer: DiffViewerHandle | null = null;
+		const jumpToChunk = (index: number): void => {
+			const view = editor.view ?? editor.merge?.b ?? null;
+			if (!view || index >= chunks.length) return;
+			const anchor = Math.min(chunks[index]!.fromB, view.state.doc.length);
+			view.dispatch({ selection: { anchor }, effects: EditorView.scrollIntoView(anchor, { y: 'center' }) });
+			updateCounter();
+		};
+		const viewerChanges = (): DiffViewerChange[] => {
+			const aDoc = EditorState.create({ doc: normalize(left.contents ?? '') }).doc;
+			const bDoc = editor.view?.state.doc ?? editor.merge?.b.state.doc ?? EditorState.create({ doc: normalize(right.contents ?? '') }).doc;
+			const linesOf = (doc: Text, base: number, from: number, to: number): string[] => {
+				if (to <= from) return [];
+				const start = doc.lineAt(Math.min(Math.max(base + from, 0), doc.length)).number;
+				const end = doc.lineAt(Math.min(Math.max(base + to - 1, 0), doc.length)).number;
+				const out: string[] = [];
+				for (let n = start; n <= end; n++) out.push(doc.line(n).text);
+				return out;
+			};
+			return chunks.map((chunk) => {
+				let added = 0;
+				let deleted = 0;
+				const deletedLines: string[] = [];
+				const addedLines: string[] = [];
+				for (const change of chunk.changes) {
+					if (change.toA > change.fromA) {
+						deleted += aDoc.lineAt(chunk.fromA + change.toA - 1).number - aDoc.lineAt(chunk.fromA + change.fromA).number + 1;
+						deletedLines.push(...linesOf(aDoc, chunk.fromA, change.fromA, change.toA));
+					}
+					if (change.toB > change.fromB) {
+						added += bDoc.lineAt(chunk.fromB + change.toB - 1).number - bDoc.lineAt(chunk.fromB + change.fromB).number + 1;
+						addedLines.push(...linesOf(bDoc, chunk.fromB, change.fromB, change.toB));
+					}
+				}
+				const preview = [
+					...deletedLines.slice(0, VIEWER_PREVIEW_CAP).map((text) => ({ text, kind: 'del' as const })),
+					...addedLines.slice(0, VIEWER_PREVIEW_CAP).map((text) => ({ text, kind: 'add' as const })),
+				];
+				return {
+					added,
+					deleted,
+					preview,
+					hidden: Math.max(deletedLines.length - VIEWER_PREVIEW_CAP, 0) + Math.max(addedLines.length - VIEWER_PREVIEW_CAP, 0),
+				};
+			});
+		};
+		const openViewer = (): void => {
+			if (viewer) return;
+			viewer = mountAccessibleDiffViewer(host, viewerChanges, {
+				initial: Math.min(at(), Math.max(chunks.length - 1, 0)),
+				jump: jumpToChunk,
+				onClose: () => {
+					viewer = null;
+					(editor.view ?? editor.merge?.b)?.focus();
+				},
+			});
+		};
+		toggleViewer = () => {
+			if (viewer) viewer.close();
+			else openViewer();
+		};
+		// VS Code's diff-editor keys: F7 / Shift+F7 open and walk the accessible viewer.
+		const diffKeys = keymap.of([{
+			key: 'F7',
+			run: () => {
+				if (viewer) viewer.navigate(1);
+				else openViewer();
+				return true;
+			},
+			shift: () => {
+				if (viewer) viewer.navigate(-1);
+				else openViewer();
+				return true;
+			},
+		}]);
 		// The side-by-side panes' scroll coupling (attachScrollSync), torn down with each
 		// rebuild so no mirror survives onto destroyed views.
 		let detachScrollSync: (() => void) | null = null;
 		// The overview rulers (the green/red scrollbar change map), likewise rebuilt per
 		// layout and refreshed whenever a pane's edits move the changes.
-		const { attachOverviewRuler, chunkOverviewMarks } = await import('./editorExtras');
+		const { attachOverviewRuler, chunkOverviewMarks, positionRevertArrows } = await import('./editorExtras');
 		let overviews: { refresh: () => void; detach: () => void }[] = [];
 		const refreshOverviews = (): void => {
 			for (const overview of overviews) overview.refresh();
@@ -814,6 +896,19 @@ export const openMethods: ThisType<EditorGroup> = {
 			for (const overview of overviews) overview.detach();
 			overviews = [];
 		};
+		// The split view's revert arrows follow the panes' scroll (positionRevertArrows):
+		// one rAF-deduped pass per scroll and per edit, detached with each rebuild.
+		let detachRevertArrows: (() => void) | null = null;
+		let arrowsQueued = false;
+		const scheduleRevertArrows = (): void => {
+			if (arrowsQueued) return;
+			arrowsQueued = true;
+			requestAnimationFrame(() => {
+				arrowsQueued = false;
+				const column = host.querySelector<HTMLElement>('.cm-merge-revert');
+				if (column && editor.merge) positionRevertArrows(column, editor.merge.a, chunks);
+			});
+		};
 		// Wide panes get the classic side-by-side view; narrow ones a single-column inline
 		// view - unless the layout button pinned one. A ResizeObserver rebuilds the editors
 		// whenever the pane crosses the threshold. The right side is the editable one (VS
@@ -821,9 +916,14 @@ export const openMethods: ThisType<EditorGroup> = {
 		// so a toggle never wipes what the user typed.
 		const render = (split: boolean) => {
 			lastSplit = split;
+			// The viewer overlays the panes this render replaces — it leaves first, so no
+			// stale panel survives a layout switch or a follow-the-file rebuild.
+			viewer?.close();
 			const buffer = editor.dirty ? editor.view?.state.doc.toString() ?? editor.merge?.b.state.doc.toString() : undefined;
 			detachScrollSync?.();
 			detachScrollSync = null;
+			detachRevertArrows?.();
+			detachRevertArrows = null;
 			detachOverviews();
 			editor.merge?.destroy();
 			editor.merge = undefined;
@@ -842,9 +942,12 @@ export const openMethods: ThisType<EditorGroup> = {
 				languageSlot.of(languageSupport ?? []),
 				diffKeys,
 				EditorView.updateListener.of((update) => {
+					// An edit moves the changes: the chunk list, the ruler marks, the counter
+					// and the revert arrows all follow.
+					if (update.docChanged) recomputeChunks();
 					updateCounter();
-					// An edit moves the changes: the ruler marks and the counter follow.
 					refreshOverviews();
+					scheduleRevertArrows();
 					if (!editable) return;
 					if (update.docChanged) {
 						const dirty = !this.bufferAtSavedState(editor);
@@ -859,7 +962,7 @@ export const openMethods: ThisType<EditorGroup> = {
 			];
 			if (split) {
 				editor.merge = new MergeView({
-					a: { doc: normalize(left.contents ?? ''), extensions: [...baseExtensions(true), languageSlot.of(languageSupport ?? []), diffKeys, EditorView.updateListener.of(() => updateCounter())] },
+					a: { doc: normalize(left.contents ?? ''), extensions: [...baseExtensions(true), languageSlot.of(languageSupport ?? []), diffKeys, EditorView.updateListener.of(() => { updateCounter(); scheduleRevertArrows(); })] },
 					b: { doc: normalize(buffer ?? right.contents ?? ''), extensions: bExtensions },
 					parent: host,
 					collapseUnchanged: { margin: 3, minSize: 4 },
@@ -870,7 +973,21 @@ export const openMethods: ThisType<EditorGroup> = {
 					// chunk with the base side's text (the package's direction spelling).
 					revertControls: editable ? 'a-to-b' : undefined
 				});
+				// VS Code's side headers, one over each pane (the merge view's pane wrappers
+				// take the label above their editor; the package's layout is otherwise kept).
+				const wraps = host.querySelectorAll('.cm-mergeViewEditor');
+				wraps[0]?.insertBefore(sideHeader(input.left), wraps[0].firstChild);
+				wraps[1]?.insertBefore(sideHeader(input.right), wraps[1].firstChild);
 				detachScrollSync = attachScrollSync(editor.merge.a, editor.merge.b);
+				// The arrows ride the panes' scroll: the package repositions them only in
+				// document coordinates, which this layout's standing column needs translated.
+				editor.merge.a.scrollDOM.addEventListener('scroll', scheduleRevertArrows);
+				editor.merge.b.scrollDOM.addEventListener('scroll', scheduleRevertArrows);
+				detachRevertArrows = () => {
+					editor.merge?.a.scrollDOM.removeEventListener('scroll', scheduleRevertArrows);
+					editor.merge?.b.scrollDOM.removeEventListener('scroll', scheduleRevertArrows);
+				};
+				scheduleRevertArrows();
 				const chunks = (): readonly Chunk[] => editor.merge!.chunks;
 				overviews.push(
 					attachOverviewRuler(editor.merge.a, () => chunkOverviewMarks(chunks(), 'a', editor.merge!.a.state.doc)),
@@ -893,6 +1010,9 @@ export const openMethods: ThisType<EditorGroup> = {
 					}),
 					parent: host
 				});
+				// The inline view's one side header sits over the single editor (VS Code's
+				// unified diff keeps the modified file's label above it).
+				host.insertBefore(sideHeader(input.right), editor.view.dom);
 				// The inline view's ruler: green at the insertions, red at each deletion's
 				// landing point, rebuilt against the current buffer on every refresh.
 				const aDoc = EditorState.create({ doc: normalize(left.contents ?? '') }).doc;
@@ -927,6 +1047,28 @@ export const openMethods: ThisType<EditorGroup> = {
 			refreshChangeInfo();
 		};
 		rebuild = render;
+		// The diff follows its file, the way VS Code's diff editor does: a watcher batch
+		// naming the working file (or the row's second click on this tab) re-reads both
+		// sides and rebuilds. A dirty buffer is never touched, and an unchanged re-read —
+		// this save's own watcher echo among them — skips the rebuild, keeping the cursor.
+		editor.diffReload = async (): Promise<boolean> => {
+			if (editor.dirty || !this.open.includes(editor)) return false;
+			let newLeft: FileContents, newRight: FileContents;
+			try {
+				[newLeft, newRight] = await Promise.all([read(input.left), read(input.right)]);
+			} catch {
+				return false; // a side vanished mid-read — the shown contents stay
+			}
+			// The reads were async: the tab may have closed or dirtied meanwhile.
+			if (editor.dirty || !this.open.includes(editor)) return false;
+			if (normalize(newLeft.contents ?? '') === normalize(left.contents ?? '') && normalize(newRight.contents ?? '') === normalize(right.contents ?? '')) return false;
+			left = newLeft;
+			right = newRight;
+			editor.encoding = right.encoding ?? editor.encoding;
+			editor.eol = right.eol ?? editor.eol;
+			render(lastSplit);
+			return true;
+		};
 		let split: boolean | undefined;
 		// The first render waits one frame for the pane to be mounted and measurable: the
 		// naive build-then-flip cost a full editor construction twice on narrow panes.
@@ -1343,6 +1485,39 @@ export const openMethods: ThisType<EditorGroup> = {
 			});
 		};
 		const currentLine = view ? view.state.doc.lineAt(view.state.selection.main.head).number : null;
+		// VS Code's Copy Deleted/Changed Lines: on a diff pane, the change the cursor (or a
+		// right-clicked position, when no selection stands) intersects has its lines copied
+		// whole — the deleted side's text from the read-only pane, the inserted side's from
+		// the modified one. The click's own pane decides which entry appears, so the menu
+		// speaks for what was right-clicked, never the other side.
+		const diffSide = editor.input.kind !== 'diff'
+			? null
+			: pane && editor.merge?.a === pane ? 'a' : pane && editor.merge?.b === pane ? 'b' : editor.view && pane === editor.view ? 'inline' : null;
+		const diffCopyRows = (): MenuEntry[] => {
+			if (!view || !diffSide || !editor.diffChunks?.length) return [];
+			const selection = view.state.selection.main;
+			// A right-click without a selection reads the clicked position; a selection
+			// (or an ordinary cursor standing inside a change) reads the selection.
+			const from = selection.empty && pos !== null ? pos : selection.from;
+			const to = selection.empty && pos !== null ? pos : selection.to;
+			const hits = editor.diffChunks.filter((chunk) => {
+				const start = diffSide === 'a' ? chunk.fromA : chunk.fromB;
+				const end = diffSide === 'a' ? chunk.toA : chunk.toB;
+				if (end <= start) return false;
+				// A bare cursor hits the change its position sits inside; a selection hits
+				// every change its range overlaps.
+				return from === to ? from >= start && from < end : from < end && to > start;
+			});
+			if (hits.length === 0) return [];
+			const run = (): void => {
+				const texts = hits.map((chunk) => view!.state.sliceDoc(diffSide === 'a' ? chunk.fromA : chunk.fromB, diffSide === 'a' ? chunk.toA : chunk.toB));
+				void writeText(texts.join('\n'));
+			};
+			return [{
+				label: t(diffSide === 'a' ? 'diff.menu.copyDeletedLines' : 'diff.menu.copyChangedLines'),
+				run,
+			}];
+		};
 		return [
 			{ label: 'Go to Definition', keybinding: 'F12', run: () => void this.goToDefinition(editor, pos) },
 			{ label: 'Find References', keybinding: 'Shift+F12', run: () => void this.findReferences(editor, pos) },
@@ -1357,6 +1532,7 @@ export const openMethods: ThisType<EditorGroup> = {
 			'separator',
 			{ label: 'Cut', keybinding: 'Ctrl+X', disabled: readOnly, run: () => cut() },
 			{ label: 'Copy', keybinding: 'Ctrl+C', disabled: !view, run: () => copy() },
+			...diffCopyRows(),
 			{ label: 'Paste', keybinding: 'Ctrl+V', disabled: readOnly, run: () => void paste() },
 			{ label: t('editor.menu.compareWithClipboard'), disabled: !view, run: () => void compareWithClipboard() },
 			'separator',

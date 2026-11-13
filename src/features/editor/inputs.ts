@@ -3,7 +3,7 @@
 
 import type { Text } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
-import type { MergeView } from '@codemirror/merge';
+import type { Chunk, MergeView } from '@codemirror/merge';
 import type { FastView, HexView, HexCompareView, ImageView } from '../viewers/types';
 import type { CanLogView, CanRawView } from '../can/types';
 import type { EditableDocView } from './docEditView';
@@ -76,6 +76,14 @@ export interface Editor {
 	 *  like VS Code's diff editor and Ctrl+S writes back there. The input stays untouched —
 	 *  the tab summaries the remote workbench syncs carry the input verbatim. */
 	diffSavePath?: string;
+	/** A text diff's in-place re-read: both sides re-fetched from their recorded revisions
+	 *  and the view rebuilt, so the comparison follows its file the way VS Code's diff
+	 *  editor does. Refuses a dirty buffer — the edits own the pane until saved or
+	 *  reverted; the caller decides what a refusal means. */
+	diffReload?: () => Promise<boolean>;
+	/** A text diff's current changes (the accessible viewer's list and the Copy
+	 *  Deleted/Changed Lines rows both read them; recomputed on every render and edit). */
+	diffChunks?: readonly Chunk[];
 	/** The extension's own Binary Compare page — a binary file between two revisions. */
 	folderCompare?: FolderCompareView;
 	/** An address-aligned hex comparison of two binary files on disk. */

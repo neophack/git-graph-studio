@@ -250,3 +250,56 @@ describe('the diff overview ruler (chunkOverviewMarks)', () => {
 		]);
 	});
 });
+
+describe('the revert arrows (positionRevertArrows)', () => {
+	/** A column with one button per chunk; tops are the document offsets the package writes. */
+	function columnWith(chunkTops: number[]): { column: HTMLElement; chunkList: { fromA: number }[] } {
+		const column = document.createElement('div');
+		const chunkList = chunkTops.map((top, i) => {
+			const button = document.createElement('button');
+			button.dataset.chunk = String(i);
+			button.style.top = `${top}px`;
+			column.appendChild(button);
+			return { fromA: top };
+		});
+		return { column, chunkList };
+	}
+
+	function stubView(scrollTop: number, clientHeight: number) {
+		return {
+			scrollDOM: { scrollTop, clientHeight },
+			lineBlockAt: (pos: number) => ({ top: pos })
+		};
+	}
+
+	it('rides the panes\u2019 scroll: the column translates by the offset, arrows follow the code', async () => {
+		const { positionRevertArrows } = await import('../src/features/editor/editorExtras');
+		// Chunk tops 100 and 300 in the document; the pane scrolled to 150.
+		const { column, chunkList } = columnWith([100, 300]);
+		positionRevertArrows(column, stubView(150, 400), chunkList);
+		expect(column.style.transform).toBe('translateY(-150px)');
+		// Arrow one sits at 100 - 150 = -50: past the viewport's top edge, hidden. Arrow two
+		// at 300 - 150 = 150, inside the 400px viewport, shown.
+		const [first, second] = Array.from(column.querySelectorAll('button'));
+		expect(first.style.visibility).toBe('hidden');
+		expect(second.style.visibility).toBe('');
+	});
+
+	it('no offset means no transform, and every in-view arrow stays visible', async () => {
+		const { positionRevertArrows } = await import('../src/features/editor/editorExtras');
+		const { column, chunkList } = columnWith([0, 200]);
+		positionRevertArrows(column, stubView(0, 400), chunkList);
+		expect(column.style.transform).toBe('');
+		for (const button of Array.from(column.querySelectorAll('button'))) {
+			expect(button.style.visibility).toBe('');
+		}
+	});
+
+	it('a button without a chunk (a rebuilt set mid-edit) hides instead of guessing', async () => {
+		const { positionRevertArrows } = await import('../src/features/editor/editorExtras');
+		const { column, chunkList } = columnWith([200]);
+		chunkList.length = 0;
+		positionRevertArrows(column, stubView(0, 400), chunkList);
+		expect(column.querySelector('button')!.style.visibility).toBe('hidden');
+	});
+});

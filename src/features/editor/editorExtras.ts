@@ -559,3 +559,27 @@ export function attachOverviewRuler(
 		}
 	};
 }
+
+/** Positions the merge view's revert arrows for this app's panes-scroll-themselves layout.
+ *  The package computes each arrow's `top` as a document offset (`lineBlockAt(...).top`),
+ *  correct in its own design — one outer scroller carries both panes and the arrow column
+ *  together — but here the panes scroll inside themselves and the column stands still: the
+ *  arrows freeze at document offsets instead of following the code, and their far-down
+ *  tops stretch the outer container's scrollable range out to the last chunk, which is
+ *  where the diff's ghost scrollbar at the far right came from. The refresh translates the
+ *  column by the scroll offset — the package keeps writing document offsets, exactly the
+ *  coordinate the translate consumes — and hides arrows outside the viewport. */
+export function positionRevertArrows(
+	column: HTMLElement,
+	view: { scrollDOM: { scrollTop: number; clientHeight: number }; lineBlockAt(pos: number): { top: number } },
+	chunks: readonly { fromA: number }[],
+): void {
+	const top = view.scrollDOM.scrollTop;
+	const height = view.scrollDOM.clientHeight;
+	column.style.transform = top > 0 ? `translateY(${-top}px)` : '';
+	for (const button of Array.from(column.querySelectorAll('button'))) {
+		const chunk = chunks[Number(button.dataset.chunk)];
+		const at = chunk ? view.lineBlockAt(chunk.fromA).top - top : -1;
+		button.style.visibility = chunk && at >= -20 && at <= height - 10 ? '' : 'hidden';
+	}
+}

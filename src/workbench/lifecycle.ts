@@ -305,9 +305,12 @@ export const lifecycleMethods: ThisType<Workbench> = {
 					? restored[Math.min(index, restored.length - 1)]!
 					: index === 0 ? this.editors.groupAt(0) : this.editors.split('right');
 				if (this.repoPath !== root) return; // the folder changed under the restore
-				await Promise.all(session.files.map((path) => group.openFile(path, { inactive: true })));
+				// `restore` skips the files the disk lost without a toast; the per-file catch
+				// keeps one failing surface (an image preview's read, say) from aborting the
+				// whole batch's Promise.all.
+				await Promise.all(session.files.map((path) => group.openFile(path, { inactive: true, restore: true }).catch(() => undefined)));
 				if (this.repoPath !== root) return;
-				if (session.active) await group.openFile(session.active);
+				if (session.active) await group.openFile(session.active, { restore: true }).catch(() => undefined);
 				else group.activateLast();
 			}
 		} finally {
@@ -315,6 +318,11 @@ export const lifecycleMethods: ThisType<Workbench> = {
 			this.restoring = false;
 			this.workbenchSync?.localOnly(false);
 		}
+		// The files the disk lost opened to nothing: what the editors hold now IS the
+		// session — write it over the snapshot so the vanished paths are gone for good
+		// instead of retripping on every boot. Only for this root: a restore the folder
+		// switch aborted must not overwrite the new folder's own session.
+		if (this.repoPath === root) this.saveSnapshot();
 	},
 
 	dispose(): void {
@@ -388,6 +396,12 @@ export const lifecycleMethods: ThisType<Workbench> = {
 					void this.editors.reloadIfClean(path);
 					void this.editors.markSaveConflict(path);
 				}
+			}
+			// The text diffs follow their files through the same batch — every diff tab whose
+			// working file sits under the root re-reads its sides, or a checkout leaves the
+			// previous branch's comparison on screen until the tab was closed.
+			for (const path of this.editors.diffSavePaths()) {
+				if (path.toLowerCase().startsWith(root)) void this.editors.reloadIfClean(path);
 			}
 		}
 		this.scheduleRefresh(0);

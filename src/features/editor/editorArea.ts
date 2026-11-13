@@ -1191,6 +1191,12 @@ export class EditorArea {
 		return this.groups().flatMap((g) => g.openFilePaths());
 	}
 
+	/** The working files behind every group's open diff tabs (the truncated watcher batch's
+	 *  prefix pass over them — a diff follows its file like the file tabs do). */
+	diffSavePaths(): string[] {
+		return this.groups().flatMap((g) => g.diffSavePaths());
+	}
+
 	/** The open extension-page tabs' input ids (`webview:<extId>:<panelId>` — one live page
 	 *  per panel, the PC's real tab or a remote frontend's copy): Remote Access's
 	 *  cross-frontend close sync (module 19) watches this set. */

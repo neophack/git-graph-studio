@@ -192,6 +192,12 @@ export class EditorGroup {
 		return this.open.flatMap((e) => (e.input.kind === 'file' ? [e.input.path] : []));
 	}
 
+	/** The working files behind this group's open diff tabs (the truncated watcher batch's
+	 *  prefix pass over them — a diff follows its file like the file tabs do). */
+	diffSavePaths(): string[] {
+		return this.open.flatMap((e) => (e.input.kind === 'diff' && e.diffSavePath ? [e.diffSavePath] : []));
+	}
+
 	declare saveAll: () => Promise<void> ;
 
 	declare hasDirtyEditors: () => boolean ;
@@ -208,7 +214,7 @@ export class EditorGroup {
 
 	declare openContent: (input: Extract<EditorInput, { kind: 'content' }>) => Promise<void> ;
 
-	declare openFile: (path: string, options?: { line?: number; column?: number; inactive?: boolean }) => Promise<void> ;
+	declare openFile: (path: string, options?: { line?: number; column?: number; inactive?: boolean; restore?: boolean }) => Promise<void> ;
 
 	declare tryMountFastView: (editor: Editor, parent?: HTMLElement, indexed?: boolean, onEdit?: () => void) => Promise<boolean>;
 

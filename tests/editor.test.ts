@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { EditorGroup, type Editor } from '../src/features/editor';
+import { EditorGroup, type Editor, type EditorInput } from '../src/features/editor';
 import { workspaceFileCache } from '../src/features/editor/navigate';
 import { fileIcon } from '../src/platform/fileIcons';
 import { settings } from '../src/platform/settings';
@@ -144,7 +144,8 @@ describe('editor group', () => {
 		// building blind and flipping cost two editor constructions on narrow panes).
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(document.querySelectorAll('.cm-mergeView .cm-editor')).toHaveLength(2);
-		expect(texts('.diff-header > span:not(.diff-stats)')).toEqual(['a/x.ts (Index)', 'a/x.ts (Working Tree)']);
+		// VS Code's side headers: one `path (revision)` label over each pane.
+		expect(texts('.diff-side-header')).toEqual(['a/x.ts (Index)', 'a/x.ts (Working Tree)']);
 		// The Xcode-style change navigation: statistics for a modified file, counters absent
 		// for identical sides.
 		// +1 added, −1 deleted, one change (the pieces are separate spans + a text node).
@@ -310,6 +311,83 @@ describe('editor group', () => {
 		click(wh);
 		expect(wh.classList.contains('active')).toBe(true);
 		expect(editor.view!.state.readOnly).toBe(true);
+	});
+
+	it('a clean diff re-reads its sides when the working file changes; a dirty buffer keeps the pane', async () => {
+		// The Source Control diff's comparison is a snapshot only until the disk moves: the
+		// watcher batch naming the file re-reads both sides of a clean tab (VS Code's diff
+		// editor follows its file). The save path keeps the repo side's forward slashes
+		// (`src/a.ts`) while the batch spells them the root's way (`src\\a.ts`) — one file,
+		// both spellings must match.
+		const store: Record<string, string> = { 'C:\\repo\\src/a.ts': 'first\n' };
+		backend.on('read_file_at', ({ revision, path }) => revision === '*'
+			? { contents: store[`C:\\repo\\${String(path)}`] ?? '', binary: false, size: 20, encoding: 'utf8', eol: 'lf' }
+			: { contents: `${revision}:${String(path)}\n`, binary: false, size: 20, encoding: 'utf8', eol: 'lf' });
+		files(store);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openDiff({
+			kind: 'diff', id: 'w1', title: 'a.ts (Working Tree)',
+			left: { revision: 'HEAD', path: 'src/a.ts', label: 'HEAD', exists: true },
+			right: { revision: '*', path: 'src/a.ts', label: 'Working Tree', exists: true }
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		const diff = (group as unknown as { open: Editor[] }).open.find((e) => e.input.kind === 'diff')!;
+		expect(diff.merge!.b.state.doc.toString()).toBe('first\n');
+		// This save's own echo re-reads both sides but changes nothing: no rebuild, the
+		// pane's document keeps its identity (the cursor never jumps).
+		const doc = diff.merge!.b.state.doc;
+		await group.reloadIfClean('C:\\repo\\src\\a.ts');
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(diff.merge!.b.state.doc).toBe(doc);
+		// The disk moved under the clean tab: the modified pane shows the new text, the
+		// base pane re-reads its revision, the tab stays clean.
+		store['C:\\repo\\src/a.ts'] = 'changed on disk\n';
+		await group.reloadIfClean('C:\\repo\\src\\a.ts');
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(diff.merge!.b.state.doc.toString()).toBe('changed on disk\n');
+		expect(diff.dirty).toBe(false);
+		// A dirty buffer owns the pane: the batch leaves it alone, exactly like a dirty
+		// file tab (which takes the conflict bar instead).
+		diff.merge!.b.dispatch({ changes: { from: 0, insert: 'mine ' } });
+		store['C:\\repo\\src/a.ts'] = 'changed again\n';
+		await group.reloadIfClean('C:\\repo\\src\\a.ts');
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(diff.merge!.b.state.doc.toString()).toBe('mine changed on disk\n');
+		expect(diff.dirty).toBe(true);
+	});
+
+	it('clicking an already-open diff again re-reads a clean tab and keeps a dirty buffer', async () => {
+		// The Source Control row's second click used to re-activate the tab with the
+		// comparison it opened with: the file's new state stayed invisible until the tab
+		// (or the app) was closed and reopened.
+		const store: Record<string, string> = { 'C:\\repo\\a.ts': 'first\n' };
+		backend.on('read_file_at', ({ revision, path }) => revision === '*'
+			? { contents: store[`C:\\repo\\${String(path)}`] ?? '', binary: false, size: 20, encoding: 'utf8', eol: 'lf' }
+			: { contents: `${revision}:${String(path)}\n`, binary: false, size: 20, encoding: 'utf8', eol: 'lf' });
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		const input: Extract<EditorInput, { kind: 'diff' }> = {
+			kind: 'diff', id: 'scm:worktree:a.ts', title: 'a.ts (Working Tree)',
+			left: { revision: 'HEAD', path: 'a.ts', label: 'HEAD', exists: true },
+			right: { revision: '*', path: 'a.ts', label: 'Working Tree', exists: true }
+		};
+		await group.openDiff(input);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		// The file changed since the tab opened; the click re-reads the sides in place.
+		store['C:\\repo\\a.ts'] = 'second\n';
+		await group.openDiff(input);
+		expect(texts('.tab .label')).toEqual(['a.ts (Working Tree)']);
+		const diff = (group as unknown as { open: Editor[] }).open.find((e) => e.input.kind === 'diff')!;
+		expect(diff.merge!.b.state.doc.toString()).toBe('second\n');
+		// An unsaved buffer survives the second click with the tab: the edits are not the
+		// disk's, and the activation alone is what the user asked for.
+		diff.merge!.b.dispatch({ changes: { from: 0, insert: 'mine ' } });
+		store['C:\\repo\\a.ts'] = 'third\n';
+		await group.openDiff(input);
+		expect(diff.merge!.b.state.doc.toString()).toBe('mine second\n');
+		expect(diff.dirty).toBe(true);
+		expect(texts('.tab .label')).toEqual(['a.ts (Working Tree)']);
 	});
 
 	it('back/forward navigation lands on an open revision tab', async () => {

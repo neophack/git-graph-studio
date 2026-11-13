@@ -63,6 +63,18 @@ function askToSave(label: string): Promise<'save' | 'discard' | 'cancel'> {
 }
 
 /** The dirty concern of EditorGroup — assigned onto the prototype by the module facade. */
+
+/** Windows compares disk paths case-insensitively and in one separator dialect: a diff's
+ *  save path keeps the repo side's forward slashes (`joinPath` rewrites none), while a
+ *  watcher batch's `joinRepo` spells every level in the root's own separator — the same
+ *  file must match under both spellings. A POSIX path compares as it is. */
+function sameDiskPath(a: string, b: string): boolean {
+	if (a.includes('\\') || b.includes('\\')) {
+		return a.replace(/[\\/]+/g, '\\').toLowerCase() === b.replace(/[\\/]+/g, '\\').toLowerCase();
+	}
+	return a === b;
+}
+
 export const dirtyMethods: ThisType<EditorGroup> = {
 	async save(editor?: Editor | null): Promise<void> {
 		if (editor === undefined) editor = this.active;
@@ -468,6 +480,15 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 	},
 
 	async reloadIfClean(path: string): Promise<void> {
+		// A text diff of this file follows the disk alongside its file tab (VS Code's diff
+		// editor): a clean one re-reads both sides, a dirty one keeps its buffer exactly
+		// like a dirty file tab does. Independent of the file-tab half below — a dirty file
+		// tab (the save-conflict path) must not withhold the diff's reload.
+		for (const diff of this.open) {
+			if (diff.input.kind !== 'diff' || diff.dirty || !diff.diffSavePath || !diff.diffReload) continue;
+			if (!sameDiskPath(diff.diffSavePath, path)) continue;
+			void diff.diffReload();
+		}
 		const editor = this.open.find((e) => e.input.kind === 'file' && e.input.path === path);
 		if (!editor || editor.dirty) return;
 		// A windowed editor's document lives in the backend: it compares the file's stamp

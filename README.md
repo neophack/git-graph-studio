@@ -5,8 +5,12 @@ with git status colouring, a Source Control panel (stage / unstage / discard / c
 editor whose split groups behave as VS Code's (Ctrl+\ family and the orthogonal cut, moving
 editors between groups, spatial and sequential group focus, maximize, join, reset, and tab
 drag-and-drop whose edge bands open the split they name — a split takes half of the source
-group's space and a close hands it back proportionally), a built-in terminal (ConPTY on
-Windows; the shell is a setting, defaulting to **GGS Bash** — the bundled pure-Rust
+group's space and a close hands it back proportionally), a git diff editor shaped like VS
+Code's (per-side `path (revision)` headers, word-level change highlights, collapsed
+unchanged regions, change navigation with the F7 accessible viewer, Open File, Copy
+Deleted/Changed Lines, revert-chunk arrows, and the modified pane saving back with Ctrl+S),
+a built-in terminal (ConPTY on
+Windows; the shell is a setting, defaulting to **GGS Bash** — the bundled pure-Rust 
 bash-like shell that speaks Git Bash's dialect (`/c/...` paths, `/dev/null`, a built-in
 awk, `uname MINGW64`) and also backs Claude Code's shell tool on Windows, where no bash
 exists for it to find; PowerShell is the alternative) — and an extension platform whose

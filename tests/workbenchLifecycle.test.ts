@@ -6,6 +6,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { applyContributions, removeContributions } from '../src/features/extensions';
+import type { Editor } from '../src/features/editor';
 import { commands } from '../src/platform/commands';
 import { ExtensionHost } from '../src/features/extensions';
 import * as state from '../src/platform/state';
@@ -403,6 +404,28 @@ describe('a stale session restore', () => {
 		expect(workbench.editors.openFilePaths()).toEqual([`${REPO_A}\\a.txt`]);
 		expect(w.restoring).toBe(false);
 	});
+
+	it('a session whose files the disk lost opens silently and prunes the snapshot', async () => {
+		// A folder opened, then its files deleted/moved elsewhere: every boot used to raise
+		// one sticky error toast per vanished path (os error 2/3), forever, because the
+		// snapshot kept listing them.
+		state.saveWorkspaceSnapshot(REPO_A, { openFiles: [`${REPO_A}\\a.txt`, `${REPO_A}\\gone.txt`], activeFile: `${REPO_A}\\a.txt`, expanded: [] });
+		backend.handlers.set('read_file', ({ path }) => {
+			if (String(path).endsWith('gone.txt')) throw new Error(`${String(path)}: 系统找不到指定的文件。(os error 2)`);
+			return { contents: `contents of ${String(path)}\n`, binary: false, size: 12 };
+		});
+
+		const w = workbench as unknown as { restoreSnapshot(root: string, snapshot: state.WorkspaceSnapshot): Promise<void>; restoring: boolean };
+		await w.restoreSnapshot(REPO_A, state.workspaceSnapshot(REPO_A)!);
+		await flush(4);
+
+		// The surviving file opened; the missing one left no tab and no toast.
+		expect(workbench.editors.openFilePaths()).toEqual([`${REPO_A}\\a.txt`]);
+		expect(texts('#notifications .message').join('\n')).not.toContain('os error');
+		expect(w.restoring).toBe(false);
+		// The snapshot now holds the surviving session: the vanished path is gone for good.
+		expect(state.workspaceSnapshot(REPO_A)!.openFiles).toEqual([`${REPO_A}\\a.txt`]);
+	});
 });
 
 describe('external changes the watcher could not list in full', () => {
@@ -428,6 +451,29 @@ describe('external changes the watcher could not list in full', () => {
 		reloaded.length = 0;
 		backend.emit(FS_CHANGED_EVENT, { root: REPO_B, paths: ['a.txt'], truncated: true, gitChanged: false });
 		expect(reloaded).toEqual([]);
+	});
+
+	it('a truncated batch re-reads the diff tabs whose working file sits under the root', async () => {
+		// A checkout's batch names no paths: the Source Control diff a user left open must
+		// follow its file like the file tabs do, or it shows the previous branch's
+		// comparison until the tab (or the app) was closed and reopened.
+		const disk: Record<string, string> = { 'src/a.ts': 'first\n' };
+		backend.handlers.set('read_file_at', ({ revision, path }) => revision === '*'
+			? { contents: disk[String(path)] ?? '', binary: false, size: 6, encoding: 'utf8', eol: 'lf' }
+			: { contents: 'base\n', binary: false, size: 5, encoding: 'utf8', eol: 'lf' });
+		await workbench.editors.openDiff({
+			kind: 'diff', id: 'scm:worktree:src/a.ts', title: 'a.ts (Working Tree)',
+			left: { revision: 'HEAD', path: 'src/a.ts', label: 'HEAD', exists: true },
+			right: { revision: '*', path: 'src/a.ts', label: 'Working Tree', exists: true }
+		});
+		const groups = (workbench.editors as unknown as { groups: () => { open: Editor[] }[] }).groups();
+		const diff = groups.flatMap((g) => g.open).find((e) => e.input.kind === 'diff')!;
+		await until(() => diff.merge !== undefined);
+		expect(diff.merge!.b.state.doc.toString()).toBe('first\n');
+
+		disk['src/a.ts'] = 'checked out\n';
+		backend.emit(FS_CHANGED_EVENT, { root: REPO_A, paths: [], truncated: true, gitChanged: true });
+		await until(() => diff.merge!.b.state.doc.toString() === 'checked out\n');
 	});
 });
 

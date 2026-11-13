@@ -359,7 +359,14 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
    frame's own editor background shows until the page paints its themed one. */
 .ext-page-frame, .webview-panel-frame, .editor-pane iframe { color-scheme: normal; }
 .editor-pane .cm-editor { flex: 1; min-height: 0; height: 100%; }
-.editor-pane .cm-merge-view { display: flex; flex: 1; min-height: 0; }
+/* position: relative anchors the accessible diff viewer's overlay (F7), which mounts into
+   this host and covers it. */
+.editor-pane .cm-merge-view { display: flex; flex: 1; min-height: 0; position: relative; }
+/* Inline (single-column) diff: the lone editor is a row-flex item of the merge host, and
+   CodeMirror's content minimum (a `pre` line, no shrink) would widen it past the pane —
+   the find widget anchored to its right edge lands outside the window and is clipped.
+   Split mode needs nothing: each pane's own wrapper carries overflow hidden. */
+.editor-pane .cm-merge-view > .cm-editor { min-width: 0; }
 /* @codemirror/merge's outer root carries no height of its own: it fills the app's host.
    Without the bound it grows to its content and no wheel can scroll the diff. */
 .cm-merge-view > .cm-mergeView { height: 100%; }
@@ -370,7 +377,11 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
    file. Binding each pane's scroller to its viewport puts both scrollbars where the user
    is looking; both layouts' specificity outranks the package's `!important` defaults. */
 .cm-merge-view > .cm-mergeView > .cm-mergeViewEditors { height: 100%; }
-.cm-merge-view > .cm-mergeView > .cm-mergeViewEditors > .cm-mergeViewEditor > .cm-editor { height: 100% !important; }
+/* VS Code's side headers live inside each pane's wrapper, above its editor: the wrapper
+   becomes a column, and the editor flexes below its label (the editor's `height: 100%`
+   rule above stays harmless — a flex item with flex-basis 0 sizes from the flexing). */
+.cm-merge-view > .cm-mergeView > .cm-mergeViewEditors > .cm-mergeViewEditor { display: flex; flex-direction: column; }
+.cm-merge-view > .cm-mergeView > .cm-mergeViewEditors > .cm-mergeViewEditor > .cm-editor { flex: 1 1 0 !important; min-height: 0 !important; }
 .cm-merge-view > .cm-mergeView > .cm-mergeViewEditors > .cm-mergeViewEditor > .cm-editor > .cm-scroller { height: 100% !important; overflow-y: auto !important; }
 /* The diff overview ruler (VS Code's scrollbar change map): a narrow strip at each pane's
    right edge where every changed region shows as a green (inserted) or red (deleted) mark,
@@ -399,13 +410,35 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .editor-outline-item:hover { background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.12)); }
 .editor-notice { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--vscode-descriptionForeground); }
 .editor-notice .codicon { font-size: 40px; opacity: 0.5; }
-.diff-header { display: flex; flex: none; height: 24px; font-size: 12px; color: var(--vscode-descriptionForeground); border-bottom: 1px solid var(--vscode-editorGroup-border); }
-/* Direct children only: a descendant selector would also reach the toolbar's codicon spans,
-   whose flex grow + 12px padding + overflow hidden are what clipped the icons in half. */
-.diff-header > span { flex: 1; padding: 0 12px; line-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.diff-header > span + span { border-left: 1px solid var(--vscode-editorGroup-border); }
-/* Inline (narrow) diff: the header's two labels no longer sit beside each other. */
-.editor-pane.diff-inline .diff-header > span + span { border-left: none; }
+/* The diff editor's actions row (VS Code keeps these in the title bar; this editor hosts
+   them at the diff's top edge): the toolbar left, the +N/−N statistics pushed right. */
+.diff-header { display: flex; flex: none; align-items: center; height: 24px; font-size: 12px; color: var(--vscode-descriptionForeground); border-bottom: 1px solid var(--vscode-editorGroup-border); }
+.diff-header > .diff-toolbar { flex: 1; }
+.diff-stats { font-size: 11px; margin-left: auto; margin-right: 12px; white-space: nowrap; }
+/* VS Code's side headers: one slim label — `path (revision)` — over each pane, centered
+   and muted; the inline layout carries the single header over its one editor. */
+.diff-side-header { flex: none; height: 22px; line-height: 22px; font-size: 12px; color: var(--vscode-descriptionForeground); background: var(--vscode-editorGroup-headerBackground, transparent); border-bottom: 1px solid var(--vscode-editorGroup-border); text-align: center; padding: 0 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-pane.diff-inline .cm-merge-view { flex-direction: column; }
+.editor-pane.diff-inline .cm-merge-view > .cm-editor { flex: 1 1 0; min-height: 0; }
+
+/* The accessible diff viewer (VS Code's F7 surface): a solid panel at the diff's top over
+   a dimming backdrop, one row per change ("Difference i of n: +a −d" plus the changed
+   lines), the current row highlighted; the arrows/Enter/Escape drive it from the keyboard. */
+.diff-viewer-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.4); z-index: 20; }
+.diff-viewer { position: absolute; top: 0; left: 0; right: 0; max-height: 62%; display: flex; flex-direction: column; z-index: 21; background: var(--vscode-editorWidget-background); color: var(--vscode-editorWidget-foreground, var(--vscode-foreground)); border: 1px solid var(--vscode-widget-border, var(--vscode-editorGroup-border)); border-top: none; box-shadow: var(--vscode-widget-shadow, 0 4px 12px rgba(0, 0, 0, 0.3)); outline: none; }
+.diff-viewer-head { display: flex; align-items: center; justify-content: space-between; flex: none; height: 26px; padding: 0 4px 0 12px; font-size: 12px; color: var(--vscode-descriptionForeground); border-bottom: 1px solid var(--vscode-editorGroup-border); }
+.diff-viewer-rows { flex: 1; min-height: 0; overflow: auto; }
+.diff-viewer-row { padding: 6px 12px; cursor: pointer; border-bottom: 1px solid var(--vscode-editorGroup-border); }
+.diff-viewer-row:hover { background: var(--vscode-list-hoverBackground); }
+.diff-viewer-row.current { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+.diff-viewer-row-title { display: flex; gap: 8px; font-size: 12px; margin-bottom: 4px; }
+.diff-viewer-row-title .added { color: var(--vscode-gitDecoration-addedResourceForeground, #73c991); }
+.diff-viewer-row-title .deleted { color: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39); }
+.diff-viewer-preview { font-family: var(--vscode-editor-font-family); font-size: 12px; line-height: 16px; white-space: pre; overflow: hidden; }
+.diff-viewer-line.add { color: var(--vscode-charts-green, #81b88b); }
+.diff-viewer-line.del { color: var(--vscode-charts-red, #c74e39); }
+.diff-viewer-line.more, .diff-viewer-empty { color: var(--vscode-descriptionForeground); font-style: italic; }
+.diff-viewer-empty { padding: 12px; }
 
 /* Welcome page */
 .welcome { flex: 1; overflow: auto; display: flex; justify-content: center; padding: 40px 24px; }
@@ -823,11 +856,15 @@ body.resizing iframe { pointer-events: none; }
 .cm-editor .cm-tooltip-autocomplete ul li[aria-selected] { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
 .cm-editor .cm-indent-markers { --indent-marker-bg-color: var(--vscode-editorIndentGuide-background); }
 /* Diff (merge view) */
-/* The merge view is scrolled by its `.cm-mergeView` container (the library's own layout: the
-   editors take their natural height and the container has `overflow-y: auto`). Forcing a
-   100% height onto the editors instead clips them inside `overflow: hidden` wrappers - no
-   scrollbar, no wheel scrolling - so only the container is sized here. */
-.cm-merge-view .cm-mergeView { flex: 1; min-height: 0; overflow-y: auto; }
+/* This app's diff panes scroll themselves (VS Code's diff: both scrollbars where the user
+   is looking — see the pane rules near `.cm-merge-view` above), so the merge container
+   itself must never scroll: it would put a third scrollbar at the diff's far right, and
+   the revert arrows' document-offset tops (thousands of px into a tall file) are exactly
+   what stretches its scrollable range. */
+.cm-merge-view .cm-mergeView { flex: 1; min-height: 0; overflow: hidden; }
+/* The arrow column rides the panes' scroll via a transform (positionRevertArrows); its own
+   box clips the arrows the transform carries past the viewport edges. */
+.cm-merge-view .cm-merge-revert { overflow: hidden; }
 /* Diff highlighting is VS Code's: changed lines get a translucent line background, changed
    words a stronger text background, and no underline or strikethrough. The split merge view
    (`.cm-mergeView`) and the inline/unified diff (`.editor-pane.diff-inline`) share these
@@ -847,6 +884,9 @@ body.resizing iframe { pointer-events: none; }
 .editor-pane .cm-editor.cm-merge-b .cm-changedLineGutter, .editor-pane .cm-editor.cm-merge-b .cm-inlineChangedLineGutter { background: var(--vscode-diffEditorGutter-insertedLineBackground); }
 .editor-pane .cm-editor.cm-merge-b .cm-deletedLineGutter { background: var(--vscode-diffEditorGutter-removedLineBackground); }
 .editor-pane .cm-editor.cm-merge-a .cm-collapsedLines, .editor-pane .cm-editor.cm-merge-b .cm-collapsedLines { background: var(--vscode-editorWidget-background); color: var(--vscode-descriptionForeground); border: none; }
+/* VS Code's unchanged-region bar: the pill centres its count and answers the pointer. */
+.editor-pane .cm-editor.cm-merge-a .cm-collapsedLines, .editor-pane .cm-editor.cm-merge-b .cm-collapsedLines { text-align: center; border-radius: 4px; }
+.editor-pane .cm-editor.cm-merge-a .cm-collapsedLines:hover, .editor-pane .cm-editor.cm-merge-b .cm-collapsedLines:hover { background: var(--vscode-list-hoverBackground); }
 /* In the split view the left editor (`.cm-merge-a`) shows the removed side: its changed
    lines/text take the removed colors (the right editor keeps the inserted ones above). */
 .editor-pane .cm-editor.cm-merge-a .cm-changedLine { background: var(--vscode-diffEditor-removedLineBackground); }
@@ -1487,7 +1527,6 @@ body.resizing iframe { pointer-events: none; }
 
 /* ---------- The diff's change navigation and statistics (Xcode-style version editor) ---------- */
 .diff-count { font-size: 11px; color: var(--vscode-descriptionForeground); min-width: 52px; text-align: center; }
-.diff-stats { font-size: 11px; margin-left: 8px; white-space: nowrap; }
 .diff-stats .added { color: var(--vscode-gitDecoration-addedResourceForeground, #73c991); margin-right: 6px; }
 .diff-stats .deleted { color: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39); margin-right: 6px; }
 
