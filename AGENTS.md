@@ -159,8 +159,10 @@ guarantees the window is never a blank dark rectangle.
   import the directory, not the file),
   `src/workbench/titlebar.ts`, `src/workbench/statusbar.ts`, `src/workbench/panel.ts` (panel chrome; its Output view is
   the Git channel), `src/platform/ui/` (shared DOM kit: dom, codicon, notify, progress,
-  contextMenu, quickInput under one facade — codicons, notifications, context menus, quick
-  input), `src/platform/ipc/` (the typed IPC seam: one file per backend domain —
+  contextMenu, quickInput, globalContextMenu under one facade — codicons, notifications,
+  context menus, quick input, and the app-wide fallback context menu (Copy/Paste/Select
+  All over every unclaimed surface — selectable text is copyable on every page, popups
+  included; the terminal's renderer-kept selection registers a selection source)), `src/platform/ipc/` (the typed IPC seam: one file per backend domain —
   `core.ts` is the only door to `@tauri-apps/api`, the domain files' function signatures
   are the contract `tests/ipcContract.test.ts` and `scripts/check-ipc.mjs` hold against
   the backend's registration; the shared result shapes — StatusMap, FileContents,

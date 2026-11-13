@@ -19,6 +19,7 @@ import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { loadXterm } from '../../platform/lazy';
 
 import { actionButton, el, icon, notify, showContextMenu, type MenuEntry } from '../../platform/ui/index';
+import { registerSelectionSource } from '../../platform/ui/globalContextMenu';
 import { THEME_EVENT, settings } from '../../platform/settings';
 import { t } from '../../platform/i18n';
 import { OutputFollow, FOLLOW_GRACE_MS } from './outputFollow';
@@ -169,6 +170,10 @@ export class TerminalView {
 		window.addEventListener('beforeunload', () => {
 			for (const session of this.sessions) if (!session.attached) void ptyKill(session.id);
 		});
+		// The fallback context menu's Copy reaches the terminal's selection here: xterm keeps
+		// it outside the DOM's, so the menu consults this renderer-kept source (the active
+		// session's) when the document selection is empty.
+		registerSelectionSource(() => this.active?.term.hasSelection() ? this.active.term.getSelection() : null);
 		// The instance's terminal set changed — a terminal opened or died anywhere (the
 		// PC's window, another remote session, this frontend): mirror it while this page is
 		// being looked at (§6.6 keeps the traffic away otherwise).

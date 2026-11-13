@@ -6,6 +6,7 @@
 import '@vscode/codicons/dist/codicon.css';
 import './workbench/shell.css';
 import { bootStage, webviewBeat } from './platform/ipc/app';
+import { installGlobalContextMenu } from './platform/ui/globalContextMenu';
 import { initSettings, loadSettingsFile } from './platform/settings';
 import { installDesktopRemoteHooks } from './remote/desktopHooks';
 import { installDeviceShell, primeDeviceShell } from './remote/deviceShell';
@@ -13,9 +14,12 @@ import { tauriBridgePresent } from './remote/assetUrl';
 
 // The webview's own right-click menu is the host browser's chrome (back/refresh/save
 // as/print/inspect) - never something this desktop app wants surfaced. Views that offer
-// their own context menu already call preventDefault() on their own 'contextmenu' handler;
-// this is the catch-all for everywhere else. Devtools stay reachable from the Help menu.
-document.addEventListener('contextmenu', (event) => event.preventDefault());
+// their own context menu already call preventDefault() on their own 'contextmenu' handler
+// and keep it; everywhere else the fallback menu answers — Copy over whatever is selected
+// (notifications, dialogs, tooltips, the Output view, previews), Paste into a focused
+// field, Select All — so selectable text is copyable on every page, popups included.
+// Devtools stay reachable from the Help menu.
+installGlobalContextMenu(document);
 
 // The backend's liveness probe hook (window.rs's sweep): the Rust side evals a probe here
 // every ~20 s and the page answers through `webview_beat` — two consecutive silent probes
