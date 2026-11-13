@@ -3,8 +3,8 @@
 // block - then the "Git Graph" item, the conflict count, the symbol index state and the save
 // progress, then the extension-owned items (`window.createStatusBarItem`); on the right the
 // extension items come first, then the cursor position, the indent, the encoding, the line
-// endings, the language, and the notification bell (which opens the notification centre -
-// every toast ever shown stays listed there until cleared).
+// endings, the language, the file watcher's dot, and the notification bell (which opens the
+// notification centre - every toast ever shown stays listed there until cleared).
 
 import { type HeadInfo, repoHead } from '../platform/ipc/revision';
 import type { WatcherReport } from '../platform/ipc/fs';
@@ -141,7 +141,7 @@ export class StatusBar {
 		this.watcherItem.hidden = true;
 		this.extLeft = el('div', 'status-ext');
 		this.extRight = el('div', 'status-ext');
-		this.left.append(this.repoItem, this.branchItem, this.syncItem, this.conflictsItem, this.symbolsItem, this.saveItem, this.watcherItem, this.extLeft);
+		this.left.append(this.repoItem, this.branchItem, this.syncItem, this.conflictsItem, this.symbolsItem, this.saveItem, this.extLeft);
 
 		this.positionItem = el('div', 'status-item static');
 		this.indentItem = el('div', 'status-item', ['Spaces: 4']);
@@ -159,9 +159,10 @@ export class StatusBar {
 		this.bellItem.title = 'Notifications';
 		this.bellItem.hidden = true;
 		this.bellItem.addEventListener('click', () => this.toggleCentre());
-		// Extension items sit before the app's own right cluster (VS Code's placement).
+		// Extension items sit before the app's own right cluster (VS Code's placement); the
+		// watcher dot sits at the cluster's right end, just left of the bell.
 		this.right.prepend(this.extRight);
-		this.right.append(this.positionItem, this.indentItem, this.eolItem, this.encodingItem, this.languageItem, this.bellItem);
+		this.right.append(this.positionItem, this.indentItem, this.eolItem, this.encodingItem, this.languageItem, this.watcherItem, this.bellItem);
 		this.centrePanel = el('div', 'notification-centre');
 		this.centrePanel.hidden = true;
 		document.body.appendChild(this.centrePanel);

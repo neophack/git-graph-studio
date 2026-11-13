@@ -1111,10 +1111,10 @@
 						const wb = (await import('/src/workbench/workbench.ts')).currentWorkbench;
 						await wb.refreshWatcherStatus();
 						await waitFor(() => {
-							const dot = document.querySelector('.status-left .status-watcher');
+							const dot = document.querySelector('.status-right .status-watcher');
 							return dot && !dot.hidden && dot.classList.contains('watcher-ok');
 						}, 20000);
-						const dot = document.querySelector('.status-left .status-watcher');
+						const dot = document.querySelector('.status-right .status-watcher');
 						return dot.className + ' - ' + dot.title.split('\n')[0];
 					});
 				}

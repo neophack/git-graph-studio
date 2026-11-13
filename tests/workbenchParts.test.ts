@@ -290,7 +290,7 @@ describe('status bar', () => {
 
 	it('shows the file watcher as a dot: green while it answers, red once it stops, hidden with no folder', () => {
 		const bar = new StatusBar(document.getElementById('statusbar')!);
-		const dot = () => document.querySelector<HTMLElement>('.status-left .status-watcher')!;
+		const dot = () => document.querySelector<HTMLElement>('.status-right .status-watcher')!;
 		// No open folder (an empty answer), or a backend without the command (null): no dot.
 		bar.setWatcherStatus([]);
 		expect(dot().hidden).toBe(true);
