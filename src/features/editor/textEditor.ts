@@ -4,7 +4,7 @@
 // `editor.ts` reaches it through `lazy.ts`'s `loadTextEditor()` and keeps the loaded module
 // around; `folderCompare.ts` does the same for its read-only panes.
 
-import { Compartment, EditorSelection, EditorState, Transaction, type Extension, type StateCommand } from '@codemirror/state';
+import { Compartment, EditorSelection, EditorState, StateEffect, Transaction, type Extension, type SelectionRange, type StateCommand } from '@codemirror/state';
 import { EditorView, gutter, GutterMarker, keymap, type Command, type KeyBinding, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, highlightSpecialChars, rectangularSelection, crosshairCursor, ViewPlugin, type ViewUpdate } from '@codemirror/view';
 import { addCursorAbove, addCursorBelow, copyLineDown, copyLineUp, cursorMatchingBracket, defaultKeymap, deleteLine, deleteTrailingWhitespace, history, historyKeymap, indentWithTab, moveLineDown, moveLineUp, redo, selectAll, selectLine, undo } from '@codemirror/commands';
 import { closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
@@ -45,6 +45,12 @@ export type { Extension };
  *  word wrap ride in compartments so the settings can reconfigure open editors in place. */
 export const indentSlot = new Compartment();
 export const wrapSlot = new Compartment();
+
+/** The find/replace match's reveal: centred in both axes, so the hit lands in the window's
+ *  middle the way VS Code's find does. The library's own default is a minimal scroll, which
+ *  parks a match right of the viewport flush against its right edge — the end of the line. */
+export const findScrollToMatch = (range: SelectionRange): StateEffect<unknown> =>
+	EditorView.scrollIntoView(range, { y: 'center', x: 'center' });
 
 /** VS Code's Ctrl+Shift+Enter: a blank line above the cursor's line, indented like it. */
 const insertBlankLineAbove: StateCommand = ({ state, dispatch }) => {
@@ -316,8 +322,9 @@ export function baseExtensions(readOnly: boolean, path = ''): Extension[] {
 		highlightActiveLine(),
 		highlightSelectionMatches(),
 		// The M3 3.4 find/replace widget replaces CodeMirror's default panel; the search
-		// keymap (Ctrl+F, Enter/F3) keeps driving it.
-		search({ top: true, createPanel: createFindPanel }),
+		// keymap (Ctrl+F, Enter/F3) keeps driving it. The jumped-to match reveals centred
+		// (findScrollToMatch), not at the viewport's edge.
+		search({ top: true, createPanel: createFindPanel, scrollToMatch: findScrollToMatch }),
 		// Every text surface scrolls past its end: the last line parks at the viewport's top.
 		pastEndExtension(),
 		keymap.of([...commentBindings(path), ...vscodeKeymap, ...editingKeymap, ...closeBracketsKeymap, ...completionKeymap, ...findKeymap, ...historyKeymap, ...foldKeymap, indentWithTab]),
@@ -435,7 +442,10 @@ export function revealPosition(view: EditorView, line: number, column: number): 
 	const pos = Math.min(target.from + Math.max(0, column - 1), target.to);
 	view.dispatch({
 		selection: { anchor: pos },
-		effects: EditorView.scrollIntoView(pos, { y: 'center' })
+		// Centred on both axes: a column deep in a long line otherwise rides CodeMirror's
+		// minimal caret reveal flush to the right edge — the Search view's jump-to-result
+		// hid its match there.
+		effects: EditorView.scrollIntoView(pos, { y: 'center', x: 'center' })
 	});
 	view.focus();
 }

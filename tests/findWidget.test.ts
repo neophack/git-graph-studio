@@ -5,25 +5,27 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { EditorSelection, EditorState } from '@codemirror/state';
 import { EditorView } from '@codemirror/view';
-import { SearchQuery, openSearchPanel, setSearchQuery } from '@codemirror/search';
+import { SearchQuery, findNext, openSearchPanel, search, setSearchQuery } from '@codemirror/search';
 
 import { countMatches, createFindPanel, openReplacePanel } from '../src/features/editor';
+import { findScrollToMatch, revealPosition } from '../src/features/editor/textEditor';
 import { findOptions } from '../src/platform/find/findOptions';
 import { FindHistory, HistoryRecall } from '../src/platform/find/findHistory';
 import { settings } from '../src/platform/settings';
-import { search } from '@codemirror/search';
 import { click, key, texts, type } from './helpers';
 
 const DOC = 'one two One twoo\nthree one\n';
 
-function viewOf(doc: string, selection = doc.length): EditorView {
+function viewOf(doc: string, selection = doc.length, extra: Parameters<typeof EditorState.create>[0]['extensions'] = []): EditorView {
 	const host = document.createElement('div');
 	document.body.appendChild(host);
 	const view = new EditorView({
 		state: EditorState.create({
 			doc,
 			selection: { anchor: selection },
-			extensions: [EditorState.allowMultipleSelections.of(true), search({ top: true, createPanel: createFindPanel })]
+			// The production pairing (baseExtensions): the widget plus the centred match
+			// reveal (findScrollToMatch) the search commands drive.
+			extensions: [EditorState.allowMultipleSelections.of(true), search({ top: true, createPanel: createFindPanel, scrollToMatch: findScrollToMatch }), ...extra]
 		}),
 		parent: host
 	});
@@ -328,6 +330,44 @@ describe('the widget', () => {
 		const editableWidget = editable.dom.querySelector('.cm-find-widget') as HTMLElement;
 		expect((editableWidget.querySelector('.cm-replace-row') as HTMLElement).classList.contains('open')).toBe(true);
 		editable.destroy();
+		view.destroy();
+	});
+});
+
+describe('the match reveal', () => {
+	/** The scroll requests a view's transactions carried. The library's `scrollIntoView`
+	 *  effect has no exported type marker, so a reference effect identifies its type and
+	 *  the value (a ScrollTarget) carries the strategy and the target range. */
+	function viewThatRecordsScrolls(extensions: Parameters<typeof EditorState.create>[0]['extensions']): { view: EditorView; scrolls: { y: string; x: string; from: number; to: number }[] } {
+		const scrolls: { y: string; x: string; from: number; to: number }[] = [];
+		const reference = EditorView.scrollIntoView(0);
+		const listener = EditorView.updateListener.of((update) => {
+			for (const tr of update.transactions) {
+				for (const effect of tr.effects) {
+					if (effect.type !== reference.type) continue;
+					const target = effect.value as { y: string; x: string; range: { from: number; to: number } };
+					scrolls.push({ y: target.y, x: target.x, from: target.range.from, to: target.range.to });
+				}
+			}
+		});
+		return { view: viewOf(DOC, 0, [...extensions, listener]), scrolls };
+	}
+
+	it('find-next centres the match on both axes — the minimal default parks it at the edge', () => {
+		const { view, scrolls } = viewThatRecordsScrolls([]);
+		// The query must be set first: findNext with no valid query opens the panel instead.
+		view.dispatch({ effects: setSearchQuery.of(queryOf()) });
+		expect(findNext(view)).toBe(true);
+		const reveal = scrolls.findLast((s) => s.y !== undefined);
+		expect(reveal).toMatchObject({ y: 'center', x: 'center', from: 0, to: 3 });
+		view.destroy();
+	});
+
+	it('revealPosition centres the position too, not only the line', () => {
+		const { view, scrolls } = viewThatRecordsScrolls([]);
+		revealPosition(view, 1, 9); // the "O" of "One", column 9 of line 1
+		const reveal = scrolls.findLast((s) => s.y !== undefined);
+		expect(reveal).toMatchObject({ y: 'center', x: 'center', from: 8, to: 8 });
 		view.destroy();
 	});
 });

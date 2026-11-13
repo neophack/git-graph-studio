@@ -12,7 +12,7 @@
 // scroller's own moves (CodeMirror keeping the caret in view), which are read back into it.
 
 import { hook } from '../../platform/hooks';
-import { EditorState, StateEffect, StateField, Compartment } from '@codemirror/state';
+import { EditorSelection, EditorState, StateEffect, StateField, Compartment } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, drawSelection, highlightActiveLine, highlightSpecialChars, keymap, lineNumbers } from '@codemirror/view';
 import { attachWheel, type Disposable } from '../../scroll/input';
 import { type AutoscrollStrategy, ScrollModel, VERTICAL_SCROLL_MARGIN } from '../../scroll/model';
@@ -864,11 +864,14 @@ export class EditableDocView {
 		const relative = match.line - this.first;
 		if (relative < 0 || relative >= cm.state.doc.lines) return;
 		const line = cm.state.doc.line(relative + 1);
+		const from = line.from + utf16Col(line.text, match.startCol);
+		const to = line.from + utf16Col(line.text, match.endCol);
 		cm.dispatch({
-			selection: {
-				anchor: line.from + utf16Col(line.text, match.startCol),
-				head: line.from + utf16Col(line.text, match.endCol)
-			}
+			selection: { anchor: from, head: to },
+			// The vertical reveal is the scroll model's (ensureAround's autoscroll); this
+			// effect centres the match horizontally, where the model has no opinion — the
+			// caret reveal CodeMirror otherwise runs parks it flush at the right edge.
+			effects: EditorView.scrollIntoView(EditorSelection.range(from, to), { x: 'center' })
 		});
 	}
 
