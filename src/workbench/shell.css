@@ -400,10 +400,12 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .editor-notice { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--vscode-descriptionForeground); }
 .editor-notice .codicon { font-size: 40px; opacity: 0.5; }
 .diff-header { display: flex; flex: none; height: 24px; font-size: 12px; color: var(--vscode-descriptionForeground); border-bottom: 1px solid var(--vscode-editorGroup-border); }
-.diff-header span { flex: 1; padding: 0 12px; line-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.diff-header span + span { border-left: 1px solid var(--vscode-editorGroup-border); }
+/* Direct children only: a descendant selector would also reach the toolbar's codicon spans,
+   whose flex grow + 12px padding + overflow hidden are what clipped the icons in half. */
+.diff-header > span { flex: 1; padding: 0 12px; line-height: 24px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diff-header > span + span { border-left: 1px solid var(--vscode-editorGroup-border); }
 /* Inline (narrow) diff: the header's two labels no longer sit beside each other. */
-.editor-pane.diff-inline .diff-header span + span { border-left: none; }
+.editor-pane.diff-inline .diff-header > span + span { border-left: none; }
 
 /* Welcome page */
 .welcome { flex: 1; overflow: auto; display: flex; justify-content: center; padding: 40px 24px; }
