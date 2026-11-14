@@ -1,8 +1,8 @@
 // The view a `.dmp` / `.mdmp` opens in: the backend parsed the minidump's header,
 // stream table, module list and memory map (`dump_open`) while this view mounts, and the
 // carve pass (`dump_scan`) then walks the dumped memory regions for embedded files by
-// magic signature — the MultiExtractor workflow, streamed: progress as it scans, entries
-// in batches, one done. The list browses what was carved (images preview in place, the
+// magic signature — one streamed scan: progress as it runs, entries in batches, one
+// done. The list browses what was carved (images preview in place, the
 // rest as a hex head), the Modules tab lists the dump's loaded images as rebuild-PE
 // candidates, and the extract writes the selection — carved files flat, rebuilt modules
 // under `modules/` — into the output folder beside the dump.

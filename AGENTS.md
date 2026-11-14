@@ -2818,7 +2818,7 @@ background; the table browses what has landed, the way the CAN raw trace does.
 ### 21. Memory Dump Viewer
 
 A Windows user-mode minidump (`.dmp` / `.mdmp` — Task Manager's "Create dump file", a
-crash handler's save) opens as MultiExtractor's workflow over process memory: the backend
+crash handler's save) opens as a carver's workflow over process memory: the backend
 parses the `MDMP` header and its stream table in one pass (modules, the memory map, the
 system row, the process row — the parser tolerates the quirks the live 456 MiB msedge dump
 taught us: a `Version` field that is not the spec constant, the newer `Header64` wide
@@ -2837,11 +2837,12 @@ memory regions for embedded files by magic signature while the list browses.
 - Backend: the `ggs-dmp` crate (`src-tauri/crates/ggs-dmp/`): the header + stream
   directory (classic u32 and wide u64 layouts, the row-count heuristic picking the stride
   that recovers more valid rows), the ModuleList / Memory64List / MemoryList readers
-  (self-describing entry sizes stepped, never hardcoded), `carve.rs` — the MultiExtractor-
-  shaped format table (header magic + per-format validator: PNG's IEND, JPEG's marker
+  (self-describing entry sizes stepped, never hardcoded), `carve.rs` — the classic
+  carver's format table (header magic + per-format validator: PNG's IEND, JPEG's marker
   chain, RIFF's size field, ZIP's central directory, SQLite's page count, OGG's page walk,
-  MP3's frame walk, and the rest) scanning region by region in chunks with boundary
-  overlap, VA attribution, and module containment per hit — and `pe.rs`, the module
+  MP3's frame walk, TrueType's table directory, and the rest) over a single in-memory
+  read of the dump — every validator slice reads the buffer, memchr drives every magic
+  and trailer pass — with VA attribution and module containment per hit — and `pe.rs`, the module
   rebuild that maps a loaded image's sections back to their `PointerToRawData` slots into
   a disk-layout PE (pages the dumper skipped land as zeros, honestly) — behind the
   `src-tauri/src/dump_commands.rs` adapters (`dump_open` / `dump_scan` streamed over a
@@ -2851,8 +2852,12 @@ memory regions for embedded files by magic signature while the list browses.
   image preview, the extract's coordinates, the modules tab, the mid-scan cancel), the
   `ggs-dmp` crate's in-crate tests (synthetic minidumps built in a tempdir: the wide
   variant, the MemoryList fallback, the carve's hit/validation/dedup, the PE rebuild over
-  a region hole), the dev harness's `Memory dump viewer` surface (mocked backend: the
-  overview strip, the streamed list, the type chip, the image preview, the modules tab)
+  a region hole, and the every-format guarantee — one dump carrying a crafted sample of
+  each of the catalogue's 33 formats, every one carved at its offset with its exact size
+  and extracted byte-identical), the dev harness's `Memory dump viewer` surface (mocked
+  backend: the overview strip, the streamed list, the type chip, the image preview, the
+  modules tab), and `real_dump <file> --scan` — the crate's example that parses and
+  carves a real dump from the command line
 
 ## Development workflow
 

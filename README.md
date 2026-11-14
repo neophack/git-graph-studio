@@ -67,8 +67,7 @@ weak-crypto APIs, with CWE tags) and the **Import Graph** (file dependencies wit
 cycles). A Windows memory dump (`.dmp` / `.mdmp`) opens in the **Memory Dump Viewer**: the backend
 parses the minidump (streams, the module list, the memory map, system and process facts)
 and carves the dumped memory for embedded files by magic signature — images, media,
-archives, documents, databases — MultiExtractor's workflow, streamed while the list
-browses. Carved images preview in place (the rest as a hex head), every hit carries its
+archives, documents, databases — one streamed scan while the list browses. Carved images preview in place (the rest as a hex head), every hit carries its
 virtual address and the module it sat inside, the dump's loaded modules extract as
 rebuilt disk-layout PEs, and any selection writes out of the dump into a folder beside it.
 

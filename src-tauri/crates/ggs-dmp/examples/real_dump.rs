@@ -47,11 +47,13 @@ fn main() {
         overview.os.arch, overview.os.version, overview.pid, overview.threads, overview.has_exception
     );
     println!(
-        "modules {} ({}) · memory {} regions ({}) · streams {}",
+        "modules {} ({} = {} bytes) · memory {} regions ({} = {} bytes) · streams {}",
         overview.modules.len(),
         humans(overview.module_total_bytes),
+        overview.module_total_bytes,
         overview.memory_regions,
         humans(overview.memory_total_bytes),
+        overview.memory_total_bytes,
         overview.streams.len()
     );
     for module in overview.modules.iter().take(5) {
@@ -127,15 +129,12 @@ fn chrono_or_unix(stamp: u64) -> String {
 }
 
 fn humans(n: u64) -> String {
-    if n < 1024 {
-        return format!("{n} B");
-    }
-    let units = ["KB", "MB", "GB", "TB"];
-    let mut value = n as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < units.len() - 1 {
-        value /= 1024.0;
+    let mut value = n;
+    let mut unit = 0usize;
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    while value >= 1024 && unit < UNITS.len() - 1 {
+        value /= 1024;
         unit += 1;
     }
-    format!("{value:.1} {}", units[unit])
+    format!("{value} {}", UNITS[unit])
 }

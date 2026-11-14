@@ -904,6 +904,7 @@ export const en = {
 	'dump.tag.archive': 'Archives',
 	'dump.tag.doc': 'Documents',
 	'dump.tag.db': 'Databases',
+	'dump.tag.font': 'Fonts',
 	'dump.kind.module': 'module',
 	'dump.out': 'Extract to',
 	'dump.out.title': 'The folder the extract writes into (created if missing; a default sits beside the dump)',

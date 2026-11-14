@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 serde.workspace = true
+memchr.workspace = true
 ggs-base.workspace = true
 
 [dev-dependencies]

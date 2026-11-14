@@ -2008,6 +2008,7 @@ name = "ggs-dmp"
 version = "0.0.0"
 dependencies = [
  "ggs-base",
+ "memchr",
  "serde",
  "tempfile",
 ]

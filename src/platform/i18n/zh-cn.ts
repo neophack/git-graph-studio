@@ -902,6 +902,7 @@ export const zhCn: typeof en = {
 	'dump.tag.archive': '压缩包',
 	'dump.tag.doc': '文档',
 	'dump.tag.db': '数据库',
+	'dump.tag.font': '字体',
 	'dump.kind.module': '模块',
 	'dump.out': '提取到',
 	'dump.out.title': '提取输出的文件夹（不存在则创建；默认位于转储文件旁）',

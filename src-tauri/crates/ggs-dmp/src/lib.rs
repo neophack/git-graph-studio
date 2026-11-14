@@ -662,7 +662,7 @@ pub struct ExtractProgress {
 }
 
 /// One extract item's answer: where the file landed and how big it is, or why it failed.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractItemResult {
     pub name: String,

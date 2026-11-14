@@ -88,7 +88,7 @@ export function filterCarved(entries: CarvedEntry[], filter: DumpFilter): Carved
 }
 
 /** One count per family tag, in the order the filter chips render them. */
-export const TAG_ORDER = ['image', 'media', 'archive', 'doc', 'db'] as const;
+export const TAG_ORDER = ['image', 'media', 'archive', 'doc', 'db', 'font'] as const;
 
 export function countByTag(entries: CarvedEntry[]): Record<string, number> {
 	const counts: Record<string, number> = {};
