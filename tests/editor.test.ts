@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { activateHover, hasHoverTooltips } from '@codemirror/view';
 
 import { EditorGroup, type Editor, type EditorInput } from '../src/features/editor';
 import { workspaceFileCache } from '../src/features/editor/navigate';
@@ -167,6 +168,81 @@ describe('editor group', () => {
 		await group.openFile('C:\\repo\\a\\x.ts');
 		await group.openFile('C:\\repo\\b\\x.ts');
 		expect(texts('.tab .description')).toEqual(['a', 'b']);
+	});
+
+	it('the diff panes hover a macro with its #define value, like a text editor', async () => {
+		backend.on('read_file_at', ({ revision, path }) => ({ contents: `${revision}:${path}\nint n = MAX_LEN;\n`, binary: false, size: 40 }));
+		files({ 'C:\\repo\\a.ts': 'int n = MAX_LEN;\nint m = 0;\n', 'C:\\repo\\inc\\conf.h': '#define MAX_LEN 256\n' });
+		backend.on('symbol_lookup', ({ name }) => {
+			if (String(name) === 'MAX_LEN') return [{ kind: 'macro', name: 'MAX_LEN', path: 'inc/conf.h', line: 0 }];
+			return [];
+		});
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openDiff({
+			kind: 'diff', id: 'd-hover', title: 'a.ts (Working Tree)',
+			left: { revision: ':index', path: 'a.ts', label: 'Index', exists: true },
+			right: { revision: '*', path: 'a.ts', label: 'Working Tree', exists: true }
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		// Hovering the macro's name on either pane shows its indexed #define — the same
+		// hoverTooltip source a text editor mounts, over the workspace symbol index.
+		const editor = group.activeEditor!;
+		expect(editor.merge).toBeDefined();
+		const hoverAt = (view: NonNullable<typeof editor.merge>['a']): void => {
+			const line = view.state.doc.line(2);
+			activateHover(view, line.from + line.text.indexOf('MAX_LEN'), 1);
+		};
+		hoverAt(editor.merge!.b);
+		await flush();
+		// The modified pane's hover answered — and the macro hover is the only hover
+		// tooltip a diff pane mounts, so an active tooltip means it resolved the name.
+		expect(hasHoverTooltips(editor.merge!.b.state)).toBe(true);
+		// The read-only base side answers too.
+		hoverAt(editor.merge!.a);
+		await flush();
+		expect(hasHoverTooltips(editor.merge!.a.state)).toBe(true);
+		await group.closeAll();
+	});
+
+	it('the split diff has a draggable divider that resizes the base side and survives rebuilds', async () => {
+		backend.on('read_file_at', ({ revision, path }) => ({ contents: `${revision}:${path}\n`, binary: false, size: 20 }));
+		files({ 'C:\\repo\\a.ts': 'one\n' });
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openDiff({
+			kind: 'diff', id: 'd-sash', title: 'a.ts (Working Tree)',
+			left: { revision: ':index', path: 'a.ts', label: 'Index', exists: true },
+			right: { revision: '*', path: 'a.ts', label: 'Working Tree', exists: true }
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		// The sash sits between the panes; until the first drag the package's 50/50 flex
+		// stands (no inline flex on the base side's wrapper).
+		const sash = document.querySelector('.cm-diff-sash');
+		expect(sash).not.toBeNull();
+		const wrapA = document.querySelector<HTMLElement>('.cm-mergeViewEditors > .cm-mergeViewEditor')!;
+		expect(wrapA.style.flex).toBe('');
+		// Dragging the sash left writes the base side's flex-basis percent — jsdom's rects
+		// are all zeros, so every position clamps to the 85% stop; the drag's temp state
+		// (body resizing, cursor, the dragging mark) is cleaned up on mouseup.
+		sash.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 300 }));
+		document.dispatchEvent(new MouseEvent('mousemove', { clientX: 100 }));
+		document.dispatchEvent(new MouseEvent('mouseup', { clientX: 100 }));
+		expect(wrapA.style.flex).toBe('0 0 85%');
+		expect(document.body.classList.contains('resizing')).toBe(false);
+		expect(document.body.style.cursor).toBe('');
+		// The dragged ratio rides the rebuilds a layout switch makes: the inline layout
+		// drops the sash, switching back re-installs it and re-applies the ratio.
+		click([...document.querySelectorAll<HTMLButtonElement>('.diff-toolbar button')].find((b) => b.title.startsWith('Switch between'))!);
+		await flush();
+		expect(document.querySelector('.cm-diff-sash')).toBeNull();
+		click([...document.querySelectorAll<HTMLButtonElement>('.diff-toolbar button')].find((b) => b.title.startsWith('Switch between'))!);
+		await flush();
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		const wrapA2 = document.querySelector<HTMLElement>('.cm-mergeViewEditors > .cm-mergeViewEditor')!;
+		expect(document.querySelector('.cm-diff-sash')).not.toBeNull();
+		expect(wrapA2.style.flex).toBe('0 0 85%');
+		await group.closeAll();
 	});
 
 	it('a diff error that is not a missing side surfaces; a missing revision side reads empty', async () => {

@@ -393,6 +393,15 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
    the diff panes: theme colours, a hover highlight, the package's glyph kept. */
 .cm-merge-revert button { color: var(--vscode-editor-foreground); opacity: 0.7; border-radius: 3px; }
 .cm-merge-revert button:hover { background: var(--vscode-toolbar-hoverBackground); opacity: 1; }
+/* The split diff's draggable divider (VS Code's sash): a narrow strip between the panes a
+   mouse drag turns into the base side's flex-basis percent (the sash's handler writes the
+   panes' inline flex; until the first drag the package's 50/50 grow stands). A 1px centre
+   line reads as the pane boundary; hover or drag widens it in the theme's sash colour.
+   Kept under the overview rulers' z-index (6) so a ruler click at the base side's edge
+   still centres its spot. */
+.cm-merge-view .cm-mergeViewEditors .cm-diff-sash { flex: 0 0 6px; position: relative; z-index: 5; cursor: ew-resize; }
+.cm-merge-view .cm-mergeViewEditors .cm-diff-sash::before { content: ''; position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; transform: translateX(-0.5px); background: var(--vscode-editorGroup-border); }
+.cm-merge-view .cm-mergeViewEditors .cm-diff-sash:hover::before, .cm-merge-view .cm-mergeViewEditors .cm-diff-sash.dragging::before { width: 3px; background: var(--vscode-sash-hoverBorder, var(--vscode-focusBorder)); }
 .editor-pane iframe { flex: 1; border: none; width: 100%; height: 100%; background: var(--vscode-editor-background); }
 /* The Git Graph host: the extension's own generated page in its frame. */
 .graph-host { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }

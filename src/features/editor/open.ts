@@ -6,6 +6,7 @@ import type { OverviewMark } from './editorExtras';
 import { type FileContents, type FileProbe, fileProbe, readFileBase64 } from '../../platform/ipc/fs';
 import { materializeRevisionFile, readFileAt } from '../../platform/ipc/revision';
 import { scmBlame } from '../../platform/ipc/scm';
+import { symbolLookup } from '../../platform/ipc/symbols';
 import { hasBookmark } from './bookmarks';
 import { samePath, contextUri, menuSection, resourceContext } from '../extensions';
 import { loadAnalysisPages, loadCanViews, loadCallTree, loadFileHistory, loadFolderCompare, loadHexCompare, loadMerge, loadSymbolDbView, loadTextEditor } from '../../platform/lazy';
@@ -665,6 +666,11 @@ export const openMethods: ThisType<EditorGroup> = {
 		 *  editor's extra ignore options. `manualSplit` (undefined = follow the pane width)
 		 *  persists per tab for the diff's lifetime. */
 		let manualSplit: boolean | undefined;
+		/** The split view's base-side share in percent, dragged on the pane divider; null
+		 *  until the first drag keeps the package's 50/50 flex. It rides the tab's rebuilds
+		 *  (layout switch, ignore toggles, the width flip) and dies with the tab — the same
+		 *  lifetime manualSplit has. */
+		let splitRatio: number | null = null;
 		/** The unchanged stretches between changes: shown whole by default (the toolbar
 		 *  button folds them), the choice persisting per tab through the rebuilds a layout
 		 *  switch or an ignore toggle makes. */
@@ -745,8 +751,17 @@ export const openMethods: ThisType<EditorGroup> = {
 		// would leave the diff growing unbounded over the status bar.
 		const host = el('div', 'editorState cm-merge-view');
 		editor.pane.appendChild(host);
-		// The text editor and the merge views are async chunks, loaded with the first diff.
-		const [{ EditorView, EditorState, baseExtensions, keymap, languageSlot, loadLanguage }, { Chunk, MergeView, goToNextChunk, goToPreviousChunk, unifiedMergeView }] = await Promise.all([textEditor(), loadMerge()]);
+		// The text editor and the merge views are async chunks, loaded with the first diff —
+		// with the workbench's macro hover beside them: a hovered #define shows its value in
+		// the diff panes exactly as a text editor's does (the group supplies root and the
+		// cached read; no open root or unindexed name answers nothing, so the mount is
+		// unconditional).
+		const [{ EditorView, EditorState, baseExtensions, keymap, languageSlot, loadLanguage }, { Chunk, MergeView, goToNextChunk, goToPreviousChunk, unifiedMergeView }, { symbolHoverExtension }] = await Promise.all([textEditor(), loadMerge(), import('./editorProviderViews')]);
+		const macroHover = symbolHoverExtension({
+			root: () => this.rootPath,
+			lookup: (name) => symbolLookup(name),
+			read: (path) => this.cachedRead(path)
+		});
 		// The language support, once loaded, so that a layout switch rebuilds an already
 		// highlighted view instead of dropping back to Plain Text until the next open.
 		let languageSupport: Extension | null = null;
@@ -955,6 +970,9 @@ export const openMethods: ThisType<EditorGroup> = {
 				...baseExtensions(!editable),
 				languageSlot.of(languageSupport ?? []),
 				diffKeys,
+				// Both panes hover macros: the base side is read-only but a hover is a read,
+				// and the inline layout's single editor reuses this list.
+				macroHover,
 				EditorView.updateListener.of((update) => {
 					// An edit moves the changes: the chunk list, the ruler marks, the counter
 					// and the revert arrows all follow.
@@ -976,7 +994,7 @@ export const openMethods: ThisType<EditorGroup> = {
 			];
 			if (split) {
 				editor.merge = new MergeView({
-					a: { doc: normalize(left.contents ?? ''), extensions: [...baseExtensions(true), languageSlot.of(languageSupport ?? []), diffKeys, EditorView.updateListener.of(() => { updateCounter(); scheduleRevertArrows(); })] },
+					a: { doc: normalize(left.contents ?? ''), extensions: [...baseExtensions(true), languageSlot.of(languageSupport ?? []), diffKeys, macroHover, EditorView.updateListener.of(() => { updateCounter(); scheduleRevertArrows(); })] },
 					b: { doc: normalize(buffer ?? right.contents ?? ''), extensions: bExtensions },
 					parent: host,
 					collapseUnchanged: collapsedUnchanged ? { margin: 3, minSize: 4 } : undefined,
@@ -1002,6 +1020,51 @@ export const openMethods: ThisType<EditorGroup> = {
 					editor.merge?.b.scrollDOM.removeEventListener('scroll', scheduleRevertArrows);
 				};
 				scheduleRevertArrows();
+				// VS Code's draggable divider: a sash between the panes whose drag sets the
+				// base side's flex-basis percent (splitRatio, above — the wrapper's inline flex
+				// is rewritten on every rebuild that carries a dragged ratio; until the first
+				// drag the package's 50/50 grow stands). Moves are coalesced to one layout per
+				// frame, like the workbench's own sashes, and CodeMirror re-measures each pane
+				// through its own resize observer.
+				const wrapA = editor.merge.a.dom.parentElement;
+				const wrapB = editor.merge.b.dom.parentElement;
+				const row = wrapB?.parentElement ?? null;
+				if (wrapA && row) {
+					const sash = el('div', 'cm-diff-sash');
+					sash.addEventListener('mousedown', (event) => {
+						event.preventDefault();
+						const bounds = row.getBoundingClientRect();
+						const ratioAt = (x: number): number => Math.min(85, Math.max(15, ((x - bounds.left) / bounds.width) * 100));
+						const apply = (x: number): void => {
+							splitRatio = ratioAt(x);
+							wrapA.style.flex = `0 0 ${splitRatio}%`;
+						};
+						sash.classList.add('dragging');
+						document.body.classList.add('resizing');
+						document.body.style.cursor = 'ew-resize';
+						let latest = event.clientX;
+						let pending = 0;
+						const raf = window.requestAnimationFrame?.bind(window) ?? ((callback: () => void) => window.setTimeout(callback, 16));
+						const move = (e: MouseEvent): void => {
+							latest = e.clientX;
+							if (pending) return;
+							pending = raf(() => apply(latest));
+						};
+						const up = (): void => {
+							if (pending) { window.cancelAnimationFrame?.(pending); pending = 0; }
+							apply(latest);
+							document.removeEventListener('mousemove', move);
+							document.removeEventListener('mouseup', up);
+							sash.classList.remove('dragging');
+							document.body.classList.remove('resizing');
+							document.body.style.cursor = '';
+						};
+						document.addEventListener('mousemove', move);
+						document.addEventListener('mouseup', up);
+					});
+					row.insertBefore(sash, wrapB);
+					if (splitRatio !== null) wrapA.style.flex = `0 0 ${splitRatio}%`;
+				}
 				const chunks = (): readonly Chunk[] => editor.merge!.chunks;
 				overviews.push(
 					attachOverviewRuler(editor.merge.a, () => chunkOverviewMarks(chunks(), 'a', editor.merge!.a.state.doc)),
