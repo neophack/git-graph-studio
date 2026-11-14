@@ -319,8 +319,8 @@ describe('status bar', () => {
 		}
 		setLocale('zh-cn');
 		try {
-			expect(t('status.watcherRunning')).toBe('文件监视器运行中 - 外部改动自动刷新');
-			expect(t('status.watcherError')).toBe('文件监视器不可用 - 请使用刷新操作更新视图');
+			expect(t('status.watcherRunning')).toBe('自动刷新已开启 - 外部改动实时同步');
+			expect(t('status.watcherError')).toBe('自动刷新不可用 - 请使用刷新操作更新视图');
 		} finally {
 			setLocale('en');
 		}
