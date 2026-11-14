@@ -24,7 +24,11 @@ mod test_isolated_store;
 /// push crosses into tauri (docs/architecture-restructure-plan.md §4.7, P3-1).
 pub mod events;
 pub mod can_commands;
+pub mod cmd_dbc;
+pub mod cmd_elf;
+pub mod cmd_dts;
 pub mod csv_commands;
+pub mod dump_commands;
 pub mod viewer_commands;
 /// The app's own update channel (2026-11-10): the repository's newest release, this
 /// platform's installer downloaded through the marketplace's streaming progress and
@@ -73,7 +77,7 @@ pub mod window;
 
 mod desktop {
     use crate::{
-        can_commands, viewer_commands, cmd_analysis, cmd_app, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_media, cmd_providers,
+        can_commands, viewer_commands, cmd_analysis, cmd_app, cmd_assoc, cmd_dbc, cmd_dts, cmd_elf, cmd_ext, cmd_fs, cmd_fuzzy, cmd_media, cmd_providers, csv_commands, dump_commands,
         cmd_scm, cmd_search, cmd_symbols, ext_child, ext_gallery, ext_process, mcp, measure,
         pty, remote_debug, remote_host,
         app_update,
@@ -335,7 +339,10 @@ mod desktop {
             .manage(ggs_text::viewer::ViewerState::default())
             .manage(ggs_text::viewer::indexed::IndexedState::default())
             .manage(ggs_can::CanLogState::default())
-            .manage(ggs_csv::CsvState::default())
+            .manage(ggs_dbc::DbcState::default())
+            .manage(ggs_elf::ElfState::default())
+.manage(ggs_csv::CsvState::default())
+            .manage(ggs_dmp::DumpState::default())
             .manage(ext_gallery::GalleryInstallState::default())
             .manage(app_update::AppUpdateState::default())
             // A clone of the app's one host (`ext_process::host()`), not a second,
@@ -353,7 +360,7 @@ mod desktop {
             // The media viewer's streaming protocol (module 7): the file's bytes with HTTP
             // Range support, confined to the open workspace roots (media_command in
             // cmd_media.rs; Tauri spells a custom scheme http://ggsmedia.localhost/ on
-            // Windows, ggsmedia:// elsewhere - convertFileSrc handles both).
+            // Windows, ggsmedia:// elsewhere — convertFileSrc handles both).
             .register_asynchronous_uri_scheme_protocol("ggsmedia", |ctx, request, responder| {
                 use tauri::Manager as _;
                 cmd_media::serve_media(
@@ -605,6 +612,18 @@ mod desktop {
                 csv_commands::csv_count,
                 csv_commands::csv_series,
                 csv_commands::csv_close,
+                cmd_dbc::dbc_open,
+                cmd_dbc::dbc_decode,
+                cmd_dbc::dbc_close,
+                cmd_elf::elf_open,
+                cmd_elf::elf_symbols,
+                cmd_elf::elf_close,
+                cmd_dts::devtree_open,
+                dump_commands::dump_open,
+                dump_commands::dump_scan,
+                dump_commands::dump_preview,
+                dump_commands::dump_extract,
+                dump_commands::dump_cancel,
                 cmd_fs::repo_submodules,
                 cmd_fs::remote_paths_policy,
                 cmd_fs::remote_ext_roots,

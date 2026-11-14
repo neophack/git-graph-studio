@@ -2318,6 +2318,22 @@ fn asc_start_epoch(path: &Path) -> Option<f64> {
     }
     None
 }
+
+/// The measurement start a log's header states (BLF SYSTEMTIME or .asc `date` line),
+/// without walking the file — the raw view's open answer carries it, so its absolute
+/// time is the frames' own t plus this one add.
+pub fn start_epoch_of(path: &Path) -> Option<f64> {
+    let mut sig = [0u8; 4];
+    let is_blf = File::open(path)
+        .ok()
+        .and_then(|mut f| f.read_exact(&mut sig).ok())
+        .is_some_and(|()| &sig == b"LOGG");
+    if is_blf {
+        blf_start_epoch(path)
+    } else {
+        asc_start_epoch(path)
+    }
+}
 impl<W: Write + Seek> Converter<W> {
     /// Finishes the target (the BLF's header rewrite) and reports the frames written, or
     /// the first I/O error the writer recorded along the way.
@@ -2703,6 +2719,9 @@ impl FrameSink for VecSink {
 pub struct CanOpenResult {
     pub doc_id: u32,
     pub total_bytes: u64,
+    /// The log's wall-clock start (seconds since the Unix epoch), when its header states
+    /// one — the raw view's absolute-time display rides on it (`start + frame t`).
+    pub start_timestamp_s: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -3421,6 +3440,37 @@ mod tests {
         assert!(
             (start - (days as f64 * 86_400.0 + 8.0 * 3_600.0 + 30.0 * 60.0 + 0.25)).abs() < 1e-6
         );
+    }
+
+    #[test]
+    fn open_answer_carries_the_headers_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let days = days_from_civil(2026, 9, 14) as f64;
+        let start_of_day = days * 86_400.0 + 8.0 * 3_600.0 + 30.0 * 60.0 + 0.25;
+        // The .asc header's `date` line, read without walking the frames.
+        let asc = dir.path().join("run.asc");
+        std::fs::write(
+            &asc,
+            "date Mon Sep 14 08:30:00.250 2026\nbase hex timestamps absolute\n   0.000000 1  100 Rx d 8 17\n",
+        )
+        .unwrap();
+        let start = start_epoch_of(&asc).unwrap();
+        assert!((start - start_of_day).abs() < 1e-6);
+        // The BLF header's SYSTEMTIME, through the same helper.
+        let mut file = blf_with(&can_message(0, 1, 0x1, 0));
+        let st: [u16; 8] = [2026, 9, 1, 14, 8, 30, 0, 250];
+        for (i, v) in st.iter().enumerate() {
+            file[40 + i * 2..40 + i * 2 + 2].copy_from_slice(&v.to_le_bytes());
+        }
+        let blf = dir.path().join("run.blf");
+        std::fs::write(&blf, &file).unwrap();
+        let start = start_epoch_of(&blf).unwrap();
+        assert!((start - start_of_day).abs() < 1e-6);
+        // No `date` line: None, never a fabricated start — the view then keeps
+        // relative time only.
+        let bare = dir.path().join("bare.asc");
+        std::fs::write(&bare, "base hex timestamps absolute\n   0.0 1 100 Rx d 1 11\n").unwrap();
+        assert!(start_epoch_of(&bare).is_none());
     }
 
     #[test]

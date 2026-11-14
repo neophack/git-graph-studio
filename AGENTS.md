@@ -134,7 +134,7 @@ Extensions view would call it), a mission line, and a test file.
 | 10 | Git Graph Engine | The graph view and the engine seam |
 | 11 | Integrated Terminal | Shells inside the panel |
 | 12 | Extension Platform | VSIX installs and the extension host |
-| 13 | CAN Trace Analyzer | CANoe-style `.blf` / `.asc` analysis |
+| 13 | CAN Trace Analyzer | CANoe-style `.blf` / `.asc` analysis and the CAN database (`.dbc`) browser |
 | 14 | Performance Lab | Measurement, metrics, the perf gate and the module self-tests |
 | 15 | Build & Release Pipeline | Asset preparation, packaging, installers, CI |
 | 16 | Symbol MCP Server | The `ggs --mcp` AI bridge over the symbol index |
@@ -142,6 +142,9 @@ Extensions view would call it), a mission line, and a test file.
 | 18 | GGS Bash | The Windows-only bundled bash-like shell and the Terminal Shell setting |
 | 19 | Remote Access | The tray daemon, the Hub relay and the browser workbench (ggs-remote) |
 | 20 | Data Table | CSV/TSV table browsing, sorting and multi-column plotting |
+| 21 | Memory Dump Viewer | Windows minidump browsing, embedded-file carving and module extraction |
+| 22 | ELF Inspector | ELF32/64 images: summary, segments, sections and the symbol table |
+| 23 | Device Tree | Device tree source and blob: the node tree over one parse |
 
 ### 1. Workbench Shell
 
@@ -1264,6 +1267,14 @@ page shows the integration's state (`claude_mcp_status`).
   run with its observable result)
 
 ### 13. CAN Trace Analyzer
+
+The CAN Database viewer is the analyzer's sibling: a `.dbc` opens in `src/features/dbc/dbcView.ts` —
+the message list (filter by name or id), the picked frame's signals and comments, and the decode
+panel that feeds the backend `dbc_decode` a frame id plus payload hex and reads the physical
+values back (byte order, scaling, multiplexing and `VAL_` labels all honoured). The parser and
+decoder live in the `ggs-dbc` crate; `dbc_open`/`dbc_decode`/`dbc_close` are the commands, the
+documents held in `ggs_dbc::DbcState`. The Text button swaps the tab to the file's editable text
+form — the same one-button journey the CAN trace and the data table take.
 
 CANoe's Statistics window and graphics window in one view: `.blf` / `.asc` traces parsed in
 the backend, rendered asynchronously — per-channel counts, bus load, per-identifier cycle
@@ -2804,7 +2815,91 @@ background; the table browses what has landed, the way the CAN raw trace does.
   three groups, the decimation's spike), the dev harness's `?scroll=1` Data table surface
   (the wheel's rows, the sort, the plot's draw and its zoom refetch)
 
+### 21. Memory Dump Viewer
+
+A Windows user-mode minidump (`.dmp` / `.mdmp` — Task Manager's "Create dump file", a
+crash handler's save) opens as MultiExtractor's workflow over process memory: the backend
+parses the `MDMP` header and its stream table in one pass (modules, the memory map, the
+system row, the process row — the parser tolerates the quirks the live 456 MiB msedge dump
+taught us: a `Version` field that is not the spec constant, the newer `Header64` wide
+directory, and the newer dumper's self-describing stream heads), then carves the dumped
+memory regions for embedded files by magic signature while the list browses.
+
+- Frontend: `src/features/dump/dumpView.ts` (the view: the overview strip — arch, OS, PID,
+  threads, modules, memory, streams, crash/live — the Files / Modules tab chips over the
+  carve scan's streamed results, the type / query / min-size filters (client-side over the
+  delivered entries), image previews in place over a hex head for the rest, the module
+  rebuild cards, and the extract row's output folder with Extract Selected / Extract All),
+  `src/features/dump/dumpModel.ts` (the list's pure model: carve names, byte formatting,
+  the filter, the hex head), `src/features/dump/{index,types}.ts` (the facade),
+  `src/platform/ipc/dump.ts` (the typed seam), `src/platform/fileIcons.ts`'s
+  `isDumpFile` (the routing predicate the Explorer shares)
+- Backend: the `ggs-dmp` crate (`src-tauri/crates/ggs-dmp/`): the header + stream
+  directory (classic u32 and wide u64 layouts, the row-count heuristic picking the stride
+  that recovers more valid rows), the ModuleList / Memory64List / MemoryList readers
+  (self-describing entry sizes stepped, never hardcoded), `carve.rs` — the MultiExtractor-
+  shaped format table (header magic + per-format validator: PNG's IEND, JPEG's marker
+  chain, RIFF's size field, ZIP's central directory, SQLite's page count, OGG's page walk,
+  MP3's frame walk, and the rest) scanning region by region in chunks with boundary
+  overlap, VA attribution, and module containment per hit — and `pe.rs`, the module
+  rebuild that maps a loaded image's sections back to their `PointerToRawData` slots into
+  a disk-layout PE (pages the dumper skipped land as zeros, honestly) — behind the
+  `src-tauri/src/dump_commands.rs` adapters (`dump_open` / `dump_scan` streamed over a
+  Channel with `Generation` cancellation / `dump_preview` base64 / `dump_extract` per-item
+  progress / `dump_cancel`)
+- Tests: `tests/dumpViewer.test.ts` (the routing, the streamed list, the filters, the
+  image preview, the extract's coordinates, the modules tab, the mid-scan cancel), the
+  `ggs-dmp` crate's in-crate tests (synthetic minidumps built in a tempdir: the wide
+  variant, the MemoryList fallback, the carve's hit/validation/dedup, the PE rebuild over
+  a region hole), the dev harness's `Memory dump viewer` surface (mocked backend: the
+  overview strip, the streamed list, the type chip, the image preview, the modules tab)
+
 ## Development workflow
+
+### 22. ELF Inspector
+
+An ELF image (`.elf` / `.axf` — the embedded toolchains' output) opens as an inspector over
+the bytes: the summary card (class, endianness, type, machine, entry, the rough ROM/RAM
+split — allocated non-writable sections are the flash-ish footprint, the writable ones the
+RAM), the program headers, the section table, and the symbol table — the kept functions and
+objects (sized ones only) sorted largest first and windowed through the backend, with a
+case-insensitive filter the backend applies. The reader is hand-written in the `ggs-elf`
+crate (ELF32 and ELF64, both endiannesses, no `object`/`goblin` dependency); `elf_open` /
+`elf_symbols` / `elf_close` are the commands, the parsed images held in `ggs_elf::ElfState`.
+
+- Frontend: `src/features/elf/elfView.ts` (the view: the summary card, the mode chips —
+  Sections / Symbols — over one body, the virtual-scrolled symbol table on the scroll
+  model), `src/features/elf/{index,types}.ts` (the facade), `src/platform/ipc/elf.ts` (the
+  typed seam), `src/platform/fileIcons.ts`'s `isElfImage` (the routing predicate)
+- Backend: the `ggs-elf` crate (`src-tauri/crates/ggs-elf/`) behind the
+  `src-tauri/src/cmd_elf.rs` adapters
+- Tests: `tests/elfView.test.ts` (the routing, the summary, the sections, the symbol
+  windows and their filter, dispose releasing the document), the crate's own parse tests
+  (a hand-built ELF64 fixture asserted section by section)
+- Dev probe: `dev/dev-harness.html`'s ELF inspector surface
+
+### 23. Device Tree
+
+A device tree opens as one tree whichever form it came in: a `.dtb` blob read off its FDT
+magic (the big-endian header, the token-stream structure block, the string table, the
+memory-reservation pairs) or `.dts` / `.dtsi` source parsed through a tolerant tokenizer
+(`` /dts-v1/ `` directives, `/memreserve/` pairs, labels, `&label` overlays as named nodes,
+`/delete-node/` and `/delete-property/` honoured, preprocessor lines skipped to their line's
+end). Every property value keeps its own reading — strings, hex cells, raw bytes, `&phandle`
+references — and the view spells it back the way the source wrote it, with collapsible nodes,
+a search box pruning to the matching nodes and their ancestors, and the Text button (source
+files only) making the same one-button journey to the editable text.
+
+- Frontend: `src/features/devtree/devTreeView.ts` (the tree, the prune, the reservations
+  line), `src/features/devtree/{index,types}.ts` (the facade), `src/platform/ipc/devtree.ts`
+  (the typed seam), `src/platform/fileIcons.ts`'s `isDevTreeFile` (the routing predicate)
+- Backend: the `ggs-dts` crate (`src-tauri/crates/ggs-dts/` — the blob walk and the source
+  parser answering one `DtsDocument`) behind the `src-tauri/src/cmd_dts.rs` adapter
+  (`devtree_open`, one shot, no state)
+- Tests: `tests/devTree.test.ts` (the routing, the tree render, the toggle, the prune, the
+  failure banner, the Text swap), the crate's own parse tests (a hand-built blob asserted
+  node by node beside the source spellings)
+- Dev probe: `dev/dev-harness.html`'s device tree surface
 
 ### Before you change anything
 

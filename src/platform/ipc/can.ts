@@ -114,6 +114,9 @@ export interface CanIntervals {
 export interface CanOpenResult {
 	docId: number;
 	totalBytes: number;
+	/** The log's wall-clock start (seconds since the Unix epoch), when its header states
+	 *  one — absolute time is `startTimestampS + tS`; null keeps the view relative-only. */
+	startTimestampS: number | null;
 }
 
 export interface CanFrameLine {

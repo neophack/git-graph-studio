@@ -7,6 +7,9 @@ import type { Chunk, MergeView } from '@codemirror/merge';
 import type { FastView, HexView, HexCompareView, ImageView } from '../viewers/types';
 import type { CanLogView, CanRawView } from '../can/types';
 import type { CsvView } from '../data/types';
+import type { DbcView } from '../dbc/types';
+import type { ElfView } from '../elf/types';
+import type { DevTreeView } from '../devtree/types';
 import type { EditableDocView } from './docEditView';
 import type { FileHistoryView } from '../scm/types';
 import type { CallTreeView, WsSymbol } from '../search/types';
@@ -115,6 +118,15 @@ export interface Editor {
 	/** A data table (.csv / .tsv) — the tab the file opens in, with the table and plot
 	 * modes over one backend document. */
 	csv?: CsvView;
+	/** A CAN database (.dbc) — the message browser and its decode panel. */
+	dbc?: DbcView;
+	/** An ELF image (.elf / .axf) — the summary, sections and symbol table. */
+	elf?: ElfView;
+	/** A device tree (.dts / .dtsi / .dtb) — the node tree over the parsed document. */
+	devtree?: DevTreeView;
+	/** A Windows memory dump (.dmp / .mdmp) — the tab the file opens in: the carve scan's
+	 * results, the module list, previews and extraction (module 21). */
+	dump?: import('../dump/types').DumpView;
 	/** A large file's windowed editable editor — the document lives in the backend's rope
 	 *  and only a window of lines is ever in the webview. */
 	doc?: EditableDocView;

@@ -64,7 +64,15 @@ a fit-relative zoom toolbar, arrow-key panning), beside a collapsible tree of mo
 complexity, size, nesting per function), **Dead Code** (declarations no call site in the
 workspace spells), a rule-based **Security Scan** (hardcoded secrets, dangerous and
 weak-crypto APIs, with CWE tags) and the **Import Graph** (file dependencies with import
-cycles). The sidebar's sixth entry opens the **MCP Server** page: the connection
+cycles). A Windows memory dump (`.dmp` / `.mdmp`) opens in the **Memory Dump Viewer**: the backend
+parses the minidump (streams, the module list, the memory map, system and process facts)
+and carves the dumped memory for embedded files by magic signature — images, media,
+archives, documents, databases — MultiExtractor's workflow, streamed while the list
+browses. Carved images preview in place (the rest as a hex head), every hit carries its
+virtual address and the module it sat inside, the dump's loaded modules extract as
+rebuilt disk-layout PEs, and any selection writes out of the dump into a folder beside it.
+
+The sidebar's sixth entry opens the **MCP Server** page: the connection
 snippets (with copy buttons) for pointing an AI client at this repository through
 `ggs --mcp`, the 15-tool catalogue, and the bridge's recent call log. The shell itself is themeable
 (`Auto (System)` follows the OS) with a Compact / Comfortable density setting, motion that

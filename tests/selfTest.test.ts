@@ -47,6 +47,14 @@ beforeEach(async () => {
 		['scm_stashes', () => []],
 		['workspace_symbols', () => [{ kind: 'function', name: 'two', path: 'notes.txt', line: 1 }]],
 		['analysis_status', () => ({ state: 'ready', done: 2, total: 2, files: 2, symbols: 3, calls: 2 })],
+		// The metrics stream self-test counts every batched row against the Done's
+		// function count — the scripted answer carries two rows and a matching Done.
+		['analysis_metrics', ({ onEvent }) => {
+			const channel = onEvent as { onmessage: (e: unknown) => void };
+			channel.onmessage({ kind: 'batch', rows: [{ path: 'a.rs', name: 'one', kind: 'fn', container: null, line: 1, lines: 2, params: 0, complexity: 1, nesting: 0, refs: 0 }, { path: 'a.rs', name: 'two', kind: 'fn', container: null, line: 5, lines: 3, params: 1, complexity: 2, nesting: 1, refs: 1 }] });
+			channel.onmessage({ kind: 'done', files: 1, functions: 2, cancelled: false });
+			return null;
+		}],
 		['mcp_tools', () => [{ name: 'symbol_lookup', description: 'look up a symbol' }]],
 		['mcp_log', () => []],
 		['ext_list', () => [{ id: 'neophack.git-graph-rs', format: 'vsix' }]],

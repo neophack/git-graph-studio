@@ -1364,6 +1364,11 @@ export class EditorArea {
 	openHex = (path?: string) => this.activeGroup.openHex(path);
 	openLocalHexCompare = (left: string, right: string) => this.activeGroup.openLocalHexCompare(left, right);
 	openMarkdownPreview = (path?: string) => this.activeGroup.openMarkdownPreview(path);
+	/** The analysis index's status push reaches every group's open analysis pages, not
+	 *  just the active one — a page waiting on a cold build in any group follows it. */
+	noteAnalysisStatus = (status: import('../../platform/ipc/analysis').AnalysisStatus | null) => {
+		for (const group of this.groups()) group.noteAnalysisStatus(status);
+	};
 	openMarkdownPreviewToSide = (path?: string) => {
 		// The path is captured before the split: the fresh group is empty and focused, so
 		// the preview's "active file" default would find nothing there.

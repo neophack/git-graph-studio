@@ -11,6 +11,10 @@ import { rustCommandNames } from '../scripts/check-ipc.mjs';
 import * as app from '../src/platform/ipc/app';
 import * as assoc from '../src/platform/ipc/assoc';
 import * as can from '../src/platform/ipc/can';
+import * as dbc from '../src/platform/ipc/dbc';
+import * as devtree from '../src/platform/ipc/devtree';
+import * as elf from '../src/platform/ipc/elf';
+import * as dump from '../src/platform/ipc/dump';
 import * as ext from '../src/platform/ipc/ext';
 import * as extChild from '../src/platform/ipc/extChild';
 import * as extProcess from '../src/platform/ipc/extProcess';
@@ -39,7 +43,7 @@ const anything = new Proxy(function hole() { return hole; } as never, {
 });
 
 const domains: Record<string, Record<string, unknown>> = {
-	app, assoc, can, ext, extChild, extProcess, fs: fsDomain, fuzzy, gallery,
+	app, assoc, can, dump, ext, extChild, extProcess, fs: fsDomain, fuzzy, gallery,
 	mcp: ipcMcp, providers, pty, remote, revision, scm, search, symbols, analysis, viewer, settings,
 };
 

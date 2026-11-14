@@ -175,7 +175,13 @@
 						console.warn('[harness] unhandled invoke:', command, args);
 						return Promise.resolve(null);
 					},
-					transformCallback: function (callback) { return Math.floor(Math.random() * 1e9); }
+					transformCallback: function (callback) {
+					// The real internals parks the callback on window['_<id>'] — the Channel
+					// delivery path needs it, so the mock parks it the same way.
+					var id = Math.floor(Math.random() * 1e9);
+					window['_invoke_cb_' + id] = callback;
+					return id;
+				}
 				};
 				// The event plugin, with emits crossing to the other dev pages (dev/dev-events.js):
 				// two dev pages become two frontends, as the Relay makes them.
@@ -384,6 +390,18 @@
 				{ name: 'label', numeric: false }
 			];
 			const csvSeriesLog = [];
+			const CAN_START_S = 1_789_374_600; // 2026-09-14 08:30:00 UTC; the chip reads it in the page's zone.
+			// The Memory Dump Viewer's stand-in dump: two modules, three carved entries, a 1x1 PNG.
+			const DUMP_MODULES = [
+				{ base: 0x7ff00000, size: 4096, timestamp: CAN_START_S, name: 'C:\bin\app.exe', fileName: 'app.exe' },
+				{ base: 0x7ff10000, size: 8192, timestamp: CAN_START_S, name: 'C:\Windows\System32\a.dll', fileName: 'a.dll' }
+			];
+			const DUMP_ENTRIES = [
+				{ id: 0, format: 'png', tag: 'image', offset: 100, size: 2048, va: 0x7ff00064, inModule: 'app.exe' },
+				{ id: 1, format: 'zip', tag: 'archive', offset: 4096, size: 65536, va: 0x10001000, inModule: null },
+				{ id: 2, format: 'jpg', tag: 'image', offset: 8192, size: 512, va: 0x10020000, inModule: null }
+			];
+			const DUMP_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 			const NAMES = ['file.txt', 'huge.txt', 'monster.js', 'blob.bin', 'trace.asc'];
 			const hexLine = (n, tag) => 'line ' + n + ' of ' + tag;
 			const chunkB64 = (path, offset, len) => {
@@ -420,14 +438,85 @@
 				indexed_open: () => ({ docId: 2, lineCount: MONSTER_LINES, language: 'js', syntaxName: 'JavaScript', encoding: 'utf8', eol: 'lf' }),
 				indexed_lines: ({ start, end }) => ({ startLine: Number(start), lineCount: MONSTER_LINES, tokensPending: false, lines: Array.from({ length: Math.max(0, (end === undefined ? Number(start) + 100 : Number(end) + 1) - Number(start)) }, (_, i) => ['monster line ' + (Number(start) + i), []]) }),
 				read_file_chunk: ({ path, offset, len }) => chunkB64(path, offset, len),
-				can_log_open: () => ({ docId: 22, totalBytes: 500_000 }),
+				can_log_open: () => ({ docId: 22, totalBytes: 500_000, startTimestampS: CAN_START_S }),
+				dump_open: () => ({ path: '/repo/crash.dmp', size: 477_865_602, timeDateStamp: CAN_START_S, flags: 2, flagNames: ['WithFullMemory'], os: { arch: 'x64', version: '10.0.26200', build: 26200, processors: 24, productType: 1 }, pid: 484088, threads: 13, hasException: false, modules: DUMP_MODULES, moduleTotalBytes: 12_288, memoryRegions: 691, memoryTotalBytes: 477_000_000, streams: [{ kind: 4, name: 'ModuleList', size: 2272 }] }),
+				dump_scan: ({ onEvent }) => {
+					// The Channel crossed as its JSON token: deliver through the callback the
+					// mocked transformCallback parked on window.
+					let index = 0;
+					const deliver = (message) => {
+						const cb = window['_invoke_cb_' + String(onEvent).slice('__CHANNEL__:'.length)];
+						if (typeof cb === 'function') cb({ index: index++, message });
+					};
+					deliver({ kind: 'progress', scanned: 200_000_000, total: 477_000_000, entries: 1 });
+					deliver({ kind: 'batch', entries: DUMP_ENTRIES });
+					deliver({ kind: 'done', entries: DUMP_ENTRIES.length, elapsedMs: 3200, cancelled: false });
+					return { modules: DUMP_MODULES, scanBytes: 477_000_000 };
+				},
+				dump_preview: ({ size }) => ({ data: DUMP_PNG_B64, truncated: false, totalSize: Number(size) }),
+				dump_extract: ({ entries }) => ({
+					items: (entries || []).map((r) => ({ name: r.name, path: 'C:\out\' + r.name, bytes: r.size || 0, error: null })),
+					outDir: 'C:\out',
+					totalBytes: (entries || []).reduce((n, r) => n + (r.size || 0), 0)
+				}),
+				dump_cancel: () => null,
 			csv_open: () => ({ docId: 30, totalBytes: 400_000, delimiter: ',', hasHeader: true }),
 			csv_count: () => ({ parsed: CSV_ROWS, done: true, error: null, bytes: 400_000, totalBytes: 400_000, columns: CSV_COLUMNS }),
 			csv_rows: ({ start, end }) => Array.from({ length: Math.max(0, Number(end) - Number(start)) }, (_, i) => {
 				const row = Number(start) + i;
 				return { index: row, cells: [row, Math.sin(row / 50) * 100, Math.cos(row / 80) * 100, row % 7 === 0 ? 'tick ' + row : ''] };
 			}),
-			csv_series: (args) => {
+				dbc_open: () => ({
+					docId: 40, version: 'Harness 1.0', nodes: ['Engine', 'Gateway'],
+					messages: [
+						{ id: 0x100, name: 'EngineData', dlc: 8, transmitter: 'Engine', extended: false, comment: 'The engine frame', signals: [
+							{ name: 'EngineSpeed', startBit: 0, length: 16, littleEndian: true, signed: false, scale: 0.25, offset: 0, min: 0, max: 16383.75, unit: 'rpm', receivers: ['Gateway'], multiplex: null, comment: null, values: [] },
+							{ name: 'VehicleSpeed', startBit: 24, length: 16, littleEndian: true, signed: false, scale: 0.01, offset: 0, min: 0, max: 655.35, unit: 'km/h', receivers: ['Gateway'], multiplex: null, comment: null, values: [{ value: 0, label: 'Stopped' }] }
+						] },
+						{ id: 0x18ff0100, name: 'Status', dlc: 8, transmitter: 'Engine', extended: true, comment: null, signals: [] }
+					]
+				}),
+				dbc_decode: ({ id }) => (id === 0x100 ? [
+					{ name: 'EngineSpeed', raw: 3200, value: 800, unit: 'rpm', label: null },
+					{ name: 'VehicleSpeed', raw: 12345, value: 123.45, unit: 'km/h', label: 'Stopped' }
+				] : []),
+				dbc_close: () => undefined,
+				elf_open: () => ({
+					docId: 41, classBits: 32, littleEndian: true, fileType: 'EXEC', machineName: 'AArch64', entry: 0x8000,
+					segments: [
+						{ kind: 'LOAD', flags: 'RX', offset: 0x8000, vaddr: 0x8000, fileBytes: 0x1200, memBytes: 0x1200 },
+						{ kind: 'LOAD', flags: 'RW', offset: 0x9200, vaddr: 0x20000000, fileBytes: 0x40, memBytes: 0x400 }
+					],
+					sections: [
+						{ name: '.text', kind: 'PROGBITS', addr: 0x8000, offset: 0x8000, size: 0x1000, alloc: true, write: false, exec: true },
+						{ name: '.rodata', kind: 'PROGBITS', addr: 0x9000, offset: 0x9000, size: 0x200, alloc: true, write: false, exec: false },
+						{ name: '.data', kind: 'PROGBITS', addr: 0x20000000, offset: 0x9200, size: 0x40, alloc: true, write: true, exec: false },
+						{ name: '.bss', kind: 'NOBITS', addr: 0x20000040, offset: 0x9240, size: 0x3c0, alloc: true, write: true, exec: false }
+					],
+					symbolsTotal: 40, needed: ['libc.so'], romBytes: 0x1200, ramBytes: 0x400, totalBytes: 0x9500
+				}),
+				elf_symbols: ({ start, end, filter }) => {
+					const all = Array.from({ length: 40 }, (_, i) => ({ name: 'fn_' + String(i).padStart(2, '0'), value: 0x8000 + i * 16, size: 40 - i, kind: i % 5 === 0 ? 'object' : 'func', bind: i % 2 === 0 ? 'global' : 'local' }));
+					const m = filter ? all.filter((f) => f.name.includes(filter)) : all;
+					return { total: m.length, lines: m.slice(Number(start), Number(end)) };
+				},
+				elf_close: () => undefined,
+				devtree_open: () => ({
+					format: 'dts', bootCpuid: null,
+					memReserve: [{ address: 0x80000000, size: 0x1000 }],
+					nodes: 3, properties: 3, totalBytes: 900,
+					root: {
+						name: '/', label: null, unitAddress: null,
+						properties: [{ name: 'model', values: [{ kind: 'str', text: 'Harness Board' }] }],
+						children: [
+							{ name: 'chosen', label: null, unitAddress: null, properties: [{ name: 'bootargs', values: [{ kind: 'str', text: 'console=ttyS0' }] }], children: [] },
+							{ name: 'soc', label: null, unitAddress: null, properties: [], children: [
+								{ name: 'serial@101000', label: 'uart0', unitAddress: '101000', properties: [{ name: 'reg', values: [{ kind: 'cell', text: '0x10100000' }, { kind: 'cell', text: '0x00000064' }] }], children: [] }
+							] }
+						]
+					}
+				}),
+				csv_series: (args) => {
 				csvSeriesLog.push(args);
 				const from = args.xFrom === null || args.xFrom === undefined ? 0 : Number(args.xFrom);
 				const to = args.xTo === null || args.xTo === undefined ? CSV_ROWS - 1 : Number(args.xTo);
@@ -449,7 +538,6 @@
 				};
 			},
 			csv_close: () => null,
-				
 				can_log_count: () => ({ parsed: CAN_FRAMES, done: true, error: null }),
 				can_log_frames: ({ start, end }) => Array.from({ length: Math.max(0, Number(end) - Number(start)) }, (_, i) => ({ tS: (Number(start) + i) * 0.001, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17' })),
 				can_log_close: () => undefined,
@@ -771,10 +859,23 @@
 
 			/* ----- the CAN raw view (.asc), constructed directly ----- */
 			await surface('CAN raw view', async () => {
-				const { CanRawView } = await import('/src/features/can/canRawView.ts');
+				const { CanRawView, formatCanStart } = await import('/src/features/can/canRawView.ts');
 				const view = new CanRawView('/repo/trace.asc');
 				document.getElementById('editorGroup').appendChild(view.root);
 				await waitFor(() => view.scroll.rowCount === CAN_FRAMES && view.scroll.visibleLines > 0);
+				const startChip = view.root.querySelector('.can-start');
+				check('CAN raw view', 'the header\'s measurement start shows as a date chip', true, !!startChip && !startChip.hidden && startChip.textContent.includes(formatCanStart(CAN_START_S)));
+				await waitFor(() => view.root.querySelector('.can-raw-row .can-raw-time'));
+				const toggle = view.root.querySelector('.can-time-chip');
+				const firstTime = () => view.root.querySelector('.can-raw-row .can-raw-time').textContent;
+				check('CAN raw view', 'the Time column starts relative (seconds)', /^\d+\.\d{6}$/.test(firstTime()), true);
+				toggle.click();
+				await settle();
+				check('CAN raw view', 'the toggle renders the wall clock (start + t)', /^\d\d:\d\d:\d\d\.\d{3}$/.test(firstTime()), true);
+				check('CAN raw view', 'the toggle reads pressed in absolute mode', 'true', toggle.getAttribute('aria-pressed'));
+				toggle.click();
+				await settle();
+				check('CAN raw view', 'the toggle falls back to relative seconds', /^\d+\.\d{6}$/.test(firstTime()), true);
 				const scroller = view.root.querySelector('.can-raw-scroll');
 				const page = Math.trunc(view.scroll.visibleLines - 1);
 				wheel(scroller, 100);
@@ -851,12 +952,114 @@
 				view.root.remove();
 			});
 
+			/* ----- the CAN database (.dbc): the frame list, the signals, the decode panel ----- */
+			await surface('CAN database', async () => {
+				const { DbcView } = await import('/src/features/dbc/dbcView.ts');
+				const view = new DbcView('/repo/powertrain.dbc');
+				document.getElementById('editorGroup').appendChild(view.root);
+				await waitFor(() => view.root.querySelectorAll('.dbc-row').length === 2);
+				check('CAN database', 'every frame lists with its hex id', 2, view.root.querySelectorAll('.dbc-row').length);
+				check('CAN database', 'the extended frame carries its mark', 1, view.root.querySelectorAll('.dbc-row .dbc-ext').length);
+				check('CAN database', 'the live chip names the frames and nodes', true, view.root.querySelector('.can-live-text').textContent.includes('2 frames'));
+				click(view.root.querySelector('.dbc-row'));
+				await waitFor(() => view.root.querySelectorAll('.dbc-sig-row').length === 2);
+				check('CAN database', 'the picked frame shows its signals', 2, view.root.querySelectorAll('.dbc-sig-row').length);
+				// The decode panel: the pre-filled id, a payload typed, the values back.
+				const dataInput = view.root.querySelector('.dbc-decode-data');
+				dataInput.value = '00 00 0c 80 39 30 00 00';
+				click(view.root.querySelector('.dbc-decode-run'));
+				await waitFor(() => view.root.querySelectorAll('.dbc-decode-row').length === 2);
+				check('CAN database', 'the decode panel answers the physical values', true, view.root.textContent.includes('123.45'));
+				view.dispose();
+				view.root.remove();
+			});
+
+			/* ----- the ELF inspector (.elf): the summary, the sections, the symbols ----- */
+			await surface('ELF inspector', async () => {
+				const { ElfView } = await import('/src/features/elf/elfView.ts');
+				const view = new ElfView('/repo/firmware.elf');
+				document.getElementById('editorGroup').appendChild(view.root);
+				await waitFor(() => view.root.querySelectorAll('.elf-sec-row').length === 4);
+				check('ELF inspector', 'the summary names the class and machine', true, view.root.textContent.includes('32-bit LE') && view.root.textContent.includes('AArch64'));
+				check('ELF inspector', 'the ROM/RAM sums land on the card', true, view.root.textContent.includes('4.5 KB') && view.root.textContent.includes('1.0 KB'));
+				check('ELF inspector', 'the section table lists every section', 4, view.root.querySelectorAll('.elf-sec-row').length);
+				// The symbols: the mode chip swaps, the window fills, the filter narrows.
+				click(view.root.querySelectorAll('.elf-mode-chip')[1]);
+				await waitFor(() => view.scroll.rowCount === 40);
+				await waitFor(() => view.root.querySelectorAll('.elf-sym-row').length > 0);
+				check('ELF inspector', 'the symbol window filled', true, view.root.querySelectorAll('.elf-sym-row').length > 0);
+				const search = view.root.querySelector('.elf-search');
+				search.value = 'fn_0';
+				search.dispatchEvent(new Event('input', { bubbles: true }));
+				await waitFor(() => view.scroll.rowCount === 10);
+				check('ELF inspector', 'the filter narrows through the backend', 10, view.scroll.rowCount);
+				view.dispose();
+				view.root.remove();
+			});
+
+			/* ----- the device tree (.dts): the node tree, the toggle, the search prune ----- */
+			await surface('Device tree', async () => {
+				const { DevTreeView } = await import('/src/features/devtree/devTreeView.ts');
+				const view = new DevTreeView('/repo/board.dts');
+				document.getElementById('editorGroup').appendChild(view.root);
+				await waitFor(() => view.root.querySelectorAll('.dt-node-row').length === 4);
+				check('Device tree', 'the tree renders root and children', 4, view.root.querySelectorAll('.dt-node-row').length);
+				check('Device tree', 'the reservation pair rides on top', true, view.root.querySelector('.dt-reserve').textContent.includes('0x80000000'));
+				check('Device tree', 'the format chip names the parse', true, view.root.querySelector('.can-live-text').textContent.includes('DTS'));
+				// soc's toggle opens the serial node with its cells.
+				const toggles = view.root.querySelectorAll('.dt-toggle');
+				click(toggles[toggles.length - 1]);
+				await waitFor(() => view.root.querySelector('.dt-label') !== null);
+				check('Device tree', 'the expanded node shows its label and cells', true, view.root.querySelector('.dt-label').textContent.includes('uart0') && view.root.textContent.includes('0x10100000'));
+				// The search prunes to the matching node and its ancestors.
+				const search = view.root.querySelector('.dbc-search');
+				search.value = 'bootargs';
+				search.dispatchEvent(new Event('input', { bubbles: true }));
+				await waitFor(() => view.root.querySelectorAll('.dt-node-row').length === 2);
+				check('Device tree', 'the filter keeps the match and its ancestors', 2, view.root.querySelectorAll('.dt-node-row').length);
+				view.dispose();
+				view.root.remove();
+			});
+
+			/* ----- the Memory Dump Viewer: the overview strip, the streamed carve list, the
+
+			   image preview, the modules tab. Mocked backend only — a real dump to carve is
+			   the vitest suite's business over the scripted backend and the crate's own tests. ----- */
+			await surface('Memory dump viewer', async () => {
+				if (!window.__harness.mocked) return;
+				const { DumpView } = await import('/src/features/dump/dumpView.ts');
+				const view = new DumpView('/repo/crash.dmp');
+				document.getElementById('editorGroup').appendChild(view.root);
+				await waitFor(() => view.root.querySelectorAll('.dump-row').length === DUMP_ENTRIES.length);
+				check('Memory dump viewer', 'the carve list streamed every entry', DUMP_ENTRIES.length, view.root.querySelectorAll('.dump-row').length);
+				const overviewText = view.root.querySelector('.dump-overview').textContent;
+				check('Memory dump viewer', 'the overview strip names the arch and the region count', true, overviewText.includes('x64') && overviewText.includes('691 memory regions'));
+				check('Memory dump viewer', 'the scan done state names the count and the elapsed', true, view.root.querySelector('.can-live-text').textContent.includes('3 files found'));
+				const tag = view.root.querySelector('.dump-tag-select');
+				tag.value = 'image';
+				tag.dispatchEvent(new Event('change'));
+				check('Memory dump viewer', 'the type chip narrows to the images', 2, view.root.querySelectorAll('.dump-row').length);
+				tag.value = '';
+				tag.dispatchEvent(new Event('change'));
+				click(view.root.querySelector('.dump-row'));
+				await waitFor(() => view.root.querySelector('.dump-preview-img') !== null);
+				check('Memory dump viewer', 'a carved PNG previews as an image over a hex head', true, view.root.querySelector('.dump-preview-hex') !== null);
+				click(view.root.querySelector('.dump-toolbar .csv-mode-chip:nth-of-type(2)'));
+				await waitFor(() => view.root.querySelectorAll('.dump-row').length === DUMP_MODULES.length);
+				check('Memory dump viewer', 'the modules tab lists the loaded modules', DUMP_MODULES.length, view.root.querySelectorAll('.dump-row').length);
+				click(view.root.querySelectorAll('.dump-row')[1]);
+				await waitFor(() => view.root.querySelector('.dump-preview-card') !== null);
+				check('Memory dump viewer', 'a module click shows the rebuild card', true, view.root.querySelector('.dump-preview-card').textContent.includes('a.dll'));
+				view.dispose();
+				view.root.remove();
+			});
+
 			/* ----- the media viewer (a video/audio file): the facts panel, the element's
 			   playback, the toolbar. The page has no ggsmedia protocol handler, so the view's
 			   fallback answers — one whole-file read into a blob URL, the remote shells' path. ----- */
 			await surface('Media viewer', async () => {
 				const { MediaView } = await import('/src/features/viewers/mediaView.ts');
-				const view = new MediaView('C:\\repo\\demo.wav', {});
+				const view = new MediaView('C:\repo\demo.wav', {});
 				document.getElementById('editorGroup').appendChild(view.root);
 				await view.load();
 				// The unresolvable protocol URL fails over to the byte read, the WAV decodes,

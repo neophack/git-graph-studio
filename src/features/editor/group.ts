@@ -234,6 +234,22 @@ export class EditorGroup {
 
 	declare swapTextToCsv: (editor: Editor) => Promise<void> ;
 
+	declare swapDbcToText: (editor: Editor) => Promise<void> ;
+
+	declare mountDbcTextForm: (editor: Editor) => Promise<void> ;
+
+	declare swapTextToDbc: (editor: Editor) => Promise<void> ;
+
+	declare swapDevTreeToText: (editor: Editor) => Promise<void> ;
+
+	declare mountDevTreeTextForm: (editor: Editor) => Promise<void> ;
+
+	declare swapTextToDevTree: (editor: Editor) => Promise<void> ;
+
+	declare mountStructuredTextForm: (editor: Editor, backButton: () => HTMLButtonElement, onBack: () => void, paneClass: string) => Promise<void> ;
+
+	declare teardownForStructuredSwap: (editor: Editor) => Promise<void> ;
+
 	declare openHex: (path?: string) => Promise<void>;
 
 	declare openCanStats: (path: string) => void ;
@@ -245,6 +261,9 @@ export class EditorGroup {
 	declare mountMediaView: (editor: Editor) => Promise<void> ;
 
 	declare openMarkdownPreview: (path?: string) => Promise<void>;
+
+	/** The analysis index's status push: every open analysis page's build-progress line. */
+	declare noteAnalysisStatus: (status: import('../../platform/ipc/analysis').AnalysisStatus | null) => void;
 
 	declare openFileHistory: (path?: string) => Promise<void>;
 

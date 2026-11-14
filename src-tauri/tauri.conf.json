@@ -56,7 +56,9 @@
           "blf",
           "asc",
           "bin",
-          "hex"
+          "hex",
+          "dmp",
+          "mdmp"
         ],
         "name": "Git Graph Studio file",
         "description": "Opened with Git Graph Studio (the CAN Trace Analyzer, the hex viewer, the editor suite)",

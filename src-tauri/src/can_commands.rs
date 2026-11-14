@@ -89,6 +89,9 @@ pub async fn can_log_open(
     state: tauri::State<'_, CanLogState>,
 ) -> Result<CanOpenResult, String> {
     let total_bytes = ggs_can::total_bytes_of(Path::new(&path));
+    // The header's measurement start rides the open answer (a 144-byte header read / the
+    // .asc's first lines), so the view can show it and render absolute time at once.
+    let start_timestamp_s = ggs_can::start_epoch_of(Path::new(&path));
     let doc = Arc::new(ggs_can::CanLogDoc::new(total_bytes));
     let doc_id = state.register(Arc::clone(&doc));
     tauri::async_runtime::spawn_blocking(move || {
@@ -97,6 +100,7 @@ pub async fn can_log_open(
     Ok(ggs_can::CanOpenResult {
         doc_id,
         total_bytes,
+        start_timestamp_s,
     })
 }
 /// A window of the document's frames, in log order — only what the viewport shows ever

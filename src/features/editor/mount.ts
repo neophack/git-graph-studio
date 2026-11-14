@@ -5,7 +5,7 @@
 import { type FileContents, type FileProbe, fileProbe } from '../../platform/ipc/fs';
 import { symbolLookup } from '../../platform/ipc/symbols';
 import { declaredLanguageName } from '../extensions';
-import { loadDataViews, loadCanViews, loadEditorExtensions, loadFastView, loadHexView, loadImageView, loadMediaView, loadMergeEditor } from '../../platform/lazy';
+import { loadDataViews, loadCanViews, loadDbcView, loadDevTreeView, loadEditorExtensions, loadFastView, loadHexView, loadImageView, loadMediaView, loadMergeEditor } from '../../platform/lazy';
 import { t } from '../../platform/i18n';
 import { settings } from '../../platform/settings';
 import { basename, el, icon, notify, showContextMenu, toPosix } from '../../platform/ui/index';
@@ -268,6 +268,138 @@ export const mountMethods: ThisType<import('./group').EditorGroup> = {
 			this.attachMergeSupport(editor);
 			this.updateOutline(editor);
 		}
+	},
+
+	/* The CAN database's and the device tree's text forms: the same one-button
+	 * journey the CSV has — a Text button swaps the structured tab to the editable
+	 * text, the bar's structured button swaps it back. The two share the helper; the
+	 * bars differ only in their button's label and its swap. */
+
+	async swapDbcToText(editor: Editor): Promise<void> {
+		if (editor.input.kind !== 'file' || !editor.dbc) return;
+		editor.dbc.dispose();
+		editor.dbc = undefined;
+		editor.onClose = undefined;
+		editor.pane.replaceChildren();
+		await this.mountDbcTextForm(editor);
+		this.emitActive();
+	},
+
+	async mountDbcTextForm(editor: Editor): Promise<void> {
+		const back = () => el('button', 'button secondary can-text', [icon('database'), ` ${t('dbc.text.back')}`]) as HTMLButtonElement;
+		await this.mountStructuredTextForm(editor, back, () => void this.swapTextToDbc(editor), 'dbc-database');
+	},
+
+	async swapTextToDbc(editor: Editor): Promise<void> {
+		if (editor.input.kind !== 'file') return;
+		if (editor.dirty) {
+			await this.save(editor);
+			if (!editor.dirty) await this.swapTextToDbc(editor);
+			return;
+		}
+		const { DbcView } = await loadDbcView();
+		if (!this.open.includes(editor) || editor.dbc) return; // closed, or swapped meanwhile
+		await this.teardownForStructuredSwap(editor);
+		editor.pane.classList.add('dbc-database');
+		editor.dbc = new DbcView(editor.input.path, { onEditText: () => void this.swapDbcToText(editor) });
+		editor.pane.appendChild(editor.dbc.root);
+		editor.onClose = () => editor.dbc?.dispose();
+		this.emitActive();
+	},
+
+	async swapDevTreeToText(editor: Editor): Promise<void> {
+		if (editor.input.kind !== 'file' || !editor.devtree) return;
+		editor.devtree.dispose();
+		editor.devtree = undefined;
+		editor.onClose = undefined;
+		editor.pane.replaceChildren();
+		await this.mountDevTreeTextForm(editor);
+		this.emitActive();
+	},
+
+	async mountDevTreeTextForm(editor: Editor): Promise<void> {
+		const back = () => el('button', 'button secondary can-text', [icon('graph-scatter'), ` ${t('dt.text.back')}`]) as HTMLButtonElement;
+		await this.mountStructuredTextForm(editor, back, () => void this.swapTextToDevTree(editor), 'devtree');
+	},
+
+	async swapTextToDevTree(editor: Editor): Promise<void> {
+		if (editor.input.kind !== 'file') return;
+		if (editor.dirty) {
+			await this.save(editor);
+			if (!editor.dirty) await this.swapTextToDevTree(editor);
+			return;
+		}
+		const { DevTreeView } = await loadDevTreeView();
+		if (!this.open.includes(editor) || editor.devtree) return; // closed, or swapped meanwhile
+		await this.teardownForStructuredSwap(editor);
+		editor.pane.classList.add('devtree');
+		editor.devtree = new DevTreeView(editor.input.path, { onEditText: () => void this.swapDevTreeToText(editor) });
+		editor.pane.appendChild(editor.devtree.root);
+		editor.onClose = () => editor.devtree?.dispose();
+		this.emitActive();
+	},
+
+	/** The shared body of both swaps back to text: the bar with the structured view's
+	 *  return button over the file's ordinary text mount (the CSV form's shape, with
+	 *  the button's label and target the caller's). */
+	async mountStructuredTextForm(editor: Editor, backButton: () => HTMLButtonElement, onBack: () => void, paneClass: string): Promise<void> {
+		if (editor.input.kind !== 'file') return;
+		const path = editor.input.path;
+		const back = backButton();
+		back.title = t(paneClass === 'dbc-database' ? 'dbc.text.backTitle' : 'dt.text.backTitle');
+		back.addEventListener('click', onBack);
+		const pathChip = el('span', 'can-path', [path]);
+		pathChip.title = path;
+		const bar = el('div', 'hex-toolbar can-text-bar', [pathChip, el('span', 'hex-toolbar-sep'), back]);
+		const wrap = el('div', 'can-text-wrap', [bar]);
+		editor.pane.replaceChildren(wrap);
+		let probe: FileProbe | null = null;
+		try {
+			probe = await fileProbe(path);
+		} catch {
+			probe = null; // `read_file` below reports the real error
+		}
+		if (probe !== null && probe.size > hook('openThreshold')(WINDOWED_EDIT_BYTES)) {
+			if (!probe.longLines && (await this.tryMountDocEdit(editor, wrap))) return;
+			if (await this.tryMountFastView(editor, wrap, true, () => void this.swapFastToWholeEditor(editor))) {
+				if (!probe.longLines) notify('info', t('viewer.readOnlyFallback') + basename(path));
+				return;
+			}
+		}
+		let file: FileContents;
+		try {
+			file = await readFileRaw(path);
+		} catch (error) {
+			notify('error', String(error));
+			return;
+		}
+		if (file.binary || file.contents === null) {
+			await this.mountHexView(editor, wrap);
+		} else {
+			editor.encoding = file.encoding ?? 'utf8';
+			editor.eol = file.eol ?? 'lf';
+			await this.mountTextEditor(editor, file.contents, wrap);
+			this.attachMergeSupport(editor);
+			this.updateOutline(editor);
+		}
+	},
+
+	/** Everything a structured view's swap tears down: the text editor's mounts, the
+	 *  outline, the pane class. The CSV's own swap keeps its copy. */
+	async teardownForStructuredSwap(editor: Editor): Promise<void> {
+		editor.view?.destroy();
+		editor.view = undefined;
+		editor.fast?.dispose();
+		editor.fast = undefined;
+		editor.doc?.dispose();
+		editor.doc = undefined;
+		editor.hex?.destroy();
+		editor.hex = undefined;
+		editor.mergeToolbar = undefined;
+		editor.outline?.remove();
+		editor.outline = undefined;
+		editor.pane.classList.remove('has-outline');
+		editor.pane.replaceChildren();
 	},
 
 	async swapTextToCsv(editor: Editor): Promise<void> {

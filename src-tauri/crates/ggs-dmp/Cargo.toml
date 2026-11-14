@@ -1,0 +1,18 @@
+[package]
+name = "ggs-dmp"
+version = "0.0.0"
+description = "The Memory Dump Viewer's engine — Windows minidump parsing, magic-signature file carving and in-memory PE module reconstruction"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+ggs-base.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

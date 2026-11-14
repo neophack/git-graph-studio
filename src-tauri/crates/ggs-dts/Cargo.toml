@@ -1,0 +1,17 @@
+[package]
+name = "ggs-dts"
+version = "0.0.0"
+description = "The Device Tree Viewer's engine — flattened device tree (.dtb) binary parsing and device tree source (.dts) text parsing into one node tree"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

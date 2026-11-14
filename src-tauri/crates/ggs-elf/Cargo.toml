@@ -1,0 +1,17 @@
+[package]
+name = "ggs-elf"
+version = "0.0.0"
+description = "The ELF Inspector's engine — ELF32/ELF64 header, program headers, sections and symbol tables read straight off the bytes"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

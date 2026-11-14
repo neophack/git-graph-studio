@@ -45,6 +45,8 @@
 				<string>asc</string>
 				<string>bin</string>
 				<string>hex</string>
+				<string>dmp</string>
+				<string>mdmp</string>
 			</array>
 		</dict>
 	</array>

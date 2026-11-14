@@ -103,6 +103,10 @@ ggs-remote-proto = { path = "crates/ggs-remote-proto" }
 ggs-config = { path = "crates/ggs-config" }
 ggs-can = { path = "crates/ggs-can" }
 ggs-csv = { path = "crates/ggs-csv" }
+ggs-dbc = { path = "crates/ggs-dbc" }
+ggs-elf = { path = "crates/ggs-elf" }
+ggs-dts = { path = "crates/ggs-dts" }
+ggs-dmp = { path = "crates/ggs-dmp" }
 ggs-text = { path = "crates/ggs-text" }
 ggs-fs = { path = "crates/ggs-fs" }
 ggs-index = { path = "crates/ggs-index" }
@@ -197,6 +201,14 @@ ggs-config = { workspace = true }
 ggs-can = { workspace = true }
 # The Data Table engine (module 20): CSV/TSV parse, windows, sort, plot series.
 ggs-csv = { workspace = true }
+# The CAN database engine (module 13): DBC parse and frame decode.
+ggs-dbc = { workspace = true }
+# The ELF Inspector's engine (module 21): ELF32/64 sections, segments, symbols.
+ggs-elf = { workspace = true }
+# The Device Tree Viewer's engine (module 22): .dtb blob and .dts source parse.
+ggs-dts = { workspace = true }
+# The Memory Dump Viewer engine (module 21): minidump parse, carve, module rebuild.
+ggs-dmp = { workspace = true }
 # The text engine: encodings, rope viewer, find/replace, probe, backups (modules 6/7).
 ggs-text = { workspace = true }
 # The workspace file services (module 3's backend).

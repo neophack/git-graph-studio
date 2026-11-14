@@ -82,7 +82,8 @@
    "rust": [
     "src-tauri/crates/ggs-fs/",
     "src-tauri/src/cmd_fs.rs",
-    "src-tauri/src/watcher.rs"
+    "src-tauri/src/watcher.rs",
+    "src-tauri/src/cmd_media.rs"
    ],
    "tests": [
     "tests/explorer.test.ts",
@@ -233,16 +234,22 @@
   {
    "id": 13,
    "name": "CAN Trace Analyzer",
-   "mission": "CANoe-style .blf / .asc analysis",
+   "mission": "CANoe-style .blf/.asc analysis and the CAN database (.dbc) browser",
    "ts": [
-    "src/features/can/"
+    "src/features/can/",
+    "src/features/dbc/",
+    "src/platform/ipc/dbc.ts"
    ],
    "rust": [
     "src-tauri/crates/ggs-can/",
-    "src-tauri/src/can_commands.rs"
+    "src-tauri/src/can_commands.rs",
+    "src-tauri/crates/ggs-dbc/",
+    "src-tauri/crates/ggs-dbc/",
+    "src-tauri/src/cmd_dbc.rs"
    ],
    "tests": [
-    "tests/canLog.test.ts"
+    "tests/canLog.test.ts",
+    "tests/dbcView.test.ts"
    ]
   },
   {
@@ -353,6 +360,54 @@
    ],
    "tests": [
     "tests/csvView.test.ts"
+   ]
+  },
+  {
+   "id": 21,
+   "name": "Memory Dump Viewer",
+   "mission": "Windows minidump browsing, embedded-file carving and module extraction",
+   "ts": [
+    "src/features/dump/",
+    "src/platform/ipc/dump.ts"
+   ],
+   "rust": [
+    "src-tauri/crates/ggs-dmp/",
+    "src-tauri/src/dump_commands.rs"
+   ],
+   "tests": [
+    "tests/dumpViewer.test.ts"
+   ]
+  },
+  {
+   "id": 22,
+   "name": "ELF Inspector",
+   "mission": "ELF32/64 images: summary, segments, sections and the symbol table",
+   "ts": [
+    "src/features/elf/",
+    "src/platform/ipc/elf.ts"
+   ],
+   "rust": [
+    "src-tauri/crates/ggs-elf/",
+    "src-tauri/src/cmd_elf.rs"
+   ],
+   "tests": [
+    "tests/elfView.test.ts"
+   ]
+  },
+  {
+   "id": 23,
+   "name": "Device Tree",
+   "mission": "Device tree source and blob: the node tree over one parse",
+   "ts": [
+    "src/features/devtree/",
+    "src/platform/ipc/devtree.ts"
+   ],
+   "rust": [
+    "src-tauri/crates/ggs-dts/",
+    "src-tauri/src/cmd_dts.rs"
+   ],
+   "tests": [
+    "tests/devTree.test.ts"
    ]
   }
  ]

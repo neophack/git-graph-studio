@@ -10,6 +10,11 @@
 // filter narrows the whole log, not just the frames already on screen. Rows keep numbering
 // in log order whatever the filter removed.
 //
+// Time reads two ways: the header's measurement start (an .asc `date` line, a BLF's
+// SYSTEMTIME — the open answer carries it) shows beside the path as a date, and the chip
+// next to it switches the Time column between the frames' relative seconds and their
+// wall-clock absolute time (`start + t`) — every rendered row repaints in place.
+//
 // The view answers the space it gets (canLayout.ts): wide, the toolbar is the desktop
 // row and the rows are 20px; narrow (the phone's editor page, a thin desktop column), the
 // same two rows take phone heights — the command bar (the file, the live chip, ⋯) over
@@ -70,6 +75,21 @@ function compact(value: number): string {
 	return String(Math.round(value));
 }
 
+/** A frame's absolute time: the log's wall-clock start plus the frame's own t, as the
+ *  local clock reads it. `cell` is the Time column's `HH:MM:SS.mmm`; `full` carries the
+ *  date too (`yyyy-MM-dd HH:MM:SS.mmm`) — the cell tooltip and the start chip's text. */
+export function absTimeParts(startS: number, tS: number): { cell: string; full: string } {
+	const d = new Date((startS + tS) * 1000);
+	const pad = (value: number, width: number) => String(value).padStart(width, '0');
+	const cell = `${pad(d.getHours(), 2)}:${pad(d.getMinutes(), 2)}:${pad(d.getSeconds(), 2)}.${pad(d.getMilliseconds(), 3)}`;
+	return { cell, full: `${d.getFullYear()}-${pad(d.getMonth() + 1, 2)}-${pad(d.getDate(), 2)} ${cell}` };
+}
+
+/** The start chip's text: the log's own measurement start. */
+export function formatCanStart(startS: number): string {
+	return absTimeParts(startS, 0).full;
+}
+
 /** One `<option>` with its value — the filter selects' shared builder. */
 function selectOption(value: string, label: string): HTMLOptionElement {
 	const option = el('option', undefined, [label]) as HTMLOptionElement;
@@ -102,6 +122,15 @@ export class CanRawView {
 	/** The toolbar's two rows — the sheet's controls come home to their own row. */
 	private readonly mainBar: HTMLElement;
 	private readonly filtersBar: HTMLElement;
+	/** The measurement start the log's header stated (a `date` line / the BLF SYSTEMTIME):
+	 *  the chip after the path shows it, and the Time column can render each frame's
+	 *  absolute time as `start + t`. `null` (no date in the header) keeps the view
+	 *  relative-only — the toggle then sits disabled with the reason in its tooltip. */
+	private readonly startChip: HTMLElement;
+	private readonly startLabel: HTMLElement;
+	private readonly timeChip: HTMLButtonElement;
+	private startS: number | null = null;
+	private absTime = false;
 	private readonly idBox: HTMLInputElement;
 	private readonly channelSelect: HTMLSelectElement;
 	private readonly dirSelect: HTMLSelectElement;
@@ -243,6 +272,19 @@ export class CanRawView {
 		]);
 		const pathChip = el('span', 'can-path', [this.path]);
 		pathChip.title = this.path;
+		// The measurement start (hidden until the open answer names one) and the Time
+		// column's relative/absolute toggle beside it — the chips' vocabulary (a pressed
+		// state, a title explaining both sides), not part of the filter set.
+		this.startLabel = el('span');
+		this.startChip = el('span', 'can-start', [icon('clock'), this.startLabel]);
+		this.startChip.title = t('can.raw.start.title');
+		this.startChip.hidden = true;
+		this.timeChip = el('button', 'can-chip can-time-chip', [t('can.raw.time.absChip')]) as HTMLButtonElement;
+		this.timeChip.type = 'button';
+		this.timeChip.setAttribute('aria-pressed', 'false');
+		this.timeChip.disabled = true;
+		this.timeChip.addEventListener('click', () => this.toggleTimeMode());
+		this.syncTimeChip();
 		// The find bar's toolbar entry — Ctrl+F anywhere in the view opens it too.
 		this.findButton = el('button', 'button secondary can-find-open', [icon('search')]) as HTMLButtonElement;
 		this.findButton.title = t('can.raw.find.title');
@@ -257,6 +299,8 @@ export class CanRawView {
 		const moreButton = canMoreButton(() => this.openMoreSheet(binaryLog));
 		this.mainBar = el('div', 'can-bar can-bar-main', [
 			pathChip,
+			this.startChip,
+			this.timeChip,
 			this.live,
 			moreButton,
 			this.findButton,
@@ -414,7 +458,53 @@ export class CanRawView {
 			return;
 		}
 		this.doc = doc;
+		// The header's start lights the chip and arms the toggle — one add per frame is
+		// all absolute time costs, and a header without a date leaves the view relative.
+		this.startS = doc.startTimestampS;
+		if (doc.startTimestampS !== null) {
+			this.startLabel.textContent = formatCanStart(doc.startTimestampS);
+			this.startChip.hidden = false;
+		}
+		this.timeChip.disabled = this.startS === null;
+		this.syncTimeChip();
 		this.poll();
+	}
+
+	/** The toggle flipped: every rendered row's Time cell repaints in place — the frame
+	 *  data is unchanged, so no refetch; each row carries its own t in `data-ts`. */
+	private toggleTimeMode(): void {
+		if (this.startS === null) return;
+		this.absTime = !this.absTime;
+		this.syncTimeChip();
+		for (const [index, node] of this.cache) {
+			const cell = node.querySelector<HTMLElement>('.can-raw-time');
+			if (cell) this.paintTimeCell(cell, index, Number(node.dataset.ts));
+		}
+	}
+
+	/** The toggle chip's look and tooltip follow the mode: pressed is absolute, the
+	 *  titles say what is shown and what a click does. */
+	private syncTimeChip(): void {
+		this.timeChip.classList.toggle('can-chip-on', this.absTime);
+		this.timeChip.setAttribute('aria-pressed', String(this.absTime));
+		this.timeChip.title = this.startS === null
+			? t('can.raw.time.noStart')
+			: this.absTime
+				? t('can.raw.time.absOn')
+				: t('can.raw.time.absOff');
+	}
+
+	/** One Time cell's text: the relative seconds as the log writes them, or the wall
+	 *  clock over the measurement start — the full date rides the tooltip there. */
+	private paintTimeCell(cell: HTMLElement, index: number, tS: number): void {
+		if (this.absTime && this.startS !== null) {
+			const { cell: text, full } = absTimeParts(this.startS, tS);
+			cell.textContent = text;
+			cell.title = `#${(index + 1).toLocaleString()} ${full}`;
+		} else {
+			cell.textContent = tS.toFixed(6);
+			cell.title = '';
+		}
 	}
 
 	/** One progress poll: extend the scroll range with the newly parsed (and, with a
@@ -819,12 +909,13 @@ export class CanRawView {
 		dir.title = line.tx ? t('can.raw.dir.tx') : t('can.raw.dir.rx');
 		const id = el('span', 'can-raw-id' + (line.error ? ' can-warn' : ''), [idHex(line.id, line.extended) + (line.extended && !line.error ? 'x' : '')]);
 		const data = el('span', 'can-raw-data', [line.dataHex]);
+		const time = el('span', 'can-raw-time');
 		const cells = [
 			// The "No." is the frame's own place in the log (`line.index`), not its position
 			// among the matches — a filtered view still numbers the frames it shows the way
 			// the whole log does.
 			el('span', 'can-raw-no', [String(line.index + 1)]),
-			el('span', 'can-raw-time', [line.tS.toFixed(6)]),
+			time,
 			el('span', 'can-raw-ch', [String(line.channel)]),
 			id,
 			dir,
@@ -833,6 +924,9 @@ export class CanRawView {
 			data
 		];
 		const row = el('div', 'can-raw-row can-raw-grid' + (line.error ? ' can-row-error' : ''), cells);
+		// The toggle repaints cached rows in place from this — the frame's own t.
+		row.dataset.ts = String(line.tS);
+		this.paintTimeCell(time, index, line.tS);
 		// The find's marks travel with the row: a hit tints, the current one outlines.
 		if (this.hitSet.has(index)) row.classList.add('can-raw-hit');
 		if (this.hits[this.hitIndex] === index) row.classList.add('can-raw-cur');

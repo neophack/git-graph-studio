@@ -67,7 +67,7 @@ export function checkModules() {
 		}
 	}
 	if (MODULES.some((m, i) => MODULES.findIndex((o) => o.id === m.id) !== i)) problems.push('modules.json: duplicate module ids');
-	for (let i = 1; i <= 19; i += 1) {
+	for (let i = 1; i <= 21; i += 1) {
 		if (!MODULES.some((m) => m.id === i)) problems.push(`modules.json: module id ${i} missing`);
 	}
 	if (problems.length > 0) throw new Error(`Module-map coverage violations (docs/architecture-restructure-plan.md §6, modules.json):\n  ${problems.join('\n  ')}`);

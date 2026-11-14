@@ -46,6 +46,21 @@ export const loadCanViews = once(async () => {
  *  the first .csv / .tsv that opens. */
 export const loadDataViews = once(() => import('../features/data/csvView'));
 
+/** The CAN database view (module 13) - the .dbc message browser and its decode panel -
+ *  loaded with the first .dbc that opens. */
+export const loadDbcView = once(() => import('../features/dbc/dbcView'));
+
+/** The ELF Inspector (module 21) - the .elf/.axf summary, sections and symbols -
+ *  loaded with the first image that opens. */
+export const loadElfView = once(() => import('../features/elf/elfView'));
+
+/** The Device Tree view (module 22) - the .dts/.dtb node tree - loaded with the first
+ *  device tree that opens. */
+export const loadDevTreeView = once(() => import('../features/devtree/devTreeView'));
+
+/** The Memory Dump Viewer (module 21), loaded with the first .dmp / .mdmp that opens. */
+export const loadDumpViews = once(() => import('../features/dump/dumpView'));
+
 /** The hex viewer, loaded with the first binary file; the hex comparison shares its helpers. */
 export const loadHexView = once(() => import('../features/viewers/hexView'));
 export const loadHexCompare = once(() => import('../features/viewers/hexCompare'));

@@ -1988,6 +1988,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "ggs-csv"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "tempfile",
+]
+
+[[package]]
+name = "ggs-dbc"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "tempfile",
+]
+
+[[package]]
+name = "ggs-dmp"
+version = "0.0.0"
+dependencies = [
+ "ggs-base",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
+name = "ggs-dts"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "tempfile",
+]
+
+[[package]]
+name = "ggs-elf"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "tempfile",
+]
+
+[[package]]
 name = "ggs-ext"
 version = "0.0.0"
 dependencies = [
@@ -2212,6 +2253,11 @@ dependencies = [
  "ggs-can",
  "ggs-codec",
  "ggs-config",
+ "ggs-csv",
+ "ggs-dbc",
+ "ggs-dmp",
+ "ggs-dts",
+ "ggs-elf",
  "ggs-ext",
  "ggs-fs",
  "ggs-git",

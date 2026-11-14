@@ -9,14 +9,14 @@ import { scmBlame } from '../../platform/ipc/scm';
 import { symbolLookup } from '../../platform/ipc/symbols';
 import { hasBookmark } from './bookmarks';
 import { samePath, contextUri, menuSection, resourceContext } from '../extensions';
-import { loadAnalysisPages, loadCanViews, loadCallTree, loadDataViews, loadFileHistory, loadFolderCompare, loadHexCompare, loadMerge, loadSymbolDbView, loadTextEditor } from '../../platform/lazy';
+import { loadAnalysisPages, loadCanViews, loadCallTree, loadDataViews, loadDbcView, loadDevTreeView, loadDumpViews, loadElfView, loadFileHistory, loadFolderCompare, loadHexCompare, loadMerge, loadSymbolDbView, loadTextEditor } from '../../platform/lazy';
 import { imageMime, mediaMime, renderMarkdown } from '../../platform/markdown';
 import type { BlameLine } from '../scm/types';
 import type { WsSymbol } from '../search/types';
 import { commands } from '../../platform/commands';
 import { t, trText } from '../../platform/i18n';
 import { basename, el, icon, joinPath, notify, relativeTo, type MenuEntry } from '../../platform/ui/index';
-import { fileIcon, isCanLog, isCsvData } from '../../platform/fileIcons';
+import { fileIcon, isCanLog, isCsvData, isDbcFile, isDevTreeFile, isDumpFile, isElfImage } from '../../platform/fileIcons';
 import { hook } from '../../platform/hooks';
 import type { DiffSide } from './types';
 import type { EditorCommandName } from './types';
@@ -245,6 +245,91 @@ export const openMethods: ThisType<EditorGroup> = {
 			});
 			editor.pane.appendChild(editor.csv.root);
 			editor.onClose = () => editor.csv?.dispose();
+			this.add(editor, show(), intent);
+			return;
+		}
+		// A Windows memory dump (.dmp / .mdmp) opens in the dump viewer: the backend
+		// parses the minidump (streams, modules, memory map) at once and carves the dumped
+		// memory for embedded files in the background while the list browses. A jump to a
+		// text position has no meaning over carved bytes, so it keeps the dump form.
+		if (isDumpFile(name)) {
+			editor.languageName = 'Memory Dump';
+			editor.iconClass = 'file-binary';
+			const { DumpView } = await loadDumpViews();
+			editor.dump = new DumpView(path);
+			editor.pane.classList.add('can-log');
+			editor.pane.appendChild(editor.dump.root);
+			editor.onClose = () => editor.dump?.dispose();
+			this.add(editor, show(), intent);
+			return;
+		}
+		// A CAN database (.dbc) opens in the database view: the message list, the
+		// signals of the picked frame and the decode panel. A jump to a text position
+		// (a search hit) opens the file's text form instead.
+		if (isDbcFile(name)) {
+			if (options.line !== undefined) {
+				editor.languageName = 'Plain Text';
+				await this.mountDbcTextForm(editor);
+				const showNow = show();
+				this.add(editor, showNow, intent);
+				if (!showNow) return;
+				this.revealIn(editor, options.line, options.column ?? 1);
+				if (this.navIndex >= 0 && this.navHistory[this.navIndex]!.input === editor.input) {
+					this.navHistory[this.navIndex] = { input: editor.input, line: options.line, column: options.column ?? 1 };
+				}
+				return;
+			}
+			editor.languageName = 'DBC';
+			const { DbcView } = await loadDbcView();
+			editor.dbc = new DbcView(path, { onEditText: () => void this.swapDbcToText(editor) });
+			editor.pane.appendChild(editor.dbc.root);
+			editor.onClose = () => editor.dbc?.dispose();
+			this.add(editor, show(), intent);
+			return;
+		}
+		// An ELF image (.elf / .axf) opens in the inspector: the summary card, the
+		// sections and the symbol table. A jump to a line has no meaning in a binary —
+		// the ordinary binary path below serves it (the hex viewer).
+		if (isElfImage(name) && options.line === undefined) {
+			editor.languageName = 'ELF';
+			const { ElfView } = await loadElfView();
+			editor.elf = new ElfView(path);
+			editor.pane.appendChild(editor.elf.root);
+			editor.onClose = () => editor.elf?.dispose();
+			this.add(editor, show(), intent);
+			return;
+		}
+		// A device tree (.dts / .dtsi / .dtb) opens in the tree view — the source too,
+		// with the Text button a click away; a jump to a text position opens the text
+		// form (a .dtb's jump falls through to the binary path below).
+		if (isDevTreeFile(name)) {
+			if (options.line !== undefined) {
+				if (name.toLowerCase().endsWith('.dtb')) {
+					editor.languageName = 'Plain Text';
+					await this.mountDevTreeTextForm(editor);
+					const showNow = show();
+					this.add(editor, showNow, intent);
+					if (!showNow) return;
+					this.revealIn(editor, options.line, options.column ?? 1);
+					return;
+				}
+				editor.languageName = 'Plain Text';
+				await this.mountDevTreeTextForm(editor);
+				const showNow = show();
+				this.add(editor, showNow, intent);
+				if (!showNow) return;
+				this.revealIn(editor, options.line, options.column ?? 1);
+				if (this.navIndex >= 0 && this.navHistory[this.navIndex]!.input === editor.input) {
+					this.navHistory[this.navIndex] = { input: editor.input, line: options.line, column: options.column ?? 1 };
+				}
+				return;
+			}
+			editor.languageName = 'Device Tree';
+			const { DevTreeView } = await loadDevTreeView();
+			const isBlob = name.toLowerCase().endsWith('.dtb');
+			editor.devtree = new DevTreeView(path, isBlob ? {} : { onEditText: () => void this.swapDevTreeToText(editor) });
+			editor.pane.appendChild(editor.devtree.root);
+			editor.onClose = () => editor.devtree?.dispose();
 			this.add(editor, show(), intent);
 			return;
 		}

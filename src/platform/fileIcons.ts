@@ -6,7 +6,7 @@
 const CODE_EXTENSIONS = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'rs', 'py', 'go', 'java', 'c', 'cc', 'cpp', 'h', 'hpp', 'cs', 'rb', 'php', 'sh', 'bash', 'zsh', 'ps1', 'bat', 'cmd', 'html', 'htm', 'css', 'scss', 'less', 'vue', 'svelte', 'toml', 'yaml', 'yml', 'xml', 'sql', 'lua', 'kt', 'swift', 'dart', 'scala', 'clj', 'ex', 'exs', 'erl', 'hs', 'ml', 'r', 'jl', 'nim', 'zig', 'vb', 'pl', 'gradle', 'cmake', 'mk', 'dockerfile', 'tf', 'proto', 'graphql', 'wasm']);
 const MEDIA_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp', 'ico', 'svg', 'webp', 'avif', 'mp3', 'wav', 'ogg', 'mp4', 'webm', 'mov']);
 const ARCHIVE_EXTENSIONS = new Set(['zip', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar', 'tar', 'jar', 'vsix']);
-const BINARY_EXTENSIONS = new Set(['exe', 'dll', 'so', 'dylib', 'bin', 'o', 'a', 'lib', 'node', 'class', 'pyc', 'wasm']);
+const BINARY_EXTENSIONS = new Set(['exe', 'dll', 'so', 'dylib', 'bin', 'o', 'a', 'lib', 'node', 'class', 'pyc', 'wasm', 'dmp', 'mdmp']);
 
 /** Tint colors for file icons, mirroring VS Code's Seti icon theme per extension. */
 const FILE_ICON_COLORS: Record<string, string> = {
@@ -49,6 +49,34 @@ export function isCsvData(name: string): boolean {
 	const dot = name.lastIndexOf('.');
 	const ext = dot === -1 ? '' : name.slice(dot + 1).toLowerCase();
 	return ext === 'csv' || ext === 'tsv';
+}
+
+/** A CAN database (.dbc), which opens in the CAN database view (`dbcView.ts`). */
+export function isDbcFile(name: string): boolean {
+	const dot = name.lastIndexOf('.');
+	return dot !== -1 && name.slice(dot + 1).toLowerCase() === 'dbc';
+}
+
+/** An ELF image (.elf / .axf), which opens in the ELF Inspector (`elfView.ts`). */
+export function isElfImage(name: string): boolean {
+	const dot = name.lastIndexOf('.');
+	const ext = dot === -1 ? '' : name.slice(dot + 1).toLowerCase();
+	return ext === 'elf' || ext === 'axf';
+}
+
+/** Device tree source or blob (.dts / .dtsi / .dtb), which opens in the device tree
+ *  view (`devTreeView.ts`). */
+export function isDevTreeFile(name: string): boolean {
+	const dot = name.lastIndexOf('.');
+	const ext = dot === -1 ? '' : name.slice(dot + 1).toLowerCase();
+	return ext === 'dts' || ext === 'dtsi' || ext === 'dtb';
+}
+
+/** A Windows memory dump (.dmp / .mdmp), which opens in the dump viewer (`dumpView.ts`). */
+export function isDumpFile(name: string): boolean {
+	const dot = name.lastIndexOf('.');
+	const ext = dot === -1 ? '' : name.slice(dot + 1).toLowerCase();
+	return ext === 'dmp' || ext === 'mdmp';
 }
 
 /** The codicon for a file name - the choice VS Code's generic (non-Seti) icon set makes. */

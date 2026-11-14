@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { EditorGroup } from '../src/features/editor';
 import { isCanLog } from '../src/platform/fileIcons';
 import { busLoad, CanLogView, formatCycle, idHex, parseIdFilter, progressText, setCanPointerOverride, type CanIntervals, type CanLogStats, type CanProgress } from '../src/features/can';
-import { CanRawView, type CanFrameLine } from '../src/features/can';
+import { CanRawView, absTimeParts, formatCanStart, type CanFrameLine } from '../src/features/can';
 import { backend, Channel, dialog } from './tauriMock';
 import { click, texts } from './helpers';
 
@@ -418,6 +418,61 @@ describe('CAN log views', () => {
 		expect(chips.every((chip) => !chip.classList.contains('can-chip-on'))).toBe(true);
 		expect(view.root.querySelector<HTMLInputElement>('.can-filter')!.value).toBe('');
 		expect(clear.disabled).toBe(true);
+		view.dispose();
+	});
+
+	it('shows the header\'s measurement start and switches the Time column between relative and absolute', async () => {
+		// 2026-09-14 08:30:00.250 local — the wall clock the .asc header's date line states.
+		const startS = new Date(2026, 8, 14, 8, 30, 0, 250).getTime() / 1000;
+		backend.on('can_log_open', () => ({ docId: 41, totalBytes: 1000, startTimestampS: startS }));
+		backend.on('can_log_count', () => ({ parsed: RAW_LINES.length, done: true, error: null }));
+		backend.on('can_log_frames', ({ start, end }) => RAW_LINES.slice(start as number, end as number));
+		backend.on('can_log_close', () => undefined);
+		const view = new CanRawView('/tmp/run.asc');
+		document.body.append(view.root);
+		await waitForReady(() => document.querySelectorAll('.can-raw-rows .can-raw-row').length > 0);
+		// The chip beside the path carries the header's own date and time.
+		const startChip = view.root.querySelector<HTMLElement>('.can-start')!;
+		expect(startChip.hidden).toBe(false);
+		expect(startChip.textContent).toContain(formatCanStart(startS));
+		// Relative by default: the Time column reads the frame's own seconds.
+		const timeOf = (): string => view.root.querySelector<HTMLElement>('.can-raw-row .can-raw-time')!.textContent ?? '';
+		expect(timeOf()).toBe((0).toFixed(6));
+		// The toggle flips every rendered row to the wall clock (start + t) at once —
+		// no refetch, the rows repaint from the t each one carries.
+		const callsBefore = backend.callsTo('can_log_frames').length;
+		const toggle = view.root.querySelector<HTMLButtonElement>('.can-time-chip')!;
+		expect(toggle.disabled).toBe(false);
+		toggle.click();
+		await waitForReady(() => timeOf() === absTimeParts(startS, 0).cell);
+		for (const row of Array.from(view.root.querySelectorAll<HTMLElement>('.can-raw-rows .can-raw-row'))) {
+			const tS = Number(row.dataset.ts);
+			expect(row.querySelector<HTMLElement>('.can-raw-time')!.textContent).toBe(absTimeParts(startS, tS).cell);
+		}
+		expect(toggle.getAttribute('aria-pressed')).toBe('true');
+		expect(backend.callsTo('can_log_frames').length).toBe(callsBefore);
+		// And back: the same rows read relative seconds again.
+		toggle.click();
+		expect(timeOf()).toBe((0).toFixed(6));
+		expect(toggle.getAttribute('aria-pressed')).toBe('false');
+		view.dispose();
+	});
+
+	it('a headerless log stays relative-only: no start chip, the toggle disabled', async () => {
+		backend.on('can_log_open', () => ({ docId: 42, totalBytes: 1000, startTimestampS: null }));
+		backend.on('can_log_count', () => ({ parsed: RAW_LINES.length, done: true, error: null }));
+		backend.on('can_log_frames', ({ start, end }) => RAW_LINES.slice(start as number, end as number));
+		backend.on('can_log_close', () => undefined);
+		const view = new CanRawView('/tmp/bare.asc');
+		document.body.append(view.root);
+		await waitForReady(() => document.querySelectorAll('.can-raw-rows .can-raw-row').length > 0);
+		expect(view.root.querySelector<HTMLElement>('.can-start')!.hidden).toBe(true);
+		const toggle = view.root.querySelector<HTMLButtonElement>('.can-time-chip')!;
+		expect(toggle.disabled).toBe(true);
+		// A click is a no-op: the rows keep their relative seconds.
+		toggle.click();
+		expect(view.root.querySelector<HTMLElement>('.can-raw-row .can-raw-time')!.textContent).toBe((0).toFixed(6));
+		expect(toggle.getAttribute('aria-pressed')).toBe('false');
 		view.dispose();
 	});
 

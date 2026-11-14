@@ -34,6 +34,8 @@ const CATALOG: &[(&str, &str, bool)] = &[
     ("asc", "application/x-vector-asc", true),
     ("bin", "application/octet-stream", true),
     ("hex", "application/x-hex", true),
+    ("dmp", "application/x-minidump", false),
+    ("mdmp", "application/x-minidump", false),
     ("log", "text/plain", false),
     ("md", "text/markdown", false),
     ("json", "application/json", false),
