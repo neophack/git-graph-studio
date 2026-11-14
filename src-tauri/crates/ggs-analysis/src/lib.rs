@@ -321,6 +321,21 @@ impl AnalysisData {
         report: &(dyn Fn(usize, usize) + Sync),
         cancelled: &(dyn Fn() -> bool + Sync),
     ) -> Option<AnalysisData> {
+        Self::build_streaming(root, threads, report, cancelled, None)
+    }
+
+    /// The build with a per-batch consumer: after each batch's files are interned (before
+    /// `derive`), `consume` sees the partially-built analysis — the streaming reports'
+    /// hook, so their per-file rows land while the index is still parsing. The data is in
+    /// walk order here, not path order, and the derived tables are absent: only `files()`
+    /// and `names()` are meaningful. `None` means cancelled — nothing is installed.
+    pub fn build_streaming(
+        root: &str,
+        threads: usize,
+        report: &(dyn Fn(usize, usize) + Sync),
+        cancelled: &(dyn Fn() -> bool + Sync),
+        mut consume: Option<&mut (dyn FnMut(&AnalysisData) + Send)>,
+    ) -> Option<AnalysisData> {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads.max(1))
             .build()
@@ -344,6 +359,9 @@ impl AnalysisData {
                 // and the strings never outlive this loop.
                 for one in parsed.drain(..) {
                     data.files.push(convert(&mut data.names, &mut data.sigs, one));
+                }
+                if let Some(consume) = consume.as_mut() {
+                    consume(&data);
                 }
                 report(data.files.len(), total);
             }

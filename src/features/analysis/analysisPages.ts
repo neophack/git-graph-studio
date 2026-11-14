@@ -12,7 +12,7 @@
 // here belongs to the first-paint bundle.
 
 import { Channel } from '../../platform/ipc/core';
-import { analysisDeadCode, analysisImportGraph, type DeadCodeEvent, type DeadRow, analysisMetrics, type FileDep, type MetricRow, type MetricsEvent, type ModuleEdge, type ModuleDiagram, type ModuleGraphData, analysisModuleDiagram, analysisModuleGraph, analysisSecurity, type Finding, type ImportGraphData, type SecurityEvent } from '../../platform/ipc/analysis';
+import { analysisDeadCode, analysisImportGraph, type AnalysisStatus, type DeadCodeEvent, type DeadRow, analysisMetrics, type FileDep, type MetricRow, type MetricsEvent, type ModuleEdge, type ModuleDiagram, type ModuleGraphData, analysisModuleDiagram, analysisModuleGraph, analysisSecurity, type Finding, type ImportGraphData, type SecurityEvent } from '../../platform/ipc/analysis';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { t, tf } from '../../platform/i18n';
@@ -59,9 +59,13 @@ abstract class ReportPage<T> implements AnalysisPageView {
 	protected running = false;
 	protected summary = '';
 	protected runId = 0;
+	/** The analysis index's latest status push: while a cold build parses under a
+	 *  report, the building line says where it is instead of a bare spinner. */
+	private buildStatus: AnalysisStatus | null = null;
 	private readonly title: HTMLElement;
 	private readonly filterInput: HTMLInputElement;
 	private readonly progress: HTMLElement;
+	private readonly buildingLine: HTMLElement;
 	protected readonly list: HTMLElement;
 
 	onOpen: ((path: string, line: number) => void) | null = null;
@@ -88,12 +92,30 @@ abstract class ReportPage<T> implements AnalysisPageView {
 			])
 		]);
 		this.progress = el('div', 'an-progress');
+		this.buildingLine = el('div', 'an-building');
 		this.list = el('div', 'an-list');
-		container.append(header, this.progress, this.list);
+		container.append(header, this.progress, this.buildingLine, this.list);
 		this.render();
 		// The report runs on open: the index is already built by then, so the first
-		// batch is a query away, not a parse away.
+		// batch is a query away, not a parse away — and on a cold index the build
+		// streams the per-file reports itself, rows landing as files parse.
 		void this.start();
+	}
+
+	/** The index status pushes (the editor area routes them): the building line's
+	 *  live counts. Painted directly — a progress push must not re-render the list. */
+	noteBuildStatus(status: AnalysisStatus | null): void {
+		this.buildStatus = status;
+		this.paintBuilding();
+	}
+
+	/** The building line under the progress bar: visible only while this page waits
+	 *  on a build that is actually running. */
+	private paintBuilding(): void {
+		const status = this.buildStatus;
+		this.buildingLine.textContent = this.running && status?.state === 'building'
+			? tf('analysis.page.building', status.done, status.total)
+			: '';
 	}
 
 	/** The typed channel + invoke of the report command. */
@@ -144,6 +166,7 @@ abstract class ReportPage<T> implements AnalysisPageView {
 
 	render(): void {
 		this.progress.classList.toggle('running', this.running);
+		this.paintBuilding();
 		this.title.textContent = this.running
 			? `${t('analysis.page.loading')}…`
 			: this.error
@@ -217,7 +240,9 @@ class MetricsPage extends ReportPage<MetricRow> {
 				// UI thread for the whole stream; `resort` orders the rows once at the end.
 				this.retain(event.rows);
 				this.render();
-			} else {
+			} else if (!event.cancelled) {
+				// A cancelled run (a folder switch, a newer rebuild) retires quietly:
+				// its zero totals must not stand as the page's answer.
 				this.summary = tf('analysis.metrics.summary', event.functions);
 			}
 		};
@@ -300,7 +325,7 @@ class DeadCodePage extends ReportPage<DeadRow> {
 			if (event.kind === 'batch') {
 				this.retain(event.rows);
 				this.render();
-			} else {
+			} else if (!event.cancelled) {
 				this.summary = tf('analysis.deadcode.summary', event.found);
 			}
 		};
@@ -350,7 +375,7 @@ class SecurityPage extends ReportPage<Finding> {
 			if (event.kind === 'batch') {
 				this.retain(event.findings);
 				this.render();
-			} else {
+			} else if (!event.cancelled) {
 				this.summary = tf('analysis.security.summary', event.findings);
 			}
 		};
@@ -405,6 +430,9 @@ class ModulePage implements AnalysisPageView {
 	private data: ModuleGraphData | null = null;
 	private loading = true;
 	private error: string | null = null;
+	/** The index status push: while the page's load waits on a cold build, the
+	 *  status line names the build's live position instead of a bare "Analyzing". */
+	private buildStatus: AnalysisStatus | null = null;
 	/** The filter as typed (the tree follows it live); the drawing follows `graphFilter`. */
 	private filter = '';
 	private graphFilter = '';
@@ -519,6 +547,14 @@ class ModulePage implements AnalysisPageView {
 		this.render();
 	}
 
+	/** The index status pushes (the editor area routes them): the loading state names
+	 *  the build's live position. While the build runs nothing else is drawn, so the
+	 *  re-render costs nothing; after it the pushes are ignored. */
+	noteBuildStatus(status: AnalysisStatus | null): void {
+		this.buildStatus = status;
+		if (this.loading) this.render();
+	}
+
 	/** Whether a file pair survives the filter: its file names, or a symbol at one of
 	 *  its call sites, spelling part of the query. */
 	private fileMatches(dep: FileDep): boolean {
@@ -550,7 +586,11 @@ class ModulePage implements AnalysisPageView {
 		this.statusHost.textContent = '';
 		const status = (text: string, cls = 'an-empty') => this.statusHost.appendChild(el('div', cls, [text]));
 		if (this.loading) {
-			status(`${t('analysis.page.loading')}…`);
+			// A cold index's build names its live position — the wait is the parse, and
+			// the click's first answer is the counter moving.
+			status(this.buildStatus?.state === 'building'
+				? tf('analysis.page.building', this.buildStatus.done, this.buildStatus.total)
+				: `${t('analysis.page.loading')}…`);
 			this.syncView();
 			return;
 		}
@@ -911,6 +951,9 @@ class ImportsPage implements AnalysisPageView {
 	private graph: ImportGraphData | null = null;
 	private loading = true;
 	private error: string | null = null;
+	/** The index status push: while the page's load waits on a cold build, the
+	 *  loading line names the build's live position. */
+	private buildStatus: AnalysisStatus | null = null;
 	private filter = '';
 	private readonly title: HTMLElement;
 	private readonly body: HTMLElement;
@@ -959,6 +1002,13 @@ class ImportsPage implements AnalysisPageView {
 		this.render();
 	}
 
+	/** The index status pushes (the editor area routes them): the loading state names
+	 *  the build's live position; after the load they change nothing. */
+	noteBuildStatus(status: AnalysisStatus | null): void {
+		this.buildStatus = status;
+		if (this.loading) this.render();
+	}
+
 	render(): void {
 		this.body.textContent = '';
 		this.title.textContent = this.loading
@@ -969,7 +1019,9 @@ class ImportsPage implements AnalysisPageView {
 					? tf('analysis.imports.summary', this.graph.edges.length, this.graph.cycles.length)
 					: '');
 		if (this.loading) {
-			this.body.appendChild(el('div', 'an-empty', [`${t('analysis.page.loading')}…`]));
+			this.body.appendChild(el('div', 'an-empty', [this.buildStatus?.state === 'building'
+				? tf('analysis.page.building', this.buildStatus.done, this.buildStatus.total)
+				: `${t('analysis.page.loading')}…`]));
 			return;
 		}
 		if (this.error) {

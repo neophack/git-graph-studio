@@ -269,6 +269,44 @@ describe('the report pages', () => {
 		await flush(8);
 		expect(texts('.an-title')[0]).toContain('try again');
 	});
+
+	it('a cold build names its live position while the page waits, and the line clears with the report', async () => {
+		await modules();
+		let release: (() => void) | null = null;
+		backend.on('analysis_dead_code', () => new Promise<void>((resolve) => { release = resolve; }));
+		const page = createAnalysisPage('deadcode', host());
+		await flush(4);
+		// The build's status push (boot routes it) reaches the page: the counter moves
+		// instead of a bare spinner.
+		page.noteBuildStatus?.({ state: 'building', done: 512, total: 3000, files: 0, symbols: 0, calls: 0 });
+		expect(texts('.an-building')[0]).toContain('512');
+		expect(texts('.an-building')[0]).toContain('3000');
+		// A push from a finished index is not a build: the line stays empty.
+		page.noteBuildStatus?.({ state: 'ready', done: 3, total: 3, files: 3, symbols: 9, calls: 5 });
+		expect(texts('.an-building')[0]).toBe('');
+		page.noteBuildStatus?.({ state: 'building', done: 512, total: 3000, files: 0, symbols: 0, calls: 0 });
+		// The report finishing clears the line for good.
+		release?.();
+		await flush(8);
+		expect(texts('.an-building')[0]).toBe('');
+	});
+
+	it('a cancelled run retires quietly — its zero totals never stand as the answer', async () => {
+		await modules();
+		backend.on('analysis_metrics', ({ onEvent }) => {
+			(onEvent as Channel).send({ kind: 'batch', rows: [
+				{ path: 'a.rs', name: 'fn', kind: 'function', container: null, line: 0, lines: 1, params: 0, complexity: 1, nesting: 0, refs: 0, hotspot: 1 }
+			] });
+			(onEvent as Channel).send({ kind: 'done', files: 0, functions: 0, cancelled: true });
+			return null;
+		});
+		createAnalysisPage('metrics', host());
+		await flush(8);
+		// The rows keep streaming (they are honest — they landed), but the cancelled
+		// Done's `0 functions measured` must not become the title.
+		expect(texts('.an-title')[0]).not.toContain('0 functions');
+		expect(texts('.an-title')[0]).toContain('Complexity');
+	});
 });
 
 describe('the graph pages', () => {

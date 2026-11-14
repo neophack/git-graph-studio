@@ -8,12 +8,13 @@
 // and pure helpers. Anything that writes, spawns or dialogs is verified structurally only, and
 // the scan names it so the report shows what a button does without doing it.
 
-import { analysisStatus } from '../../platform/ipc/analysis';
+import { analysisMetrics, analysisStatus, type MetricsEvent } from '../../platform/ipc/analysis';
 import { extList } from '../../platform/ipc/ext';
 import { providerCcswitchScan, providerList } from '../../platform/ipc/providers';
 import { extProcessStatus } from '../../platform/ipc/extProcess';
 import { mcpTools } from '../../platform/ipc/mcp';
 import { workspaceSymbols } from '../../platform/ipc/search';
+import { Channel } from '../../platform/ipc/core';
 
 import { commands } from '../../platform/commands';
 import { t } from '../../platform/i18n';
@@ -620,6 +621,25 @@ export function registerSelfTestSuites(workbench: Workbench): void {
 					await settle();
 					await commands.execute('workbench.closeEditor');
 					await settle();
+				}
+			},
+			{
+				id: 'stream',
+				name: 'the metrics report streams its rows and the Done counts every one',
+				run: async () => {
+					// The real command end to end: on a cold index the build streams the
+					// batches itself, on a warm one the resident run does — either way the
+					// Done's function count must equal the rows that crossed.
+					const onEvent = new Channel<MetricsEvent>();
+					let rows = 0;
+					let functions = -1;
+					onEvent.onmessage = (event) => {
+						if (event.kind === 'batch') rows += event.rows.length;
+						else functions = event.cancelled ? rows : event.functions;
+					};
+					await analysisMetrics(onEvent);
+					if (functions < 0) throw new Error('the report never finished');
+					if (functions !== rows) throw new Error(`the Done says ${functions} functions, ${rows} rows streamed`);
 				}
 			}
 		]

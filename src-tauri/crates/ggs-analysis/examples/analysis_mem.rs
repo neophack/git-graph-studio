@@ -238,7 +238,7 @@ fn main() {
     // Phase 4: the Complexity & Hotspots report, streamed batch by batch.
     let mut sink = Dropping::new();
     phase("metrics", || {
-        run_metrics(&index, &data, &root, &|_| 0, &mut sink);
+        run_metrics(&index, &data, &|_| 0, &mut sink);
         println!("  {} batches, {} json bytes", sink.batches, sink.rows);
     });
 

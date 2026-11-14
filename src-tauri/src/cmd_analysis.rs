@@ -5,7 +5,9 @@
 //! composition root's sweeper (`index_lease`) releases it once it sits idle. Watcher
 //! batches update a resident index file by file, and every report command streams its
 //! rows over a channel through the ggs-base push seam — the search view's rhythm (plan
-//! §3.4).
+//! §3.4). The two per-file reports (metrics, security) do not wait the build out: on a
+//! cold index their rows stream through the build's per-batch hook, the click's first
+//! batch landing one parse batch in instead of a whole tree in.
 
 use std::sync::{Arc, Mutex};
 
@@ -13,14 +15,15 @@ use tauri::ipc::Channel;
 use tauri::State;
 
 use ggs_analysis::index::{
-    run_dead_code, run_metrics, run_security, AnalysisIndexEvent, AnalysisStatus,
-    DeadCodeEvent, MetricsEvent, SecurityEvent,
+    run_dead_code, run_metrics, run_security, security_scan_files, AnalysisIndexEvent,
+    AnalysisStatus, DeadCodeEvent, MetricsEvent, SecurityEvent,
 };
 use ggs_analysis::imports::ImportGraph;
 use ggs_analysis::modules::{self, ModuleGraph};
 use ggs_analysis::AnalysisData;
 use ggs_analysis::diagram::ModuleDiagram;
 
+use ggs_base::sink::BatchSink;
 use ggs_base::workspace::WorkspaceRoots;
 
 /* ---------- The commands ---------- */
@@ -129,6 +132,9 @@ pub async fn analysis_module_diagram(
 /// column blends the symbol index's occurrence counts in (the index is made resident for
 /// it, like any symbol query); the big-code-analysis columns (cognitive complexity, Halstead, LLOC, MI) enrich each
 /// batch outside the analysis lock — a re-read per report, the security scan's rhythm.
+/// On a cold index the report streams DURING the build: every parsed batch's rows cross
+/// at once, the click's first answer being rows instead of a spinner (plan §3.4 — the
+/// first batch reaches the UI in the parse of one batch, not the parse of the tree).
 #[tauri::command]
 pub async fn analysis_metrics(
     app: tauri::AppHandle,
@@ -139,23 +145,62 @@ pub async fn analysis_metrics(
     on_event: Channel<MetricsEvent>,
 ) -> Result<(), String> {
     let root = resolve_root(roots.inner(), repo)?;
-    let data = analysis_of(&app, analysis_index.inner(), root.clone()).await?;
+    // Without the counts the hotspot column reads zero, still a report: a failed symbol
+    // load does not fail the page. (Before the build, so the streamed rows enrich too.)
+    let _ = crate::cmd_symbols::ensure_symbols(&app, symbol_index.inner(), root.clone()).await;
     let index = std::sync::Arc::clone(analysis_index.inner());
     let symbols = std::sync::Arc::clone(symbol_index.inner());
-    // Without the counts the hotspot column reads zero, still a report: a failed symbol
-    // load does not fail the page.
-    let _ = crate::cmd_symbols::ensure_symbols(&app, symbol_index.inner(), root.clone()).await;
     // The hotspot column asks per name as rows stream: one binary search into the
     // store's occurrence lists, never the whole name-to-count table a large workspace
     // would put in memory for the report's run.
     tauri::async_runtime::spawn_blocking(move || {
+        let events = crate::events::TauriEvents(app.clone());
+        let mut sink = crate::events::ChannelSink(on_event);
         let refs_root = root.clone();
         let refs_of = move |name: &str| symbols.ref_count(&refs_root, name).unwrap_or(0);
-        let mut sink = crate::events::ChannelSink(on_event);
-        run_metrics(&index, &data, &root, &refs_of, &mut sink);
+        // The build-time hook: every parsed batch's rows leave at once, and the counts
+        // the final Done needs accumulate beside them.
+        let mut streamed = 0usize;
+        let mut functions = 0usize;
+        let mut hook = |data: &ggs_analysis::AnalysisData| {
+            let files = data.files();
+            if files.len() > streamed {
+                let rows =
+                    ggs_analysis::metrics::rows_for_files(data, &files[streamed..], &refs_of);
+                functions += rows.len();
+                streamed = files.len();
+                let _ = sink.send(MetricsEvent::Batch { rows });
+            }
+        };
+        match index.ensure_with_batches(Some(&events), &root, Some(&mut hook)) {
+            Ok(data) => {
+                if streamed == 0 {
+                    // The analysis was already resident (the hook never ran): the
+                    // ordinary whole-report run.
+                    run_metrics(&index, &data, &refs_of, &mut sink);
+                } else {
+                    let _ = sink.send(MetricsEvent::Done {
+                        files: streamed,
+                        functions,
+                        cancelled: false,
+                    });
+                }
+            }
+            // A cancelled build (a folder switch, a newer rebuild) retires the page the
+            // way a retired report does — no error banner, the newer run owns the view.
+            Err(message) if message == "cancelled" => {
+                let _ = sink.send(MetricsEvent::Done {
+                    files: 0,
+                    functions: 0,
+                    cancelled: true,
+                });
+            }
+            Err(message) => return Err(message),
+        }
+        Ok(())
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?
 }
 
 /// Declarations no call site in the workspace spells, streamed in batches.
@@ -182,7 +227,9 @@ pub async fn analysis_dead_code(
 
 /// The rule-based security scan (secrets, dangerous and weak-crypto APIs), streamed in
 /// batches. Pattern rules need the raw text, so the files are re-read here — a report
-/// run, not the index's hot path.
+/// run, not the index's hot path. On a cold index the scan streams DURING the build:
+/// every parsed batch's findings cross at once, the click's first answer being rows
+/// instead of a spinner (the metrics report's rhythm).
 #[tauri::command]
 pub async fn analysis_security(
     app: tauri::AppHandle,
@@ -192,14 +239,52 @@ pub async fn analysis_security(
     on_event: Channel<SecurityEvent>,
 ) -> Result<(), String> {
     let root = resolve_root(roots.inner(), repo)?;
-    let data = analysis_of(&app, analysis_index.inner(), root.clone()).await?;
     let index = std::sync::Arc::clone(analysis_index.inner());
     tauri::async_runtime::spawn_blocking(move || {
+        let events = crate::events::TauriEvents(app.clone());
         let mut sink = crate::events::ChannelSink(on_event);
-        run_security(&index, &data, &root, &mut sink);
+        let mut streamed = 0usize;
+        let mut scanned = 0usize;
+        let mut findings = 0usize;
+        let mut hook = |data: &ggs_analysis::AnalysisData| {
+            let files = data.files();
+            if files.len() > streamed {
+                let (scan, found) =
+                    security_scan_files(data, &root, &files[streamed..], &mut sink);
+                scanned += scan;
+                findings += found;
+                streamed = files.len();
+            }
+        };
+        match index.ensure_with_batches(Some(&events), &root, Some(&mut hook)) {
+            Ok(data) => {
+                if streamed == 0 {
+                    // The analysis was already resident (the hook never ran): the
+                    // ordinary whole-report run.
+                    run_security(&index, &data, &root, &mut sink);
+                } else {
+                    let _ = sink.send(SecurityEvent::Done {
+                        files: scanned,
+                        findings,
+                        cancelled: false,
+                    });
+                }
+            }
+            // A cancelled build (a folder switch, a newer rebuild) retires the page the
+            // way a retired report does — no error banner, the newer run owns the view.
+            Err(message) if message == "cancelled" => {
+                let _ = sink.send(SecurityEvent::Done {
+                    files: 0,
+                    findings: 0,
+                    cancelled: true,
+                });
+            }
+            Err(message) => return Err(message),
+        }
+        Ok(())
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?
 }
 
 /// The workspace's import graph with its cycles, in one answer.

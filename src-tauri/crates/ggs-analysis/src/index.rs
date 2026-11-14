@@ -18,11 +18,8 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use rayon::prelude::*;
-
 use ggs_base::sink::BatchSink;
 
-use crate::bca;
 use crate::deadcode::DeadRow;
 use crate::metrics::MetricRow;
 use crate::security::{self, Finding};
@@ -214,6 +211,22 @@ impl AnalysisIndex {
         sink: Option<&dyn ggs_base::sink::EventSink>,
         root: &str,
     ) -> Result<Arc<Mutex<AnalysisData>>, String> {
+        self.ensure_with_batches(sink, root, None)
+    }
+
+    /// The analysis of a root, built now when none is resident — and while a build runs,
+    /// `during_build` sees every parsed batch (the streaming reports' hook: their per-file
+    /// rows land while the index is still parsing, the click's first answer being rows
+    /// instead of a spinner). A resident analysis answers without calling the hook; the
+    /// hook's data is the build's partial (walk order, no derived tables — files and
+    /// names only). Concurrent callers wait for the one build in flight; a cancelled
+    /// build (a folder switch, a newer rebuild) answers an error.
+    pub fn ensure_with_batches(
+        &self,
+        sink: Option<&dyn ggs_base::sink::EventSink>,
+        root: &str,
+        during_build: Option<&mut (dyn FnMut(&AnalysisData) + Send)>,
+    ) -> Result<Arc<Mutex<AnalysisData>>, String> {
         if let Some(data) = self.analysis(root) {
             return Ok(data);
         }
@@ -224,7 +237,7 @@ impl AnalysisIndex {
         if let Some(data) = self.analysis(root) {
             return Ok(data);
         }
-        self.build_on_blocking(sink, root, None, index_threads(false))?;
+        self.build_on_blocking(sink, root, None, during_build, index_threads(false))?;
         self.analysis(root)
             .ok_or_else(|| "The code analysis was cancelled".to_owned())
     }
@@ -274,7 +287,7 @@ impl AnalysisIndex {
         root: &str,
         channel: Option<&mut dyn BatchSink<AnalysisIndexEvent>>,
     ) -> Result<AnalysisStatus, String> {
-        self.build_on_blocking(sink, root, channel, index_threads(false))
+        self.build_on_blocking(sink, root, channel, None, index_threads(false))
     }
 
     fn build_on_blocking(
@@ -282,6 +295,7 @@ impl AnalysisIndex {
         sink: Option<&dyn ggs_base::sink::EventSink>,
         root: &str,
         channel: Option<&mut dyn BatchSink<AnalysisIndexEvent>>,
+        during_build: Option<&mut (dyn FnMut(&AnalysisData) + Send)>,
         threads: usize,
     ) -> Result<AnalysisStatus, String> {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -313,7 +327,7 @@ impl AnalysisIndex {
                 }
             }
         };
-        let built = AnalysisData::build(root, threads, &report, &|| !is_current());
+        let built = AnalysisData::build_streaming(root, threads, &report, &|| !is_current(), during_build);
         // A cancelled build leaves the previous analysis standing, like the symbol index —
         // and its STATUS too: the progress report left "Building N/M" on the note, and a
         // cancelled build never clears it (a report run bumps the same generation, so
@@ -431,7 +445,6 @@ fn ready_status(data: &AnalysisData) -> AnalysisStatus {
 pub fn run_metrics(
     index: &AnalysisIndex,
     data: &Arc<Mutex<AnalysisData>>,
-    root: &str,
     refs_of: &dyn Fn(&str) -> usize,
     sink: &mut dyn BatchSink<MetricsEvent>,
 ) {
@@ -448,30 +461,13 @@ pub fn run_metrics(
             return;
         }
         let end = (start + REPORT_BATCH).min(file_count);
-        // Rows for this batch of files, under the lock (the index already measured
-        // the shape).
-        let mut files: Vec<(String, Vec<MetricRow>)> = {
+        // Rows for this batch of files under the lock (the index already measured the
+        // shape); the enrichment parses outside it, so the analysis keeps serving queries.
+        let rows = {
             let data = data.lock().unwrap();
-            data.files()[start..end]
-                .iter()
-                .map(|file| (file.path.clone(), crate::metrics::rows_for_file(&data, file, refs_of)))
-                .collect()
+            crate::metrics::rows_for_files(&data, &data.files()[start..end], refs_of)
         };
-        // Enrichment parses outside the lock, so the analysis keeps serving queries.
-        // Lossy: a non-UTF-8 file's ASCII identifiers survive the decode, so its
-        // functions still enrich instead of silently dropping out of the report.
-        files.par_iter_mut().for_each(|(path, rows)| {
-            let ext = path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-            if let Ok(bytes) = std::fs::read(std::path::Path::new(root).join(path.as_str())) {
-                let text = String::from_utf8_lossy(&bytes);
-                bca::enrich_file(ext, &text, rows);
-            }
-        });
-        functions += files.iter().map(|(_, rows)| rows.len()).sum::<usize>();
-        let rows: Vec<MetricRow> = files
-            .into_iter()
-            .flat_map(|(_, rows)| rows.into_iter())
-            .collect();
+        functions += rows.len();
         let _ = sink.send(MetricsEvent::Batch { rows });
     }
     let _ = sink.send(MetricsEvent::Done {
@@ -544,12 +540,12 @@ pub fn run_security(
     sink: &mut dyn BatchSink<SecurityEvent>,
 ) {
     let run = index.begin_run();
+    let file_count = data.lock().unwrap().file_count();
     let mut files = 0usize;
     let mut total = 0usize;
     {
         let data = data.lock().unwrap();
-        let names = data.names();
-        for file in data.files() {
+        for start in (0..file_count).step_by(REPORT_BATCH) {
             if !index.is_current_run(run) {
                 let _ = sink.send(SecurityEvent::Done {
                     files: 0,
@@ -558,19 +554,10 @@ pub fn run_security(
                 });
                 return;
             }
-            // Secrets are usually ASCII: a non-UTF-8 file decodes lossily and stays
-            // scannable, instead of silently dropping out of the scan whole.
-            let Ok(bytes) = std::fs::read(std::path::Path::new(root).join(&file.path)) else {
-                continue;
-            };
-            let text = String::from_utf8_lossy(&bytes);
-            files += 1;
-            let ext = file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-            let findings = security::scan_file(&file.path, ext, &text, &file.calls, names);
-            total += findings.len();
-            if !findings.is_empty() {
-                let _ = sink.send(SecurityEvent::Batch { findings });
-            }
+            let end = (start + REPORT_BATCH).min(file_count);
+            let (scanned, found) = security_scan_files(&data, root, &data.files()[start..end], sink);
+            files += scanned;
+            total += found;
         }
     }
     let _ = sink.send(SecurityEvent::Done {
@@ -578,6 +565,36 @@ pub fn run_security(
         findings: total,
         cancelled: false,
     });
+}
+
+/// Scan a slice of files (each re-read — pattern rules need the raw text), sending every
+/// file's findings as its own batch; answers (files scanned, findings). The whole-report
+/// runner and the streaming build's per-batch hook share it, so what a streaming page
+/// shows mid-build is exactly what the resident run answers with. Secrets are usually
+/// ASCII: a non-UTF-8 file decodes lossily and stays scannable, instead of silently
+/// dropping out of the scan whole.
+pub fn security_scan_files(
+    data: &AnalysisData,
+    root: &str,
+    files: &[crate::FileAnalysis],
+    sink: &mut dyn BatchSink<SecurityEvent>,
+) -> (usize, usize) {
+    let mut scanned = 0usize;
+    let mut found = 0usize;
+    for file in files {
+        let Ok(bytes) = std::fs::read(std::path::Path::new(root).join(&file.path)) else {
+            continue;
+        };
+        scanned += 1;
+        let text = String::from_utf8_lossy(&bytes);
+        let ext = file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+        let findings = security::scan_file(&file.path, ext, &text, &file.calls, data.names());
+        found += findings.len();
+        if !findings.is_empty() {
+            let _ = sink.send(SecurityEvent::Batch { findings });
+        }
+    }
+    (scanned, found)
 }
 
 #[cfg(test)]
@@ -653,6 +670,128 @@ mod tests {
             Arc::ptr_eq(&first, &second),
             "a resident analysis is not rebuilt"
         );
+    }
+
+    #[test]
+    fn the_streaming_build_feeds_the_report_hook_per_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..300 {
+            write(
+                dir.path(),
+                &format!("f{i:03}.rs"),
+                "fn one() -> u32 { 0 }\nfn two() -> u32 { one() }\n",
+            );
+        }
+        let index = AnalysisIndex::new();
+        let root = dir.path().display().to_string();
+        let mut seen: Vec<usize> = Vec::new();
+        let mut hooked_symbols = 0usize;
+        let mut hook = |data: &AnalysisData| {
+            seen.push(data.file_count());
+            // Each call carries the accumulated partial (its derived tables absent —
+            // `symbol_count` derives), so the last snapshot is the whole tree's count.
+            hooked_symbols = data.files().iter().map(|f| f.symbols.len()).sum::<usize>();
+        };
+        index.ensure_with_batches(None, &root, Some(&mut hook)).unwrap();
+        // 300 files parse as 256 + 44: the hook sees every batch's growth, so a report
+        // riding it answers after the FIRST batch — the click's first rows are one parse
+        // batch away, not the whole tree away.
+        assert_eq!(seen, vec![256, 300], "{seen:?}");
+        assert_eq!(hooked_symbols, 600);
+        // The finished build is installed and serves like any other.
+        assert_eq!(index.status(&root).state, AnalysisState::Ready);
+        let data = index.analysis(&root).unwrap();
+        assert_eq!(data.lock().unwrap().lookup("one").len(), 300);
+    }
+
+    #[test]
+    fn a_resident_analysis_never_calls_the_streaming_hook() {
+        let (_dir, index, root) = seeded();
+        let mut calls = 0usize;
+        index
+            .ensure_with_batches(None, &root, Some(&mut |_| calls += 1))
+            .unwrap();
+        assert_eq!(calls, 0, "a resident analysis answers without the hook");
+    }
+
+    #[test]
+    fn the_streaming_hook_answers_what_the_resident_report_answers() {
+        use ggs_base::sink::VecSink;
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "a.rs",
+            "pub fn start() -> u32 { helper() }\nfn helper() -> u32 { 7 }\n",
+        );
+        write(
+            dir.path(),
+            "b.rs",
+            "API_KEY = 'super-secret-value-123'\nfn lonely() {}\n",
+        );
+        let index = Arc::new(AnalysisIndex::new());
+        let root = dir.path().display().to_string();
+        let refs = |_: &str| 3usize;
+
+        // The cold path: every batch's rows and findings stream through the hook.
+        let mut streamed_rows: Vec<MetricRow> = Vec::new();
+        let mut streamed_functions = 0usize;
+        let mut streamed_findings = 0usize;
+        let mut consumed = 0usize;
+        let mut security_stream = VecSink(Vec::new());
+        {
+            let mut hook = |data: &AnalysisData| {
+                let files = data.files();
+                if files.len() > consumed {
+                    let rows = crate::metrics::rows_for_files(data, &files[consumed..], &refs);
+                    streamed_functions += rows.len();
+                    streamed_rows.extend(rows);
+                    let (_, found) =
+                        security_scan_files(data, &root, &files[consumed..], &mut security_stream);
+                    streamed_findings += found;
+                    consumed = files.len();
+                }
+            };
+            index.ensure_with_batches(None, &root, Some(&mut hook)).unwrap();
+        }
+
+        // The resident path over the same corpus: the ordinary whole-report runs.
+        let data = index.analysis(&root).unwrap();
+        let mut whole = VecSink(Vec::new());
+        run_metrics(&index, &data, &refs, &mut whole);
+        let mut resident_rows: Vec<MetricRow> = whole
+            .0
+            .iter()
+            .flat_map(|event| match event {
+                MetricsEvent::Batch { rows } => rows.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        let mut resident_functions = 0usize;
+        for event in &whole.0 {
+            if let MetricsEvent::Done { functions, .. } = event {
+                resident_functions = *functions;
+            }
+        }
+        let mut resident_security = VecSink(Vec::new());
+        run_security(&index, &data, &root, &mut resident_security);
+        let mut resident_findings = 0usize;
+        for event in &resident_security.0 {
+            if let SecurityEvent::Done { findings, .. } = event {
+                resident_findings = *findings;
+            }
+        }
+
+        // The rows a streaming page showed mid-build are exactly the resident rows —
+        // path, name and line identify them; the counts the Done carries agree too.
+        let key = |row: &MetricRow| (row.path.clone(), row.name.clone(), row.line);
+        streamed_rows.sort_by_key(|row| key(row));
+        resident_rows.sort_by_key(|row| key(row));
+        assert_eq!(streamed_rows, resident_rows);
+        assert_eq!(streamed_functions, resident_functions);
+        assert_eq!(streamed_findings, resident_findings);
+        // The corpus carries both reports' material, so the equality is not vacuous.
+        assert!(streamed_functions >= 3);
+        assert!(streamed_findings >= 1);
     }
 
     #[test]
@@ -765,7 +904,7 @@ mod tests {
         let data = index.analysis(&root).unwrap();
 
         let mut metrics_sink = VecSink(Vec::new());
-        run_metrics(&index, &data, &root, &|_| 0, &mut metrics_sink);
+        run_metrics(&index, &data, &|_| 0, &mut metrics_sink);
         assert!(metrics_sink.0.len() >= 2);
         assert!(matches!(
             metrics_sink.0.last(),

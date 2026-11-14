@@ -1413,6 +1413,12 @@ the same data into
 module dependencies → file pairs → call sites, children rendering only while expanded),
 Complexity & Hotspots, Dead Code, Security Scan (rule-based, no taint tracking) and the
 Import Graph (with cycles) — each opening a streamed result page in the editor area. The
+two per-file reports (metrics, security) stream WHILE a cold index builds — the build's
+per-batch hook (`ensure_with_batches`) hands every parsed batch's rows to the command, so
+the click's first answer lands one parse batch in, and every page names the build's live
+`done/total` (boot routes the `studio://analysis-index` pushes to the open pages) instead
+of a bare spinner; the cross-file reports (dead code, module, imports) wait the build out
+honestly — their answers need the whole workspace. The
 engine resolves calls by name with receiver hints (no type inference); its honest limits
 are stated on the pages themselves. The per-symbol call graph walk and the shortest call
 chain remain engine services served to the MCP server (module 16), not a page. The
@@ -1445,7 +1451,9 @@ viewport (pan, zoom, states) around it.
   by the first analysis command, never on a folder open — `ensure_blocking` — and
   released once idle, `release_idle`, through module 5's `index_lease.rs`) and the
   streaming report runners (each batch builds, enriches, sends and drops — a large
-  tree's whole row set never sits in memory; the hotspot column asks the symbol
+  tree's whole row set never sits in memory; `ensure_with_batches` rides the same
+  batches into a cold build, the per-file reports streaming while it parses;
+  the hotspot column asks the symbol
   index per name — `ref_count`, one binary search into the trusted occurrence
   list — where `occurrence_counts` would hold every name and count of the
   workspace in a map for the report's whole run),

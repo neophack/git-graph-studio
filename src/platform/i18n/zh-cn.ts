@@ -423,6 +423,7 @@ export const zhCn: typeof en = {
 	'analysis.tool.imports.desc': '文件间依赖与循环导入',
 	'analysis.page.filter': '筛选结果',
 	'analysis.page.loading': '分析中',
+	'analysis.page.building': '正在建立代码索引 {0}/{1}，分析出的结果即时显示',
 	'analysis.page.empty': '没有可报告的内容。',
 	'analysis.page.error': '分析未能完成——请重试。',
 	'analysis.page.rerun': '重新运行',

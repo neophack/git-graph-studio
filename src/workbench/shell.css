@@ -2101,6 +2101,10 @@ button.ggs-symbol-hover-loc:hover { text-decoration: underline; color: var(--vsc
 .an-progress { height: 2px; flex: none; background: transparent; }
 .an-progress.running { background: var(--vscode-focusBorder); animation: an-slide 1.2s ease-in-out infinite; }
 @keyframes an-slide { 0% { transform: scaleX(0.05); transform-origin: left; } 60% { transform: scaleX(0.7); } 100% { transform: scaleX(1); transform-origin: left; } }
+/* The cold build's live position under the progress bar: the counter moves while the
+   rows stream in, so the wait reads as work, not a hang. */
+.an-building { flex: none; padding: 4px 20px 0; color: var(--vscode-descriptionForeground); font-size: 11px; }
+.an-building:empty { display: none; }
 .an-list { flex: 1; min-height: 0; overflow: auto; padding: 4px 0 12px; }
 .an-empty { color: var(--vscode-descriptionForeground); padding: 12px 20px; }
 .an-more { color: var(--vscode-descriptionForeground); font-size: 11px; padding: 6px 20px; }

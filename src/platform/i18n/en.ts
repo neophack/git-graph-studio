@@ -424,6 +424,7 @@ export const en = {
 	'analysis.tool.imports.desc': 'File dependencies and import cycles',
 	'analysis.page.filter': 'Filter results',
 	'analysis.page.loading': 'Analyzing',
+	'analysis.page.building': 'Building the code index {0}/{1} — results appear as files are analysed',
 	'analysis.page.empty': 'Nothing to report.',
 	'analysis.page.error': 'The analysis did not finish — try again.',
 	'analysis.page.rerun': 'Run again',

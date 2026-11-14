@@ -6,6 +6,7 @@
 //! Halstead volume, logical SLOC, the maintainability index — join at report time,
 //! re-reading what they measure.
 
+use rayon::prelude::*;
 use serde::Serialize;
 
 use super::bca;
@@ -76,6 +77,34 @@ pub fn rows_for_file(
                 mi: None,
             }
         })
+        .collect()
+}
+
+/// A slice of files' rows, the big-code-analysis columns enriched outside any lock (a
+/// re-read per report, the security scan's rhythm) — the whole-report runner and the
+/// streaming build's per-batch hook share it, so a row a streaming page shows mid-build
+/// is exactly the row the resident run answers with. Lossy: a non-UTF-8 file's ASCII
+/// identifiers survive the decode, so its functions still enrich instead of silently
+/// dropping out of the report.
+pub fn rows_for_files(
+    data: &AnalysisData,
+    files: &[FileAnalysis],
+    refs_of: &dyn Fn(&str) -> usize,
+) -> Vec<MetricRow> {
+    let mut files: Vec<(String, Vec<MetricRow>)> = files
+        .iter()
+        .map(|file| (file.path.clone(), rows_for_file(data, file, refs_of)))
+        .collect();
+    files.par_iter_mut().for_each(|(path, rows)| {
+        let ext = path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+        if let Ok(bytes) = std::fs::read(std::path::Path::new(data.root()).join(path.as_str())) {
+            let text = String::from_utf8_lossy(&bytes);
+            bca::enrich_file(ext, &text, rows);
+        }
+    });
+    files
+        .into_iter()
+        .flat_map(|(_, rows)| rows)
         .collect()
 }
 

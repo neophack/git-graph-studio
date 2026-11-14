@@ -506,7 +506,12 @@ export const bootMethods: ThisType<Workbench> = {
 		// The symbol index's builds report from the backend (an open's resume, a watcher's
 		// incremental update, this command's own rebuild): the status item follows them all.
 		void listen<SymbolIndexStatus>('studio://symbol-index', (event) => this.statusBar.setSymbols(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
-		void listen<AnalysisStatus>('studio://analysis-index', (event) => this.analysis.noteStatus(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
+		void listen<AnalysisStatus>('studio://analysis-index', (event) => {
+			this.analysis.noteStatus(event.payload);
+			// The open analysis pages follow the build too: a page whose report waits on
+			// a cold build shows its live progress instead of a bare spinner.
+			this.editors.noteAnalysisStatus(event.payload);
+		}).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
 		window.addEventListener('focus', this.onWindowFocusBound);
 		window.addEventListener('blur', this.onWindowBlurBound);
 		void getCurrentWindow().onCloseRequested(async (event) => {

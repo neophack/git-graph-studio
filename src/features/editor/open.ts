@@ -1393,6 +1393,16 @@ export const openMethods: ThisType<EditorGroup> = {
 		this.add(editor, true, intent);
 	},
 
+	/** The analysis index's status push (boot routes `studio://analysis-index` here
+	 *  beside the sidebar): every open analysis page's build-progress line follows —
+	 *  a page whose load waits on a cold build shows the counter moving instead of a
+	 *  bare spinner. */
+	noteAnalysisStatus(status: import('../../platform/ipc/analysis').AnalysisStatus | null): void {
+		for (const editor of this.open) {
+			if (editor.input.kind === 'analysis') editor.analysis?.noteBuildStatus?.(status);
+		}
+	},
+
 	async openAnalysisPage(
 		tool: import('../analysis').AnalysisToolId,
 		folders?: string[]
