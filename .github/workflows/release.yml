@@ -77,9 +77,19 @@ jobs:
         env:
           INPUT_VERSION: ${{ inputs.version }}
           REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
           VERSION="$INPUT_VERSION"
-          if [ -z "$VERSION" ] || [ "$VERSION" = "main" ]; then
+          # The input "main" means "resolve it" (a branch name is never a semver). And a
+          # branch dispatch has no version in its name — only a pushed TAG does. The old
+          # fallback took REF_NAME for an empty (or literal "main") input on ANY ref, so
+          # dispatching on the main branch resolved the version to "main" and stamped
+          # `version = "main"` into every Cargo.toml the build touches (2026-11-14: all
+          # the stamping jobs died at cargo metadata while the tests passed).
+          if [ "$VERSION" = "main" ]; then
+            VERSION=""
+          fi
+          if [ -z "$VERSION" ] && [ "$REF_TYPE" = "tag" ]; then
             VERSION="$REF_NAME"
           fi
           if [ -z "$VERSION" ]; then
