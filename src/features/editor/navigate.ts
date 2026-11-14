@@ -9,11 +9,16 @@ import { isCodeExtension } from '../../platform/fileIcons';
 import type { EditorGroup } from './group';
 import { SYMBOL_ICONS } from './breadcrumbs';
 import type { Editor } from './inputs';
+import { mountPeek, type PeekHandle } from './peek';
 import { readFileRaw } from './shared';
 
 
 /** How many workspace files "Go to Definition" reads through before giving up. */
 const MAX_DEFINITION_FILES = 3000;
+
+/** The one peek popup alive over the workbench's editors: opening another — in this or
+ *  another tab — dismisses it, exactly as a new popup replaces the old one. */
+let activePeek: PeekHandle | null = null;
 
 export const workspaceFileCache = new Map<string, string | null>();
 /** How many workspace files the definition search keeps cached (whole file strings). */
@@ -133,6 +138,63 @@ export const navigateMethods: ThisType<EditorGroup> = {
 		const target = other ?? hits[0];
 		if (!target) return false;
 		return this.jumpToDefinition(target, currentPath, view);
+	},
+
+	/** Peek Definition (Alt+F12): the word under the cursor's definition, shown in a
+	 *  popup over the editor — the file and the scroll never move. The index's exact
+	 *  answer leads; the substring query's exact-name hits fill in when there is no
+	 *  persistent index yet. Works wherever the whole-document view is, a text editor's
+	 *  and a diff pane's alike. */
+	async peekDefinition(editor?: Editor | null, pos?: number | null): Promise<void> {
+		if (editor === undefined) editor = this.active;
+		if (!editor) return;
+		const view = editor.view ?? editor.merge?.b ?? null;
+		if (!view || !this.rootPath) return;
+		const at = pos ?? view.state.selection.main.head;
+		const word = view.state.wordAt(at) ?? view.state.wordAt(view.state.selection.main.head);
+		if (!word) return;
+		const name = view.state.sliceDoc(word.from, word.to);
+		const currentPath = editor.input.kind === 'file' ? editor.input.path : null;
+		let defs: WsSymbol[] = [];
+		try {
+			defs = (await symbolLookup(name)) ?? [];
+		} catch {
+			defs = [];
+		}
+		if (defs.length === 0) {
+			try {
+				defs = ((await workspaceSymbols(name, 200)) ?? []).filter((s) => s.name === name);
+			} catch {
+				return;
+			}
+		}
+		defs = defs.slice(0, 8);
+		if (defs.length === 0) {
+			notify('info', `No definition found for '${name}'.`);
+			return;
+		}
+		const previous = activePeek;
+		activePeek = null;
+		previous?.close();
+		const root = this.rootPath;
+		let handle: PeekHandle | null = null;
+		handle = mountPeek(view, word.from, name, defs, {
+			root: () => this.rootPath,
+			read: (path) => this.cachedRead(joinPath(root, path)),
+			open: (path, line) => {
+				handle?.close();
+				const absolute = joinPath(root, path);
+				if (currentPath && (absolute === currentPath || toPosix(absolute) === toPosix(currentPath))) {
+					this.revealPosition(view, line + 1, 1);
+					return;
+				}
+				void this.openFile(absolute, { line: line + 1, column: 1 });
+			},
+			close: () => {
+				activePeek = null;
+			}
+		});
+		activePeek = handle;
 	},
 
 	async pickDefinition(defs: WsSymbol[], currentPath: string | null, view: EditorView): Promise<boolean> {

@@ -350,6 +350,7 @@ export const zhCn: typeof en = {
 	'symbols.page.expandAll': '全部展开',
 	'symbols.page.empty': '此文件夹的符号索引为空。',
 	'symbols.hover.definitions': '个定义',
+	'symbols.hover.openDefinition': '打开定义',
 	'symbols.context.empty': '将光标放在符号上，即可在此查看它的定义。',
 	'symbols.context.ambiguous': '个符号同名——请在编辑器中选择其一。',
 	'symbols.context.pin': '将上下文窗口固定到当前符号',

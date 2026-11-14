@@ -872,6 +872,34 @@ body.resizing iframe { pointer-events: none; }
 .cm-editor .cm-tooltip { background: var(--vscode-editorHoverWidget-background); border: 1px solid var(--vscode-editorHoverWidget-border); color: var(--vscode-editorWidget-foreground); }
 .cm-editor .cm-tooltip-autocomplete ul li[aria-selected] { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
 .cm-editor .cm-indent-markers { --indent-marker-bg-color: var(--vscode-editorIndentGuide-background); }
+/* The quick-info hover (macro and symbol): the head names the symbol, each entry its doc
+   comment, declaration line and location — the location a button that opens the
+   definition, styled as VS Code's hover links are. */
+.ggs-symbol-hover { max-width: 640px; font-family: var(--vscode-font-family); font-size: 12px; }
+.ggs-symbol-hover-head { display: flex; align-items: center; gap: 6px; padding: 2px 0 5px; font-weight: 600; }
+.ggs-symbol-hover-code, .ggs-symbol-hover-comment { margin: 3px 0; padding: 4px 8px; background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.1)); border-radius: 3px; font-family: var(--vscode-editor-font-family, monospace); font-size: var(--vscode-editor-font-size, 12px); white-space: pre; overflow-x: auto; max-width: 100%; }
+.ggs-symbol-hover-comment { color: var(--vscode-descriptionForeground); }
+.ggs-symbol-hover-loc { display: inline-block; margin: 1px 0 2px; padding: 0; border: none; background: none; color: var(--vscode-textLink-foreground); font-family: var(--vscode-font-family); font-size: 11px; cursor: pointer; text-align: left; }
+button.ggs-symbol-hover-loc:hover { text-decoration: underline; color: var(--vscode-textLink-activeForeground); }
+/* The peek-definition popup (CLion's quick definition lookup): anchored over the editor,
+   sticky until Escape or a click outside, the head's actions in VS Code's hover-toolbar
+   shape, the definitions' chooser a slim list, the body the declaring file's window. */
+.ggs-peek { position: fixed; z-index: 300; display: flex; flex-direction: column; width: min(680px, calc(100vw - 40px)); max-height: min(380px, calc(100vh - 80px)); background: var(--vscode-editorHoverWidget-background); border: 1px solid var(--vscode-editorHoverWidget-border); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35); color: var(--vscode-editorHoverWidget-foreground); font-family: var(--vscode-font-family); font-size: 12px; }
+.ggs-peek-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-bottom: 1px solid var(--vscode-editorHoverWidget-border); flex: none; }
+.ggs-peek-head .codicon { color: var(--vscode-symbolIcon-classForeground, var(--vscode-descriptionForeground)); }
+.ggs-peek-name { font-weight: 600; }
+.ggs-peek-kind { color: var(--vscode-descriptionForeground); }
+.ggs-peek-spring { flex: 1; }
+.ggs-peek-open, .ggs-peek-close { border: none; background: none; color: var(--vscode-textLink-foreground); font-family: inherit; font-size: 11px; padding: 2px 6px; cursor: pointer; }
+.ggs-peek-close { color: var(--vscode-descriptionForeground); font-size: 14px; padding: 0 4px; }
+.ggs-peek-open:hover, .ggs-peek-close:hover { background: var(--vscode-toolbar-hoverBackground); }
+.ggs-peek-defs { max-height: 120px; overflow: auto; border-bottom: 1px solid var(--vscode-editorHoverWidget-border); flex: none; }
+.ggs-peek-def { display: flex; align-items: center; gap: 8px; width: 100%; border: none; background: none; color: inherit; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; padding: 2px 8px; cursor: pointer; text-align: left; }
+.ggs-peek-def:hover { background: var(--vscode-list-hoverBackground); }
+.ggs-peek-def.active { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+.ggs-peek-def-kind { margin-left: auto; font-family: var(--vscode-font-family); color: var(--vscode-descriptionForeground); }
+.ggs-peek-def.active .ggs-peek-def-kind { color: var(--vscode-list-activeSelectionForeground); opacity: 0.8; }
+.ggs-peek-body { margin: 0; padding: 6px 8px; overflow: auto; flex: 1; min-height: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: var(--vscode-editor-font-size, 12px); line-height: 1.4; white-space: pre; background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.08)); }
 /* Diff (merge view) */
 /* This app's diff panes scroll themselves (VS Code's diff: both scrollbars where the user
    is looking — see the pane rules near `.cm-merge-view` above), so the merge container

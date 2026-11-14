@@ -1391,6 +1391,7 @@ export class EditorArea {
 	save = () => this.activeGroup.save();
 	runEditorCommand = (command: import('./types').EditorCommandName) => this.activeGroup.runEditorCommand(command);
 	goToDefinition = () => this.activeGroup.goToDefinition();
+	peekDefinition = () => this.activeGroup.peekDefinition();
 	findReferences = () => this.activeGroup.findReferences();
 	openCallTreeAtCursor = () => this.activeGroup.openCallTreeAtCursor();
 	openSymbolDatabase = () => this.activeGroup.openSymbolDatabase();

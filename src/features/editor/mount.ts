@@ -8,7 +8,7 @@ import { declaredLanguageName } from '../extensions';
 import { loadCanViews, loadEditorExtensions, loadFastView, loadHexView, loadImageView, loadMergeEditor } from '../../platform/lazy';
 import { t } from '../../platform/i18n';
 import { settings } from '../../platform/settings';
-import { basename, el, icon, notify, showContextMenu } from '../../platform/ui/index';
+import { basename, el, icon, notify, showContextMenu, toPosix } from '../../platform/ui/index';
 import type { EditorView } from '@codemirror/view';
 import { hook } from '../../platform/hooks';
 import { readFileRaw } from './shared';
@@ -275,13 +275,23 @@ export const mountMethods: ThisType<import('./group').EditorGroup> = {
 						diagnosticsExtension(editor.input.path),
 						extensionDecorationsExtension(editor.input.path),
 						extensionProviderExtensions(editor.input.path),
-						// The workbench's own macro hover: the group supplies the root and the
+						// The workbench's own quick-info hover: the group supplies the root and the
 						// cached file read (a save invalidates it), so a hovered #define shows
-						// the text that is on disk now.
+						// the text that is on disk now, any other indexed symbol its declaration,
+						// and a clicked location lands in the editor — in this tab when the
+						// definition is this file's own, a tab away otherwise.
 						symbolHoverExtension({
 							root: () => this.rootPath,
 							lookup: (name) => symbolLookup(name),
-							read: (path) => this.cachedRead(path)
+							read: (path) => this.cachedRead(path),
+							open: (path, line) => {
+								const currentPath = editor.input.kind === 'file' ? editor.input.path : null;
+								if (currentPath && (path === currentPath || toPosix(path) === toPosix(currentPath))) {
+									if (editor.view) this.revealPosition(editor.view, line + 1, 1);
+									return;
+								}
+								void this.openFile(path, { line: line + 1, column: 1 });
+							}
 						})
 					] : []),
 					conflictDecorations(),

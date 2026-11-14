@@ -752,15 +752,17 @@ export const openMethods: ThisType<EditorGroup> = {
 		const host = el('div', 'editorState cm-merge-view');
 		editor.pane.appendChild(host);
 		// The text editor and the merge views are async chunks, loaded with the first diff —
-		// with the workbench's macro hover beside them: a hovered #define shows its value in
-		// the diff panes exactly as a text editor's does (the group supplies root and the
-		// cached read; no open root or unindexed name answers nothing, so the mount is
-		// unconditional).
+		// with the workbench's quick-info hover beside them: a hovered #define shows its
+		// value in the diff panes exactly as a text editor's does, and any other indexed
+		// symbol its declaration — the group supplies root and the cached read; no open
+		// root or unindexed name answers nothing, so the mount is unconditional. A clicked
+		// location always opens a tab: a diff tab holds no file of its own.
 		const [{ EditorView, EditorState, baseExtensions, keymap, languageSlot, loadLanguage }, { Chunk, MergeView, goToNextChunk, goToPreviousChunk, unifiedMergeView }, { symbolHoverExtension }] = await Promise.all([textEditor(), loadMerge(), import('./editorProviderViews')]);
-		const macroHover = symbolHoverExtension({
+		const symbolHover = symbolHoverExtension({
 			root: () => this.rootPath,
 			lookup: (name) => symbolLookup(name),
-			read: (path) => this.cachedRead(path)
+			read: (path) => this.cachedRead(path),
+			open: (path, line) => void this.openFile(path, { line: line + 1, column: 1 })
 		});
 		// The language support, once loaded, so that a layout switch rebuilds an already
 		// highlighted view instead of dropping back to Plain Text until the next open.
@@ -916,7 +918,7 @@ export const openMethods: ThisType<EditorGroup> = {
 		let detachScrollSync: (() => void) | null = null;
 		// The overview rulers (the green/red scrollbar change map), likewise rebuilt per
 		// layout and refreshed whenever a pane's edits move the changes.
-		const { attachOverviewRuler, chunkOverviewMarks, positionRevertArrows } = await import('./editorExtras');
+		const { attachOverviewRuler, chunkOverviewMarks, freezeEditorSupplements, positionRevertArrows } = await import('./editorExtras');
 		let overviews: { refresh: () => void; detach: () => void }[] = [];
 		const refreshOverviews = (): void => {
 			for (const overview of overviews) overview.refresh();
@@ -972,7 +974,7 @@ export const openMethods: ThisType<EditorGroup> = {
 				diffKeys,
 				// Both panes hover macros: the base side is read-only but a hover is a read,
 				// and the inline layout's single editor reuses this list.
-				macroHover,
+				symbolHover,
 				EditorView.updateListener.of((update) => {
 					// An edit moves the changes: the chunk list, the ruler marks, the counter
 					// and the revert arrows all follow.
@@ -994,7 +996,7 @@ export const openMethods: ThisType<EditorGroup> = {
 			];
 			if (split) {
 				editor.merge = new MergeView({
-					a: { doc: normalize(left.contents ?? ''), extensions: [...baseExtensions(true), languageSlot.of(languageSupport ?? []), diffKeys, macroHover, EditorView.updateListener.of(() => { updateCounter(); scheduleRevertArrows(); })] },
+					a: { doc: normalize(left.contents ?? ''), extensions: [...baseExtensions(true), languageSlot.of(languageSupport ?? []), diffKeys, symbolHover, EditorView.updateListener.of(() => { updateCounter(); scheduleRevertArrows(); })] },
 					b: { doc: normalize(buffer ?? right.contents ?? ''), extensions: bExtensions },
 					parent: host,
 					collapseUnchanged: collapsedUnchanged ? { margin: 3, minSize: 4 } : undefined,
@@ -1024,8 +1026,10 @@ export const openMethods: ThisType<EditorGroup> = {
 				// base side's flex-basis percent (splitRatio, above — the wrapper's inline flex
 				// is rewritten on every rebuild that carries a dragged ratio; until the first
 				// drag the package's 50/50 grow stands). Moves are coalesced to one layout per
-				// frame, like the workbench's own sashes, and CodeMirror re-measures each pane
-				// through its own resize observer.
+				// frame, like the workbench's own sashes; the per-frame supplements (minimap,
+				// sticky stack, overview rulers — each a reflow-forcing redraw per resize) are
+				// frozen for the drag and redrawn once on release, and pointer capture keeps
+				// the editors' own mousemove measuring (hover positioning) out of the drag.
 				const wrapA = editor.merge.a.dom.parentElement;
 				const wrapB = editor.merge.b.dom.parentElement;
 				const row = wrapB?.parentElement ?? null;
@@ -1033,6 +1037,9 @@ export const openMethods: ThisType<EditorGroup> = {
 					const sash = el('div', 'cm-diff-sash');
 					sash.addEventListener('mousedown', (event) => {
 						event.preventDefault();
+						if (typeof PointerEvent !== 'undefined' && typeof sash.setPointerCapture === 'function') {
+							try { sash.setPointerCapture((event as PointerEvent).pointerId); } catch { /* a plain mouse, or jsdom */ }
+						}
 						const bounds = row.getBoundingClientRect();
 						const ratioAt = (x: number): number => Math.min(85, Math.max(15, ((x - bounds.left) / bounds.width) * 100));
 						const apply = (x: number): void => {
@@ -1042,6 +1049,7 @@ export const openMethods: ThisType<EditorGroup> = {
 						sash.classList.add('dragging');
 						document.body.classList.add('resizing');
 						document.body.style.cursor = 'ew-resize';
+						freezeEditorSupplements(true);
 						let latest = event.clientX;
 						let pending = 0;
 						const raf = window.requestAnimationFrame?.bind(window) ?? ((callback: () => void) => window.setTimeout(callback, 16));
@@ -1055,6 +1063,7 @@ export const openMethods: ThisType<EditorGroup> = {
 							apply(latest);
 							document.removeEventListener('mousemove', move);
 							document.removeEventListener('mouseup', up);
+							freezeEditorSupplements(false);
 							sash.classList.remove('dragging');
 							document.body.classList.remove('resizing');
 							document.body.style.cursor = '';

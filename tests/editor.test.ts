@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { activateHover, hasHoverTooltips } from '@codemirror/view';
 
 import { EditorGroup, type Editor, type EditorInput } from '../src/features/editor';
+import { editorSupplementsFrozen } from '../src/features/editor/editorExtras';
 import { workspaceFileCache } from '../src/features/editor/navigate';
 import { fileIcon } from '../src/platform/fileIcons';
 import { settings } from '../src/platform/settings';
@@ -223,11 +224,14 @@ describe('editor group', () => {
 		const wrapA = document.querySelector<HTMLElement>('.cm-mergeViewEditors > .cm-mergeViewEditor')!;
 		expect(wrapA.style.flex).toBe('');
 		// Dragging the sash left writes the base side's flex-basis percent — jsdom's rects
-		// are all zeros, so every position clamps to the 85% stop; the drag's temp state
-		// (body resizing, cursor, the dragging mark) is cleaned up on mouseup.
+		// are all zeros, so every position clamps to the 85% stop; the drag freezes the
+		// per-frame editor supplements (minimap, sticky, rulers) and unfreezes on release,
+		// and the drag's temp state (body resizing, cursor, the dragging mark) cleans up.
 		sash.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 300 }));
+		expect(editorSupplementsFrozen()).toBe(true);
 		document.dispatchEvent(new MouseEvent('mousemove', { clientX: 100 }));
 		document.dispatchEvent(new MouseEvent('mouseup', { clientX: 100 }));
+		expect(editorSupplementsFrozen()).toBe(false);
 		expect(wrapA.style.flex).toBe('0 0 85%');
 		expect(document.body.classList.contains('resizing')).toBe(false);
 		expect(document.body.style.cursor).toBe('');

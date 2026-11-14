@@ -13,7 +13,8 @@ import { buildTree, subtreeCounts, SymbolDatabaseView } from '../src/features/se
 import { fileSymbolItems, workspaceSymbolItems } from '../src/workbench';
 import { backend } from './tauriMock';
 import { click, flush, key, texts } from './helpers';
-import { macroHoverDom, macroHoverEntries, macroHoverFor, macroValueAt, resetMacroHoverCache, type MacroHoverSource } from '../src/features/editor/editorProviderViews';
+import { macroHoverDom, macroHoverEntries, macroHoverFor, macroValueAt, precedingComment, quickInfoDom, quickInfoFor, resetMacroHoverCache, resetQuickInfoCache, type MacroHoverSource } from '../src/features/editor/editorProviderViews';
+import { buildPeekDom, definitionWindow } from '../src/features/editor/peek';
 import type { WsSymbol } from '../src/platform/ipc/search';
 import type { EditorView } from '@codemirror/view';
 
@@ -425,3 +426,212 @@ describe('the macro hover', () => {
 		expect(several.querySelectorAll('.ggs-symbol-hover-code')).toHaveLength(1, 'an unread file shows its location only');
 	});
 });
+
+describe('the quick-info hover (any indexed symbol)', () => {
+	beforeEach(() => {
+		resetMacroHoverCache();
+		resetQuickInfoCache();
+	});
+
+	const MAIN_C = 'C:/repo/src/main.c';
+	const files: Record<string, string> = {
+		[MAIN_C]: '/** Adds its arguments. */\nint add(int a, int b)\n{\n\treturn a + b;\n}\n',
+		['C:/repo/src/other.c']: 'int add(int a, int b);\n'
+	};
+
+	function source(defs: WsSymbol[]): MacroHoverSource & { lookups: string[] } {
+		const lookups: string[] = [];
+		return {
+			lookups,
+			root: () => 'C:\\repo',
+			lookup: async (name: string) => {
+				lookups.push(name);
+				return defs;
+			},
+			read: async (path: string) => {
+				const posix = path.split('\\').join('/');
+				const text = files[posix];
+				return text === undefined ? null : text;
+			}
+		};
+	}
+
+	it('lifts the comment block that ends on the line above a declaration', () => {
+		const text = files[MAIN_C]!;
+		expect(precedingComment(text, 1)).toBe('/** Adds its arguments. */');
+		expect(precedingComment(text, 4)).toBe('');
+		const chained = '// one\n// two\nint f(void);\n';
+		expect(precedingComment(chained, 2)).toBe('// one\n// two');
+		const gapped = '// one\n\n// two\nint f(void);\n';
+		expect(precedingComment(gapped, 3)).toBe('// two', 'a blank line ends the block');
+		const many = Array.from({ length: 8 }, (_, i) => `// row ${i}`).join('\n') + '\nint f(void);\n';
+		const picked = precedingComment(many, 8).split('\n');
+		expect(picked).toHaveLength(6);
+		expect(picked[0]).toBe('// row 2', 'the lines closest to the declaration win');
+	});
+
+	it('answers the signature line and the comment above it', async () => {
+		const info = await quickInfoFor(source([{ kind: 'function', name: 'add', path: 'src/main.c', line: 1 }]), 'add');
+		expect(info!.name).toBe('add');
+		expect(info!.entries).toHaveLength(1);
+		expect(info!.entries[0]!.text).toBe('int add(int a, int b)');
+		expect(info!.entries[0]!.comment).toBe('/** Adds its arguments. */');
+	});
+
+	it('skips macro definitions, answers nothing without any, and re-uses the lookup', async () => {
+		const macrosOnly = source([{ kind: 'macro', name: 'add', path: 'src/main.c', line: 0 }]);
+		expect(await quickInfoFor(macrosOnly, 'add')).toBeNull();
+		expect(await quickInfoFor(macrosOnly, 'add')).toBeNull();
+		expect(macrosOnly.lookups).toEqual(['add'], 'the TTL cache holds');
+
+		const none = source([{ kind: 'macro', name: 'other', path: 'src/main.c', line: 0 }]);
+		expect(await quickInfoFor(none, 'other')).toBeNull();
+	});
+
+	it('leads with the hovered file own definition', async () => {
+		const info = await quickInfoFor(
+			source([
+				{ kind: 'function', name: 'add', path: 'src/other.c', line: 0 },
+				{ kind: 'function', name: 'add', path: 'src/main.c', line: 1 }
+			]),
+			'add',
+			'C:/repo/src/main.c'
+		);
+		expect(info!.entries[0]!.path).toBe('src/main.c');
+		expect(info!.entries[0]!.text).toBe('int add(int a, int b)');
+		expect(info!.entries).toHaveLength(2);
+	});
+
+	it('renders the kind, comment, signature and a location that opens on click', async () => {
+		const info = await quickInfoFor(source([{ kind: 'function', name: 'add', path: 'src/main.c', line: 1 }]), 'add');
+		const opened: string[] = [];
+		const dom = quickInfoDom(info!, (path, line) => opened.push(`${path}@${line}`));
+		expect(dom.classList.contains('ggs-quick-info')).toBe(true);
+		expect(dom.querySelector('.ggs-symbol-hover-head')!.textContent).toBe('add');
+		expect(dom.querySelector('.ggs-symbol-hover-comment')!.textContent).toBe('/** Adds its arguments. */');
+		expect(dom.querySelector('.ggs-symbol-hover-code')!.textContent).toBe('int add(int a, int b)');
+		click(dom.querySelector('button.ggs-symbol-hover-loc'));
+		expect(opened).toEqual(['src/main.c@1']);
+
+		const plain = quickInfoDom(info!);
+		expect(plain.querySelector('.ggs-symbol-hover-loc')!.tagName).toBe('DIV', 'no open, no button');
+	});
+});
+
+describe('the peek definition popup', () => {
+	it('shows the context above and the body through the column-0 close', () => {
+		const text = 'a\nb\nint f(void)\n{\n\tstep();\n}\nint g;\n';
+		expect(definitionWindow(text, 2)).toBe('a\nb\nint f(void)\n{\n\tstep();\n}');
+	});
+
+	it('uses the end line the index names and caps the window', () => {
+		const text = 'x\n#define W(a) \\\n\tstep(a) \\\n\tstep(a+1)\nint y;\n';
+		expect(definitionWindow(text, 1, 3)).toBe('x\n#define W(a) \\\n\tstep(a) \\\n\tstep(a+1)');
+		const long = Array.from({ length: 120 }, (_, i) => `row ${i}`).join('\n');
+		expect(definitionWindow(long, 0).split('\n').length).toBeLessThanOrEqual(60);
+	});
+
+	it('lists several definitions, switches the body with the pick, marks the active row', async () => {
+		const files: Record<string, string> = {
+			'C:/repo/a.c': 'int one(void);\n',
+			'C:/repo/b.c': 'int two(void);\n'
+		};
+		const handlers = {
+			root: () => 'C:\\repo',
+			read: async (path: string) => {
+				const posix = `C:/repo/${path.split('\\').join('/')}`;
+				return files[posix] ?? null;
+			},
+			open: () => undefined,
+			close: () => undefined
+		};
+		const dom = buildPeekDom(
+			'fn',
+			[
+				{ kind: 'function', name: 'fn', path: 'a.c', line: 0 },
+				{ kind: 'function', name: 'fn', path: 'b.c', line: 0 }
+			],
+			handlers
+		);
+		expect(dom.querySelectorAll('.ggs-peek-def')).toHaveLength(2);
+		expect(dom.querySelector('.ggs-peek-name')!.textContent).toBe('fn');
+		expect(dom.querySelector('.ggs-peek-kind')!.textContent).toBe('function');
+		await flush(2);
+		expect(dom.querySelector('.ggs-peek-body')!.textContent).toBe('int one(void);');
+		expect(dom.querySelectorAll('.ggs-peek-def')[0]!.classList.contains('active')).toBe(true);
+		click(dom.querySelectorAll('.ggs-peek-def')[1]);
+		await flush(2);
+		expect(dom.querySelector('.ggs-peek-body')!.textContent).toBe('int two(void);');
+		expect(dom.querySelectorAll('.ggs-peek-def')[1]!.classList.contains('active')).toBe(true);
+	});
+
+	it('opens the shown definition through its own actions and closes', () => {
+		const opened: string[] = [];
+		let closed = 0;
+		const dom = buildPeekDom(
+			'fn',
+			[{ kind: 'function', name: 'fn', path: 'a.c', line: 2 }],
+			{
+				root: () => 'C:\\repo',
+				read: async () => '',
+				open: (path, line) => opened.push(`${path}@${line}`),
+				close: () => {
+					closed++;
+				}
+			}
+		);
+		click(dom.querySelector('.ggs-peek-open'));
+		expect(opened).toEqual(['a.c@2']);
+		expect(closed).toBe(1);
+		click(dom.querySelector('.ggs-peek-close'));
+		expect(closed).toBe(2);
+	});
+});
+
+describe('Peek Definition through the index', () => {
+	it('shows the definition in place, opens it into a tab, and Escape closes', async () => {
+		scriptFiles({ [`${REPO}\\main.ts`]: 'const x = alpha();\n', [`${REPO}\\src\\a.ts`]: 'function alpha() {}\n' });
+		backend.on('symbol_lookup', () => [{ kind: 'function', name: 'alpha', path: 'src/a.ts', line: 0 }]);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot(REPO);
+		await group.openFile(`${REPO}\\main.ts`);
+		group.activeView!.dispatch({ selection: { anchor: 10 } });
+		await group.peekDefinition();
+		await flush(4);
+		const peek = document.querySelector('.ggs-peek');
+		expect(peek).not.toBeNull();
+		expect(peek!.querySelector('.ggs-peek-name')!.textContent).toBe('alpha');
+		expect(peek!.querySelector('.ggs-peek-body')!.textContent).toBe('function alpha() {}');
+		expect(document.querySelector('.tab.active .label')!.textContent).toBe('main.ts', 'the file never moves');
+
+		// The popup's Open button rides the same jump: a tab opens at the definition.
+		click(peek!.querySelector('.ggs-peek-open'));
+		await flush(4);
+		expect(document.querySelector('.tab.active .label')!.textContent).toBe('a.ts');
+		expect(document.querySelector('.ggs-peek')).toBeNull('opening dismisses the popup');
+
+		// A second peek stands alone; Escape dismisses it without opening anything.
+		await group.openFile(`${REPO}\\main.ts`);
+		group.activeView!.dispatch({ selection: { anchor: 10 } });
+		await group.peekDefinition();
+		await flush(4);
+		expect(document.querySelector('.ggs-peek')).not.toBeNull();
+		key(document, 'Escape');
+		expect(document.querySelector('.ggs-peek')).toBeNull();
+	});
+
+	it('answers nothing when the index holds no definition', async () => {
+		scriptFiles({ [`${REPO}\\main.ts`]: 'const x = alpha();\n' });
+		backend.on('symbol_lookup', () => []);
+		backend.on('workspace_symbols', () => []);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot(REPO);
+		await group.openFile(`${REPO}\\main.ts`);
+		group.activeView!.dispatch({ selection: { anchor: 10 } });
+		await group.peekDefinition();
+		await flush(4);
+		expect(document.querySelector('.ggs-peek')).toBeNull();
+		expect(document.querySelector('.notification')?.textContent).toContain('alpha');
+	});
+});
+

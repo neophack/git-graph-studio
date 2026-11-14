@@ -27,6 +27,37 @@ function scheduled(run: () => void): () => void {
 	};
 }
 
+/* ---------- The per-frame supplement freeze ---------- */
+
+// The three heavy per-frame supplements — the minimap's canvas repaint, the sticky stack's
+// overlay rebuild and the overview rulers' mark rebuild (each a mix of DOM writes and
+// heightmap reads that forces synchronous reflow) — all answer a pane resize. A diff's
+// pane divider changes both panes' width every frame it is dragged, so a large diff paid
+// hundreds of layout reads per frame and the drag stuttered. A sash drag freezes them:
+// each supplement checks the flag at its redraw's entry and answers nothing; unfreezing
+// redraws every registered supplement once, so the strips and maps land correct again.
+
+const supplementRedraws = new Set<() => void>();
+let supplementsFrozen = false;
+
+/** Whether the per-frame supplements are currently frozen (a sash drag is running). */
+export function editorSupplementsFrozen(): boolean {
+	return supplementsFrozen;
+}
+
+/** Freeze/unfreeze the per-frame supplements. Unfreezing redraws them all once. */
+export function freezeEditorSupplements(frozen: boolean): void {
+	if (supplementsFrozen === frozen) return;
+	supplementsFrozen = frozen;
+	if (!frozen) for (const redraw of supplementRedraws) redraw();
+}
+
+/** Register a supplement's redraw: run once on unfreeze. The returned call unregisters. */
+function onSupplementRedraw(redraw: () => void): () => void {
+	supplementRedraws.add(redraw);
+	return () => supplementRedraws.delete(redraw);
+}
+
 /* ---------- Bracket pair colouring ---------- */
 
 /** VS Code's depth colours: gold, then purple, then blue, repeating. */
@@ -213,6 +244,7 @@ export function stickyScrollExtension(): Extension {
 	return ViewPlugin.fromClass(class {
 		readonly overlay = document.createElement('div');
 		readonly listener = () => this.draw();
+		readonly unregisterRedraw = onSupplementRedraw(() => this.draw());
 
 		/** The find widget's bar (a CodeMirror panel) pushes the sticky stack down when open. */
 		readonly panelsObserver: ResizeObserver | null = typeof ResizeObserver === 'function'
@@ -237,10 +269,13 @@ export function stickyScrollExtension(): Extension {
 			this.view.scrollDOM.removeEventListener('scroll', this.listener);
 			document.removeEventListener(SETTINGS_EVENT, this.listener);
 			this.panelsObserver?.disconnect();
+			this.unregisterRedraw();
 			this.overlay.remove();
 		}
 
 		private readonly draw = scheduled(() => {
+			// A sash drag freezes the per-frame supplements (see freezeEditorSupplements).
+			if (editorSupplementsFrozen()) return;
 			const view = this.view;
 			this.overlay.textContent = '';
 			if (!settings.stickyScroll) {
@@ -303,6 +338,7 @@ export function minimapExtension(): Extension {
 		readonly scrollListener = () => this.scheduleSlider();
 		readonly schedule = scheduled(() => this.draw());
 		readonly scheduleSlider = scheduled(() => this.updateSlider());
+		readonly unregisterRedraw = onSupplementRedraw(() => this.schedule());
 
 		constructor(readonly view: EditorView) {
 			this.root.className = 'cm-minimap';
@@ -339,6 +375,7 @@ export function minimapExtension(): Extension {
 			this.view.scrollDOM.removeEventListener('scroll', this.scrollListener);
 			document.removeEventListener(SETTINGS_EVENT, this.listener);
 			document.removeEventListener(THEME_EVENT, this.listener);
+			this.unregisterRedraw();
 			this.view.dom.classList.remove('has-minimap');
 			this.root.remove();
 		}
@@ -369,6 +406,8 @@ export function minimapExtension(): Extension {
 		}
 
 		private draw(): void {
+			// A sash drag freezes the per-frame supplements (see freezeEditorSupplements).
+			if (editorSupplementsFrozen()) return;
 			const view = this.view;
 			const on = settings.minimap;
 			view.dom.classList.toggle('has-minimap', on);
@@ -513,6 +552,10 @@ export function attachOverviewRuler(
 	ruler.className = 'cm-overview-ruler';
 	pane.dom.appendChild(ruler);
 	const draw = scheduled(() => {
+		// A sash drag freezes the per-frame supplements (see freezeEditorSupplements): this
+		// rebuild reads the heightmap per changed region — hundreds of forced reflows per
+		// frame on a large diff.
+		if (editorSupplementsFrozen()) return;
 		ruler.textContent = '';
 		const doc = pane.state.doc;
 		const height = pane.scrollDOM.scrollHeight;
@@ -535,6 +578,7 @@ export function attachOverviewRuler(
 		}
 	});
 	const refresh = draw;
+	const unregisterRedraw = onSupplementRedraw(refresh);
 	// A pane resize (window, panel sash, group split) rescales the strip's mapping.
 	const resize = new ResizeObserver(refresh);
 	resize.observe(pane.scrollDOM);
@@ -554,6 +598,7 @@ export function attachOverviewRuler(
 		refresh,
 		detach: (): void => {
 			resize.disconnect();
+			unregisterRedraw();
 			if (onClick) ruler.removeEventListener('click', onClick);
 			ruler.remove();
 		}

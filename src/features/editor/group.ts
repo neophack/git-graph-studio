@@ -494,6 +494,8 @@ export class EditorGroup {
 
 	declare goToDefinition: (editor?: Editor | null, pos?: number | null) => Promise<void>;
 
+	declare peekDefinition: (editor?: Editor | null, pos?: number | null) => Promise<void> ;
+
 	declare goToIndexedDefinition: (name: string, currentPath: string | null, view: EditorView) => Promise<boolean> ;
 
 	declare pickDefinition: (defs: WsSymbol[], currentPath: string | null, view: EditorView) => Promise<boolean> ;

@@ -207,7 +207,10 @@ export const bootMethods: ThisType<Workbench> = {
 			'Expand Selection': '扩展选择',
 			'Shrink Selection': '缩小选择',
 			'Open Previous Recently Used Editor': '打开上一个最近使用的编辑器',
-			'Open Next Recently Used Editor': '打开下一个最近使用的编辑器'
+			'Open Next Recently Used Editor': '打开下一个最近使用的编辑器',
+			'Go to Definition': '转到定义',
+			'Peek Definition': '速览定义',
+			'Find References': '查找引用'
 		});
 
 		register({ id: 'workbench.quickOpen', title: 'Go to File...', category: 'Go', keybinding: 'Ctrl+P', enabled: hasRepo, run: () => this.quickOpen('') });
@@ -215,6 +218,7 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'workbench.goBack', title: 'Go Back', category: 'Go', keybinding: 'Alt+Left', enabled: () => this.editors.canGoBack(), run: () => this.editors.goBack() });
 		register({ id: 'workbench.goForward', title: 'Go Forward', category: 'Go', keybinding: 'Alt+Right', enabled: () => this.editors.canGoForward(), run: () => this.editors.goForward() });
 		register({ id: 'editor.gotoDefinition', title: 'Go to Definition', category: 'Go', keybinding: 'F12', enabled: () => this.editors.activeView !== null, run: () => void this.editors.goToDefinition() });
+		register({ id: 'editor.peekDefinition', title: 'Peek Definition', category: 'Go', keybinding: 'Alt+F12', enabled: () => this.editors.activeView !== null, run: () => void this.editors.peekDefinition() });
 		register({ id: 'workbench.nextEditor', title: 'Next Editor', category: 'Go', keybinding: 'Ctrl+PageDown', run: () => this.editors.activateNext(1) });
 		register({ id: 'workbench.previousEditor', title: 'Previous Editor', category: 'Go', keybinding: 'Ctrl+PageUp', run: () => this.editors.activateNext(-1) });
 		// Ctrl+Tab: the most-recently-used walk within the focused group (the mru the tabs

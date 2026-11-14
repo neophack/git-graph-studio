@@ -350,6 +350,7 @@ export const en = {
 	'symbols.page.expandAll': 'Expand All',
 	'symbols.page.empty': 'The symbol index is empty for this folder.',
 	'symbols.hover.definitions': 'definitions',
+	'symbols.hover.openDefinition': 'Open definition',
 	'symbols.context.empty': 'Place the cursor on a symbol to see its definition here.',
 	'symbols.context.ambiguous': 'symbols share this name - pick one in the editor.',
 	'symbols.context.pin': 'Pin the context window to the current symbol',

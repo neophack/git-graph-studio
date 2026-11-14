@@ -1,10 +1,13 @@
 // The editor-side hover surfaces and Go-to-Definition: the extensions' hover and
 // definition providers ride the frame half (editorHovers.ts's bridge) as a CodeMirror
 // hover tooltip that asks the providers, and F12 / Ctrl+Click opens the first location.
-// Beside them the workbench's own macro hover answers from the symbol index: the word
-// under the pointer's `#define` definitions, one entry each — a name defined in several
-// places lists all of them. Markdown from a provider renders as TEXT — an extension's
-// hover must not be able to inject markup into the workbench's DOM.
+// Beside them the workbench's own quick-info hover answers from the symbol index
+// (CLion's quick documentation without a language server): a hovered `#define` shows
+// every indexed definition's directive text, and any other indexed symbol shows its
+// declaration line with the comment block above it — a name defined in several places
+// lists all of them, each location a click that opens the definition. Markdown from a
+// provider renders as TEXT — an extension's hover must not be able to inject markup
+// into the workbench's DOM.
 
 import { hoverTooltip, EditorView, keymap, type TooltipView } from '@codemirror/view';
 import { Facet, type Extension } from '@codemirror/state';
@@ -103,11 +106,14 @@ export interface MacroHoverEntry {
 
 /** Where the hover's data comes from, injected so tests and the mount share one path:
  *  the group's root for path joins, the index's exact-name lookup, the group's cached
- *  file read (which a save invalidates, so a hovered macro never shows stale text). */
+ *  file read (which a save invalidates, so a hovered macro never shows stale text), and
+ *  the open that a clicked location rides — the repo-relative path and the 0-based
+ *  declaration line; the group resolves them against its own root. */
 export interface MacroHoverSource {
 	root(): string | null;
 	lookup(name: string): Promise<WsSymbol[]>;
 	read(path: string): Promise<string | null>;
+	open?(path: string, line: number): void;
 }
 
 /** How many directive lines and characters one hover entry shows. */
@@ -118,6 +124,11 @@ const MACRO_HOVER_MAX_DEFS = 8;
 /** A lookup answer rides hovers of the same name for this long before it is re-asked. */
 const MACRO_LOOKUP_TTL_MS = 15_000;
 const MACRO_LOOKUP_CACHE_MAX = 64;
+/** The quick-info body's own caps: at most this many definitions of one name, and the
+ *  comment block above a declaration shows at most this many lines / characters. */
+const QUICK_INFO_MAX_DEFS = 3;
+const QUICK_INFO_COMMENT_LINES = 6;
+const QUICK_INFO_COMMENT_CHARS = 300;
 
 /** The directive a definition names: its lines from the declaration through the end line
  *  (a `\`-continued macro's continuations), trimmed of trailing blank lines and capped. */
@@ -128,6 +139,22 @@ export function macroValueAt(contents: string, line: number, endLine: number | u
 	const text = lines.slice(from, to + 1).join('\n');
 	const trimmed = text.replace(/\s+$/, '');
 	return trimmed.slice(0, MACRO_VALUE_CHARS);
+}
+
+/** The comment block that ends on the line above `line`: consecutive `//`, `///`, `/*`
+ *  or `*` rows walked upward, stopped by any other text or a blank line, reading
+ *  downward and capped — a declaration's doc comment, as CLion's hover shows it. */
+export function precedingComment(contents: string, line: number): string {
+	const lines = contents.split('\n');
+	const picked: string[] = [];
+	for (let i = line - 1; i >= 0 && picked.length < QUICK_INFO_COMMENT_LINES; i--) {
+		const text = lines[i]?.trim() ?? '';
+		if (!text || !/^(\/\/|\/\*|\*)/.test(text)) break;
+		picked.push(lines[i]!);
+	}
+	if (picked.length === 0) return '';
+	picked.reverse();
+	return picked.join('\n').slice(0, QUICK_INFO_COMMENT_CHARS).trim();
 }
 
 const macroLookupCache = new Map<string, { at: number; entries: MacroHoverEntry[] }>();
@@ -187,7 +214,7 @@ export async function macroHoverFor(source: MacroHoverSource, view: EditorView, 
 	return entries.length > 0 ? entries : null;
 }
 
-export function macroHoverDom(name: string, entries: MacroHoverEntry[]): HTMLElement {
+export function macroHoverDom(name: string, entries: MacroHoverEntry[], open?: (path: string, line: number) => void): HTMLElement {
 	const dom = document.createElement('div');
 	dom.className = 'ggs-symbol-hover';
 	const head = document.createElement('div');
@@ -195,9 +222,15 @@ export function macroHoverDom(name: string, entries: MacroHoverEntry[]): HTMLEle
 	head.textContent = entries.length > 1 ? `${name} — ${entries.length} ${t('symbols.hover.definitions')}` : name;
 	dom.appendChild(head);
 	for (const entry of entries) {
-		const loc = document.createElement('div');
+		const loc = open
+			? document.createElement('button')
+			: document.createElement('div');
 		loc.className = 'ggs-symbol-hover-loc';
 		loc.textContent = `${entry.path}:${entry.line + 1}`;
+		if (open) {
+			loc.title = t('symbols.hover.openDefinition');
+			loc.addEventListener('click', () => open(entry.path, entry.line));
+		}
 		dom.appendChild(loc);
 		if (entry.text) {
 			const code = document.createElement('pre');
@@ -209,20 +242,150 @@ export function macroHoverDom(name: string, entries: MacroHoverEntry[]): HTMLEle
 	return dom;
 }
 
-/** The workbench's own hover: every definition of the hovered macro, listed. A second
- *  tooltip source beside the extension providers' — both may answer, CodeMirror stacks
- *  them. Definitions of other kinds stay off it: Go-to-Definition and the Context
- *  Window already speak for them. */
+/* ---------- The quick-info hover: every other indexed symbol ---------- */
+
+/** One non-macro definition the quick-info hover lists: its declaration line and the
+ *  comment block above it, both sliced off the declaring file. */
+export interface SymbolQuickInfoEntry {
+	kind: string;
+	/** Repo-relative, forward slashes — the index's own spelling. */
+	path: string;
+	/** 0-based declaration line. */
+	line: number;
+	/** The declaration line's text, or '' when the file could not be read. */
+	text: string;
+	/** The doc comment above the declaration, or '' when there is none. */
+	comment: string;
+}
+
+/** A hovered name's non-macro answer: the name and up to `QUICK_INFO_MAX_DEFS` entries. */
+export interface SymbolQuickInfo {
+	name: string;
+	entries: SymbolQuickInfoEntry[];
+}
+
+const quickInfoCache = new Map<string, { at: number; info: SymbolQuickInfo | null }>();
+
+/** Drop every cached quick-info answer: the tests reset it between cases. */
+export function resetQuickInfoCache(): void {
+	quickInfoCache.clear();
+}
+
+function cacheQuickInfo(key: string, info: SymbolQuickInfo | null): SymbolQuickInfo | null {
+	quickInfoCache.delete(key);
+	quickInfoCache.set(key, { at: Date.now(), info });
+	if (quickInfoCache.size > MACRO_LOOKUP_CACHE_MAX) {
+		quickInfoCache.delete(quickInfoCache.keys().next().value!);
+	}
+	return info;
+}
+
+/** Paths compare POSIX-side, case-insensitively — the two spellings of one Windows path. */
+function sameFile(a: string, b: string): boolean {
+	return a.split('\\').join('/').toLowerCase() === b.split('\\').join('/').toLowerCase();
+}
+
+/** The hovered name's non-macro definitions, one entry each — null when the index holds
+ *  none (macros answer first, so this is the hover's fallback). The hovered file's own
+ *  definition leads when `currentPath` names it; the rest follow in index order. */
+export async function quickInfoFor(source: MacroHoverSource, name: string, currentPath?: string): Promise<SymbolQuickInfo | null> {
+	const root = source.root();
+	if (!root) return null;
+	const key = `${root}\u0000${name}`;
+	const cached = quickInfoCache.get(key);
+	if (cached && Date.now() - cached.at < MACRO_LOOKUP_TTL_MS) return cached.info;
+	let defs: WsSymbol[];
+	try {
+		defs = (await source.lookup(name)).filter((def) => def.kind !== 'macro').slice(0, QUICK_INFO_MAX_DEFS);
+	} catch {
+		return null;
+	}
+	if (currentPath) {
+		defs.sort((a, b) => Number(sameFile(joinPath(root, b.path), currentPath)) - Number(sameFile(joinPath(root, a.path), currentPath)));
+	}
+	const entries: SymbolQuickInfoEntry[] = [];
+	for (const def of defs) {
+		let text = '';
+		let comment = '';
+		try {
+			const contents = await source.read(joinPath(root, def.path));
+			if (contents !== null) {
+				text = macroValueAt(contents, def.line, def.line);
+				comment = precedingComment(contents, def.line);
+			}
+		} catch {
+			text = '';
+		}
+		entries.push({ kind: def.kind, path: def.path, line: def.line, text, comment });
+	}
+	if (entries.length === 0) return cacheQuickInfo(key, null);
+	return cacheQuickInfo(key, { name, entries });
+}
+
+/** The quick-info tooltip: kind, name, then one entry per definition — its doc comment
+ *  (when there is one), its declaration line and its location, clickable when `open`
+ *  is wired (the location rides the same open the workbench's jump uses). */
+export function quickInfoDom(info: SymbolQuickInfo, open?: (path: string, line: number) => void): HTMLElement {
+	const dom = document.createElement('div');
+	dom.className = 'ggs-symbol-hover ggs-quick-info';
+	const head = document.createElement('div');
+	head.className = 'ggs-symbol-hover-head';
+	head.textContent = info.entries.length > 1 ? `${info.name} — ${info.entries.length} ${t('symbols.hover.definitions')}` : info.name;
+	dom.appendChild(head);
+	for (const entry of info.entries) {
+		if (entry.comment) {
+			const comment = document.createElement('pre');
+			comment.className = 'ggs-symbol-hover-comment';
+			comment.textContent = entry.comment;
+			dom.appendChild(comment);
+		}
+		if (entry.text) {
+			const code = document.createElement('pre');
+			code.className = 'ggs-symbol-hover-code';
+			code.textContent = entry.text;
+			dom.appendChild(code);
+		}
+		const loc = open ? document.createElement('button') : document.createElement('div');
+		loc.className = 'ggs-symbol-hover-loc';
+		loc.textContent = `${entry.path}:${entry.line + 1}`;
+		if (open) {
+			loc.title = t('symbols.hover.openDefinition');
+			loc.addEventListener('click', () => open(entry.path, entry.line));
+		}
+		dom.appendChild(loc);
+	}
+	return dom;
+}
+
+/** The workbench's own hover (CLion's quick info, over the symbol index): a hovered
+ *  `#define` lists every indexed definition's directive text, and any other indexed
+ *  symbol shows its declaration line with the comment above it. A second tooltip source
+ *  beside the extension providers' — both may answer, CodeMirror stacks them. Definitions
+ *  of the hovered file's own symbol lead the list; each location opens the definition on
+ *  click when `open` is wired. */
 export function symbolHoverExtension(source: MacroHoverSource): Extension {
+	const open = source.open
+		? (path: string, line: number): void => {
+				const root = source.root();
+				if (root) source.open!(joinPath(root, path), line);
+			}
+		: undefined;
 	return hoverTooltip(async (view, pos) => {
 		const word = view.state.wordAt(pos);
 		if (!word) return null;
 		const name = view.state.sliceDoc(word.from, word.to);
-		const entries = await macroHoverEntries(source, name);
-		if (entries.length === 0) return null;
+		const macroEntries = await macroHoverEntries(source, name);
+		if (macroEntries.length > 0) {
+			return {
+				pos: word.from,
+				create: (): TooltipView => ({ dom: macroHoverDom(name, macroEntries, open) })
+			};
+		}
+		const info = await quickInfoFor(source, name, view.state.facet(pathSlot));
+		if (!info) return null;
 		return {
 			pos: word.from,
-			create: (): TooltipView => ({ dom: macroHoverDom(name, entries) })
+			create: (): TooltipView => ({ dom: quickInfoDom(info, open) })
 		};
 	}, { hoverTime: 350 });
 }
