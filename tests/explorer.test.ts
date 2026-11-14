@@ -225,6 +225,37 @@ describe('explorer', () => {
 		expect(menuLabels()).not.toContain('Open Preview');
 	});
 
+	it('an HTML file opens in the default browser — the explorer menu entry hands it the path', async () => {
+		fileSystem({ [ROOT]: ['page.html', 'index.htm', 'site.xhtml', 'a.txt'] });
+		const explorer = new Explorer(document.getElementById('sidebar')!);
+		explorer.setRoot(ROOT);
+		await flush();
+		const rowFor = (name: string) =>
+			[...document.querySelectorAll<HTMLElement>('.tree .row')].find((row) => row.querySelector('.label')?.textContent === name)!;
+
+		// Every HTML spelling carries the row; the opener's open-path answers it.
+		for (const name of ['page.html', 'index.htm', 'site.xhtml']) {
+			rightClick(rowFor(name));
+			expect(menuLabels()).toContain('Open in Default Browser');
+			click(menuItem('Open in Default Browser'));
+			await flush();
+		}
+		expect(backend.openedPaths).toEqual([`${ROOT}\\page.html`, `${ROOT}\\index.htm`, `${ROOT}\\site.xhtml`]);
+
+		// A non-HTML file never shows the row, and the remote shell (a visitor's browser
+		// cannot reach the PC's file) hides it like the Reveal entry.
+		rightClick(rowFor('a.txt'));
+		expect(menuLabels()).not.toContain('Open in Default Browser');
+		document.documentElement.setAttribute('data-remote-shell', '');
+		try {
+			rightClick(rowFor('page.html'));
+			expect(menuLabels()).not.toContain('Open in Default Browser');
+			expect(menuLabels()).toContain('Open to the Right');
+		} finally {
+			document.documentElement.removeAttribute('data-remote-shell');
+		}
+	});
+
 	it("the transfer rows are the remote session's alone — the desktop never shows them (K16)", async () => {
 		fileSystem({ [ROOT]: ['src/', 'README.md'], [`${ROOT}\\src`]: [] });
 		const explorer = new Explorer(document.getElementById('sidebar')!);

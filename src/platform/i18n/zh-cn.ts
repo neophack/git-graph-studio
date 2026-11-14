@@ -193,6 +193,7 @@ export const zhCn: typeof en = {
 	'explorer.openBelow': '在下方打开',
 	'explorer.openAbove': '在上方打开',
 	'explorer.openHex': '在十六进制查看器中打开',
+	'explorer.openInBrowser': '使用默认浏览器打开',
 	'explorer.revealInFileExplorer': '在文件资源管理器中显示',
 	'explorer.moduleAnalysis': '模块分析',
 	'explorer.openInTerminal': '在集成终端中打开',

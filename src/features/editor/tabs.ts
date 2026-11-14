@@ -8,7 +8,7 @@ import { fileIconColor, isCanLog } from '../../platform/fileIcons';
 import { hook } from '../../platform/hooks';
 import { appNewInstance } from '../../platform/ipc/app';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { revealItemInDir } from '@tauri-apps/plugin-opener';
+import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 import type { EditorGroup } from './group';
 import { editorState } from './editorState';
 import type { Editor, NavEntry } from './inputs';
@@ -362,6 +362,19 @@ export const tabsMethods: ThisType<EditorGroup> = {
 			button.addEventListener('click', (event) => {
 				event.stopPropagation();
 				this.onRunInTerminal?.(active.input.kind === 'file' ? active.input.path : '');
+			});
+			actions.push(button);
+		}
+		// An HTML file's open-in-browser button: the system's default browser renders the
+		// page (the opener's open-path does the platform open; the editor has no page
+		// preview of its own). A visitor's browser cannot reach the PC's file, so like the
+		// Explorer's Reveal entry the button stays desktop-only.
+		if (active?.input.kind === 'file' && !remoteShell() && /\.(html?|xhtml)$/i.test(active.input.path)) {
+			const button = el('button', 'markdown-preview-button html-browser-button', [icon('browser')]);
+			button.title = t('explorer.openInBrowser');
+			button.addEventListener('click', (event) => {
+				event.stopPropagation();
+				void openPath(active.input.kind === 'file' ? active.input.path : '').catch((e) => notify('error', String(e)));
 			});
 			actions.push(button);
 		}

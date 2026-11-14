@@ -23,6 +23,9 @@ export const backend = {
 	emits: [] as { event: string; payload: unknown }[],
 	dialog: { openResult: null as string | null, saveResult: null as string | null },
 	opened: [] as string[],
+	/** The opener's open-path answers (a file opened in its default application — an
+	 *  HTML file's browser), recorded beside `opened`'s URLs. */
+	openedPaths: [] as string[],
 	revealed: [] as string[],
 	clipboard: [] as string[],
 	clipboardText: '',
@@ -48,6 +51,7 @@ export const backend = {
 		this.dialog.openResult = null;
 		this.dialog.saveResult = null;
 		this.opened.length = 0;
+		this.openedPaths.length = 0;
 		this.revealed.length = 0;
 		this.clipboard.length = 0;
 		this.window = { minimized: 0, toggled: 0, closed: 0, maximized: false, resizeHandlers: [], moveHandlers: [] };
@@ -161,6 +165,7 @@ export const dialog = {
 
 export const opener = {
 	openUrl: vi.fn(async (url: string) => { backend.opened.push(url); }),
+	openPath: vi.fn(async (path: string) => { backend.openedPaths.push(path); }),
 	revealItemInDir: vi.fn(async (path: string) => { backend.revealed.push(path); })
 };
 

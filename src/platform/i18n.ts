@@ -175,6 +175,7 @@ const zhCnText: Record<string, string> = {
 	'Markdown: Open Preview to the Side': 'Markdown: 在侧边打开预览',
 	'Python: Run File in Terminal': 'Python: 在终端中运行文件',
 	'File: Open in Hex Viewer': '文件: 在十六进制查看器中打开',
+	'File: Open in Default Browser': '文件: 使用默认浏览器打开',
 	'Initialize Repository': '初始化仓库',
 	'Toggle Primary Side Bar': '切换主侧边栏',
 	'Toggle Panel': '切换面板',

@@ -151,7 +151,8 @@ describe('every command of the workbench', () => {
 		// running handler, they stay disabled - expected skips, not coverage the sweep lost.
 		// Six workbench commands are legitimately disabled in this exact workspace - a clean
 		// plain-text file (save/saveAll have nothing dirty, markdown preview needs markdown,
-		// python.runFile needs python, gotoSymbolInFile needs an outline) plus
+		// python.runFile needs python, file.openInBrowser needs an HTML page,
+		// gotoSymbolInFile needs an outline) plus
 		// initRepository (a repository is open): VS Code disables them here too. Everything
 		// else must be swept.
 		const contextual = new Set([
@@ -160,6 +161,7 @@ describe('every command of the workbench', () => {
 			'markdown.showPreview',
 			'markdown.showPreviewToSide',
 			'python.runFile',
+			'file.openInBrowser',
 			'workbench.gotoSymbolInFile',
 			'git.initRepository'
 		]);
@@ -254,6 +256,23 @@ describe('every command of the workbench', () => {
 		await flush(6);
 		expect(commands.isEnabled('python.runFile')).toBe(false);
 		expect(document.querySelector('.python-run-button')).toBeNull();
+	});
+
+	it('file.openInBrowser opens the active HTML page in the default browser', async () => {
+		const workbench = await bootWithRepo();
+		await workbench.editors.openFile(`${REPO}\\page.html`);
+		await flush(6);
+		// An HTML file active: the command enables and the browser button rides the tab strip.
+		expect(commands.isEnabled('file.openInBrowser')).toBe(true);
+		expect(document.querySelector('.html-browser-button')).not.toBeNull();
+		await commands.execute('file.openInBrowser');
+		await flush(6);
+		expect(backend.openedPaths).toEqual([`${REPO}\\page.html`]);
+		// Not an HTML file: the command disables and the button is gone.
+		await workbench.editors.openFile(`${REPO}\\notes.txt`);
+		await flush(6);
+		expect(commands.isEnabled('file.openInBrowser')).toBe(false);
+		expect(document.querySelector('.html-browser-button')).toBeNull();
 	});
 
 	it('menus name registered commands only, and keybindings are unique', async () => {

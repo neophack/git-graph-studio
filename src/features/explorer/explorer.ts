@@ -5,7 +5,7 @@
 // "Find in Folder" hand-off to the Search view.
 
 import { copyInto, createFile, createFolder, deletePath, type DirEntryInfo, listDir, listDirPage, pasteCopy, pasteMove, renamePath } from '../../platform/ipc/fs';
-import { revealItemInDir } from '@tauri-apps/plugin-opener';
+import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { fileIcon, fileIconColor } from '../../platform/fileIcons';
@@ -966,13 +966,20 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 				'separator'
 			] : []) as MenuEntry[],
 				...(isDir ? [] : [
-				// A Markdown file opens as its rendered preview, like VS Code's own
-				// explorer entries (the editor's toolbar button and Ctrl+Shift+V do the same).
-				...(/\.(md|markdown)$/i.test(path) ? [
-					{ label: t('explorer.openPreview'), run: () => this.onOpenMarkdownPreview?.(path, false) },
-					{ label: t('explorer.openPreviewSide'), run: () => this.onOpenMarkdownPreview?.(path, true) }
-				] as MenuEntry[] : []),
-				{ label: t('explorer.openToTheRight'), run: () => this.onOpenInDirection?.(path, 'right') },
+					// A Markdown file opens as its rendered preview, like VS Code's own
+					// explorer entries (the editor's toolbar button and Ctrl+Shift+V do the same).
+					...(/\.(md|markdown)$/i.test(path) ? [
+						{ label: t('explorer.openPreview'), run: () => this.onOpenMarkdownPreview?.(path, false) },
+						{ label: t('explorer.openPreviewSide'), run: () => this.onOpenMarkdownPreview?.(path, true) }
+					] as MenuEntry[] : []),
+					// An HTML page renders in the system's default browser (the opener's
+					// open-path does the platform open) — the editor has no page preview to
+					// offer, and a visitor's browser cannot reach the PC's file, so the row
+					// hides on the remote shell like the Reveal entry.
+					...(remoteShell() || !/\.(html?|xhtml)$/i.test(path) ? [] : [
+						{ label: t('explorer.openInBrowser'), run: () => void openPath(path).catch((e) => notify('error', String(e))) }
+					] as MenuEntry[]),
+					{ label: t('explorer.openToTheRight'), run: () => this.onOpenInDirection?.(path, 'right') },
 				{ label: t('explorer.openToTheLeft'), run: () => this.onOpenInDirection?.(path, 'left') },
 				{ label: t('explorer.openBelow'), run: () => this.onOpenInDirection?.(path, 'down') },
 				{ label: t('explorer.openAbove'), run: () => this.onOpenInDirection?.(path, 'up') },

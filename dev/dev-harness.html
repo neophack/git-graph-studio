@@ -111,6 +111,8 @@
 				'ext_list': function () { return []; },
 				// The opener plugin (URL links): recorded, like the rest of the stand-ins.
 				'plugin:opener|open_url': function (args) { window.__harness.opened.push(String(args.url)); return null; },
+				// The opener's open-path (an HTML file's default-browser open): recorded the same way.
+				'plugin:opener|open_path': function (args) { window.__harness.opened.push(String(args.path)); return null; },
 				// The boot round trip the workbench opens with (a null answer here crashes
 				// boot()'s context read — the plain-browser mode answers the plain launch).
 				'boot_context': function () { return { file: null, actions: [], repo: null, opened: null, openedFor: null }; },
@@ -1976,6 +1978,41 @@
 							await invoke('delete_path', { path: source, permanent: true }).catch(() => undefined);
 							await invoke('delete_path', { path: target, permanent: true }).catch(() => undefined);
 							await invoke('delete_path', { path: root + '/-harness-transfer-export.zip', permanent: true }).catch(() => undefined);
+						}
+					});
+				}
+				// An HTML file's default-browser open (the explorer menu entry, the tab button
+				// and the palette command all ride the opener's open-path): the real bridge
+				// answering it — the default application actually opening the page — is what
+				// jsdom (the scripted plugin) cannot prove.
+				if (window.__harness.mocked) {
+					skip('explorer', 'an HTML file opens in the default browser', 'the scripted backend records the open-path call alone');
+				} else {
+					await check('explorer', 'an HTML file opens in the default browser', async () => {
+						const wb = (await import('/src/workbench/workbench.ts')).currentWorkbench;
+						const roots = wb.explorer.roots();
+						if (roots.length === 0) throw new Error('no folder is open');
+						await wb.showView('explorer');
+						const root = roots[0].replace(/[\\/]+$/, '');
+						const page = root + '/-harness-open-browser.html';
+						await invoke('write_file', { path: page, contents: '<!doctype html><html><body><h1>opened by the harness</h1></body></html>' });
+						try {
+							await wb.explorer.refresh();
+							const row = await waitFor(() => Array.from(document.querySelectorAll('#sidebar .tree .row')).find((r) => (r.dataset.path || '').endsWith('-harness-open-browser.html')), 5000);
+							if (!row) throw new Error('the tree never showed the harness page');
+							const box = row.getBoundingClientRect();
+							row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: box.left + 10, clientY: box.top + 5 }));
+							const entry = await waitFor(() => Array.from(document.querySelectorAll('#overlays .context-menu .item')).find((i) => i.textContent && i.textContent.includes('Open in Default Browser')), 3000);
+							if (!entry) throw new Error('the menu carried no Open in Default Browser entry');
+							const errorsBefore = document.querySelectorAll('#notifications .notification .codicon-error').length;
+							entry.click();
+							await sleep(600);
+							if (document.querySelectorAll('#notifications .notification .codicon-error').length > errorsBefore) {
+								throw new Error('the open-path call was refused (an error notification appeared)');
+							}
+							return 'the default application was asked to render ' + page;
+						} finally {
+							await invoke('delete_path', { path: page, permanent: true }).catch(() => undefined);
 						}
 					});
 				}

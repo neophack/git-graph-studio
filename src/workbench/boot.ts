@@ -10,7 +10,7 @@ import { type RemoteHostStatus, remoteHostHideMain, remoteHostStatus } from '../
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
-import { openUrl } from '@tauri-apps/plugin-opener';
+import { openPath, openUrl } from '@tauri-apps/plugin-opener';
 import { resolveTerminalPath } from '../features/terminal/links';
 import { type AnalysisStatus } from '../features/analysis';
 import type { AnalysisToolId } from '../features/analysis';
@@ -252,6 +252,9 @@ export const bootMethods: ThisType<Workbench> = {
 		// The `.py` tab-strip run button's palette twin (VS Code's Run Python File): the
 		// terminal opens with the file's interpreter line.
 		register({ id: 'python.runFile', title: 'Python: Run File in Terminal', category: 'Python', enabled: () => this.editors.activeInput?.kind === 'file' && /\.py$/i.test(this.editors.activeInput.path), run: () => { const input = this.editors.activeInput; if (input?.kind === 'file') void this.runPythonFile(input.path); } });
+		// The HTML tab-strip button's palette twin: the system's default browser renders
+		// the page the editor has no preview for.
+		register({ id: 'file.openInBrowser', title: 'File: Open in Default Browser', category: 'File', enabled: () => this.editors.activeInput?.kind === 'file' && /\.(html?|xhtml)$/i.test(this.editors.activeInput.path), run: () => { const input = this.editors.activeInput; if (input?.kind === 'file') void openPath(input.path).catch((e) => notify('error', String(e))); } });
 		register({ id: 'workbench.openHexViewer', title: 'File: Open in Hex Viewer', category: 'File', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.editors.openHex(this.editors.activeInput!.kind === 'file' ? this.editors.activeInput.path : '') });
 		register({ id: 'workbench.compareFolders', title: 'Compare Two Folders...', category: 'File', enabled: hasRepo, run: () => void this.compareFolders() });
 		register({ id: 'workbench.gotoSymbolInFile', title: 'Go to Symbol in File...', category: 'Go', keybinding: 'Ctrl+Shift+O', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.editors.gotoSymbolInFile() });

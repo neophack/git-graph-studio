@@ -193,6 +193,7 @@ export const en = {
 	'explorer.openBelow': 'Open Below',
 	'explorer.openAbove': 'Open Above',
 	'explorer.openHex': 'Open in Hex Viewer',
+	'explorer.openInBrowser': 'Open in Default Browser',
 	'explorer.revealInFileExplorer': 'Reveal in File Explorer',
 	'explorer.moduleAnalysis': 'Module Analysis',
 	'explorer.openInTerminal': 'Open in Integrated Terminal',

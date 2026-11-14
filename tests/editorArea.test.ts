@@ -631,6 +631,23 @@ describe('editor area (M3 3.1)', () => {
 		expect(document.querySelector('.python-run-button')).toBeNull();
 	});
 
+	it("an HTML file's browser button opens it with the system's default browser", async () => {
+		files({ 'C:\\repo\\page.html': '<h1>hi</h1>\n', 'C:\\repo\\a.ts': 'a\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\page.html');
+		const cluster = document.querySelector('.tabs-container .tab-actions')!;
+		const open = cluster.querySelector('.html-browser-button')!;
+		expect(open).not.toBeNull();
+		click(open);
+		// The opener's open-path took the file: the default application (a browser for
+		// .html) renders it.
+		expect(backend.openedPaths).toEqual(['C:\\repo\\page.html']);
+		// The button is an HTML file's alone: a .ts tab carries none.
+		await area.openFile('C:\\repo\\a.ts');
+		expect(document.querySelector('.html-browser-button')).toBeNull();
+	});
+
 	it('an upgrade\'s fresh manifest re-renders the title button — whichever icon and placement the new version declares', async () => {
 		// The Claude button is the extension\'s own editor/title contribution; an upgrade
 		// must never lose it. What the host does on an install (reload(): drop the old
