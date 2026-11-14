@@ -228,6 +228,12 @@ export class EditorGroup {
 
 	declare swapTextToCanRaw: (editor: Editor) => Promise<void> ;
 
+	declare swapCsvToText: (editor: Editor) => Promise<void> ;
+
+	declare mountCsvTextForm: (editor: Editor) => Promise<void> ;
+
+	declare swapTextToCsv: (editor: Editor) => Promise<void> ;
+
 	declare openHex: (path?: string) => Promise<void>;
 
 	declare openCanStats: (path: string) => void ;

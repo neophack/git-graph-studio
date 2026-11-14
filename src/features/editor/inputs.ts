@@ -6,6 +6,7 @@ import type { EditorView } from '@codemirror/view';
 import type { Chunk, MergeView } from '@codemirror/merge';
 import type { FastView, HexView, HexCompareView, ImageView } from '../viewers/types';
 import type { CanLogView, CanRawView } from '../can/types';
+import type { CsvView } from '../data/types';
 import type { EditableDocView } from './docEditView';
 import type { FileHistoryView } from '../scm/types';
 import type { CallTreeView, WsSymbol } from '../search/types';
@@ -108,6 +109,9 @@ export interface Editor {
 	canlog?: CanLogView;
 	/** A CAN log's raw frame view — the tab a .blf / .asc opens in, live while it parses. */
 	canraw?: CanRawView;
+	/** A data table (.csv / .tsv) — the tab the file opens in, with the table and plot
+	 * modes over one backend document. */
+	csv?: CsvView;
 	/** A large file's windowed editable editor — the document lives in the backend's rope
 	 *  and only a window of lines is ever in the webview. */
 	doc?: EditableDocView;

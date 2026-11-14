@@ -24,6 +24,7 @@ mod test_isolated_store;
 /// push crosses into tauri (docs/architecture-restructure-plan.md §4.7, P3-1).
 pub mod events;
 pub mod can_commands;
+pub mod csv_commands;
 pub mod viewer_commands;
 /// The app's own update channel (2026-11-10): the repository's newest release, this
 /// platform's installer downloaded through the marketplace's streaming progress and
@@ -333,6 +334,7 @@ mod desktop {
             .manage(ggs_text::viewer::ViewerState::default())
             .manage(ggs_text::viewer::indexed::IndexedState::default())
             .manage(ggs_can::CanLogState::default())
+            .manage(ggs_csv::CsvState::default())
             .manage(ext_gallery::GalleryInstallState::default())
             .manage(app_update::AppUpdateState::default())
             // A clone of the app's one host (`ext_process::host()`), not a second,
@@ -584,6 +586,11 @@ mod desktop {
                 can_commands::can_log_count,
                 can_commands::can_log_find,
                 can_commands::can_log_close,
+                csv_commands::csv_open,
+                csv_commands::csv_rows,
+                csv_commands::csv_count,
+                csv_commands::csv_series,
+                csv_commands::csv_close,
                 cmd_fs::repo_submodules,
                 cmd_fs::remote_paths_policy,
                 cmd_fs::remote_ext_roots,

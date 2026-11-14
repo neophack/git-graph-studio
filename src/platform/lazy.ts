@@ -42,6 +42,10 @@ export const loadCanViews = once(async () => {
 	return { CanRawView, CanLogView };
 });
 
+/** The Data Table views (module 20) - the CSV table browser and its plot - loaded with
+ *  the first .csv / .tsv that opens. */
+export const loadDataViews = once(() => import('../features/data/csvView'));
+
 /** The hex viewer, loaded with the first binary file; the hex comparison shares its helpers. */
 export const loadHexView = once(() => import('../features/viewers/hexView'));
 export const loadHexCompare = once(() => import('../features/viewers/hexCompare'));

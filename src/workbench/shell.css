@@ -2572,3 +2572,66 @@ body.zen #statusbar,
 body.zen .tabs-container {
 	display: none !important;
 }
+/* ---------- The Data Table (module 20): the .csv / .tsv table and its plot ----------
+ * The table is the CAN raw view's shape — a toolbar row, a header, a virtual-scroll
+ * viewport whose rows the backend serves by window — plus a natively horizontally
+ * scrolling column space (a header translates with its scrollLeft; the No. gutter
+ * sticks left). The plot reuses the CAN charts' vocabulary: their SVG classes for the
+ * axes, grid, lines and tooltip, their palette classes for the series. Every colour
+ * derives from the theme's variables. */
+.csv-view .csv-toolbar { gap: 8px; }
+.csv-view .csv-toolbar .button { flex: none; white-space: nowrap; height: 22px; padding: 0 10px; font-size: 12px; gap: 4px; }
+.csv-view .csv-toolbar .can-live { margin-left: auto; }
+.csv-mode-chip.can-chip-on { background: color-mix(in srgb, var(--vscode-focusBorder, #0078d4) 28%, transparent); border-color: var(--vscode-focusBorder, #0078d4); color: var(--vscode-foreground); }
+.csv-mode-chip { border: 1px solid transparent; }
+.csv-mode-chip .codicon { font-size: 14px; }
+.csv-table-pane { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.csv-banner { padding: 8px 12px; text-align: left; }
+.csv-head-wrap { flex: none; overflow: hidden; border-bottom: 1px solid var(--vscode-panel-border, #2b2b2b); color: var(--vscode-descriptionForeground, #999); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.csv-head { display: grid; grid-template-columns: var(--csv-cols); align-items: center; padding: 4px 0; width: max-content; min-width: 100%; }
+.csv-hcell { display: inline-flex; align-items: center; gap: 4px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding: 0 8px; }
+.csv-hcol { background: transparent; border: none; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer; text-align: left; }
+.csv-hcol:hover { color: var(--vscode-foreground); }
+.csv-hcol.csv-hsort { color: var(--vscode-foreground); }
+.csv-sort-arrow { font-size: 12px; color: var(--vscode-focusBorder, #0078d4); }
+.csv-num-mark { font-size: 12px; opacity: 0.7; }
+.csv-viewport { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.csv-scroll { flex: 1; min-height: 0; overflow-x: auto; overflow-y: hidden; overflow-anchor: none; position: relative; font-family: var(--vscode-editor-font-family, Consolas, monospace); font-size: var(--vscode-editor-font-size, 13px); font-variant-numeric: tabular-nums; touch-action: pan-x; }
+.csv-rows { position: relative; width: max-content; min-width: 100%; }
+.csv-row { position: absolute; left: 0; width: 100%; height: var(--csv-row-h, 22px); line-height: var(--csv-row-h, 22px); display: grid; grid-template-columns: var(--csv-cols); align-items: center; }
+.csv-row:nth-child(even) { background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 3%, transparent); }
+.csv-row:hover { background: color-mix(in srgb, var(--vscode-focusBorder, #0078d4) 12%, transparent); }
+.csv-cell { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding: 0 8px; }
+.csv-cell-num { text-align: right; }
+.csv-no { position: sticky; left: 0; z-index: 1; justify-content: flex-end; text-align: right; color: var(--vscode-descriptionForeground, #999); background: inherit; border-right: 1px solid var(--vscode-panel-border, #2b2b2b); }
+.csv-head .csv-no { background: var(--vscode-editor-background, #1e1e1e); }
+.csv-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--vscode-descriptionForeground, #999); font-style: italic; pointer-events: none; }
+.csv-empty[hidden] { display: none; }
+/* The plot pane: the picker bar over the chart, the CAN charts' classes inside. */
+.csv-plot-pane { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: 8px 12px 12px; gap: 6px; }
+.csv-plot-pane[hidden] { display: none; }
+.csv-plot-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; flex: none; }
+.csv-plot-label { font-size: 11px; color: var(--vscode-descriptionForeground, #999); text-transform: uppercase; letter-spacing: 0.04em; }
+.csv-x-select { height: 22px; max-width: 200px; font-size: 12px; background: var(--vscode-dropdown-background, #3c3c3c); color: var(--vscode-dropdown-foreground, #cccccc); border: 1px solid var(--vscode-dropdown-border, #3c3c3c); border-radius: 2px; }
+.csv-y-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; min-width: 0; max-height: 76px; overflow: auto; }
+.csv-y-chip {
+	display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 9px; border-radius: 11px; font-size: 11px;
+	background: transparent; color: var(--vscode-descriptionForeground, #999);
+	border: 1px solid var(--vscode-panel-border, #2b2b2b); cursor: pointer; max-width: 200px;
+}
+.csv-y-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.csv-y-chip:hover { border-color: var(--vscode-focusBorder, #0078d4); color: var(--vscode-foreground); }
+.csv-y-chip.can-chip-on { background: color-mix(in srgb, var(--vscode-focusBorder, #0078d4) 28%, transparent); border-color: var(--vscode-focusBorder, #0078d4); color: var(--vscode-foreground); }
+.csv-plot-reset { flex: none; height: 22px; padding: 0 10px; font-size: 12px; gap: 4px; white-space: nowrap; }
+.csv-plot-hint { color: var(--vscode-descriptionForeground, #999); font-style: italic; padding: 24px; text-align: center; }
+.csv-plot-hint[hidden] { display: none; }
+.csv-plot-host-slot { flex: 1; min-height: 0; position: relative; }
+.csv-plot { position: absolute; inset: 0; display: flex; flex-direction: column; }
+.csv-plot-host { flex: 1; min-height: 0; position: relative; }
+.csv-plot-host svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.csv-plot-tiphost { position: absolute; inset: 0; pointer-events: none; }
+/* The narrow form: the toolbar's controls wrap, the picker bar keeps wrapping, the rows
+ * grow to a finger's height under a coarse pointer (the view sets --csv-row-h). */
+.csv-view[data-compact] .csv-toolbar { flex-wrap: wrap; row-gap: 4px; }
+.csv-view[data-compact] .csv-toolbar .can-path { flex: 1 1 100%; }
+

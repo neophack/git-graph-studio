@@ -141,6 +141,7 @@ Extensions view would call it), a mission line, and a test file.
 | 17 | Code Analysis | tree-sitter parsing and the five analysis tools |
 | 18 | GGS Bash | The Windows-only bundled bash-like shell and the Terminal Shell setting |
 | 19 | Remote Access | The tray daemon, the Hub relay and the browser workbench (ggs-remote) |
+| 20 | Data Table | CSV/TSV table browsing, sorting and multi-column plotting |
 
 ### 1. Workbench Shell
 
@@ -380,7 +381,9 @@ mouse, the keyboard and the fingers (2026-10-18, the owner's direction: 图像�
   share — Zed's ScrollManager in TypeScript: `model.ts` owns the viewport's top as a row
   index, clamped, with the autoscroll strategies; `wheel.ts` reads a wheel event as system
   lines per notch or trackpad pixels; `amount.ts` the page distance; `input.ts` the DOM
-  listeners; `scrollbar.ts` the drawn scrollbar — the surfaces scroll nothing natively, so
+  listeners; `scrollbar.ts` the drawn scrollbar; `touch.ts` the finger's drag-and-coast
+  scroll and the coarse-pointer fact (module 20's data table browses with it too) — the
+  surfaces scroll nothing natively, so
   no document is too tall for the layout engine), `src/features/viewers/fastView.ts` (Fast Viewer —
   backend-rope document, the visible rows only), `src/features/viewers/hexShared.ts` (the leaf the two
   hex surfaces share — the offset formatting, the row grid, the Copy Special vocabulary and its
@@ -2736,6 +2739,42 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   its config sets `handshake_rate = 0`, the knob that lifts the default 10 handshakes
   per minute per IP). CI:
   `remote-daemon-test` (three OSes) and `remote-hub-test` in `studio.yml`.
+
+### 20. Data Table
+
+A `.csv` / `.tsv` measurement export opens as CANoe's data table: the backend sniffs the
+file's shape from the first kilobytes — the delimiter (`,` `;` tab `|`), whether the first
+record is a header (a record carrying any number is data), every column's name and whether
+it is predominantly numeric — and keeps streaming the records into a document in the
+background; the table browses what has landed, the way the CAN raw trace does.
+
+- Frontend: `src/features/data/csvView.ts` (the view: the toolbar's Table / Plot mode
+  chips, the virtual-scroll table — a natively horizontally scrolling column space under a
+  synced header, the No. gutter sticking left, one row height under a coarse pointer with
+  a finger's momentum over `src/scroll/touch.ts` — the header click that sorts, and the
+  live chip over the walk), `src/features/data/csvPlot.ts` (the plot: every selected
+  numeric column as a line over one shared x axis — a column, or the row's own position —
+  drawn with the CAN charts' SVG vocabulary and palette; the wheel zooms the x window
+  about the cursor, a drag pans, double-click resets, and every window change refetches
+  that range at full resolution with the y axis rescaled to it), `src/features/data/{index,types}.ts`
+  (the facade), `src/platform/ipc/csv.ts` (the typed seam)
+- Backend: the `ggs-csv` crate (`src-tauri/crates/ggs-csv/`): the RFC-4180 record reader
+  (quoted delimiters, escapes and newlines carry across chunk boundaries), the sniff, the
+  walk that lands rows in batches and keeps per-column numeric tallies (a `nan` cell is a
+  number for the tally and a gap for the plot), the windowed `rows_of` over a memoized
+  sort (numbers first, then text case-insensitively, empties last — descending reverses
+  the values, never the groups), and `series_of` — one pass per selected column under one
+  lock, min/max-bucket decimation to ≤ 4096 points per series (a one-sample spike inside a
+  million-row range still draws) with the range's stats — behind the
+  `src-tauri/src/csv_commands.rs` adapters (`csv_open` / `csv_count` / `csv_rows` /
+  `csv_series` / `csv_close`, the raw CAN log's document shape carrying cells instead of
+  frames; `src/scroll/touch.ts` holds the touch scroll and coarse-pointer vocabulary the
+  CAN pages re-export)
+- Tests: `tests/csvView.test.ts` (the routing, the table's window and its sort cycle, the
+  walk's live chip, the plot's auto-selection, the y chips and the x select), the
+  `ggs-csv` crate's in-crate tests (the reader's chunk boundaries, the sniff, the sort's
+  three groups, the decimation's spike), the dev harness's `?scroll=1` Data table surface
+  (the wheel's rows, the sort, the plot's draw and its zoom refetch)
 
 ## Development workflow
 

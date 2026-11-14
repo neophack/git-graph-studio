@@ -5,7 +5,7 @@
 import { type FileContents, type FileProbe, fileProbe } from '../../platform/ipc/fs';
 import { symbolLookup } from '../../platform/ipc/symbols';
 import { declaredLanguageName } from '../extensions';
-import { loadCanViews, loadEditorExtensions, loadFastView, loadHexView, loadImageView, loadMergeEditor } from '../../platform/lazy';
+import { loadDataViews, loadCanViews, loadEditorExtensions, loadFastView, loadHexView, loadImageView, loadMergeEditor } from '../../platform/lazy';
 import { t } from '../../platform/i18n';
 import { settings } from '../../platform/settings';
 import { basename, el, icon, notify, showContextMenu, toPosix } from '../../platform/ui/index';
@@ -205,6 +205,100 @@ export const mountMethods: ThisType<import('./group').EditorGroup> = {
 		});
 		editor.pane.appendChild(editor.canraw.root);
 		editor.onClose = () => editor.canraw?.dispose();
+		this.emitActive();
+	},
+
+	/* The data table's text form: the same one-button journey the CAN trace has — the
+	 * table's Text button swaps this tab to the editable text, and the bar's Table button
+	 * swaps it back (the .csv shares `.can-text-wrap` / `.can-text-bar`'s generic layout). */
+
+	async swapCsvToText(editor: Editor): Promise<void> {
+		if (editor.input.kind !== 'file' || !editor.csv) return;
+		editor.csv.dispose();
+		editor.csv = undefined;
+		editor.onClose = undefined;
+		editor.pane.replaceChildren();
+		await this.mountCsvTextForm(editor);
+		this.emitActive();
+	},
+
+	async mountCsvTextForm(editor: Editor): Promise<void> {
+		if (editor.input.kind !== 'file') return;
+		const path = editor.input.path;
+		const table = el('button', 'button secondary can-frames', [icon('table'), ` ${t('csv.table')}`]);
+		table.title = t('csv.text.backTitle');
+		table.addEventListener('click', () => void this.swapTextToCsv(editor));
+		const pathChip = el('span', 'can-path', [path]);
+		pathChip.title = path;
+		const bar = el('div', 'hex-toolbar can-text-bar', [pathChip, el('span', 'hex-toolbar-sep'), table]);
+		// The bar and the editor share a wrapper: the fast viewer styles itself
+		// `position: absolute; inset: 0`, which would otherwise cover the bar outright.
+		const wrap = el('div', 'can-text-wrap', [bar]);
+		editor.pane.append(wrap);
+		let probe: FileProbe | null = null;
+		try {
+			probe = await fileProbe(path);
+		} catch {
+			probe = null; // `read_file` below reports the real error
+		}
+		// A large export edits in the windowed editor whatever its size — no read-only
+		// wall. A minified one (few enormous lines) or a document the rope backend
+		// refuses opens in the indexed fast viewer instead, still offering the whole-file
+		// editor through its Edit button.
+		if (probe !== null && probe.size > hook('openThreshold')(WINDOWED_EDIT_BYTES)) {
+			if (!probe.longLines && (await this.tryMountDocEdit(editor, wrap))) return;
+			if (await this.tryMountFastView(editor, wrap, true, () => void this.swapFastToWholeEditor(editor))) {
+				if (!probe.longLines) notify('info', t('viewer.readOnlyFallback') + basename(path));
+				return;
+			}
+		}
+		let file: FileContents;
+		try {
+			file = await readFileRaw(path);
+		} catch (error) {
+			notify('error', String(error));
+			return;
+		}
+		if (file.binary || file.contents === null) {
+			await this.mountHexView(editor, wrap);
+		} else {
+			editor.encoding = file.encoding ?? 'utf8';
+			editor.eol = file.eol ?? 'lf';
+			await this.mountTextEditor(editor, file.contents, wrap);
+			this.attachMergeSupport(editor);
+			this.updateOutline(editor);
+		}
+	},
+
+	async swapTextToCsv(editor: Editor): Promise<void> {
+		if (editor.input.kind !== 'file') return;
+		if (editor.dirty) {
+			await this.save(editor);
+			if (!editor.dirty) await this.swapTextToCsv(editor);
+			return;
+		}
+		const { CsvView } = await loadDataViews();
+		if (!this.open.includes(editor) || editor.csv) return; // closed, or swapped meanwhile
+		editor.view?.destroy();
+		editor.view = undefined;
+		editor.fast?.dispose();
+		editor.fast = undefined;
+		editor.doc?.dispose();
+		editor.doc = undefined;
+		editor.hex?.destroy();
+		editor.hex = undefined;
+		editor.mergeToolbar = undefined;
+		editor.outline?.remove();
+		editor.outline = undefined;
+		editor.pane.classList.remove('has-outline');
+		editor.pane.replaceChildren();
+		const path = editor.input.path;
+		editor.languageName = 'CSV';
+		editor.csv = new CsvView(path, {
+			onEditText: () => void this.swapCsvToText(editor)
+		});
+		editor.pane.appendChild(editor.csv.root);
+		editor.onClose = () => editor.csv?.dispose();
 		this.emitActive();
 	},
 

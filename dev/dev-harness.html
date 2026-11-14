@@ -349,6 +349,14 @@
 			const HUGE_LINES = 300_000;
 			const MONSTER_LINES = 60_000;
 			const CAN_FRAMES = 20_000;
+			const CSV_ROWS = 20_000;
+			const CSV_COLUMNS = [
+				{ name: 't', numeric: true },
+				{ name: 'v1', numeric: true },
+				{ name: 'v2', numeric: true },
+				{ name: 'label', numeric: false }
+			];
+			const csvSeriesLog = [];
 			const NAMES = ['file.txt', 'huge.txt', 'monster.js', 'blob.bin', 'trace.asc'];
 			const hexLine = (n, tag) => 'line ' + n + ' of ' + tag;
 			const chunkB64 = (path, offset, len) => {
@@ -386,6 +394,35 @@
 				indexed_lines: ({ start, end }) => ({ startLine: Number(start), lineCount: MONSTER_LINES, tokensPending: false, lines: Array.from({ length: Math.max(0, (end === undefined ? Number(start) + 100 : Number(end) + 1) - Number(start)) }, (_, i) => ['monster line ' + (Number(start) + i), []]) }),
 				read_file_chunk: ({ path, offset, len }) => chunkB64(path, offset, len),
 				can_log_open: () => ({ docId: 22, totalBytes: 500_000 }),
+			csv_open: () => ({ docId: 30, totalBytes: 400_000, delimiter: ',', hasHeader: true }),
+			csv_count: () => ({ parsed: CSV_ROWS, done: true, error: null, bytes: 400_000, totalBytes: 400_000, columns: CSV_COLUMNS }),
+			csv_rows: ({ start, end }) => Array.from({ length: Math.max(0, Number(end) - Number(start)) }, (_, i) => {
+				const row = Number(start) + i;
+				return { index: row, cells: [row, Math.sin(row / 50) * 100, Math.cos(row / 80) * 100, row % 7 === 0 ? 'tick ' + row : ''] };
+			}),
+			csv_series: (args) => {
+				csvSeriesLog.push(args);
+				const from = args.xFrom === null || args.xFrom === undefined ? 0 : Number(args.xFrom);
+				const to = args.xTo === null || args.xTo === undefined ? CSV_ROWS - 1 : Number(args.xTo);
+				const span = Math.max(1, to - from);
+				const steps = Math.min(512, span);
+				return {
+					xMin: 0,
+					xMax: CSV_ROWS - 1,
+					series: (args.ys || []).map((c) => ({
+						column: c,
+						name: CSV_COLUMNS[c].name,
+						points: Array.from({ length: steps + 1 }, (_, k) => {
+							const row = from + Math.round((k / steps) * span);
+							const y = c === 0 ? row : c === 1 ? Math.sin(row / 50) * 100 : Math.cos(row / 80) * 100;
+							return { x: row, y };
+						}),
+						stats: { count: span, min: -100, max: 100, avg: 0 }
+					}))
+				};
+			},
+			csv_close: () => null,
+				
 				can_log_count: () => ({ parsed: CAN_FRAMES, done: true, error: null }),
 				can_log_frames: ({ start, end }) => Array.from({ length: Math.max(0, Number(end) - Number(start)) }, (_, i) => ({ tS: (Number(start) + i) * 0.001, channel: 1, id: 0x100, extended: false, fd: false, brs: false, esi: false, remote: false, error: false, tx: false, dlc: 8, dataHex: '17' })),
 				can_log_close: () => undefined,
@@ -737,6 +774,45 @@
 				check('CAN statistics', 'no chart section clips its content', 0, clipped.length);
 				// And the load chart really is the pane's scrollable content, not a blank.
 				check('CAN statistics', 'the load chart drew its lines', 2, pane.querySelectorAll('.can-section-load path.can-chart-line').length);
+				view.root.remove();
+			});
+
+			/* ----- the data table (.csv): the virtual table, the sort, the plot's zoom ----- */
+			await surface('Data table', async () => {
+				const { CsvView } = await import('/src/features/data/csvView.ts');
+				const view = new CsvView('/repo/readings.csv');
+				document.getElementById('editorGroup').appendChild(view.root);
+				await waitFor(() => view.scroll.rowCount === CSV_ROWS && view.scroll.visibleLines > 0);
+				await waitFor(() => view.root.querySelectorAll('.csv-rows .csv-row').length > 0);
+				const scroller = view.root.querySelector('.csv-scroll');
+				const page = Math.trunc(view.scroll.visibleLines - 1);
+				wheel(scroller, 100);
+				check('Data table', 'a wheel notch is three rows', 3, view.scroll.top);
+				key(scroller, 'PageDown');
+				check('Data table', 'a PageDown is one page', 3 + page, view.scroll.top);
+				key(scroller, 'PageUp');
+				check('Data table', 'PageUp is one page back', 3, view.scroll.top);
+				// The No. gutter shows the row's own file position while the rows scroll.
+				const noOf = () => view.root.querySelector('.csv-rows .csv-row .csv-no').textContent;
+				check('Data table', 'the top row numbers its file position', String(view.scroll.top + 1), noOf());
+				// A header click sorts through the backend; the arrow lands on the column.
+				click(view.root.querySelector('.csv-head .csv-hcol:nth-of-type(1)'));
+				await waitFor(() => view.root.querySelectorAll('.csv-sort-arrow').length === 1);
+				check('Data table', 'the sort arrow is on the clicked column', 1, view.root.querySelectorAll('.csv-sort-arrow').length);
+				// The plot: the auto-selected numeric columns draw over the row axis.
+				click(view.root.querySelector('.csv-mode-chip:nth-of-type(2)'));
+				await waitFor(() => view.root.querySelectorAll('.csv-plot path.can-chart-line').length > 0);
+				check('Data table', 'the plot drew the auto-selected series', 2, view.root.querySelectorAll('.csv-plot path.can-chart-line').length);
+				check('Data table', 'the legend names each series', 2, view.root.querySelectorAll('.csv-plot .can-legend-chip').length);
+				// The wheel over the plot zooms the x window and refetches that window.
+				const plotHost = view.root.querySelector('.csv-plot-host');
+				const box = rect(plotHost);
+				plotHost.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, deltaMode: 0, bubbles: true, cancelable: true, clientX: box.left + 100, clientY: box.top + 100 }));
+				await waitFor(() => csvSeriesLog.length > 0 && csvSeriesLog.at(-1).xFrom !== null && csvSeriesLog.at(-1).xFrom !== undefined);
+				const zoomed = csvSeriesLog.at(-1);
+				check('Data table', 'the wheel zoomed and the refetch carries the window', true, zoomed.xFrom !== null);
+				check('Data table', 'the zoomed window is inside the file', true, Number(zoomed.xTo) < CSV_ROWS - 1);
+				view.dispose();
 				view.root.remove();
 			});
 

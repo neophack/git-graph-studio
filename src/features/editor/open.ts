@@ -9,14 +9,14 @@ import { scmBlame } from '../../platform/ipc/scm';
 import { symbolLookup } from '../../platform/ipc/symbols';
 import { hasBookmark } from './bookmarks';
 import { samePath, contextUri, menuSection, resourceContext } from '../extensions';
-import { loadAnalysisPages, loadCanViews, loadCallTree, loadFileHistory, loadFolderCompare, loadHexCompare, loadMerge, loadSymbolDbView, loadTextEditor } from '../../platform/lazy';
+import { loadAnalysisPages, loadCanViews, loadCallTree, loadDataViews, loadFileHistory, loadFolderCompare, loadHexCompare, loadMerge, loadSymbolDbView, loadTextEditor } from '../../platform/lazy';
 import { imageMime, renderMarkdown } from '../../platform/markdown';
 import type { BlameLine } from '../scm/types';
 import type { WsSymbol } from '../search/types';
 import { commands } from '../../platform/commands';
 import { t, trText } from '../../platform/i18n';
 import { basename, el, icon, joinPath, notify, relativeTo, type MenuEntry } from '../../platform/ui/index';
-import { fileIcon, isCanLog } from '../../platform/fileIcons';
+import { fileIcon, isCanLog, isCsvData } from '../../platform/fileIcons';
 import { hook } from '../../platform/hooks';
 import type { DiffSide } from './types';
 import type { EditorCommandName } from './types';
@@ -209,6 +209,35 @@ export const openMethods: ThisType<EditorGroup> = {
 			editor.pane.classList.add('can-log');
 			editor.pane.appendChild(editor.canraw.root);
 			editor.onClose = () => editor.canraw?.dispose();
+			this.add(editor, show(), intent);
+			return;
+		}
+		// A data file (.csv / .tsv) opens in the data table view: the backend sniffs the
+		// shape and streams the rows in the background while the table browses, and the
+		// plot reads the numeric columns back as series. A jump to a text position (a
+		// search hit) opens the file's text form instead — that is where the line exists.
+		if (isCsvData(name)) {
+			if (options.line !== undefined) {
+				editor.languageName = 'Plain Text';
+				editor.pane.classList.add('csv-log');
+				await this.mountCsvTextForm(editor);
+				const showNow = show();
+				this.add(editor, showNow, intent);
+				if (!showNow) return;
+				this.revealIn(editor, options.line, options.column ?? 1);
+				// The activation recorded the new editor at 1:1; note where it actually landed.
+				if (this.navIndex >= 0 && this.navHistory[this.navIndex]!.input === editor.input) {
+					this.navHistory[this.navIndex] = { input: editor.input, line: options.line, column: options.column ?? 1 };
+				}
+				return;
+			}
+			editor.languageName = 'CSV';
+			const { CsvView } = await loadDataViews();
+			editor.csv = new CsvView(path, {
+				onEditText: () => void this.swapCsvToText(editor)
+			});
+			editor.pane.appendChild(editor.csv.root);
+			editor.onClose = () => editor.csv?.dispose();
 			this.add(editor, show(), intent);
 			return;
 		}

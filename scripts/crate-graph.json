@@ -10,6 +10,7 @@
 		"ggs-text": 1,
 		"ggs-fs": 1,
 		"ggs-can": 1,
+		"ggs-csv": 1,
 		"ggs-index": 1,
 		"ggs-analysis": 1,
 		"ggs-mcp": 1,
@@ -42,6 +43,9 @@
 			"ggs-text"
 		],
 		"ggs-can": [
+			"ggs-base"
+		],
+		"ggs-csv": [
 			"ggs-base"
 		],
 		"ggs-index": [
@@ -98,6 +102,7 @@
 			"ggs-text",
 			"ggs-fs",
 			"ggs-can",
+			"ggs-csv",
 			"ggs-index",
 			"ggs-analysis",
 			"ggs-mcp",

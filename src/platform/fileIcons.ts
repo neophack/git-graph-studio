@@ -44,6 +44,13 @@ export function isCanLog(name: string): boolean {
 	return ext === 'blf' || ext === 'asc';
 }
 
+/** Tabular text data (.csv / .tsv), which opens in the data table view (`csvView.ts`). */
+export function isCsvData(name: string): boolean {
+	const dot = name.lastIndexOf('.');
+	const ext = dot === -1 ? '' : name.slice(dot + 1).toLowerCase();
+	return ext === 'csv' || ext === 'tsv';
+}
+
 /** The codicon for a file name - the choice VS Code's generic (non-Seti) icon set makes. */
 export function fileIcon(name: string): string {
 	const dot = name.lastIndexOf('.');
