@@ -445,15 +445,18 @@ pub async fn pair_password(
 #[serde(default)]
 pub struct PairHub {
     ticket: String,
+    unlock: String,
     url: String,
     #[serde(default, alias = "joinKey")]
     join_key: String,
 }
 
-/// Point this PC at a relay from the pair page: its set-password and unlock screens carry
-/// the server fields (2026-10-12), so a server may land before any password exists — it
-/// parks in NoPassword and connects the moment one does (§20.4). The one-time pair ticket
-/// is the local proof, the same one that authorizes setting the very password.
+/// Point this PC at a relay from the pair page: before any password exists its set-password
+/// screen carries the server fields (2026-10-12), so a server may land and parks in
+/// NoPassword, connecting the moment one does (§20.4). Once a password exists the card —
+/// like the LAN card — needs the unlock too (2026-11-14, the owner's direction): the relay
+/// carries this PC's link, and whoever could move it without the password could lead every
+/// visitor's connection to their own server.
 pub async fn pair_hub_connect(
     State(daemon): State<Arc<Daemon>>,
     headers: HeaderMap,
@@ -464,6 +467,9 @@ pub async fn pair_hub_connect(
     };
     if !json_request_ok(&headers) || !ticket_ok(&daemon, &body.ticket) {
         return error(StatusCode::FORBIDDEN, "ticket");
+    }
+    if daemon.auth.is_set() && !unlocked(&daemon, Some(&body.unlock)) {
+        return error(StatusCode::FORBIDDEN, "locked");
     }
     let settings = match super::admin::hub_settings(&body.url, &body.join_key, "") {
         Ok(settings) => settings,
@@ -478,7 +484,8 @@ pub async fn pair_hub_connect(
     }
 }
 
-/// Forget the relay from the pair page; the device key stays (§20.10).
+/// Forget the relay from the pair page; the device key stays (§20.10). The connect gate
+/// rides along: the ticket suffices before any password, the unlock after one.
 pub async fn pair_hub_disconnect(
     State(daemon): State<Arc<Daemon>>,
     headers: HeaderMap,
@@ -489,6 +496,9 @@ pub async fn pair_hub_disconnect(
     };
     if !json_request_ok(&headers) || !ticket_ok(&daemon, &body.ticket) {
         return error(StatusCode::FORBIDDEN, "ticket");
+    }
+    if daemon.auth.is_set() && !unlocked(&daemon, Some(&body.unlock)) {
+        return error(StatusCode::FORBIDDEN, "locked");
     }
     match daemon.hub.disconnect() {
         Ok(()) => json_response(StatusCode::OK, daemon.hub.snapshot().as_json()),

@@ -1685,7 +1685,9 @@ async fn pair_unlock_guards_the_qr_behind_the_password() {
 /// The pair page's relay card (2026-10-12): the tray's set-password screen carries the
 /// server fields, so a server may be saved before any password exists — it parks in
 /// NoPassword, the pair state carries the saved settings for the form to prefill, and the
-/// password landing through the same page wakes the parked tunnel.
+/// password landing through the same page wakes the parked tunnel. Once one exists the
+/// card is password-guarded (2026-11-14): the ticket alone moves the server no more, the
+/// unlock does.
 #[tokio::test]
 async fn the_pair_page_sets_the_relay_server_before_the_password() {
     let h = start().await;
@@ -1798,13 +1800,52 @@ async fn the_pair_page_sets_the_relay_server_before_the_password() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
-    // Disconnect forgets it again, key and all.
-    let off = http(
+    // A password exists: the relay card needs the unlock now (2026-11-14) — the ticket
+    // alone moves neither the server nor the forget.
+    let locked = http(
+        h.loopback,
+        "POST",
+        "/pair/hub/connect",
+        &[("Content-Type", "application/json")],
+        Some(&format!(r#"{{"ticket":"{ticket}","url":"http://127.0.0.1:9"}}"#)),
+    )
+    .await;
+    assert_eq!(locked.status, 403, "{}", locked.body);
+    let locked = http(
         h.loopback,
         "POST",
         "/pair/hub/disconnect",
         &[("Content-Type", "application/json")],
         Some(&format!(r#"{{"ticket":"{ticket}"}}"#)),
+    )
+    .await;
+    assert_eq!(locked.status, 403, "{}", locked.body);
+    assert_eq!(
+        h.daemon.hub.current().map(|s| s.join_key),
+        Some("lan-secret".into()),
+        "the locked refusals must have left the saved server standing"
+    );
+    let ok = http(
+        h.loopback,
+        "POST",
+        "/pair/unlock",
+        &[("Content-Type", "application/json")],
+        Some(&format!(r#"{{"ticket":"{ticket}","password":"{PASSWORD}"}}"#)),
+    )
+    .await;
+    assert_eq!(ok.status, 200, "{}", ok.body);
+    let unlock = serde_json::from_str::<serde_json::Value>(&ok.body).unwrap()["unlock"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Unlocked, the forget goes through, key and all.
+    let off = http(
+        h.loopback,
+        "POST",
+        "/pair/hub/disconnect",
+        &[("Content-Type", "application/json")],
+        Some(&format!(r#"{{"ticket":"{ticket}","unlock":"{unlock}"}}"#)),
     )
     .await;
     assert_eq!(off.status, 200, "{}", off.body);

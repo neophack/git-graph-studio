@@ -531,7 +531,7 @@ Windows 权限：用 `icacls` 等效 API 不现实，`auth.json`、`admin.token`
 | `GET /relay` | loopback | 一次性令牌 | Relay 接入 |
 | `GET /pair` | loopback | `?t=` 一次性票据 | 本机配对页（扫码窗口）：输入访问密码解锁（R19）后才显示二维码与地址列表 |
 | `POST /pair/unlock` | loopback | 一次性票据 | `{password}` → Argon2id 校验 → 解锁令牌（内存 5 min、仅 loopback；失败计入 §7.6 限速） |
-| `POST /pair/hub/connect`、`/pair/hub/disconnect` | loopback | 一次性票据 | 配对页的中继服务器表单（2026-10-12）：`{url, joinKey?}`（url 也可为整条连接串）保存 / 忘记中继；与 `/admin/hub/*` 同一逻辑，票据即本机凭据（与首次设密同一凭证）；`GET /pair/state` 的 `hub.settings` 带回已存地址供表单回填 |
+| `POST /pair/hub/connect`、`/pair/hub/disconnect` | loopback | 一次性票据；密码落定后另需解锁令牌 | 配对页的中继服务器表单（2026-10-12）：`{url, joinKey?, unlock?}`（url 也可为整条连接串）保存 / 忘记中继；与 `/admin/hub/*` 同一逻辑。密码未落定前票据即本机凭据（与首次设密同一凭证），守护进程持有（NoPassword）、密码落定即自动连接；密码落定后与 LAN 卡片同规则，须解锁令牌（2026-11-14：中继承载此 PC 的链接，移动它须过密码）；`GET /pair/state` 的 `hub.settings` 带回已存地址供表单回填 |
 | `GET /admin/*` | loopback | admin token | 管理 API；`/admin/qr` 需另附解锁令牌（R19） |
 
 中间件（顺序）：请求体上限（API 64 KB，上传走 WS）→ 安全响应头 → 认证提取（`Cookie: ggsr=<token>` → 查会话 → 校验 epoch、过期）→ 路由。
@@ -608,7 +608,7 @@ impl Auth {
   4. 浏览器 `transport.ts` 处理 4401：注销 Service Worker 中的私有缓存（API 响应，资源缓存保留）、清 sessionStorage → `location.replace('/login?reason=password-changed')`；
   5. 登录页根据 `reason` 显示“密码已更新，请重新登录”。
 - **踢下线**：删除单个会话 + 向该会话的连接发 4401 `revoked`。“全部下线”保持密码不变，只把 `epoch+1`。
-- **配对页解锁（R19）**：`/pair` 与插件页显示二维码、地址列表前须输入访问密码——`POST /pair/unlock`（配对页）或 `POST /admin/unlock`（插件页代理）本机 Argon2id 校验，错误同样计入限速。解锁令牌只存内存、5 分钟过期、仅在 loopback 有效；密码未设置时配对页先引导设置，首次设置成功即视为已解锁；配对页的改密区域在解锁之后。配对页的设密与解锁两屏同样带中继服务器表单（2026-10-12：托盘打开的页面也是"密码设置处即服务器设置处"——`POST /pair/hub/connect` 凭一次性票据即可保存，密码未落定前由守护进程持有（NoPassword），密码落定即自动连接）。
+- **配对页解锁（R19）**：`/pair` 与插件页显示二维码、地址列表前须输入访问密码——`POST /pair/unlock`（配对页）或 `POST /admin/unlock`（插件页代理）本机 Argon2id 校验，错误同样计入限速。解锁令牌只存内存、5 分钟过期、仅在 loopback 有效；密码未设置时配对页先引导设置，首次设置成功即视为已解锁；配对页的改密区域在解锁之后。配对页的设密屏带中继服务器表单（2026-10-12："密码设置处即服务器设置处"——密码未落定前 `POST /pair/hub/connect` 凭一次性票据即可保存，由守护进程持有（NoPassword），密码落定即自动连接）；密码落定后中继卡片与 LAN 卡片同规则，解锁之后才显示、修改须携带解锁令牌（2026-11-14：中继承载此 PC 的链接，未过密码的手也能改它，等于把每个访客的连接引到自己的服务器上——这道门必须存在）。
 
 ### 7.7 WS 连接任务（`ws/mod.rs`）
 
@@ -705,7 +705,7 @@ GGS Remote — 监听中 (https://192.168.1.20:47615/)
 
 - **Windows/macOS**：`tao::event_loop::EventLoopBuilder::with_user_event()` 在主线程运行；`tray_icon::TrayIconBuilder` 创建图标；菜单事件通过 `MenuEvent::receiver()` 转成 `std::sync::mpsc` 发给 tokio 线程；状态变化通过 `EventLoopProxy::send_event` 回到主线程更新图标。macOS 启动时设置 `ActivationPolicy::Accessory`（不出现在 Dock），打包为 `GGS Remote.app`，`Info.plist` 里 `LSUIElement = true`。
 - **Linux**：`ksni::TrayMethods::spawn`（tokio 特性）。D-Bus 上没有 `StatusNotifierWatcher`（如未装 AppIndicator 扩展的 GNOME）时记录日志，进入无托盘模式，管理只能通过 GGS 插件页或 CLI。
-- **扫码窗口（R19）**：“显示配对二维码…”经一次性票据打开 loopback 配对页（`https://127.0.0.1:<lp>/pair?t=…`，默认浏览器）；页面先要求输入访问密码（§7.6 配对页解锁），解锁成功才渲染各 LAN 地址的二维码与 Hub 链接（Hub 在线时其链接与二维码居首，2026-10-12），5 分钟后重新上锁。页面常设中继服务器卡片（设密屏、解锁屏、解锁后都在）：地址/连接串 + 可选服务器口令、连接状态行（未配置/已保存待设密/连接中/在线/被拒/被顶替）与断开按钮（§7.6）。
+- **扫码窗口（R19）**：“显示配对二维码…”经一次性票据打开 loopback 配对页（`https://127.0.0.1:<lp>/pair?t=…`，默认浏览器）；页面先要求输入访问密码（§7.6 配对页解锁），解锁成功才渲染各 LAN 地址的二维码与 Hub 链接（Hub 在线时其链接与二维码居首，2026-10-12），5 分钟后重新上锁。页面常设中继服务器卡片（设密屏与解锁后都在；密码落定后解锁屏不再显示，2026-11-14）：地址/连接串 + 可选服务器口令、连接状态行（未配置/已保存待设密/连接中/在线/被拒/被顶替）与断开按钮（§7.6）。
 - **菜单语言**：读 `~/.ggs/settings.json` 的 `locale`（应用实际写入的键；`displayLanguage` 作为旧写法兼容），en / zh-cn；两个托盘后端每秒轮询菜单模型并在签名变化时重建，应用切语言后秒级跟随。
 - **平台细节（M6 手测清单）**：explorer.exe 崩溃重启后按 `TaskbarCreated` 重新注册图标；系统关机/注销（`WM_ENDSESSION` / macOS 会话结束）时事件循环干净退出，避免 `sessions.json`、`daemon.lock` 写坏；Windows 托盘 tooltip ≤ 127 字符；macOS 图标提供模板版本（黑白两套，菜单栏深浅自适应）。
 - **内存措施**：tokio current_thread；I/O 线程栈 1 MB；资源缓存默认放磁盘，内存 LRU 只放最近 16 MB；不在内存里保留实例资源的原文；空闲时 `malloc_trim(0)`（Linux glibc，每 5 分钟）；Windows 上定期 `SetProcessWorkingSetSize(-1,-1)` 不做（会造成页面抖动），只依赖不常驻大块内存。**M7 用 `scripts/probes/remote-memory.mjs` 测量**，未达标再考虑 `mimalloc` 等措施。
@@ -1247,7 +1247,7 @@ deactivate(): 不停守护进程（它要常驻）
 
 ### 14.3 “远程访问”页面
 
-状态（运行/暂停、端口、TLS 模式、CA 指纹、最近外来访问时间与防火墙指引）、每个 LAN 地址的链接与二维码、复制按钮、设置/修改密码、设备列表与断开、全部断开、证书下载与安装说明（iOS/Android/桌面）、开机启动开关、“在新窗口打开的远程窗口是否在桌面显示”开关、“窗口页显示路径输入框”开关（`folderInput`，默认开）。**二维码与地址列表的显示在解锁之后**（R19：`POST /admin/unlock`，与托盘打开的配对页同一机制与令牌）。**设置密码与解锁两屏都带中继服务器配置**（服务器地址/连接串 + 可选服务器口令；2026-10-12，主人的要求：密码设置处即服务器设置处）——密码未设置时先保存的服务器由守护进程持有（NoPassword），密码落定即自动连接。**中继设置并在线时，`status_json` 的 `links` 只含它的 `/u/<uuid>/` 链接——页面上（扩展页与配对页）只显示它的二维码，局域网的隐藏**（2026-10-12，主人的要求；服务器已配置但未在线时没有中继链接可显，局域网二维码作为回退保留）；证书下载锚点固定在 LAN 链接（`lanLinks`）上，不跟着排位走。样式用主题变量，文字中英双语。
+状态（运行/暂停、端口、TLS 模式、CA 指纹、最近外来访问时间与防火墙指引）、每个 LAN 地址的链接与二维码、复制按钮、设置/修改密码、设备列表与断开、全部断开、证书下载与安装说明（iOS/Android/桌面）、开机启动开关、“在新窗口打开的远程窗口是否在桌面显示”开关、“窗口页显示路径输入框”开关（`folderInput`，默认开）。**二维码与地址列表的显示在解锁之后**（R19：`POST /admin/unlock`，与托盘打开的配对页同一机制与令牌）。**中继服务器配置**（服务器地址/连接串 + 可选服务器口令）在设密屏与解锁后显示（2026-10-12，主人的要求：密码设置处即服务器设置处；2026-11-14，主人的要求：密码落定后修改中继须先输入访问密码——锁定的解锁屏不带表单，页面底部的"从任何地方访问此 PC"区块同样在解锁后才显示）——密码未设置时先保存的服务器由守护进程持有（NoPassword），密码落定即自动连接。**中继设置并在线时，`status_json` 的 `links` 只含它的 `/u/<uuid>/` 链接——页面上（扩展页与配对页）只显示它的二维码，局域网的隐藏**（2026-10-12，主人的要求；服务器已配置但未在线时没有中继链接可显，局域网二维码作为回退保留）；证书下载锚点固定在 LAN 链接（`lanLinks`）上，不跟着排位走。样式用主题变量，文字中英双语。
 
 ---
 

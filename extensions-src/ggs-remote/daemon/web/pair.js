@@ -38,9 +38,11 @@ async function render() {
 	show('unlocked', status.unlocked);
 	show('change', status.unlocked);
 	show('ca', status.unlocked && status.tls?.mode === 'self-signed');
-	// The server card lives on the password screens themselves: a server saved before any
-	// password exists is held and connects the moment one lands.
-	renderRelay(status.hub ?? {});
+	// The server card rides the set-password screen while no password exists (a server
+	// saved ahead is held and connects the moment one lands); once one does it shows only
+	// after the unlock, like the LAN card — the relay carries this PC's link, and moving
+	// it is a password-guarded change (2026-11-14).
+	renderRelay(status, !status.passwordSet || status.unlocked);
 	// The LAN card moves the address every signed-in device is on: before a password it
 	// rides the ticket (like the first password), after one the unlock.
 	renderLan(status, !status.passwordSet || status.unlocked);
@@ -142,8 +144,10 @@ function relayState(hub) {
 	}
 }
 
-function renderRelay(hub) {
-	document.getElementById('relay').hidden = false;
+function renderRelay(status, visible) {
+	show('relay', visible);
+	if (!visible) return;
+	const hub = status.hub ?? {};
 	const settings = hub.settings ?? {};
 	const url = document.getElementById('relay-url');
 	const key = document.getElementById('relay-key');
@@ -158,6 +162,7 @@ document.getElementById('relay-form').addEventListener('submit', async (event) =
 	const error = document.getElementById('relay-error');
 	const response = await postJson('pair/hub/connect', {
 		ticket,
+		unlock,
 		url: document.getElementById('relay-url').value.trim(),
 		joinKey: document.getElementById('relay-key').value
 	});
@@ -172,7 +177,7 @@ document.getElementById('relay-form').addEventListener('submit', async (event) =
 });
 
 document.getElementById('relay-disconnect').addEventListener('click', async () => {
-	await postJson('pair/hub/disconnect', { ticket });
+	await postJson('pair/hub/disconnect', { ticket, unlock });
 	render();
 });
 

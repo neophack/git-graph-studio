@@ -186,9 +186,11 @@
 		);
 	}
 
-	/** The relay server configuration: shown on the password screens (where it is first
-	 *  needed) and in the relay section below. Saving persists it; with no password set yet
-	 *  the daemon holds it until the password lands, then connects. */
+	/** The relay server configuration: shown while no password exists (the set-password
+	 *  screen, where it is first needed) and in the relay section below once unlocked.
+	 *  Saving persists it; with no password set yet the daemon holds it until the password
+	 *  lands, then connects. Behind a password the unlock gates it (2026-11-14): the relay
+	 *  carries this PC's link, moving it is a password-guarded change. */
 	function serverForm(status, buttonLabel) {
 		const hub = status.hub || {};
 		const settings = hub.settings || {};
@@ -298,10 +300,8 @@
 			parts.push(
 				section(
 					L('Links and QR codes', '链接与二维码'),
-					el('p', {}, L('Enter the access password to show this PC’s links.', '输入访问密码后显示此 PC 的链接。')),
-					passwordForm(L('Access password', '访问密码'), L('Unlock', '解锁'), async (password) => render(await request('unlock', { password }))),
-					el('p', { class: 'muted' }, L('A relay server (ggs-remote-hub) is optional: with one the phone works from any network. While it is set and online, only its QR code is shown below — the LAN codes hide.', '中继服务器（ggs-remote-hub）是可选的：配置后手机在任何网络都能访问。设置并在线时，下方只显示中继的二维码——局域网的二维码会隐藏。')),
-					serverForm(status, L('Save server', '保存服务器'))
+					el('p', {}, L('Enter the access password to show this PC’s links and relay settings.', '输入访问密码后显示此 PC 的链接和中继服务器设置。')),
+					passwordForm(L('Access password', '访问密码'), L('Unlock', '解锁'), async (password) => render(await request('unlock', { password })))
 				)
 			);
 		} else {
@@ -346,7 +346,9 @@
 			);
 		}
 		parts.push(section(L('Signed-in devices', '已登录的设备'), await devicesList()));
-		parts.push(await hubSection(status));
+		// The relay section hides behind the unlock once a password exists (2026-11-14);
+		// before one, the set-password screen above carries the server fields.
+		if (!status.passwordSet || status.unlocked) parts.push(await hubSection(status));
 		parts.push(
 			section(
 				L('Service', '服务'),
