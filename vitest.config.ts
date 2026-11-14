@@ -25,15 +25,22 @@ export default defineConfig({
 	// run while the tests themselves passed. The module-runner path knows no such
 	// callback gap.
 	//
-	// Two files stay on the classic threads pool, each because the vm pool's module
-	// system breaks something they exercise: extensions.test.ts vm-requires jsdom's CJS
-	// dependency tree, whose @exodus/bytes dependency ships ESM under a CJS extension
-	// and breaks inside the vm context; and editor.test.ts asserts the lazy language chunk's
-	// arrival — an in-app dynamic import the vm pool answers with
+	// Three files stay on the classic threads pool, each because the vm pool breaks
+	// something they exercise: extensions.test.ts vm-requires jsdom's CJS dependency
+	// tree, whose @exodus/bytes dependency ships ESM under a CJS extension and breaks
+	// inside the vm context; editor.test.ts asserts the lazy language chunk's arrival —
+	// an in-app dynamic import the vm pool answers with
 	// ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING under the full suite's load, which
 	// loadLanguage degrades to a silent Plain Text (the same vm import-callback gap the
-	// snapshot environment works around above). The classic pool runs the app's imports
-	// the way production does. The global seam check runs in both; it is idempotent.
+	// snapshot environment works around above); and perf.test.ts builds the suite's
+	// largest allocation (a 50,000-row jsdom tree) — under the vm pool's worker
+	// resource limit (vmThreads.memoryLimit) a worker carrying enough earlier files
+	// dies exactly once the perf file lands in it: the worker exits silently (exit 1,
+	// no test output, "Worker exited unexpectedly" from the pool) and only on the runs
+	// whose scheduling loaded that worker heaviest — the 2026-11-14 Release run's only
+	// failure, on the same commit the push run's identical job passed. The classic pool
+	// runs the app's imports the way production does, with no vm memory ceiling. The
+	// global seam check runs in every pool; it is idempotent.
 	test: {
 		environment: 'jsdom',
 		setupFiles: ['tests/setup.ts'],
@@ -49,7 +56,8 @@ export default defineConfig({
 					include: ['tests/**/*.test.ts'],
 					exclude: [
 						'tests/extensions.test.ts',
-						'tests/editor.test.ts'
+						'tests/editor.test.ts',
+						'tests/perf.test.ts'
 					],
 					setupFiles: ['tests/setup.ts'],
 					pool: 'vmThreads',
@@ -64,7 +72,8 @@ export default defineConfig({
 					environment: 'jsdom',
 					include: [
 						'tests/extensions.test.ts',
-						'tests/editor.test.ts'
+						'tests/editor.test.ts',
+						'tests/perf.test.ts'
 					],
 					setupFiles: ['tests/setup.ts'],
 					pool: 'threads'
