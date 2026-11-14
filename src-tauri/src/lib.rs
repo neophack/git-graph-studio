@@ -39,6 +39,7 @@ pub mod cmd_assoc;
 pub mod cmd_ext;
 pub mod cmd_fs;
 pub mod cmd_fuzzy;
+pub mod cmd_media;
 pub mod cmd_providers;
 pub mod cmd_scm;
 pub mod cmd_search;
@@ -72,7 +73,7 @@ pub mod window;
 
 mod desktop {
     use crate::{
-        can_commands, viewer_commands, cmd_analysis, cmd_app, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_providers,
+        can_commands, viewer_commands, cmd_analysis, cmd_app, cmd_assoc, cmd_ext, cmd_fs, cmd_fuzzy, cmd_media, cmd_providers,
         cmd_scm, cmd_search, cmd_symbols, ext_child, ext_gallery, ext_process, mcp, measure,
         pty, remote_debug, remote_host,
         app_update,
@@ -349,6 +350,18 @@ mod desktop {
             .register_uri_scheme_protocol("ggs", |ctx, request| {
                 cmd_ext::serve_ext_asset(&request, &ctx.app_handle().asset_resolver())
             })
+            // The media viewer's streaming protocol (module 7): the file's bytes with HTTP
+            // Range support, confined to the open workspace roots (media_command in
+            // cmd_media.rs; Tauri spells a custom scheme http://ggsmedia.localhost/ on
+            // Windows, ggsmedia:// elsewhere - convertFileSrc handles both).
+            .register_asynchronous_uri_scheme_protocol("ggsmedia", |ctx, request, responder| {
+                use tauri::Manager as _;
+                cmd_media::serve_media(
+                    ctx.app_handle().state::<WorkspaceRoots>(),
+                    request,
+                    responder,
+                );
+            })
             .setup(|app| {
                 // Git's output reaches the panel's "Git" channel as it happens.
                 use tauri::Emitter;
@@ -556,6 +569,7 @@ mod desktop {
                 cmd_fs::file_fingerprint,
                 cmd_fs::encodings,
                 cmd_fs::read_file_base64,
+                cmd_media::media_info,
                 cmd_fs::read_file_chunk,
                 cmd_fs::patch_file,
                 cmd_fs::write_file,

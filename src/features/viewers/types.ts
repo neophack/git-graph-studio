@@ -4,3 +4,4 @@ export type FastView = import('./fastView').FastView;
 export type HexView = import('./hexView').HexView;
 export type HexCompareView = import('./hexCompare').HexCompareView;
 export type ImageView = import('./imageView').ImageView;
+export type MediaView = import('./mediaView').MediaView;

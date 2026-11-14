@@ -9,6 +9,7 @@ import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { fileIcon, fileIconColor } from '../../platform/fileIcons';
+import { mediaMime } from '../../platform/markdown';
 import type { StatusMap } from '../../platform/ipc/scm';
 import { contextUri, menuSection, resourceContext } from '../extensions';
 import { t, tf } from '../../platform/i18n';
@@ -978,6 +979,12 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 					// hides on the remote shell like the Reveal entry.
 					...(remoteShell() || !/\.(html?|xhtml)$/i.test(path) ? [] : [
 						{ label: t('explorer.openInBrowser'), run: () => void openPath(path).catch((e) => notify('error', String(e))) }
+					] as MenuEntry[]),
+					// A video/audio file opens in its system player too — the webview build's
+					// codec set is not every codec's, and the file manager's open does not
+					// depend on it (desktop only; the remote open is a download).
+					...(remoteShell() || isDir || !mediaMime(basename(path)) ? [] : [
+						{ label: t('media.systemPlayer'), run: () => void openPath(path).catch((e) => notify('error', String(e))) }
 					] as MenuEntry[]),
 					{ label: t('explorer.openToTheRight'), run: () => this.onOpenInDirection?.(path, 'right') },
 				{ label: t('explorer.openToTheLeft'), run: () => this.onOpenInDirection?.(path, 'left') },

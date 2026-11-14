@@ -375,7 +375,11 @@ colouring, sticky scroll, minimap, bookmarks, markdown preview.
 A million-line file opens as fast as its bytes can be read; a multi-gigabyte binary is
 paged, never loaded whole; an image opens in a professional viewer driven equally by the
 mouse, the keyboard and the fingers (2026-10-18, the owner's direction: 图像查看要支持手机
-触摸操作，要重写 pc 端和手机端，要更好用，更专业，功能更全，手机端支持手势操作图像).
+触摸操作，要重写 pc 端和手机端，要更好用，更专业，功能更全，手机端支持手势操作图像);
+a video/audio file opens in the media viewer (2026-11-14, the owner's direction: 增加视频
+音频信息显示功能，可以使用播放器打开视频和音频) — the webview's own decoder plays it, the
+backend's header parsers answer the container facts, and a codec the webview build cannot
+decode hands off to the system player.
 
 - Frontend: `src/scroll/` (the row scroll model every viewer and the windowed editor
   share — Zed's ScrollManager in TypeScript: `model.ts` owns the viewport's top as a row
@@ -402,15 +406,39 @@ mouse, the keyboard and the fingers (2026-10-18, the owner's direction: 图像�
   `src/features/viewers/imageModel.ts` (its pure geometry: fit, pan limits, the rubber
   band, the zoom about a point, the ladder, the screen → pixel inverse),
   `src/features/viewers/imageGestures.ts` (its Pointer Events recognizer: tap, double tap,
-  long press, pan with fling velocity, pinch)
+  long press, pan with fling velocity, pinch),
+  `src/features/viewers/mediaView.ts` (the media viewer, a lazy chunk: the webview decoder's
+  `<video>` over an audio-art stage, a compact toolbar — play/pause, seek slider, mute,
+  speed, loop — keyboard (space/arrows/M/L/I) and stage context menu, the container-facts
+  information panel (format, duration, bitrate; the video track's codec/resolution/frame
+  rate; the audio track's codec/sample rate/channels/sample width — every value copies),
+  "Open in System Player" (desktop only, also the Explorer's context menu row for media
+  files), the source ladder — `ggsmedia://` streaming first, one bounded whole-file read as
+  the no-protocol fallback (the remote shells), the decode failure degrading to the system
+  player — and the in-place reload on a disk change)
 - Backend: `src-tauri/crates/ggs-text/` (the viewer engine), byte comparison in the
-  `ggs-index` crate's `hexdiff`, chunked reads via `ggs-fs` (the `cmd_fs.rs` adapters)
+  `ggs-index` crate's `hexdiff`, chunked reads via `ggs-fs` (the `cmd_fs.rs` adapters),
+  the media facts and the streaming protocol via the `ggs-fs` crate's `media` module behind
+  `src-tauri/src/cmd_media.rs` — `media_info` (the header parsers: MP4/MOV/M4A box walk with
+  the moov at the tail, Matroska/WebM EBML, RIFF WAV/AVI, FLAC, MP3 with the Xing frame
+  count and the CBR estimate, OGG Vorbis/Opus/FLAC/Theora plus the granule tail scan) and
+  the `ggsmedia://` protocol (convertFileSrc, `http://ggsmedia.localhost/…` on Windows),
+  whose responses answer the element's HTTP Range requests in ≤8 MiB windows off the main
+  thread, confined to the open workspace roots (the `ggs://` extension pages' discipline,
+  dynamic to this instance's roots)
 - Bench: `src-tauri/crates/ggs-text/examples/viewer_bench.rs` (the open path's phases — syntax set, rope,
   `ViewerDoc::new`, the first highlight window — `viewer_bench [mb]`)
 - Dev probe: `dev/hex-probe.html` (the hex view in isolation, against any theme)
 - Tests: `tests/imageViewer.test.ts` (the image geometry, the gesture recognizer, and the
   viewer through the editor group — toolbar, wheel, drag, keyboard, pinch, double tap,
   the gallery and its swipe, the context menu, the reload)
+  + `tests/mediaView.test.ts` (the media mime routing, the viewer through the editor
+  group — the facts panel, the toolbar's play/seek/mute, the context menu, the system
+  player hand-off, the decode-failure ladder and its too-large cut, the open routing that
+  never reaches the binary probe, the reload, the Explorer's media menu row)
+  + the media parsers' fixtures in `ggs-fs/src/media.rs` (byte-built MP4/WebM/WAV/FLAC/
+  MP3/OGG/AVI) and the protocol's range/confinement tests in `cmd_media.rs`; the dev
+  harness's scroll pass mounts the viewer over a synthesized WAV (`Media viewer` surface)
 
 ### 8. Compare & Merge
 

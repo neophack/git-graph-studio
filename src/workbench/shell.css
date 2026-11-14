@@ -2635,3 +2635,35 @@ body.zen .tabs-container {
 .csv-view[data-compact] .csv-toolbar { flex-wrap: wrap; row-gap: 4px; }
 .csv-view[data-compact] .csv-toolbar .can-path { flex: 1 1 100%; }
 
+/* The media viewer (src/features/viewers/mediaView.ts): the webview decoder's video over
+ * an audio-art stage, a compact toolbar under it, the container facts in a side panel. */
+.editor-pane.media-preview { display: flex; flex-direction: column; }
+.media-preview { flex: 1; min-height: 0; display: flex; flex-direction: column; outline: none; }
+.media-stage { flex: 1; min-height: 0; position: relative; display: flex; align-items: center; justify-content: center; overflow: hidden; background: #1b1b1b; }
+.media-video { max-width: 100%; max-height: 100%; outline: none; }
+.media-art { display: flex; flex-direction: column; align-items: center; gap: 10px; color: var(--vscode-descriptionForeground, #999); user-select: none; }
+.media-art[hidden] { display: none; }
+.media-art-icon { font-size: 64px; height: 64px; width: 64px; }
+.media-art-name { font-size: 13px; max-width: 80%; overflow-wrap: anywhere; text-align: center; }
+.media-message { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px; text-align: center; color: var(--vscode-descriptionForeground, #999); pointer-events: none; background: inherit; }
+.media-message[hidden] { display: none; }
+.media-message-action { pointer-events: auto; }
+.media-toolbar { display: flex; align-items: center; gap: 2px; padding: 4px 8px; border-top: 1px solid var(--vscode-panel-border, #2b2b2b); font-size: 12px; flex: none; overflow-x: auto; scrollbar-width: none; }
+.media-toolbar::-webkit-scrollbar { display: none; }
+.media-group { display: inline-flex; align-items: center; gap: 2px; flex: none; min-width: 0; }
+.media-group:first-child { flex: 1 1 auto; }
+.media-sep { width: 1px; height: 16px; margin: 0 6px; background: var(--vscode-panel-border, #2b2b2b); flex: none; }
+.media-toolbar .action-btn.active { background: var(--vscode-inputOption-activeBackground, rgba(0, 103, 192, 0.35)); color: var(--vscode-inputOption-activeForeground, var(--vscode-icon-foreground)); }
+.media-time { min-width: 92px; text-align: center; font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground, #999); flex: none; }
+.media-seek { flex: 1 1 120px; min-width: 80px; height: 16px; accent-color: var(--vscode-focusBorder, #0078d4); margin: 0 4px; }
+.media-rate { height: 22px; background: var(--vscode-dropdown-background, var(--vscode-input-background)); color: var(--vscode-dropdown-foreground, var(--vscode-foreground)); border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border, #3c3c3c)); border-radius: 2px; font-size: 11px; padding: 0 2px; }
+.media-info { flex: none; max-height: 40%; overflow-y: auto; border-top: 1px solid var(--vscode-panel-border, #2b2b2b); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); font-size: 12px; }
+.media-info[hidden] { display: none; }
+.media-info-section { padding: 6px 12px 2px; }
+.media-info-title { font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; color: var(--vscode-sideBarSectionHeader-foreground, var(--vscode-foreground)); padding-bottom: 4px; }
+.media-info-row { display: flex; gap: 12px; padding: 2px 0; align-items: baseline; cursor: pointer; }
+.media-info-row:hover { background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.1)); }
+.media-info-label { color: var(--vscode-descriptionForeground, #999); white-space: nowrap; flex: none; min-width: 88px; }
+.media-info-value { min-width: 0; overflow-wrap: anywhere; user-select: text; }
+.media-message-action { background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff); border: none; border-radius: 2px; padding: 4px 12px; font-size: 12px; cursor: pointer; }
+.media-message-action:hover { background: var(--vscode-button-hoverBackground, #1177bb); }

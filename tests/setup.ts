@@ -20,7 +20,12 @@ if (typeof document !== 'undefined') {
 	installDesktopRemoteHooks();
 }
 
-vi.mock('@tauri-apps/api/core', () => ({ invoke, Channel }));
+vi.mock('@tauri-apps/api/core', () => ({
+	invoke,
+	Channel,
+	// The media viewer's streaming URL (Tauri's own spelling, Windows form).
+	convertFileSrc: (path: string, scheme = 'asset') => `http://${scheme}.localhost/${encodeURIComponent(path)}`
+}));
 vi.mock('@tauri-apps/api/event', () => ({ listen, emit }));
 vi.mock('@tauri-apps/api/window', () => windowApi);
 vi.mock('@tauri-apps/api/webview', () => webviewApi);

@@ -242,6 +242,8 @@ export class EditorGroup {
 
 	declare mountImagePreview: (editor: Editor) => Promise<void> ;
 
+	declare mountMediaView: (editor: Editor) => Promise<void> ;
+
 	declare openMarkdownPreview: (path?: string) => Promise<void>;
 
 	declare openFileHistory: (path?: string) => Promise<void>;

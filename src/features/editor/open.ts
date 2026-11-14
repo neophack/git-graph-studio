@@ -10,7 +10,7 @@ import { symbolLookup } from '../../platform/ipc/symbols';
 import { hasBookmark } from './bookmarks';
 import { samePath, contextUri, menuSection, resourceContext } from '../extensions';
 import { loadAnalysisPages, loadCanViews, loadCallTree, loadDataViews, loadFileHistory, loadFolderCompare, loadHexCompare, loadMerge, loadSymbolDbView, loadTextEditor } from '../../platform/lazy';
-import { imageMime, renderMarkdown } from '../../platform/markdown';
+import { imageMime, mediaMime, renderMarkdown } from '../../platform/markdown';
 import type { BlameLine } from '../scm/types';
 import type { WsSymbol } from '../search/types';
 import { commands } from '../../platform/commands';
@@ -176,6 +176,13 @@ export const openMethods: ThisType<EditorGroup> = {
 		// An image opens in the image preview rather than as bytes in a text editor.
 		if (imageMime(name)) {
 			await this.mountImagePreview(editor);
+			this.add(editor, show(), intent);
+			return;
+		}
+		// A video/audio file opens in the media viewer (the player + the container-facts
+		// panel) rather than a hex dump — the classification runs before the binary probe.
+		if (mediaMime(name)) {
+			await this.mountMediaView(editor);
 			this.add(editor, show(), intent);
 			return;
 		}

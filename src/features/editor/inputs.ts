@@ -105,6 +105,9 @@ export interface Editor {
 	hex?: HexView;
 	/** An image file's viewer — reloaded in place when the file changes on disk. */
 	image?: ImageView;
+	/** A video/audio file's media viewer — its player and container-facts panel, reloaded
+	 *  in place when the file changes on disk. */
+	media?: import('../viewers/types').MediaView;
 	/** A CAN log (.blf / .asc) statistics view, filled when the backend's parse returns. */
 	canlog?: CanLogView;
 	/** A CAN log's raw frame view — the tab a .blf / .asc opens in, live while it parses. */

@@ -124,6 +124,33 @@
 			};
 
 			window.__harness = { pulled: 0, checkedOut: [], oldText: oldText, typed: [], ptys: [], ptyTail: '', opened: [] };
+			// One real second of 440 Hz sine as a 16-bit 8 kHz mono WAV: the media viewer's
+			// surface plays it through the element (the browser decodes WAV natively).
+			window.__harness.wavB64 = (() => {
+				const rate = 8000;
+				const dataLen = rate * 2;
+				const buffer = new ArrayBuffer(44 + dataLen);
+				const bytes = new DataView(buffer);
+				const spell = (at, text) => { for (let i = 0; i < text.length; i++) bytes.setUint8(at + i, text.charCodeAt(i)); };
+				spell(0, 'RIFF');
+				bytes.setUint32(4, 36 + dataLen, true);
+				spell(8, 'WAVE');
+				spell(12, 'fmt ');
+				bytes.setUint32(16, 16, true);
+				bytes.setUint16(20, 1, true);
+				bytes.setUint16(22, 1, true);
+				bytes.setUint32(24, rate, true);
+				bytes.setUint32(28, rate * 2, true);
+				bytes.setUint16(32, 2, true);
+				bytes.setUint16(34, 16, true);
+				spell(36, 'data');
+				bytes.setUint32(40, dataLen, true);
+				for (let i = 0; i < dataLen / 2; i++) bytes.setInt16(44 + i * 2, Math.round(Math.sin((i * 440 * 2 * Math.PI) / rate) * 8000), true);
+				let binary = '';
+				const raw = new Uint8Array(buffer);
+				for (let i = 0; i < raw.length; i++) binary += String.fromCharCode(raw[i]);
+				return btoa(binary);
+			})();
 
 			// The terminal-link mode (?terminal=1) seeds its shell BEFORE the workbench boots:
 			// a session already running in the fake backend's table makes the terminal page's
@@ -460,7 +487,15 @@
 					out.set(text, 8 + meta.length);
 					return out;
 				},
-				read_file_base64: () => btoa(window.__harness.oldText)
+				read_file_base64: (args) => (args && String(args.path || '').toLowerCase().endsWith('.wav') ? window.__harness.wavB64 : btoa(window.__harness.oldText)),
+				// The media viewer's container facts (module 7): a 16-bit 8 kHz mono WAV.
+				media_info: () => ({
+					format: 'WAV',
+					durationMs: 1000,
+					bitrateBps: 8 * (44 + 16000),
+					sizeBytes: 44 + 16000,
+					audio: { codec: 'PCM', sampleRate: 8000, channels: 1, bitsPerSample: 16 }
+				})
 			};
 			const baseInvoke = window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
 			window.__TAURI_INTERNALS__.invoke = (command, args) =>
@@ -812,6 +847,32 @@
 				const zoomed = csvSeriesLog.at(-1);
 				check('Data table', 'the wheel zoomed and the refetch carries the window', true, zoomed.xFrom !== null);
 				check('Data table', 'the zoomed window is inside the file', true, Number(zoomed.xTo) < CSV_ROWS - 1);
+				view.dispose();
+				view.root.remove();
+			});
+
+			/* ----- the media viewer (a video/audio file): the facts panel, the element's
+			   playback, the toolbar. The page has no ggsmedia protocol handler, so the view's
+			   fallback answers — one whole-file read into a blob URL, the remote shells' path. ----- */
+			await surface('Media viewer', async () => {
+				const { MediaView } = await import('/src/features/viewers/mediaView.ts');
+				const view = new MediaView('C:\\repo\\demo.wav', {});
+				document.getElementById('editorGroup').appendChild(view.root);
+				await view.load();
+				// The unresolvable protocol URL fails over to the byte read, the WAV decodes,
+				// the facts render, and the element answers its own duration.
+				await waitFor(() => view.root.querySelector('.media-info .media-info-row'));
+				const facts = view.root.querySelector('.media-info').textContent;
+				check('Media viewer', 'the container facts render', (text) => text.includes('WAV') && text.includes('PCM'), facts);
+				const video = view.root.querySelector('.media-video');
+				await waitFor(() => isFinite(video.duration) && video.duration > 0.5);
+				check('Media viewer', 'the element decoded the wav', true, video.duration > 0.5 && video.duration < 2);
+				check('Media viewer', 'the audio art shows instead of a picture', true, !view.root.querySelector('.media-art').hidden);
+				const playButton = view.root.querySelector('.media-toolbar .action-btn');
+				click(playButton);
+				await waitFor(() => !video.paused);
+				check('Media viewer', 'the toolbar plays', true, !video.paused && video.currentTime >= 0);
+				video.pause();
 				view.dispose();
 				view.root.remove();
 			});

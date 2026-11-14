@@ -5,7 +5,7 @@
 import { type FileContents, type FileProbe, fileProbe } from '../../platform/ipc/fs';
 import { symbolLookup } from '../../platform/ipc/symbols';
 import { declaredLanguageName } from '../extensions';
-import { loadDataViews, loadCanViews, loadEditorExtensions, loadFastView, loadHexView, loadImageView, loadMergeEditor } from '../../platform/lazy';
+import { loadDataViews, loadCanViews, loadEditorExtensions, loadFastView, loadHexView, loadImageView, loadMediaView, loadMergeEditor } from '../../platform/lazy';
 import { t } from '../../platform/i18n';
 import { settings } from '../../platform/settings';
 import { basename, el, icon, notify, showContextMenu, toPosix } from '../../platform/ui/index';
@@ -338,6 +338,24 @@ export const mountMethods: ThisType<import('./group').EditorGroup> = {
 		editor.image = view;
 		editor.onClose = () => view.dispose();
 		editor.pane.classList.add('image-preview');
+		editor.pane.append(view.root);
+		await view.load();
+	},
+
+	/** A video/audio file opens in the media viewer: the webview's decoder plays it, the
+	 *  backend's header parsers answer the information panel, and a codec the webview
+	 *  build cannot decode degrades to the system player. */
+	async mountMediaView(editor: Editor): Promise<void> {
+		if (editor.input.kind !== 'file') return;
+		const path = editor.input.path;
+		editor.languageName = 'Media';
+		const { MediaView } = await loadMediaView();
+		const view = new MediaView(path, {
+			onOpenHex: () => void this.openHex(path)
+		});
+		editor.media = view;
+		editor.onClose = () => view.dispose();
+		editor.pane.classList.add('media-preview');
 		editor.pane.append(view.root);
 		await view.load();
 	},

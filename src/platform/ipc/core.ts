@@ -6,5 +6,5 @@
 // callers; the command names there are the contract check-ipc.mjs compares against the
 // backend's registration.
 
-export { invoke, Channel } from '@tauri-apps/api/core';
+export { invoke, Channel, convertFileSrc } from '@tauri-apps/api/core';
 export { emit, emitTo, listen, type UnlistenFn } from '@tauri-apps/api/event';

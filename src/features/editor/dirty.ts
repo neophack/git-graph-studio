@@ -502,6 +502,10 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 			await editor.image.reload();
 			return;
 		}
+		if (editor.media) {
+			await editor.media.reload();
+			return;
+		}
 		const view = editor.view;
 		if (!view) return;
 		try {

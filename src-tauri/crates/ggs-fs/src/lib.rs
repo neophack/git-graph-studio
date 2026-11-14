@@ -1,12 +1,15 @@
 //! ggs-fs (L1, module 3's backend): the workspace file services — directory listing,
 //! chunked reads and patches, the no-clobber copy engine ("name (copy).ext"), the
 //! streaming import/export transfer engine with cancellation, the confined chunked
-//! uploads, `zip_tree` (the export and the remote download pack through it) and the
+//! uploads, `zip_tree` (the export and the remote download pack through it), the media
+//! file metadata (module 7's video/audio viewer probes through `media`) and the
 //! `.gitignore`-aware parallel tree walk every consumer (Quick Open, search, the symbol
 //! index, the analysis engine) shares — the exclusion policy stays ONE list here.
 //!
 //! Allowed dependencies: ggs-base, ggs-text (encoding), ignore, rayon, trash, zip,
 //! base64. No tauri — the wire upload path and the zip walk are plain calls.
+
+pub mod media;
 
 use std::fs;
 use std::path::{Path, PathBuf};

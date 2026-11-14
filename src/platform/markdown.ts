@@ -189,3 +189,28 @@ export function imageMime(name: string): string | null {
 		default: return null;
 	}
 }
+
+/** The MIME type a video/audio file plays as, by extension — the media viewer's routing
+ *  (a match opens the player instead of the hex dump the binary probe would reach). */
+export function mediaMime(name: string): string | null {
+	const ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase();
+	switch (ext) {
+		case 'mp4': case 'm4v': return 'video/mp4';
+		case 'mov': return 'video/quicktime';
+		case 'webm': return 'video/webm';
+		case 'mkv': return 'video/x-matroska';
+		case 'avi': return 'video/x-msvideo';
+		case 'wmv': return 'video/x-ms-wmv';
+		case 'mpg': case 'mpeg': return 'video/mpeg';
+		case '3gp': return 'video/3gpp';
+		case 'mp3': return 'audio/mpeg';
+		case 'm4a': return 'audio/mp4';
+		case 'wav': return 'audio/wav';
+		case 'ogg': case 'oga': case 'opus': return 'audio/ogg';
+		case 'flac': return 'audio/flac';
+		case 'aac': return 'audio/aac';
+		case 'wma': return 'audio/x-ms-wma';
+		case 'weba': return 'audio/webm';
+		default: return null;
+	}
+}

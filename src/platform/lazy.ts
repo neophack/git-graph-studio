@@ -51,6 +51,9 @@ export const loadHexView = once(() => import('../features/viewers/hexView'));
 export const loadHexCompare = once(() => import('../features/viewers/hexCompare'));
 /** The image viewer (zoom, pan, gestures, gallery), loaded with the first image that opens. */
 export const loadImageView = once(() => import('../features/viewers/imageView'));
+/** The media viewer (video/audio player, information panel), loaded with the first media
+ *  file that opens. */
+export const loadMediaView = once(() => import('../features/viewers/mediaView'));
 
 /** The Fast Viewer (a read-only large file), the folder-compare and merge-conflict views, the
  *  file-history timeline, the call tree and the workspace snippets - each opens with its first
