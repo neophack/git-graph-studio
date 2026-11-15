@@ -255,7 +255,9 @@ mod media_command_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("clip.bin");
         std::fs::write(&file, (0..100_000u32).map(|i| (i % 251) as u8).collect::<Vec<_>>()).unwrap();
-        let path = file.to_str().unwrap().replace('/', "\\");
+        // The spelling the webview hands over: a Windows drive path (`C:\…`) or the POSIX
+        // absolute form — `request_path` strips the URL's leading slash from both.
+        let path = if cfg!(windows) { file.to_str().unwrap().replace('/', "\\") } else { file.to_str().unwrap().to_string() };
         let open = roots(&[&path]);
 
         let make_with = |range: Option<&str>, file: &str| {
@@ -296,7 +298,7 @@ mod media_command_tests {
         // An empty file answers 200 with an empty body, whatever was asked.
         let empty = dir.join("empty.bin");
         std::fs::write(&empty, b"").unwrap();
-        let empty_path = empty.to_str().unwrap().replace('/', "\\");
+        let empty_path = if cfg!(windows) { empty.to_str().unwrap().replace('/', "\\") } else { empty.to_str().unwrap().to_string() };
         let empty_roots = roots(&[&empty_path]);
         for range in [None, Some("bytes=0-"), Some("bytes=-10")] {
             let response = media_response(&make_with(range, &empty_path), &empty_roots);
