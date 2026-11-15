@@ -1807,7 +1807,9 @@ async fn the_pair_page_sets_the_relay_server_before_the_password() {
         "POST",
         "/pair/hub/connect",
         &[("Content-Type", "application/json")],
-        Some(&format!(r#"{{"ticket":"{ticket}","url":"http://127.0.0.1:9"}}"#)),
+        Some(&format!(
+            r#"{{"ticket":"{ticket}","url":"http://127.0.0.1:9"}}"#
+        )),
     )
     .await;
     assert_eq!(locked.status, 403, "{}", locked.body);
@@ -1830,7 +1832,9 @@ async fn the_pair_page_sets_the_relay_server_before_the_password() {
         "POST",
         "/pair/unlock",
         &[("Content-Type", "application/json")],
-        Some(&format!(r#"{{"ticket":"{ticket}","password":"{PASSWORD}"}}"#)),
+        Some(&format!(
+            r#"{{"ticket":"{ticket}","password":"{PASSWORD}"}}"#
+        )),
     )
     .await;
     assert_eq!(ok.status, 200, "{}", ok.body);
