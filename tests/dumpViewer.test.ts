@@ -49,12 +49,14 @@ const OVERVIEW: DumpOverview = {
 	streams: [{ kind: 4, name: 'ModuleList', size: 2272 }]
 };
 
-/** Three carved entries: one PNG (in a module), one ZIP on the heap, one tiny JPEG the
- *  min-size filter hides. */
+/** Four carved entries: one PNG (in a module), one ZIP on the heap, one tiny JPEG the
+ *  min-size filter hides, and one TTF whose structural check failed (a false positive
+ *  the verification filter hides by default). */
 const ENTRIES: CarvedEntry[] = [
-	{ id: 0, format: 'png', tag: 'image', offset: 100, size: 2048, va: 0x7ff0_0064, inModule: 'app.exe' },
-	{ id: 1, format: 'zip', tag: 'archive', offset: 4096, size: 65536, va: 0x1000_1000, inModule: null },
-	{ id: 2, format: 'jpg', tag: 'image', offset: 8192, size: 64, va: 0x1002_0000, inModule: null }
+	{ id: 0, format: 'png', tag: 'image', offset: 100, size: 2048, va: 0x7ff0_0064, inModule: 'app.exe', verified: true },
+	{ id: 1, format: 'zip', tag: 'archive', offset: 4096, size: 65536, va: 0x1000_1000, inModule: null, verified: true },
+	{ id: 2, format: 'jpg', tag: 'image', offset: 8192, size: 64, va: 0x1002_0000, inModule: null, verified: true },
+	{ id: 3, format: 'ttf', tag: 'font', offset: 12288, size: 4096, va: 0x1003_0000, inModule: null, verified: false }
 ];
 
 /** A tiny valid PNG's bytes, as the preview's base64 answer. */
@@ -107,10 +109,10 @@ describe('the dump viewer routing', () => {
 });
 
 describe('the dump view', () => {
-	async function openView(): Promise<DumpView> {
+	async function openView(onOpenPath?: (p: string) => void): Promise<DumpView> {
 		mockDump();
 		const host = document.getElementById('editorGroup')!;
-		const view = new DumpView('C:\\dumps\\app.dmp');
+		const view = new DumpView('C:\\dumps\\app.dmp', { onOpenPath });
 		host.appendChild(view.root);
 		await waitForReady(() => view.root.querySelectorAll('.dump-row').length > 0);
 		return view;
@@ -120,7 +122,8 @@ describe('the dump view', () => {
 		await openView();
 		expect(backend.callsTo('dump_scan').length).toBe(1);
 		const rows = document.querySelectorAll('.dump-row');
-		expect(rows.length).toBe(ENTRIES.length);
+		// the verification gate hides the failed TTF by default
+		expect(rows.length).toBe(ENTRIES.length - 1);
 		expect(rows[0]!.textContent).toContain('carved_000000.png');
 		expect(rows[0]!.textContent).toContain('2.0 KB');
 		expect(rows[1]!.textContent).toContain('64.0 KB');
@@ -130,18 +133,29 @@ describe('the dump view', () => {
 		expect(document.querySelector('.dump-overview')!.textContent).toContain('691 memory regions');
 	});
 
-	it('the type chips, the query and the min size narrow the list client-side', async () => {
+	it('the family chips, the format chips, the query and the min size narrow the list', async () => {
 		await openView();
 		const tag = document.querySelector('.dump-tag-select') as HTMLSelectElement;
 		tag.value = 'image';
 		tag.dispatchEvent(new Event('change'));
 		let names = [...document.querySelectorAll('.dump-name')].map((n) => n.textContent);
 		expect(names).toEqual([carvedName(ENTRIES[0]!), carvedName(ENTRIES[2]!)]);
+		// the format select narrows within (or instead of) the family
+		const format = document.querySelector('.dump-format-select') as HTMLSelectElement;
+		expect([...format.options].some((o) => o.value === 'png')).toBe(true);
+		format.value = 'jpg';
+		format.dispatchEvent(new Event('change'));
+		names = [...document.querySelectorAll('.dump-name')].map((n) => n.textContent);
+		expect(names).toEqual([carvedName(ENTRIES[2]!)]);
+		format.value = '';
+		format.dispatchEvent(new Event('change'));
 		const min = document.querySelector('.dump-min') as HTMLInputElement;
 		min.value = '1000';
 		min.dispatchEvent(new Event('input'));
 		names = [...document.querySelectorAll('.dump-name')].map((n) => n.textContent);
 		expect(names).toEqual([carvedName(ENTRIES[0]!)]);
+		min.value = '';
+		min.dispatchEvent(new Event('input'));
 		tag.value = '';
 		tag.dispatchEvent(new Event('change'));
 		const query = document.querySelector('.dump-query') as HTMLInputElement;
@@ -149,6 +163,11 @@ describe('the dump view', () => {
 		query.dispatchEvent(new Event('input'));
 		names = [...document.querySelectorAll('.dump-name')].map((n) => n.textContent);
 		expect(names).toEqual([carvedName(ENTRIES[0]!)]);
+		query.value = '';
+		query.dispatchEvent(new Event('input'));
+		// every row carries its own checkbox, and the header carries the select-all
+		expect(document.querySelectorAll('.dump-row .dump-check').length).toBe(ENTRIES.length - 1);
+		expect(document.querySelector('.dump-check-all')).not.toBeNull();
 	});
 
 	it('a row click previews: a PNG renders as an image over a hex head', async () => {
@@ -168,7 +187,7 @@ describe('the dump view', () => {
 		await waitForReady(() => view.root.querySelectorAll('.dump-row').length > 0);
 		click(document.querySelectorAll('.dump-row')[0]!);
 		await waitForReady(() => document.querySelector('.dump-extract-row .button:not([disabled])') !== null);
-		const extract = document.querySelectorAll('.dump-extract-row .button')[0] as HTMLButtonElement;
+		const extract = document.querySelector('.dump-extract-sel') as HTMLButtonElement;
 		expect(extract.textContent).toContain('1');
 		click(extract);
 		await waitForReady(() => extracts.length > 0);
@@ -177,10 +196,114 @@ describe('the dump view', () => {
 		const outDir = backend.callsTo('dump_extract')[0]!.outDir;
 		expect(String(outDir)).toMatch(/app_extracted$/);
 		// Extract All sends every listed entry
-		const all = document.querySelectorAll('.dump-extract-row .button')[1] as HTMLButtonElement;
+		const all = document.querySelector('.dump-extract-all') as HTMLButtonElement;
 		click(all);
 		await waitForReady(() => extracts.length > 1);
-		expect(extracts[1]!.length).toBe(ENTRIES.length);
+		// Extract All works on the filtered set: the failed TTF stays behind the gate
+		expect(extracts[1]!.length).toBe(ENTRIES.length - 1);
+	});
+
+	it('checkbox clicks and ctrl+click multi-select without clearing', async () => {
+		const { extracts } = mockDump();
+		const host = document.getElementById('editorGroup')!;
+		const view = new DumpView('C:\\dumps\\app.dmp');
+		host.appendChild(view.root);
+		await waitForReady(() => view.root.querySelectorAll('.dump-row').length > 0);
+		const rows = [...document.querySelectorAll('.dump-row')] as HTMLElement[];
+		// a plain click is a single select
+		click(rows[0]!);
+		await waitForReady(() => view.root.querySelectorAll('.dump-row.dump-row-on').length === 1);
+		// a checkbox click adds a second entry without clearing the first
+		const box2 = rows[1]!.querySelector('.dump-check') as HTMLInputElement;
+		box2.click();
+		await waitForReady(() => view.root.querySelectorAll('.dump-row.dump-row-on').length === 2);
+		expect(view.root.querySelector('.dump-selected')!.textContent).toContain('2 selected');
+		// a plain click resets to one; ctrl+click toggles back to two
+		click(rows[2]!);
+		await waitForReady(() => view.root.querySelectorAll('.dump-row.dump-row-on').length === 1);
+		rows[1]!.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+		await waitForReady(() => view.root.querySelectorAll('.dump-row.dump-row-on').length === 2);
+		// the header checkbox selects the whole filtered set
+		(document.querySelector('.dump-check-all') as HTMLInputElement).click();
+		await waitForReady(() => view.root.querySelectorAll('.dump-row.dump-row-on').length === ENTRIES.length - 1);
+		const extract = document.querySelector('.dump-extract-sel') as HTMLButtonElement;
+		expect(extract.textContent).toContain(String(ENTRIES.length - 1));
+		click(extract);
+		await waitForReady(() => extracts.length > 0);
+		expect(extracts[0]!.length).toBe(ENTRIES.length - 1);
+		// clear empties the selection again
+		const clear = document.querySelectorAll('.dump-extract-row .dump-mini')[1] as HTMLButtonElement;
+		click(clear);
+		await waitForReady(() => view.root.querySelectorAll('.dump-row.dump-row-on').length === 0);
+	});
+
+	it('shift+click selects the range from the anchor', async () => {
+		mockDump();
+		const host = document.getElementById('editorGroup')!;
+		const view = new DumpView('C:\\dumps\\app.dmp');
+		host.appendChild(view.root);
+		await waitForReady(() => view.root.querySelectorAll('.dump-row').length > 0);
+		const rows = [...document.querySelectorAll('.dump-row')] as HTMLElement[];
+		click(rows[0]!);
+		rows[2]!.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+		await waitForReady(() => view.root.querySelectorAll('.dump-row.dump-row-on').length === ENTRIES.length - 1);
+	});
+
+	it('Ctrl+A selects every filtered row', async () => {
+		mockDump();
+		const host = document.getElementById('editorGroup')!;
+		const view = new DumpView('C:\\dumps\\app.dmp');
+		host.appendChild(view.root);
+		await waitForReady(() => view.root.querySelectorAll('.dump-row').length > 0);
+		view.root.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, bubbles: true, cancelable: true }));
+		await waitForReady(() => view.root.querySelectorAll('.dump-row.dump-row-on').length === ENTRIES.length - 1);
+	});
+
+	it('the preview opens an extracted file in the app and in the system app', async () => {
+		const opened: string[] = [];
+		const view = await openView((p) => opened.push(p));
+		click(document.querySelectorAll('.dump-row')[0]!);
+		await waitForReady(() => document.querySelector('.dump-preview-img') !== null);
+		expect(document.querySelector('.dump-preview-actions')!.hidden).toBe(false);
+		const inApp = document.querySelector('.dump-open-app') as HTMLButtonElement;
+		click(inApp);
+		await waitForReady(() => opened.length > 0);
+		expect(opened[0]!).toMatch(/carved_000000\.png$/);
+		const external = document.querySelector('.dump-open-ext') as HTMLButtonElement;
+		click(external);
+		await waitForReady(() => backend.openedPaths.length > 0);
+		expect(backend.openedPaths[0]!).toMatch(/carved_000000\.png$/);
+	});
+
+	it('the verification filter hides the structurally-failed false positives', async () => {
+		const { extracts } = mockDump();
+		const host = document.getElementById('editorGroup')!;
+		const view = new DumpView('C:\dumps\app.dmp');
+		host.appendChild(view.root);
+		// the default gate hides the failed TTF: three rows, no failed one among them
+		await waitForReady(() => view.root.querySelectorAll('.dump-row').length === ENTRIES.length - 1);
+		expect([...document.querySelectorAll('.dump-name')].map((n) => n.textContent)).not.toContain('carved_000003.ttf');
+		// switching to all reveals it, dimmed and titled
+		const check = document.querySelector('.dump-check-select') as HTMLSelectElement;
+		check.value = 'all';
+		check.dispatchEvent(new Event('change'));
+		await waitForReady(() => view.root.querySelectorAll('.dump-row').length === ENTRIES.length);
+		const bad = document.querySelectorAll('.dump-row.dump-row-bad');
+		expect(bad.length).toBe(1);
+		expect(bad[0]!.textContent).toContain('carved_000003.ttf');
+		// failed-only narrows to it
+		check.value = 'fail';
+		check.dispatchEvent(new Event('change'));
+		await waitForReady(() => view.root.querySelectorAll('.dump-row').length === 1);
+		expect(document.querySelector('.dump-name')!.textContent).toBe('carved_000003.ttf');
+		// and extraction respects the gate: filtered-scope sends only verified entries
+		check.value = 'pass';
+		check.dispatchEvent(new Event('change'));
+		await waitForReady(() => view.root.querySelectorAll('.dump-row').length === ENTRIES.length - 1);
+		const all = document.querySelector('.dump-extract-all') as HTMLButtonElement;
+		click(all);
+		await waitForReady(() => extracts.length > 0);
+		expect(extracts[0]!.every((r) => r.format !== 'ttf')).toBe(true);
 	});
 
 	it('the Modules tab lists the loaded modules and extracts them as rebuilds', async () => {
@@ -198,7 +321,7 @@ describe('the dump view', () => {
 		click(rows[1]!);
 		await waitForReady(() => document.querySelector('.dump-preview-card') !== null);
 		expect(document.querySelector('.dump-preview-card')!.textContent).toContain('a.dll');
-		click(document.querySelectorAll('.dump-extract-row .button')[1]!);
+		click(document.querySelector('.dump-extract-all')!);
 		await waitForReady(() => extracts.length > 0);
 		expect(extracts[0]!.every((r) => r.kind === 'module')).toBe(true);
 		expect(extracts[0]![0]).toMatchObject({ kind: 'module', name: 'app.exe', base: OVERVIEW.modules[0]!.base });
@@ -237,9 +360,9 @@ describe('the dump list model', () => {
 		expect(formatBytes(3_500_000)).toBe('3.3 MB');
 		expect(imageMime('png')).toBe('image/png');
 		expect(imageMime('zip')).toBeNull();
-		const filtered = filterCarved(ENTRIES, { tag: 'image', query: '', minSize: 1000 });
+		const filtered = filterCarved(ENTRIES, { tag: 'image', format: '', query: '', minSize: 1000, check: 'pass' });
 		expect(filtered.map((e) => e.id)).toEqual([0]);
-		const searched = filterCarved(ENTRIES, { tag: '', query: 'APP.EXE', minSize: 0 });
+		const searched = filterCarved(ENTRIES, { tag: '', format: '', query: 'APP.EXE', minSize: 0, check: 'pass' });
 		expect(searched.map((e) => e.id)).toEqual([0]);
 		const head = hexDump(new Uint8Array([0x4d, 0x5a, 0x90, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]));
 		expect(head.split('\n')[0]).toContain('4d 5a 90 00');

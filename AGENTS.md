@@ -2827,9 +2827,15 @@ memory regions for embedded files by magic signature while the list browses.
 
 - Frontend: `src/features/dump/dumpView.ts` (the view: the overview strip — arch, OS, PID,
   threads, modules, memory, streams, crash/live — the Files / Modules tab chips over the
-  carve scan's streamed results, the type / query / min-size filters (client-side over the
-  delivered entries), image previews in place over a hex head for the rest, the module
-  rebuild cards, and the extract row's output folder with Extract Selected / Extract All),
+  carve scan's streamed results, the family / per-format / verification / query / min-size filters
+  hiding everything off-target (client-side over the delivered entries, each chip naming
+  its own count), a header row with a select-all checkbox over column labels, per-row
+  checkboxes with click / ctrl+click / shift+range selection and Ctrl+A over the filtered
+  set, image previews in place over a hex head for the rest with the module rebuild
+  cards, the extract row's output folder with the selection's running total and Extract
+  Selected / Extract Filtered, and a preview's two opens — extract-and-open in the app's
+  own viewer through the caller's routing, or extract-and-hand-to the system's default
+  application),
   `src/features/dump/dumpModel.ts` (the list's pure model: carve names, byte formatting,
   the filter, the hex head), `src/features/dump/{index,types}.ts` (the facade),
   `src/platform/ipc/dump.ts` (the typed seam), `src/platform/fileIcons.ts`'s
@@ -2842,14 +2848,20 @@ memory regions for embedded files by magic signature while the list browses.
   chain, RIFF's size field, ZIP's central directory, SQLite's page count, OGG's page walk,
   MP3's frame walk, TrueType's table directory, and the rest) over a single in-memory
   read of the dump — every validator slice reads the buffer, memchr drives every magic
-  and trailer pass — with VA attribution and module containment per hit — and `pe.rs`, the module
+  and trailer pass — with VA attribution and module containment per hit — `verify.rs`,
+  the structural second pass each entry carries as its `verified` flag (PNG's chunk chain
+  with per-chunk CRCs, JPEG's marker walk with the EOI at the end, the declared-length
+  containers re-added up, SQLite's page arithmetic, the sfnt directory) that the view
+  filters out by default — and `pe.rs`, the module
   rebuild that maps a loaded image's sections back to their `PointerToRawData` slots into
   a disk-layout PE (pages the dumper skipped land as zeros, honestly) — behind the
   `src-tauri/src/dump_commands.rs` adapters (`dump_open` / `dump_scan` streamed over a
   Channel with `Generation` cancellation / `dump_preview` base64 / `dump_extract` per-item
   progress / `dump_cancel`)
-- Tests: `tests/dumpViewer.test.ts` (the routing, the streamed list, the filters, the
-  image preview, the extract's coordinates, the modules tab, the mid-scan cancel), the
+- Tests: `tests/dumpViewer.test.ts` (the routing, the streamed list, the filters — family
+  and per-format — the image preview, the checkbox / ctrl / shift / Ctrl+A multi-select,
+  the extract's coordinates, the preview's two opens, the modules tab, the mid-scan
+  cancel), the
   `ggs-dmp` crate's in-crate tests (synthetic minidumps built in a tempdir: the wide
   variant, the MemoryList fallback, the carve's hit/validation/dedup, the PE rebuild over
   a region hole, and the every-format guarantee — one dump carrying a crafted sample of

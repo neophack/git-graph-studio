@@ -447,14 +447,19 @@ fn pdf(d: &Detect) -> Option<u64> {
 
 fn sqlite(d: &Detect) -> Option<u64> {
     let head = d.head(100);
-    let mut page_size = u64::from(u16_at(head, 16));
+    let mut page_size = u64::from(u16::from_be_bytes(
+        head.get(16..18).map_or([0; 2], |b| b.try_into().expect("slice")),
+    ));
     if page_size == 1 {
         page_size = 65_536;
     }
     if !(512..=65_536).contains(&page_size) || !page_size.is_power_of_two() {
         return None;
     }
-    let pages = u64::from(u32_at(head, 28));
+    // The header's fields are big-endian.
+    let pages = u64::from(u32::from_be_bytes(
+        head.get(28..32).map_or([0; 4], |b| b.try_into().expect("slice")),
+    ));
     if pages == 0 {
         return None;
     }
@@ -861,6 +866,15 @@ pub fn scan(
                     .iter()
                     .find(|m| va >= m.base && va - m.base < u64::from(m.size))
                     .map(|m| m.file_name.clone());
+                // The structural check runs here, over the exact slice the entry names:
+                // a hit that only looked like a header is reported with `verified`
+                // false, and the view filters it out by default. A declared length that
+                // overruns the dump is truncation by definition — unverified.
+                let verified = if end <= data.len() as u64 {
+                    crate::verify::check(spec.format, hit, &data, &data[hit as usize..end as usize]).is_ok()
+                } else {
+                    false
+                };
                 batch.push(CarvedEntry {
                     id,
                     format: spec.format.to_string(),
@@ -869,6 +883,7 @@ pub fn scan(
                     size,
                     va: Some(va),
                     in_module,
+                    verified,
                 });
                 id += 1;
             }
@@ -951,19 +966,19 @@ mod tests {
     }
 
     fn minimal_png() -> Vec<u8> {
-        // A real structure, not just the magic: IHDR chunk, one IDAT-ish blob, IEND+CRC.
+        // A real structure, not just the magic: a 13-byte IHDR with its true CRC, one
+        // IDAT-ish blob, IEND with its true CRC — the smallest legal PNG (45 bytes).
         let mut v = Vec::new();
         v.extend_from_slice(b"\x89PNG\r\n\x1a\n");
         v.extend_from_slice(&13u32.to_be_bytes());
         v.extend_from_slice(b"IHDR");
-        v.extend_from_slice(&[1, 0, 0, 1, 8, 2, 0, 0, 0]);
-        v.extend_from_slice(&[0u8; 4]); // IHDR CRC
-        v.extend_from_slice(&4u32.to_be_bytes());
-        v.extend_from_slice(b"IDAT");
-        v.extend_from_slice(&[0xAB, 0xCD, 0xEF, 0x01]);
-        v.extend_from_slice(&[0u8; 4]);
+        v.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]);
+        let crc = crate::verify::crc32(&v[12..]);
+        v.extend_from_slice(&crc.to_be_bytes());
         v.extend_from_slice(&0u32.to_be_bytes());
-        v.extend_from_slice(b"IEND\xAE\x42\x60\x82");
+        v.extend_from_slice(b"IEND");
+        let crc = crate::verify::crc32(b"IEND");
+        v.extend_from_slice(&crc.to_be_bytes());
         v
     }
 
@@ -1081,6 +1096,22 @@ mod tests {
     }
 
     #[test]
+    fn a_png_with_a_corrupt_crc_is_reported_unverified() {
+        // The carve validator only needs the IHDR and an IEND; the structural check
+        // walks the chunk CRCs. A constant in memory that looks like a header never has
+        // matching CRCs: the entry is reported (the user may still want to look),
+        // flagged verified=false, and the view filters it out by default.
+        let mut png = minimal_png();
+        png[20] ^= 0xFF; // corrupt one IHDR data byte, keeping the structure intact
+        let mut payload = vec![0u8; 24];
+        payload.extend_from_slice(&png);
+        let (entries, _, _) = scan_payload(&payload, &["png".to_string()]);
+        let hits: Vec<&CarvedEntry> = entries.iter().filter(|e| e.format == "png").collect();
+        assert_eq!(hits.len(), 1, "{entries:?}");
+        assert!(!hits[0].verified, "the corrupt CRC must flag unverified");
+    }
+
+    #[test]
     fn a_ttf_with_a_sane_table_directory_carves() {
         let mut font = Vec::new();
         font.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]); // version 1.0
@@ -1123,9 +1154,11 @@ mod tests {
             v.extend(minimal_png());
         });
         push("jpg", 0, 0, &|v| {
-            v.extend_from_slice(&[0xFF, 0xD8, 0xFF, 0xE0]); // SOI + APP0
-            v.extend_from_slice(&[0x00, 0x10, b'J', b'F', b'I', b'F', 0x00]);
-            v.extend(std::iter::repeat_n(0x11u8, 24));
+            v.extend_from_slice(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]); // SOI + APP0
+            v.extend(std::iter::repeat_n(0x11u8, 14)); // the APP0 body
+            v.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08]); // SOS
+            v.extend(std::iter::repeat_n(0x22u8, 6)); // its header
+            v.extend(std::iter::repeat_n(0x33u8, 10)); // entropy data
             v.extend_from_slice(&[0xFF, 0xD9]); // EOI
         });
         push("gif", 0, 0, &|v| {
@@ -1236,7 +1269,7 @@ mod tests {
             v.extend_from_slice(&[1, 0, 9, 0]); // type 1, header size 9 words
             v.extend_from_slice(&0u16.to_le_bytes()); // version
             v.extend_from_slice(&9u32.to_le_bytes()); // mtSize, in words
-            v.extend(std::iter::repeat_n(0x12u8, 6));
+            v.extend(std::iter::repeat_n(0x12u8, 8));
         });
         push("ttf", 0, 0, &|v| {
             v.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]); // version 1.0
@@ -1249,20 +1282,20 @@ mod tests {
             v.extend(std::iter::repeat_n(0u8, 40 - 28));
             v.extend(std::iter::repeat_n(0x77u8, 60));
         });
-        push("ttc", 0, 64, &|v| {
+        push("ttc", 0, 104, &|v| {
             v.extend_from_slice(b"ttcf");
             v.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // version
             v.extend_from_slice(&1u32.to_be_bytes()); // one font
             v.extend_from_slice(&16u32.to_be_bytes()); // its offset (past the 16-byte header)
-            // the sfnt at 16: one table of 32 bytes at 16 (within the sfnt)
+            // the sfnt at 16: one table whose extent reaches the file's end
             v.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]);
             v.extend_from_slice(&1u16.to_be_bytes());
             v.extend_from_slice(&[0u8; 6]);
             v.extend_from_slice(b"glyf");
             v.extend_from_slice(&[0u8; 4]);
-            v.extend_from_slice(&16u32.to_be_bytes());
-            v.extend_from_slice(&32u32.to_be_bytes());
-            v.extend(std::iter::repeat_n(0x77u8, 32));
+            v.extend_from_slice(&28u32.to_be_bytes()); // offset within the sfnt
+            v.extend_from_slice(&60u32.to_be_bytes()); // length
+            v.extend(std::iter::repeat_n(0x77u8, 60));
         });
         push("mp3", 0, 1668, &|v| {
             // four MPEG-1 Layer III 128 kbps 44.1 kHz frames of 417 bytes
@@ -1296,7 +1329,7 @@ mod tests {
             v.extend_from_slice(b"FWS");
             v.push(6); // version
             v.extend_from_slice(&80u32.to_le_bytes()); // the whole file's length
-            v.extend(std::iter::repeat_n(0x22u8, 73));
+            v.extend(std::iter::repeat_n(0x22u8, 72));
         });
         push("mod", 1080, 1028, &|v| {
             v.extend(std::iter::repeat_n(0u8, 20)); // song title
@@ -1378,9 +1411,9 @@ mod tests {
         });
         push("sqlite", 0, 2048, &|v| {
             v.extend_from_slice(b"SQLite format 3\x00");
-            v.extend_from_slice(&1024u16.to_le_bytes()); // page size
+            v.extend_from_slice(&1024u16.to_be_bytes()); // page size (big-endian)
             v.extend_from_slice(&[0u8; 10]); // write/read versions, reserved bytes
-            v.extend_from_slice(&2u32.to_le_bytes()); // page count
+            v.extend_from_slice(&2u32.to_be_bytes()); // page count (big-endian)
             v.extend(std::iter::repeat_n(0x44u8, 2048 - 100));
         });
         push("iff", 0, 0, &|v| {
@@ -1464,7 +1497,8 @@ mod tests {
             assert_eq!(hits[0].size, *size, "format {format}: size mismatch");
             assert_eq!(hits[0].offset, f.base_rva + carve_at, "format {format}: carve start");
         }
-        // And nothing was invented beyond the catalogue's formats.
+        // And nothing was invented beyond the catalogue's formats — every crafted
+        // sample passes its structural check.
         let supported = supported_formats();
         for entry in &entries {
             assert!(
@@ -1472,6 +1506,7 @@ mod tests {
                 "unknown format {} reported",
                 entry.format
             );
+            assert!(entry.verified, "{} failed the structural check (offset {}, size {})", entry.format, entry.offset, entry.size);
         }
 
         // The extract writes every carved file back byte-identical.

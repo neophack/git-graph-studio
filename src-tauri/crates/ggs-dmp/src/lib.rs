@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod carve;
 pub mod pe;
+pub mod verify;
 
 /// The dump header magic, as the u32 the file starts with ("MDMP" little-endian).
 const MINIDUMP_SIGNATURE: u32 = 0x504D_444D;
@@ -591,6 +592,10 @@ pub struct CarvedEntry {
     pub size: u64,
     pub va: Option<u64>,
     pub in_module: Option<String>,
+    /// The structural check passed (the chunk chain / declared lengths / end marker all
+    /// hold over the carved bytes). A false hit passes the carve validator but fails
+    /// here — the view filters those out by default.
+    pub verified: bool,
 }
 
 /// The scan's synchronous answer: the module list (delivered up front — it is one small

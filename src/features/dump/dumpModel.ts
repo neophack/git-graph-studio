@@ -63,11 +63,15 @@ export function hexDump(bytes: Uint8Array, maxRows = 16): string {
 	return lines.join('\n');
 }
 
-/** The list's filter: a format family chip (empty = all), a name query, a minimum size. */
+/** The list's filter: a format family chip and a concrete format (either may narrow;
+ *  empty = all), a name query, a minimum size, and the verification gate — `pass` (the
+ *  default) hides the structurally-failed false positives. */
 export interface DumpFilter {
 	tag: string;
+	format: string;
 	query: string;
 	minSize: number;
+	check: 'pass' | 'fail' | 'all';
 }
 
 /** The carved rows the filter keeps, in scan order. */
@@ -75,7 +79,10 @@ export function filterCarved(entries: CarvedEntry[], filter: DumpFilter): Carved
 	const query = filter.query.trim().toLowerCase();
 	return entries.filter((e) => {
 		if (filter.tag && e.tag !== filter.tag) return false;
+		if (filter.format && e.format !== filter.format) return false;
 		if (e.size < filter.minSize) return false;
+		if (filter.check === 'pass' && !e.verified) return false;
+		if (filter.check === 'fail' && e.verified) return false;
 		if (query) {
 			const name = carvedName(e);
 			const where = (e.inModule ?? '').toLowerCase();
@@ -94,4 +101,12 @@ export function countByTag(entries: CarvedEntry[]): Record<string, number> {
 	const counts: Record<string, number> = {};
 	for (const e of entries) counts[e.tag] = (counts[e.tag] ?? 0) + 1;
 	return counts;
+}
+
+/** The distinct formats the scan found, most common first — the format filter's
+ *  options, each carrying its own count so the user sees what narrowing buys. */
+export function countByFormat(entries: CarvedEntry[]): [string, number][] {
+	const counts = new Map<string, number>();
+	for (const e of entries) counts.set(e.format, (counts.get(e.format) ?? 0) + 1);
+	return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 }

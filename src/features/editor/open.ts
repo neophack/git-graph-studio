@@ -256,7 +256,7 @@ export const openMethods: ThisType<EditorGroup> = {
 			editor.languageName = 'Memory Dump';
 			editor.iconClass = 'file-binary';
 			const { DumpView } = await loadDumpViews();
-			editor.dump = new DumpView(path);
+			editor.dump = new DumpView(path, { onOpenPath: (extracted) => void this.openFile(extracted) });
 			editor.pane.classList.add('can-log');
 			editor.pane.appendChild(editor.dump.root);
 			editor.onClose = () => editor.dump?.dispose();

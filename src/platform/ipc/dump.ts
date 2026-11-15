@@ -64,6 +64,10 @@ export interface CarvedEntry {
 	size: number;
 	va: number | null;
 	inModule: string | null;
+	/** The entry's structural check passed (chunk chain / declared lengths / end marker).
+	 *  A false hit passes the carve validator but fails here — the list filters these
+	 *  out by default. */
+	verified: boolean;
 }
 
 /** The scan's knobs. `formats` empty scans every supported format. */
