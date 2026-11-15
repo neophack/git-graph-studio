@@ -233,6 +233,38 @@ describe('the plot mode', () => {
 		view.dispose();
 	});
 
+	it('the hover readout leaves no residue: one crosshair per hover, nothing after leave', async () => {
+		mockDoc();
+		mockSeries();
+		const view = new CsvView('C:\\data\\readings.csv');
+		document.getElementById('editorGroup')!.appendChild(view.root);
+		await waitForReady(() => view.scroll.rowCount === ROWS.length);
+		click(document.querySelector('.csv-view .csv-mode-chip:nth-of-type(2)')!);
+		await waitForReady(() => document.querySelectorAll('.csv-view .csv-plot path.can-chart-line').length > 0);
+		// jsdom lays nothing out; the hover maps the pointer through the svg's own rect,
+		// which the test fixes at the drawn size so a clientX lands where it says.
+		const svg = document.querySelector('.csv-view .csv-plot svg.can-chart')! as SVGElement;
+		svg.getBoundingClientRect = () => ({ left: 0, top: 0, width: 800, height: 300, right: 800, bottom: 300 }) as DOMRect;
+		const hover = (clientX: number): void => {
+			svg.parentElement!.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, cancelable: true, clientX, clientY: 100, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+		};
+		// Two hovers at different x: the second readout replaces the first, never adds to it.
+		hover(200);
+		expect(document.querySelectorAll('.csv-view .csv-plot .can-chart-cross').length).toBe(1);
+		hover(600);
+		expect(document.querySelectorAll('.csv-view .csv-plot .can-chart-cross').length).toBe(1);
+		expect(document.querySelectorAll('.csv-view .csv-plot .can-chart-dot').length).toBe(1);
+		expect(document.querySelectorAll('.csv-view .csv-plot .can-chart-axislabel').length).toBe(1);
+		// Leaving the chart sweeps the readout off the SVG too — the crosshair, the dots
+		// and the axis label die with the tooltip.
+		svg.parentElement!.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
+		expect(document.querySelector('.csv-view .csv-plot .can-chart-cross')).toBeNull();
+		expect(document.querySelector('.csv-view .csv-plot .can-chart-dot')).toBeNull();
+		expect(document.querySelector('.csv-view .csv-plot .can-chart-axislabel')).toBeNull();
+		expect(document.querySelector('.csv-view .csv-plot .can-chart-tip')).toBeNull();
+		view.dispose();
+	});
+
 	it('the y chips toggle columns in the selection and refetch', async () => {
 		mockDoc();
 		mockSeries();

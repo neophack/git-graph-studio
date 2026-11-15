@@ -115,6 +115,9 @@ export class CsvPlot {
 	private opts: CsvPlotOptions;
 	private sizer: ResizeObserver | null = null;
 	private tip: HTMLElement | null = null;
+	/** The readout's SVG marks — the crosshair, the dots, the axis label — lifted with
+	 *  the tooltip; without the sweep every mousemove leaves its set behind. */
+	private tipOverlay: SVGElement[] = [];
 	/** The drag in flight: its pointer, its start x and the view it started from. A move
 	 *  past the drag's slop turns into a pan; anything shorter stays a readout (tap). */
 	private drag: { pointerId: number; startX: number; view: PlotWindow; panning: boolean } | null = null;
@@ -254,6 +257,8 @@ export class CsvPlot {
 	}
 
 	private hideTip(): void {
+		for (const node of this.tipOverlay) node.remove();
+		this.tipOverlay = [];
 		this.tip?.remove();
 		this.tip = null;
 	}
@@ -305,14 +310,14 @@ export class CsvPlot {
 				el('b', undefined, [fmtPlotNum(best.y)])
 			]));
 		}
-		svg.append(...overlay);
 		const head = `${fmtPlotNum(snapX)}${this.opts.xLabel ? ` ${this.opts.xLabel}` : ''}`;
 		const label = svgNode('g', { class: 'can-chart-axislabel' });
 		const w = head.length * 6 + 10;
 		const lx = Math.min(Math.max(x0px, crossX - w / 2), Math.max(x0px, x1px - w));
 		label.append(svgNode('rect', { x: lx, y: y1px + 2, width: w, height: 15, rx: 2 }));
 		label.append(svgText(lx + w / 2, y1px + 13, head, 'middle', 'can-chart-axislabel-text'));
-		svg.append(label);
+		this.tipOverlay = [...overlay, label];
+		svg.append(...this.tipOverlay);
 		this.tip = el('div', 'can-chart-tip', [el('div', 'can-chart-tip-head', [head]), ...rows]);
 		const hostRect = this.root.getBoundingClientRect();
 		const px = clientX - hostRect.left;
