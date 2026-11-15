@@ -628,6 +628,10 @@ pub enum DumpEvent {
     Batch {
         entries: Vec<CarvedEntry>,
     },
+    /// The variant's own `rename_all` renames its fields — the enum-level attribute
+    /// names the variants only, and `elapsed_ms` crossed as snake_case where the
+    /// view read `elapsedMs` (the "用时 NaNs" the done line printed, 2026-11-15).
+    #[serde(rename_all = "camelCase")]
     Done {
         entries: u64,
         elapsed_ms: u64,

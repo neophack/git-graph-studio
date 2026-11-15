@@ -1802,8 +1802,12 @@ button.ggs-symbol-hover-loc:hover { text-decoration: underline; color: var(--vsc
  * and type selects). No third row ever appears at any width: the title truncates, the
  * filter takes whatever remains, the narrow form folds the actions into the ⋯ sheet. */
 
-.can-toolbar { display: flex; flex-direction: column; align-items: stretch; padding: 0; gap: 0; }
-.can-raw-view .can-toolbar { gap: 0; }
+/* The two-row toolbar is the CAN pages' own shape — the raw trace and the statistics
+   root `can-raw-view` / `can-log-view`. The other structured viewers reuse the
+   `hex-toolbar can-toolbar` pair on one flat row (2026-11-15: the unscoped column
+   stretched the CSV data table's chips into full-width stacked rows), so the column
+   never applies to the class alone. */
+.can-raw-view .can-toolbar, .can-log-view .can-toolbar { display: flex; flex-direction: column; align-items: stretch; padding: 0; gap: 0; }
 .can-bar { display: flex; align-items: center; gap: 6px; min-height: 34px; padding: 3px 10px; }
 .can-bar-main .can-toolbar-title, .can-bar-main .can-path {
 	flex: 1 1 0; min-width: 0;
@@ -1847,7 +1851,7 @@ button.ggs-symbol-hover-loc:hover { text-decoration: underline; color: var(--vsc
 
 /* The narrow form's two rows: the app bar (title/path, the live chip, ⋯) over the filter
  * row — the same two rows at phone heights, the actions folded into the ⋯ sheet. */
-.can-view[data-compact] .can-toolbar { border-bottom: 0.5px solid var(--m-sep); }
+.can-raw-view[data-compact] .can-toolbar, .can-log-view[data-compact] .can-toolbar { border-bottom: 0.5px solid var(--m-sep); }
 .can-view[data-compact] .can-bar {
 	min-height: 44px; gap: 8px;
 	padding: 4px max(12px, env(safe-area-inset-right)) 4px max(12px, env(safe-area-inset-left));
@@ -2694,8 +2698,11 @@ body.zen .tabs-container {
 .dump-count { color: var(--vscode-descriptionForeground, #999); font-variant-numeric: tabular-nums; margin-left: auto; white-space: nowrap; }
 .dump-extract-row .button { flex: none; height: 22px; padding: 0 10px; font-size: 12px; gap: 4px; }
 .dump-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(320px, 7fr) minmax(220px, 3fr); }
-.dump-list-pane { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
-.dump-list { display: flex; flex-direction: column; font-size: 12px; font-variant-numeric: tabular-nums; --dump-cols: 26px 14px minmax(140px, 1.5fr) 60px 76px 118px minmax(80px, 1fr); }
+/* The column template lives on the pane — the head and the rows are siblings, and a
+   definition on .dump-list never inherits into the header (its grid then collapses to
+   one column and the labels stack, 2026-11-15). */
+.dump-list-pane { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: auto; --dump-cols: 26px 14px minmax(140px, 1.5fr) 60px 76px 118px minmax(80px, 1fr); }
+.dump-list { display: flex; flex-direction: column; font-size: 12px; font-variant-numeric: tabular-nums; }
 .dump-head { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: var(--dump-cols); align-items: center; height: 24px; padding: 0 8px; background: var(--vscode-editor-background, #1e1e1e); border-bottom: 1px solid var(--vscode-panel-border, #2b2b2b); color: var(--vscode-descriptionForeground, #999); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; user-select: none; }
 .dump-hdot { width: 8px; }
 .dump-hname { font-family: var(--vscode-editor-font-family, Consolas, monospace); }

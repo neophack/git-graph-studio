@@ -295,7 +295,7 @@ export class CanLogView {
 		const status = el('div', 'hex-status can-status', [this.live, this.summaryLine]);
 		this.progressFill = el('i');
 		this.progress = el('div', 'can-progress', [this.progressFill]);
-		this.root = el('div', 'can-view', [toolbar, body, this.progress, status]);
+		this.root = el('div', 'can-view can-log-view', [toolbar, body, this.progress, status]);
 		this.sheet = new CanActionSheet(this.root);
 		this.form = new CanLayout(this.root);
 		this.form.onChange(() => {

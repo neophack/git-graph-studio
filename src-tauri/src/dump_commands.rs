@@ -132,3 +132,29 @@ pub fn dump_cancel(state: State<'_, DumpState>) -> Result<(), String> {
     state.cancel.cancel();
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The events cross the Channel as JSON, and the view reads `elapsedMs` — serde's
+    /// enum-level `rename_all` names the variants alone, so the `Done` variant carries
+    /// its own field casing. This pins the wire shape the frontend's `DumpEvent` type
+    /// is typed against (the "用时 NaNs" regression, 2026-11-15).
+    #[test]
+    fn the_done_event_crosses_the_wire_with_camel_case_fields() {
+        let json = serde_json::to_value(DumpEvent::Done {
+            entries: 12,
+            elapsed_ms: 3200,
+            cancelled: false,
+        })
+        .expect("serialize");
+        assert_eq!(json["kind"], "done");
+        assert_eq!(json["entries"], 12);
+        assert_eq!(json["elapsedMs"], 3200, "the view reads elapsedMs, never elapsed_ms");
+        assert_eq!(json["cancelled"], false);
+        let progress =
+            serde_json::to_value(DumpEvent::Progress { scanned: 1, total: 2, entries: 3 }).expect("serialize");
+        assert_eq!(progress["kind"], "progress");
+    }
+}
