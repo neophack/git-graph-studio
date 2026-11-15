@@ -201,20 +201,28 @@ impl Dump {
         let mut streams = Vec::new();
         if stream_count > 0
             && dir_u32 >= HEADER_SIZE
-            && dir_u32.checked_add(entries_bytes).is_some_and(|end| end <= size)
+            && dir_u32
+                .checked_add(entries_bytes)
+                .is_some_and(|end| end <= size)
         {
             streams = dump.read_dir(dir_u32, stream_count, 12);
         }
         let mut wide_rva = [0u8; 8];
         if !dump.read_exact_at(12, &mut wide_rva)? {
-            return Err(format!("{}: the stream directory is unreadable", path.display()));
+            return Err(format!(
+                "{}: the stream directory is unreadable",
+                path.display()
+            ));
         }
         let wide = dump.read_dir(u64::from_le_bytes(wide_rva), stream_count, 16);
         if wide.len() > streams.len() {
             streams = wide;
         }
         if streams.is_empty() {
-            return Err(format!("{}: the stream directory is unreadable", path.display()));
+            return Err(format!(
+                "{}: the stream directory is unreadable",
+                path.display()
+            ));
         }
         dump.streams = streams;
         Ok(dump)
@@ -255,7 +263,11 @@ impl Dump {
             if !(3..=25).contains(&kind) {
                 continue;
             }
-            if rva == 0 || rva.checked_add(u64::from(size)).is_none_or(|end| end > self.size) {
+            if rva == 0
+                || rva
+                    .checked_add(u64::from(size))
+                    .is_none_or(|end| end > self.size)
+            {
                 continue;
             }
             streams.push(DirEntry { kind, size, rva });
@@ -269,7 +281,10 @@ impl Dump {
         if buf.is_empty() {
             return Ok(true);
         }
-        if offset.checked_add(buf.len() as u64).is_none_or(|end| end > self.size) {
+        if offset
+            .checked_add(buf.len() as u64)
+            .is_none_or(|end| end > self.size)
+        {
             return Ok(false);
         }
         self.file
@@ -281,7 +296,10 @@ impl Dump {
 
     /// Reads up to `len` bytes at an offset (short read past the end allowed).
     fn read_vec_at(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, String> {
-        if offset.checked_add(len as u64).is_none_or(|end| end > self.size) {
+        if offset
+            .checked_add(len as u64)
+            .is_none_or(|end| end > self.size)
+        {
             return Ok(Vec::new());
         }
         self.file
@@ -318,7 +336,10 @@ impl Dump {
     /// bad length reads as an empty string — module names are cosmetic, never fatal.
     fn string_at(&mut self, rva: u32) -> String {
         let mut len = [0u8; 4];
-        if !self.read_exact_at(u64::from(rva), &mut len).unwrap_or(false) {
+        if !self
+            .read_exact_at(u64::from(rva), &mut len)
+            .unwrap_or(false)
+        {
             return String::new();
         }
         let bytes = u32::from_le_bytes(len) as usize;
@@ -345,7 +366,8 @@ impl Dump {
         if raw.len() < 4 {
             return Ok(Vec::new());
         }
-        let count = usize::try_from(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])).unwrap_or(0);
+        let count =
+            usize::try_from(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])).unwrap_or(0);
         const ENTRY: usize = 108;
         let mut modules = Vec::with_capacity(count.min(4096));
         for i in 0..count {
@@ -384,8 +406,8 @@ impl Dump {
             if raw.len() < 16 {
                 return Ok(Vec::new());
             }
-            let count =
-                usize::try_from(u64::from_le_bytes(raw[0..8].try_into().expect("slice"))).unwrap_or(0);
+            let count = usize::try_from(u64::from_le_bytes(raw[0..8].try_into().expect("slice")))
+                .unwrap_or(0);
             let base_rva = u64::from_le_bytes(raw[8..16].try_into().expect("slice"));
             let need = 16usize
                 .checked_add(count.checked_mul(16).ok_or("memory map size overflow")?)
@@ -416,8 +438,8 @@ impl Dump {
             if raw.len() < 4 {
                 return Ok(Vec::new());
             }
-            let count =
-                usize::try_from(u32::from_le_bytes(raw[0..4].try_into().expect("slice"))).unwrap_or(0);
+            let count = usize::try_from(u32::from_le_bytes(raw[0..4].try_into().expect("slice")))
+                .unwrap_or(0);
             const ENTRY: usize = 16;
             let mut out = Vec::new();
             for i in 0..count {
@@ -426,10 +448,12 @@ impl Dump {
                     break;
                 }
                 let va = u64::from_le_bytes(raw[o..o + 8].try_into().expect("slice"));
-                let size =
-                    u64::from(u32::from_le_bytes(raw[o + 8..o + 12].try_into().expect("slice")));
-                let rva =
-                    u64::from(u32::from_le_bytes(raw[o + 12..o + 16].try_into().expect("slice")));
+                let size = u64::from(u32::from_le_bytes(
+                    raw[o + 8..o + 12].try_into().expect("slice"),
+                ));
+                let rva = u64::from(u32::from_le_bytes(
+                    raw[o + 12..o + 16].try_into().expect("slice"),
+                ));
                 if rva == 0 || rva.checked_add(size).is_none_or(|end| end > self.size) {
                     continue;
                 }
@@ -458,10 +482,16 @@ impl Dump {
         };
         let raw = self.read_vec_at(s.rva, s.size as usize)?;
         let u16_at = |k: usize| {
-            u16::from_le_bytes(raw.get(k..k + 2).map_or([0; 2], |b| b.try_into().expect("slice")))
+            u16::from_le_bytes(
+                raw.get(k..k + 2)
+                    .map_or([0; 2], |b| b.try_into().expect("slice")),
+            )
         };
         let u32_at = |k: usize| {
-            u32::from_le_bytes(raw.get(k..k + 4).map_or([0; 4], |b| b.try_into().expect("slice")))
+            u32::from_le_bytes(
+                raw.get(k..k + 4)
+                    .map_or([0; 4], |b| b.try_into().expect("slice")),
+            )
         };
         let arch = match u16_at(0) {
             0 => "x86",
@@ -700,7 +730,9 @@ pub fn extract_range(dump: &mut Dump, offset: u64, size: u64, out: &Path) -> Res
     const CHUNK: u64 = 1024 * 1024;
     let mut buf = vec![0u8; CHUNK as usize];
     let mut done = 0u64;
-    dump.file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    dump.file
+        .seek(SeekFrom::Start(offset))
+        .map_err(|e| e.to_string())?;
     while done < size {
         let want = (size - done).min(CHUNK) as usize;
         dump.file
@@ -715,7 +747,10 @@ pub fn extract_range(dump: &mut Dump, offset: u64, size: u64, out: &Path) -> Res
 /// A file name worth writing: the path's last component, the separators and reserved
 /// characters flattened, length-capped, never empty.
 fn sanitize_name(raw: &str) -> String {
-    let base = raw.rsplit(['\\', '/']).find(|p| !p.is_empty()).unwrap_or(raw);
+    let base = raw
+        .rsplit(['\\', '/'])
+        .find(|p| !p.is_empty())
+        .unwrap_or(raw);
     let cleaned: String = base
         .chars()
         .map(|c| {
@@ -926,7 +961,7 @@ pub(crate) mod fixture {
         out.extend_from_slice(&0u32.to_le_bytes()); // checksum
         out.extend_from_slice(&0x6700_0000u32.to_le_bytes()); // timestamp
         out.extend_from_slice(&0x2u64.to_le_bytes()); // MiniDumpWithFullMemory
-        // directory: SystemInfo(7), ModuleList(4), Memory64List(9), Exception(6)
+                                                      // directory: SystemInfo(7), ModuleList(4), Memory64List(9), Exception(6)
         for (kind, size, rva) in [
             (7u32, 56u32, sys_rva as u32),
             (4, module_list_size, module_list_rva as u32),
@@ -960,7 +995,11 @@ mod tests {
         let payload_len = 64u64;
         let f = crate::fixture::write(
             &dir,
-            &[(0x7FF0_0000_0000, 0x1000, r"C:\Windows\System32\kernel32.dll")],
+            &[(
+                0x7FF0_0000_0000,
+                0x1000,
+                r"C:\Windows\System32\kernel32.dll",
+            )],
             &[(0x7FF0_0000_0000, payload_len)],
             &|buf| buf.extend_from_slice(&vec![0xABu8; payload_len as usize]),
         );
@@ -968,7 +1007,10 @@ mod tests {
         let overview = dump.overview(&f.path).expect("overview");
         // The fixture appends the 8-byte Exception body behind the payload.
         assert_eq!(overview.size, f.base_rva + payload_len + 8);
-        assert!(overview.has_exception, "the fixture carries an Exception stream row");
+        assert!(
+            overview.has_exception,
+            "the fixture carries an Exception stream row"
+        );
         assert_eq!(overview.flag_names, vec!["WithFullMemory"]);
         assert_eq!(overview.modules.len(), 1);
         let m = &overview.modules[0];
@@ -982,8 +1024,16 @@ mod tests {
             dump.file_offset_for(&regions, 0x7FF0_0000_0010),
             Some(f.base_rva + 0x10)
         );
-        assert_eq!(dump.file_offset_for(&regions, 0x7FF0_0000_1000), None, "past the region");
-        assert_eq!(dump.file_offset_for(&regions, 0x7FEF_FFFF_FFFF), None, "below the region");
+        assert_eq!(
+            dump.file_offset_for(&regions, 0x7FF0_0000_1000),
+            None,
+            "past the region"
+        );
+        assert_eq!(
+            dump.file_offset_for(&regions, 0x7FEF_FFFF_FFFF),
+            None,
+            "below the region"
+        );
     }
 
     #[test]
@@ -1032,7 +1082,11 @@ mod tests {
         let path = dir.path().join("wide.dmp");
         std::fs::write(&path, &out).expect("write");
         let mut dump = Dump::open(&path).expect("open (wide)");
-        assert_eq!(dump.streams.len(), 2, "both streams must survive the wide decode");
+        assert_eq!(
+            dump.streams.len(),
+            2,
+            "both streams must survive the wide decode"
+        );
         let overview = dump.overview(&path).expect("overview");
         assert_eq!(overview.os.arch, "x64");
         let regions = dump.regions().expect("regions");
