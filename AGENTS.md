@@ -2844,11 +2844,19 @@ memory regions for embedded files by magic signature while the list browses.
   directory (classic u32 and wide u64 layouts, the row-count heuristic picking the stride
   that recovers more valid rows), the ModuleList / Memory64List / MemoryList readers
   (self-describing entry sizes stepped, never hardcoded), `carve.rs` — the classic
-  carver's format table (header magic + per-format validator: PNG's IEND, JPEG's marker
-  chain, RIFF's size field, ZIP's central directory, SQLite's page count, OGG's page walk,
-  MP3's frame walk, TrueType's table directory, and the rest) over a single in-memory
-  read of the dump — every validator slice reads the buffer, memchr drives every magic
-  and trailer pass — with VA attribution and module containment per hit — `verify.rs`,
+  carver's format table (header magic + per-format structural validator) over a single
+  in-memory read of the dump — every validator slice reads the buffer, memchr drives every
+  magic and trailer pass — with VA attribution and module containment per hit. The
+  validator set is fitted byte-for-byte against the reference carver's extraction of a
+  real 332 MB SumatraPDF minidump (2026-11-15, the owner's direction: 只提取
+  这些文件, ggs 也要做到一致 — 905 entries at identical offsets and sizes, the cross-carver
+  diff riding `real_dump --entries`): PNG ends at the CRC-stamped IEND with no minimum
+  size, JPEG walks the APP0-led marker chain to the SOS, cursors and icons carve per
+  directory entry (a 32bpp BITMAPINFOHEADER bitmap whose XOR + AND planes add up to the
+  entry's declared length, or an embedded PNG), TrueType requires a sorted directory of
+  known sfnt tags, a collection's v2 DSIG trailer extends it, AVI needs its hdrl LIST,
+  PDF stops at the first %%EOF plus its newline, MP3 hides behind an ID3 tag, and the
+  loose shapes (BMP/GIF/WMF/TGA/ZIP/RAR) are validated structurally — `verify.rs`,
   the structural second pass each entry carries as its `verified` flag (PNG's chunk chain
   with per-chunk CRCs, JPEG's marker walk with the EOI at the end, the declared-length
   containers re-added up, SQLite's page arithmetic, the sfnt directory) that the view

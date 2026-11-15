@@ -1,13 +1,15 @@
-//! The real-dump probe: `real_dump <dump-file> [--scan] [--verify]` — parses a minidump
+//! The real-dump probe: `real_dump <dump-file> [--scan] [--verify] [--entries <out.json>]` —
+//! parses a minidump
 //! the way the viewer's open does (streams, modules, memory map), with `--scan` runs the
 //! carve pass over its memory regions and prints the hit counts per format, and with
 //! `--verify` checks every carved entry against its format's structure (PNG's chunk
 //! chain and CRCs, JPEG's marker walk with the EOI at the end, the declared-length
 //! containers re-added up, SQLite's page count) plus one completeness trap the list
 //! cannot show: entries whose size equals the scan's size cap, whose real end lies
-//! beyond it. A sample of each content format is also written out and re-read from
-//! disk, so the extract path itself is proven not to truncate. The crate's tests prove
-//! the parser against synthetic fixtures; this probe proves it against a real one.
+//! beyond it. `--entries` writes every carved entry as JSON — the cross-carver
+//! comparison feed. A sample of each content format is also written out and re-read
+//! from disk, so the extract path itself is proven not to truncate. The crate's tests
+//! prove the parser against synthetic fixtures; this probe proves it against a real one.
 //!
 //! ```text
 //! cargo run -p ggs-dmp --example real_dump -- "C:\path\to\dump.DMP" --scan --verify
@@ -50,7 +52,11 @@ fn main() {
     );
     println!(
         "os {} {} · pid {} · threads {} · exception {}",
-        overview.os.arch, overview.os.version, overview.pid, overview.threads, overview.has_exception
+        overview.os.arch,
+        overview.os.version,
+        overview.pid,
+        overview.threads,
+        overview.has_exception
     );
     println!(
         "modules {} ({} = {} bytes) · memory {} regions ({} = {} bytes) · streams {}",
@@ -63,13 +69,22 @@ fn main() {
         overview.streams.len()
     );
     for module in overview.modules.iter().take(5) {
-        println!("  module {} · {} · {}", module.file_name, humans(u64::from(module.size)), module.name);
+        println!(
+            "  module {} · {} · {}",
+            module.file_name,
+            humans(u64::from(module.size)),
+            module.name
+        );
     }
     let mut biggest = overview.modules.clone();
     biggest.sort_by_key(|m| std::cmp::Reverse(m.size));
     if let Some(m) = biggest.first() {
         if overview.modules.len() > 5 {
-            println!("  … biggest: {} · {}", m.file_name, humans(u64::from(m.size)));
+            println!(
+                "  … biggest: {} · {}",
+                m.file_name,
+                humans(u64::from(m.size))
+            );
         }
     }
 
@@ -117,6 +132,24 @@ fn main() {
     if args.iter().any(|a| a == "--verify") {
         verify(path, &sink.entries);
     }
+
+    // `--entries <path>` writes every carved entry as JSON — the diff feed for the
+    // cross-carver comparison this probe exists to make possible.
+    if let Some(at) = args.iter().position(|a| a == "--entries") {
+        let Some(out) = args.get(at + 1) else {
+            eprintln!("--entries needs a file path");
+            std::process::exit(2);
+        };
+        let mut rows = Vec::new();
+        for entry in &sink.entries {
+            rows.push(format!(
+                r#"{{"format":"{}","offset":{},"size":{}}}"#,
+                entry.format, entry.offset, entry.size
+            ));
+        }
+        std::fs::write(out, format!("[{}]", rows.join(",\n"))).expect("write entries");
+        println!("entries written to {out}");
+    }
 }
 
 /* ---------- The verify pass ---------- */
@@ -147,7 +180,11 @@ fn verify(path: &std::path::Path, entries: &[ggs_dmp::CarvedEntry]) {
             .map(|end| &data[entry.offset as usize..end as usize]);
         let Some(slice) = slice else {
             slot[2] += 1;
-            failures.push((entry.format.clone(), entry.offset, "range past the dump".into()));
+            failures.push((
+                entry.format.clone(),
+                entry.offset,
+                "range past the dump".into(),
+            ));
             continue;
         };
         if entry.size == cap {
@@ -160,7 +197,11 @@ fn verify(path: &std::path::Path, entries: &[ggs_dmp::CarvedEntry]) {
         } else {
             slot[2] += 1;
             if failures.len() < 40 && !entry.verified {
-                failures.push((entry.format.clone(), entry.offset, "flagged by the scan".into()));
+                failures.push((
+                    entry.format.clone(),
+                    entry.offset,
+                    "flagged by the scan".into(),
+                ));
             }
         }
         slot[0] += 1;
@@ -174,7 +215,10 @@ fn verify(path: &std::path::Path, entries: &[ggs_dmp::CarvedEntry]) {
     let mut total_failed = 0u64;
     let mut total_cap = 0u64;
     for (format, s) in &stats {
-        println!("{format:<8} {:>8} {:>9} {:>8} {:>10}", s[0], s[1], s[2], s[3]);
+        println!(
+            "{format:<8} {:>8} {:>9} {:>8} {:>10}",
+            s[0], s[1], s[2], s[3]
+        );
         total_ok += s[1];
         total_failed += s[2];
         total_cap += s[3];
@@ -196,7 +240,11 @@ fn verify(path: &std::path::Path, entries: &[ggs_dmp::CarvedEntry]) {
                 .map(|o| format!("0x{o:x}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            println!("  {format:<8} {} at {list}{}", offsets.len(), if offsets.len() > 6 { " …" } else { "" });
+            println!(
+                "  {format:<8} {} at {list}{}",
+                offsets.len(),
+                if offsets.len() > 6 { " …" } else { "" }
+            );
         }
     }
     for (format, offset, message) in failures.iter().take(20) {
@@ -222,7 +270,11 @@ fn verify(path: &std::path::Path, entries: &[ggs_dmp::CarvedEntry]) {
             if entry.size == cap {
                 continue; // cap-clipped entries are truncated by definition; not the sample
             }
-            let Some(end) = entry.offset.checked_add(entry.size).filter(|e| *e <= data.len() as u64) else {
+            let Some(end) = entry
+                .offset
+                .checked_add(entry.size)
+                .filter(|e| *e <= data.len() as u64)
+            else {
                 continue;
             };
             let bytes = &data[entry.offset as usize..end as usize];

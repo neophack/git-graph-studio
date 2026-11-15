@@ -75,7 +75,10 @@ pub fn extract_module(
         return Err("the module's base page is not in the dump (MZ missing)".to_string());
     }
     let lfanew = u32::from_le_bytes(headers[0x3C..0x40].try_into().expect("slice")) as usize;
-    if lfanew < 0x40 || lfanew + 248 > headers.len() || &headers[lfanew..lfanew + 4] != b"PE\x00\x00" {
+    if lfanew < 0x40
+        || lfanew + 248 > headers.len()
+        || &headers[lfanew..lfanew + 4] != b"PE\x00\x00"
+    {
         return Err("the module's PE header is not in the dump".to_string());
     }
     let num_sections = usize::from(u16::from_le_bytes(
@@ -104,10 +107,18 @@ pub fn extract_module(
     let mut sections: Vec<(u64, u64, u64, u64)> = Vec::with_capacity(num_sections); // vaddr, vsize, rawptr, rawsize
     for i in 0..num_sections {
         let at = sections_at + i * 40;
-        let vsize = u64::from(u32::from_le_bytes(headers[at + 8..at + 12].try_into().expect("slice")));
-        let vaddr = u64::from(u32::from_le_bytes(headers[at + 12..at + 16].try_into().expect("slice")));
-        let rawsize = u64::from(u32::from_le_bytes(headers[at + 16..at + 20].try_into().expect("slice")));
-        let rawptr = u64::from(u32::from_le_bytes(headers[at + 20..at + 24].try_into().expect("slice")));
+        let vsize = u64::from(u32::from_le_bytes(
+            headers[at + 8..at + 12].try_into().expect("slice"),
+        ));
+        let vaddr = u64::from(u32::from_le_bytes(
+            headers[at + 12..at + 16].try_into().expect("slice"),
+        ));
+        let rawsize = u64::from(u32::from_le_bytes(
+            headers[at + 16..at + 20].try_into().expect("slice"),
+        ));
+        let rawptr = u64::from(u32::from_le_bytes(
+            headers[at + 20..at + 24].try_into().expect("slice"),
+        ));
         if rawsize == 0 {
             continue; // BSS-like: nothing on disk, nothing in memory worth mapping
         }
@@ -128,12 +139,18 @@ pub fn extract_module(
     file.set_len(file_len).map_err(|e| e.to_string())?;
     let head_len = size_of_headers.min(headers.len() as u64) as usize;
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-    file.write_all(&headers[..head_len]).map_err(|e| e.to_string())?;
+    file.write_all(&headers[..head_len])
+        .map_err(|e| e.to_string())?;
     for (vaddr, vsize, rawptr, rawsize) in &sections {
         let (vaddr, vsize, rawptr, rawsize) = (*vaddr, *vsize, *rawptr, *rawsize);
-        let copy = rawsize.min(if vsize == 0 { rawsize } else { vsize.max(rawsize) });
+        let copy = rawsize.min(if vsize == 0 {
+            rawsize
+        } else {
+            vsize.max(rawsize)
+        });
         let mem = read_memory(dump, regions, module.base + vaddr, copy as usize);
-        file.seek(SeekFrom::Start(rawptr)).map_err(|e| e.to_string())?;
+        file.seek(SeekFrom::Start(rawptr))
+            .map_err(|e| e.to_string())?;
         file.write_all(&mem).map_err(|e| e.to_string())?;
     }
     Ok(file_len)

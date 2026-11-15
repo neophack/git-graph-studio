@@ -35,7 +35,9 @@ pub fn check(format: &str, offset: u64, data: &[u8], slice: &[u8]) -> Result<(),
             if !slice.starts_with(b"%PDF-") {
                 return Err("header".into());
             }
-            if !slice.ends_with(b"%%EOF") {
+            // The writer's newline after the EOF comment belongs to the file.
+            let core = slice.strip_suffix(b"\n").unwrap_or(slice);
+            if !core.ends_with(b"%%EOF") {
                 return Err("%%EOF not at the end".into());
             }
             Ok(())
@@ -45,11 +47,20 @@ pub fn check(format: &str, offset: u64, data: &[u8], slice: &[u8]) -> Result<(),
                 return Err("short header".into());
             }
             let page_size = u16::from_be_bytes([slice[16], slice[17]]);
-            let page_size = if page_size == 1 { 65_536 } else { u64::from(page_size) };
+            let page_size = if page_size == 1 {
+                65_536
+            } else {
+                u64::from(page_size)
+            };
             let pages = u32_be(slice, 28) as u64;
             if pages > 0 {
                 if pages * page_size != slice.len() as u64 {
-                    return Err(format!("{} pages x {} != {}", pages, page_size, slice.len()));
+                    return Err(format!(
+                        "{} pages x {} != {}",
+                        pages,
+                        page_size,
+                        slice.len()
+                    ));
                 }
             } else if !(slice.len() as u64).is_multiple_of(page_size) {
                 return Err("size not a page multiple".into());
@@ -63,7 +74,8 @@ pub fn check(format: &str, offset: u64, data: &[u8], slice: &[u8]) -> Result<(),
             check_sfnt(slice, 0, slice.len())
         }
         "ttc" => {
-            // The container: one font-offset table, each offset naming a full sfnt.
+            // The container: one font-offset table, each offset naming a full sfnt; a
+            // v2 collection's DSIG (offset + length) may run past the fonts.
             if slice.len() < 16 || &slice[0..4] != b"ttcf" {
                 return Err("container".into());
             }
@@ -87,6 +99,14 @@ pub fn check(format: &str, offset: u64, data: &[u8], slice: &[u8]) -> Result<(),
                     let len = u32_be(slice, e + 12) as usize;
                     end = end.max(at + off + len);
                 }
+            }
+            // A v2 collection's DSIG trailer — type, length, offset fields right
+            // behind the font table — may run the file past the fonts.
+            let hdr = 12 + num_fonts * 4;
+            if slice.len() >= hdr + 12 && &slice[hdr..hdr + 4] == b"DSIG" {
+                let dsig_len = u32_be(slice, hdr + 4) as usize;
+                let dsig_offset = u32_be(slice, hdr + 8) as usize;
+                end = end.max(dsig_offset + dsig_len);
             }
             if end != slice.len() {
                 return Err(format!("ttc end {end} != {}", slice.len()));
@@ -120,35 +140,46 @@ pub fn check(format: &str, offset: u64, data: &[u8], slice: &[u8]) -> Result<(),
         "mov" => {
             // The atom's size word sits one word before the carved start: it names
             // size = carved + 4.
-            let Some(at) = offset.checked_sub(4).filter(|a| *a + 4 <= data.len() as u64) else {
+            let Some(at) = offset
+                .checked_sub(4)
+                .filter(|a| *a + 4 <= data.len() as u64)
+            else {
                 return Err("no size word before the hit".into());
             };
-            let atom =
-                u32::from_be_bytes(data[at as usize..(at + 4) as usize].try_into().expect("4 bytes")) as usize;
+            let atom = u32::from_be_bytes(
+                data[at as usize..(at + 4) as usize]
+                    .try_into()
+                    .expect("4 bytes"),
+            ) as usize;
             if atom != slice.len() + 4 {
                 return Err(format!("atom size {atom} != carved {} + 4", slice.len()));
             }
             Ok(())
         }
         "ico" | "cur" => {
-            let count = usize::from(u16_le(slice, 4));
-            if count == 0 || 6 + count * 16 > slice.len() {
-                return Err("bad dir".into());
-            }
-            let mut end = 6 + count * 16;
-            for i in 0..count {
-                let at = 6 + i * 16;
-                let res = u32_le(slice, at + 8) as usize;
-                let off = u32_le(slice, at + 12) as usize;
-                if off < end || off + res > slice.len() {
-                    return Err(format!("entry {i} out of range"));
+            // The carve emits one icon-directory ENTRY per record: a 32bpp
+            // BITMAPINFOHEADER bitmap whose XOR + AND planes add up to the carved
+            // length, or an embedded PNG.
+            if slice.len() >= 40 && u32_le(slice, 0) == 40 {
+                let w = u32_le(slice, 4) as i32;
+                let h = u32_le(slice, 8) as i32;
+                let planes = u16_le(slice, 12);
+                let bpp = u16_le(slice, 14);
+                let comp = u32_le(slice, 16);
+                if planes != 1 || bpp != 32 || comp != 0 {
+                    return Err("planes/depth/compression".into());
                 }
-                end = end.max(off + res);
+                if !(1..=256).contains(&w) || h != 2 * w {
+                    return Err(format!("{}x{}", w, h));
+                }
+                let and_row = (w as u64).div_ceil(32) * 4;
+                let calc = 40 + 4 * w as u64 * w as u64 + and_row * w as u64;
+                if calc != slice.len() as u64 {
+                    return Err(format!("planes add up to {calc}, not {}", slice.len()));
+                }
+                return Ok(());
             }
-            if end != slice.len() {
-                return Err(format!("entries end {end} != {}", slice.len()));
-            }
-            Ok(())
+            check_png(slice)
         }
         // The remaining formats' size came out of their own declared-length fields in
         // the carve validator; nothing cheaper to re-check here than the validator did.
@@ -193,7 +224,10 @@ fn check_png(s: &[u8]) -> Result<(), String> {
         let crc = u32_be(s, pos + 8 + len);
         let computed = crc32(&s[pos + 4..pos + 8 + len]);
         if crc != computed {
-            return Err(format!("CRC mismatch on {} at {pos}", String::from_utf8_lossy(ctype)));
+            return Err(format!(
+                "CRC mismatch on {} at {pos}",
+                String::from_utf8_lossy(ctype)
+            ));
         }
         if ctype == b"IEND" {
             if pos + 12 + len != s.len() {
@@ -250,7 +284,10 @@ fn check_zip(s: &[u8]) -> Result<(), String> {
     }
     if !s.ends_with(b"PK\x05\x06") {
         // A trailing comment is legal: find the EOCD from the end.
-        let found = s.windows(4).rposition(|w| w == b"PK\x05\x06").map(|p| s.len() - p);
+        let found = s
+            .windows(4)
+            .rposition(|w| w == b"PK\x05\x06")
+            .map(|p| s.len() - p);
         let Some(from_end) = found else {
             return Err("no EOCD".into());
         };
@@ -273,7 +310,11 @@ pub(crate) fn crc32(data: &[u8]) -> u32 {
         for (n, slot) in t.iter_mut().enumerate() {
             let mut c = n as u32;
             for _ in 0..8 {
-                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
             }
             *slot = c;
         }
@@ -287,19 +328,31 @@ pub(crate) fn crc32(data: &[u8]) -> u32 {
 }
 
 fn u16_le(buf: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes(buf.get(at..at + 2).map_or([0; 2], |b| b.try_into().expect("slice")))
+    u16::from_le_bytes(
+        buf.get(at..at + 2)
+            .map_or([0; 2], |b| b.try_into().expect("slice")),
+    )
 }
 
 fn u32_le(buf: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(buf.get(at..at + 4).map_or([0; 4], |b| b.try_into().expect("slice")))
+    u32::from_le_bytes(
+        buf.get(at..at + 4)
+            .map_or([0; 4], |b| b.try_into().expect("slice")),
+    )
 }
 
 fn u64_le(buf: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(buf.get(at..at + 8).map_or([0; 8], |b| b.try_into().expect("slice")))
+    u64::from_le_bytes(
+        buf.get(at..at + 8)
+            .map_or([0; 8], |b| b.try_into().expect("slice")),
+    )
 }
 
 fn u32_be(buf: &[u8], at: usize) -> u32 {
-    u32::from_be_bytes(buf.get(at..at + 4).map_or([0; 4], |b| b.try_into().expect("slice")))
+    u32::from_be_bytes(
+        buf.get(at..at + 4)
+            .map_or([0; 4], |b| b.try_into().expect("slice")),
+    )
 }
 
 /* ---------- Tests ---------- */
