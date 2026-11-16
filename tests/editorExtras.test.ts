@@ -225,27 +225,27 @@ describe('editor decorations (M3 3.2)', () => {
 });
 
 describe('the diff overview ruler (chunkOverviewMarks)', () => {
-	it('maps chunk-relative changes to per-side line marks: red where the side lost lines, green where it gained', async () => {
+	it('maps hunk spans to per-side line marks: red where the side lost lines, green where it gained', async () => {
 		const { chunkOverviewMarks } = await import('../src/features/editor/editorExtras');
-		const { Chunk } = await import('@codemirror/merge');
 		const { EditorState } = await import('@codemirror/state');
-		// A two-line replacement and an insertion, like a real diff.
+		// A two-line replacement and a trailing insertion, like a real diff — the ranges
+		// are the diff view's hunk spans (absolute positions; an empty side anchors).
 		const aDoc = EditorState.create({ doc: 'old one\nold two\nkept\n' }).doc;
 		const bDoc = EditorState.create({ doc: 'new one\nnew two\nkept\nadded\n' }).doc;
-		const chunks = Chunk.build(aDoc, bDoc);
-		// The replacement and the trailing insertion are two chunks (a matched line between).
-		expect(chunks.length).toBe(2);
-		const red = chunkOverviewMarks(chunks, 'a', aDoc);
-		const green = chunkOverviewMarks(chunks, 'b', bDoc);
-		// The differ pairs the two replaced lines separately: one mark per change, red on the
-		// base side, green on the modified side (the trailing insertion joins the green set).
+		const ranges = [
+			{ fromA: 0, toA: 16, fromB: 0, toB: 16 },
+			{ fromA: aDoc.length, toA: aDoc.length, fromB: bDoc.line(4).from, toB: bDoc.length }
+		];
+		const red = chunkOverviewMarks(ranges, 'a', aDoc);
+		const green = chunkOverviewMarks(ranges, 'b', bDoc);
+		// Red on the base side's replaced lines, green on the modified side's replaced and
+		// added lines — one contiguous mark per hunk; the insertion's empty base span
+		// marks nothing.
 		expect(red).toEqual([
-			{ from: 1, to: 1, color: 'var(--vscode-editorGutter-deletedBackground)' },
-			{ from: 2, to: 2, color: 'var(--vscode-editorGutter-deletedBackground)' }
+			{ from: 1, to: 2, color: 'var(--vscode-editorGutter-deletedBackground)' }
 		]);
 		expect(green).toEqual([
-			{ from: 1, to: 1, color: 'var(--vscode-editorGutter-addedBackground)' },
-			{ from: 2, to: 2, color: 'var(--vscode-editorGutter-addedBackground)' },
+			{ from: 1, to: 2, color: 'var(--vscode-editorGutter-addedBackground)' },
 			{ from: 4, to: 4, color: 'var(--vscode-editorGutter-addedBackground)' }
 		]);
 	});

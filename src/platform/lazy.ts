@@ -1,6 +1,6 @@
 // The libraries that are not needed to paint the workbench, loaded on first use so they live
 // in async chunks (vite.config.ts `manualChunks`) instead of the first-paint bundle: xterm
-// arrives with the first terminal, @codemirror/merge with the first diff. Each loader runs
+// arrives with the first terminal, the diff view with the first diff. Each loader runs
 // its import once and hands every later caller the same promise.
 
 function once<T>(load: () => Promise<T>): () => Promise<T> {
@@ -21,8 +21,9 @@ export const loadEditorExtensions = once(() => Promise.all([
 	import('../features/editor/editorProviderViews')
 ]));
 
-/** `@codemirror/merge`: the side-by-side and unified diff views. */
-export const loadMerge = once(() => import('@codemirror/merge'));
+/** The text diff view (`diffView.ts`): the diff editor's renderer over the backend's
+ *  git-computed hunks, loaded with the first diff. */
+export const loadDiffView = once(() => import('../features/editor/diffView'));
 
 /** xterm.js with its fit and search addons and the stylesheet. */
 export const loadXterm = once(async () => {

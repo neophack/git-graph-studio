@@ -472,7 +472,7 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 
 	bufferAtSavedState(editor: Editor): boolean {
 		// A merge (diff) view's buffer is its modified pane.
-		const doc = editor.view?.state.doc ?? editor.merge?.b.state.doc;
+		const doc = editor.view?.state.doc ?? editor.merge?.b?.state.doc;
 		if (!doc || editor.savedDoc === undefined) return false;
 		return doc.eq(editor.savedDoc)
 			&& (editor.eol ?? 'lf') === (editor.savedEol ?? 'lf')

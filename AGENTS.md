@@ -365,7 +365,11 @@ colouring, sticky scroll, minimap, bookmarks, markdown preview.
   `src/features/editor/docFind.ts` (the whole-file find/replace bar the windowed editor and the Fast Viewer
   serve, over `viewer_find` / `viewer_replace`), `src/features/editor/diffViewer.ts` (the diff editor's
   accessible viewer — VS Code's F7 surface: every change as one overlay row with a +/− preview,
-  walked by F7/Shift+F7/arrows, Enter jumping to the change, Escape closing), `src/features/editor/editorProviderViews.ts` (the extension providers' hover/definition bridge beside the workbench's own quick-info hover — a hovered `#define` shows every indexed definition's directive text, any other indexed symbol its declaration line and the doc comment above it, each location a click that opens the definition; macros answer first), `src/features/editor/editorExtras.ts`, `src/features/editor/autocomplete.ts`,
+  walked by F7/Shift+F7/arrows, Enter jumping to the change, Escape closing), `src/features/editor/editorProviderViews.ts` (the extension providers' hover/definition bridge beside the workbench's own quick-info hover — a hovered `#define` shows every indexed definition's directive text, any other indexed symbol its declaration line and the doc comment above it, each location a click that opens the definition; macros answer first), `src/features/editor/editorExtras.ts`, `src/features/editor/diffView.ts` (the text diff
+  view: the backend's git-computed hunks — `scm_diff`'s gix answer — painted as line
+  decorations over the split panes or the unified editor, unchanged gaps collapsing into
+  an expandable pill, VS Code's per-change revert arrows on an editable modified pane;
+  the frontend never diffs), `src/features/editor/autocomplete.ts`,
   `src/features/editor/snippetRegistry.ts`, `src/features/editor/findWidget.ts`, `src/platform/find/findOptions.ts` (options shared with
   Workspace Search), `src/platform/find/findHistory.ts` (the find and search fields' query history — the
   Up/Down recall — shared with Workspace Search), `src/features/editor/bookmarks.ts`, `src/features/editor/cmTheme.ts`,

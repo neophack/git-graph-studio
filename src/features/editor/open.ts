@@ -1,15 +1,15 @@
-import type { Extension, Text } from '@codemirror/state';
+import type { Extension } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
-import type { Chunk } from '@codemirror/merge';
 import { mountAccessibleDiffViewer, PREVIEW_CAP as VIEWER_PREVIEW_CAP, type DiffViewerChange, type DiffViewerHandle } from './diffViewer';
 import type { OverviewMark } from './editorExtras';
+import type { TextDiffView } from './diffView';
 import { type FileContents, type FileProbe, fileProbe, readFileBase64 } from '../../platform/ipc/fs';
 import { materializeRevisionFile, readFileAt } from '../../platform/ipc/revision';
-import { scmBlame } from '../../platform/ipc/scm';
+import { scmBlame, scmDiff, type DiffHunkData, type LineDiffData } from '../../platform/ipc/scm';
 import { symbolLookup } from '../../platform/ipc/symbols';
 import { hasBookmark } from './bookmarks';
 import { samePath, contextUri, menuSection, resourceContext } from '../extensions';
-import { loadAnalysisPages, loadCanViews, loadCallTree, loadDataViews, loadDbcView, loadDevTreeView, loadDumpViews, loadElfView, loadFileHistory, loadFolderCompare, loadHexCompare, loadMerge, loadSymbolDbView, loadTextEditor } from '../../platform/lazy';
+import { loadAnalysisPages, loadCanViews, loadCallTree, loadDataViews, loadDbcView, loadDevTreeView, loadDumpViews, loadElfView, loadFileHistory, loadFolderCompare, loadHexCompare, loadDiffView, loadSymbolDbView, loadTextEditor } from '../../platform/lazy';
 import { imageMime, mediaMime, renderMarkdown } from '../../platform/markdown';
 import type { BlameLine } from '../scm/types';
 import type { WsSymbol } from '../search/types';
@@ -773,12 +773,6 @@ export const openMethods: ThisType<EditorGroup> = {
 		// whitespace or case would make the shown text a rewrite of the file's own, so an
 		// editable pane refuses them (the toggle below guards a dirty buffer).
 		const ignore = { whitespace: false, case: false };
-		const normalize = (text: string): string => {
-			let out = text.replace(/\r\n?/g, '\n');
-			if (ignore.whitespace) out = out.split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).join('\n');
-			if (ignore.case) out = out.toLowerCase();
-			return out;
-		};
 		const toolbar = el('div', 'diff-toolbar');
 		let lastSplit = true;
 		let rebuild: ((split: boolean) => void) | null = null;
@@ -831,23 +825,24 @@ export const openMethods: ThisType<EditorGroup> = {
 			openFileButton.addEventListener('click', () => void this.openFile(savePath));
 			toolbar.appendChild(openFileButton);
 		}
-		// The unchanged-regions toggle: off, every line of both sides shows; on, the merge
-		// views fold the long unchanged stretches between changes into "… N lines" bars.
+		// The unchanged-regions toggle: off, every line of both sides shows; on, the diff
+		// view folds the long unchanged stretches between changes into "… N lines" bars.
 		const collapseButton = el('button', 'action-btn toggle', [icon('collapse-all')]);
 		collapseButton.title = t('diff.action.collapseUnchanged');
 		collapseButton.addEventListener('click', () => {
 			collapsedUnchanged = !collapsedUnchanged;
 			collapseButton.classList.toggle('active', collapsedUnchanged);
-			rebuild?.(lastSplit);
+			diffHandle?.setCollapse(collapsedUnchanged);
 		});
 		toolbar.appendChild(collapseButton);
 		const toggle = (label: string, key: 'whitespace' | 'case') => {
 			const button = el('button', 'action-btn toggle' + (ignore[key] ? ' active' : ''), [label]);
 			button.title = label === 'Aa' ? 'Ignore case' : 'Ignore whitespace';
 			button.addEventListener('click', () => {
-				// Turning an ignore option on goes read-only (the shown text is then a rewrite
-				// of the file's own), which an unsaved buffer may not be discarded for — the
-				// toggle waits for the save.
+				// Turning an ignore option on goes read-only (VS Code's own rule for its
+				// inline ignores), which an unsaved buffer may not be discarded for — the
+				// toggle waits for the save. The rebuild applies the read-only state, and
+				// the backend answers the folded comparison with the new options.
 				if (!ignore[key] && savePath && editor.dirty) {
 					notify('info', t('diff.saveBeforeIgnore'));
 					return;
@@ -855,6 +850,7 @@ export const openMethods: ThisType<EditorGroup> = {
 				ignore[key] = !ignore[key];
 				button.classList.toggle('active', ignore[key]);
 				rebuild?.(lastSplit);
+				void requestHunks();
 			});
 			toolbar.appendChild(button);
 		};
@@ -872,13 +868,13 @@ export const openMethods: ThisType<EditorGroup> = {
 		// would leave the diff growing unbounded over the status bar.
 		const host = el('div', 'editorState cm-merge-view');
 		editor.pane.appendChild(host);
-		// The text editor and the merge views are async chunks, loaded with the first diff —
+		// The text editor and the diff view are async chunks, loaded with the first diff —
 		// with the workbench's quick-info hover beside them: a hovered #define shows its
 		// value in the diff panes exactly as a text editor's does, and any other indexed
 		// symbol its declaration — the group supplies root and the cached read; no open
 		// root or unindexed name answers nothing, so the mount is unconditional. A clicked
 		// location always opens a tab: a diff tab holds no file of its own.
-		const [{ EditorView, EditorState, baseExtensions, keymap, languageSlot, loadLanguage }, { Chunk, MergeView, goToNextChunk, goToPreviousChunk, unifiedMergeView }, { symbolHoverExtension }] = await Promise.all([textEditor(), loadMerge(), import('./editorProviderViews')]);
+		const [{ EditorView, baseExtensions, keymap, languageSlot, loadLanguage }, { mountTextDiffView }, { symbolHoverExtension }] = await Promise.all([textEditor(), loadDiffView(), import('./editorProviderViews')]);
 		const symbolHover = symbolHoverExtension({
 			root: () => this.rootPath,
 			lookup: (name) => symbolLookup(name),
@@ -888,72 +884,107 @@ export const openMethods: ThisType<EditorGroup> = {
 		// The language support, once loaded, so that a layout switch rebuilds an already
 		// highlighted view instead of dropping back to Plain Text until the next open.
 		let languageSupport: Extension | null = null;
-		/** The change navigation's state: the hunks, which one the cursor is in, and the
-		 *  +added/−deleted line statistics the header badge shows. Recomputed per render -
-		 *  both layouts expose their chunks (the merge view directly, the unified view via
-		 *  a build over its two texts). */
-		let chunks: readonly InstanceType<typeof Chunk>[] = [];
+		/** The change navigation's state: the hunks — the backend's git-computed changes
+		 *  (`scm_diff`, the gix engine; the frontend never diffs) — which one the cursor
+		 *  is in, and the +added/−deleted line statistics the header badge shows. */
+		let hunks: readonly DiffHunkData[] = [];
+		let hunkStats: LineDiffData = { binary: false, hunks: [], additions: 0, deletions: 0 };
+		let diffHandle: TextDiffView | null = null;
+		/** The in-flight hunks request's sequence: only the newest answer applies (an
+		 *  edit's debounced recompute supersedes the one before it). */
+		let hunksSeq = 0;
+		let hunksTimer: number | null = null;
+		const rangesNow = (): { fromA: number; toA: number; fromB: number; toB: number }[] => diffHandle?.ranges() ?? [];
 		const at = (): number => {
 			const view = editor.view ?? editor.merge?.b ?? null;
 			if (!view) return 0;
 			const head = view.state.selection.main.head;
 			let index = 0;
-			for (const chunk of chunks) {
-				if (chunk.fromB > head) break;
+			for (const range of rangesNow()) {
+				if (range.fromB > head) break;
 				index++;
 			}
-			return Math.min(index, chunks.length);
+			return Math.min(index, hunks.length);
 		};
-		/** The live chunk list — the statistics, the accessible viewer and the Copy
-		 *  Deleted/Changed menu rows all read it. A split rebuild exposes the merge view's
-		 *  own list (which updates itself as the user types), an inline rebuild derives from
-		 *  the two documents; `editor.diffChunks` mirrors it for the concerns outside this
-		 *  closure (the context menu), recomputed on every render and every edit. */
-		const recomputeChunks = (): void => {
-			const aDoc = EditorState.create({ doc: normalize(left.contents ?? '') }).doc;
-			const bDoc = editor.view?.state.doc ?? editor.merge?.b.state.doc ?? EditorState.create({ doc: normalize(right.contents ?? '') }).doc;
-			chunks = editor.merge?.chunks ?? Chunk.build(aDoc, bDoc);
-			editor.diffChunks = chunks;
+		/** Applies a backend answer: the views repaint, the badge and the counter follow,
+		 *  and the context menu's change ranges mirror for the concerns outside this
+		 *  closure. */
+		const applyDiff = (answer: LineDiffData): void => {
+			hunkStats = answer;
+			hunks = answer.hunks;
+			diffHandle?.setDiff(hunks);
+			refreshChangeInfo();
+		};
+		/** Asks the backend for the diff of the two sides as they stand — the sides'
+		 *  resolved texts ride along (they are what the panes show, and a revision read
+		 *  re-run could answer bytes the panes never displayed), the ignore options with
+		 *  them. The modified pane's own text is the right side: an unsaved buffer re-diffs
+		 *  against its live edits without touching the disk, a clean one sends what it read. */
+		const requestHunks = async (): Promise<void> => {
+			const seq = ++hunksSeq;
+			const buffer = editor.view?.state.doc.toString() ?? editor.merge?.b?.state.doc.toString();
+			try {
+				const answer = await scmDiff({
+					repo: input.repo,
+					left: { revision: input.left.revision, path: input.left.path, text: left.contents ?? '' },
+					right: { revision: input.right.revision, path: input.right.path, text: buffer ?? right.contents ?? '' },
+					ignoreWhitespace: ignore.whitespace || undefined,
+					ignoreCase: ignore.case || undefined
+				});
+				if (seq !== hunksSeq || !this.open.includes(editor)) return;
+				applyDiff(answer);
+			} catch {
+				// The sides still stand; the previous drawing stays until the next answer.
+			}
+		};
+		/** The edits' re-diff: coalesced, so a burst of keystrokes asks the backend once. */
+		const scheduleHunks = (): void => {
+			if (hunksTimer !== null) return;
+			hunksTimer = window.setTimeout(() => {
+				hunksTimer = null;
+				void requestHunks();
+			}, 250);
 		};
 		const refreshChangeInfo = (): void => {
-			recomputeChunks();
-			const aDoc = EditorState.create({ doc: normalize(left.contents ?? '') }).doc;
-			const bDoc = editor.view?.state.doc ?? editor.merge?.b.state.doc ?? EditorState.create({ doc: normalize(right.contents ?? '') }).doc;
-			let additions = 0;
-			let deletions = 0;
-			for (const chunk of chunks) {
-				for (const change of chunk.changes) {
-					if (change.toA > change.fromA) deletions += aDoc.lineAt(chunk.fromA + change.toA - 1).number - aDoc.lineAt(chunk.fromA + change.fromA).number + 1;
-					if (change.toB > change.fromB) additions += bDoc.lineAt(chunk.fromB + change.toB - 1).number - bDoc.lineAt(chunk.fromB + change.fromB).number + 1;
-				}
-			}
+			editor.diffRanges = rangesNow();
 			stats.innerHTML = '';
-			if (chunks.length > 0) {
-				const added = el('span', 'added', [`+${additions}`]);
-				const removed = el('span', 'deleted', [`\u2212${deletions}`]);
-				stats.append(added, removed, `${chunks.length} change${chunks.length === 1 ? '' : 's'}`);
-				stats.title = `${additions} added, ${deletions} deleted lines across ${chunks.length} changes`;
+			if (hunks.length > 0) {
+				const added = el('span', 'added', [`+${hunkStats.additions}`]);
+				const removed = el('span', 'deleted', [`\u2212${hunkStats.deletions}`]);
+				stats.append(added, removed, `${hunks.length} change${hunks.length === 1 ? '' : 's'}`);
+				stats.title = `${hunkStats.additions} added, ${hunkStats.deletions} deleted lines across ${hunks.length} changes`;
 			} else {
 				stats.textContent = 'No changes';
 				stats.title = 'The two sides are identical';
 			}
 			updateCounter();
+			refreshOverviews();
+			scheduleRevertArrows();
 		};
 		const updateCounter = (): void => {
-			if (chunks.length === 0) {
+			if (hunks.length === 0) {
 				counter.textContent = '';
 				return;
 			}
-			counter.textContent = `${Math.min(at() + 1, chunks.length)} / ${chunks.length}`;
+			counter.textContent = `${Math.min(at() + 1, hunks.length)} / ${hunks.length}`;
 		};
-		/** Jump to the previous/next change (Xcode's version editor arrows). */
+		/** Jump to the previous/next change (Xcode's version editor arrows): the modified
+		 *  pane's selection moves to the change's first line and the pane scrolls it in. */
 		stepChange = (direction: 1 | -1): void => {
 			const view = editor.view ?? editor.merge?.b ?? null;
-			if (!view || chunks.length === 0) return;
-			const command = direction === 1 ? goToNextChunk : goToPreviousChunk;
-			command(view);
-			// The command moves the selection; scroll it in and refresh the counter.
-			view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y: 'center' }) });
+			const ranges = rangesNow();
+			if (!view || ranges.length === 0) return;
+			const head = view.state.selection.main.head;
+			const next = ranges.find((range) => range.fromB > head);
+			const index = direction === 1
+				? ranges.indexOf(next!) === -1 ? ranges.length - 1 : ranges.indexOf(next!)
+				: (() => {
+					let at = ranges.length - 1;
+					while (at >= 0 && ranges[at]!.fromB >= head) at--;
+					return Math.max(at, 0);
+				})();
+			const anchor = Math.min(ranges[index]!.fromB, view.state.doc.length);
+			view.dispatch({ selection: { anchor }, effects: EditorView.scrollIntoView(anchor, { y: 'center' }) });
 			updateCounter();
 		};
 		// The accessible diff viewer (module 6's diffViewer, VS Code's F7 surface): the
@@ -962,44 +993,24 @@ export const openMethods: ThisType<EditorGroup> = {
 		let viewer: DiffViewerHandle | null = null;
 		const jumpToChunk = (index: number): void => {
 			const view = editor.view ?? editor.merge?.b ?? null;
-			if (!view || index >= chunks.length) return;
-			const anchor = Math.min(chunks[index]!.fromB, view.state.doc.length);
+			if (!view || index >= hunks.length) return;
+			const anchor = Math.min(rangesNow()[index]?.fromB ?? 0, view.state.doc.length);
 			view.dispatch({ selection: { anchor }, effects: EditorView.scrollIntoView(anchor, { y: 'center' }) });
 			updateCounter();
 		};
 		const viewerChanges = (): DiffViewerChange[] => {
-			const aDoc = EditorState.create({ doc: normalize(left.contents ?? '') }).doc;
-			const bDoc = editor.view?.state.doc ?? editor.merge?.b.state.doc ?? EditorState.create({ doc: normalize(right.contents ?? '') }).doc;
-			const linesOf = (doc: Text, base: number, from: number, to: number): string[] => {
-				if (to <= from) return [];
-				const start = doc.lineAt(Math.min(Math.max(base + from, 0), doc.length)).number;
-				const end = doc.lineAt(Math.min(Math.max(base + to - 1, 0), doc.length)).number;
-				const out: string[] = [];
-				for (let n = start; n <= end; n++) out.push(doc.line(n).text);
-				return out;
-			};
-			return chunks.map((chunk) => {
-				let added = 0;
-				let deleted = 0;
-				const deletedLines: string[] = [];
-				const addedLines: string[] = [];
-				for (const change of chunk.changes) {
-					if (change.toA > change.fromA) {
-						deleted += aDoc.lineAt(chunk.fromA + change.toA - 1).number - aDoc.lineAt(chunk.fromA + change.fromA).number + 1;
-						deletedLines.push(...linesOf(aDoc, chunk.fromA, change.fromA, change.toA));
-					}
-					if (change.toB > change.fromB) {
-						added += bDoc.lineAt(chunk.fromB + change.toB - 1).number - bDoc.lineAt(chunk.fromB + change.fromB).number + 1;
-						addedLines.push(...linesOf(bDoc, chunk.fromB, change.fromB, change.toB));
-					}
-				}
+			// The hunks carry their own lines, so the rows read straight off the backend's
+			// answer — no document walk here.
+			return hunks.map((hunk) => {
+				const deletedLines = hunk.lines.filter((line) => line.kind === 'deleted').map((line) => line.text);
+				const addedLines = hunk.lines.filter((line) => line.kind === 'added').map((line) => line.text);
 				const preview = [
 					...deletedLines.slice(0, VIEWER_PREVIEW_CAP).map((text) => ({ text, kind: 'del' as const })),
 					...addedLines.slice(0, VIEWER_PREVIEW_CAP).map((text) => ({ text, kind: 'add' as const })),
 				];
 				return {
-					added,
-					deleted,
+					added: hunk.newLines,
+					deleted: hunk.oldLines,
 					preview,
 					hidden: Math.max(deletedLines.length - VIEWER_PREVIEW_CAP, 0) + Math.max(addedLines.length - VIEWER_PREVIEW_CAP, 0),
 				};
@@ -1008,7 +1019,7 @@ export const openMethods: ThisType<EditorGroup> = {
 		const openViewer = (): void => {
 			if (viewer) return;
 			viewer = mountAccessibleDiffViewer(host, viewerChanges, {
-				initial: Math.min(at(), Math.max(chunks.length - 1, 0)),
+				initial: Math.min(at(), Math.max(hunks.length - 1, 0)),
 				jump: jumpToChunk,
 				onClose: () => {
 					viewer = null;
@@ -1058,7 +1069,7 @@ export const openMethods: ThisType<EditorGroup> = {
 			requestAnimationFrame(() => {
 				arrowsQueued = false;
 				const column = host.querySelector<HTMLElement>('.cm-merge-revert');
-				if (column && editor.merge) positionRevertArrows(column, editor.merge.a, chunks);
+				if (column && editor.merge?.a) positionRevertArrows(column, editor.merge.a, editor.merge.ranges());
 			});
 		};
 		// Wide panes get the classic side-by-side view; narrow ones a single-column inline
@@ -1071,21 +1082,28 @@ export const openMethods: ThisType<EditorGroup> = {
 			// The viewer overlays the panes this render replaces — it leaves first, so no
 			// stale panel survives a layout switch or a follow-the-file rebuild.
 			viewer?.close();
-			const buffer = editor.dirty ? editor.view?.state.doc.toString() ?? editor.merge?.b.state.doc.toString() : undefined;
+			const buffer = editor.dirty ? editor.view?.state.doc.toString() ?? editor.merge?.b?.state.doc.toString() : undefined;
 			detachScrollSync?.();
 			detachScrollSync = null;
 			detachRevertArrows?.();
 			detachRevertArrows = null;
 			detachOverviews();
+			// The split's handle owns both panes; the unified layout's lone editor is
+			// `editor.view` and its handle stays merge-less, so exactly one branch destroys.
 			editor.merge?.destroy();
 			editor.merge = undefined;
 			editor.view?.destroy();
 			editor.view = undefined;
+			diffHandle = null;
+			if (hunksTimer !== null) {
+				window.clearTimeout(hunksTimer);
+				hunksTimer = null;
+			}
 			host.textContent = '';
 			editor.pane.classList.toggle('diff-inline', !split);
-			// Ignoring whitespace or case would show a rewrite of the file's text, so the
-			// pane edits only while both ignore options are off (the toggle guards a dirty
-			// buffer, and a clean pane loses nothing by going read-only).
+			// Ignoring whitespace or case no longer rewrites the shown text — the backend
+			// folds the comparison instead — but the editable rule stays (the toggle guards
+			// a dirty buffer, and a clean pane loses nothing by going read-only).
 			const editable = savePath !== null && !ignore.whitespace && !ignore.case;
 			// The modified pane's extensions: the counter rides every layout; an editable
 			// pane tracks the dirty mark against its saved baseline and takes Ctrl+S.
@@ -1097,9 +1115,9 @@ export const openMethods: ThisType<EditorGroup> = {
 				// and the inline layout's single editor reuses this list.
 				symbolHover,
 				EditorView.updateListener.of((update) => {
-					// An edit moves the changes: the chunk list, the ruler marks, the counter
-					// and the revert arrows all follow.
-					if (update.docChanged) recomputeChunks();
+					// An edit moves the changes: the decorations map through it at once, and
+					// the debounced backend answer replaces them wholesale when it lands.
+					if (update.docChanged) scheduleHunks();
 					updateCounter();
 					refreshOverviews();
 					scheduleRevertArrows();
@@ -1115,32 +1133,44 @@ export const openMethods: ThisType<EditorGroup> = {
 				}),
 				...(editable ? [keymap.of([{ key: 'Mod-s', run: () => (void this.save(editor), true) }])] : [])
 			];
+			// VS Code's per-change revert: the modified pane's change rewrites with the
+			// base side's lines (a side that never edits has nothing to revert).
+			const revertHunk = (index: number): void => {
+				const view = diffHandle?.b ?? null;
+				const range = rangesNow()[index];
+				const hunk = hunks[index];
+				if (!view || !range || !hunk) return;
+				const deleted = hunk.lines.filter((line) => line.kind === 'deleted').map((line) => line.text);
+				// The span's own trailing break rides along, so the replacement keeps the
+				// line count the base side had exactly.
+				const aDoc = diffHandle?.a?.state.doc;
+				const trailingBreak = aDoc !== undefined && hunk.oldLines > 0 && range.toA > aDoc.line(hunk.oldStart + hunk.oldLines - 1).to;
+				view.dispatch({ changes: { from: range.fromB, to: range.toB, insert: deleted.join('\n') + (deleted.length > 0 && trailingBreak ? '\n' : '') } });
+			};
 			if (split) {
-				editor.merge = new MergeView({
-					a: { doc: normalize(left.contents ?? ''), extensions: [...baseExtensions(true), languageSlot.of(languageSupport ?? []), diffKeys, symbolHover, EditorView.updateListener.of(() => { updateCounter(); scheduleRevertArrows(); })] },
-					b: { doc: normalize(buffer ?? right.contents ?? ''), extensions: bExtensions },
-					parent: host,
-					collapseUnchanged: collapsedUnchanged ? { margin: 3, minSize: 4 } : undefined,
-					highlightChanges: true,
-					gutter: true,
-					// VS Code's per-chunk revert arrows, only where the pane edits: the read-only
-					// sides have nothing to revert. The controls rewrite the modified pane's
-					// chunk with the base side's text (the package's direction spelling).
-					revertControls: editable ? 'a-to-b' : undefined
+				diffHandle = editor.merge = mountTextDiffView(host, {
+					split: true,
+					leftDoc: left.contents ?? '',
+					rightDoc: buffer ?? right.contents ?? '',
+					hunks,
+					collapse: collapsedUnchanged,
+					aExtensions: [...baseExtensions(true), languageSlot.of(languageSupport ?? []), diffKeys, symbolHover, EditorView.updateListener.of(() => { updateCounter(); scheduleRevertArrows(); })],
+					bExtensions,
+					revert: editable ? { onRevert: revertHunk } : undefined
 				});
-				// VS Code's side headers, one over each pane (the merge view's pane wrappers
-				// take the label above their editor; the package's layout is otherwise kept).
+				// VS Code's side headers, one over each pane (the pane wrappers take the
+				// label above their editor).
 				const wraps = host.querySelectorAll('.cm-mergeViewEditor');
 				wraps[0]?.insertBefore(sideHeader(input.left), wraps[0].firstChild);
 				wraps[1]?.insertBefore(sideHeader(input.right), wraps[1].firstChild);
-				detachScrollSync = attachScrollSync(editor.merge.a, editor.merge.b);
-				// The arrows ride the panes' scroll: the package repositions them only in
+				detachScrollSync = attachScrollSync(editor.merge.a!, editor.merge.b!);
+				// The arrows ride the panes' scroll: the column repositions them only in
 				// document coordinates, which this layout's standing column needs translated.
-				editor.merge.a.scrollDOM.addEventListener('scroll', scheduleRevertArrows);
-				editor.merge.b.scrollDOM.addEventListener('scroll', scheduleRevertArrows);
+				editor.merge.a!.scrollDOM.addEventListener('scroll', scheduleRevertArrows);
+				editor.merge.b!.scrollDOM.addEventListener('scroll', scheduleRevertArrows);
 				detachRevertArrows = () => {
-					editor.merge?.a.scrollDOM.removeEventListener('scroll', scheduleRevertArrows);
-					editor.merge?.b.scrollDOM.removeEventListener('scroll', scheduleRevertArrows);
+					editor.merge?.a?.scrollDOM.removeEventListener('scroll', scheduleRevertArrows);
+					editor.merge?.b?.scrollDOM.removeEventListener('scroll', scheduleRevertArrows);
 				};
 				scheduleRevertArrows();
 				// VS Code's draggable divider: a sash between the panes whose drag sets the
@@ -1151,8 +1181,8 @@ export const openMethods: ThisType<EditorGroup> = {
 				// sticky stack, overview rulers — each a reflow-forcing redraw per resize) are
 				// frozen for the drag and redrawn once on release, and pointer capture keeps
 				// the editors' own mousemove measuring (hover positioning) out of the drag.
-				const wrapA = editor.merge.a.dom.parentElement;
-				const wrapB = editor.merge.b.dom.parentElement;
+				const wrapA = editor.merge.a!.dom.parentElement;
+				const wrapB = editor.merge.b!.dom.parentElement;
 				const row = wrapB?.parentElement ?? null;
 				if (wrapA && row) {
 					const sash = el('div', 'cm-diff-sash');
@@ -1195,43 +1225,50 @@ export const openMethods: ThisType<EditorGroup> = {
 					row.insertBefore(sash, wrapB);
 					if (splitRatio !== null) wrapA.style.flex = `0 0 ${splitRatio}%`;
 				}
-				const chunks = (): readonly Chunk[] => editor.merge!.chunks;
-				overviews.push(
-					attachOverviewRuler(editor.merge.a, () => chunkOverviewMarks(chunks(), 'a', editor.merge!.a.state.doc)),
-					attachOverviewRuler(editor.merge.b, () => chunkOverviewMarks(chunks(), 'b', editor.merge!.b.state.doc))
-				);
+					const chunks = (): { fromA: number; toA: number; fromB: number; toB: number }[] => editor.merge!.ranges();
+					overviews.push(
+						attachOverviewRuler(editor.merge.a!, () => chunkOverviewMarks(chunks(), 'a', editor.merge!.a!.state.doc)),
+						attachOverviewRuler(editor.merge.b!, () => chunkOverviewMarks(chunks(), 'b', editor.merge!.b!.state.doc))
+					);
 			} else {
-				editor.view = new EditorView({
-					state: EditorState.create({
-						doc: normalize(buffer ?? right.contents ?? ''),
-						extensions: [
-							...bExtensions,
-							unifiedMergeView({
-								original: normalize(left.contents ?? ''),
-								collapseUnchanged: collapsedUnchanged ? { margin: 3, minSize: 4 } : undefined,
-								highlightChanges: true,
-								gutter: true,
-								mergeControls: false
-							})
-						]
-					}),
-					parent: host
+				// The unified layout: one editor over the modified text, the backend hunks'
+				// deleted lines riding the view's block widgets above their new positions.
+				// `editor.merge` stays unset — the lone editor is `editor.view` (which the
+				// generic teardown destroys), and the closures reach the handle directly.
+				diffHandle = mountTextDiffView(host, {
+					split: false,
+					leftDoc: left.contents ?? '',
+					rightDoc: buffer ?? right.contents ?? '',
+					hunks,
+					collapse: collapsedUnchanged,
+					aExtensions: [],
+					bExtensions
 				});
+				editor.view = diffHandle.b ?? undefined;
+				if (!editor.view) return;
 				// The inline view's one side header sits over the single editor (VS Code's
 				// unified diff keeps the modified file's label above it).
-				host.insertBefore(sideHeader(input.right), editor.view.dom);
+				host.insertBefore(sideHeader(input.right), editor.view!.dom);
 				// The inline view's ruler: green at the insertions, red at each deletion's
-				// landing point, rebuilt against the current buffer on every refresh.
-				const aDoc = EditorState.create({ doc: normalize(left.contents ?? '') }).doc;
+				// landing point, read off the backend's hunks on every refresh.
 				const inlineMarks = (): OverviewMark[] => {
 					const doc = editor.view!.state.doc;
-					const chunks = Chunk.build(aDoc, doc);
-					const marks = chunkOverviewMarks(chunks, 'b', doc);
-					for (const chunk of chunks) {
-						for (const change of chunk.changes) {
-							if (change.toA <= change.fromA) continue;
-							const at = doc.lineAt(Math.min(chunk.fromB + change.fromB, doc.length)).number;
-							marks.push({ from: at, to: at, color: 'var(--vscode-editorGutter-deletedBackground)' });
+					const marks: OverviewMark[] = [];
+					const added = 'var(--vscode-editorGutter-addedBackground)';
+					const deleted = 'var(--vscode-editorGutter-deletedBackground)';
+					for (const range of rangesNow()) {
+						if (range.toB > range.fromB) {
+							marks.push({
+								from: doc.lineAt(range.fromB).number,
+								to: doc.lineAt(Math.max(range.toB - 1, range.fromB)).number,
+								color: added,
+							});
+						}
+						// A deletion's base-side span is empty: its anchor names the line the
+						// deleted block sits above, and the ruler paints it red there.
+						if (range.toA === range.fromA) {
+							const line = doc.lineAt(Math.min(range.fromB, doc.length)).number;
+							marks.push({ from: line, to: line, color: deleted });
 						}
 					}
 					return marks;
@@ -1268,12 +1305,13 @@ export const openMethods: ThisType<EditorGroup> = {
 			}
 			// The reads were async: the tab may have closed or dirtied meanwhile.
 			if (editor.dirty || !this.open.includes(editor)) return false;
-			if (normalize(newLeft.contents ?? '') === normalize(left.contents ?? '') && normalize(newRight.contents ?? '') === normalize(right.contents ?? '')) return false;
+			if (newLeft.contents === left.contents && newRight.contents === right.contents) return false;
 			left = newLeft;
 			right = newRight;
 			editor.encoding = right.encoding ?? editor.encoding;
 			editor.eol = right.eol ?? editor.eol;
 			render(lastSplit);
+			void requestHunks();
 			return true;
 		};
 		let split: boolean | undefined;
@@ -1297,12 +1335,15 @@ export const openMethods: ThisType<EditorGroup> = {
 			}
 		});
 		editor.diffObserver.observe(host);
+		// The hunks: asked once as the tab opens — the views mount in a frame, the answer
+		// applies whenever it lands (its repaint guards on the handle being there).
+		void requestHunks();
 		void loadLanguage(name).then((language) => {
 			if (!language) return;
 			languageSupport = language.support;
 			editor.languageName = language.name;
 			const effect = languageSlot.reconfigure(language.support);
-			if (editor.merge) {
+			if (editor.merge?.a && editor.merge.b) {
 				editor.merge.a.dispatch({ effects: effect });
 				editor.merge.b.dispatch({ effects: effect });
 			}
@@ -1711,15 +1752,15 @@ export const openMethods: ThisType<EditorGroup> = {
 			? null
 			: pane && editor.merge?.a === pane ? 'a' : pane && editor.merge?.b === pane ? 'b' : editor.view && pane === editor.view ? 'inline' : null;
 		const diffCopyRows = (): MenuEntry[] => {
-			if (!view || !diffSide || !editor.diffChunks?.length) return [];
+			if (!view || !diffSide || !editor.diffRanges?.length) return [];
 			const selection = view.state.selection.main;
 			// A right-click without a selection reads the clicked position; a selection
 			// (or an ordinary cursor standing inside a change) reads the selection.
 			const from = selection.empty && pos !== null ? pos : selection.from;
 			const to = selection.empty && pos !== null ? pos : selection.to;
-			const hits = editor.diffChunks.filter((chunk) => {
-				const start = diffSide === 'a' ? chunk.fromA : chunk.fromB;
-				const end = diffSide === 'a' ? chunk.toA : chunk.toB;
+			const hits = editor.diffRanges.filter((range) => {
+				const start = diffSide === 'a' ? range.fromA : range.fromB;
+				const end = diffSide === 'a' ? range.toA : range.toB;
 				if (end <= start) return false;
 				// A bare cursor hits the change its position sits inside; a selection hits
 				// every change its range overlaps.
@@ -1727,7 +1768,7 @@ export const openMethods: ThisType<EditorGroup> = {
 			});
 			if (hits.length === 0) return [];
 			const run = (): void => {
-				const texts = hits.map((chunk) => view!.state.sliceDoc(diffSide === 'a' ? chunk.fromA : chunk.fromB, diffSide === 'a' ? chunk.toA : chunk.toB));
+				const texts = hits.map((range) => view!.state.sliceDoc(diffSide === 'a' ? range.fromA : range.fromB, diffSide === 'a' ? range.toA : range.toB));
 				void writeText(texts.join('\n'));
 			};
 			return [{

@@ -5,11 +5,12 @@
 
 import { createFolder, type FileContents, deletePath, fileProbe, readFile, writeFile } from '../../platform/ipc/fs';
 import { compareDirs } from '../../platform/ipc/search';
+import { scmDiff } from '../../platform/ipc/scm';
 import type { EditorView } from '@codemirror/view';
-import type { MergeView } from '@codemirror/merge';
+import type { TextDiffView } from '../editor/types';
 
 import { coalesced } from '../../platform/coalesce';
-import { loadHexCompare, loadMerge, loadTextEditor } from '../../platform/lazy';
+import { loadDiffView, loadHexCompare, loadTextEditor } from '../../platform/lazy';
 import type { HexCompareView } from '../viewers/types';
 
 import { basename, confirmDialog, dirname, el, icon, joinPath, notify, showContextMenu, type MenuEntry } from '../../platform/ui/index';
@@ -35,7 +36,7 @@ export class FolderCompareView {
 	private loading = false;
 	/** The currently shown file's diff: both texts (a text file), or the hex comparison of
 	 *  two binaries - whichever the chosen file asked for. */
-	private fileDiff: { path: string; left: string; right: string; merge?: MergeView; view?: EditorView; hexCompare?: HexCompareView; host: HTMLElement } | null = null;
+	private fileDiff: { path: string; left: string; right: string; merge?: TextDiffView; view?: EditorView; hexCompare?: HexCompareView; host: HTMLElement } | null = null;
 	/** Incremented on every render: a detail load started before the latest render is stale -
 	 *  its DOM was wiped and its `fileDiff` slot reassigned, so its continuation must not
 	 *  attach to the detached element nor claim the slot (the stale check in `detail`). */
@@ -274,31 +275,38 @@ export class FolderCompareView {
 				view.scan();
 				return;
 			}
-			const [left, right] = await Promise.all([
-				read(joinPath(this.left, entry.path)),
-				read(joinPath(this.right, entry.path))
-			]);
-			const [{ MergeView }, { readOnlyExtensions, attachOverviewRuler, chunkOverviewMarks }] = await Promise.all([
-				loadMerge(),
-				loadTextEditor()
-			]);
-			if (stale()) return;
-			const host = el('div', 'cm-merge-view fc-file-diff');
-			detail.appendChild(host);
-			const merge = new MergeView({
-				a: { doc: left.contents ?? '', extensions: readOnlyExtensions() },
-				b: { doc: right.contents ?? '', extensions: readOnlyExtensions() },
-				parent: host,
-				collapseUnchanged: { margin: 3, minSize: 4 },
-				highlightChanges: true,
-				gutter: true
-			});
-			// The scrollbar change map (VS Code's overview ruler): red at the left side's
-			// deletions, green at the right side's insertions. The panes never edit here, so
-			// one build serves the diff's life.
-			attachOverviewRuler(merge.a, () => chunkOverviewMarks(merge.chunks, 'a', merge.a.state.doc));
-			attachOverviewRuler(merge.b, () => chunkOverviewMarks(merge.chunks, 'b', merge.b.state.doc));
-			this.fileDiff = { path: entry.path, left: left.contents ?? '', right: right.contents ?? '', merge, host };
+		const [left, right] = await Promise.all([
+			read(joinPath(this.left, entry.path)),
+			read(joinPath(this.right, entry.path))
+		]);
+		const [{ mountTextDiffView }, { readOnlyExtensions, attachOverviewRuler, chunkOverviewMarks }] = await Promise.all([
+			loadDiffView(),
+			loadTextEditor()
+		]);
+		// The hunks come from the backend's gix diff, both sides' texts riding along (a
+		// folder compare needs no repository — the texts are the whole answer).
+		const diff = await scmDiff({
+			left: { revision: '*', path: joinPath(this.left, entry.path), text: left.contents ?? '' },
+			right: { revision: '*', path: joinPath(this.right, entry.path), text: right.contents ?? '' }
+		}).catch(() => ({ binary: true, hunks: [], additions: 0, deletions: 0 }));
+		if (stale()) return;
+		const host = el('div', 'cm-merge-view fc-file-diff');
+		detail.appendChild(host);
+		const merge = mountTextDiffView(host, {
+			split: true,
+			leftDoc: left.contents ?? '',
+			rightDoc: right.contents ?? '',
+			hunks: diff.hunks,
+			collapse: true,
+			aExtensions: readOnlyExtensions(),
+			bExtensions: readOnlyExtensions()
+		});
+		// The scrollbar change map (VS Code's overview ruler): red at the left side's
+		// deletions, green at the right side's insertions. The panes never edit here, so
+		// one build serves the diff's life.
+		attachOverviewRuler(merge.a!, () => chunkOverviewMarks(merge.ranges(), 'a', merge.a!.state.doc));
+		attachOverviewRuler(merge.b!, () => chunkOverviewMarks(merge.ranges(), 'b', merge.b!.state.doc));
+		this.fileDiff = { path: entry.path, left: left.contents ?? '', right: right.contents ?? '', merge, host };
 		})();
 		return detail;
 	}

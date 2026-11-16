@@ -993,15 +993,27 @@ export class EditorArea {
 
 	/** Position one overlay's host exactly over its placeholder pane, or hide it while the
 	 *  placeholder is hidden or gone (another tab showing, the tab closed) — the frame
-	 *  beneath keeps running either way, as a pane-hidden pane always kept its iframe. */
+	 *  beneath keeps running either way, as a pane-hidden pane always kept its iframe.
+	 *  The hiding is visibility-only: a display:none iframe answers the page's own
+	 *  measurements with 0×0, and a render that runs while its tab sits in the background
+	 *  (a git refresh pushing new commits into it) then bakes that zero into the page's
+	 *  own layout — git-graph's auto-layout reads a 0 viewWidth, sets its SVG's width to
+	 *  0, and the graph column stays blank when the tab comes back, because a bare tab
+	 *  switch runs no layout that would repair it. VS Code's host keeps its background
+	 *  webviews laid out against the same corruption. visibility:hidden paints nothing,
+	 *  takes no pointer and is focus-unreachable, while every measurement inside the
+	 *  frame stays real. */
 	private placeOverlay(entry: ExtOverlay): void {
 		const { host, placeholder } = entry;
 		if (!placeholder.isConnected || placeholder.hidden) {
-			host.style.display = 'none';
+			host.style.visibility = 'hidden';
+			host.style.pointerEvents = 'none';
 			return;
 		}
 		const base = this.overlayLayer.getBoundingClientRect();
 		const box = placeholder.getBoundingClientRect();
+		host.style.visibility = 'visible';
+		host.style.pointerEvents = '';
 		host.style.display = 'block';
 		host.style.left = `${box.left - base.left}px`;
 		host.style.top = `${box.top - base.top}px`;

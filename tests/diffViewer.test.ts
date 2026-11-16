@@ -178,18 +178,36 @@ describe('Copy Deleted / Changed Lines', () => {
 		expect(menuLabels()).not.toContain('Copy Deleted Lines');
 	});
 
-	it('an edit moves the chunk list the menu and viewer read', async () => {
+	it('an edit moves the change list the menu and viewer read', async () => {
 		const group = new EditorGroup(document.getElementById('editorGroup')!);
 		const editor = await openWorkingDiff(group, 'one\ntwo\nthree\n', 'ONE\ntwo\nthree\n');
-		expect(editor.diffChunks).toHaveLength(1);
-		// Changing the third line to a second change updates the chunk list live — the
-		// context menu and the viewer see two changes without a rebuild. (Adjacent changes
-		// would merge into one chunk; the separated line grows the list.)
+		expect(editor.diffRanges).toHaveLength(1);
+		// Changing the third line to a second change re-diffs against the edited buffer —
+		// the backend answers the debounced recompute, and the context menu and the viewer
+		// see two changes without a rebuild. (The unchanged middle line keeps the hunks
+		// apart, exactly as git reports them.)
 		editor.merge!.b.dispatch({ changes: { from: 8, to: 13, insert: 'THREE' } });
-		expect(editor.diffChunks).toHaveLength(2);
+		await new Promise((resolve) => setTimeout(resolve, 350));
+		expect(editor.diffRanges).toHaveLength(2);
 		key(editor.merge!.b.contentDOM, 'F7');
 		expect(document.querySelectorAll('.diff-viewer-row')).toHaveLength(2);
 		key(viewer(), 'Escape');
 		expect(document.querySelector('.diff-viewer')).toBeNull();
+	});
+
+	it('edits across blank lines stay separate changes (git\u2019s own granularity)', async () => {
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		// Four independent one-line edits, each pair separated by a blank line: the git
+		// diff reports four hunks, and so does the change list — the merged single block
+		// the char-level frontend diff used to show is the bug this pins.
+		const left = ['const a = 1;', '', 'const b = 2;', '', 'const c = 3;', '', 'const d = 4;', ''].join('\n');
+		const right = ['const a = 11;', '', 'const b = 22;', '', 'const c = 33;', '', 'const d = 44;', ''].join('\n');
+		const editor = await openWorkingDiff(group, left, right);
+		expect(editor.diffRanges).toHaveLength(4);
+		// Each change holds its own line alone, and the stats badge counts 4+4.
+		expect(texts('.diff-stats')[0]).toContain('4 changes');
+		// One blank line between edits is enough: git keeps two hunks, so does the list.
+		const editor2 = await openWorkingDiff(group, 'const a = 1;\n\nconst b = 2;\n', 'const a = 10;\n\nconst b = 20;\n');
+		expect(editor2.diffRanges).toHaveLength(2);
 	});
 });

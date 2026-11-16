@@ -1,9 +1,9 @@
-// The diff colours in shell.css only apply if they outweigh @codemirror/merge's base theme,
-// whose selectors (`.<theme>.cm-merge-b .cm-changedText`, `.<theme> .cm-deletedChunk
-// .cm-deletedText`) carry three classes and paint a 2px gradient underline under changed
-// words. A bare `.cm-changedText { background: ... }` loses that cascade silently and the
-// underline reappears - the split view's right editor shipped that way once. This pins every
-// shell.css rule that styles a diff decoration to at least four classes of specificity.
+// The diff view's decoration classes (`diffView.ts` paints the backend hunks with them)
+// are styled by shell.css in the VS Code diff palette — inserted/removed line backgrounds,
+// the unified layout's deleted-line block rows, the unchanged-gap pill and the revert
+// arrows' column. This pins the styling exists for both layouts and that no rule paints an
+// underline over a diff line (VS Code's diff never underlines; an early merge-view theme
+// did, and a leftover would come back silently).
 
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 
 const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'workbench', 'shell.css'), 'utf8');
 
-const DIFF_CLASSES = ['cm-changedText', 'cm-changedLine', 'cm-deletedText', 'cm-deletedChunk', 'cm-changedLineGutter', 'cm-deletedLineGutter', 'cm-inlineChangedLine', 'cm-collapsedLines'];
+const DIFF_CLASSES = ['cm-diff-ins', 'cm-diff-del', 'cm-diff-del-block', 'cm-diff-del-row', 'cm-diff-unchanged', 'cm-merge-revert'];
 
 /** Every comma-separated selector of every rule in the stylesheet (comments stripped). */
 function selectors(): string[] {
@@ -28,20 +28,32 @@ function selectors(): string[] {
 	return out;
 }
 
-describe('diff decoration styles outweigh the merge view base theme', () => {
-	it('every rule on a diff decoration carries at least four classes', () => {
-		const weak = selectors()
-			.filter((selector) => DIFF_CLASSES.some((cls) => selector.includes(`.${cls}`)))
-			.filter((selector) => (selector.match(/\.[\w-]+/g) ?? []).length < 4);
-		expect(weak).toEqual([]);
+/** The rule body a selector opens (from its `{` to the next `}` — the diff rules are all
+ *  single-declaration-block rules, which is all this test reads). */
+function ruleBody(selector: string): string {
+	const at = css.indexOf(selector);
+	const open = css.indexOf('{', at);
+	return css.slice(open + 1, css.indexOf('}', open));
+}
+
+describe('diff decoration styles', () => {
+	it('every decoration class the view paints is styled', () => {
+		const styled = selectors();
+		const missing = DIFF_CLASSES.filter((cls) => !styled.some((selector) => selector.includes(`.${cls}`)));
+		expect(missing).toEqual([]);
 	});
 
-	it('styles both split sides and the unified view, with no underline left over', () => {
-		const rules = selectors();
-		expect(rules).toContain('.editor-pane .cm-editor.cm-merge-a .cm-changedText');
-		expect(rules).toContain('.editor-pane .cm-editor.cm-merge-b .cm-changedText');
-		expect(rules).toContain('.editor-pane .cm-editor.cm-merge-b .cm-deletedChunk .cm-deletedText');
-		expect(css).toMatch(/\.cm-changedText[^{]*\{\s*text-decoration:\s*none/);
+	it('changed lines wear the VS Code diff palette in both layouts', () => {
+		expect(css).toMatch(/\.cm-diff-ins\s*\{[^}]*--vscode-diffEditor-insertedLineBackground/);
+		expect(css).toMatch(/\.cm-diff-del\s*\{[^}]*--vscode-diffEditor-removedLineBackground/);
+		expect(css).toMatch(/\.cm-diff-del-row\s*\{[^}]*--vscode-diffEditor-removedTextBackground/);
+	});
+
+	it('no diff line carries an underline or strikethrough', () => {
+		for (const cls of ['cm-diff-ins', 'cm-diff-del', 'cm-diff-del-row']) {
+			const selector = selectors().find((s) => s.includes(`.${cls}`))!;
+			expect(ruleBody(selector)).not.toMatch(/text-decoration:\s*(?!none)/);
+		}
 	});
 
 	it('the inline diff editor keeps its pane width — the find widget never lands outside the window', () => {

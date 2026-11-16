@@ -3,7 +3,6 @@
 
 import type { Text } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
-import type { Chunk, MergeView } from '@codemirror/merge';
 import type { FastView, HexView, HexCompareView, ImageView } from '../viewers/types';
 import type { CanLogView, CanRawView } from '../can/types';
 import type { CsvView } from '../data/types';
@@ -11,6 +10,7 @@ import type { DbcView } from '../dbc/types';
 import type { ElfView } from '../elf/types';
 import type { DevTreeView } from '../devtree/types';
 import type { EditableDocView } from './docEditView';
+import type { TextDiffView } from './diffView';
 import type { FileHistoryView } from '../scm/types';
 import type { CallTreeView, WsSymbol } from '../search/types';
 import type { FolderCompareView, MergeToolbar } from '../compare/types';
@@ -74,7 +74,10 @@ export interface Editor {
 	/** The symbol outline beside the editor, shown while the "show code outline" setting is on. */
 	outline?: HTMLElement;
 	view?: EditorView;
-	merge?: MergeView;
+	/** The split text diff's handle (the unified layout's lone editor rides `view` instead).
+	 *  `a`/`b`/`destroy` keep the shape every generic path (settings, closing, saving)
+	 *  already walks. */
+	merge?: TextDiffView;
 	diffObserver?: ResizeObserver;
 	/** An editable diff's working file (the modified side's absolute path): the pane edits
 	 *  like VS Code's diff editor and Ctrl+S writes back there. The input stays untouched —
@@ -85,9 +88,10 @@ export interface Editor {
 	 *  editor does. Refuses a dirty buffer — the edits own the pane until saved or
 	 *  reverted; the caller decides what a refusal means. */
 	diffReload?: () => Promise<boolean>;
-	/** A text diff's current changes (the accessible viewer's list and the Copy
-	 *  Deleted/Changed Lines rows both read them; recomputed on every render and edit). */
-	diffChunks?: readonly Chunk[];
+	/** A text diff's current change spans — each hunk's positions in both documents, the
+	 *  context menu's Copy Deleted/Changed rows read them (refreshed on every backend
+	 *  answer and edit). */
+	diffRanges?: readonly { fromA: number; toA: number; fromB: number; toB: number }[];
 	/** The extension's own Binary Compare page — a binary file between two revisions. */
 	folderCompare?: FolderCompareView;
 	/** An address-aligned hex comparison of two binary files on disk. */

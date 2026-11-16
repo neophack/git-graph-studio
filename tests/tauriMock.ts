@@ -123,11 +123,92 @@ export function dispatchScripted(command: string, args: Record<string, unknown> 
 			};
 		}
 	}
+	// The diff editor's hunks: the real answer is the backend's gix diff, but a test that
+	// only scripts the side reads keeps working — the mock diffs the two texts the editor
+	// sent (it always sends them) with a plain line LCS, whose hunk shapes match the
+	// engine's at test sizes. A scripted `scm_diff` answers instead, as any command's does.
+	if (!handler && command === 'scm_diff') {
+		handler = (callArgs) => mockScmDiff(callArgs);
+	}
 	// A map that overrides `get` with its own defaulting layer still answers; only a truly
 	// unhandled command throws.
 	handler ??= backend.handlers.get(command);
 	if (!handler) throw new Error(`unhandled invoke: ${command}`);
 	return Promise.resolve(handler(args));
+}
+
+/** The mock's own line diff for `scm_diff`, shaped exactly like the backend's answer
+ *  (git's hunk numbering: an empty side's start names the line the change sits after). */
+function mockScmDiff(args: Record<string, unknown>): unknown {
+	const ignoreWhitespace = args.ignoreWhitespace === true;
+	const ignoreCase = args.ignoreCase === true;
+	const linesOf = (text: string): string[] => (text === '' ? [] : text.split('\n').filter((line, i, all) => !(i === all.length - 1 && line === '')));
+	const oldAll = linesOf(String((args.left as { text?: string } | undefined)?.text ?? ''));
+	const newAll = linesOf(String((args.right as { text?: string } | undefined)?.text ?? ''));
+	const strip = (line: string): string => {
+		let out = line.replace(/\r$/, '');
+		if (ignoreCase) out = out.toLowerCase();
+		if (ignoreWhitespace) out = out.split(/\s+/).filter((w) => w !== '').join(' ');
+		return out;
+	};
+	const a = oldAll.map(strip);
+	const b = newAll.map(strip);
+	interface MockHunk { oldStart: number; oldLines: number; newStart: number; newLines: number; lines: { kind: string; text: string }[] }
+	const hunks: MockHunk[] = [];
+	const pushHunk = (oldFrom: number, oldTo: number, newFrom: number, newTo: number): void => {
+		hunks.push({
+			oldStart: oldTo > oldFrom ? oldFrom + 1 : oldFrom,
+			oldLines: oldTo - oldFrom,
+			newStart: newTo > newFrom ? newFrom + 1 : newFrom,
+			newLines: newTo - newFrom,
+			lines: [
+				...oldAll.slice(oldFrom, oldTo).map((text) => ({ kind: 'deleted', text })),
+				...newAll.slice(newFrom, newTo).map((text) => ({ kind: 'added', text })),
+			],
+		});
+	};
+	// The LCS table (test files are small; a huge pair collapses to one whole-file change).
+	if (a.length * b.length > 4_000_000) {
+		if (oldAll.length || newAll.length) pushHunk(0, oldAll.length, 0, newAll.length);
+	} else {
+		const table: number[][] = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
+		for (let i = a.length - 1; i >= 0; i--) {
+			for (let j = b.length - 1; j >= 0; j--) {
+				table[i]![j] = a[i] === b[j] ? table[i + 1]![j + 1]! + 1 : Math.max(table[i + 1]![j]!, table[i]![j + 1]!);
+			}
+		}
+		// The matched pairs the table spells out, then each stretch they leave out as one
+		// change — a replacement's deletions and insertions share a hunk the way git
+		// reports it, and an unchanged line between two edits keeps the hunks apart.
+		const pairs: [number, number][] = [];
+		let i = 0;
+		let j = 0;
+		while (i < a.length && j < b.length) {
+			if (a[i] === b[j]) {
+				pairs.push([i, j]);
+				i++;
+				j++;
+			} else if (table[i + 1]![j]! >= table[i]![j + 1]!) {
+				i++;
+			} else {
+				j++;
+			}
+		}
+		let oi = 0;
+		let nj = 0;
+		for (const [mi, mj] of pairs) {
+			if (mi > oi || mj > nj) pushHunk(oi, mi, nj, mj);
+			oi = mi + 1;
+			nj = mj + 1;
+		}
+		if (oi < a.length || nj < b.length) pushHunk(oi, a.length, nj, b.length);
+	}
+	return {
+		binary: false,
+		hunks,
+		additions: hunks.reduce((sum, hunk) => sum + hunk.newLines, 0),
+		deletions: hunks.reduce((sum, hunk) => sum + hunk.oldLines, 0),
+	};
 }
 
 export async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {

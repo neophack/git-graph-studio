@@ -6,19 +6,19 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { loadEditorExtensions, loadMerge, loadTextEditor, loadXterm } from '../src/platform/lazy';
+import { loadDiffView, loadEditorExtensions, loadTextEditor, loadXterm } from '../src/platform/lazy';
 
 describe('lazy chunks', () => {
 	it('loads each library once and shares the promise', async () => {
 		expect(loadTextEditor()).toBe(loadTextEditor());
-		expect(loadMerge()).toBe(loadMerge());
+		expect(loadDiffView()).toBe(loadDiffView());
 		expect(loadXterm()).toBe(loadXterm());
 		expect(loadEditorExtensions()).toBe(loadEditorExtensions());
 		const cm = await loadTextEditor();
 		expect(typeof cm.EditorView).toBe('function');
 		expect(cm.baseExtensions(true).length).toBeGreaterThan(5);
-		const merge = await loadMerge();
-		expect(typeof merge.MergeView).toBe('function');
+		const diffView = await loadDiffView();
+		expect(typeof diffView.mountTextDiffView).toBe('function');
 		const xterm = await loadXterm();
 		expect(typeof xterm.Terminal).toBe('function');
 		// The search addon rides the same chunk: the terminal's find bar never imports it directly.

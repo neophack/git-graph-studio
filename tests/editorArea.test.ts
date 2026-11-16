@@ -332,6 +332,51 @@ describe('editor area (M3 3.1)', () => {
 		expect(host.style.top).toBe('60px');
 	});
 
+	it('hides a backgrounded page\'s frame with visibility, never display:none — the page\'s own measurements stay real while its tab sits in the background (git-graph\'s auto-layout reads a 0 viewWidth out of a display:none frame and zeroes its SVG width: the graph column then stays blank when the tab returns, since a bare tab switch runs no layout to repair it)', async () => {
+		files({ 'C:\\repo\\a.ts': 'a\n' });
+		const area = new EditorArea(document.getElementById('editorGroup')!);
+		area.setRoot('C:\\repo');
+		await area.openFile('C:\\repo\\a.ts');
+		const frame = document.createElement('iframe');
+		await area.openExtPage({ kind: 'extpage', id: 'extpage:x:1', title: 'Graph', extId: 'x', pageId: 'webview' }, (host) => { host.appendChild(frame); });
+		const host = frame.parentElement!;
+		const placeholder = document.querySelector<HTMLElement>('.editor-pane.ext-page')!;
+		// jsdom lays nothing out: the placement math runs against stubbed boxes, as in the
+		// resize-span test above, so the retained geometry is observable.
+		const rectOf = (b: { left: number; top: number; width: number; height: number }) =>
+			({ ...b, right: b.left + b.width, bottom: b.top + b.height, x: b.left, y: b.top, toJSON: () => ({}) }) as DOMRect;
+		placeholder.getBoundingClientRect = () => rectOf({ left: 10, top: 20, width: 300, height: 200 });
+		(document.querySelector('.ext-overlay-layer') as HTMLElement).getBoundingClientRect = () => rectOf({ left: 0, top: 0, width: 0, height: 0 });
+		window.dispatchEvent(new Event('resize'));
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect(host.style.display).toBe('block');
+		expect(host.style.width).toBe('300px');
+
+		// Background the tab (the file editor takes the group back): the host hides
+		// VISUALLY — nothing paints, nothing takes a pointer — while its display stays
+		// block and its geometry stays, so the frame inside keeps measuring 300×200 for
+		// every render the extension pushes into the hidden tab. The sync is coalesced
+		// (the 100 ms bound), so the wait is part of the behaviour under test.
+		await area.openFile('C:\\repo\\a.ts');
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect(host.style.visibility).toBe('hidden');
+		expect(host.style.pointerEvents).toBe('none');
+		expect(host.style.display).toBe('block');
+		expect(host.style.width).toBe('300px');
+		expect(host.style.left).toBe('10px');
+
+		// Back to the page (the tab click the user makes): placed and interactive again.
+		const tab = [...document.querySelectorAll('.tab')].find((t) => t.textContent?.includes('Graph'))!;
+		tab.click();
+		window.dispatchEvent(new Event('resize'));
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect(host.style.visibility).toBe('visible');
+		expect(host.style.pointerEvents).toBe('');
+		expect(host.style.display).toBe('block');
+		expect(host.style.left).toBe('10px');
+		expect(host.style.width).toBe('300px');
+	});
+
 	it('a locked group keeps its editors — placed opens land elsewhere (claude-code locks its chat group)', async () => {
 		files({ 'C:\\repo\\a.ts': 'a\n', 'C:\\repo\\b.ts': 'b\n', 'C:\\repo\\c.ts': 'c\n' });
 		const area = new EditorArea(document.getElementById('editorGroup')!);

@@ -8,8 +8,11 @@
 use std::path::Path;
 
 use ggs_base::workspace::WorkspaceRoots;
+use ggs_git::diff::{self, DiffOptions, LineDiff};
 use ggs_git::ops;
+use ggs_git::revision::revision_file_bytes;
 use ggs_git::runner::{has_undecodable_name, run_chunked, Git};
+use serde::Deserialize;
 use tauri::State;
 
 /// The repository a command acts on: the one the view names (`repo`, a submodule's section
@@ -46,6 +49,90 @@ pub async fn file_log(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/* ---------- The diff editors' line diff (gix-computed, never the frontend) ---------- */
+
+/// One side of a `scm_diff`: where its text comes from. `revision` carries the
+/// `read_file_at` vocabulary — `*` the working tree, `:index` the staged copy, anything
+/// else a git revision — and `text` overrides the read entirely (the diff editor's live
+/// buffer, so edits re-diff without touching the disk).
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffSideSpec {
+    pub revision: String,
+    pub path: String,
+    pub text: Option<String>,
+}
+
+/// A side's decoded text plus its binary verdict, resolved exactly like the diff editor's
+/// own side reads do: an explicit text is used as it is, the working tree reads off disk,
+/// a revision through the git runner. A path absent on its side is an empty text (the
+/// deleted or not-yet-added half of a diff); only the working tree's read can fail for
+/// reasons worth surfacing.
+fn diff_side_text(side: &DiffSideSpec, repo_path: &str) -> Result<(String, bool), String> {
+    if let Some(text) = &side.text {
+        return Ok((text.clone(), false));
+    }
+    let bytes = if side.revision == "*" {
+        match std::fs::read(Path::new(repo_path).join(&side.path)) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(format!("{}: {error}", side.path)),
+        }
+    } else {
+        let git = Git::new(repo_path);
+        revision_file_bytes(&git, &side.revision, &side.path)?.unwrap_or_default()
+    };
+    let contents = ggs_fs::decode(bytes, None);
+    Ok((contents.contents.unwrap_or_default(), contents.binary))
+}
+
+/// The line diff the diff editors render, computed backend-side by the gix engine
+/// (`ggs_git::diff`): git's own algorithm and slider heuristics, git's own hunk
+/// numbering. Both sides resolve here — revision reads, working-tree reads or the
+/// caller's live buffer — so the frontend never diffs, whatever the file's size.
+#[tauri::command]
+pub async fn scm_diff(
+    roots: State<'_, WorkspaceRoots>,
+    repo: Option<String>,
+    left: DiffSideSpec,
+    right: DiffSideSpec,
+    ignore_whitespace: Option<bool>,
+    ignore_case: Option<bool>,
+) -> Result<LineDiff, String> {
+    // The repository matters only where a side reads one — two explicit texts (the
+    // folder compare's pair, the diff editor's own resolved sides) diff without one.
+    let needs_repo = left.text.is_none() || right.text.is_none();
+    let repo_path = if needs_repo {
+        open_repo(&roots, repo)?
+    } else {
+        open_repo(&roots, repo).unwrap_or_default()
+    };
+    let options = DiffOptions {
+        ignore_whitespace: ignore_whitespace.unwrap_or(false),
+        ignore_case: ignore_case.unwrap_or(false),
+    };
+    tauri::async_runtime::spawn_blocking(move || scm_diff_impl(&repo_path, &left, &right, options))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn scm_diff_impl(
+    repo_path: &str,
+    left: &DiffSideSpec,
+    right: &DiffSideSpec,
+    options: DiffOptions,
+) -> Result<LineDiff, String> {
+    let (old, left_binary) = diff_side_text(left, repo_path)?;
+    let (new, right_binary) = diff_side_text(right, repo_path)?;
+    if left_binary || right_binary || diff::looks_binary(old.as_bytes()) || diff::looks_binary(new.as_bytes()) {
+        return Ok(LineDiff {
+            binary: true,
+            ..LineDiff::default()
+        });
+    }
+    Ok(diff::text_diff(&old, &new, options))
 }
 
 /* ---------- The palette's mutations (branch/remote/stash/tag) ---------- */
@@ -1082,7 +1169,125 @@ mod tests {
             "the refusal fires before anything new is staged (the setup's own stage is all)"
         );
     }
+    /* ---------- scm_diff ---------- */
+
+    fn side(revision: &str, path: &str) -> DiffSideSpec {
+        DiffSideSpec {
+            revision: revision.to_owned(),
+            path: path.to_owned(),
+            text: None,
+        }
+    }
+
+    fn hunks_of(d: &LineDiff) -> Vec<(u32, u32, u32, u32)> {
+        d.hunks
+            .iter()
+            .map(|h| (h.old_start, h.old_lines, h.new_start, h.new_lines))
+            .collect()
+    }
+
+    #[test]
+    fn scm_diff_reads_revisions_the_way_the_editor_does() {
+        let scratch = Scratch::new("scm-diff-sides");
+        let git = scratch.repo("repo");
+        commit(&git, "a.txt", "one\n\ntwo\n\nthree\n", "first");
+        write(&git, "a.txt", "ONE\n\ntwo\n\nTHREE\n");
+        let repo = &scratch.path("repo").display().to_string();
+        // The working tree against HEAD: two edits across blank lines stay two hunks.
+        let d = scm_diff_impl(
+            repo,
+            &side("HEAD", "a.txt"),
+            &side("*", "a.txt"),
+            DiffOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(hunks_of(&d), vec![(1, 1, 1, 1), (5, 1, 5, 1)]);
+        // The staged half against HEAD carries the edit; the index side reads through
+        // the same runner.
+        git.run(&["add", "--", "a.txt"]).unwrap();
+        let d = scm_diff_impl(
+            repo,
+            &side("HEAD", "a.txt"),
+            &side(":index", "a.txt"),
+            DiffOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(hunks_of(&d), vec![(1, 1, 1, 1), (5, 1, 5, 1)]);
+        // The live buffer overrides a read, so an unsaved edit re-diffs without the disk
+        // (the buffer half-matches: only the fifth line differs from HEAD).
+        let mut buffered = side("*", "a.txt");
+        buffered.text = Some("ONE\n\ntwo\n\nthree\n".to_owned());
+        let d = scm_diff_impl(
+            repo,
+            &side("HEAD", "a.txt"),
+            &buffered,
+            DiffOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(hunks_of(&d), vec![(1, 1, 1, 1)]);
+        // The ignore options fold the comparison, never the texts.
+        let d = scm_diff_impl(
+            repo,
+            &side("HEAD", "a.txt"),
+            &side("*", "a.txt"),
+            DiffOptions {
+                ignore_whitespace: true,
+                ignore_case: true,
+            },
+        )
+        .unwrap();
+        assert!(d.hunks.is_empty());
+        // A path absent at a revision is the empty side of an added file. (The commit
+        // sweeps the staged a.txt too — a plain `git commit` commits the whole index —
+        // which nothing past this point leans on.)
+        commit(&git, "new.txt", "fresh\n", "add");
+        let d = scm_diff_impl(
+            repo,
+            &side("HEAD^", "new.txt"),
+            &side("HEAD", "new.txt"),
+            DiffOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(hunks_of(&d), vec![(0, 0, 1, 1)]);
+    }
+
+    #[test]
+    fn scm_diff_reports_binary_instead_of_line_hunks() {
+        let scratch = Scratch::new("scm-diff-binary");
+        let git = scratch.repo("repo");
+        commit(&git, "bin.dat", "ok\x00not text", "add binary");
+        write(&git, "bin.dat", "ok\x00changed bytes");
+        let repo = &scratch.path("repo").display().to_string();
+        let d = scm_diff_impl(
+            repo,
+            &side("HEAD", "bin.dat"),
+            &side("*", "bin.dat"),
+            DiffOptions::default(),
+        )
+        .unwrap();
+        assert!(d.binary);
+        assert!(d.hunks.is_empty());
+    }
+
+    #[test]
+    fn scm_diff_counts_the_lines_each_side_gained() {
+        let scratch = Scratch::new("scm-diff-stats");
+        let git = scratch.repo("repo");
+        commit(&git, "a.txt", "keep\n", "first");
+        write(&git, "a.txt", "keep\nadded one\nadded two\n");
+        let repo = &scratch.path("repo").display().to_string();
+        let d = scm_diff_impl(
+            repo,
+            &side("HEAD", "a.txt"),
+            &side("*", "a.txt"),
+            DiffOptions::default(),
+        )
+        .unwrap();
+        assert_eq!((d.additions, d.deletions), (2, 0));
+    }
+
 }
+
 
 #[cfg(test)]
 mod blame_tests {
@@ -1142,4 +1347,6 @@ summary Version of a.txt from a.txt
         assert_eq!(lines[0].author, "Ada");
         assert_eq!(lines[0].summary, "sha256 commit");
     }
+
+
 }

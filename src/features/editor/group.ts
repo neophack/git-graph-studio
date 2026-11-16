@@ -108,7 +108,7 @@ export class EditorGroup {
 		if (key !== 'tabSize' && key !== 'wordWrap' || !editorState.cm) return;
 		for (const editor of this.open) {
 			if (editor.view) editorState.cm.reconfigureEditorSettings(editor.view);
-			if (editor.merge) {
+			if (editor.merge?.a && editor.merge.b) {
 				editorState.cm.reconfigureEditorSettings(editor.merge.a);
 				editorState.cm.reconfigureEditorSettings(editor.merge.b);
 			}

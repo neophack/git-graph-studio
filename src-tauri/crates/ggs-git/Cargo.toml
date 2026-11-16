@@ -13,6 +13,7 @@ workspace = true
 serde.workspace = true
 sha1.workspace = true
 hex.workspace = true
+gix-diff = { version = "0.70.0", features = ["sha1"] }
 
 [target.'cfg(windows)'.dependencies]
 # The SOFTWARE\GitForWindows\InstallPath value Git's own installer writes (locate).

@@ -6,7 +6,6 @@
 import { RangeSetBuilder, StateEffect, StateField, type Extension, type Text } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import { syntaxTree } from '@codemirror/language';
-import type { Chunk } from '@codemirror/merge';
 
 import { SETTINGS_EVENT, THEME_EVENT, settings } from '../../platform/settings';
 import { deltaToPixels, OngoingScroll, wheelToDelta } from '../../scroll/wheel';
@@ -517,22 +516,23 @@ export interface OverviewMark {
 }
 
 /** The overview ruler's marks for one side of a diff — VS Code's green/red scrollbar map:
- *  every change the side gained lines on shows green, every one it lost lines on red. The
- *  chunk's changes are chunk-relative (the package stores them against the chunk's own
- *  start), so their offsets ride on the chunk's start position. */
-export function chunkOverviewMarks(chunks: readonly Chunk[], side: 'a' | 'b', doc: Text): OverviewMark[] {
+ *  every change the side gained lines on shows green, every one it lost lines on red.
+ *  The ranges are the diff view's hunk spans in absolute document positions; an empty
+ *  side's span (a pure insertion or deletion) marks nothing here. */
+export function chunkOverviewMarks(
+	ranges: readonly { fromA: number; toA: number; fromB: number; toB: number }[],
+	side: 'a' | 'b',
+	doc: Text,
+): OverviewMark[] {
 	const added = 'var(--vscode-editorGutter-addedBackground)';
 	const deleted = 'var(--vscode-editorGutter-deletedBackground)';
 	const marks: OverviewMark[] = [];
-	for (const chunk of chunks) {
-		const base = side === 'a' ? chunk.fromA : chunk.fromB;
-		for (const change of chunk.changes) {
-			const from = side === 'a' ? change.fromA : change.fromB;
-			const to = side === 'a' ? change.toA : change.toB;
-			if (to <= from) continue;
-			const clamped = (at: number): number => doc.lineAt(Math.min(Math.max(at, 0), doc.length)).number;
-			marks.push({ from: clamped(base + from), to: clamped(base + to - 1), color: side === 'a' ? deleted : added });
-		}
+	for (const range of ranges) {
+		const from = side === 'a' ? range.fromA : range.fromB;
+		const to = side === 'a' ? range.toA : range.toB;
+		if (to <= from) continue;
+		const lineOf = (at: number): number => doc.lineAt(Math.min(Math.max(at, 0), doc.length)).number;
+		marks.push({ from: lineOf(from), to: lineOf(to - 1), color: side === 'a' ? deleted : added });
 	}
 	return marks;
 }

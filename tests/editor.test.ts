@@ -316,22 +316,22 @@ describe('editor group', () => {
 		});
 		await new Promise((resolve) => setTimeout(resolve, 20)); // the first render waits a frame
 		// Default unfolded: no collapse bars in either pane.
-		expect(document.querySelectorAll('.cm-collapsedLines')).toHaveLength(0);
+		expect(document.querySelectorAll('.cm-diff-unchanged')).toHaveLength(0);
 		const collapseButton = [...document.querySelectorAll<HTMLButtonElement>('.diff-toolbar button')]
 			.find((b) => b.title === 'Collapse Unchanged Regions')!;
 		click(collapseButton);
 		expect(collapseButton.classList.contains('active')).toBe(true);
 		// Both sides of the split view fold their shared unchanged stretch.
-		expect(document.querySelectorAll('.cm-collapsedLines').length).toBeGreaterThan(0);
+		expect(document.querySelectorAll('.cm-diff-unchanged').length).toBeGreaterThan(0);
 		// The choice rides the rebuild a layout switch makes: the inline view folds too…
 		const layoutButton = [...document.querySelectorAll<HTMLButtonElement>('.diff-toolbar button')]
 			.find((b) => b.title.startsWith('Switch between'))!;
 		click(layoutButton);
 		expect(document.querySelector('.editor-pane')!.classList.contains('diff-inline')).toBe(true);
-		expect(document.querySelectorAll('.cm-collapsedLines').length).toBeGreaterThan(0);
+		expect(document.querySelectorAll('.cm-diff-unchanged').length).toBeGreaterThan(0);
 		// …and toggling the fold off there shows every line again.
 		click(collapseButton);
-		expect(document.querySelectorAll('.cm-collapsedLines')).toHaveLength(0);
+		expect(document.querySelectorAll('.cm-diff-unchanged')).toHaveLength(0);
 	});
 
 	it('a working-tree diff is editable and saves back; a staged diff stays read-only', async () => {

@@ -3,8 +3,6 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { MergeView } from '@codemirror/merge';
-
 import { FolderCompareView } from '../src/features/compare';
 import { backend } from './tauriMock';
 import { click, flush, menuItem, rightClick, texts, type } from './helpers';
@@ -55,7 +53,6 @@ describe('folder compare', () => {
 		backend.on('read_file', ({ path }) => new Promise((resolve) => {
 			gates.push(() => resolve(textFile(`text of ${path}\n`)));
 		}));
-		const destroySpy = vi.spyOn(MergeView.prototype, 'destroy');
 		const host = document.createElement('div');
 		document.body.appendChild(host);
 		const view = new FolderCompareView(host, { left: LEFT, right: RIGHT });
@@ -84,11 +81,10 @@ describe('folder compare', () => {
 		expect(fileDiff).not.toBeNull();
 		expect(fileDiff!.host.isConnected).toBe(true);
 
-		// Disposing destroys the live diff, not the superseded one (which was never created).
-		const liveDom = host.querySelector('.cm-mergeView')!;
+		// Disposing destroys the live diff, not the superseded one (which was never
+		// created): the pane leaves the DOM with the views that owned it.
 		view.dispose();
-		expect(destroySpy.mock.instances.map((view) => (view as MergeView).dom)).toContain(liveDom);
-		destroySpy.mockRestore();
+		expect(host.querySelectorAll('.cm-mergeView')).toHaveLength(0);
 	});
 
 	it('copies a file to the other side in its own encoding and line endings', async () => {

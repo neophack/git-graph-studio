@@ -70,3 +70,23 @@ export interface DiffRequest {
 	left: DiffSide;
 	right: DiffSide;
 }
+
+/** The text diff view's handle (`diffView.ts`): the backend's git-computed hunks painted
+ *  over one or two CodeMirror panes. `a`/`b`/`destroy` keep the shape the generic editor
+ *  paths (settings, closing, saving, hovers) already walk — the split layout sets it on
+ *  `Editor.merge`, the unified layout's lone editor rides `Editor.view`. */
+export interface TextDiffView {
+	/** The base pane; null in the unified layout. */
+	a: import('@codemirror/view').EditorView | null;
+	/** The modified pane (the unified layout's one editor). */
+	b: import('@codemirror/view').EditorView | null;
+	/** The hunks the backend last answered with. */
+	hunks: readonly import('../../platform/ipc/scm').DiffHunkData[];
+	/** Replace the hunks (and re-collapse); called on every backend answer. */
+	setDiff(hunks: readonly import('../../platform/ipc/scm').DiffHunkData[]): void;
+	/** Toggle the unchanged-gap collapsing. */
+	setCollapse(on: boolean): void;
+	/** Each hunk's spans in the current documents, in document order. */
+	ranges(): { fromA: number; toA: number; fromB: number; toB: number }[];
+	destroy(): void;
+}

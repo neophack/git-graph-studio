@@ -367,15 +367,14 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
    the find widget anchored to its right edge lands outside the window and is clipped.
    Split mode needs nothing: each pane's own wrapper carries overflow hidden. */
 .editor-pane .cm-merge-view > .cm-editor { min-width: 0; }
-/* @codemirror/merge's outer root carries no height of its own: it fills the app's host.
+/* The diff view's outer root carries no height of its own: it fills the app's host.
    Without the bound it grows to its content and no wheel can scroll the diff. */
 .cm-merge-view > .cm-mergeView { height: 100%; }
-/* The merge view's panes scroll themselves, VS Code's diff: the package's own design
-   (`height: auto !important` and `overflow-y: visible !important` on every pane) parks each
-   pane at its whole-content height inside an outer scroller, which puts the pane's
-   horizontal scrollbar at the bottom of the *entire document* — screens away on a long
-   file. Binding each pane's scroller to its viewport puts both scrollbars where the user
-   is looking; both layouts' specificity outranks the package's `!important` defaults. */
+/* The diff view's panes scroll themselves, VS Code's diff: each pane's scroller is bound
+   to its viewport, which puts both scrollbars where the user is looking — the unbound
+   design parks each pane at its whole-content height inside an outer scroller, putting
+   the horizontal scrollbar at the bottom of the *entire document* — screens away on a
+   long file. Both layouts' specificity outranks any editor default. */
 .cm-merge-view > .cm-mergeView > .cm-mergeViewEditors { height: 100%; }
 /* VS Code's side headers live inside each pane's wrapper, above its editor: the wrapper
    becomes a column, and the editor flexes below its label (the editor's `height: 100%`
@@ -910,34 +909,28 @@ button.ggs-symbol-hover-loc:hover { text-decoration: underline; color: var(--vsc
 /* The arrow column rides the panes' scroll via a transform (positionRevertArrows); its own
    box clips the arrows the transform carries past the viewport edges. */
 .cm-merge-view .cm-merge-revert { overflow: hidden; }
-/* Diff highlighting is VS Code's: changed lines get a translucent line background, changed
-   words a stronger text background, and no underline or strikethrough. The split merge view
+/* Diff highlighting is VS Code's: changed lines get a translucent line background and a
+   3px gutter bar at their left edge, the unified layout's deleted lines a stronger text
+   background in their block widget, and no underline or strikethrough. The split view
    (`.cm-mergeView`) and the inline/unified diff (`.editor-pane.diff-inline`) share these
-   rules so both layouts render identically.
-   Selector weight matters here: @codemirror/merge's base theme targets
-   `.<theme>.cm-merge-b .cm-changedText` (three classes) and paints a 2px gradient underline
-   under changed words, so every rule below is anchored on `.editor-pane .cm-editor` to
-   outweigh it - a bare `.cm-changedText` silently loses and the underline comes back. */
-.editor-pane .cm-editor.cm-merge-a .cm-changedText, .editor-pane .cm-editor.cm-merge-b .cm-changedText,
-.editor-pane .cm-editor.cm-merge-b .cm-deletedText, .editor-pane .cm-editor.cm-merge-b .cm-insertedLine,
-.editor-pane .cm-editor.cm-merge-b .cm-deletedLine { text-decoration: none; }
-.editor-pane .cm-editor.cm-merge-b .cm-changedLine, .editor-pane .cm-editor.cm-merge-b .cm-inlineChangedLine { background: var(--vscode-diffEditor-insertedLineBackground); }
-.editor-pane .cm-editor.cm-merge-b .cm-changedText { background: var(--vscode-diffEditor-insertedTextBackground); }
-.editor-pane .cm-editor.cm-merge-b .cm-deletedChunk { background: var(--vscode-diffEditor-removedLineBackground); }
-.editor-pane .cm-editor.cm-merge-b .cm-deletedChunk .cm-deletedText, .editor-pane .cm-editor.cm-merge-b .cm-deletedText { background: var(--vscode-diffEditor-removedTextBackground); }
-.editor-pane .cm-editor .cm-changeGutter { width: 3px; }
-.editor-pane .cm-editor.cm-merge-b .cm-changedLineGutter, .editor-pane .cm-editor.cm-merge-b .cm-inlineChangedLineGutter { background: var(--vscode-diffEditorGutter-insertedLineBackground); }
-.editor-pane .cm-editor.cm-merge-b .cm-deletedLineGutter { background: var(--vscode-diffEditorGutter-removedLineBackground); }
-.editor-pane .cm-editor.cm-merge-a .cm-collapsedLines, .editor-pane .cm-editor.cm-merge-b .cm-collapsedLines { background: var(--vscode-editorWidget-background); color: var(--vscode-descriptionForeground); border: none; }
-/* VS Code's unchanged-region bar: the pill centres its count and answers the pointer. */
-.editor-pane .cm-editor.cm-merge-a .cm-collapsedLines, .editor-pane .cm-editor.cm-merge-b .cm-collapsedLines { text-align: center; border-radius: 4px; }
-.editor-pane .cm-editor.cm-merge-a .cm-collapsedLines:hover, .editor-pane .cm-editor.cm-merge-b .cm-collapsedLines:hover { background: var(--vscode-list-hoverBackground); }
-/* In the split view the left editor (`.cm-merge-a`) shows the removed side: its changed
-   lines/text take the removed colors (the right editor keeps the inserted ones above). */
-.editor-pane .cm-editor.cm-merge-a .cm-changedLine { background: var(--vscode-diffEditor-removedLineBackground); }
-.editor-pane .cm-editor.cm-merge-a .cm-changedText { background: var(--vscode-diffEditor-removedTextBackground); }
-.editor-pane .cm-editor.cm-merge-a .cm-changedLineGutter { background: var(--vscode-diffEditorGutter-removedLineBackground); }
-/* Alignment spacers use VS Code's diagonal fill (`diffEditor.diagonalFill`, default #cccccc33). */
+   rules so both layouts render identically. The decorations are the app's own classes —
+   the hunks come from the backend's gix diff and `diffView.ts` paints them. */
+.editor-pane .cm-diff-ins { background: var(--vscode-diffEditor-insertedLineBackground); border-left: 3px solid var(--vscode-diffEditorGutter-insertedLineBackground); }
+.editor-pane .cm-diff-del { background: var(--vscode-diffEditor-removedLineBackground); border-left: 3px solid var(--vscode-diffEditorGutter-removedLineBackground); }
+/* The unified layout's deleted-line block: the widget rides above the hunk's new lines,
+   its rows painted like deleted lines in the removed palette. */
+.editor-pane .cm-diff-del-block { background: var(--vscode-diffEditor-removedLineBackground); }
+.editor-pane .cm-diff-del-row { font-family: var(--vscode-editor-font-family, monospace); font-size: var(--vscode-editor-font-size, 13px); line-height: inherit; white-space: pre; background: var(--vscode-diffEditor-removedTextBackground); border-left: 3px solid var(--vscode-diffEditorGutter-removedLineBackground); min-height: 1.4em; }
+/* The unchanged-gap pill: centred, quiet, pointer-rounded — a click hands the lines back. */
+.cm-diff-unchanged { display: block; width: 100%; box-sizing: border-box; text-align: center; background: var(--vscode-editorWidget-background); color: var(--vscode-descriptionForeground); border: none; border-radius: 4px; font-size: 11px; padding: 1px 0; cursor: pointer; }
+.cm-diff-unchanged:hover { background: var(--vscode-list-hoverBackground); }
+/* The per-change revert arrows' column between the split panes: a narrow flex item whose
+   buttons position absolutely at their hunk's document offset (positionRevertArrows
+   translates the column by the panes' scroll). */
+.cm-merge-view .cm-merge-revert { width: 1.6em; flex: 0 0 1.6em; position: relative; overflow: hidden; }
+.cm-merge-revert button { position: absolute; display: block; width: 100%; box-sizing: border-box; text-align: center; background: none; border: none; cursor: pointer; padding: 2px 0; color: var(--vscode-editor-foreground); opacity: 0.7; border-radius: 3px; }
+.cm-merge-revert button:hover { background: var(--vscode-toolbar-hoverBackground); opacity: 1; }
+.cm-merge-revert button .codicon { font-size: 13px; }
 .cm-mergeView .cm-mergeSpacer { background: repeating-linear-gradient(-45deg, transparent, transparent 4px, var(--vscode-diffEditor-diagonalFill, #cccccc33) 4px, var(--vscode-diffEditor-diagonalFill, #cccccc33) 5px); }
 
 /* ---------- Title bar (VS Code's custom title bar on Windows) ---------- */

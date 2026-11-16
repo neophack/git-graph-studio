@@ -64,6 +64,53 @@ export interface BlameLine {
 	summary: string;
 }
 
+/** One side of `scm_diff`: where its text comes from. `revision` carries the
+ *  `read_file_at` vocabulary — `*` the working tree, `:index` the staged copy, anything
+ *  else a git revision — and `text` overrides the read entirely (the diff editor's live
+ *  buffer, so an edit re-diffs without touching the disk). */
+export interface DiffSideSpec {
+	revision: string;
+	path: string;
+	text?: string;
+}
+
+/** One changed line of a `scm_diff` hunk, its text as the file carries it. */
+export interface DiffLineData {
+	kind: 'deleted' | 'added';
+	text: string;
+}
+
+/** One git-computed change: a run of deleted lines replaced by a run of added ones
+ *  (either side may be empty). The starts are 1-based the way git's `@@ -l,c +l,c @@`
+ *  headers spell them — a side with zero lines names the line the change sits after
+ *  (`oldStart` 5 = an insertion following line 5). Hunks carry changed lines only; the
+ *  unchanged gaps between them belong to the view. */
+export interface DiffHunkData {
+	oldStart: number;
+	oldLines: number;
+	newStart: number;
+	newLines: number;
+	lines: DiffLineData[];
+}
+
+/** The backend's line diff for a text pair, computed by the gix engine (git's own
+ *  algorithm and slider heuristics) — the frontend never diffs. `binary` replaces
+ *  hunks when a side is binary. */
+export interface LineDiffData {
+	binary: boolean;
+	hunks: DiffHunkData[];
+	additions: number;
+	deletions: number;
+}
+
+export const scmDiff = (args: {
+	repo?: string;
+	left: DiffSideSpec;
+	right: DiffSideSpec;
+	ignoreWhitespace?: boolean;
+	ignoreCase?: boolean;
+}) => invoke<LineDiffData>('scm_diff', args);
+
 /** The repo-scoped forms omit the key entirely (the scripted backend records args as
  *  passed; an `undefined` property would differ from the key's absence). */
 const withRepo = (args: Record<string, unknown>, repo?: string) => (repo === undefined ? args : { ...args, repo });

@@ -630,6 +630,7 @@ mod desktop {
                 cmd_fs::remote_canonical_paths,
                 cmd_scm::scm_status,
                 cmd_scm::file_log,
+                cmd_scm::scm_diff,
                 cmd_scm::git_init,
                 cmd_scm::git_stage,
                 cmd_scm::git_unstage,
