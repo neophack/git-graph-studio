@@ -41,6 +41,11 @@ export default defineConfig({
 	// failure, on the same commit the push run's identical job passed. The classic pool
 	// runs the app's imports the way production does, with no vm memory ceiling. The
 	// global seam check runs in every pool; it is idempotent.
+	//
+	// notifyTeardown.test.ts joins them because the behaviour it pins only exists in
+	// this pool: the toast countdown's guard against a DOM the environment teardown
+	// deleted — the vm pool's `document` is a getter-only binding no test can remove
+	// (the file's own header tells that story).
 	test: {
 		environment: 'jsdom',
 		setupFiles: ['tests/setup.ts'],
@@ -57,7 +62,8 @@ export default defineConfig({
 					exclude: [
 						'tests/extensions.test.ts',
 						'tests/editor.test.ts',
-						'tests/perf.test.ts'
+						'tests/perf.test.ts',
+						'tests/notifyTeardown.test.ts'
 					],
 					setupFiles: ['tests/setup.ts'],
 					pool: 'vmThreads',
@@ -73,7 +79,8 @@ export default defineConfig({
 					include: [
 						'tests/extensions.test.ts',
 						'tests/editor.test.ts',
-						'tests/perf.test.ts'
+						'tests/perf.test.ts',
+						'tests/notifyTeardown.test.ts'
 					],
 					setupFiles: ['tests/setup.ts'],
 					pool: 'threads'

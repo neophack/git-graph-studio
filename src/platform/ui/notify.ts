@@ -99,6 +99,17 @@ export function notify(kind: NotificationKind, message: string, actions: Notific
 		return node !== null && toast.contains(node);
 	};
 	const tick = (): void => {
+		// The interval can outlive the DOM it was drawn in (a test environment tears the
+		// jsdom globals away mid-suite while a toast's countdown is still armed — the
+		// 2026-11-16 Release run's only failure): a timer callback that throws is an
+		// unhandled error for the whole process, so the tick stops itself instead.
+		if (typeof document === 'undefined') {
+			if (ticking !== null) {
+				window.clearInterval(ticking);
+				ticking = null;
+			}
+			return;
+		}
 		const now = Date.now();
 		if (hovered || selectionHeld() || document.hidden) {
 			lastTick = now;
