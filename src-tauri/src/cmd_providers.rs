@@ -169,7 +169,7 @@ pub fn provider_save(app: tauri::AppHandle, profile: ProviderInput) -> Result<Pr
     let mut store = read_store(&home)?;
     let before = store.clone();
     let choice_before = effective_choice(&store);
-    apply_save(&home, &mut store, &profile)?;
+    apply_save(&mut store, &profile)?;
     write_store(&home, &store)?;
     drop(_guard);
     let choice = effective_choice(&store);

@@ -1,6 +1,7 @@
 //! ggs-providers (L1, module 12's AI provider bridge): the provider store under
-//! `~/.ggs/ai-providers.json` (AES-256-GCM key sealing under `~/.ggs/keys/`), the
-//! built-in presets, the per-window effective choice, the spawn-time environment the
+//! `~/.ggs/ai-providers.json` (AES-256-GCM key sealing under a master key derived
+//! from the machine's identity — a store copied to another PC does not decrypt),
+//! the built-in presets, the per-window effective choice, the spawn-time environment the
 //! bridged backend inherits, the gateway probes, the cc-switch import, the usage
 //! aggregation, and the Claude MCP integration writes — everything but the eleven
 //! `#[tauri::command]`s and the "restart the bridged backend" wiring, which stay in
@@ -22,6 +23,7 @@ use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const CLAUDE_CODE_EXT_ID: &str = "Anthropic.claude-code";
 
@@ -417,28 +419,116 @@ pub fn claude_tweaks() -> &'static [ClaudeTweak] {
         // and PR body — the single most-complained-about behaviour; `attribution:
         // false` is the schema's documented hide-all form (the deprecated
         // `includeCoAuthoredBy` answers the same key).
-        ClaudeTweak { id: "commitAttribution", env_key: None, settings_key: Some("attribution") },
-        ClaudeTweak { id: "costWarnings", env_key: Some("DISABLE_COST_WARNINGS"), settings_key: None },
-        ClaudeTweak { id: "spinnerTips", env_key: None, settings_key: Some("spinnerTipsEnabled") },
-        ClaudeTweak { id: "progressBar", env_key: None, settings_key: Some("terminalProgressBarEnabled") },
-        ClaudeTweak { id: "terminalTitle", env_key: Some("CLAUDE_CODE_DISABLE_TERMINAL_TITLE"), settings_key: None },
-        ClaudeTweak { id: "todoList", env_key: None, settings_key: Some("todoFeatureEnabled") },
-        ClaudeTweak { id: "mouseMode", env_key: Some("CLAUDE_CODE_DISABLE_MOUSE"), settings_key: None },
-        ClaudeTweak { id: "autoUpdater", env_key: Some("DISABLE_AUTOUPDATER"), settings_key: None },
-        ClaudeTweak { id: "telemetry", env_key: Some("DISABLE_TELEMETRY"), settings_key: None },
-        ClaudeTweak { id: "errorReporting", env_key: Some("DISABLE_ERROR_REPORTING"), settings_key: None },
-        ClaudeTweak { id: "growthbook", env_key: Some("DISABLE_GROWTHBOOK"), settings_key: None },
-        ClaudeTweak { id: "autoCompact", env_key: Some("DISABLE_AUTO_COMPACT"), settings_key: None },
-        ClaudeTweak { id: "checkpointing", env_key: Some("CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING"), settings_key: None },
-        ClaudeTweak { id: "autoMemory", env_key: None, settings_key: Some("autoMemoryEnabled") },
-        ClaudeTweak { id: "interleavedThinking", env_key: Some("DISABLE_INTERLEAVED_THINKING"), settings_key: None },
-        ClaudeTweak { id: "proactivity", env_key: Some("CLAUDE_CODE_DISABLE_PROACTIVITY"), settings_key: None },
-        ClaudeTweak { id: "ideAutoInstall", env_key: Some("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL"), settings_key: None },
-        ClaudeTweak { id: "bugCommand", env_key: Some("DISABLE_BUG_COMMAND"), settings_key: None },
-        ClaudeTweak { id: "feedbackSurvey", env_key: Some("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"), settings_key: None },
-        ClaudeTweak { id: "installChecks", env_key: Some("DISABLE_INSTALLATION_CHECKS"), settings_key: None },
-        ClaudeTweak { id: "promptCaching", env_key: Some("DISABLE_PROMPT_CACHING"), settings_key: None },
-        ClaudeTweak { id: "webFetch", env_key: Some("CLAUDE_CODE_DISABLE_WEB_FETCH"), settings_key: None },
+        ClaudeTweak {
+            id: "commitAttribution",
+            env_key: None,
+            settings_key: Some("attribution"),
+        },
+        ClaudeTweak {
+            id: "costWarnings",
+            env_key: Some("DISABLE_COST_WARNINGS"),
+            settings_key: None,
+        },
+        ClaudeTweak {
+            id: "spinnerTips",
+            env_key: None,
+            settings_key: Some("spinnerTipsEnabled"),
+        },
+        ClaudeTweak {
+            id: "progressBar",
+            env_key: None,
+            settings_key: Some("terminalProgressBarEnabled"),
+        },
+        ClaudeTweak {
+            id: "terminalTitle",
+            env_key: Some("CLAUDE_CODE_DISABLE_TERMINAL_TITLE"),
+            settings_key: None,
+        },
+        ClaudeTweak {
+            id: "todoList",
+            env_key: None,
+            settings_key: Some("todoFeatureEnabled"),
+        },
+        ClaudeTweak {
+            id: "mouseMode",
+            env_key: Some("CLAUDE_CODE_DISABLE_MOUSE"),
+            settings_key: None,
+        },
+        ClaudeTweak {
+            id: "autoUpdater",
+            env_key: Some("DISABLE_AUTOUPDATER"),
+            settings_key: None,
+        },
+        ClaudeTweak {
+            id: "telemetry",
+            env_key: Some("DISABLE_TELEMETRY"),
+            settings_key: None,
+        },
+        ClaudeTweak {
+            id: "errorReporting",
+            env_key: Some("DISABLE_ERROR_REPORTING"),
+            settings_key: None,
+        },
+        ClaudeTweak {
+            id: "growthbook",
+            env_key: Some("DISABLE_GROWTHBOOK"),
+            settings_key: None,
+        },
+        ClaudeTweak {
+            id: "autoCompact",
+            env_key: Some("DISABLE_AUTO_COMPACT"),
+            settings_key: None,
+        },
+        ClaudeTweak {
+            id: "checkpointing",
+            env_key: Some("CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING"),
+            settings_key: None,
+        },
+        ClaudeTweak {
+            id: "autoMemory",
+            env_key: None,
+            settings_key: Some("autoMemoryEnabled"),
+        },
+        ClaudeTweak {
+            id: "interleavedThinking",
+            env_key: Some("DISABLE_INTERLEAVED_THINKING"),
+            settings_key: None,
+        },
+        ClaudeTweak {
+            id: "proactivity",
+            env_key: Some("CLAUDE_CODE_DISABLE_PROACTIVITY"),
+            settings_key: None,
+        },
+        ClaudeTweak {
+            id: "ideAutoInstall",
+            env_key: Some("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL"),
+            settings_key: None,
+        },
+        ClaudeTweak {
+            id: "bugCommand",
+            env_key: Some("DISABLE_BUG_COMMAND"),
+            settings_key: None,
+        },
+        ClaudeTweak {
+            id: "feedbackSurvey",
+            env_key: Some("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"),
+            settings_key: None,
+        },
+        ClaudeTweak {
+            id: "installChecks",
+            env_key: Some("DISABLE_INSTALLATION_CHECKS"),
+            settings_key: None,
+        },
+        ClaudeTweak {
+            id: "promptCaching",
+            env_key: Some("DISABLE_PROMPT_CACHING"),
+            settings_key: None,
+        },
+        ClaudeTweak {
+            id: "webFetch",
+            env_key: Some("CLAUDE_CODE_DISABLE_WEB_FETCH"),
+            settings_key: None,
+        },
     ]
 }
 
@@ -476,36 +566,103 @@ pub fn tweak_env_vars(tweaks: &[String]) -> Vec<(String, String)> {
 
 /* ---------- The key sealing ---------- */
 
-/// The per-install master key, created on first use: 32 random bytes at
-/// `~/.ggs/keys/ai-providers.key`, readable by the user alone (0600 on unix).
-fn master_key(home: &Path) -> Result<[u8; 32], String> {
-    let path = home.join("keys").join("ai-providers.key");
-    if let Ok(bytes) = std::fs::read(&path) {
-        let Ok(key) = <[u8; 32]>::try_from(bytes.as_slice()) else {
-            return Err(format!("{} is not a 32-byte master key", path.display()));
-        };
-        return Ok(key);
-    }
-    std::fs::create_dir_all(path.parent().expect("keys/ has a parent"))
-        .map_err(|e| format!("create the keys directory: {e}"))?;
-    let mut key = [0u8; 32];
-    getrandom::fill(&mut key).map_err(|e| format!("generate a master key: {e}"))?;
-    std::fs::write(&path, key).map_err(|e| format!("write {}: {e}", path.display()))?;
-    #[cfg(unix)]
+/// The machine identity the master key derives from (2026-11-16, the owner's
+/// direction: 加密要跟机器绑定 — `ai-providers.json` copied to another PC must not
+/// decrypt, `keys/ai-providers.key` carried along included). Windows reads the OS
+/// install's MachineGuid, Linux its machine-id, macOS the platform UUID; a host
+/// where none answers falls back to hostname + username — still machine-varying,
+/// so two machines derive the same key only on one machine. The OS reinstall /
+/// rename cost is by design: the keys re-enter, the store never leaks.
+fn machine_id() -> String {
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("restrict {}: {e}", path.display()))?;
+        use winreg::enums::HKEY_LOCAL_MACHINE;
+        use winreg::RegKey;
+        if let Ok(cryptography) =
+            RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey("SOFTWARE\\Microsoft\\Cryptography")
+        {
+            if let Ok(guid) = cryptography.get_value::<String, _>("MachineGuid") {
+                let guid = guid.trim();
+                if !guid.is_empty() {
+                    return guid.to_owned();
+                }
+            }
+        }
     }
-    Ok(key)
+    #[cfg(target_os = "linux")]
+    {
+        for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                let id = text.trim();
+                if !id.is_empty() {
+                    return id.to_owned();
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("ioreg")
+            .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            if let Some(line) = text.lines().find(|line| line.contains("IOPlatformUUID")) {
+                if let Some(uuid) = line.split('"').nth(3) {
+                    if !uuid.is_empty() {
+                        return uuid.to_owned();
+                    }
+                }
+            }
+        }
+    }
+    let host = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .map(|host| host.trim().to_owned())
+        .unwrap_or_default();
+    let user = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .map(|user| user.trim().to_owned())
+        .unwrap_or_default();
+    format!("{host}/{user}")
 }
 
-/// Encrypt a secret: a fresh 12-byte nonce per seal, AES-256-GCM over key material with
-/// the bridge's name as additional authenticated data, `base64(nonce ‖ ciphertext ‖ tag)`
-/// as the stored form.
-fn seal(home: &Path, secret: &str) -> Result<String, String> {
-    let key = master_key(home)?;
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+/// The machine-bound master key for one identity: SHA-256 over a domain-separated
+/// machine identity. No key material is stored anywhere — a copied store's blobs
+/// open only on the machine whose identity sealed them. Pure, so the tests can
+/// play two machines against each other.
+fn machine_master_key_for(machine_id: &str) -> [u8; 32] {
+    Sha256::new()
+        .chain_update(b"ggs/ai-providers/machine-key/v1\0")
+        .chain_update(machine_id.as_bytes())
+        .finalize()
+        .into()
+}
+
+/// This machine's master key. An identity-less host (every source above failed)
+/// refuses to seal rather than deriving a key every machine would share.
+fn machine_master_key() -> Result<[u8; 32], String> {
+    let id = machine_id();
+    if id.is_empty() {
+        return Err("no machine identity is readable — the API keys cannot be sealed".to_owned());
+    }
+    Ok(machine_master_key_for(&id))
+}
+
+/// The retired per-install file key (`~/.ggs/keys/ai-providers.key`, the random
+/// 32 bytes an earlier version stored), read only while a store written before the
+/// machine binding may still carry entries sealed under it — [`migrate_sealed_keys`]
+/// re-seals those under the machine key and deletes the file.
+fn legacy_master_key(home: &Path) -> Option<[u8; 32]> {
+    let bytes = std::fs::read(home.join("keys").join("ai-providers.key")).ok()?;
+    <[u8; 32]>::try_from(bytes.as_slice()).ok()
+}
+
+/// Encrypt a secret under one master key: a fresh 12-byte nonce per seal, AES-256-GCM
+/// with the bridge's name as additional authenticated data, `base64(nonce ‖ ciphertext
+/// ‖ tag)` as the stored form. Pure — the tests seal under two machines' keys.
+fn seal_with(key: &[u8; 32], secret: &str) -> Result<String, String> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     let mut nonce = [0u8; 12];
     getrandom::fill(&mut nonce).map_err(|e| format!("generate a nonce: {e}"))?;
     let sealed = cipher
@@ -522,9 +679,9 @@ fn seal(home: &Path, secret: &str) -> Result<String, String> {
     Ok(BASE64.encode(blob))
 }
 
-/// The `seal` inverse: any tampering, any other master key, any other purpose fails.
-fn unseal(home: &Path, sealed: &str) -> Result<String, String> {
-    let key = master_key(home)?;
+/// The [`seal_with`] inverse: any tampering, any other master key, any other purpose
+/// fails.
+fn open_with(key: &[u8; 32], sealed: &str) -> Result<String, String> {
     let blob = BASE64
         .decode(sealed)
         .map_err(|e| format!("a sealed key is not valid base64: {e}"))?;
@@ -532,7 +689,7 @@ fn unseal(home: &Path, sealed: &str) -> Result<String, String> {
         return Err("a sealed key is too short to open".to_owned());
     }
     let (nonce, body) = blob.split_at(12);
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     let plain = cipher
         .decrypt(
             Nonce::from_slice(nonce),
@@ -542,9 +699,92 @@ fn unseal(home: &Path, sealed: &str) -> Result<String, String> {
             },
         )
         .map_err(|_| {
-            "the stored API key does not open under this install's master key".to_owned()
+            "the stored API key does not open under this machine's master key".to_owned()
         })?;
     String::from_utf8(plain).map_err(|_| "the stored API key is not valid UTF-8".to_owned())
+}
+
+/// Encrypt a secret under this machine's master key.
+fn seal(secret: &str) -> Result<String, String> {
+    seal_with(&machine_master_key()?, secret)
+}
+
+/// The [`seal`] inverse, with the migration grace: an entry opens under this
+/// machine's key first; failing that, under the retired file key while it still
+/// exists (stores written before the machine binding) — until
+/// [`migrate_sealed_keys`] re-seals the entry and retires the file. Afterwards the
+/// entry is simply refused: on this machine, keys are sealed to the machine that
+/// set them.
+fn unseal(home: &Path, sealed: &str) -> Result<String, String> {
+    let machine = machine_master_key()?;
+    match open_with(&machine, sealed) {
+        Ok(plain) => Ok(plain),
+        Err(_) => match legacy_master_key(home) {
+            Some(legacy) => open_with(&legacy, sealed),
+            None => Err(
+                "the stored API key does not open on this machine — keys are \
+                sealed to the machine that set them"
+                    .to_owned(),
+            ),
+        },
+    }
+}
+
+/// Re-seal every entry an earlier version sealed under the retired random file key
+/// under this machine's master key, persist the store, then retire the file itself
+/// (2026-11-16, the owner's direction: copying `ai-providers.json` — with or without
+/// `keys/ai-providers.key` — to another PC must not decrypt). The file is deleted
+/// only once every sealed entry opens under the machine key; an entry that opens
+/// under neither key is dead on use (the page asks for the key again) and keeps the
+/// file until the user re-saves it. Idempotent: a fully machine-sealed store with
+/// no file is a no-op. Returns whether the store was rewritten.
+pub fn migrate_sealed_keys(home: &Path, store: &mut ProviderStore) -> Result<bool, String> {
+    let machine = machine_master_key()?;
+    let Some(legacy) = legacy_master_key(home) else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    for profile in &mut store.profiles {
+        let Some(sealed) = profile.api_key_enc.as_deref() else {
+            continue;
+        };
+        if open_with(&machine, sealed).is_ok() {
+            continue;
+        }
+        if let Ok(plain) = open_with(&legacy, sealed) {
+            profile.api_key_enc = Some(seal_with(&machine, &plain)?);
+            changed = true;
+        }
+    }
+    if changed {
+        write_store(home, store)?;
+    }
+    // The file's last reader was the unseal grace above; with every entry now
+    // opening under the machine key it has nothing left to open — and a stolen
+    // pair of files opens only pre-migration backups, which the next save makes
+    // stale. Removing it closes even that.
+    if store.profiles.iter().all(|profile| {
+        profile
+            .api_key_enc
+            .as_deref()
+            .is_none_or(|sealed| open_with(&machine, sealed).is_ok())
+    }) {
+        let _ = std::fs::remove_file(home.join("keys").join("ai-providers.key"));
+    }
+    Ok(changed)
+}
+
+/// [`migrate_sealed_keys`]'s boot pass — the boot pass and every folder change run
+/// it through [`apply_claude_integration`], under the store write lock. Best-effort
+/// by the caller's convention: errors are logged, never fatal.
+pub fn migrate_sealed_keys_pass() -> Result<(), String> {
+    let _held = STORE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = ggs_home()?;
+    let mut store = read_store(&home)?;
+    migrate_sealed_keys(&home, &mut store)?;
+    Ok(())
 }
 
 /* ---------- The profile edits (pure, the commands' core) ---------- */
@@ -608,9 +848,9 @@ fn normalize_profile(
 }
 
 /// Apply one save onto the store: normalize the fields, then the key — absent keeps the
-/// stored one (and its hint), empty clears it, anything else seals the new value. The
-/// key never rides through the normalized profile.
-pub fn apply_save(home: &Path, store: &mut ProviderStore, input: &ProviderInput) -> Result<(), String> {
+/// stored one (and its hint), empty clears it, anything else seals the new value under
+/// this machine's master key. The key never rides through the normalized profile.
+pub fn apply_save(store: &mut ProviderStore, input: &ProviderInput) -> Result<(), String> {
     let mut profile = normalize_profile(input, &presets())?;
     let existing = store.profiles.iter().find(|p| p.id == profile.id);
     if profile.preset == "official" {
@@ -629,7 +869,7 @@ pub fn apply_save(home: &Path, store: &mut ProviderStore, input: &ProviderInput)
             Some(key) => {
                 let trimmed = key.trim();
                 if !trimmed.is_empty() {
-                    profile.api_key_enc = Some(seal(home, trimmed)?);
+                    profile.api_key_enc = Some(seal(trimmed)?);
                     profile.api_key_hint = Some(
                         trimmed
                             .chars()
@@ -1239,7 +1479,7 @@ pub fn import_ccswitch_entries(
             api_key: entry.api_key,
             fold_system: None,
         };
-        apply_save(home, store, &input)?;
+        apply_save(store, &input)?;
         if entry.candidate.current {
             activate = Some(entry.candidate.id.clone());
         }
@@ -1543,7 +1783,10 @@ pub fn withdraw_claude_provider_env_inner() -> Result<(), String> {
 /// rather than being replaced. This pass never carries a secret — the provider
 /// configuration's no-disk-write rule (2026-10-13) is about the key, and these are
 /// the behaviour settings Claude Code only reads from settings.
-pub fn claude_tweaks_settings(existing: Option<&str>, enabled: &[String]) -> Result<Option<String>, String> {
+pub fn claude_tweaks_settings(
+    existing: Option<&str>,
+    enabled: &[String],
+) -> Result<Option<String>, String> {
     let mut settings: serde_json::Value = match existing {
         Some(text) if text.trim().is_empty() => serde_json::json!({}),
         Some(text) => serde_json::from_str(text).map_err(|e| {
@@ -1559,7 +1802,9 @@ pub fn claude_tweaks_settings(existing: Option<&str>, enabled: &[String]) -> Res
     let object = settings.as_object_mut().expect("checked above");
     let mut changed = false;
     for tweak in claude_tweaks() {
-        let Some(key) = tweak.settings_key else { continue };
+        let Some(key) = tweak.settings_key else {
+            continue;
+        };
         let on = enabled.iter().any(|id| id == tweak.id);
         match (on, object.get(key)) {
             (true, Some(value)) if *value == serde_json::Value::Bool(false) => {}
@@ -1607,8 +1852,6 @@ pub fn apply_claude_tweaks_inner() -> Result<(), String> {
     }
     Ok(())
 }
-
-
 
 /// A profile as the UI sees it: every field but the key (a `hasKey` flag and the last
 /// four characters stand in for it — the ciphertext never needs to cross).
@@ -1722,8 +1965,6 @@ pub fn probe_key(
         .and_then(|sealed| unseal(home, sealed).ok())
         .unwrap_or_default()
 }
-
-
 
 /// One hour's aggregated token usage over the redirected Claude state — the numbers
 /// behind the chat pane's usage curve. Hours are UTC (`startMs` is the hour's epoch
@@ -2180,10 +2421,11 @@ pub fn apply_claude_mcp(folders: &[String], command: Option<&Path>) -> Result<()
 /// the MCP registration first, then the provider-keys withdrawal, then the tweaks'
 /// settings pass — three passes over the redirected state, each a no-op when the file
 /// already agrees.
-pub fn apply_claude_integration(
-    folders: &[String],
-    command: Option<&Path>,
-) -> Result<(), String> {
+pub fn apply_claude_integration(folders: &[String], command: Option<&Path>) -> Result<(), String> {
+    // The machine-binding migration rides the same boot / folder-change pass: a
+    // store written before 2026-11-16 re-seals under the machine key and its
+    // `keys/ai-providers.key` retires, before anything reads through the seal.
+    migrate_sealed_keys_pass()?;
     apply_claude_mcp(folders, command)?;
     withdraw_claude_provider_env_inner()?;
     apply_claude_tweaks_inner()
@@ -2383,41 +2625,100 @@ mod tests {
     }
 
     /// Sealing round-trips, seals to fresh ciphertext every time, and a blob from
-    /// another install's master key does not open.
+    /// another machine's master key does not open — the machine binding (2026-11-16,
+    /// the owner's direction: the store copied to another PC, `keys/` included, must
+    /// not decrypt).
     #[test]
-    fn sealing_round_trips_and_binds_to_its_home() {
-        let guard_a = ProviderHome::pin();
-        let home_a = ggs_home().unwrap();
-        let sealed = seal(&home_a, "sk-secret-1234").unwrap();
+    fn sealing_round_trips_and_binds_to_its_machine() {
+        let machine_a = machine_master_key_for("machine-a");
+        let sealed = seal_with(&machine_a, "sk-secret-1234").unwrap();
         assert!(!sealed.contains("sk-secret-1234"));
-        assert_eq!(unseal(&home_a, &sealed).unwrap(), "sk-secret-1234");
+        assert_eq!(open_with(&machine_a, &sealed).unwrap(), "sk-secret-1234");
         // A different nonce per seal — the same secret seals to different bytes.
-        assert_ne!(sealed, seal(&home_a, "sk-secret-1234").unwrap());
-        drop(guard_a);
+        assert_ne!(sealed, seal_with(&machine_a, "sk-secret-1234").unwrap());
 
-        // A different install's master key does not open it (sequential, never a
-        // nested pin — the homes' serializing lock is not reentrant).
-        let guard_b = ProviderHome::pin();
-        let home_b = ggs_home().unwrap();
-        assert!(unseal(&home_b, &sealed).is_err());
-        drop(guard_b);
+        // Another machine's derivation — the json and the keys/ file copied
+        // wholesale — does not open it.
+        let machine_b = machine_master_key_for("machine-b");
+        assert_ne!(machine_a, machine_b);
+        assert!(open_with(&machine_b, &sealed).is_err());
     }
 
-    /// The master key file lands once, 32 bytes, and user-readable only (unix).
+    /// The master key is derived from the machine's identity and stored nowhere:
+    /// sealing a key creates no `keys/` directory at all, and the derivation is
+    /// stable for one identity.
     #[test]
-    fn the_master_key_is_created_once_user_readable_only() {
+    fn the_machine_master_key_stores_no_key_file() {
         let _guard = ProviderHome::pin();
         let home = ggs_home().unwrap();
-        let key = master_key(&home).unwrap();
-        let path = home.join("keys").join("ai-providers.key");
-        assert_eq!(std::fs::read(&path).unwrap().len(), 32);
-        assert_eq!(master_key(&home).unwrap(), key);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
+        let sealed = seal("sk-secret-1234").unwrap();
+        assert_eq!(unseal(&home, &sealed).unwrap(), "sk-secret-1234");
+        assert!(
+            !home.join("keys").exists(),
+            "the machine-bound seal stores no key material on disk"
+        );
+        assert_eq!(
+            machine_master_key_for("one-identity"),
+            machine_master_key_for("one-identity")
+        );
+    }
+
+    /// The legacy migration: entries sealed under the retired random file key
+    /// re-seal under the machine key, the store persists, the file retires, and a
+    /// second pass is a no-op.
+    #[test]
+    fn a_legacy_file_key_store_migrates_and_the_file_retires() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        // A store as the earlier version wrote it: entries under the random file key.
+        let mut legacy = [0u8; 32];
+        getrandom::fill(&mut legacy).unwrap();
+        std::fs::create_dir_all(home.join("keys")).unwrap();
+        std::fs::write(home.join("keys").join("ai-providers.key"), legacy).unwrap();
+        let mut store = read_store(&home).unwrap();
+        store.profiles[1].api_key_enc = Some(seal_with(&legacy, "sk-live-key").unwrap());
+        write_store(&home, &store).unwrap();
+
+        let changed = migrate_sealed_keys(&home, &mut read_store(&home).unwrap()).unwrap();
+        assert!(changed);
+        let migrated = read_store(&home).unwrap();
+        let sealed = migrated.profiles[1].api_key_enc.as_deref().unwrap();
+        assert_eq!(unseal(&home, sealed).unwrap(), "sk-live-key");
+        assert!(!home.join("keys").join("ai-providers.key").exists());
+
+        // Idempotent: nothing legacy is in flight, the second pass does nothing.
+        let mut reread = read_store(&home).unwrap();
+        assert!(!migrate_sealed_keys(&home, &mut reread).unwrap());
+    }
+
+    /// The migration's careful edge: an entry that opens under neither key (dead on
+    /// use, the page asks for the key again) keeps the file in place — the deletion
+    /// happens only once every sealed entry opens under the machine key, and a later
+    /// save of the dead entry lets the next pass retire it.
+    #[test]
+    fn a_dead_legacy_entry_keeps_the_file_until_it_is_re_saved() {
+        let _guard = ProviderHome::pin();
+        let home = ggs_home().unwrap();
+        let mut legacy = [0u8; 32];
+        getrandom::fill(&mut legacy).unwrap();
+        std::fs::create_dir_all(home.join("keys")).unwrap();
+        std::fs::write(home.join("keys").join("ai-providers.key"), legacy).unwrap();
+        let mut store = read_store(&home).unwrap();
+        store.profiles[1].api_key_enc = Some(seal_with(&legacy, "sk-live-key").unwrap());
+        // The seeded official profile carries the dead entry: base64, but not a blob.
+        store.profiles[0].api_key_enc = Some(BASE64.encode(b"not-a-sealed-key"));
+        write_store(&home, &store).unwrap();
+
+        let changed = migrate_sealed_keys(&home, &mut read_store(&home).unwrap()).unwrap();
+        assert!(changed, "the live entry still migrated");
+        assert!(home.join("keys").join("ai-providers.key").exists());
+
+        // The dead entry re-saved under the machine key; the next pass retires the file.
+        let mut fixed = read_store(&home).unwrap();
+        fixed.profiles[0].api_key_enc = Some(seal("sk-re-entered").unwrap());
+        write_store(&home, &fixed).unwrap();
+        assert!(!migrate_sealed_keys(&home, &mut read_store(&home).unwrap()).unwrap());
+        assert!(!home.join("keys").join("ai-providers.key").exists());
     }
 
     /// A bridged backend always gets `CLAUDE_CONFIG_DIR` under ~/.ggs — the official
@@ -2460,7 +2761,7 @@ mod tests {
         let _guard = ProviderHome::pin();
         let home = ggs_home().unwrap();
         let mut store = third_party_store();
-        store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
+        store.profiles[1].api_key_enc = Some(seal("sk-live-key").unwrap());
         write_store(&home, &store).unwrap();
         let spawn = backend_env_for(CLAUDE_CODE_EXT_ID, &home, None);
         let map = env_map(&spawn);
@@ -2474,9 +2775,7 @@ mod tests {
             map["ANTHROPIC_BASE_URL"]
         );
         assert!(
-            !spawn
-                .iter()
-                .any(|(_, value)| value.contains("sk-live-key")),
+            !spawn.iter().any(|(_, value)| value.contains("sk-live-key")),
             "the real key leaked into the spawn environment: {spawn:?}"
         );
         assert_eq!(
@@ -2633,7 +2932,7 @@ mod tests {
         let _guard = ProviderHome::pin();
         let home = ggs_home().unwrap();
         let mut store = third_party_store();
-        store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
+        store.profiles[1].api_key_enc = Some(seal("sk-live-key").unwrap());
         store.profiles[1].api_key_hint = Some("-key".to_owned());
         let active = store.profiles[1].clone();
         let env = provider_env_vars(&active, &home);
@@ -2680,9 +2979,7 @@ mod tests {
             spawn_map["ANTHROPIC_BASE_URL"]
         );
         assert!(
-            !spawn
-                .iter()
-                .any(|(_, value)| value.contains("sk-live-key")),
+            !spawn.iter().any(|(_, value)| value.contains("sk-live-key")),
             "the real key leaked into the spawn environment: {spawn:?}"
         );
     }
@@ -2738,13 +3035,12 @@ mod tests {
         );
     }
 
-    /// A key sealed under another install's master key is skipped, not fatal: the
-    /// endpoint vars still apply, the key vars are absent.
+    /// A key sealed on another machine is skipped, not fatal: the endpoint vars
+    /// still apply, the key vars are absent.
     #[test]
-    fn a_key_from_another_install_is_skipped_not_fatal() {
-        let guard_a = ProviderHome::pin();
-        let sealed_elsewhere = seal(&ggs_home().unwrap(), "sk-elsewhere").unwrap();
-        drop(guard_a);
+    fn a_key_from_another_machine_is_skipped_not_fatal() {
+        let sealed_elsewhere =
+            seal_with(&machine_master_key_for("another-machine"), "sk-elsewhere").unwrap();
 
         let _guard = ProviderHome::pin();
         let home = ggs_home().unwrap();
@@ -3017,10 +3313,14 @@ mod tests {
         assert_eq!(json["spinnerTipsEnabled"], serde_json::json!(false));
 
         // Fully off: our own `false`s go, and the pass that agrees answers None.
-        let cleaned = claude_tweaks_settings(Some(&off), &enabled(&[])).unwrap().unwrap();
+        let cleaned = claude_tweaks_settings(Some(&off), &enabled(&[]))
+            .unwrap()
+            .unwrap();
         let json: serde_json::Value = serde_json::from_str(&cleaned).unwrap();
         assert!(json.get("spinnerTipsEnabled").is_none(), "{json}");
-        assert!(claude_tweaks_settings(Some(&cleaned), &enabled(&[])).unwrap().is_none());
+        assert!(claude_tweaks_settings(Some(&cleaned), &enabled(&[]))
+            .unwrap()
+            .is_none());
         assert!(
             claude_tweaks_settings(Some(&text), &enabled(&["commitAttribution", "spinnerTips"]))
                 .unwrap()
@@ -3029,7 +3329,9 @@ mod tests {
         );
 
         // A fresh file gains the enabled keys alone; an unparseable one fails.
-        let fresh = claude_tweaks_settings(None, &enabled(&["autoMemory"])).unwrap().unwrap();
+        let fresh = claude_tweaks_settings(None, &enabled(&["autoMemory"]))
+            .unwrap()
+            .unwrap();
         let json: serde_json::Value = serde_json::from_str(&fresh).unwrap();
         assert_eq!(json["autoMemoryEnabled"], serde_json::json!(false));
         assert!(claude_tweaks_settings(Some("{not json"), &enabled(&[])).is_err());
@@ -3056,7 +3358,9 @@ mod tests {
         apply_claude_tweaks_inner().unwrap();
         let account_settings: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(
-                home.join("claude-accounts").join("official-work").join("settings.json"),
+                home.join("claude-accounts")
+                    .join("official-work")
+                    .join("settings.json"),
             )
             .unwrap(),
         )
@@ -3095,7 +3399,7 @@ mod tests {
         let home = ggs_home().unwrap();
         let mut store = third_party_store();
         store.active_id = Some("official".to_owned());
-        store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
+        store.profiles[1].api_key_enc = Some(seal("sk-live-key").unwrap());
 
         // official → deepseek (this window's choice moves; the store's default moves
         // with it): both the environment and the store changed.
@@ -3153,7 +3457,13 @@ mod tests {
         let before = store.clone();
         set_active(&mut store, "official-2").unwrap();
         assert_eq!(
-            provider_change(&before, &store, &home, Some("official-2"), Some("official-2")),
+            provider_change(
+                &before,
+                &store,
+                &home,
+                Some("official-2"),
+                Some("official-2")
+            ),
             ProviderChange {
                 env_changed: false,
                 store_changed: false
@@ -3164,7 +3474,13 @@ mod tests {
         // the backend's environment (dir included) does not.
         let before = store.clone();
         store.profiles[2].label = "Work account (team)".to_owned();
-        let change = provider_change(&before, &store, &home, Some("official-2"), Some("official-2"));
+        let change = provider_change(
+            &before,
+            &store,
+            &home,
+            Some("official-2"),
+            Some("official-2"),
+        );
         assert!(!change.env_changed && change.store_changed);
 
         // And back: account → deepseek moves both the dir and the provider env.
@@ -3185,7 +3501,7 @@ mod tests {
         let home = ggs_home().unwrap();
         let mut store = third_party_store();
         store.active_id = Some("official".to_owned());
-        store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
+        store.profiles[1].api_key_enc = Some(seal("sk-live-key").unwrap());
         let claude_dir = home.join("claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
         std::fs::write(
@@ -3293,7 +3609,10 @@ mod tests {
         assert!(!account.contains_key("ANTHROPIC_BASE_URL"), "{account:?}");
         assert_eq!(
             account["CLAUDE_CONFIG_DIR"],
-            home.join("claude-accounts").join("official-work").to_str().unwrap()
+            home.join("claude-accounts")
+                .join("official-work")
+                .to_str()
+                .unwrap()
         );
 
         // A choice whose profile is gone (deleted in another window) falls back to
@@ -3365,7 +3684,7 @@ mod tests {
             api_key: Some("sk-first-key".to_owned()),
             fold_system: None,
         };
-        apply_save(&home, &mut store, &input).unwrap();
+        apply_save(&mut store, &input).unwrap();
         let saved = store
             .profiles
             .iter()
@@ -3384,7 +3703,7 @@ mod tests {
         relabel.api_key = None;
         relabel.label = "DeepSeek (team)".to_owned();
         let mut store2 = store.clone();
-        apply_save(&home, &mut store2, &relabel).unwrap();
+        apply_save(&mut store2, &relabel).unwrap();
         assert_eq!(
             store2
                 .profiles
@@ -3398,7 +3717,7 @@ mod tests {
         // Empty apiKey clears it.
         let mut cleared = relabel.clone();
         cleared.api_key = Some(String::new());
-        apply_save(&home, &mut store2, &cleared).unwrap();
+        apply_save(&mut store2, &cleared).unwrap();
         assert!(store2
             .profiles
             .iter()
@@ -3424,7 +3743,6 @@ mod tests {
     #[test]
     fn profiles_validate_their_shape() {
         let _guard = ProviderHome::pin();
-        let home = ggs_home().unwrap();
         let mut store = seeded_store();
         let official = ProviderInput {
             id: "official".to_owned(),
@@ -3436,7 +3754,7 @@ mod tests {
             api_key: Some("k".to_owned()),
             fold_system: None,
         };
-        apply_save(&home, &mut store, &official).unwrap();
+        apply_save(&mut store, &official).unwrap();
         let profile = store.profiles.iter().find(|p| p.id == "official").unwrap();
         assert!(
             profile.base_url.is_none() && profile.model.is_none() && profile.api_key_enc.is_none()
@@ -3446,14 +3764,14 @@ mod tests {
         bad_url.id = "custom1".to_owned();
         bad_url.preset = "custom".to_owned();
         bad_url.base_url = Some("ftp://nope".to_owned());
-        assert!(apply_save(&home, &mut store, &bad_url).is_err());
+        assert!(apply_save(&mut store, &bad_url).is_err());
         bad_url.base_url = None;
-        assert!(apply_save(&home, &mut store, &bad_url).is_err());
+        assert!(apply_save(&mut store, &bad_url).is_err());
 
         let mut bad_id = bad_url.clone();
         bad_id.id = "../escape".to_owned();
         bad_id.base_url = Some("https://ok.example".to_owned());
-        assert!(apply_save(&home, &mut store, &bad_id).is_err());
+        assert!(apply_save(&mut store, &bad_id).is_err());
     }
 
     /// The compatibility relay switch: a NewAPI gateway folds by default, every other
@@ -3462,7 +3780,6 @@ mod tests {
     #[test]
     fn the_fold_system_switch_defaults_to_newapi_and_keeps_the_users_choice() {
         let _guard = ProviderHome::pin();
-        let home = ggs_home().unwrap();
         let mut store = seeded_store();
         let gateway = ProviderInput {
             id: "gw".to_owned(),
@@ -3474,7 +3791,7 @@ mod tests {
             api_key: None,
             fold_system: None,
         };
-        apply_save(&home, &mut store, &gateway).unwrap();
+        apply_save(&mut store, &gateway).unwrap();
         let folds = |store: &ProviderStore, id: &str| {
             store
                 .profiles
@@ -3492,12 +3809,12 @@ mod tests {
 
         let mut off = gateway.clone();
         off.fold_system = Some(false);
-        apply_save(&home, &mut store, &off).unwrap();
+        apply_save(&mut store, &off).unwrap();
         let mut custom_on = gateway.clone();
         custom_on.id = "c".to_owned();
         custom_on.preset = "custom".to_owned();
         custom_on.fold_system = Some(true);
-        apply_save(&home, &mut store, &custom_on).unwrap();
+        apply_save(&mut store, &custom_on).unwrap();
         let reread: ProviderStore =
             serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
         assert!(!folds(&reread, "gw"));
@@ -3521,9 +3838,8 @@ mod tests {
     #[test]
     fn the_list_answer_never_carries_a_key_in_any_form() {
         let _guard = ProviderHome::pin();
-        let home = ggs_home().unwrap();
         let mut store = third_party_store();
-        store.profiles[1].api_key_enc = Some(seal(&home, "sk-live-key").unwrap());
+        store.profiles[1].api_key_enc = Some(seal("sk-live-key").unwrap());
         let answer = list_answer(&store, store.active_id.as_deref());
         let json = serde_json::to_string(&answer).unwrap();
         assert!(
@@ -3543,7 +3859,6 @@ mod tests {
     #[test]
     fn an_unknown_preset_is_rejected() {
         let _guard = ProviderHome::pin();
-        let home = ggs_home().unwrap();
         let mut store = seeded_store();
         let input = ProviderInput {
             id: "x".to_owned(),
@@ -3555,7 +3870,7 @@ mod tests {
             api_key: None,
             fold_system: None,
         };
-        assert!(apply_save(&home, &mut store, &input).is_err());
+        assert!(apply_save(&mut store, &input).is_err());
     }
 
     /// The seeded store lists the official service as active with the built-in
@@ -3668,7 +3983,7 @@ mod tests {
             api_key: Some("密钥-secret-Δ".to_owned()),
             fold_system: None,
         };
-        apply_save(&home, &mut store, &input).unwrap();
+        apply_save(&mut store, &input).unwrap();
         write_store(&home, &store).unwrap();
 
         let read_back = read_store(&home).unwrap();
@@ -3901,7 +4216,10 @@ mod tests {
         let spawn = env_map(&spawn_env);
         // The managed credential: the imported key seals into the store and reaches the
         // backend only as the placeholder over the relay's URL.
-        assert_eq!(spawn["ANTHROPIC_AUTH_TOKEN"], MANAGED_CREDENTIAL_PLACEHOLDER);
+        assert_eq!(
+            spawn["ANTHROPIC_AUTH_TOKEN"],
+            MANAGED_CREDENTIAL_PLACEHOLDER
+        );
         assert!(
             !spawn_env
                 .iter()
@@ -4232,7 +4550,9 @@ mod tests {
         apply_claude_mcp(&["/repo".to_owned()], Some(Path::new(command))).unwrap();
         let account_config: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(
-                home.join("claude-accounts").join("official-work").join(".claude.json"),
+                home.join("claude-accounts")
+                    .join("official-work")
+                    .join(".claude.json"),
             )
             .unwrap(),
         )
@@ -4268,7 +4588,9 @@ mod tests {
         );
         let account_config: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(
-                home.join("claude-accounts").join("official-work").join(".claude.json"),
+                home.join("claude-accounts")
+                    .join("official-work")
+                    .join(".claude.json"),
             )
             .unwrap(),
         )

@@ -294,7 +294,10 @@ fn is_hop_header(name: &str) -> bool {
 /// The forwarded request's headers: hop headers drop, and a managed route's placeholder
 /// credential headers drop with it (the caller appends the real pair) while an
 /// unmanaged route's own pair crosses verbatim.
-fn credential_headers(headers: &[(String, String)], api_key: Option<&str>) -> Vec<(String, String)> {
+fn credential_headers(
+    headers: &[(String, String)],
+    api_key: Option<&str>,
+) -> Vec<(String, String)> {
     headers
         .iter()
         .filter(|(name, _)| {
@@ -823,10 +826,7 @@ mod tests {
         assert!(answer.contains("ok"), "{answer}");
         let head = captured.lock().unwrap().clone();
         assert!(head.contains("x-api-key: sk-real-key"), "{head}");
-        assert!(
-            head.contains("authorization: Bearer sk-real-key"),
-            "{head}"
-        );
+        assert!(head.contains("authorization: Bearer sk-real-key"), "{head}");
         assert!(!head.contains("ggs-managed"), "{head}");
         server.join().unwrap();
     }
@@ -858,12 +858,25 @@ mod tests {
             )
         };
         let managed = headers(Some("sk-real"));
-        assert!(!managed.iter().any(|(name, _)| name.eq_ignore_ascii_case("x-api-key")));
-        assert!(!managed.iter().any(|(name, _)| name.eq_ignore_ascii_case("authorization")));
-        assert!(managed.iter().any(|(name, value)| name == "anthropic-version" && value == "2023-06-01"));
-        assert!(!managed.iter().any(|(name, _)| name == "host"), "hop headers drop");
+        assert!(!managed
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("x-api-key")));
+        assert!(!managed
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("authorization")));
+        assert!(managed
+            .iter()
+            .any(|(name, value)| name == "anthropic-version" && value == "2023-06-01"));
+        assert!(
+            !managed.iter().any(|(name, _)| name == "host"),
+            "hop headers drop"
+        );
         let unmanaged = headers(None);
-        assert!(unmanaged.iter().any(|(name, value)| name == "X-Api-Key" && value == "ggs-managed"));
-        assert!(unmanaged.iter().any(|(name, value)| name == "Authorization" && value == "Bearer ggs-managed"));
+        assert!(unmanaged
+            .iter()
+            .any(|(name, value)| name == "X-Api-Key" && value == "ggs-managed"));
+        assert!(unmanaged
+            .iter()
+            .any(|(name, value)| name == "Authorization" && value == "Bearer ggs-managed"));
     }
 }

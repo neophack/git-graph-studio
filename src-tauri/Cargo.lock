@@ -2153,8 +2153,10 @@ dependencies = [
  "ggs-shellenv",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "ureq",
+ "winreg 0.52.0",
 ]
 
 [[package]]

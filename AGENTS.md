@@ -731,8 +731,13 @@ nothing.
 model provider — the official Claude service or any Anthropic-compatible endpoint
 (DeepSeek, Zhipu GLM, Moonshot Kimi, a custom gateway). The store lives at
 `~/.ggs/ai-providers.json` — never Claude's own `~/.claude`: `cmd_providers.rs` seals
-every API key with AES-256-GCM under a per-install master key
-(`~/.ggs/keys/ai-providers.key`, 0600) and decrypts one only when `ext_process` spawns
+every API key with AES-256-GCM under a master key derived from the machine's identity
+(2026-11-16, the owner's direction: 加密要跟机器绑定 — Windows' MachineGuid, Linux'
+machine-id, macOS' platform UUID, hashed with a domain separator; no key material is
+stored anywhere, and `ai-providers.json` copied to another PC does not decrypt —
+`keys/ai-providers.key` carried along included, that earlier version's random file key
+was retired: the boot pass re-seals legacy entries under the machine key and deletes
+the file) and decrypts one only when `ext_process` spawns
 the bridged backend — through the spawn-env source the composition root registers
 (`lib.rs`'s `run` wires `cmd_providers::backend_env` onto
 `ext_process::add_spawn_env_source`), so `ext_process` names no provider knowledge and
@@ -996,7 +1001,8 @@ page shows the integration's state (`claude_mcp_status`).
   download-and-install over ureq, origin-confined, a marketplace package installing
   through `cmd_ext`'s ordinary VSIX path),
   the `ggs-providers` crate behind `src-tauri/src/cmd_providers.rs` (the AI provider bridge: the provider store under
-  `~/.ggs/ai-providers.json`, the AES-256-GCM key sealing under `~/.ggs/keys/`, the
+  `~/.ggs/ai-providers.json`, the AES-256-GCM key sealing under a master key derived
+  from the machine's identity, the
   built-in presets — official / DeepSeek / Zhipu GLM / Moonshot Kimi / custom, each
   flagging whether it can run keyless — `provider_usage` (the usage curve's data: the
   redirected Claude state's session transcripts `~/.ggs/claude/projects/**/*.jsonl`
