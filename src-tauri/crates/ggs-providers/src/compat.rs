@@ -15,10 +15,19 @@
 //! `<system-reminder>` block inside the adjacent user turn (Claude Code's own convention
 //! for user-role injections), everything else untouched; every other byte, header and
 //! status crosses verbatim, and the answer streams back as it arrives (SSE included).
-//! Routes are keyed by an unguessable token per upstream origin, so the listener is no
-//! open relay for other local processes. One listener per app process, started on the
-//! first route; it lives as long as the process — the backends it serves are stopped
-//! with the app.
+//!
+//! It is also the credential seam (2026-11-16, the owner's direction: once the user has
+//! set the key it must not be readable — 盗刷 protection): a managed route carries the
+//! profile's real key, strips the placeholder `x-api-key` / `authorization` headers the
+//! engine sends, and injects the real pair upstream-side. The spawn env holds the
+//! relay's URL and a placeholder pair instead of the key, so nothing the engine spawns
+//! — PowerShell, Git Bash, a Linux terminal, an MCP server — inherits anything
+//! stealable.
+//!
+//! Routes are keyed by an unguessable token per (upstream, credential, fold) triple, so
+//! the listener is no open relay for other local processes. One listener per app
+//! process, started on the first route; it lives as long as the process — the backends
+//! it serves are stopped with the app.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -37,8 +46,18 @@ const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 struct Relay {
     port: u16,
-    /// token → upstream base URL (no trailing slash).
-    routes: Mutex<HashMap<String, String>>,
+    /// token → route.
+    routes: Mutex<HashMap<String, Route>>,
+}
+
+/// One route's destination and behavior: the upstream base URL, the real credential to
+/// inject — `None` passes the client's own credential headers through verbatim, the
+/// shape where the backend's env carries the key itself — and whether the fold pass
+/// rewrites mid-`messages[]` system entries (the profile's compatibility switch).
+struct Route {
+    upstream: String,
+    api_key: Option<String>,
+    fold: bool,
 }
 
 static RELAY: OnceLock<Result<Relay, String>> = OnceLock::new();
@@ -66,22 +85,49 @@ fn relay() -> Result<&'static Relay, String> {
 }
 
 /// The loopback base URL that relays to `upstream` (an `http(s)://` base URL, the
-/// profile's `ANTHROPIC_BASE_URL`). The same upstream always answers the same route,
-/// so a backend restart keeps a stable URL.
+/// profile's `ANTHROPIC_BASE_URL`) without touching credentials. The same upstream
+/// always answers the same route, so a backend restart keeps a stable URL.
 pub fn local_base_url(upstream: &str) -> Result<String, String> {
+    routed_base_url(upstream, None, true)
+}
+
+/// The loopback base URL that relays to `upstream` with the real credential injected
+/// (2026-11-16, the owner's direction: once the user has set the key it must not be
+/// readable — the engine's tool shells, PowerShell and Git Bash and Linux terminals
+/// alike, inherit whatever the environment carries, and one `env` in a tool command
+/// reads it straight out). The spawn env carries this URL and a placeholder pair
+/// instead; [`serve`] strips the placeholders and injects the real key upstream-side,
+/// where no tool reaches. The same (upstream, key, fold) triple always answers the
+/// same route, so a backend restart keeps a stable URL.
+pub fn managed_base_url(upstream: &str, api_key: &str, fold: bool) -> Result<String, String> {
+    routed_base_url(upstream, Some(api_key.to_owned()), fold)
+}
+
+fn routed_base_url(upstream: &str, api_key: Option<String>, fold: bool) -> Result<String, String> {
     let upstream = upstream.trim().trim_end_matches('/');
     if !(upstream.starts_with("https://") || upstream.starts_with("http://")) {
         return Err(format!("not an http(s) base URL: {upstream}"));
     }
     let relay = relay()?;
     let mut routes = relay.routes.lock().unwrap();
-    let token = match routes.iter().find(|(_, base)| base.as_str() == upstream) {
+    let token = match routes.iter().find(|(_, route)| {
+        route.upstream == upstream
+            && route.api_key.as_deref() == api_key.as_deref()
+            && route.fold == fold
+    }) {
         Some((token, _)) => token.clone(),
         None => {
             let mut bytes = [0u8; 16];
             getrandom::fill(&mut bytes).map_err(|e| format!("route token: {e}"))?;
             let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-            routes.insert(token.clone(), upstream.to_owned());
+            routes.insert(
+                token.clone(),
+                Route {
+                    upstream: upstream.to_owned(),
+                    api_key,
+                    fold,
+                },
+            );
             token
         }
     };
@@ -245,6 +291,23 @@ fn is_hop_header(name: &str) -> bool {
     )
 }
 
+/// The forwarded request's headers: hop headers drop, and a managed route's placeholder
+/// credential headers drop with it (the caller appends the real pair) while an
+/// unmanaged route's own pair crosses verbatim.
+fn credential_headers(headers: &[(String, String)], api_key: Option<&str>) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter(|(name, _)| {
+            if is_hop_header(name) {
+                return false;
+            }
+            let lowered = name.to_ascii_lowercase();
+            !(api_key.is_some() && matches!(lowered.as_str(), "x-api-key" | "authorization"))
+        })
+        .cloned()
+        .collect()
+}
+
 fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
@@ -272,30 +335,41 @@ fn serve(stream: TcpStream) -> Result<(), String> {
     let mut client = reader.into_inner();
     let _ = client.set_read_timeout(None);
 
-    let upstream_url = {
+    let resolved = {
         let routes = relay()?.routes.lock().unwrap();
         request.target.strip_prefix("/r/").and_then(|rest| {
             let (token, tail) = rest.split_at(rest.find(['/', '?']).unwrap_or(rest.len()));
-            routes.get(token).map(|base| format!("{base}{tail}"))
+            routes.get(token).map(|route| {
+                (
+                    format!("{}{tail}", route.upstream),
+                    route.api_key.clone(),
+                    route.fold,
+                )
+            })
         })
     };
-    let Some(upstream_url) = upstream_url else {
+    let Some((upstream_url, api_key, fold)) = resolved else {
         return write_error(&mut client, 404, "unknown provider relay route");
     };
 
     let body = if request.body.is_empty() {
         request.body
-    } else {
+    } else if fold {
         fold_system_messages(&request.body).unwrap_or(request.body)
+    } else {
+        request.body
     };
 
     let mut builder = ureq::http::Request::builder()
         .method(request.method.as_str())
         .uri(upstream_url.as_str());
-    for (name, value) in &request.headers {
-        if !is_hop_header(name) {
-            builder = builder.header(name.as_str(), value.as_str());
-        }
+    for (name, value) in credential_headers(&request.headers, api_key.as_deref()) {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+    if let Some(key) = api_key.as_deref() {
+        builder = builder
+            .header("x-api-key", key)
+            .header("authorization", format!("Bearer {key}"));
     }
     let result = if body.is_empty() {
         builder
@@ -680,5 +754,116 @@ mod tests {
         assert_eq!(response.status().as_u16(), 404);
         let text = response.body_mut().read_to_string().unwrap();
         assert!(text.contains("unknown provider relay route"), "{text}");
+    }
+
+    /// The managed credential's whole point (2026-11-16, the owner's direction): the
+    /// engine's placeholder pair never reaches the upstream — the relay strips it and
+    /// injects the route's real key, and an unmanaged route's own pair crosses
+    /// verbatim.
+    #[test]
+    fn a_managed_route_swaps_the_placeholder_pair_for_the_real_one_upstream_side() {
+        let upstream = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let upstream_port = upstream.local_addr().unwrap().port();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let server = {
+            let captured = std::sync::Arc::clone(&captured);
+            std::thread::spawn(move || {
+                let (stream, _) = upstream.accept().unwrap();
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                loop {
+                    head.clear();
+                    if reader.read_line(&mut head).unwrap() == 0 || head == "\r\n" {
+                        break;
+                    }
+                    let mut captured = captured.lock().unwrap();
+                    captured.push_str(&head);
+                }
+                let mut stream = stream;
+                let _ = std::io::Write::write_all(
+                    &mut stream,
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+                );
+            })
+        };
+        let local = managed_base_url(
+            &format!("http://127.0.0.1:{upstream_port}/anthropic"),
+            "sk-real-key",
+            true,
+        )
+        .unwrap();
+        let token = local.rsplit_once("/r/").unwrap().1;
+        let port: u16 = local
+            .rsplit_once("/r/")
+            .unwrap()
+            .0
+            .rsplit(':')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut request = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        use std::io::{Read as _, Write as _};
+        request
+            .write_all(
+                format!(
+                    "POST /r/{token}/v1/messages HTTP/1.1\r\n\
+                     x-api-key: ggs-managed\r\n\
+                     authorization: Bearer ggs-managed\r\n\
+                     content-type: application/json\r\n\
+                     content-length: 2\r\n\
+                     \r\n\
+                     {{}}"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut answer = String::new();
+        let _ = request.read_to_string(&mut answer);
+        assert!(answer.contains("ok"), "{answer}");
+        let head = captured.lock().unwrap().clone();
+        assert!(head.contains("x-api-key: sk-real-key"), "{head}");
+        assert!(
+            head.contains("authorization: Bearer sk-real-key"),
+            "{head}"
+        );
+        assert!(!head.contains("ggs-managed"), "{head}");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_managed_route_keeps_its_own_token_per_credential() {
+        let first = managed_base_url("http://127.0.0.1:9/anthropic", "sk-one", true).unwrap();
+        let second = managed_base_url("http://127.0.0.1:9/anthropic", "sk-two", true).unwrap();
+        assert_ne!(first, second, "different keys must not share a route");
+        assert_eq!(
+            managed_base_url("http://127.0.0.1:9/anthropic", "sk-one", true).unwrap(),
+            first,
+            "the same triple answers the same route across backend restarts"
+        );
+    }
+
+    #[test]
+    fn credential_headers_drop_the_placeholders_and_keep_the_rest() {
+        let headers = |api_key: Option<&str>| {
+            super::credential_headers(
+                &[
+                    ("X-Api-Key".to_owned(), "ggs-managed".to_owned()),
+                    ("Authorization".to_owned(), "Bearer ggs-managed".to_owned()),
+                    ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
+                    ("content-type".to_owned(), "application/json".to_owned()),
+                    ("host".to_owned(), "upstream.example".to_owned()),
+                ],
+                api_key,
+            )
+        };
+        let managed = headers(Some("sk-real"));
+        assert!(!managed.iter().any(|(name, _)| name.eq_ignore_ascii_case("x-api-key")));
+        assert!(!managed.iter().any(|(name, _)| name.eq_ignore_ascii_case("authorization")));
+        assert!(managed.iter().any(|(name, value)| name == "anthropic-version" && value == "2023-06-01"));
+        assert!(!managed.iter().any(|(name, _)| name == "host"), "hop headers drop");
+        let unmanaged = headers(None);
+        assert!(unmanaged.iter().any(|(name, value)| name == "X-Api-Key" && value == "ggs-managed"));
+        assert!(unmanaged.iter().any(|(name, value)| name == "Authorization" && value == "Bearer ggs-managed"));
     }
 }

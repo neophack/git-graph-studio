@@ -804,10 +804,19 @@ survive the choice — the spawn env only adds pairs, so an inherited value, a G
 Bash session that launched the app or a user-level leftover, is overridden empty;
 an empty value reads as unset everywhere downstream; the rollout does not decide),
 and a change restarts through `providers_shell_refresh`,
-the provider switch's own path. The whole env set is
-inherited by the
-extension's CLI children (the same takeover `claude-code-sandbox.mjs` proves against a
-local server). The UI is the sidebar chip on the Claude view's section header
+the provider switch's own path. The whole env set rides the backend's own process
+only — and since 2026-11-16 (the owner's direction: once the user has set the key it
+must not be readable, 防盗刷 protection) the key does not ride it at all: the endpoint
+URL becomes the loopback relay's (`compat::managed_base_url` — a route keyed per
+upstream+credential+fold that strips the placeholder `x-api-key` / `authorization`
+headers the engine sends and injects the real pair upstream-side) and the pair becomes
+`ggs-managed` (`MANAGED_CREDENTIAL_PLACEHOLDER`), which the engine authenticates
+against exactly as it did against the real key — so nothing the engine spawns,
+PowerShell and Git Bash and Linux terminals and MCP servers alike, inherits anything
+stealable, and one `env` in a tool command reads a placeholder (the same takeover
+`claude-code-sandbox.mjs` proves against a local server). A relay that cannot start
+leaves the direct pair in place: the chat working beats the last bit of hardening.
+The UI is the sidebar chip on the Claude view's section header
 (`aiProviders.ts` — mounted only for the ids the backend's `bridgedExtIds` names, so
 `src/` names no extension id), its quick pick, and the Model Providers page
 (`providersPage.ts`, the `ai.providers` command); switching provider (or editing the
@@ -999,14 +1008,17 @@ page shows the integration's state (`claude_mcp_status`).
   not name each other; and `compat.rs`, the third-party compatibility relay
   (2026-10-23: Claude Code 2.1.154+ puts `role: "system"` entries mid-`messages[]`,
   which strict gateways and the Qwen chat templates behind NewAPI reject with
-  `System message must be at the beginning` — a per-profile switch, the Model
-  Providers form's checkbox (`foldSystem`; unset follows the preset: on for a NewAPI
-  gateway, off for every other preset, never the official service): with it on,
-  `cmd_providers::backend_env` points the profile's `ANTHROPIC_BASE_URL` at a
-  loopback relay, one listener
-  per process with an unguessable route token per upstream, that folds those entries
-  into the adjacent user turn as `<system-reminder>` blocks — after any `tool_result`
-  blocks — and streams every other byte, SSE included, through verbatim),
+  `System message must be at the beginning`; since 2026-11-16 the relay is also the
+  credential seam — the owner's direction: once the user has set the key it must not
+  be readable, 防盗刷 protection): every third-party profile's `ANTHROPIC_BASE_URL`
+  points at the loopback relay from `backend_env_for` crate-side — one listener per
+  process, an unguessable route token per upstream+credential+fold — that folds the
+  system entries into the adjacent user turn as `<system-reminder>` blocks (per the
+  profile's `foldSystem` switch), strips the placeholder `x-api-key` /
+  `authorization` pair and injects the profile's real key upstream-side, and streams
+  every other byte, SSE included, through verbatim; the spawn env therefore carries
+  the relay's URL and the `ggs-managed` placeholder where the endpoint and key used
+  to ride, and nothing the engine spawns inherits anything stealable),
   `src-tauri/crates/ggs-text/src/grammar.rs` (the TextMate-grammar loader: `.tmLanguage` plists and
   `.json` grammars converted to Sublime syntax and added to the rope viewer's syntect set), the `ggs-ext` crate's `process` module behind `src-tauri/src/ext_process.rs` (the process extension host: eager
   start at boot and install, lazy start on first command as the fallback, `initialize`

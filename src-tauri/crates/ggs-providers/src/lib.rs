@@ -653,6 +653,14 @@ pub fn apply_save(home: &Path, store: &mut ProviderStore, input: &ProviderInput)
 
 /* ---------- The spawn-time environment ---------- */
 
+/// The credential pair's stand-in in the spawn environment (2026-11-16, the owner's
+/// direction: once the user has set the key it must not be readable — 盗刷 protection):
+/// the engine authenticates against it exactly as it did against the real key, the
+/// relay swaps it for the real pair upstream-side, and every process the engine spawns
+/// — PowerShell, Git Bash, a Linux terminal, an MCP server — inherits nothing
+/// stealable.
+pub const MANAGED_CREDENTIAL_PLACEHOLDER: &str = "ggs-managed";
+
 /// The environment a bridged extension's backend is spawned with. Pure over the store
 /// and the home, so the exact bytes a backend sees are testable. The decrypted key
 /// exists only inside this vector's lifetime — the command's answer never carries it.
@@ -753,12 +761,17 @@ pub fn claude_dir_for(profile: Option<&ProviderProfile>, home: &Path) -> PathBuf
 /// (2026-10-01, the long-login-page bug): the extension process reads `process.env`
 /// for exactly the keyless-auth shape — a token there is Claude Code's own, and the
 /// chat authenticates from the first state push instead of rendering the official
-/// login page until a config probe says otherwise. The extension's CLI children
-/// inherit the whole set (the same takeover the claude-code sandbox probe proves end
-/// to end against a local server), which is why the environment alone carries the
-/// provider: nothing provider-shaped is ever written into Claude's own files. A store
-/// that cannot be read adds nothing: the backend still starts, and the extension's
-/// own login remains the fallback.
+/// login page until a config probe says otherwise. Since 2026-11-16 (the owner's
+/// direction: once the user has set the key it must not be readable — 盗刷 protection)
+/// the key itself no longer rides the environment: the endpoint URL becomes the
+/// loopback relay's ([`compat::managed_base_url`], whose route carries the real key)
+/// and the pair becomes [`MANAGED_CREDENTIAL_PLACEHOLDER`] the engine authenticates
+/// against exactly as before — every process the engine spawns, PowerShell and Git
+/// Bash and Linux terminals alike, inherits nothing stealable (the same takeover the
+/// claude-code sandbox probe proves end to end against a local server). The
+/// environment alone still carries the provider: nothing provider-shaped is ever
+/// written into Claude's own files. A store that cannot be read adds nothing: the
+/// backend still starts, and the extension's own login remains the fallback.
 pub fn backend_env_for(ext_id: &str, home: &Path, instance: Option<&str>) -> Vec<(String, String)> {
     if !BRIDGED_EXT_IDS.contains(&ext_id) {
         return Vec::new();
@@ -774,6 +787,15 @@ pub fn backend_env_for(ext_id: &str, home: &Path, instance: Option<&str>) -> Vec
     if let Some(active) = active {
         env.extend(provider_env_vars(active, home));
     }
+    // The credential seam: the pair leaves the environment here (see
+    // [`swap_in_managed_credential`]), the fold flag riding the route per the profile's
+    // compatibility switch.
+    swap_in_managed_credential(
+        &mut env,
+        store
+            .as_ref()
+            .is_some_and(|store| active_folds_system(store, instance)),
+    );
     // The enabled tweaks ride every spawn, official and third-party alike (they shape
     // Claude Code's behaviour, not the provider): one `=1` pair per env-backed switch.
     if let Some(store) = store.as_ref() {
@@ -1251,6 +1273,51 @@ pub fn backend_env(ext_id: &str) -> Vec<(String, String)> {
         }
     }
     env
+}
+
+/// The relay seam over a built spawn environment: the endpoint's URL becomes the
+/// loopback relay's — a managed route when the environment carries a key (the route
+/// injects the real pair upstream-side, [`compat::managed_base_url`]), a plain route
+/// under the profile's compatibility switch otherwise ([`compat::local_base_url`]) —
+/// and the credential pair becomes [`MANAGED_CREDENTIAL_PLACEHOLDER`]. The engine's
+/// auth gates read the placeholder exactly as they read the real key, and nothing its
+/// tool shells spawn can steal. A relay that cannot start leaves the direct pair in
+/// place: the chat working beats the last bit of hardening. An environment without an
+/// endpoint (a custom profile against the default endpoint) keeps its pair — there is
+/// nothing to route through.
+fn swap_in_managed_credential(env: &mut [(String, String)], folds: bool) {
+    let base_url = env
+        .iter()
+        .position(|(name, _)| name == "ANTHROPIC_BASE_URL")
+        .map(|index| env[index].1.clone());
+    let api_key = env
+        .iter()
+        .position(|(name, _)| name == "ANTHROPIC_API_KEY")
+        .map(|index| env[index].1.clone());
+    let Some(upstream) = base_url else {
+        return;
+    };
+    let relayed = match api_key.as_deref().filter(|key| !key.is_empty()) {
+        Some(key) => compat::managed_base_url(&upstream, key, folds),
+        None if folds => compat::local_base_url(&upstream),
+        None => return,
+    };
+    match relayed {
+        Ok(local) => {
+            for (name, value) in env.iter_mut() {
+                match name.as_str() {
+                    "ANTHROPIC_BASE_URL" => *value = local.clone(),
+                    "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_API_KEY" => {
+                        *value = MANAGED_CREDENTIAL_PLACEHOLDER.to_owned();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("[providers] managed credential relay: {error}");
+        }
+    }
 }
 
 /* ---------- The provider switch's gate and Claude-settings withdrawal ---------- */
@@ -2397,11 +2464,20 @@ mod tests {
         write_store(&home, &store).unwrap();
         let spawn = backend_env_for(CLAUDE_CODE_EXT_ID, &home, None);
         let map = env_map(&spawn);
-        assert_eq!(map["ANTHROPIC_AUTH_TOKEN"], "sk-live-key");
-        assert_eq!(map["ANTHROPIC_API_KEY"], "sk-live-key");
-        assert_eq!(
-            map["ANTHROPIC_BASE_URL"],
-            "https://api.deepseek.com/anthropic"
+        // The managed credential (2026-11-16): the pair is the relay's placeholder, the
+        // URL the relay's, and the real key appears nowhere in the environment.
+        assert_eq!(map["ANTHROPIC_AUTH_TOKEN"], MANAGED_CREDENTIAL_PLACEHOLDER);
+        assert_eq!(map["ANTHROPIC_API_KEY"], MANAGED_CREDENTIAL_PLACEHOLDER);
+        assert!(
+            map["ANTHROPIC_BASE_URL"].starts_with("http://127.0.0.1:"),
+            "{:?}",
+            map["ANTHROPIC_BASE_URL"]
+        );
+        assert!(
+            !spawn
+                .iter()
+                .any(|(_, value)| value.contains("sk-live-key")),
+            "the real key leaked into the spawn environment: {spawn:?}"
         );
         assert_eq!(
             map["CLAUDE_CONFIG_DIR"],
@@ -2592,10 +2668,22 @@ mod tests {
         let spawn = backend_env_for(CLAUDE_CODE_EXT_ID, &home, None);
         let spawn_map = env_map(&spawn);
         assert_eq!(spawn_map.len(), 12 + pinned_shell_keys(), "{spawn:?}");
-        assert_eq!(spawn_map["ANTHROPIC_AUTH_TOKEN"], "sk-live-key");
+        // The spawn shape is the managed credential's: the placeholder pair over the
+        // relay's URL, the real key nowhere in the environment.
         assert_eq!(
-            spawn_map["ANTHROPIC_BASE_URL"],
-            "https://api.deepseek.com/anthropic"
+            spawn_map["ANTHROPIC_AUTH_TOKEN"],
+            MANAGED_CREDENTIAL_PLACEHOLDER
+        );
+        assert!(
+            spawn_map["ANTHROPIC_BASE_URL"].starts_with("http://127.0.0.1:"),
+            "{:?}",
+            spawn_map["ANTHROPIC_BASE_URL"]
+        );
+        assert!(
+            !spawn
+                .iter()
+                .any(|(_, value)| value.contains("sk-live-key")),
+            "the real key leaked into the spawn environment: {spawn:?}"
         );
     }
 
@@ -3114,15 +3202,26 @@ mod tests {
             let _ = withdraw_claude_provider_env();
         }
 
-        // The window's next backend spawn carries the new provider — endpoint, key,
-        // models, flags — over the same shared config dir.
+        // The window's next backend spawn carries the new provider — endpoint, models,
+        // flags — over the same shared config dir; the key rides as the managed
+        // credential's placeholder over the relay's URL (2026-11-16), never in the clear.
         let spawn_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, Some("deepseek"));
         let spawn = env_map(&spawn_env);
-        assert_eq!(
-            spawn["ANTHROPIC_BASE_URL"],
-            "https://api.deepseek.com/anthropic"
+        assert!(
+            spawn["ANTHROPIC_BASE_URL"].starts_with("http://127.0.0.1:"),
+            "{:?}",
+            spawn["ANTHROPIC_BASE_URL"]
         );
-        assert_eq!(spawn["ANTHROPIC_AUTH_TOKEN"], "sk-live-key");
+        assert_eq!(
+            spawn["ANTHROPIC_AUTH_TOKEN"],
+            MANAGED_CREDENTIAL_PLACEHOLDER
+        );
+        assert!(
+            !spawn_env
+                .iter()
+                .any(|(_, value)| value.contains("sk-live-key")),
+            "the real key leaked into the spawn environment: {spawn_env:?}"
+        );
         assert_eq!(spawn["ANTHROPIC_MODEL"], "deepseek-flash");
         assert_eq!(
             spawn["CLAUDE_CONFIG_DIR"],
@@ -3800,7 +3899,15 @@ mod tests {
         write_store(&home, &store).unwrap();
         let spawn_env = backend_env_for(CLAUDE_CODE_EXT_ID, &home, None);
         let spawn = env_map(&spawn_env);
-        assert_eq!(spawn["ANTHROPIC_AUTH_TOKEN"], "sk-cc-deepseek");
+        // The managed credential: the imported key seals into the store and reaches the
+        // backend only as the placeholder over the relay's URL.
+        assert_eq!(spawn["ANTHROPIC_AUTH_TOKEN"], MANAGED_CREDENTIAL_PLACEHOLDER);
+        assert!(
+            !spawn_env
+                .iter()
+                .any(|(_, value)| value.contains("sk-cc-deepseek")),
+            "the real key leaked into the spawn environment: {spawn_env:?}"
+        );
 
         // Unknown names are skipped, an empty import answers zero.
         let (imported, _) =
