@@ -3139,6 +3139,10 @@ Conventions:
   cancellation generation (the `ggs-index` search pattern, `cmd_search.rs` the adapter).
 - **Naming**: camelCase TypeScript, snake_case Rust, kebab-case files under `scripts/` and
   `dev/`, `cmd_<domain>.rs` for backend command modules.
+- **Language**: all documentation and code comments are written in English — never Chinese
+  (or any other language) in docs, comments, or written prose in the tree. User-facing
+  strings are exempt: the i18n tables (`src/platform/i18n/{en,zh-cn}.ts`) carry the
+  Chinese translations on purpose.
 
 ## Commits and pull requests
 
@@ -3146,7 +3150,8 @@ Conventions:
   `refactor:`, `chore:`; optional scopes name the module or layer (`feat(scm): …`,
   `fix(tauri): …`, `build(ci): …`).
 - One logical change per commit; the subject says what changed for the user or the build,
-  the body says why and names the invariant or plan section that motivated it.
+  the body says why and names the invariant or plan section that motivated it. Commit
+  messages are written in English — never Chinese.
 - **Never commit**: `target/`, `out/`, anything `prepare.mjs` regenerates, `metrics.json`.
 - Branch model (plan §9): `main` is always releasable; milestone branches are `ggs/mN-*`;
   one PR per task. A PR is mergeable when the checks in
