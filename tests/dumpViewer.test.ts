@@ -5,7 +5,7 @@
 // own coordinates, the Modules tab lists the dump's loaded images as rebuild requests,
 // and a tab closed mid-scan cancels the backend walk.
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Channel } from '@tauri-apps/api/core';
 
 import { EditorGroup } from '../src/features/editor';
@@ -177,6 +177,33 @@ describe('the dump view', () => {
 		expect(backend.callsTo('dump_preview')[0]).toMatchObject({ offset: 100, size: 2048 });
 		expect(document.querySelector('.dump-preview-img')).not.toBeNull();
 		expect(document.querySelector('.dump-preview-hex')!.textContent).toContain('89 50 4e 47');
+	});
+
+	it('the preview revokes its object URL on replace and dispose', async () => {
+		const created: string[] = [];
+		const revoked: string[] = [];
+		const create = URL.createObjectURL.bind(URL);
+		const revoke = URL.revokeObjectURL.bind(URL);
+		vi.spyOn(URL, 'createObjectURL').mockImplementation((blob: Blob) => {
+			const url = create(blob);
+			created.push(url);
+			return url;
+		});
+		vi.spyOn(URL, 'revokeObjectURL').mockImplementation((url: string) => {
+			revoked.push(url);
+			revoke(url);
+		});
+		const view = await openView();
+		click(document.querySelectorAll('.dump-row')[0]!); // the png
+		await waitForReady(() => document.querySelector('.dump-preview-img') !== null);
+		expect(created.length).toBe(1);
+		click(document.querySelectorAll('.dump-row')[2]!); // the jpg (the zip row is no image)
+		await waitForReady(() => (document.querySelector('.dump-preview-title')?.textContent ?? '').includes('.jpg'));
+		expect(created.length).toBe(2);
+		expect(revoked).toEqual([created[0]]);
+		view.dispose();
+		expect(revoked).toEqual([created[0], created[1]]);
+		vi.restoreAllMocks();
 	});
 
 	it('the selection extracts through the scan coordinates into the output folder', async () => {

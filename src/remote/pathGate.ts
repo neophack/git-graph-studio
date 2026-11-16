@@ -228,6 +228,19 @@ export const PATH_GATED: Record<
 	can_log_open: { args: ['path'] },
 	can_log_stats: { args: ['path'] },
 	convert_can_log: { args: ['from', 'to'] },
+	// The structured viewers and the data table (modules 20–23, the media viewer): every
+	// one reads the file `path` names — a session's reads stay inside the open folders.
+	// `dump_preview` reads a raw byte range of whatever `path` names (no dump parse stands
+	// in front of it) and `dump_extract` writes `outDir`, so both halves of it gate.
+	media_info: { args: ['path'] },
+	csv_open: { args: ['path'] },
+	dbc_open: { args: ['path'] },
+	devtree_open: { args: ['path'] },
+	elf_open: { args: ['path'] },
+	dump_open: { args: ['path'] },
+	dump_scan: { args: ['path'] },
+	dump_preview: { args: ['path'] },
+	dump_extract: { args: ['path', 'outDir'] },
 	// The extension platform's own path surfaces (the backend confines these too —
 	// this is the second lock on the same door).
 	ext_fs: { args: ['path', 'to'], extensionRoots: true },

@@ -1006,7 +1006,8 @@ fn probe_mpeg_audio(file: &mut File, size: u64) -> Result<MediaInfo, String> {
     };
     let kbps: [u32; 15] = match version {
         0x3 => [32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0],
-        _ => [8, 16, 24, 32, 40, 48, 64, 80, 96, 112, 128, 144, 160, 0, 0],
+        // MPEG-2/2.5 Layer III: index 7 is 56 — dropping it misreads every rate past 48.
+        _ => [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0],
     };
     let bitrate = kbps[(br_idx - 1) as usize];
     let sample_rate = rates[sr_idx as usize];
@@ -1056,11 +1057,12 @@ fn find_mpeg_frame(head: &[u8], from: usize) -> Option<(u8, u8, u8)> {
 /// The Xing/Info frame's stored frame count (the exact duration), when the first frame
 /// carries one.
 fn xing_frames(head: &[u8], frame_at: usize, version: u8, channels: u16) -> Option<u64> {
-    // The side information's length decides where the Xing tag sits.
+    // The side information's length decides where the Xing tag sits: MPEG-1 is 32/17,
+    // MPEG-2 and 2.5 are 17/9 (stereo/mono).
     let side = match (version, channels) {
         (0x3, 2) => 32,
         (0x3, 1) => 17,
-        (_, 2) => 8,
+        (_, 2) => 17,
         _ => 9,
     };
     let tag_at = frame_at + 4 + side;
@@ -1524,6 +1526,48 @@ mod media_tests {
         let info = probe(path.to_str().unwrap()).unwrap();
         std::fs::remove_file(&path).unwrap();
         let expected = 1000.0 * 1000.0 * 1152.0 / 44100.0;
+        assert!((info.duration_ms.unwrap() - expected).abs() < 0.01);
+    }
+
+    /// One MPEG-2 Layer III frame at 56 kbit/s / 22.05 kHz stereo (header 0xFF 0xF3 …).
+    fn mp3_frame_mpeg2() -> Vec<u8> {
+        let mut frame = vec![0xFF, 0xF3, 0x70, 0x00];
+        frame.resize(183, 0x55);
+        frame
+    }
+
+    #[test]
+    fn an_mpeg2_mp3_reads_the_real_bitrate_table() {
+        // Bitrate index 7 is 56 kbit/s for MPEG-2/2.5 Layer III — a table missing the 56
+        // entry reads 64 and cuts the CBR duration estimate by an eighth.
+        let mut bytes: Vec<u8> = Vec::new();
+        for _ in 0..10 {
+            bytes.extend_from_slice(&mp3_frame_mpeg2());
+        }
+        let path = write_temp("song-mpeg2.mp3", &bytes);
+        let info = probe(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let audio = info.audio.expect("audio track");
+        assert_eq!(audio.sample_rate, Some(22050));
+        assert_eq!(audio.channels, Some(2));
+        let expected = 1830.0 * 8.0 * 1000.0 / 56_000.0;
+        assert!((info.duration_ms.unwrap() - expected).abs() < 0.01);
+    }
+
+    #[test]
+    fn an_mpeg2_xing_tag_sits_after_the_17_byte_side_information() {
+        // MPEG-2/2.5 stereo's side information is 17 bytes, so the tag starts at +21 —
+        // the 8 an early table used never finds it, and the file falls back to the CBR
+        // estimate despite carrying its exact frame count.
+        let mut frame = mp3_frame_mpeg2();
+        let mut xing = b"Xing".to_vec();
+        xing.extend_from_slice(&1u32.to_be_bytes());
+        xing.extend_from_slice(&1000u32.to_be_bytes());
+        frame[21..21 + xing.len()].copy_from_slice(&xing);
+        let path = write_temp("song-xing-mpeg2.mp3", &frame);
+        let info = probe(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let expected = 1000.0 * 1000.0 * 576.0 / 22050.0;
         assert!((info.duration_ms.unwrap() - expected).abs() < 0.01);
     }
 

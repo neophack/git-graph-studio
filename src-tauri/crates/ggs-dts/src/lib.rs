@@ -855,7 +855,7 @@ mod tests {
         push_aligned(&mut body, &u32b(FDT_BEGIN_NODE));
         push_aligned(&mut body, b"\0"); // root
         push_aligned(&mut body, &u32b(FDT_PROP));
-        let model = b"Acme Board ";
+        let model = b"Acme Board\x00";
         push_aligned(&mut body, &u32b(model.len() as u32));
         push_aligned(&mut body, &u32b(offs[0] as u32));
         push_aligned(&mut body, model);

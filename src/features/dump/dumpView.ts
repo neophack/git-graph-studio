@@ -114,6 +114,8 @@ export class DumpView {
 	private filteredCache: CarvedEntry[] = [];
 	/** The row the preview shows (the last clicked). */
 	private previewed: RowKey | null = null;
+	/** The live preview's object URL — revoked when the preview changes and at dispose. */
+	private previewUrl: string | null = null;
 	private extractBusy = false;
 	private disposed = false;
 
@@ -292,6 +294,10 @@ export class DumpView {
 	/** Closes the tab: a running scan retires on the backend (the page is gone). */
 	dispose(): void {
 		this.disposed = true;
+		if (this.previewUrl) {
+			URL.revokeObjectURL(this.previewUrl);
+			this.previewUrl = null;
+		}
 		if (this.phase === 'scanning') void dumpCancel().catch(() => undefined);
 	}
 
@@ -665,6 +671,10 @@ export class DumpView {
 	}
 
 	private async renderPreview(key: RowKey): Promise<void> {
+		if (this.previewUrl) {
+			URL.revokeObjectURL(this.previewUrl);
+			this.previewUrl = null;
+		}
 		this.previewHead.replaceChildren();
 		this.previewActions.hidden = true;
 		this.previewBody.replaceChildren(el('div', 'dump-preview-hint', [t('dump.preview.loading')]));
@@ -706,6 +716,7 @@ export class DumpView {
 			if (mime) {
 				const blob = new Blob([bytes.slice(0, bytes.length)], { type: mime });
 				const url = URL.createObjectURL(blob);
+				this.previewUrl = url;
 				const img = el('img', 'dump-preview-img') as HTMLImageElement;
 				img.src = url;
 				img.alt = carvedName(entry);

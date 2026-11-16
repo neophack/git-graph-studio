@@ -216,6 +216,8 @@ export class MediaView {
 		// shim says so) — the whole-file read is the remote path, not a fallback to wait for.
 		const protocol = remoteShell() ? null : mediaSrcUrl(this.path);
 		if (protocol) {
+			// A previous byte-fallback's blob (a decode error before this reload) goes back.
+			this.releaseBlob();
 			this.usingProtocol = true;
 			this.video.src = protocol;
 		} else {

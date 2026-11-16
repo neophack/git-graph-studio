@@ -388,12 +388,21 @@ fn sniff_delimiter(prefix: &[u8]) -> u8 {
 
 /// Feeds byte chunks, emits complete records. RFC 4180 quoting: a `"`-quoted field may
 /// carry the delimiter, newlines and `""` escapes; records end at `\n` (a preceding `\r`
-/// is stripped), inside quotes or not. The unfinished tail stays in the carry for the
-/// next chunk; `finish` emits it as the file's last record.
+/// is stripped), inside quotes or not. A quote is special only at a field's start — a
+/// stray `"` mid-field is a literal byte, so one dirty cell never merges the rows after
+/// it — and inside quotes `""` is the escape, not a close-and-reopen. The unfinished tail
+/// stays in the carry for the next chunk; `finish` emits it as the file's last record.
 struct RecordSplitter {
     delimiter: u8,
     carry: Vec<u8>,
     in_quotes: bool,
+    /// A `"` read inside quotes: the escape's first half when the next byte is another
+    /// `"`, the field's closing quote otherwise.
+    closing_quote: bool,
+    /// No field byte read yet (record start or right after the delimiter): a `"` here
+    /// opens quoting; after any other byte it is a literal, exactly as `split_record`'s
+    /// `field.is_empty()` test reads it.
+    field_start: bool,
 }
 
 impl RecordSplitter {
@@ -402,19 +411,45 @@ impl RecordSplitter {
             delimiter,
             carry: Vec::new(),
             in_quotes: false,
+            closing_quote: false,
+            field_start: true,
         }
     }
 
     fn feed(&mut self, chunk: &[u8], out: &mut Vec<Vec<String>>) {
         let mut start = 0usize;
         for (i, b) in chunk.iter().enumerate() {
-            if *b == b'"' {
-                self.in_quotes = !self.in_quotes;
-            } else if *b == b'\n' && !self.in_quotes {
+            let b = *b;
+            if self.closing_quote {
+                self.closing_quote = false;
+                if b == b'"' {
+                    continue; // the escape's second half: still quoted
+                }
+                self.in_quotes = false;
+                // b is an unquoted byte now — the delimiter and the newline act below.
+            }
+            if self.in_quotes {
+                if b == b'"' {
+                    self.closing_quote = true;
+                }
+                continue;
+            }
+            if b == b'"' && self.field_start {
+                self.in_quotes = true;
+                self.field_start = false;
+                continue;
+            }
+            if b == self.delimiter {
+                self.field_start = true;
+                continue;
+            }
+            if b == b'\n' {
                 self.carry.extend_from_slice(&chunk[start..i]);
                 start = i + 1;
                 self.emit(out);
+                continue;
             }
+            self.field_start = false;
         }
         self.carry.extend_from_slice(&chunk[start..]);
     }
@@ -439,6 +474,8 @@ impl RecordSplitter {
         out.push(split_record(&self.carry, self.delimiter));
         self.carry.clear();
         self.in_quotes = false;
+        self.closing_quote = false;
+        self.field_start = true;
     }
 }
 
@@ -909,6 +946,41 @@ mod tests {
         let mut records = Vec::new();
         splitter.feed(b"a,b\n\n\nc,d\n", &mut records);
         assert_eq!(records.len(), 2);
+    }
+
+    #[test]
+    fn a_stray_quote_mid_field_never_merges_rows() {
+        // A quote that does not open a field is a literal byte: the row still ends at its
+        // newline, exactly as `split_record` parses it. Toggling blindly would glue every
+        // later row onto this one until the next stray quote.
+        let mut splitter = RecordSplitter::new(b',');
+        let mut records = Vec::new();
+        splitter.feed(b"1,foo\"bar\n2,baz\n3,\"real\nquoted\",x\n4,end\n", &mut records);
+        assert_eq!(
+            records,
+            vec![
+                vec!["1", "foo\"bar"],
+                vec!["2", "baz"],
+                vec!["3", "real\nquoted", "x"],
+                vec!["4", "end"],
+            ]
+        );
+    }
+
+    #[test]
+    fn an_escaped_quote_pair_stays_quoted_across_a_chunk_boundary() {
+        let mut splitter = RecordSplitter::new(b',');
+        let mut records = Vec::new();
+        // The `""` escape straddles the chunk boundary: still one quoted field.
+        splitter.feed(b"\"say \"", &mut records);
+        splitter.feed(b"\"hi\nthere\",b\n", &mut records);
+        assert_eq!(records, vec![vec!["say \"hi\nthere", "b"]]);
+        // A closing quote at a chunk's last byte resolves at the next chunk's first.
+        let mut splitter = RecordSplitter::new(b',');
+        let mut records = Vec::new();
+        splitter.feed(b"\"ab\",c", &mut records);
+        splitter.feed(b"\nd,e\n", &mut records);
+        assert_eq!(records, vec![vec!["ab", "c"], vec!["d", "e"]]);
     }
 
     /* the sniff */

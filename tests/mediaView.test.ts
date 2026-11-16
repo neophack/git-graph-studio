@@ -223,6 +223,20 @@ describe('media viewer', () => {
 		expect(calls()).toBe(before + 1);
 	});
 
+	it('a reload back to the protocol releases the byte fallback’s blob URL', async () => {
+		const group = await openMedia(`${REPO}\\clip.mp4`);
+		const video = document.querySelector<HTMLVideoElement>('.media-video')!;
+		video.dispatchEvent(new Event('error')); // the protocol fails → the blob hop
+		await flush();
+		expect(video.src).toBe('blob:mocked');
+		const revoke = URL.revokeObjectURL as ReturnType<typeof vi.fn>;
+		revoke.mockClear();
+		await (group as unknown as { reloadIfClean: (p: string) => Promise<void> }).reloadIfClean(`${REPO}\\clip.mp4`);
+		// The protocol source is set again, and the fallback's blob went back.
+		expect(video.src).not.toBe('blob:mocked');
+		expect(revoke).toHaveBeenCalledWith('blob:mocked');
+	});
+
 	it("the explorer's context menu names the system player for a media file alone", async () => {
 		backend.on('list_dir', () => [
 			{ name: 'clip.mp4', path: `${REPO}\\clip.mp4`, isDir: false, size: 34_125_000 },

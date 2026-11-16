@@ -885,10 +885,11 @@ fn dds(d: &Detect) -> Vec<(u64, u64)> {
         return Vec::new();
     }
     let flags = u32_at(head, 8);
-    let width = u64::from(u32_at(head, 12));
-    let height = u64::from(u32_at(head, 16));
-    let mips = if flags & 0x20_0000 != 0 {
-        u64::from(u32_at(head, 24)).max(1)
+    let height = u64::from(u32_at(head, 12));
+    let width = u64::from(u32_at(head, 16));
+    // DDSD_MIPMAPCOUNT (0x20000) says dwMipMapCount (offset 28) is present.
+    let mips = if flags & 0x2_0000 != 0 {
+        u64::from(u32_at(head, 28)).max(1)
     } else {
         1
     };
@@ -897,10 +898,11 @@ fn dds(d: &Detect) -> Vec<(u64, u64)> {
     }
     let fourcc = u32_at(head, 84);
     let (block_w, block_h, block_bytes) = match fourcc {
-        0x3154_5844 => (4u64, 4, 4), // "DXT1"
-        0x3354_5844 => (4, 4, 8),    // "DXT3"
-        0x3554_5844 => (4, 4, 8),    // "DXT5"
-        _ => (1, 1, u64::from(u32_at(head, 88) & 0xFF).max(8)),
+        0x3154_5844 => (4u64, 4, 8), // "DXT1": 8 bytes per 4x4 block
+        0x3354_5844 => (4, 4, 16),   // "DXT3": 16 bytes per 4x4 block
+        0x3554_5844 => (4, 4, 16),   // "DXT5": 16 bytes per 4x4 block
+        // Uncompressed: ddspf.dwRGBBitCount is BITS per pixel — bytes are an eighth of it.
+        _ => (1, 1, (u64::from(u32_at(head, 88)) / 8).max(1)),
     };
     let mut size = 0u64;
     let (mut w, mut h) = (
@@ -2012,9 +2014,9 @@ mod tests {
             v.extend_from_slice(b"DDS ");
             v.extend_from_slice(&124u32.to_le_bytes()); // dwSize
             v.extend_from_slice(&0x1007u32.to_le_bytes()); // CAPS|HEIGHT|WIDTH|PIXELFORMAT
-            v.extend_from_slice(&4u32.to_le_bytes()); // width
             v.extend_from_slice(&4u32.to_le_bytes()); // height
-            v.extend_from_slice(&16u32.to_le_bytes()); // linear size
+            v.extend_from_slice(&4u32.to_le_bytes()); // width
+            v.extend_from_slice(&8u32.to_le_bytes()); // linear size: one 4x4 DXT1 block
             v.extend_from_slice(&[0u8; 8]); // depth, mipMapCount
             v.extend_from_slice(&[0u8; 44]); // reserved
             v.extend_from_slice(&32u32.to_le_bytes()); // pixel-format size
@@ -2022,7 +2024,7 @@ mod tests {
             v.extend_from_slice(b"DXT1");
             v.extend(std::iter::repeat_n(0u8, 16)); // the rest of the pixel format
             v.extend(std::iter::repeat_n(0u8, 24)); // caps, caps2, reserved — the full 128
-            v.extend(std::iter::repeat_n(0xAAu8, 4)); // one 4x4 DXT1 block
+            v.extend(std::iter::repeat_n(0xAAu8, 8)); // one 4x4 DXT1 block (8 bytes)
         });
         push("emf", 0, 0, &|v| {
             v.extend_from_slice(&1u32.to_le_bytes()); // iType = EMR_HEADER
@@ -2364,5 +2366,52 @@ mod tests {
                 "{format}: extracted bytes differ"
             );
         }
+    }
+
+    /// The DDS header walk pins the real layout: the mip count at offset 28 behind
+    /// DDSD_MIPMAPCOUNT (0x20000), and the block formats' true sizes (DXT1 8, DXT3/DXT5
+    /// 16 bytes per 4x4; an uncompressed surface's dwRGBBitCount counted in bits).
+    #[test]
+    fn a_dds_carves_its_mip_chain_at_the_real_block_sizes() {
+        let dds_bytes = |flags: u32, width: u32, height: u32, mips: u32, fourcc: &[u8; 4], rgb_bits: u32| {
+            let mut v = Vec::new();
+            v.extend_from_slice(b"DDS ");
+            v.extend_from_slice(&124u32.to_le_bytes()); // dwSize
+            v.extend_from_slice(&flags.to_le_bytes());
+            v.extend_from_slice(&height.to_le_bytes()); // dwHeight at 12
+            v.extend_from_slice(&width.to_le_bytes()); // dwWidth at 16
+            v.extend_from_slice(&0u32.to_le_bytes()); // pitchOrLinearSize
+            v.extend_from_slice(&0u32.to_le_bytes()); // dwDepth at 24
+            v.extend_from_slice(&mips.to_le_bytes()); // dwMipMapCount at 28
+            v.extend(std::iter::repeat_n(0u8, 44)); // reserved
+            v.extend_from_slice(&32u32.to_le_bytes()); // ddspf size
+            v.extend_from_slice(&0u32.to_le_bytes()); // ddspf flags
+            v.extend_from_slice(fourcc); // dwFourCC at 84
+            v.extend_from_slice(&rgb_bits.to_le_bytes()); // dwRGBBitCount at 88
+            v.extend(std::iter::repeat_n(0u8, 36)); // the rest of the 128-byte header
+            v
+        };
+        let carve = |bytes: &[u8]| {
+            let d = Detect {
+                data: bytes,
+                hit: 0,
+                max_size: 1024 * 1024,
+            };
+            dds(&d)
+        };
+        const CAPS: u32 = 0x1007; // CAPS|HEIGHT|WIDTH|PIXELFORMAT
+        const MIPS: u32 = 0x2_0000; // DDSD_MIPMAPCOUNT
+        // 8x4 DXT5, 3 levels: (2x1)+(1x1)+(1x1) blocks of 16 bytes = 64 past the header.
+        let compressed = dds_bytes(CAPS | MIPS, 8, 4, 3, b"DXT5", 0);
+        assert_eq!(carve(&compressed), vec![(0, 128 + 64)]);
+        // DXT1: 8 bytes a block — 16x8 two levels: (4x2)+(2x1) blocks = 10 * 8 = 80.
+        let dxt1 = dds_bytes(CAPS | MIPS, 16, 8, 2, b"DXT1", 0);
+        assert_eq!(carve(&dxt1), vec![(0, 128 + 80)]);
+        // No mip flag: a stray dwMipMapCount value is the dwDepth slot's neighbour, not read.
+        let no_flag = dds_bytes(CAPS, 16, 8, 5, b"DXT1", 0);
+        assert_eq!(carve(&no_flag), vec![(0, 128 + 8 * 8)]); // one 4x2-block level
+        // Uncompressed 32-bit RGB: dwRGBBitCount is bits, so 4 bytes a pixel.
+        let raw = dds_bytes(CAPS, 4, 4, 0, &[0; 4], 32);
+        assert_eq!(carve(&raw), vec![(0, 128 + 4 * 4 * 4)]);
     }
 }

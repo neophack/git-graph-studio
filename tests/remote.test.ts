@@ -1141,6 +1141,38 @@ describe('path gate roots', () => {
 		expect(withinRoots('relative/x', ['/'])).toBe(false);
 		expect(() => gateInvoke('read_file', { path: '/etc/passwd' }, ['/'])).not.toThrow();
 	});
+
+	it('the structured viewers and the dump surface read inside the open folders only', () => {
+		// The 2026-11-14/15 viewer wave (media, data table, DBC, ELF, device tree, dump)
+		// landed without gate entries — a session could `dump_preview` any byte range of
+		// any file on the PC, or `dump_extract` into any directory.
+		const root = navigator.platform.toLowerCase().includes('win') ? 'C:\\work\\repo' : '/work/repo';
+		const inside = navigator.platform.toLowerCase().includes('win') ? 'C:\\work\\repo\\f.bin' : '/work/repo/f.bin';
+		const outside = navigator.platform.toLowerCase().includes('win') ? 'C:\\Users\\me\\.ggs\\ai-providers.json' : '/etc/passwd';
+		const outOutside = navigator.platform.toLowerCase().includes('win') ? 'C:\\Windows\\Temp' : '/tmp';
+		const outInside = navigator.platform.toLowerCase().includes('win') ? 'C:\\work\\repo\\out' : '/work/repo/out';
+		for (const command of [
+			'media_info',
+			'csv_open',
+			'dbc_open',
+			'devtree_open',
+			'elf_open',
+			'dump_open',
+			'dump_scan'
+		]) {
+			expect(() => gateInvoke(command, { path: outside }, [root]), command).toThrow(/outside the folders/);
+			expect(() => gateInvoke(command, { path: inside }, [root]), command).not.toThrow();
+		}
+		// dump_preview's byte range and dump_extract's outDir gate the same way.
+		expect(() => gateInvoke('dump_preview', { path: outside, offset: 0, size: 64 }, [root])).toThrow(/outside the folders/);
+		expect(() => gateInvoke('dump_preview', { path: inside, offset: 0, size: 64 }, [root])).not.toThrow();
+		expect(() =>
+			gateInvoke('dump_extract', { path: inside, entries: [], outDir: outOutside }, [root])
+		).toThrow(/outside the folders/);
+		expect(() =>
+			gateInvoke('dump_extract', { path: inside, entries: [], outDir: outInside }, [root])
+		).not.toThrow();
+	});
 });
 
 describe('remote helpers', () => {

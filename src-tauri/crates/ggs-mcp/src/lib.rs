@@ -1661,13 +1661,14 @@ impl Eq for RankedRow {}
 impl Ord for RankedRow {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // "Greater" is the WORSE row, so the heap's root stays the worst survivor.
-        // The full-tie break prefers the earlier row (the stable sort's answer).
+        // The full-tie break prefers the earlier row (the stable sort's answer): a
+        // later arrival is the worse one — dropped first, sorted last.
         other
             .row
             .hotspot
             .cmp(&self.row.hotspot)
             .then_with(|| other.row.complexity.cmp(&self.row.complexity))
-            .then_with(|| other.seq.cmp(&self.seq))
+            .then_with(|| self.seq.cmp(&other.seq))
     }
 }
 impl PartialOrd for RankedRow {
@@ -1767,6 +1768,41 @@ pub fn run(folder: &str) -> Result<i32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn metric_row(name: &str, hotspot: u32, complexity: u32) -> ggs_analysis::metrics::MetricRow {
+        ggs_analysis::metrics::MetricRow {
+            path: "src/lib.rs".to_owned(),
+            name: name.to_owned(),
+            kind: "function".to_owned(),
+            container: None,
+            line: 1,
+            lines: 3,
+            params: 0,
+            complexity,
+            nesting: 0,
+            refs: 0,
+            hotspot,
+            cognitive: None,
+            halstead: None,
+            lloc: None,
+            mi: None,
+        }
+    }
+
+    #[test]
+    fn the_top_rows_heap_keeps_the_best_and_reads_ties_in_stream_order() {
+        // Five rows for a limit of three: the two weakest (lowest hotspot) drop, and a
+        // full tie is won by the earlier row — kept over a later twin, sorted first.
+        let mut top = TopRows::new(3);
+        top.offer(metric_row("cold", 1, 1));
+        top.offer(metric_row("hot", 100, 10));
+        top.offer(metric_row("tie-early", 50, 5));
+        top.offer(metric_row("warm", 60, 6));
+        top.offer(metric_row("tie-late", 50, 5));
+        let rows = top.into_sorted();
+        let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+        assert_eq!(names, vec!["hot", "warm", "tie-early"]);
+    }
 
     fn scratch_server() -> (tempfile::TempDir, McpServer) {
         let dir = tempfile::tempdir().unwrap();

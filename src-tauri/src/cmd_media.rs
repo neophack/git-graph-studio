@@ -86,6 +86,9 @@ fn range_window(header: Option<&str>, size: u64) -> Option<Window> {
     } else {
         let start: u64 = start_text.parse().ok()?;
         let end = if end_text.is_empty() { size.saturating_sub(1) } else { end_text.parse().ok()? };
+        if start > end {
+            return None; // `bytes=5-2` is malformed, not a window
+        }
         (start, end)
     };
     if window.0 >= size {
@@ -220,6 +223,8 @@ mod media_command_tests {
         assert_eq!(range_window(Some("bytes=900-2000"), 1000), Some((900, 999)));
         assert_eq!(range_window(Some("bytes=1000-"), 1000), None); // past the end
         assert_eq!(range_window(Some("bytes=garbage"), 1000), None);
+        assert_eq!(range_window(Some("bytes=5-2"), 1000), None); // start past end is malformed
+        assert_eq!(range_window(Some("bytes=999-999"), 1000), Some((999, 999)));
         assert_eq!(range_window(None, 1000), None);
     }
 

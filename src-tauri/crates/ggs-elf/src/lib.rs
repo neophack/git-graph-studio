@@ -246,7 +246,7 @@ pub fn parse(bytes: &[u8], total_bytes: u64) -> Result<ElfDocument, String> {
         if let Some(sh) = headers.get(shstrndx) {
             if sh.kind == 3 {
                 let from = sh.offset as usize;
-                let to = (sh.offset + sh.size).min(bytes.len() as u64) as usize;
+                let to = sh.offset.saturating_add(sh.size).min(bytes.len() as u64) as usize;
                 if from <= to && to <= bytes.len() {
                     let mut k = from;
                     while k < to {
@@ -382,12 +382,12 @@ fn sym_string(
         .filter(|sh| sh.kind == 3)
         .map(|sh| {
             let from = sh.offset as usize;
-            let to = ((sh.offset + sh.size).min(bytes.len() as u64)) as usize;
+            let to = sh.offset.saturating_add(sh.size).min(bytes.len() as u64) as usize;
             (from, to)
         })
         .filter(|(from, to)| from <= to && *to <= bytes.len() && header_index != link as usize);
     if let Some((from, to)) = table {
-        let at = from + name_off as usize;
+        let at = from.saturating_add(name_off as usize);
         if at < to {
             let end = bytes[at..to].iter().position(|&b| b == 0).map(|p| at + p).unwrap_or(to);
             return String::from_utf8_lossy(&bytes[at..end]).into_owned();
@@ -438,7 +438,7 @@ fn dynamic_needed(bytes: &[u8], wide: bool, little: bool, sections: &[ElfSection
         };
         // The value indexes .dynstr.
         let at = (dynstr.offset as usize).saturating_add(val as usize);
-        let to = ((dynstr.offset + dynstr.size).min(bytes.len() as u64)) as usize;
+        let to = dynstr.offset.saturating_add(dynstr.size).min(bytes.len() as u64) as usize;
         if at >= to {
             continue;
         }
