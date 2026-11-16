@@ -1,8 +1,11 @@
 //! The file-system watcher behind "external changes show up by themselves": one recursive
 //! `notify` watch on the open folder, whose raw events are coalesced for a short debounce
 //! window and then reported as one `FsChange` batch — the working-tree paths that changed
-//! (repo-relative, forward slashes, capped) plus a flag for anything under `.git/`, which the
-//! git-derived views (SCM, graph, status bar) refresh on without caring which ref moved.
+//! (repo-relative, forward slashes, capped), a flag for anything under `.git/`, which the
+//! git-derived views (SCM, graph, status bar) refresh on without caring which ref moved,
+//! and a flag for the index's own rewrite, the completing write of every staged-state
+//! change a worktree need not move for (a stash apply's final correction, `stash push
+//! --staged`, a terminal `git add` / `git reset`).
 //!
 //! The batch is handed to a callback; `main.rs` forwards it to the webview as the
 //! `studio://fs-changed` event and drops the caches it invalidates (file list, symbols).
@@ -44,6 +47,13 @@ pub struct FsChange {
     pub truncated: bool,
     /// Something under `.git/` changed (index, HEAD, refs, a merge in progress…).
     pub git_changed: bool,
+    /// The git index was rewritten (a stage, a reset, a stash's completing write). The
+    /// working tree itself may not have moved — a `stash push --staged` or a `git add`
+    /// touches only the index, and a stash apply's last phase corrects only the index —
+    /// so without this flag the batch would be dropped and the git-derived views would
+    /// keep their previous snapshot. Never carries paths and never sets
+    /// [`FsChange::git_changed`]: a HEAD/refs write it is not.
+    pub git_index_changed: bool,
 }
 
 /// Folders whose churn is noise to every consumer (the Explorer never shows them, the index
@@ -51,8 +61,9 @@ pub struct FsChange {
 const NOISE_DIRS: &[&str] = &["node_modules", "target", ".svn", ".hg"];
 
 /// Fold one raw event path into the batch being built. Pure, so the classification is unit
-/// tested without a watcher: paths outside the root are dropped, `.git/` sets the flag (its
-/// own paths are never listed), noise folders are dropped, everything else is listed.
+/// tested without a watcher: paths outside the root are dropped, `.git/` sets a flag (its
+/// own paths are never listed — the index a dedicated flag, HEAD/refs the git-changed one),
+/// noise folders are dropped, everything else is listed.
 pub(crate) fn fold_path(batch: &mut FsChange, root: &Path, path: &Path) {
     let Ok(relative) = path.strip_prefix(root) else {
         return;
@@ -70,12 +81,17 @@ pub(crate) fn fold_path(batch: &mut FsChange, root: &Path, path: &Path) {
     // refresh trigger the next one, four `git status` a second forever (2026-10-22: the
     // Output view never stopped scrolling and the event storm stalled the window's drag).
     if let Some(at) = all.iter().position(|part| part == ".git") {
-        // Only the entries that mean the repository's state moved count: HEAD and the refs
-        // (a commit, checkout, fetch, merge in progress), the config. `index` / `index.lock`
-        // are rewritten by every `git status` the app itself runs - reacting to them made a
-        // refresh trigger the next refresh, forever - and `objects/`, `logs/`, hooks and the
-        // like are noise to every view.
+        // The index's own rewrite is a signal of its own: it is the completing write of
+        // every staged-state change whose worktree half need not move (a stash apply's
+        // final correction, `stash push --staged`, a terminal `git add` / `git reset`),
+        // and dropping it left the git-derived views on their previous snapshot. It is
+        // never a working-tree path, and never `git_changed` — a HEAD/refs write it is
+        // not. `index.lock` is the write's transient half; the rename landing at `index`
+        // is the completion, so the lock alone flags nothing.
         let head = all.get(at + 1).map(String::as_str).unwrap_or_default();
+        if head == "index" {
+            batch.git_index_changed = true;
+        }
         let significant = matches!(
             head,
             "HEAD"
@@ -312,7 +328,7 @@ fn debounce_loop(
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
         }
-        if !batch.paths.is_empty() || batch.git_changed || batch.truncated {
+        if !batch.paths.is_empty() || batch.git_changed || batch.git_index_changed || batch.truncated {
             batch.root = root_label.to_owned();
             on_change(batch);
         }
@@ -348,12 +364,14 @@ mod tests {
         assert!(batch.git_changed);
         assert!(!batch.truncated);
 
-        // The index (rewritten by every `git status`), loose objects and reflogs never count
-        // as a repository change: they are what the app's own reads and writes produce.
+        // The index (rewritten by every `git status` the app itself runs), loose objects
+        // and reflogs never count as a repository change: they are what the app's own
+        // reads and writes produce. The index does carry its own flag — the completing
+        // write of a stash apply, a staged-only push or a terminal `git add` — while the
+        // lock's transient half flags nothing (the rename landing at `index` is the
+        // completion) and HEAD-grade entries keep their own flag.
         let mut quiet = FsChange::default();
         for noise in [
-            "index",
-            "index.lock",
             "objects/ab/cdef",
             "logs/HEAD",
             "hooks/pre-commit",
@@ -362,6 +380,13 @@ mod tests {
             fold_path(&mut quiet, root, &under(root, &format!(".git/{noise}")));
         }
         assert!(!quiet.git_changed);
+        assert!(!quiet.git_index_changed);
+        assert!(quiet.paths.is_empty());
+        fold_path(&mut quiet, root, &under(root, ".git/index.lock"));
+        assert!(!quiet.git_index_changed, "the lock is the write's transient half");
+        fold_path(&mut quiet, root, &under(root, ".git/index"));
+        assert!(quiet.git_index_changed);
+        assert!(!quiet.git_changed, "an index rewrite is not a HEAD/refs change");
         assert!(quiet.paths.is_empty());
         for signal in [
             "HEAD",
@@ -418,6 +443,50 @@ mod tests {
         }
         assert_eq!(batch.paths.len(), MAX_PATHS);
         assert!(batch.truncated);
+    }
+
+    /// An index-only burst is still emitted: the completing write of a stash apply (or a
+    /// `stash push --staged`, a terminal `git add`) moves no working-tree path, and a
+    /// batch dropped for naming nothing left the git-derived views on their previous
+    /// snapshot — the Source Control view frozen mid-story until some unrelated file
+    /// happened to change.
+    #[test]
+    fn an_index_only_burst_is_emitted_without_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let (raw_tx, raw_rx) = mpsc::channel();
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let (batch_tx, batch_rx) = mpsc::channel();
+        let watched = root.clone();
+        let watcher = std::thread::spawn(move || {
+            debounce_loop(
+                &watched,
+                None,
+                "repo",
+                &raw_rx,
+                &stop_rx,
+                Duration::from_millis(20),
+                Duration::from_millis(200),
+                move |batch| {
+                    let _ = batch_tx.send(batch);
+                },
+            )
+        });
+        raw_tx
+            .send(root.join(".git").join("index"))
+            .expect("the watcher thread is alive");
+        let batch = batch_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the index-only burst emitted within 2 s");
+        assert!(batch.paths.is_empty());
+        assert!(batch.git_index_changed);
+        assert!(!batch.git_changed);
+        assert!(!batch.truncated);
+        assert_eq!(batch.root, "repo");
+        // The loop only leaves its blocking recv when the raw channel disconnects.
+        drop(raw_tx);
+        stop_tx.send(()).ok();
+        let _ = watcher.join();
     }
 
     #[test]

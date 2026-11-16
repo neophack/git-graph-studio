@@ -414,14 +414,29 @@ export const lifecycleMethods: ThisType<Workbench> = {
 	},
 
 	recheckSwallowedBatch(): void {
-		if (this.recheckInFlight) return;
+		// A batch landing while one re-check runs must not be lost: an index-only batch is
+		// exactly the completing write of the operation the in-flight re-check may have
+		// read too early (a stash apply's final index correction). One follow-up re-check
+		// runs after it; a refresh it triggers supersedes the pending flag.
+		if (this.recheckInFlight) {
+			this.recheckPending = true;
+			return;
+		}
 		this.recheckInFlight = true;
 		void this.scm
 			.statusDiffers()
 			.catch(() => true)
 			.then((differs) => {
 				this.recheckInFlight = false;
-				if (differs) this.scheduleRefresh(0);
+				if (differs) {
+					this.recheckPending = false;
+					this.scheduleRefresh(0);
+					return;
+				}
+				if (this.recheckPending) {
+					this.recheckPending = false;
+					this.recheckSwallowedBatch();
+				}
 			});
 	},
 

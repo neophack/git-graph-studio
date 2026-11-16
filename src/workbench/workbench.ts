@@ -53,6 +53,10 @@ export interface FsChange {
 	truncated: boolean;
 	/** Something under `.git/` changed. */
 	gitChanged: boolean;
+	/** The git index was rewritten though no working-tree path moved — a stash apply's
+	 *  completing write, `stash push --staged`, a terminal `git add`/`git reset`. Older
+	 *  backends never set it; the batch's shape (no paths) routes it either way. */
+	gitIndexChanged?: boolean;
 }
 
 /** The backend watcher's event (main.rs `FS_CHANGED_EVENT`). */
@@ -941,6 +945,9 @@ export class Workbench {
 	lastRefreshAt = -Infinity;
 
 	recheckInFlight = false;
+
+	/** A batch landed while a re-check ran: one follow-up re-check is owed. */
+	recheckPending = false;
 
 	declare recheckSwallowedBatch: () => void ;
 

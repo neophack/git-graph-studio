@@ -286,7 +286,11 @@ no-clobber copy — not a transfer) stay.
   never clobbers what exists: it lands beside it as a " (copy)" sibling; the shared
   `zip_tree` the remote download path packs through; the confined chunked upload writes),
   `src-tauri/src/watcher.rs` (one recursive `notify` watch,
-  debounced `FsChange` batches — external changes appear by themselves; each watch also
+  debounced `FsChange` batches — external changes appear by themselves; a `.git/index`
+  rewrite rides as the batch's own `gitIndexChanged` flag, the completing write of every
+  staged-state change whose worktree need not move (a stash apply's final correction,
+  `stash push --staged`, a terminal `git add` / `git reset`), so the git-derived views
+  re-check although no path they list changed; each watch also
   carries a live status cell, and a refused install is recorded, so `fs_watcher_status` and
   the `studio://watcher-status` pushes can show the status bar's dot where the automatic
   refreshes do not exist or have stopped)

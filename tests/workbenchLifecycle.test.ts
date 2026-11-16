@@ -477,6 +477,27 @@ describe('external changes the watcher could not list in full', () => {
 	});
 });
 
+describe('an index-only watcher batch', () => {
+	it('re-checks the Source Control view though no working-tree path moved', async () => {
+		// The completing write of a stash apply (or of `stash push --staged`, a terminal
+		// `git add`) rewrites `.git/index` alone: the working tree itself may not move, and
+		// a batch dropped for naming nothing left the Source Control view on its previous
+		// snapshot — the applied changes invisible until some unrelated file changed.
+		await flush(8);
+		const before = backend.callsTo('scm_status').length;
+
+		backend.emit(FS_CHANGED_EVENT, { root: REPO_A, paths: [], truncated: false, gitChanged: false, gitIndexChanged: true });
+		await flush(6);
+		expect(backend.callsTo('scm_status').length).toBeGreaterThan(before);
+
+		// A batch from another root is still ignored altogether.
+		const settled = backend.callsTo('scm_status').length;
+		backend.emit(FS_CHANGED_EVENT, { root: REPO_B, paths: [], truncated: false, gitChanged: false, gitIndexChanged: true });
+		await flush(6);
+		expect(backend.callsTo('scm_status').length).toBe(settled);
+	});
+});
+
 describe('chords', () => {
 	it('spells the second key like a binding, with every modifier, and Escape cancels', async () => {
 		const ran: string[] = [];
