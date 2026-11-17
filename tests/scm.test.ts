@@ -134,7 +134,7 @@ describe('source control view', () => {
 		const diffs: string[] = [];
 		const opened: string[] = [];
 		let statusMap = new Map<string, string>();
-		view.onOpenDiff = (d) => diffs.push(`${d.title}|${d.left.revision}>${d.right.revision}`);
+		view.onOpenDiff = (d) => diffs.push(`${d.title}|${d.left.label}>${d.right.label}|${d.left.revision}>${d.right.revision}`);
 		view.onOpenFile = (p) => opened.push(p);
 		view.onStatus = (s) => { statusMap = s; };
 		view.setRepo(REPO);
@@ -154,7 +154,13 @@ describe('source control view', () => {
 		click(rows[1]);
 		click(rows[2]);
 		click(rows[3]);
-		expect(diffs).toEqual(['main.ts (Index)|HEAD>:index', 'gone.txt (Working Tree)|HEAD>*', 'README.md (Working Tree)|HEAD>*']);
+		// Every diff names its versions beside the filename: the staged compare "Staged"
+		// against HEAD's short hash, the working compares "Working Tree" — word or hash.
+		expect(diffs).toEqual([
+			'main.ts (Staged)|HEAD abc1234>Staged|HEAD>:index',
+			'gone.txt (Working Tree)|HEAD abc1234>Working Tree|HEAD>*',
+			'README.md (Working Tree)|HEAD abc1234>Working Tree|HEAD>*'
+		]);
 		expect(opened).toEqual([`${REPO}\\new.txt`]);
 	});
 

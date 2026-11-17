@@ -2029,7 +2029,7 @@ describe('the wired workbench', () => {
 		await until(() => workbench.editors.openTabInputs().some((tab) => tab.id === 'diff:scm:worktree:notes.txt'));
 		await flush(5);
 		const sent = backend.emits.filter((e) => e.event === WORKBENCH_SYNC_EVENT).map((e) => e.payload);
-		expect(sent).toContainEqual({ by: 'main', k: 'openTab', input: { kind: 'diff', id: 'scm:worktree:notes.txt', title: 'notes.txt (Working Tree)', left: { revision: 'HEAD', path: 'notes.txt', label: 'HEAD', exists: true }, right: { revision: '*', path: 'notes.txt', label: 'Working Tree', exists: true } } });
+		expect(sent).toContainEqual({ by: 'main', k: 'openTab', input: { kind: 'diff', id: 'scm:worktree:notes.txt', title: 'notes.txt (Working Tree)', left: { revision: 'HEAD', path: 'notes.txt', label: 'HEAD abc1234', exists: true }, right: { revision: '*', path: 'notes.txt', label: 'Working Tree', exists: true } } });
 	});
 
 	it('a remote open lands as a real active tab', async () => {

@@ -1465,8 +1465,11 @@ export const openMethods: ThisType<EditorGroup> = {
 			return;
 		}
 		const name = basename(path);
+		// The panes' headers name the side beside the path: a full hash reads short —
+		// a symbolic ref (the extension's "HEAD") stays itself.
+		const revisionLabel = /^[0-9a-f]{40}$/i.test(revision) ? revision.slice(0, 8) : revision;
 		const editor: Editor = {
-			input: { kind: 'diff', id, title, left: { revision, path, label: revision, exists: true }, right: { revision, path, label: revision, exists: true } },
+			input: { kind: 'diff', id, title, left: { revision, path, label: revisionLabel, exists: true }, right: { revision, path, label: revisionLabel, exists: true } },
 			id: 'diff:' + id,
 			label: title,
 			iconClass: fileIcon(name),

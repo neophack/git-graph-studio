@@ -19,6 +19,15 @@ function pageStackShell(): boolean {
 	return typeof document !== 'undefined' && document.documentElement.hasAttribute('data-page-stack');
 }
 
+/** The word a comparison side carries beside the filename (the tab title's parenthetical
+ *  and the header over its pane): a commit names its short hash beside the ref —
+ *  "HEAD abc1234" — the staged version says "Staged", the working file "Working Tree",
+ *  so every diff tab says which versions it shows. `shortHash` is the repository's head
+ *  (`SourceControlView` / `SubRepoState`, empty before the first answer or unborn). */
+function headLabel(shortHash: string): string {
+	return shortHash ? `HEAD ${shortHash}` : 'HEAD';
+}
+
 /** The rowActions concern of SourceControlView — assigned onto the prototype by the module facade. */
 export const rowActionsMethods: ThisType<SourceControlView> = {
 	rowElement(row: ScmRow): HTMLElement {
@@ -152,7 +161,7 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 					this.onOpenDiff?.({
 						id: `scm:head:${path}`,
 						title: `${basename(path)} (Working Tree)`,
-						left: { revision: 'HEAD', path: oldPath, label: 'HEAD', exists: letter !== 'A' },
+						left: { revision: 'HEAD', path: oldPath, label: headLabel(this.shortHash), exists: letter !== 'A' },
 						right: { revision: '*', path, label: 'Working Tree', exists: letter !== 'D' }
 					});
 				}
@@ -281,7 +290,7 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 							id: `scm:${sub.repoPath}:head:${p}`,
 							title: `${basename(p)} (Working Tree)`,
 							repo: sub.repoPath,
-							left: { revision: 'HEAD', path: oldPath, label: 'HEAD', exists: letter !== 'A' },
+							left: { revision: 'HEAD', path: oldPath, label: headLabel(sub.shortHash), exists: letter !== 'A' },
 							right: { revision: '*', path: p, label: 'Working Tree', exists: letter !== 'D' }
 						});
 					} }] as MenuEntry[])),
@@ -420,17 +429,18 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 			return;
 		}
 		const oldPath = file.oldPath ? toPosix(file.oldPath) : path;
+		const head = headLabel(this.shortHash);
 		const diff: DiffRequest = key === 'staged'
 			? {
 				id: `scm:index:${path}`,
-				title: `${basename(path)} (Index)`,
-				left: { revision: 'HEAD', path: oldPath, label: 'HEAD', exists: letter !== 'A' },
-				right: { revision: ':index', path, label: 'Index', exists: letter !== 'D' }
+				title: `${basename(path)} (Staged)`,
+				left: { revision: 'HEAD', path: oldPath, label: head, exists: letter !== 'A' },
+				right: { revision: ':index', path, label: 'Staged', exists: letter !== 'D' }
 			}
 			: {
 				id: `scm:worktree:${path}`,
 				title: `${basename(path)} (Working Tree)`,
-				left: { revision: file.staged !== null ? ':index' : 'HEAD', path: file.staged !== null ? path : oldPath, label: file.staged !== null ? 'Index' : 'HEAD', exists: true },
+				left: { revision: file.staged !== null ? ':index' : 'HEAD', path: file.staged !== null ? path : oldPath, label: file.staged !== null ? 'Staged' : head, exists: true },
 				right: { revision: '*', path, label: 'Working Tree', exists: letter !== 'D' }
 			};
 		this.onOpenDiff?.(diff);
@@ -443,19 +453,20 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 			return;
 		}
 		const oldPath = file.oldPath ? toPosix(file.oldPath) : path;
+		const head = headLabel(sub.shortHash);
 		const diff: DiffRequest = key === 'staged'
 			? {
 				id: `scm:${sub.repoPath}:index:${path}`,
-				title: `${basename(path)} (Index)`,
+				title: `${basename(path)} (Staged)`,
 				repo: sub.repoPath,
-				left: { revision: 'HEAD', path: oldPath, label: 'HEAD', exists: letter !== 'A' },
-				right: { revision: ':index', path, label: 'Index', exists: letter !== 'D' }
+				left: { revision: 'HEAD', path: oldPath, label: head, exists: letter !== 'A' },
+				right: { revision: ':index', path, label: 'Staged', exists: letter !== 'D' }
 			}
 			: {
 				id: `scm:${sub.repoPath}:worktree:${path}`,
 				title: `${basename(path)} (Working Tree)`,
 				repo: sub.repoPath,
-				left: { revision: file.staged !== null ? ':index' : 'HEAD', path: file.staged !== null ? path : oldPath, label: file.staged !== null ? 'Index' : 'HEAD', exists: true },
+				left: { revision: file.staged !== null ? ':index' : 'HEAD', path: file.staged !== null ? path : oldPath, label: file.staged !== null ? 'Staged' : head, exists: true },
 				right: { revision: '*', path, label: 'Working Tree', exists: letter !== 'D' }
 			};
 		this.onOpenDiff?.(diff);

@@ -7,7 +7,10 @@
 export interface DiffSide {
 	revision: string;
 	path: string;
-	/** Shown in the header over the pane, e.g. "HEAD" or "Working Tree". */
+	/** Shown in the header over the pane (and the tab title's parenthetical), so every
+	 *  diff tab says which versions it shows: a commit names its short hash — "HEAD abc1234",
+	 *  or the hash alone over a history row — the staged version "Staged", the working file
+	 *  "Working Tree". */
 	label: string;
 	/** False when the file does not exist on this side. */
 	exists: boolean;

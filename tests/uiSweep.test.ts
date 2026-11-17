@@ -507,7 +507,7 @@ function uiSweepIts(): void {
 				expect(activeTab()).toBe(label);
 			};
 			click(rowNamed('main.rs')); await flush(8);
-			await tabBecomes('main.rs (Index)'); // staged: HEAD vs index
+			await tabBecomes('main.rs (Staged)'); // staged: HEAD (short hash beside it over the panes) vs index
 			click(rowNamed('notes.txt')); await flush(8);
 			await tabBecomes('notes.txt (Working Tree)'); // unstaged: index vs working tree
 			click(rowNamed('gone.txt')); await flush(8);
