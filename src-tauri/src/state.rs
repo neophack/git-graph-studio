@@ -48,6 +48,11 @@ pub struct LaunchState {
     /// Set as the first thing `boot_context` does, before its awaits, so a handoff
     /// racing the boot can never take both roads.
     boot_context_served: AtomicBool,
+    /// A `ggs --new-window` launch: the window opens blank — the remembered folder the
+    /// frontend's boot would otherwise restore stays closed (the taskbar jump list's
+    /// and the File menu's "New Window"). An explicit `ggs <folder>` beside the flag
+    /// still opens that folder — `run()` seeds it as always.
+    blank_window: AtomicBool,
 }
 
 impl LaunchState {
@@ -92,6 +97,14 @@ impl LaunchState {
     /// The alias `handle_opened` reads.
     pub fn boot_context_read(&self) -> bool {
         self.boot_context_served()
+    }
+
+    pub fn blank_window(&self) -> bool {
+        self.blank_window.load(Ordering::SeqCst)
+    }
+
+    pub fn set_blank_window(&self, blank: bool) {
+        self.blank_window.store(blank, Ordering::SeqCst);
     }
 }
 

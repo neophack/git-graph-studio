@@ -34,6 +34,11 @@ export interface BootContext {
 	roots: OpenedRoot[];
 	/** The `.ggs-workspace` file the current roots came from, if any. */
 	workspaceFile: string | null;
+	/** A `ggs --new-window` launch (the taskbar jump list's and the File menu's "New
+	 *  Window"): the boot skips the remembered-folder restore, so the window comes up
+	 *  blank. An explicit `ggs <folder>` beside the flag still opens that folder —
+	 *  `repo` answers it as always. */
+	blank: boolean;
 }
 
 export const bootStage = (stage: string, pageMs: number) => invoke<void>('boot_stage', { stage, pageMs });

@@ -181,7 +181,8 @@ guarantees the window is never a blank dark rectangle.
   drag, a 250 ms quiet decay ends it, and the workbench's scheduled refreshes defer for as
   long as the mark lives — git processes never start against the OS's move loop),
   `src/platform/state.ts`
-  (localStorage persistence), `src/workbench/shell.css`, `src/workbench/appUpdate.ts` +
+  (localStorage persistence; its recents are the taskbar jump list's — `syncJumpList`
+  rides every remember/forget/clear), `src/workbench/shell.css`, `src/workbench/appUpdate.ts` +
   `src/platform/ipc/update.ts` (the app's own update flow, module 12's GitHub channel and
   mirror setting reused: Help → Check for App Updates, the `help.checkForUpdates` command)
 - Backend: `src-tauri/src/lib.rs` / `main.rs` (crate inventory and app entry),
@@ -193,7 +194,10 @@ guarantees the window is never a blank dark rectangle.
   `src-tauri/src/cmd_app.rs` (the app-instance domain: File → New Window's
   `app_new_instance` spawns a sibling process — the multi-open entry every platform
   shares, optionally carrying a folder (`open -n <bundle> --args <path>` on a packaged
-  macOS run, plain argv elsewhere), the handoff a Finder "Open With" makes of an
+  macOS run, plain argv elsewhere), blank by default since 2026-11-18 (the
+  argumentless spawn carries `--new-window`, whose window skips the remembered-folder
+  restore — the Windows taskbar jump list's and the Dock menu's New Window ride the
+  same spawn), the handoff a Finder "Open With" makes of an
   occupied window; a packaged macOS run reaches Launch Services through
   `open -n <bundle>`, since activating a bundled app's icon only focuses the running
   instance. On macOS the Dock icon's right-click menu offers the same:
@@ -250,10 +254,16 @@ language are user data under `~/.ggs/`; theme and UI quality are enforced, not h
   when the two drift apart); the Explorer context-menu entry `context_menu_apply` — the
   "Open with Git Graph Studio" static shell verb under `*` / `Directory` /
   `Directory\Background` / `Drive`, re-applied at every boot, removed by the NSIS
-  uninstall hooks; and the `ggs` launcher's PATH entry `user_path_apply` — the install
+  uninstall hooks; the `ggs` launcher's PATH entry `user_path_apply` — the install
   directory appended to HKCU\Environment\Path at every boot, idempotently and without
   length limits: the NSIS hooks no longer write PATH, whose string-limited read once
-  mistook a long user PATH for an empty one and wiped it, 2026-09-23)
+  mistook a long user PATH for an empty one and wiped it, 2026-09-23; and, since
+  2026-11-18, the **taskbar jump list** `jump_list_apply` (Windows) — the recent
+  folders as launch tasks (each opens exactly as a `ggs <folder>` launch) beside a
+  blank "New Window" task (`ggs --new-window`), written through
+  `ICustomDestinationList` on every recents change (`state.syncJumpList` at boot and
+  every folder open/forget/clear; a remote session's invoke is refused — the PC's
+  shell is the PC's), the pure `jump_items` builder tested on every platform)
 - Assets: `static/theme/*.css` (the colour themes)
 
 ### 3. File Explorer

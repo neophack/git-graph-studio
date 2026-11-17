@@ -14,7 +14,9 @@
 //!
 //! The same file owns the Explorer context-menu entry (`context_menu_apply`): the
 //! "Open with Git Graph Studio" verb Zed's Windows 10 install writes - static shell
-//! verbs under HKCU, no admin rights, no shell-extension DLL.
+//! verbs under HKCU, no admin rights, no shell-extension DLL - and the taskbar's
+//! right-click jump list (`jump_list_apply`): the recent folders as launch tasks and
+//! the blank "New Window" task, written through `ICustomDestinationList`.
 
 use serde::Serialize;
 
@@ -224,6 +226,247 @@ pub fn context_menu_apply(on: bool, label: String) -> Result<AssocResult, String
             message_key: "contextmenu.applied.unsupported".into(),
             detail: String::new(),
         })
+    }
+}
+
+/* ---------- The taskbar jump list (Windows) ---------- */
+
+/// How many recent folders the jump list carries — the shell's own ten-slot budget
+/// (the `BeginList` minimum) keeps room for the separator and the New Window task.
+const JUMP_LIST_FOLDER_MAX: usize = 9;
+
+/// One entry the taskbar's right-click jump list shows: a task the shell launches —
+/// this app's executable with arguments, exactly a `ggs <arguments>` launch — or the
+/// separator line between the recents and the New Window task.
+#[derive(Debug, PartialEq, Eq)]
+pub enum JumpListItem {
+    Task(JumpTask),
+    Separator,
+}
+
+/// One launch task: the label (`PKEY_Title`), the infotip (`IShellLinkW::SetDescription`)
+/// and the arguments this app starts with.
+#[derive(Debug, PartialEq, Eq)]
+pub struct JumpTask {
+    pub title: String,
+    pub description: String,
+    pub arguments: String,
+}
+
+/// The jump list's items, in order: every recent folder as a task — the folder's own
+/// name the label, the full path the infotip, and the quoted path the argument (the
+/// folder opens exactly as a `ggs <folder>` launch does) — then a separator, then the
+/// blank `--new-window` task. `folders` arrives most-recent-first (the frontend's
+/// `recentFolders()`), trimmed to [`JUMP_LIST_FOLDER_MAX`]. Pure, so every platform's
+/// tests pin the shape; the shell application is the Windows half below.
+pub fn jump_items(folders: &[String], new_window_label: &str) -> Vec<JumpListItem> {
+    let mut items = Vec::new();
+    for folder in folders.iter().take(JUMP_LIST_FOLDER_MAX) {
+        let trimmed = folder.trim_end_matches(['/', '\\']);
+        if trimmed.is_empty() {
+            continue;
+        }
+        let name = trimmed
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(trimmed);
+        items.push(JumpListItem::Task(JumpTask {
+            title: name.to_owned(),
+            description: trimmed.to_owned(),
+            arguments: format!("\"{trimmed}\""),
+        }));
+    }
+    if !items.is_empty() {
+        items.push(JumpListItem::Separator);
+    }
+    items.push(JumpListItem::Task(JumpTask {
+        title: new_window_label.to_owned(),
+        description: String::new(),
+        arguments: "--new-window".to_owned(),
+    }));
+    items
+}
+
+/// The taskbar's right-click jump list: the recent folders as launch tasks (each one
+/// opens that folder, exactly a `ggs <folder>` launch) and the blank "New Window" task
+/// (`--new-window`, whose window skips the remembered-folder restore). `folders` is the
+/// frontend's own recents (`state.syncJumpList`, applied at every folder open/close, at
+/// boot and when the user clears them); `new_window_label` is the display language's
+/// label, resolved frontend-side like `context_menu_apply`'s. The list replaces itself
+/// wholesale on every apply — the shell keeps whatever the user pinned on top. Every
+/// other platform answers nothing: macOS the Dock menu (`cmd_app::dock_menu`), Linux
+/// the desktop entry.
+#[tauri::command]
+pub fn jump_list_apply(folders: Vec<String>, new_window_label: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        jump_list::apply(&folders, &new_window_label)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (folders, new_window_label);
+        Ok(())
+    }
+}
+
+/* ---------- Windows: the jump list's shell application ---------- */
+
+#[cfg(target_os = "windows")]
+mod jump_list {
+    use super::JumpListItem;
+    use windows::core::{Interface, PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, VARIANT_BOOL};
+    use windows::Win32::System::Com::StructuredStorage::{PROPVARIANT, PROPVARIANT_0_0, PROPVARIANT_0_0_0};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoTaskMemAlloc, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::System::Variant::{VT_BOOL, VT_LPWSTR};
+    use windows::Win32::Storage::EnhancedStorage::{
+        PKEY_AppUserModel_IsDestListSeparator, PKEY_Title,
+    };
+    use windows::Win32::UI::Shell::Common::{IObjectArray, IObjectCollection};
+    use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
+    use windows::Win32::UI::Shell::{
+        DestinationList, EnumerableObjectCollection, ICustomDestinationList, IShellLinkW, ShellLink,
+    };
+
+    /// CoInitializeEx's own pairing: a thread whose apartment was already up in another
+    /// mode (the event loop's) is used as found and never uninitialized.
+    struct ComGuard(bool);
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize(); }
+            }
+        }
+    }
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// A `VT_LPWSTR` PROPVARIANT over a `CoTaskMemAlloc`'d copy of `text`. The property
+    /// store's `SetValue` takes ownership, and the shell frees it through
+    /// `PropVariantClear` — which releases exactly this allocator's memory.
+    unsafe fn propvariant_string(text: &str) -> Result<PROPVARIANT, String> {
+        let chars: Vec<u16> = wide(text);
+        let bytes = chars.len() * core::mem::size_of::<u16>();
+        let ptr = CoTaskMemAlloc(bytes) as *mut u16;
+        if ptr.is_null() {
+            return Err("jump list: out of memory".to_owned());
+        }
+        std::ptr::copy_nonoverlapping(chars.as_ptr(), ptr, chars.len());
+        let mut value = PROPVARIANT::default();
+        value.Anonymous.Anonymous = core::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+            vt: VT_LPWSTR,
+            Anonymous: PROPVARIANT_0_0_0 { pwszVal: PWSTR(ptr) },
+            ..Default::default()
+        });
+        Ok(value)
+    }
+
+    /// The `VT_BOOL` PROPVARIANT the separator line's property is.
+    unsafe fn propvariant_bool(value: bool) -> PROPVARIANT {
+        let mut pv = PROPVARIANT::default();
+        pv.Anonymous.Anonymous = core::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+            vt: VT_BOOL,
+            Anonymous: PROPVARIANT_0_0_0 {
+                boolVal: VARIANT_BOOL::from(value),
+            },
+            ..Default::default()
+        });
+        pv
+    }
+
+    /// Build the task list and hand it to the shell: `ICustomDestinationList`'s user
+    /// tasks, replaced wholesale on every apply and committed atomically, so the
+    /// taskbar never sees a half-written list. A failure is an `Err` string — the
+    /// frontend swallows it, the jump list just staying stale.
+    pub(super) fn apply(folders: &[String], new_window_label: &str) -> Result<(), String> {
+        let items = super::jump_items(folders, new_window_label);
+        let exe = std::env::current_exe()
+            .map_err(|e| format!("jump list: locate this app's executable: {e}"))?;
+        let exe_w = wide(&exe.display().to_string());
+
+        unsafe {
+            let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if hr.is_err() && hr != RPC_E_CHANGED_MODE {
+                return Err(format!("jump list: COM init: {hr}"));
+            }
+            let _com = ComGuard(hr.is_ok());
+            let list: ICustomDestinationList =
+                CoCreateInstance(&DestinationList, None, CLSCTX_INPROC_SERVER)
+                    .map_err(|e| format!("jump list: the destination list: {e}"))?;
+            // The removed-items answer we drop: nothing here pins, so the shell has
+            // nothing of ours to subtract.
+            let mut min_slots = 0u32;
+            let _: IObjectArray = list
+                .BeginList(&mut min_slots)
+                .map_err(|e| format!("jump list: begin: {e}"))?;
+            let collection: IObjectCollection =
+                CoCreateInstance(&EnumerableObjectCollection, None, CLSCTX_INPROC_SERVER)
+                    .map_err(|e| format!("jump list: the task collection: {e}"))?;
+            for item in items {
+                let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+                    .map_err(|e| format!("jump list: a task link: {e}"))?;
+                match &item {
+                    JumpListItem::Task(task) => {
+                        let args_w = wide(&task.arguments);
+                        link.SetPath(PCWSTR(exe_w.as_ptr()))
+                            .map_err(|e| format!("jump list: the app path: {e}"))?;
+                        link.SetArguments(PCWSTR(args_w.as_ptr()))
+                            .map_err(|e| format!("jump list: the task arguments: {e}"))?;
+                        link.SetIconLocation(PCWSTR(exe_w.as_ptr()), 0)
+                            .map_err(|e| format!("jump list: the task icon: {e}"))?;
+                        if !task.description.is_empty() {
+                            let description_w = wide(&task.description);
+                            link.SetDescription(PCWSTR(description_w.as_ptr()))
+                                .map_err(|e| format!("jump list: the task tip: {e}"))?;
+                        }
+                        let store: IPropertyStore = link
+                            .cast()
+                            .map_err(|e| format!("jump list: the task store: {e}"))?;
+                        let title = propvariant_string(&task.title)?;
+                        store
+                            .SetValue(&PKEY_Title, &title)
+                            .map_err(|e| format!("jump list: the task title: {e}"))?;
+                        store
+                            .Commit()
+                            .map_err(|e| format!("jump list: the task store commit: {e}"))?;
+                        let object: windows::core::IUnknown = link
+                            .cast()
+                            .map_err(|e| format!("jump list: the task object: {e}"))?;
+                        collection
+                            .AddObject(&object)
+                            .map_err(|e| format!("jump list: add the task: {e}"))?;
+                    }
+                    JumpListItem::Separator => {
+                        let store: IPropertyStore = link
+                            .cast()
+                            .map_err(|e| format!("jump list: the separator store: {e}"))?;
+                        store
+                            .SetValue(&PKEY_AppUserModel_IsDestListSeparator, &propvariant_bool(true))
+                            .map_err(|e| format!("jump list: the separator flag: {e}"))?;
+                        store
+                            .Commit()
+                            .map_err(|e| format!("jump list: the separator commit: {e}"))?;
+                        let object: windows::core::IUnknown = link
+                            .cast()
+                            .map_err(|e| format!("jump list: the separator object: {e}"))?;
+                        collection
+                            .AddObject(&object)
+                            .map_err(|e| format!("jump list: add the separator: {e}"))?;
+                    }
+                }
+            }
+            list.AddUserTasks(&collection)
+                .map_err(|e| format!("jump list: the user tasks: {e}"))?;
+            list.CommitList()
+                .map_err(|e| format!("jump list: commit: {e}"))?;
+        }
+        Ok(())
     }
 }
 
@@ -516,6 +759,70 @@ fn apply_linux(selected: &[String]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_jump_list_carries_the_recents_then_the_blank_new_window() {
+        let items = jump_items(
+            &[
+                "C:\\work\\repo\\".to_owned(),
+                "C:\\Program Files\\My Folder".to_owned(),
+            ],
+            "New Window",
+        );
+        assert_eq!(
+            items,
+            vec![
+                JumpListItem::Task(JumpTask {
+                    title: "repo".to_owned(),
+                    description: "C:\\work\\repo".to_owned(),
+                    arguments: "\"C:\\work\\repo\"".to_owned()
+                }),
+                JumpListItem::Task(JumpTask {
+                    title: "My Folder".to_owned(),
+                    description: "C:\\Program Files\\My Folder".to_owned(),
+                    arguments: "\"C:\\Program Files\\My Folder\"".to_owned()
+                }),
+                JumpListItem::Separator,
+                JumpListItem::Task(JumpTask {
+                    title: "New Window".to_owned(),
+                    description: String::new(),
+                    arguments: "--new-window".to_owned()
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn the_jump_list_trims_to_the_budget_and_survives_an_empty_recents() {
+        let folders: Vec<String> = (0..12)
+            .map(|n| format!("C:\\repo\\folder-{n:02}"))
+            .collect();
+        let items = jump_items(&folders, "New Window");
+        let tasks = items
+            .iter()
+            .filter(|item| matches!(item, JumpListItem::Task(_)))
+            .count();
+        assert_eq!(
+            tasks,
+            JUMP_LIST_FOLDER_MAX + 1,
+            "the recents cap, plus the New Window task"
+        );
+        assert!(matches!(items[0], JumpListItem::Task(_)), "newest first");
+        assert!(matches!(
+            items.last(),
+            Some(JumpListItem::Task(JumpTask { arguments, .. }))
+                if arguments == "--new-window"
+        ));
+        // No recents yet: the first launch still shows New Window, no separator.
+        assert_eq!(
+            jump_items(&[], "New Window"),
+            vec![JumpListItem::Task(JumpTask {
+                title: "New Window".to_owned(),
+                description: String::new(),
+                arguments: "--new-window".to_owned()
+            })]
+        );
+    }
 
     #[test]
     fn catalogue_marks_the_recommended_extensions() {

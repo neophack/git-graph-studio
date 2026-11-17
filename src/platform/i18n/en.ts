@@ -22,6 +22,7 @@ export const en = {
 	'keybindings.title': 'Keyboard Shortcuts',
 	'keybindings.searchPlaceholder': 'Search keybindings (type to filter, click a row\u2019s pencil to record)',
 	'workbench.focusViewContainer': 'Focus {0}',
+	'workbench.newWindow': 'New Window',
 	'workbench.newWindowFailed': 'Could not open a new window: {0}',
 	'selftest.title': 'Module Self-Tests',
 	'selftest.idle': 'Not run yet — press Run',

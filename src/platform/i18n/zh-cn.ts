@@ -267,6 +267,7 @@ export const zhCn: typeof en = {
 	'scm.rebaseAbort.none': '当前没有进行中的变基可中止。',
 	'scm.rebaseAbort.confirm': '确定要中止变基吗？分支将恢复到变基前的状态。',
 	'scm.rebaseAbort.action': '中止变基',
+	'workbench.newWindow': '新建窗口',
 	'workbench.newWindowFailed': '无法打开新窗口：{0}',
 	'settings.language': '显示语言',
 	'settings.language.description': '菜单和对话框使用的语言，立即生效。',

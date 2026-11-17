@@ -66,16 +66,18 @@ describe('the gate table', () => {
 		// open_folder is refused even for a root the window already holds: a session's
 		// roots arrive with ATTACH and boot_context, never through its own invoke.
 		// app_new_instance spawns a sibling process; settings_write/assoc_apply/
-		// context_menu_apply/providers_shell_refresh are the PC's own machine-level
-		// integrations (user_path_apply is no command at all — boot-time, unreachable).
-		// Workspace-rooted arguments change nothing: the refusal is the command's, not
-		// the path's.
+		// context_menu_apply/jump_list_apply/providers_shell_refresh are the PC's own
+		// machine-level integrations — the taskbar jump list is the PC's shell, exactly
+		// the "open with" registrations are (user_path_apply is no command at all —
+		// boot-time, unreachable). Workspace-rooted arguments change nothing: the refusal
+		// is the command's, not the path's.
 		for (const command of [
 			'open_folder',
 			'app_new_instance',
 			'settings_write',
 			'assoc_apply',
 			'context_menu_apply',
+			'jump_list_apply',
 			'providers_shell_refresh'
 		]) {
 			expect(() => gateInvoke(command, { path: ROOT, contents: '{}', extensions: [], on: true, label: 'x' }, roots), command).toThrow(

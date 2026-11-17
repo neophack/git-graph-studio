@@ -3,6 +3,9 @@
 // Settings Widget - the split the extension makes between webview state and extension state,
 // with localStorage standing in for VS Code's Memento.
 
+import { jumpListApply } from './ipc/assoc';
+import { t } from './i18n';
+
 const PREFIX = 'ggstudio.';
 
 export function load<T>(key: string, fallback: T): T {
@@ -55,6 +58,7 @@ export function rememberFolder(path: string | null): void {
 		const recent = recentFolders().filter((p) => p !== path);
 		recent.unshift(path);
 		save('recentFolders', recent.slice(0, 10));
+		syncJumpList();
 	}
 }
 
@@ -64,10 +68,27 @@ export function recentFolders(): string[] {
 
 export function forgetFolder(path: string): void {
 	save('recentFolders', recentFolders().filter((p) => p !== path));
+	syncJumpList();
 	// The recents entry and the last session's folder are one fact: a folder forgotten
 	// here (its open failed) must not stay as lastFolder, or every boot re-opens it and
 	// re-errors.
 	if (lastFolder() === path) save('lastFolder', null);
+}
+
+/** "Clear Recently Opened": the recents list empties, and the shell's own list (the
+ *  Windows taskbar jump list) with it. */
+export function clearRecents(): void {
+	save('recentFolders', []);
+	syncJumpList();
+}
+
+/** Push the recents and the New Window label at the OS shell — the Windows taskbar's
+ *  right-click jump list (every other platform's backend answers a no-op). Fire and
+ *  forget: a refusal (a remote session's, the machine-level integrations being the PC's
+ *  own) or a shell failure just leaves the list stale; nothing here is worth a toast. */
+export function syncJumpList(): void {
+	if (typeof localStorage === 'undefined') return;
+	void jumpListApply(recentFolders(), t('workbench.newWindow')).catch(() => undefined);
 }
 
 /* ---------- Command palette (the recently-run commands) ---------- */

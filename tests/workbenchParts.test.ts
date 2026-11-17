@@ -93,6 +93,23 @@ describe('persisted state', () => {
 		// the git-graph-rs plugin's mementos now; the workbench state carries folders and layout.
 	});
 
+	it('every recents change re-renders the taskbar jump list', () => {
+		// The Windows taskbar's right-click list rides the same fact: a folder remembered
+		// lands on it newest-first, a forgotten one drops off, a clear empties it, and the
+		// New Window task's label is the display language's.
+		const before = backend.callsTo('jump_list_apply').length;
+		state.rememberFolder('/a');
+		state.rememberFolder('/b');
+		let call = backend.callsTo('jump_list_apply').at(-1)!;
+		expect(call.folders).toEqual(['/b', '/a']);
+		expect(typeof call.newWindowLabel).toBe('string');
+		state.forgetFolder('/b');
+		expect(backend.callsTo('jump_list_apply').at(-1)!.folders).toEqual(['/a']);
+		state.clearRecents();
+		expect(backend.callsTo('jump_list_apply').at(-1)!.folders).toEqual([]);
+		expect(backend.callsTo('jump_list_apply').length).toBe(before + 4);
+	});
+
 	it('round-trips the command palette\'s MRU of executed commands', () => {
 		state.rememberCommand('test.alpha');
 		state.rememberCommand('test.beta');

@@ -89,6 +89,16 @@ portable-pty = "0.9"
 winreg = "0.52"
 webview2-com = "0.39"
 windows-core = "0.62"
+# The taskbar jump list (cmd_assoc's jump_list module): ICustomDestinationList and the
+# shell links. The version is windows-core's own — one copy in the tree.
+windows = { version = "0.62", features = [
+    "Win32_System_Com",
+    "Win32_System_Variant",
+    "Win32_Storage_EnhancedStorage",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
 objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSMenu", "NSMenuItem"] }
@@ -253,6 +263,8 @@ winreg = { workspace = true }
 # the ones wry already builds (one copy each).
 webview2-com = { workspace = true }
 windows-core = { workspace = true }
+# The taskbar jump list (cmd_assoc's jump_list module).
+windows = { workspace = true }
 
 # The probe runs' App Nap guard (lib.rs's GGS_DEV_HARNESS hook): an occluded macOS
 # WKWebView stops firing page timers, so the dev harness's bounded waits stall for

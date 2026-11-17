@@ -269,7 +269,8 @@ export const PATH_GATED: Record<
  *     NEW windows is what the picker's SPAWN is for.
  *  2. The PC's machine-level integrations, which a browser session must never reach: the
  *     settings file (`settings_write` — a session's settings are its device's own), the OS
- *     "open with" registrations (`assoc_apply`, `context_menu_apply`) and the bridged
+ *     "open with" registrations (`assoc_apply`, `context_menu_apply`), the taskbar
+ *     jump list (`jump_list_apply` — the PC's recents are the PC's shell) and the bridged
  *     claude-code shell refresh (`providers_shell_refresh`, which rewrites the spawn
  *     environment from the settings). (`user_path_apply` is no command at all — it runs at
  *     boot inside the backend — so it needs no gate entry.)
@@ -283,6 +284,7 @@ export const REFUSED_COMMANDS = new Set<string>([
 	'settings_write',
 	'assoc_apply',
 	'context_menu_apply',
+	'jump_list_apply',
 	'providers_shell_refresh'
 ]);
 

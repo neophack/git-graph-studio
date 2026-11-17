@@ -152,6 +152,26 @@ describe('the boot sequence', () => {
 		expect(workbench.currentRepo).toBe(REPO_B);
 	});
 
+	it('a --new-window launch opens blank — the remembered folder stays closed', async () => {
+		// The taskbar jump list's (and the File menu's) New Window: no folder restores,
+		// none opens — yet the remembered fact stays for the next plain launch.
+		await reboot({ repo: null, reloaded: false, blank: true }, REPO_B);
+		expect(backend.callsTo('open_folder')).toEqual([]);
+		expect(backend.callsTo('open_workspace')).toEqual([]);
+		expect(state.lastFolder()).toBe(REPO_B);
+		// A plain argumentless launch beside it still restores (the flag decides).
+		await reboot({ repo: null, reloaded: false }, REPO_B);
+		expect(backend.callsTo('open_folder')).toEqual([{ path: REPO_B }]);
+	});
+
+	it('the boot re-renders the taskbar jump list once a folder lands', async () => {
+		await workbench.openFolder(REPO_B);
+		await flush(6);
+		const calls = backend.callsTo('jump_list_apply');
+		expect(calls.length).toBeGreaterThanOrEqual(1);
+		expect(calls.at(-1)!.folders[0]).toBe(REPO_B);
+	});
+
 	it('a single-file and a workspace launch run the deferred services too', async () => {
 		// The `ggs <file>` and `ggs <workspace>` boots used to return before the idle block:
 		// extensions never activated and the panel never restored on those windows.

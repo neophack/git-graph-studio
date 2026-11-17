@@ -30,7 +30,7 @@ export const menusMethods: ThisType<Workbench> = {
 				...(remote() ? [] : [{ label: 'Open Recent', submenu: [
 					...state.recentFolders().map((folder) => ({ label: basename(folder), keybinding: folder, run: () => void this.openRecent(folder) })),
 					...(state.recentFolders().length > 0 ? ['separator' as const] : []),
-					{ label: 'Clear Recently Opened', disabled: state.recentFolders().length === 0, run: () => { state.save('recentFolders', []); } }
+					{ label: 'Clear Recently Opened', disabled: state.recentFolders().length === 0, run: () => state.clearRecents() }
 				] }]),
 				'separator', item('workbench.save'), item('file.saveAs'), item('workbench.saveAll'), 'separator',
 				item('workbench.closeEditor'),

@@ -606,7 +606,7 @@ export const bootMethods: ThisType<Workbench> = {
 		// opened inside this very call (the backend opens it during the splash), so when the
 		// folder the boot picks matches, the answer is applied directly - no second round trip.
 		const context = await bootContext()
-			.catch((): BootContext => ({ file: null, actions: [], repo: null, workspace: null, reloaded: false, opened: null, openedFor: null, roots: [], workspaceFile: null }));
+			.catch((): BootContext => ({ file: null, actions: [], repo: null, workspace: null, reloaded: false, opened: null, openedFor: null, roots: [], workspaceFile: null, blank: false }));
 		// A `ggs <file>` launch shows exactly that file, alone.
 		if (context.file) {
 			await this.openFileStandalone(context.file);
@@ -658,7 +658,10 @@ export const bootMethods: ThisType<Workbench> = {
 			// reopen as its first root. A page reload is no launch: the backend still holds
 			// the window's open roots, `repo` being a workspace's FIRST root, so there the
 			// remembered workspace file wins - its other roots would drop otherwise.
-			const remembered = state.lastFolder();
+			// A `ggs --new-window` launch (the taskbar jump list's and the File menu's
+			// New Window) opens blank: the remembered folder stays closed, whatever a
+			// plain argumentless launch would restore.
+			const remembered = context.blank ? null : state.lastFolder();
 			const rememberedWorkspace = remembered !== null && remembered.toLowerCase().endsWith('.ggs-workspace');
 			const last = context.reloaded && rememberedWorkspace ? remembered : context.repo ?? remembered;
 			if (last) {
@@ -677,6 +680,11 @@ export const bootMethods: ThisType<Workbench> = {
 				this.statusBar.setRepo(false);
 			}
 		}
+		// The shell's own recent list follows the page's: the Windows taskbar jump list
+		// re-renders at boot (a launch that opened no folder still answers it, so its
+		// New Window task exists from the very first run). Folder opens re-sync through
+		// `rememberFolder` themselves; this is the boot's one guaranteed pass.
+		state.syncJumpList();
 		// The rest of the boot is not what the user is waiting for, and it all shares the one
 		// main thread with the explorer's first listing and the graph view's boot: the
 		// terminal (its xterm chunk and a shell process), the extension host (its frame and

@@ -647,6 +647,11 @@ pub struct BootContext {
     roots: Vec<OpenedFolder>,
     /// The `.ggs-workspace` file the current roots came from, if any.
     workspace_file: Option<String>,
+    /// A `ggs --new-window` launch (the taskbar jump list's and the File menu's "New
+    /// Window"): the frontend skips the remembered-folder restore, so the window comes
+    /// up blank. An explicit `ggs <folder>` beside the flag still opens that folder —
+    /// `repo` answers it as always, and the explicit beats the blank.
+    blank: bool,
 }
 
 #[tauri::command]
@@ -660,6 +665,7 @@ pub async fn boot_context(app: tauri::AppHandle) -> Result<BootContext, String> 
     let file = launch.single_file();
     let actions = launch.startup_actions();
     let workspace = launch.startup_workspace();
+    let blank = launch.blank_window();
     let repo = app.state::<WorkspaceRoots>().first();
     let roots: Vec<OpenedFolder> = app
         .state::<WorkspaceRoots>()
@@ -695,6 +701,7 @@ pub async fn boot_context(app: tauri::AppHandle) -> Result<BootContext, String> 
         opened_for,
         roots,
         workspace_file,
+        blank,
     })
 }
 

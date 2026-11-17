@@ -168,6 +168,7 @@ The app installs a `ggs` command, like VS Code's `code`:
 
 ```sh
 ggs                                   # open the app (last folder, as at a normal launch)
+ggs --new-window                      # open the app blank: no folder restores, none opens
 ggs .                                 # open the current directory
 ggs <path>                            # open that folder (a file opens in single-file mode;
                                        #   a .ggs-workspace file opens as the workspace)
@@ -188,10 +189,13 @@ window appears.
 
 Every launch is its own window (the app is multi-instance): `ggs <path>` and the
 comparison subcommands open in the window they started. Inside the app, **File → New
-Window** (Ctrl/Cmd+Shift+N) opens another instance on every platform — the discoverable
-way on macOS, where clicking the app's icon again only focuses the running window
-(`open -n -a "Git Graph Studio"` does the same from the terminal). On macOS the **Dock
-icon's right-click menu** carries a New Window entry too, and a Finder folder's
+Window** (Ctrl/Cmd+Shift+N) opens another instance on every platform — blank, never
+restoring the last folder — the discoverable way on macOS, where clicking the app's
+icon again only focuses the running window (`open -n -a "Git Graph Studio"` does the
+same from the terminal). On Windows the **taskbar icon's right-click menu** (the jump
+list) lists the recently opened folders as launch tasks beside a New Window task; on
+macOS the **Dock icon's right-click menu** carries a New Window entry too, and a
+Finder folder's
 right-click lists the app under **打开方式 / Open With** (the bundle declares
 `public.folder`): the folder opens in an empty window and wins a new one otherwise, and
 a file opens like a drop would — a fresh install may need one logout/relogin before

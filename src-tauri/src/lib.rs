@@ -83,7 +83,7 @@ mod desktop {
         app_update,
     };
     use ggs_base::workspace::WorkspaceRoots;
-    use crate::cli::{cli_help, launch_path_of, parse_startup_actions, wants_help};
+    use crate::cli::{cli_help, launch_path_of, parse_startup_actions, wants_blank_window, wants_help};
     use crate::window::{apply_webkit_compat, boot_started, revalidate_assets, stamp};
     use std::sync::Mutex;
 
@@ -264,6 +264,11 @@ mod desktop {
             }
         };
         let states = crate::state::StateSet::default();
+        // A `--new-window` launch opens blank (cli.rs): recorded where the boot_context
+        // reads it, before any window or frontend exists.
+        if wants_blank_window(&args) {
+            states.launch.set_blank_window(true);
+        }
         if startup_actions.is_empty() {
             if let Some(arg) = launch_path_of(&args) {
                 let path = std::path::PathBuf::from(&arg);
@@ -701,6 +706,7 @@ mod desktop {
                 cmd_assoc::assoc_list_defaults,
                 cmd_assoc::assoc_apply,
                 cmd_assoc::context_menu_apply,
+                cmd_assoc::jump_list_apply,
                 pty::pty_create,
                 pty::pty_write,
                 pty::pty_resize,

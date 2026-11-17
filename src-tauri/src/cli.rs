@@ -39,6 +39,16 @@ pub fn launch_path_of(args: &[String]) -> Option<String> {
         })
 }
 
+/// Whether this launch is a blank one (`ggs --new-window`): the window opens with
+/// nothing — no launch folder, and the remembered folder skipped where a plain
+/// argumentless launch would restore it. The taskbar jump list's "New Window" task
+/// and the File menu's own "New Window" both launch this form. An explicit
+/// `ggs <folder>` beside the flag still wins (a launch path beats the blank), so the
+/// Remote Access daemon's folder handoff composes with it unchanged.
+pub fn wants_blank_window(args: &[String]) -> bool {
+    args.iter().skip(1).any(|arg| arg == "--new-window")
+}
+
 /// What a macOS Finder "Open With" handoff ([`tauri::RunEvent::Opened`]) carries,
 /// classified: the file URLs split into folders and files, everything else (other
 /// schemes, paths that no longer exist) ignored. Compiled on every platform so the
@@ -230,6 +240,8 @@ pub fn cli_help() -> String {
         "Usage: ggs [flag] [paths]".to_owned(),
         String::new(),
         "  ggs                                  open the app (the last folder, as at a normal launch)".to_owned(),
+        "  ggs --new-window                     open the app blank: no folder restores, none".to_owned(),
+        "                                       opens (the taskbar jump list's New Window)".to_owned(),
         "  ggs <path>                           open that folder (a file opens in single-file".to_owned(),
         "                                       mode; a .ggs-workspace file opens as the".to_owned(),
         "                                       workspace)".to_owned(),
@@ -248,4 +260,32 @@ pub fn cli_help() -> String {
     ]
     .join("\n")
         + "\n"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        std::iter::once("ggs".to_owned())
+            .chain(list.iter().map(|arg| (*arg).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn a_new_window_flag_is_a_blank_launch() {
+        assert!(wants_blank_window(&args(&["--new-window"])));
+        assert!(wants_blank_window(&args(&["--new-window", "Z:/repo"])));
+        assert!(!wants_blank_window(&args(&[])));
+        assert!(!wants_blank_window(&args(&["Z:/repo"])));
+        assert!(!wants_blank_window(&args(&["--compare", "Z:/a", "Z:/b"])));
+    }
+
+    #[test]
+    fn the_flag_is_never_read_as_the_launch_path() {
+        // A flag is a flag (launch_path_of skips every `--` word), a path beside it stays
+        // the path, and a bare flag launch opens nothing.
+        assert_eq!(launch_path_of(&args(&["--new-window"])), None);
+        assert_eq!(launch_path_of(&args(&["--new-window", "Z:/no/such/dir"])), None);
+    }
 }

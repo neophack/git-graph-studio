@@ -51,19 +51,34 @@ pub fn new_instance_plan(exe: &Path) -> NewInstancePlan {
 /// The program and arguments that start another instance — the testable core of
 /// [`spawn_new_instance`]. A launch path rides along as the new instance's one argument
 /// (`ggs <path>`): Launch Services carries it on macOS (`open -n <bundle> --args <path>`),
-/// every other build gets it as plain argv.
-fn instance_argv(plan: &NewInstancePlan, launch: Option<&str>) -> (String, Vec<String>) {
+/// every other build gets it as plain argv. Without a path, `blank` adds the
+/// `--new-window` flag instead — a New Window opens empty, never the remembered
+/// folder a plain argumentless launch restores.
+fn instance_argv(
+    plan: &NewInstancePlan,
+    launch: Option<&str>,
+    blank: bool,
+) -> (String, Vec<String>) {
     match plan {
         NewInstancePlan::OpenNew { bundle } => {
             let mut args = vec!["-n".to_owned(), bundle.display().to_string()];
-            if let Some(path) = launch {
+            if launch.is_none() && blank {
+                args.push("--args".to_owned());
+                args.push("--new-window".to_owned());
+            } else if let Some(path) = launch {
                 args.push("--args".to_owned());
                 args.push(path.to_owned());
             }
             ("open".to_owned(), args)
         }
         NewInstancePlan::SpawnExe { exe } => {
-            let args = launch.map(|path| vec![path.to_owned()]).unwrap_or_default();
+            let args = if let Some(path) = launch {
+                vec![path.to_owned()]
+            } else if blank {
+                vec!["--new-window".to_owned()]
+            } else {
+                Vec::new()
+            };
             (exe.display().to_string(), args)
         }
     }
@@ -75,7 +90,7 @@ pub fn launch_prefix() -> (String, Vec<String>) {
     let Ok(exe) = std::env::current_exe() else {
         return (String::new(), Vec::new());
     };
-    let (program, mut args) = instance_argv(&new_instance_plan(&exe), None);
+    let (program, mut args) = instance_argv(&new_instance_plan(&exe), None, false);
     if matches!(new_instance_plan(&exe), NewInstancePlan::OpenNew { .. }) {
         args.push("--args".to_owned());
     }
@@ -89,7 +104,7 @@ pub fn launch_prefix() -> (String, Vec<String>) {
 /// dropped `Child` is never waited.
 fn spawn_new_instance(launch: Option<&str>) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("locate this app's executable: {e}"))?;
-    let (program, args) = instance_argv(&new_instance_plan(&exe), launch);
+    let (program, args) = instance_argv(&new_instance_plan(&exe), launch, launch.is_none());
     let mut command = std::process::Command::new(program);
     command.args(args);
     let mut child = command
@@ -317,7 +332,8 @@ mod tests {
         assert_eq!(
             instance_argv(
                 &NewInstancePlan::OpenNew { bundle },
-                Some("/Users/nn/Documents/git-graph-studio")
+                Some("/Users/nn/Documents/git-graph-studio"),
+                false
             ),
             (
                 "open".to_owned(),
@@ -339,19 +355,67 @@ mod tests {
                 &NewInstancePlan::SpawnExe {
                     exe: PathBuf::from("/usr/bin/ggs")
                 },
-                Some("/home/nn/repo")
+                Some("/home/nn/repo"),
+                false
             ),
             ("/usr/bin/ggs".to_owned(), vec!["/home/nn/repo".to_owned()])
         );
-        // No launch path: the plain "New Window" spawn, argumentless.
+        // No launch path: the blank "New Window" spawn — `--new-window` rides along, so
+        // the new window skips the remembered-folder restore and comes up empty.
         assert_eq!(
             instance_argv(
                 &NewInstancePlan::SpawnExe {
                     exe: PathBuf::from("/usr/bin/ggs")
                 },
-                None
+                None,
+                true
+            ),
+            (
+                "/usr/bin/ggs".to_owned(),
+                vec!["--new-window".to_owned()]
+            )
+        );
+        // The Remote Access daemon's plain prefix asks for no blank: the folder it appends
+        // (or the restore the window's own boot runs) decides what shows.
+        assert_eq!(
+            instance_argv(
+                &NewInstancePlan::SpawnExe {
+                    exe: PathBuf::from("/usr/bin/ggs")
+                },
+                None,
+                false
             ),
             ("/usr/bin/ggs".to_owned(), Vec::new())
+        );
+        // A packaged macOS New Window carries the flag through `--args` too.
+        assert_eq!(
+            instance_argv(
+                &NewInstancePlan::OpenNew {
+                    bundle: PathBuf::from("/Applications/Git Graph Studio.app")
+                },
+                None,
+                true
+            ),
+            (
+                "open".to_owned(),
+                vec![
+                    "-n".to_owned(),
+                    "/Applications/Git Graph Studio.app".to_owned(),
+                    "--args".to_owned(),
+                    "--new-window".to_owned()
+                ]
+            )
+        );
+        // An explicit path beside the blank beats it — the path is the launch.
+        assert_eq!(
+            instance_argv(
+                &NewInstancePlan::SpawnExe {
+                    exe: PathBuf::from("/usr/bin/ggs")
+                },
+                Some("/home/nn/repo"),
+                true
+            ),
+            ("/usr/bin/ggs".to_owned(), vec!["/home/nn/repo".to_owned()])
         );
     }
 }
