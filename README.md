@@ -192,8 +192,12 @@ comparison subcommands open in the window they started. Inside the app, **File �
 Window** (Ctrl/Cmd+Shift+N) opens another instance on every platform — blank, never
 restoring the last folder — the discoverable way on macOS, where clicking the app's
 icon again only focuses the running window (`open -n -a "Git Graph Studio"` does the
-same from the terminal). On Windows the **taskbar icon's right-click menu** (the jump
-list) lists the recently opened folders as launch tasks beside a New Window task; on
+same from the terminal). The menus' folder opens behave the same way: **File → Open
+Folder** and **File → Open Recent** put the folder in a NEW window once the current
+one shows something — the current window keeps its session — while an empty one (the
+welcome screen) takes the folder in place. On Windows the **taskbar icon's
+right-click menu** (the jump list) lists the recently opened folders as launch tasks
+beside a New Window task; on
 macOS the **Dock icon's right-click menu** carries a New Window entry too, and a
 Finder folder's
 right-click lists the app under **打开方式 / Open With** (the bundle declares

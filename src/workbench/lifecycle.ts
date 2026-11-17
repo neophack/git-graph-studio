@@ -40,6 +40,23 @@ export const lifecycleMethods: ThisType<Workbench> = {
 	},
 
 	async openRecent(path: string): Promise<void> {
+		await this.openElsewhere(path);
+	},
+
+	/** The menus' folder open — Open Folder, Open Recent, the welcome screen's recents —
+	 *  lands in a NEW window once this one holds something: the current window keeps its
+	 *  session, and the folder wins a sibling instance exactly as a drop or a Finder
+	 *  handoff wins one (onOpenPaths' rule). An EMPTY window takes the folder in place,
+	 *  so the welcome screen's recents fill it as they always did; a mirror viewer
+	 *  driving this window keeps the in-window open too — the spawned window would show
+	 *  on the PC's screen alone, where the phone cannot see or drive it. A
+	 *  `.ggs-workspace` entry opens as the workspace, under the same rule. */
+	async openElsewhere(path: string): Promise<void> {
+		const mirror = hook('mirror');
+		if (!(mirror?.viewersNow() ?? false) && (this.repoPath !== null || this.singleFile !== null)) {
+			await appNewInstance(path).catch((error) => notify('error', tf('workbench.newWindowFailed', String(error))));
+			return;
+		}
 		if (path.toLowerCase().endsWith('.ggs-workspace')) await this.openWorkspace(path);
 		else await this.openFolder(path);
 	},
@@ -83,7 +100,7 @@ export const lifecycleMethods: ThisType<Workbench> = {
 			return;
 		}
 		if (!selected) return;
-		await this.openFolder(Array.isArray(selected) ? selected[0]! : selected);
+		await this.openElsewhere(Array.isArray(selected) ? selected[0]! : selected);
 	},
 
 	async pickWorkspace(): Promise<void> {

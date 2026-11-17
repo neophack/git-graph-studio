@@ -10,6 +10,7 @@ import type { Editor } from '../src/features/editor';
 import { commands } from '../src/platform/commands';
 import { ExtensionHost } from '../src/features/extensions';
 import * as state from '../src/platform/state';
+import { hook, provideHook } from '../src/platform/hooks';
 import { FS_CHANGED_EVENT, OPEN_PATHS_EVENT, Workbench } from '../src/workbench';
 import { backend, windowApi } from './tauriMock';
 import { click, DefaultingHandlers, flush, key, notificationButton, texts, until, workbenchShell } from './helpers';
@@ -721,6 +722,49 @@ describe('the Finder open-paths handoff', () => {
 		await flush(8);
 		expect(backend.callsTo('app_new_instance')).toEqual([{ folder: 'C:\\team.ggs-workspace' }]);
 		expect(workbench.editors.openFilePaths()).toEqual([]);
+	});
+});
+
+describe("the menus' folder opens", () => {
+	it('a folder from Open Recent wins a new window once this one shows something', async () => {
+		// The beforeEach boot opened REPO_A here: the current window keeps its session,
+		// the sibling instance takes the folder — the drop's rule, from the menu.
+		await workbench.openRecent(REPO_B);
+		expect(backend.callsTo('app_new_instance')).toEqual([{ folder: REPO_B }]);
+		expect(backend.callsTo('open_folder').some((args) => args.path === REPO_B)).toBe(false);
+		expect(workbench.currentRepo).toBe(REPO_A);
+	});
+
+	it('a recent takes an empty window in place — the welcome screen fills it as before', async () => {
+		workbench.dispose();
+		localStorage.clear();
+		backend.handlers.set('boot_context', () => ({ file: null, actions: [], repo: null }));
+		workbench = new Workbench();
+		await workbench.boot();
+		await flush(6);
+		await workbench.openRecent(REPO_B);
+		expect(backend.callsTo('open_folder').filter((args) => args.path === REPO_B)).toEqual([{ path: REPO_B }]);
+		expect(backend.callsTo('app_new_instance')).toEqual([]);
+	});
+
+	it('a workspace entry from the recents opens as a workspace, in a new window when occupied', async () => {
+		await workbench.openRecent('C:\\team.ggs-workspace');
+		expect(backend.callsTo('app_new_instance')).toEqual([{ folder: 'C:\\team.ggs-workspace' }]);
+		expect(backend.callsTo('open_workspace')).toEqual([]);
+	});
+
+	it('a mirror viewer driving the window keeps the open in place', async () => {
+		// The spawned window would show on the PC's screen alone; the phone drives the
+		// in-window open and sees it in its copy.
+		const prior = hook('mirror');
+		provideHook('mirror', { install: () => () => undefined, viewersActive: async () => false, viewersNow: () => true });
+		try {
+			await workbench.openRecent(REPO_B);
+			expect(backend.callsTo('app_new_instance')).toEqual([]);
+			expect(backend.callsTo('open_folder').filter((args) => args.path === REPO_B)).toEqual([{ path: REPO_B }]);
+		} finally {
+			provideHook('mirror', prior as NonNullable<typeof prior>);
+		}
 	});
 });
 

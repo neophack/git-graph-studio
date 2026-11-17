@@ -966,6 +966,7 @@ export class Workbench {
 	declare settleOutgoing: () => Promise<boolean> ;
 
 	declare openRecent: (path: string) => Promise<void> ;
+	declare openElsewhere: (path: string) => Promise<void>;
 
 	declare onOpenPaths: (payload: OpenedPaths) => Promise<void> ;
 
