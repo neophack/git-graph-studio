@@ -1207,7 +1207,13 @@ export const openMethods: ThisType<EditorGroup> = {
 						const move = (e: MouseEvent): void => {
 							latest = e.clientX;
 							if (pending) return;
-							pending = raf(() => apply(latest));
+							pending = raf(() => {
+								// The reset is the coalescing: a truthy pending would drop every later
+								// move, and the panes would freeze after the first frame — resizing
+								// once per drag, jumping to the pointer only on release.
+								pending = 0;
+								apply(latest);
+							});
 						};
 						const up = (): void => {
 							if (pending) { window.cancelAnimationFrame?.(pending); pending = 0; }

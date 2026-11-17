@@ -235,6 +235,30 @@ describe('editor group', () => {
 		expect(wrapA.style.flex).toBe('0 0 85%');
 		expect(document.body.classList.contains('resizing')).toBe(false);
 		expect(document.body.style.cursor).toBe('');
+		// The drag's coalescing resets pending when its frame fires, so every later move
+		// schedules and lands its own frame. Without the reset pending stays truthy and
+		// every move after the first is dropped — the panes resize once per drag, jump to
+		// the pointer only on release, and the drag reads as frozen. The stubbed rAF makes
+		// the scheduling observable (jsdom's zero rects clamp every apply to 85%, so the
+		// written flex cannot tell the applies apart).
+		{
+			const frames: (() => void)[] = [];
+			const realRaf = window.requestAnimationFrame.bind(window);
+			window.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+				frames.push(() => cb(performance.now()));
+				return frames.length;
+			}) as typeof window.requestAnimationFrame;
+			sash.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 300 }));
+			document.dispatchEvent(new MouseEvent('mousemove', { clientX: 200 }));
+			expect(frames).toHaveLength(1);
+			frames.splice(0).forEach((run) => run());
+			document.dispatchEvent(new MouseEvent('mousemove', { clientX: 150 }));
+			expect(frames).toHaveLength(1);
+			frames.splice(0).forEach((run) => run());
+			window.requestAnimationFrame = realRaf;
+			document.dispatchEvent(new MouseEvent('mouseup', { clientX: 100 }));
+			expect(editorSupplementsFrozen()).toBe(false);
+		}
 		// The dragged ratio rides the rebuilds a layout switch makes: the inline layout
 		// drops the sash, switching back re-installs it and re-applies the ratio.
 		click([...document.querySelectorAll<HTMLButtonElement>('.diff-toolbar button')].find((b) => b.title.startsWith('Switch between'))!);

@@ -27,9 +27,17 @@
 
 			/* ---------- The fake backend, for plain-browser sessions only ---------- */
 
-			// A long file, so a diff of it must scroll.
+			// A long, realistic file: thousands of C-like lines with brackets and long tails, so
+			// the diff editor's drag/scroll scenario pays what a real source file pays — a
+			// plain "line N of the file" text made the sash drag look free next to a real file.
 			var lines = [];
-			for (var i = 1; i <= 400; i++) lines.push('line ' + i + ' of the file');
+			for (var i = 1; i <= 4000; i++) {
+				var pad = new Array(1 + (i * 7) % 160).join('x');
+				var body = i % 3 === 0
+					? 'if (a->b[' + i + '] == 0x' + (i % 4096).toString(16) + ') { return bar(a, b, c); }'
+					: 'static int foo_' + i + '(struct s *arg, int len) { int v = arg->f[' + (i % 16) + ']; return v + len; }';
+				lines.push(body + ' /* ' + pad + ' */');
+			}
 			var oldText = lines.join('\n');
 			var newText = lines.map(function (l, i) { return i % 50 === 0 ? 'CHANGED ' + l : l; }).join('\n');
 			var commit = {
@@ -68,9 +76,12 @@
 				'initial_repo': function () { return '/repo'; },
 				'open_folder': function (args) { return { root: args && args.path ? args.path : '/repo', isRepo: true }; },
 				'repo_head': function () { return { branch: 'main', shortHash: commit.hash.slice(0, 7), ahead: 0, behind: 3, upstream: 'origin/main' }; },
-				'list_files': function () { return ['file.txt']; },
-				'list_dir': function () { return [{ name: 'file.txt', path: '/repo/file.txt', isDir: false, size: 1000 }]; },
-				'scm_status': function () { return [{ path: 'file.txt', oldPath: null, staged: null, unstaged: 'M', untracked: false }]; },
+				// A .c file, so the diff editor exercises the real language path (loadLanguage's
+				// C grammar, highlighting and the bracket colours over a real syntax tree) —
+				// what the sash drag pays in the packaged app, not a Plain Text stand-in.
+				'list_files': function () { return ['file.c']; },
+				'list_dir': function () { return [{ name: 'file.c', path: '/repo/file.c', isDir: false, size: 1000 }]; },
+				'scm_status': function () { return [{ path: 'file.c', oldPath: null, staged: null, unstaged: 'M', untracked: false }]; },
 				'scm_branches': function () { return [
 					{ name: 'main', remote: false, current: true, upstream: 'origin/main' },
 					{ name: 'feature', remote: false, current: false, upstream: null },
@@ -82,6 +93,45 @@
 				'scm_checkout': function (args) { window.__harness.checkedOut.push(args.name); return null; },
 				'read_file': function (args) { return { contents: oldText, binary: false, size: oldText.length }; },
 					'read_file_at': function (args) { return { contents: args.revision === 'HEAD' ? oldText : newText, binary: false, size: oldText.length }; },
+				// The diff editor's hunks, answered the way tests/tauriMock.ts answers scm_diff
+				// (git's numbering: an empty side's start names the line the change sits after;
+				// the ignore options fold the comparison, never the texts). A coarse walk — the
+				// harness mode says nothing about the backend, the real gix engine answers under
+				// `tauri dev`.
+				'scm_diff': function (args) {
+					var linesOf = function (text) {
+						if (!text) return [];
+						var all = text.split('\n');
+						if (all[all.length - 1] === '') all.pop();
+						return all;
+					};
+					var ignoreWhitespace = args.ignoreWhitespace === true, ignoreCase = args.ignoreCase === true;
+					var strip = function (line) {
+						var out = line.replace(/\r$/, '');
+						if (ignoreCase) out = out.toLowerCase();
+						if (ignoreWhitespace) out = out.split(/\s+/).filter(function (w) { return w !== ''; }).join(' ');
+						return out;
+					};
+					var aRaw = linesOf(args.left && args.left.text), bRaw = linesOf(args.right && args.right.text);
+					var a = aRaw.map(strip), b = bRaw.map(strip);
+					var hunks = [], additions = 0, deletions = 0;
+					var pushHunk = function (af, ato, bf, bto) {
+						var lines = [], k;
+						for (k = af; k < ato; k++) { lines.push({ kind: 'deleted', text: aRaw[k] }); deletions++; }
+						for (k = bf; k < bto; k++) { lines.push({ kind: 'added', text: bRaw[k] }); additions++; }
+						hunks.push({ oldStart: ato > af ? af + 1 : af, oldLines: ato - af,
+							newStart: bto > bf ? bf + 1 : bf, newLines: bto - bf, lines: lines });
+					};
+					var i = 0, j = 0;
+					while (i < a.length && j < b.length) {
+						if (a[i] === b[j]) { i++; j++; continue; }
+						var af = i, bf = j;
+						while (i < a.length && j < b.length && a[i] !== b[j]) { i++; j++; }
+						pushHunk(af, i, bf, j);
+					}
+					if (i < a.length || j < b.length) pushHunk(i, a.length, j, b.length);
+					return { binary: false, hunks: hunks, additions: additions, deletions: deletions };
+				},
 					// The open path probes before it reads; without these two a click on the
 					// tree's file never mounts an editor in plain-browser mode.
 					'file_probe': function () { return { size: oldText.length, binary: false, longLines: false }; },

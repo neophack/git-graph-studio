@@ -72,4 +72,17 @@ describe('diff decoration styles', () => {
 		expect(css).toMatch(/\.cm-merge-view \.cm-mergeView\s*\{[^}]*overflow:\s*hidden/);
 		expect(css).toMatch(/\.cm-merge-view \.cm-merge-revert\s*\{[^}]*overflow:\s*hidden/);
 	});
+
+	it('the split layout\u2019s pane row is a flex row of 50/50 columns', () => {
+		// @codemirror/merge's style module owned these structural rules and left the tree
+		// with it; without them the wrappers stack as blocks and their editors (flex-basis
+		// 0, min-height 0) collapse to zero height — headers over a blank diff.
+		const plain = css.replace(/\/\*[\s\S]*?\*\//g, '');
+		expect(plain).toMatch(/\.cm-merge-view > \.cm-mergeView > \.cm-mergeViewEditors\s*\{[^}]*display:\s*flex/);
+		const wrapper = /(?:^|[,{}])\s*\.cm-merge-view > \.cm-mergeView > \.cm-mergeViewEditors > \.cm-mergeViewEditor\s*\{([^}]*)\}/m.exec(plain)?.[1] ?? '';
+		expect(wrapper).toMatch(/flex:\s*1 1 0/);
+		expect(wrapper).toMatch(/min-width:\s*0/);
+		expect(wrapper).toMatch(/overflow:\s*hidden/);
+		expect(wrapper).toMatch(/flex-direction:\s*column/);
+	});
 });
