@@ -1142,9 +1142,12 @@ export const openMethods: ThisType<EditorGroup> = {
 				if (!view || !range || !hunk) return;
 				const deleted = hunk.lines.filter((line) => line.kind === 'deleted').map((line) => line.text);
 				// The span's own trailing break rides along, so the replacement keeps the
-				// line count the base side had exactly.
+				// line count the base side had exactly. The hunk can be the previous answer
+				// while the base pane already shows a re-read (shorter) document — clamp the
+				// line the way hunkSpan does; an out-of-range doc.line throws a RangeError.
 				const aDoc = diffHandle?.a?.state.doc;
-				const trailingBreak = aDoc !== undefined && hunk.oldLines > 0 && range.toA > aDoc.line(hunk.oldStart + hunk.oldLines - 1).to;
+				const lastOldLine = aDoc === undefined ? 0 : Math.min(hunk.oldStart + hunk.oldLines - 1, aDoc.lines);
+				const trailingBreak = aDoc !== undefined && hunk.oldLines > 0 && range.toA > aDoc.line(lastOldLine).to;
 				view.dispatch({ changes: { from: range.fromB, to: range.toB, insert: deleted.join('\n') + (deleted.length > 0 && trailingBreak ? '\n' : '') } });
 			};
 			if (split) {

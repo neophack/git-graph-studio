@@ -393,8 +393,10 @@ export function mountTextDiffView(host: HTMLElement, config: TextDiffViewConfig)
 			views.a = null;
 			views.b = null;
 			// The frame the view built leaves with it (a host that outlives the diff —
-			// the folder compare's detail slot — keeps no empty shell behind).
-			for (const root of host.children) root.remove();
+			// the folder compare's detail slot — keeps no empty shell behind). children is
+			// a LIVE collection: removing inside a for..of over it skips every other
+			// child, so the loop reads firstChild instead.
+			while (host.firstChild) host.firstChild.remove();
 		},
 	};
 }

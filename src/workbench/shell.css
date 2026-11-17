@@ -402,9 +402,15 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
    mouse drag turns into the base side's flex-basis percent (the sash's handler writes the
    panes' inline flex; until the first drag the package's 50/50 grow stands). A 1px centre
    line reads as the pane boundary; hover or drag widens it in the theme's sash colour.
-   Kept under the overview rulers' z-index (6) so a ruler click at the base side's edge
-   still centres its spot. */
-.cm-merge-view .cm-mergeViewEditors .cm-diff-sash { flex: 0 0 4px; position: relative; z-index: 5; cursor: ew-resize; }
+   The sash sits ABOVE its neighbours and owns the whole junction: the base pane's overview
+   ruler and the revert arrows' column (both z-index 6, both pointer-cursor surfaces) sit
+   flush against its 4px box, and a mouse aimed at the bar landed on them — hand cursor,
+   the drag never started. The ::after is an invisible grab strip reaching 6px into each
+   pane, so everything near the line is ew-resize and every press there starts the drag;
+   the ruler keeps painting beneath it (the marks stay visible) and the modified pane's
+   ruler at the window's far edge keeps its click-to-centre. */
+.cm-merge-view .cm-mergeViewEditors .cm-diff-sash { flex: 0 0 4px; position: relative; z-index: 7; cursor: ew-resize; }
+.cm-merge-view .cm-mergeViewEditors .cm-diff-sash::after { content: ''; position: absolute; top: 0; bottom: 0; left: -6px; right: -6px; }
 .cm-merge-view .cm-mergeViewEditors .cm-diff-sash::before { content: ''; position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; transform: translateX(-0.5px); background: var(--vscode-editorGroup-border); }
 .cm-merge-view .cm-mergeViewEditors .cm-diff-sash:hover::before, .cm-merge-view .cm-mergeViewEditors .cm-diff-sash.dragging::before { width: 3px; background: var(--vscode-sash-hoverBorder, var(--vscode-focusBorder)); }
 .editor-pane iframe { flex: 1; border: none; width: 100%; height: 100%; background: var(--vscode-editor-background); }
@@ -431,6 +437,8 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .diff-stats { font-size: 11px; margin-left: auto; margin-right: 12px; white-space: nowrap; }
 /* VS Code's side headers: one slim label — `path (revision)` — over each pane, centered
    and muted; the inline layout carries the single header over its one editor. */
+/* The height couples to the split diff's revert-arrow strip (`.cm-merge-revert` starts
+   below it — the arrows' tops are document coordinates measured from the editor's edge). */
 .diff-side-header { flex: none; height: 22px; line-height: 22px; font-size: 12px; color: var(--vscode-descriptionForeground); background: var(--vscode-editorGroup-headerBackground, transparent); border-bottom: 1px solid var(--vscode-editorGroup-border); text-align: center; padding: 0 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .editor-pane.diff-inline .cm-merge-view { flex-direction: column; }
 .editor-pane.diff-inline .cm-merge-view > .cm-editor { flex: 1 1 0; min-height: 0; }
@@ -912,9 +920,6 @@ button.ggs-symbol-hover-loc:hover { text-decoration: underline; color: var(--vsc
    the revert arrows' document-offset tops (thousands of px into a tall file) are exactly
    what stretches its scrollable range. */
 .cm-merge-view .cm-mergeView { flex: 1; min-height: 0; overflow: hidden; }
-/* The arrow column rides the panes' scroll via a transform (positionRevertArrows); its own
-   box clips the arrows the transform carries past the viewport edges. */
-.cm-merge-view .cm-merge-revert { overflow: hidden; }
 /* Diff highlighting is VS Code's: changed lines get a translucent line background and a
    3px gutter bar at their left edge, the unified layout's deleted lines a stronger text
    background in their block widget, and no underline or strikethrough. The split view
@@ -937,9 +942,16 @@ button.ggs-symbol-hover-loc:hover { text-decoration: underline; color: var(--vsc
    LEFT edge — no dedicated column between the panes, whose empty strip was dead width. The
    wrapper above is the containing block; positionRevertArrows writes each button's document
    offset and translates the strip by the panes' scroll, and the strip's own box clips the
-   arrows that translation carries past the viewport edges. */
-.cm-merge-view .cm-merge-revert { position: absolute; top: 0; bottom: 0; left: 0; width: 15px; z-index: 6; overflow: hidden; }
-.cm-merge-revert button { position: absolute; display: block; width: 100%; box-sizing: border-box; text-align: center; background: var(--vscode-editorGutter-background, var(--vscode-editor-background)); border: none; cursor: pointer; padding: 2px 0; color: var(--vscode-editor-foreground); opacity: 0.7; border-radius: 3px; }
+   arrows that translation carries past the viewport edges. The `top` starts the strip at
+   the editor's own top edge — the buttons' tops are document coordinates, so the pane's
+   side header (.diff-side-header, 22px) must not sit inside the strip: an arrow would
+   render the header's height above its hunk, the first hunk's arrow painting over the
+   header itself. The column starts 6px in, beside the sash's grab strip, and its empty
+   stretches pass the mouse through (pointer-events: none, the buttons re-enabled) — a
+   transparent full-height column that ate presses over plain content dead-ended drags
+   aimed at the pane. */
+.cm-merge-view .cm-merge-revert { position: absolute; top: 22px; bottom: 0; left: 6px; width: 15px; z-index: 6; overflow: hidden; pointer-events: none; }
+.cm-merge-revert button { position: absolute; display: block; width: 100%; box-sizing: border-box; text-align: center; background: var(--vscode-editorGutter-background, var(--vscode-editor-background)); border: none; cursor: pointer; pointer-events: auto; padding: 2px 0; color: var(--vscode-editor-foreground); opacity: 0.7; border-radius: 3px; }
 .cm-merge-revert button:hover { background: var(--vscode-toolbar-hoverBackground); opacity: 1; }
 .cm-merge-revert button .codicon { font-size: 13px; }
 /* The split layout's alignment fillers (SpacerWidget): a hunk whose sides differ in line

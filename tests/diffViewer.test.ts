@@ -211,3 +211,52 @@ describe('Copy Deleted / Changed Lines', () => {
 		expect(editor2.diffRanges).toHaveLength(2);
 	});
 });
+
+describe('the diff editor’s per-change revert arrows', () => {
+	it('a stale hunk against a re-read (shorter) base still reverts instead of throwing', async () => {
+		// The arrows outlive their answer across a rebuild: diffReload re-reads both sides
+		// and re-mounts the panes while the PREVIOUS answer's hunks still stand, so the
+		// trailing-break probe's `doc.line(oldStart + oldLines - 1)` can be out of range
+		// (the base re-read shorter) — it must clamp the way hunkSpan does, never throw.
+		let head = 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\ngone1\ngone2\n';
+		const work = 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nhere1\nhere2\n';
+		backend.on('read_file_at', ({ revision }) => ({
+			contents: revision === 'HEAD' ? head : work, binary: false, size: 20, encoding: 'utf8', eol: 'lf'
+		}));
+		// The first answer names the long-document hunk; every later answer stays gated, so
+		// the stale hunk is what the arrow reverts.
+		let calls = 0;
+		backend.on('scm_diff', () => {
+			calls++;
+			if (calls > 1) return new Promise(() => undefined);
+			return {
+				binary: false, additions: 2, deletions: 2,
+				hunks: [{ oldStart: 9, oldLines: 2, newStart: 9, newLines: 2, lines: [
+					{ kind: 'deleted', text: 'gone1' }, { kind: 'deleted', text: 'gone2' },
+					{ kind: 'added', text: 'here1' }, { kind: 'added', text: 'here2' }
+				] }]
+			};
+		});
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\repo');
+		await group.openDiff({
+			kind: 'diff', id: 'rv1', title: 'a.ts (Working Tree)',
+			left: { revision: 'HEAD', path: 'a.ts', label: 'HEAD', exists: true },
+			right: { revision: '*', path: 'a.ts', label: 'Working Tree', exists: true }
+		});
+		await new Promise((resolve) => setTimeout(resolve, RENDER));
+		const editor = (group as unknown as { open: Editor[] }).open.find((e) => e.input.kind === 'diff')!;
+		const arrow = () => document.querySelector<HTMLButtonElement>('.cm-merge-revert button');
+		expect(arrow()).not.toBeNull();
+		// The base re-reads shorter while the long-document hunk still stands.
+		head = 'l1\nl2\nl3\n';
+		expect(await editor.diffReload!()).toBe(true);
+		const modified = () => editor.merge!.b!.state.doc.toString();
+		expect(modified()).toContain('here1');
+		click(arrow()!);
+		// The revert landed instead of dying on the out-of-range probe: the base side's
+		// lines replaced the change.
+		expect(modified()).toContain('gone1');
+		expect(modified()).not.toContain('here1');
+	});
+});

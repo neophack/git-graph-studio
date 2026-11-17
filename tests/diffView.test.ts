@@ -126,4 +126,17 @@ describe('the split diff pane alignment (SpacerWidget)', () => {
 		expect(spacers(diff.b)).toBe(0);
 		expect(rows(diff.a!)).toBe(rows(diff.b!));
 	});
+
+	it('destroy leaves the host empty even with several children (the host children are a live collection)', () => {
+		// A host that outlives the diff (the folder compare's detail slot) keeps no shell
+		// behind — and removing inside a `for..of` over the live `host.children` skips every
+		// other child, so the loop must read firstChild instead.
+		const diff = mount('a\nb', 'a\nc', [hunk(2, 1, 2, 1, [{ kind: 'deleted', text: 'b' }, { kind: 'added', text: 'c' }])]);
+		const host = diff.a!.dom.closest('.cm-mergeView')!.parentElement!;
+		host.appendChild(document.createElement('div')); // a stray sibling of the view's root
+		mounted.splice(mounted.indexOf(diff), 1); // this test destroys it itself
+		diff.destroy();
+		expect(host.children.length).toBe(0);
+		host.remove();
+	});
 });

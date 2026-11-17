@@ -100,6 +100,18 @@ describe('diff decoration styles', () => {
 		expect(css).toMatch(/\.cm-merge-view \.cm-merge-revert\s*\{[^}]*overflow:\s*hidden/);
 	});
 
+	it('the revert-arrow strip starts below the pane\u2019s side header', () => {
+		// The strip overlays the modified pane's wrapper (its containing block), whose first
+		// child is the side header; the buttons' tops are document coordinates measured from
+		// the EDITOR's top edge. A strip starting at the wrapper's own top renders every
+		// arrow the header's height above its hunk — the first hunk's arrow painting over
+		// the header itself — so the strip's `top` must equal the header's `height`.
+		const stripTop = /top:\s*(\d+)px/.exec(ruleBody('.cm-merge-view .cm-merge-revert'))?.[1];
+		const headerHeight = /height:\s*(\d+)px/.exec(ruleBody('.diff-side-header'))?.[1];
+		expect(stripTop).toBeDefined();
+		expect(stripTop).toBe(headerHeight);
+	});
+
 	it('the split layout\u2019s pane row is a flex row of 50/50 columns', () => {
 		// @codemirror/merge's style module owned these structural rules and left the tree
 		// with it; without them the wrappers stack as blocks and their editors (flex-basis
@@ -111,5 +123,29 @@ describe('diff decoration styles', () => {
 		expect(wrapper).toMatch(/min-width:\s*0/);
 		expect(wrapper).toMatch(/overflow:\s*hidden/);
 		expect(wrapper).toMatch(/flex-direction:\s*column/);
+	});
+
+	it('the sash owns the pane junction — above its pointer-cursor neighbours, with a wider grab strip', () => {
+		// The base pane's overview ruler and the revert arrows' column sit flush against the
+		// sash (both z-index 6, the wrappers are no stacking contexts) with pointer cursors:
+		// a mouse aimed at the bar landed on them — hand cursor, and the drag never started.
+		// The sash must sit above both, and its own 4px is too narrow a target: an ::after
+		// extends its hit area 6px into each pane so everything near the line drags.
+		const sash = ruleBody('.cm-merge-view .cm-mergeViewEditors .cm-diff-sash');
+		expect(sash).toMatch(/z-index:\s*7/);
+		const grab = ruleBody('.cm-merge-view .cm-mergeViewEditors .cm-diff-sash::after');
+		expect(grab).toMatch(/left:\s*-6px/);
+		expect(grab).toMatch(/right:\s*-6px/);
+		// The neighbours the strip must outrank, at their z-index 6.
+		expect(ruleBody('.cm-overview-ruler')).toMatch(/z-index:\s*6/);
+		expect(ruleBody('.cm-merge-view .cm-merge-revert')).toMatch(/z-index:\s*6/);
+		// The revert column starts beside the strip (left: 6px), and its empty stretches
+		// pass the mouse through — only the arrows themselves take a press.
+		expect(ruleBody('.cm-merge-view .cm-merge-revert')).toMatch(/left:\s*6px/);
+		expect(ruleBody('.cm-merge-view .cm-merge-revert')).toMatch(/pointer-events:\s*none/);
+		// The button rule read here is the positioned one (a shorter .cm-merge-revert
+		// button rule earlier in the sheet styles colours only).
+		const buttonRule = css.match(/\.cm-merge-revert button \{([^}]*position:\s*absolute[^}]*)\}/)?.[1] ?? '';
+		expect(buttonRule).toMatch(/pointer-events:\s*auto/);
 	});
 });
