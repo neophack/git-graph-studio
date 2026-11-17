@@ -71,11 +71,12 @@
 	--vscode-editorLightBulb-foreground: #ffcc00;
 	--vscode-editorOverviewRuler-border: #ffffff;
 	--vscode-diffEditor-insertedTextBackground: #9ccc2c40;
-	--vscode-diffEditor-removedTextBackground: #ff000033;
+	--vscode-diffEditor-removedTextBackground: #cd313130;
+	--vscode-diffEditor-removedTextForeground: #6e6a6a;
 	--vscode-diffEditor-insertedLineBackground: #9bb95533;
-	--vscode-diffEditor-removedLineBackground: #ff00001a;
+	--vscode-diffEditor-removedLineBackground: #cd31311d;
 	--vscode-diffEditorGutter-insertedLineBackground: #9bb95566;
-	--vscode-diffEditorGutter-removedLineBackground: #ff000066;
+	--vscode-diffEditorGutter-removedLineBackground: #cd31314d;
 	--vscode-breadcrumb-foreground: #616161;
 	--vscode-breadcrumb-background: #ffffff;
 	--vscode-breadcrumb-focusForeground: #3b3b3b;

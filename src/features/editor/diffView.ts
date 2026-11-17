@@ -2,10 +2,12 @@
 // painted as line decorations over CodeMirror views — a split of two panes, or the
 // unified single editor whose deleted lines ride a block widget above their new
 // position. The frontend never diffs: this module only draws what the backend answered
-// and maps it through the user's edits until the next answer lands. Unchanged gaps
-// collapse into an "unchanged lines" widget the way VS Code's diff does; a click, an
-// edit or the cursor entering one expands it again; and an editable modified pane gains
-// VS Code's per-change revert arrows.
+// and maps it through the user's edits until the next answer lands. A hunk whose sides
+// differ in line count pads the shorter pane with blank spacer rows, so the identical
+// code after every hunk stays side by side. Unchanged gaps collapse into an "unchanged
+// lines" widget the way VS Code's diff does; a click, an edit or the cursor entering
+// one expands it again; and an editable modified pane gains VS Code's per-change
+// revert arrows.
 
 import { ChangeSet, EditorState, Range, RangeSet, StateEffect, StateField, type Extension, type Text } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, WidgetType } from '@codemirror/view';
@@ -52,10 +54,14 @@ const anchorAt = (doc: Text, start: number): number => (start + 1 > doc.lines ? 
  *  document — they answer the pair the backend diffed, and until the next answer lands
  *  an edited or re-read document may have moved out from under them. */
 function hunkSpan(doc: Text, hunk: DiffHunkData, side: 'old' | 'new'): { from: number; to: number } {
-	const start = Math.min(Math.max(side === 'old' ? hunk.oldStart : hunk.newStart, 1), doc.lines);
+	const raw = side === 'old' ? hunk.oldStart : hunk.newStart;
+	const start = Math.min(Math.max(raw, 1), doc.lines);
 	const lines = Math.max(Math.min(side === 'old' ? hunk.oldLines : hunk.newLines, doc.lines - start + 1), 0);
 	if (lines === 0) {
-		const at = anchorAt(doc, start);
+		// Git spells a top-of-file change `@@ -0,0` — the anchor is the document's very
+		// top, and the clamp to 1 would move it after line 1 (stealing that line into the
+		// wrong gap, which would fold the panes' margins onto different rows).
+		const at = raw === 0 ? 0 : anchorAt(doc, start);
 		return { from: at, to: at };
 	}
 	const first = doc.line(start);
@@ -89,6 +95,44 @@ function buildDeletedBlocks(doc: Text, hunks: readonly DiffHunkData[]): Range<De
 		blocks.push(Decoration.widget({ widget: new DeletedLinesWidget(deleted), block: true }).range(at));
 	}
 	return blocks;
+}
+
+/** The blank rows a pane pads where its twin's side of a hunk is longer: the shorter
+ *  side fills the difference so both panes carry the same row count through the hunk
+ *  region and the unchanged lines after it sit side by side again — what
+ *  @codemirror/merge's spacers did, and what the panes' scroll sync presumes (equal
+ *  pixel offsets). Without them every insertion, deletion or resized hunk left all the
+ *  identical code below drifting out of alignment. */
+class SpacerWidget extends WidgetType {
+	constructor(readonly lines: number) {
+		super();
+	}
+
+	eq(other: SpacerWidget): boolean {
+		return other.lines === this.lines;
+	}
+
+	toDOM(): HTMLElement {
+		const div = el('div', 'cm-diff-spacer');
+		for (let i = 0; i < this.lines; i++) div.appendChild(el('div', 'cm-diff-spacer-row'));
+		return div;
+	}
+}
+
+/** The split layout's alignment fillers: one spacer per hunk whose sides differ in line
+ *  count, riding after the shorter side's span — an occupied side's rows sit opposite
+ *  its twin's, and an empty side (a pure insertion or deletion) pads at the anchor the
+ *  hunk spans. */
+function buildSpacers(doc: Text, hunks: readonly DiffHunkData[], side: 'old' | 'new'): Range<Decoration>[] {
+	const out: Range<Decoration>[] = [];
+	for (const hunk of hunks) {
+		const mine = side === 'old' ? hunk.oldLines : hunk.newLines;
+		const want = (side === 'old' ? hunk.newLines : hunk.oldLines) - mine;
+		if (want <= 0) continue;
+		const at = hunkSpan(doc, hunk, side).to;
+		out.push(Decoration.widget({ widget: new SpacerWidget(want), block: true }).range(at));
+	}
+	return out;
 }
 
 /** The unchanged gaps between consecutive hunks, each side carrying its own span of the
@@ -236,8 +280,9 @@ export interface TextDiffViewConfig {
 	aExtensions: Extension[];
 	/** The modified pane's extensions (its own editability and listeners included). */
 	bExtensions: Extension[];
-	/** VS Code's per-change revert arrows: their presence builds the column between the
-	 *  panes (split layout only), one arrow per hunk, each handing its index back. */
+	/** VS Code's per-change revert arrows: their presence builds the arrow overlay on the
+	 *  modified pane's left edge (split layout only), one arrow per hunk, each handing its
+	 *  index back. */
 	revert?: { onRevert: (index: number) => void };
 }
 
@@ -263,14 +308,18 @@ export function mountTextDiffView(host: HTMLElement, config: TextDiffViewConfig)
 		views.a = new EditorView({ state: state(config.leftDoc, config.aExtensions, 'cm-merge-a'), parent: paneA });
 		paneA.appendChild(views.a.dom);
 		row.appendChild(paneA);
-		if (config.revert) {
-			revertColumn = el('div', 'cm-merge-revert');
-			row.appendChild(revertColumn);
-		}
 		const paneB = el('div', 'cm-mergeViewEditor');
 		views.b = new EditorView({ state: state(config.rightDoc, config.bExtensions, 'cm-merge-b'), parent: paneB });
 		paneB.appendChild(views.b.dom);
 		row.appendChild(paneB);
+		if (config.revert) {
+			// The arrows overlay the modified pane's left edge (VS Code's placement) — a
+			// dedicated column between the panes spent its width as an empty strip; here the
+			// buttons ride over the fold-gutter zone, each with its own background so the
+			// chevron beneath never shows through (shell.css positions the wrapper).
+			revertColumn = el('div', 'cm-merge-revert');
+			paneB.appendChild(revertColumn);
+		}
 		root.appendChild(row);
 		host.appendChild(root);
 	} else {
@@ -280,8 +329,9 @@ export function mountTextDiffView(host: HTMLElement, config: TextDiffViewConfig)
 	}
 
 	/** Repaints one pane: marks (with the unified layout's deleted-line blocks on the
-	 *  modified pane) and gaps, computed against the panes' CURRENT documents so an
-	 *  edit's pending backend answer never re-draws from stale geometry. */
+	 *  modified pane), the split layout's alignment spacers and gaps, computed against
+	 *  the panes' CURRENT documents so an edit's pending backend answer never re-draws
+	 *  from stale geometry. */
 	const repaint = (view: EditorView, side: 'old' | 'new', resetExpanded: boolean): void => {
 		const mine = view.state.doc;
 		const twin = (side === 'old' ? views.b : views.a)?.state.doc ?? mine;
@@ -289,6 +339,9 @@ export function mountTextDiffView(host: HTMLElement, config: TextDiffViewConfig)
 			[
 				...collectRanges(mine, buildMarks(mine, hunks, side)),
 				...(side === 'new' && views.a === null ? buildDeletedBlocks(mine, hunks) : []),
+				// The split's two panes pad their shorter sides; the unified editor is alone
+				// and needs no alignment.
+				...(config.split ? buildSpacers(mine, hunks, side) : []),
 			],
 			true,
 		);

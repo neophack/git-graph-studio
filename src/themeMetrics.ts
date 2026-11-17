@@ -31,6 +31,9 @@ export const SURFACES: SurfaceCheck[] = [
 	{ label: 'input text', foreground: '--vscode-input-foreground', background: '--vscode-input-background', min: 4.5 },
 	{ label: 'line numbers', foreground: '--vscode-editorLineNumber-foreground', background: '--vscode-editor-background', min: 3.0 },
 	{ label: 'description text', foreground: '--vscode-descriptionForeground', background: '--vscode-editor-background', min: 3.0 },
+	// The diff's removed-side text is deliberately dimmed (it must recede beside the new
+	// code), but it still has to stay readable over the editor background.
+	{ label: 'removed diff text', foreground: '--vscode-diffEditor-removedTextForeground', background: '--vscode-editor-background', min: 3.0 },
 	...SYNTAX_TOKENS.map((token): SurfaceCheck => ({
 		label: `syntax ${token}`,
 		foreground: `--syntax-${token}`,

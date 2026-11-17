@@ -252,7 +252,9 @@ describe('the diff overview ruler (chunkOverviewMarks)', () => {
 });
 
 describe('the revert arrows (positionRevertArrows)', () => {
-	/** A column with one button per chunk; tops are the document offsets the package writes. */
+	/** A column with one button per chunk; the tops are preset the way the old package wrote
+	 *  them — positionRevertArrows must keep writing them itself (the diff-view rewrite lost
+	 *  that write, and the arrows sat at their flow positions instead of their hunks). */
 	function columnWith(chunkTops: number[]): { column: HTMLElement; chunkList: { fromA: number }[] } {
 		const column = document.createElement('div');
 		const chunkList = chunkTops.map((top, i) => {
@@ -278,9 +280,14 @@ describe('the revert arrows (positionRevertArrows)', () => {
 		const { column, chunkList } = columnWith([100, 300]);
 		positionRevertArrows(column, stubView(150, 400), chunkList);
 		expect(column.style.transform).toBe('translateY(-150px)');
+		// The document offsets are written by the function itself (the stub's lineBlockAt is
+		// identity, so the written tops equal the chunks'): without this write the arrows
+		// keep their preset flow positions and land nowhere near their hunks.
+		const [first, second] = Array.from(column.querySelectorAll('button'));
+		expect(first.style.top).toBe('100px');
+		expect(second.style.top).toBe('300px');
 		// Arrow one sits at 100 - 150 = -50: past the viewport's top edge, hidden. Arrow two
 		// at 300 - 150 = 150, inside the 400px viewport, shown.
-		const [first, second] = Array.from(column.querySelectorAll('button'));
 		expect(first.style.visibility).toBe('hidden');
 		expect(second.style.visibility).toBe('');
 	});

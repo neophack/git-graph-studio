@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 
 const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'workbench', 'shell.css'), 'utf8');
 
-const DIFF_CLASSES = ['cm-diff-ins', 'cm-diff-del', 'cm-diff-del-block', 'cm-diff-del-row', 'cm-diff-unchanged', 'cm-merge-revert'];
+const DIFF_CLASSES = ['cm-diff-ins', 'cm-diff-del', 'cm-diff-del-block', 'cm-diff-del-row', 'cm-diff-unchanged', 'cm-diff-spacer-row', 'cm-merge-revert'];
 
 /** Every comma-separated selector of every rule in the stylesheet (comments stripped). */
 function selectors(): string[] {
@@ -49,11 +49,38 @@ describe('diff decoration styles', () => {
 		expect(css).toMatch(/\.cm-diff-del-row\s*\{[^}]*--vscode-diffEditor-removedTextBackground/);
 	});
 
+	it('removed lines dim their text to the theme\u2019s diff foreground', () => {
+		// The owner's direction: the bright red and its bright text pulled the eye to the old
+		// code — the removed side's text dims to --vscode-diffEditor-removedTextForeground,
+		// forced past the syntax spans so a removed line greys out whole and recedes.
+		const del = ruleBody('.editor-pane .cm-diff-del');
+		expect(del).toMatch(/--vscode-diffEditor-removedTextForeground/);
+		expect(del).toMatch(/!\s*important/);
+		expect(ruleBody('.editor-pane .cm-diff-del-row')).toMatch(/--vscode-diffEditor-removedTextForeground/);
+		// Every shipped theme defines the token — an undefined one would leave the removed
+		// side at full brightness on that theme.
+		const themes = ['dark-plus', 'dark-modern', 'hc-black', 'light-modern', 'nord', 'monokai'];
+		for (const theme of themes) {
+			const themeCss = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'static', 'theme', `${theme}.css`), 'utf8');
+			expect(themeCss, theme).toMatch(/--vscode-diffEditor-removedTextForeground:\s*#/);
+		}
+	});
+
 	it('no diff line carries an underline or strikethrough', () => {
 		for (const cls of ['cm-diff-ins', 'cm-diff-del', 'cm-diff-del-row']) {
 			const selector = selectors().find((s) => s.includes(`.${cls}`))!;
 			expect(ruleBody(selector)).not.toMatch(/text-decoration:\s*(?!none)/);
 		}
+	});
+
+	it('the alignment filler row is one scroller line tall, hatched as not-content', () => {
+		// The split layout pads the shorter pane with these rows so the identical code
+		// after a hunk stays side by side; a row any taller or shorter than a .cm-line
+		// (the scroller pins line-height: 19px) would drift the panes apart by the
+		// difference per padded row.
+		const rule = /(?:^|[,{}])\s*\.cm-merge-view \.cm-diff-spacer-row\s*\{([^}]*)\}/m.exec(css.replace(/\/\*[\s\S]*?\*\//g, ''))?.[1] ?? '';
+		expect(rule).toMatch(/height:\s*19px/);
+		expect(rule).toMatch(/--vscode-diffEditor-diagonalFill/);
 	});
 
 	it('the inline diff editor keeps its pane width — the find widget never lands outside the window', () => {
