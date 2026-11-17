@@ -452,7 +452,30 @@
 				{ id: 2, format: 'jpg', tag: 'image', offset: 8192, size: 512, va: 0x10020000, inModule: null }
 			];
 			const DUMP_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-			const NAMES = ['file.txt', 'huge.txt', 'monster.js', 'blob.bin', 'trace.asc'];
+			const NAMES = ['file.txt', 'huge.txt', 'monster.js', 'blob.bin', 'trace.asc', 'hover.c'];
+			// The quick-info hover's stand-in: a struct, a 40-row function (a body taller than
+			// the tooltip pane, so the scroll bar exists) and a variable — the hover answers
+			// workspace_symbols for their names with these lines.
+			var hoverLines = [
+				'typedef struct {',
+				'    int x;',
+				'    int y;',
+				'} Point;',
+				'',
+				'/* Computes the manhattan length. */'
+			];
+			var hoverManhattanLine = hoverLines.length;
+			hoverLines.push('int manhattan(const Point *p)', '{');
+			for (var h = 0; h < 40; h++) hoverLines.push('    int step_' + h + ' = p->x + ' + h + ';');
+			hoverLines.push('    return p->x + p->y;', '}');
+			var hoverManhattanEnd = hoverLines.length - 1;
+			hoverLines.push('');
+			var hoverOriginLine = hoverLines.length;
+			hoverLines.push('int origin;');
+			hoverLines.push('', 'int measure(void)', '{', '    return 42;', '}', '', 'void tick(void)', '{', '    int measure = 0;', '    measure = measure + 1;', '}');
+			var hoverMeasureVarLine = hoverLines.length - 2;
+			hoverLines.push('');
+			var hoverText = hoverLines.join('\n');
 			const hexLine = (n, tag) => 'line ' + n + ' of ' + tag;
 			const chunkB64 = (path, offset, len) => {
 				const name = String(path).split(/[\\/]/).pop();
@@ -474,6 +497,7 @@
 					if (name === 'blob.bin') return { size: 256 * 1024, binary: true, longLines: false };
 					if (name === 'monster.js') return { size: 40 * 1024 * 1024, binary: false, longLines: true };
 					if (name === 'huge.txt') return { size: 300 * 1024 * 1024, binary: false, longLines: false };
+					if (name === 'hover.c') return { size: hoverText.length, binary: false, longLines: false };
 					return { size: 1000, binary: false, longLines: false };
 				},
 				viewer_open: () => ({ docId: 1, lineCount: HUGE_LINES, language: 'log', syntaxName: 'Plain Text', symbols: [] }),
@@ -505,8 +529,8 @@
 				},
 				dump_preview: ({ size }) => ({ data: DUMP_PNG_B64, truncated: false, totalSize: Number(size) }),
 				dump_extract: ({ entries }) => ({
-					items: (entries || []).map((r) => ({ name: r.name, path: 'C:\out\' + r.name, bytes: r.size || 0, error: null })),
-					outDir: 'C:\out',
+					items: (entries || []).map((r) => ({ name: r.name, path: 'C:\\out\\' + r.name, bytes: r.size || 0, error: null })),
+					outDir: 'C:\\out',
 					totalBytes: (entries || []).reduce((n, r) => n + (r.size || 0), 0)
 				}),
 				dump_cancel: () => null,
@@ -614,10 +638,31 @@
 				}),
 				settings_write: () => null,
 				write_file: () => null,
-				read_file_raw: () => {
+				read_file: ({ path }) => {
+					if (String(path).split(/[\\/]/).pop() === 'hover.c') return { contents: hoverText, binary: false, size: hoverText.length };
+					return { contents: oldText, binary: false, size: oldText.length };
+				},
+				// The quick-info hover's index answer (the editor's exact-name seam is
+				// `symbol_lookup`; the @ / # modes ask `workspace_symbols`): the demo names
+				// with their real lines. `measure` answers the function FIRST — a same-named
+				// local variable exists, and the hover's ranking must still lead with the
+				// variable at a value position.
+				symbol_lookup: ({ name }) => {
+					const q = String(name || '');
+					if (q === 'manhattan') return [{ kind: 'function', name: 'manhattan', path: 'hover.c', line: hoverManhattanLine, endLine: hoverManhattanEnd }];
+					if (q === 'Point') return [{ kind: 'struct', name: 'Point', path: 'hover.c', line: 0, endLine: 3 }];
+					if (q === 'origin') return [{ kind: 'variable', name: 'origin', path: 'hover.c', line: hoverOriginLine }];
+					if (q === 'measure') return [
+						{ kind: 'function', name: 'measure', path: 'hover.c', line: hoverMeasureVarLine - 8, endLine: hoverMeasureVarLine - 5 },
+						{ kind: 'variable', name: 'measure', path: 'hover.c', line: hoverMeasureVarLine }
+					];
+					return [];
+				},
+				workspace_symbols: ({ query }) => scrollHandlers.symbol_lookup({ name: query }),
+				read_file_raw: ({ path }) => {
 					// The raw channel's frame: 8-byte little-endian header length, the JSON
 					// metadata, then the text itself (editor.ts readFileRaw).
-					const text = new TextEncoder().encode(window.__harness.oldText);
+					const text = new TextEncoder().encode(String(path || '').split(/[\\/]/).pop() === 'hover.c' ? hoverText : window.__harness.oldText);
 					const meta = new TextEncoder().encode(JSON.stringify({ binary: false, size: text.length, encoding: 'utf8', eol: 'lf' }));
 					const out = new Uint8Array(8 + meta.length + text.length);
 					new DataView(out.buffer).setBigUint64(0, BigInt(meta.length), true);
@@ -768,6 +813,126 @@
 				await sleep(300);
 				const caret = Number(/line (\d+)/.exec(document.querySelector('.cm-activeLine').textContent)?.[1] ?? -1);
 				check('code editor', 'PageDown moves the caret about one viewport (CodeMirror native)', (n) => n >= Math.floor(viewport / lineHeight) - 3 && n <= Math.floor(viewport / lineHeight) + 1, caret - 1);
+			});
+
+			/* ----- the quick-info hover: real pointer geometry jsdom cannot express ----- */
+			await surface('quick-info hover', async () => {
+				await openFromTree('hover.c');
+				// The editor group keeps every mounted view in the DOM and hides the inactive
+				// ones — the visible text-editor scroller is the hover's stage, not the first.
+				const visibleScroller = () => Array.from(document.querySelectorAll('.cm-scroller'))
+					.filter((s) => !s.closest('.doc-edit'))
+					.find((s) => s.offsetParent !== null);
+				await waitFor(() => {
+					const s = visibleScroller();
+					return Boolean(s && Array.from(s.querySelectorAll('.cm-line')).some((l) => l.textContent.includes('manhattan(const')));
+				});
+				const scroller = visibleScroller();
+				if (!scroller) throw new Error('no visible text editor for hover.c');
+				const content = scroller.querySelector('.cm-content');
+				// The demo word's exact pixels: a Range over the line's own text node, so the
+				// synthetic pointer lands on the identifier CodeMirror maps through
+				// posAtCoords — the same machinery a real mouse drives.
+				const lineEl = Array.from(scroller.querySelectorAll('.cm-line')).find((l) => l.textContent.includes('manhattan(const'));
+				if (!lineEl) throw new Error('no manhattan line rendered');
+				const node = lineEl.firstChild;
+				const at = node.textContent.indexOf('manhattan');
+				const span = document.createRange();
+				span.setStart(node, at);
+				span.setEnd(node, at + 'manhattan'.length);
+				const wr = span.getBoundingClientRect();
+				const wx = wr.left + wr.width / 2;
+				const wy = wr.top + wr.height / 2;
+				const move = (x, y) => content.dispatchEvent(new MouseEvent('mousemove', { clientX: x, clientY: y, bubbles: true }));
+				move(wx, wy);
+				const shown = await waitFor(() => document.querySelector('.cm-tooltip .ggs-symbol-hover'), 4000);
+				check('quick-info hover', 'the tooltip comes up over the word', true, Boolean(shown));
+				const body = document.querySelector('.cm-tooltip .ggs-symbol-hover-body');
+				check('quick-info hover', 'a function shows its whole body (signature through the close)', true,
+					Boolean(body) && body.textContent.startsWith('int manhattan(const Point *p)') && body.textContent.trim().endsWith('}'));
+				check('quick-info hover', 'a body taller than the pane carries the drag bar', true,
+					Boolean(body) && body.scrollHeight > body.clientHeight);
+				// Away again: a move far off word and tooltip dismisses as before — the guard
+				// pins nothing. Pure mousemove logic, so it runs in an occluded window too.
+				const farEdge = content.getBoundingClientRect();
+				move(wx, farEdge.bottom + 300);
+				await sleep(600);
+				const tipForAway = document.querySelector('.cm-tooltip');
+				check('quick-info hover', 'moving away dismisses it as before', true, !tipForAway || !tipForAway.isConnected);
+				// A same-named function and a local variable: at a value position the hover
+				// must lead with the VARIABLE's own declaration — the index holds both and the
+				// mock answers the function first, so the order below is the ranking's doing.
+				const measureLine = Array.from(scroller.querySelectorAll('.cm-line')).find((l) => l.textContent.includes('measure = measure + 1'));
+				if (!measureLine) throw new Error('no measure use line rendered');
+				let mnode = null, mOff = 0;
+				const mWalk = document.createTreeWalker(measureLine, NodeFilter.SHOW_TEXT);
+				let mCur;
+				while ((mCur = mWalk.nextNode())) {
+					const idx = mCur.textContent.indexOf('measure');
+					if (idx >= 0) { mnode = mCur; mOff = idx; break; }
+				}
+				if (!mnode) throw new Error('no measure word node');
+				const mSpan = document.createRange();
+				mSpan.setStart(mnode, mOff);
+				mSpan.setEnd(mnode, mOff + 7);
+				const mr = mSpan.getBoundingClientRect();
+				const mx = mr.left + mr.width / 2, my = mr.top + mr.height / 2;
+				move(mx, my);
+				let measureTip = null;
+				for (let i = 0; i < 40; i++) {
+					await sleep(100);
+					measureTip = document.querySelector('.cm-tooltip');
+					if (measureTip) break;
+				}
+				if (!measureTip) throw new Error('the measure tooltip never came up');
+				const firstLoc = measureTip.querySelector('.ggs-symbol-hover-loc');
+				check('quick-info hover', 'a value position leads with the variable, not the same-named function', true,
+					Boolean(firstLoc) && firstLoc.textContent === 'hover.c:' + (hoverMeasureVarLine + 1));
+				// The stickiness checks need the tooltip POSITIONED — the manager places it on
+				// the view's measure pass, and an occluded window never produces the frame
+				// (rAF stalls; the tooltip then stands parked at -10000px with a real content
+				// layout). Skip honestly there instead of failing on the environment; the
+				// content checks above stay hard either way.
+				const canFrame = await Promise.race([
+					new Promise((resolve) => requestAnimationFrame(() => resolve(true))),
+					new Promise((resolve) => setTimeout(() => resolve(false), 600))
+				]);
+				if (!canFrame) {
+					report.push({ surface: 'quick-info hover', check: 'walking from the word onto the tooltip keeps it alive', expected: 'a visible window — no frames in an occluded one', actual: 'skipped', status: 'info' });
+					report.push({ surface: 'quick-info hover', check: 'working the pane (scrolling the body) keeps it alive', expected: 'a visible window — no frames in an occluded one', actual: 'skipped', status: 'info' });
+					return;
+				}
+				// The sticky pass: walk from the word onto the tooltip — every step a real
+				// mousemove, every one of which used to dismiss the tooltip before it arrived.
+				// The away check above dismissed the previous one; hover the word again.
+				move(wx, wy);
+				let rehovered = null;
+				for (let i = 0; i < 40; i++) {
+					await sleep(100);
+					rehovered = document.querySelector('.cm-tooltip');
+					if (rehovered) break;
+				}
+				if (!rehovered) throw new Error('the re-hover never came back up');
+				const tip = rehovered;
+				const tr = rect(tip);
+				let stuck = true;
+				for (let s = 1; s <= 8; s++) {
+					move(wx + (tr.left + tr.width / 2 - wx) * (s / 8), wy + (tr.top + tr.height / 2 - wy) * (s / 8));
+					await sleep(40);
+					if (!document.contains(tip)) { stuck = false; break; }
+				}
+				check('quick-info hover', 'walking from the word onto the tooltip keeps it alive', true, stuck);
+				const scrollBefore = body.scrollTop;
+				body.scrollTop = scrollBefore + 60;
+				await sleep(80);
+				check('quick-info hover', 'working the pane (scrolling the body) keeps it alive', true,
+					document.contains(tip) && body.scrollTop === scrollBefore + 60);
+				// Away again: a move far off word and tooltip dismisses as before — the guard
+				// pins nothing.
+				const far = rect(content);
+				move(wx, far.bottom + 300);
+				await sleep(600);
+				check('quick-info hover', 'moving away dismisses it as before', true, !document.contains(tip));
 			});
 
 			/* ----- the windowed large-file editor (the row model under CodeMirror) ----- */

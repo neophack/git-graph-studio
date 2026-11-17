@@ -3,13 +3,16 @@
 // hover tooltip that asks the providers, and F12 / Ctrl+Click opens the first location.
 // Beside them the workbench's own quick-info hover answers from the symbol index
 // (CLion's quick documentation without a language server): a hovered `#define` shows
-// every indexed definition's directive text, and any other indexed symbol shows its
-// declaration line with the comment block above it — a name defined in several places
-// lists all of them, each location a click that opens the definition. Markdown from a
-// provider renders as TEXT — an extension's hover must not be able to inject markup
-// into the workbench's DOM.
+// every indexed definition's directive text, a hovered function / struct / enum / class
+// shows its whole definition body (the scrollable pane carries it whatever its length),
+// and any other symbol shows its declaration line with the comment block above it — a
+// name defined in several places lists all of them, each location a click that opens the
+// definition. The tooltip is sticky: the pointer may travel to it (the keep-alive guard
+// below) and work it — scrolling the body, clicking a location — without it dismissing.
+// Markdown from a provider renders as TEXT — an extension's hover must not be able to
+// inject markup into the workbench's DOM.
 
-import { hoverTooltip, EditorView, keymap, type TooltipView } from '@codemirror/view';
+import { hoverTooltip, ViewPlugin, EditorView, keymap, type TooltipView } from '@codemirror/view';
 import { Facet, type Extension } from '@codemirror/state';
 import { t } from '../../platform/i18n';
 import { joinPath } from '../../platform/ui/index';
@@ -39,8 +42,14 @@ const extensionHover = hoverTooltip(async (view, pos) => {
 	if (!info) return null;
 	const hover = await extensionHoverFor(info.path, info.languageId, info.text, pos >= 0 ? view.state.doc.lineAt(pos).number - 1 : 0, pos - view.state.doc.lineAt(pos).from);
 	if (!hover || hover.contents.length === 0) return null;
+	// The word under the pointer spans the tooltip's keep range: a zero-width one would
+	// dismiss on the first move off that exact spot, before the pointer ever reaches the
+	// tooltip.
+	const word = view.state.wordAt(pos);
+	const from = word ? word.from : Math.max(0, Math.min(pos, view.state.doc.length));
 	return {
-		pos: Math.max(0, Math.min(pos, view.state.doc.length)),
+		pos: from,
+		end: word ? word.to : from,
 		create: (): TooltipView => {
 			const dom = document.createElement('div');
 			dom.className = 'ggs-ext-hover';
@@ -129,6 +138,29 @@ const MACRO_LOOKUP_CACHE_MAX = 64;
 const QUICK_INFO_MAX_DEFS = 3;
 const QUICK_INFO_COMMENT_LINES = 6;
 const QUICK_INFO_COMMENT_CHARS = 300;
+/** How much of one definition body the hover keeps — a real function or struct fits
+ *  whole; the tooltip pane scrolls over the cap, not the body. */
+const HOVER_BODY_MAX_LINES = 600;
+const HOVER_BODY_MAX_CHARS = 30_000;
+/** The kinds whose declaration is a block the hover shows whole — everything else
+ *  (a variable, a constant, a field) is its declaration line. */
+const BODY_KINDS = new Set([
+	'function', 'method', 'class', 'struct', 'enum', 'union', 'interface', 'module',
+	'namespace', 'trait', 'impl', 'record', 'constructor', 'type'
+]);
+
+/** The definition body `contents` carries at `line` through `endLine` — whole, whatever
+ *  its length: the hover pane scrolls (an `endLine` at or before the line, the outline
+ *  fallback's shape, means the index names no body and the answer is ''). */
+export function symbolBodyAt(contents: string, line: number, endLine: number | undefined): string {
+	const end = endLine ?? line;
+	if (end <= line) return '';
+	const lines = contents.split('\n');
+	const from = Math.min(Math.max(0, line), lines.length - 1);
+	const to = Math.min(Math.max(end, from), from + HOVER_BODY_MAX_LINES - 1, lines.length - 1);
+	const trimmed = lines.slice(from, to + 1).join('\n').replace(/\s+$/, '');
+	return trimmed.slice(0, HOVER_BODY_MAX_CHARS);
+}
 
 /** The directive a definition names: its lines from the declaration through the end line
  *  (a `\`-continued macro's continuations), trimmed of trailing blank lines and capped. */
@@ -244,8 +276,9 @@ export function macroHoverDom(name: string, entries: MacroHoverEntry[], open?: (
 
 /* ---------- The quick-info hover: every other indexed symbol ---------- */
 
-/** One non-macro definition the quick-info hover lists: its declaration line and the
- *  comment block above it, both sliced off the declaring file. */
+/** One non-macro definition the quick-info hover lists: its declaration line, the
+ *  comment block above it and — for a block-shaped kind — the definition's whole body,
+ *  all sliced off the declaring file. */
 export interface SymbolQuickInfoEntry {
 	kind: string;
 	/** Repo-relative, forward slashes — the index's own spelling. */
@@ -256,6 +289,9 @@ export interface SymbolQuickInfoEntry {
 	text: string;
 	/** The doc comment above the declaration, or '' when there is none. */
 	comment: string;
+	/** The definition's whole body through its end line, or '' — a variable, a scalar
+	 *  kind, or an index that names no body shows the declaration line only. */
+	body: string;
 }
 
 /** A hovered name's non-macro answer: the name and up to `QUICK_INFO_MAX_DEFS` entries. */
@@ -285,46 +321,94 @@ function sameFile(a: string, b: string): boolean {
 	return a.split('\\').join('/').toLowerCase() === b.split('\\').join('/').toLowerCase();
 }
 
+/** What the text around the hovered word says it is. The index lists every same-name
+ *  declaration — a local variable and a file-scope function can share one name — so the
+ *  hover ranks the kind the site asks for first: `total(` is the function, `struct Point`
+ *  names that struct, and everything else at a value position (an assignment, a statement
+ *  end, an argument, a comparison) is the variable. Null when the site is undecided — a
+ *  bare type name in a declaration, say. */
+export function hoverKindHint(line: string, from: number, to: number): string | null {
+	const before = line.slice(0, from);
+	const after = line.slice(to);
+	if (/^\s*\(/.test(after)) return 'function';
+	const leading = before.match(/(?:^|[^\w])(struct|enum|class)\s+(?:\w+\s+)?$/);
+	if (leading) return leading[1];
+	if (/^\s*([+\-*/%&|^=<>!?:;,)\].])/.test(after)) return 'variable';
+	return null;
+}
+
+/** Whether a definition of `kind` answers a hover site asking for `hint` — a method is
+ *  the function of an `obj.m(` site, a class the struct of a `class C` site. */
+function hintMatchesKind(kind: string, hint: string): boolean {
+	switch (hint) {
+		case 'function':
+			return kind === 'function' || kind === 'method' || kind === 'constructor';
+		case 'struct':
+			return kind === 'struct' || kind === 'class' || kind === 'interface';
+		case 'enum':
+			return kind === 'enum';
+		case 'variable':
+			return kind === 'variable' || kind === 'constant' || kind === 'field' || kind === 'property';
+		default:
+			return kind === hint;
+	}
+}
+
 /** The hovered name's non-macro definitions, one entry each — null when the index holds
- *  none (macros answer first, so this is the hover's fallback). The hovered file's own
- *  definition leads when `currentPath` names it; the rest follow in index order. */
-export async function quickInfoFor(source: MacroHoverSource, name: string, currentPath?: string): Promise<SymbolQuickInfo | null> {
+ *  none (macros answer first, so this is the hover's fallback). The entries rank by what
+ *  the hover site is: a definition whose own lines cover the hovered line (hovering the
+ *  definition itself), the hovered file's own definitions, and the kind the site's text
+ *  asks for (`hoverKindHint`) — so a hovered variable leads over a same-named function.
+ *  The rest follow in index order. */
+export async function quickInfoFor(source: MacroHoverSource, name: string, currentPath?: string, currentLine?: number, hint?: string | null): Promise<SymbolQuickInfo | null> {
 	const root = source.root();
 	if (!root) return null;
-	const key = `${root}\u0000${name}`;
+	const key = `${root}\u0000${name}\u0000${currentPath ?? ''}\u0000${currentLine ?? -1}\u0000${hint ?? ''}`;
 	const cached = quickInfoCache.get(key);
 	if (cached && Date.now() - cached.at < MACRO_LOOKUP_TTL_MS) return cached.info;
 	let defs: WsSymbol[];
 	try {
-		defs = (await source.lookup(name)).filter((def) => def.kind !== 'macro').slice(0, QUICK_INFO_MAX_DEFS);
+		defs = (await source.lookup(name)).filter((def) => def.kind !== 'macro');
 	} catch {
 		return null;
 	}
-	if (currentPath) {
-		defs.sort((a, b) => Number(sameFile(joinPath(root, b.path), currentPath)) - Number(sameFile(joinPath(root, a.path), currentPath)));
+	if (currentPath || currentLine !== undefined || hint) {
+		const rank = (def: WsSymbol): number => {
+			let score = 0;
+			const inFile = Boolean(currentPath) && sameFile(joinPath(root, def.path), currentPath!);
+			if (inFile) score += 2;
+			if (hint && hintMatchesKind(def.kind, hint)) score += 3;
+			if (currentLine !== undefined && inFile && def.line <= currentLine && currentLine <= (def.endLine ?? def.line)) score += 4;
+			return score;
+		};
+		defs.sort((a, b) => rank(b) - rank(a));
 	}
+	defs = defs.slice(0, QUICK_INFO_MAX_DEFS);
 	const entries: SymbolQuickInfoEntry[] = [];
 	for (const def of defs) {
 		let text = '';
 		let comment = '';
+		let body = '';
 		try {
 			const contents = await source.read(joinPath(root, def.path));
 			if (contents !== null) {
 				text = macroValueAt(contents, def.line, def.line);
 				comment = precedingComment(contents, def.line);
+				if (BODY_KINDS.has(def.kind)) body = symbolBodyAt(contents, def.line, def.endLine);
 			}
 		} catch {
 			text = '';
 		}
-		entries.push({ kind: def.kind, path: def.path, line: def.line, text, comment });
+		entries.push({ kind: def.kind, path: def.path, line: def.line, text, comment, body });
 	}
 	if (entries.length === 0) return cacheQuickInfo(key, null);
 	return cacheQuickInfo(key, { name, entries });
 }
 
 /** The quick-info tooltip: kind, name, then one entry per definition — its doc comment
- *  (when there is one), its declaration line and its location, clickable when `open`
- *  is wired (the location rides the same open the workbench's jump uses). */
+ *  (when there is one), its body whole (a block-shaped kind; the pane scrolls) or its
+ *  declaration line, and its location, clickable when `open` is wired (the location
+ *  rides the same open the workbench's jump uses). */
 export function quickInfoDom(info: SymbolQuickInfo, open?: (path: string, line: number) => void): HTMLElement {
 	const dom = document.createElement('div');
 	dom.className = 'ggs-symbol-hover ggs-quick-info';
@@ -339,10 +423,12 @@ export function quickInfoDom(info: SymbolQuickInfo, open?: (path: string, line: 
 			comment.textContent = entry.comment;
 			dom.appendChild(comment);
 		}
-		if (entry.text) {
+		if (entry.body || entry.text) {
+			// A body carries its own signature line, so the declaration pre drops out —
+			// the same text must not show twice.
 			const code = document.createElement('pre');
-			code.className = 'ggs-symbol-hover-code';
-			code.textContent = entry.text;
+			code.className = entry.body ? 'ggs-symbol-hover-code ggs-symbol-hover-body' : 'ggs-symbol-hover-code';
+			code.textContent = entry.body || entry.text;
 			dom.appendChild(code);
 		}
 		const loc = open ? document.createElement('button') : document.createElement('div');
@@ -357,35 +443,97 @@ export function quickInfoDom(info: SymbolQuickInfo, open?: (path: string, line: 
 	return dom;
 }
 
+/* ---------- The sticky hover: reaching the tooltip must not dismiss it ---------- */
+
+/** How far the tooltip's keep-alive zone reaches: down/up covers CodeMirror's own
+ *  tooltip margin (4px) plus the adjacent line the pointer crosses on its way, the
+ *  sideways reach stays narrow so a move to a neighbouring word escapes it and re-hovers
+ *  instead of pinning a stale tooltip. */
+const HOVER_REACH_Y = 26;
+const HOVER_REACH_X = 14;
+
+/** The tooltip's own DOM must be reachable. CodeMirror's hover plugin hides its tooltip
+ *  the moment a mousemove lands off the hovered range — which every pointer travel to
+ *  the tooltip is, the 4px gap between the hovered line and the tooltip alone maps off
+ *  the range. The guard runs on view.dom's CAPTURE phase, ahead of the plugin's bubble
+ *  listener: while one of this workbench's hover tooltips stands, a no-button mousemove
+ *  inside its keep-alive zone never reaches the plugin, so the pointer can travel onto
+ *  the tooltip and work it (scroll the body, click a location) without it dismissing.
+ *  A drag (buttons ≠ 0) passes through — selection must keep working — and a move out
+ *  of the zone flows again, dismissing as before. */
+export function hoverKeepAliveExtension(): Extension {
+	return ViewPlugin.fromClass(
+		class {
+			readonly #view: EditorView;
+			#onMove = (event: MouseEvent): void => {
+				if (event.buttons !== 0) return;
+				const tip = this.#view.dom.querySelector<HTMLElement>('.cm-tooltip .ggs-symbol-hover, .cm-tooltip .ggs-ext-hover');
+				if (!tip) return;
+				// The keep-alive zone reads the tooltip HOST's geometry — the wrapper CodeMirror
+				// positions (arrow, padding and all), the same element its own in-tooltip check
+				// measures, not the content pane inside it.
+				const host = tip.closest<HTMLElement>('.cm-tooltip') ?? tip;
+				const r = host.getBoundingClientRect();
+				if (event.clientX < r.left - HOVER_REACH_X || event.clientX > r.right + HOVER_REACH_X) return;
+				if (event.clientY < r.top - HOVER_REACH_Y || event.clientY > r.bottom + HOVER_REACH_Y) return;
+				event.stopPropagation();
+			};
+			constructor(view: EditorView) {
+				this.#view = view;
+				view.dom.addEventListener('mousemove', this.#onMove, true);
+			}
+			destroy(): void {
+				this.#view.dom.removeEventListener('mousemove', this.#onMove, true);
+			}
+		}
+	);
+}
+
+/** The word under `pos` — the range a hover of that word keeps: a zero-width one
+ *  dismisses on the first move off the exact spot. Null when the pointer is not on an
+ *  identifier. */
+export function wordRangeAt(view: EditorView, pos: number): { from: number; to: number } | null {
+	return view.state.wordAt(pos);
+}
+
 /** The workbench's own hover (CLion's quick info, over the symbol index): a hovered
- *  `#define` lists every indexed definition's directive text, and any other indexed
- *  symbol shows its declaration line with the comment above it. A second tooltip source
- *  beside the extension providers' — both may answer, CodeMirror stacks them. Definitions
- *  of the hovered file's own symbol lead the list; each location opens the definition on
- *  click when `open` is wired. */
-export function symbolHoverExtension(source: MacroHoverSource): Extension {
+ *  `#define` lists every indexed definition's directive text, a hovered function /
+ *  struct / enum / class shows its whole definition body, and any other indexed symbol
+ *  shows its declaration line with the comment above it. A second tooltip source beside
+ *  the extension providers' — both may answer, CodeMirror stacks them. Definitions of
+ *  the hovered file's own symbol lead the list; each location opens the definition on
+ *  click when `open` is wired. The keep-alive guard rides along, so the tooltip is
+ *  reachable and stays while it is worked. */
+export function symbolHoverExtension(source: MacroHoverSource): Extension[] {
 	const open = source.open
 		? (path: string, line: number): void => {
 				const root = source.root();
 				if (root) source.open!(joinPath(root, path), line);
 			}
 		: undefined;
-	return hoverTooltip(async (view, pos) => {
-		const word = view.state.wordAt(pos);
-		if (!word) return null;
-		const name = view.state.sliceDoc(word.from, word.to);
-		const macroEntries = await macroHoverEntries(source, name);
-		if (macroEntries.length > 0) {
+	return [
+		hoverTooltip(async (view, pos) => {
+			const range = wordRangeAt(view, pos);
+			if (!range) return null;
+			const name = view.state.sliceDoc(range.from, range.to);
+			const macroEntries = await macroHoverEntries(source, name);
+			if (macroEntries.length > 0) {
+				return {
+					pos: range.from,
+					end: range.to,
+					create: (): TooltipView => ({ dom: macroHoverDom(name, macroEntries, open) })
+				};
+			}
+			const hoverLine = view.state.doc.lineAt(range.from);
+			const hint = hoverKindHint(hoverLine.text, range.from - hoverLine.from, range.to - hoverLine.from);
+			const info = await quickInfoFor(source, name, view.state.facet(pathSlot), hoverLine.number - 1, hint);
+			if (!info) return null;
 			return {
-				pos: word.from,
-				create: (): TooltipView => ({ dom: macroHoverDom(name, macroEntries, open) })
+				pos: range.from,
+				end: range.to,
+				create: (): TooltipView => ({ dom: quickInfoDom(info, open) })
 			};
-		}
-		const info = await quickInfoFor(source, name, view.state.facet(pathSlot));
-		if (!info) return null;
-		return {
-			pos: word.from,
-			create: (): TooltipView => ({ dom: quickInfoDom(info, open) })
-		};
-	}, { hoverTime: 350 });
+		}, { hoverTime: 350 }),
+		hoverKeepAliveExtension()
+	];
 }

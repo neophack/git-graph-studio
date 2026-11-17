@@ -34,6 +34,7 @@ const KINDS: &[&str] = &[
     "module",
     "type",
     "macro",
+    "variable",
 ];
 
 fn kind_id(kind: &str) -> u8 {
@@ -49,7 +50,10 @@ const MAGIC: &[u8; 6] = b"GGSIDX";
 /// Format 2 (the tree-sitter parser layer, plan M4.1): symbols gained a column, an end
 /// line and an interned container name. A version-1 file fails the load below and is
 /// rebuilt from scratch.
-const VERSION: u8 = 2;
+/// Format 3: the C/C++ queries index variables and require a struct/enum/class body —
+/// a version-2 file holds the old shapes (no variables, every `struct T` use indexed as
+/// a definition) and is rebuilt from scratch the same way.
+const VERSION: u8 = 3;
 /// The interned-name id a symbol without a container carries.
 const NO_CONTAINER: u32 = u32::MAX;
 /// Full builds report progress every this many files; also the cancellation checkpoint.

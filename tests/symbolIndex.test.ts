@@ -13,10 +13,11 @@ import { buildTree, subtreeCounts, SymbolDatabaseView } from '../src/features/se
 import { fileSymbolItems, workspaceSymbolItems } from '../src/workbench';
 import { backend } from './tauriMock';
 import { click, flush, key, texts } from './helpers';
-import { macroHoverDom, macroHoverEntries, macroHoverFor, macroValueAt, precedingComment, quickInfoDom, quickInfoFor, resetMacroHoverCache, resetQuickInfoCache, type MacroHoverSource } from '../src/features/editor/editorProviderViews';
+import { hoverKindHint, macroHoverDom, macroHoverEntries, macroHoverFor, macroValueAt, precedingComment, quickInfoDom, quickInfoFor, resetMacroHoverCache, resetQuickInfoCache, symbolBodyAt, wordRangeAt, hoverKeepAliveExtension, type MacroHoverSource } from '../src/features/editor/editorProviderViews';
 import { buildPeekDom, definitionWindow } from '../src/features/editor/peek';
 import type { WsSymbol } from '../src/platform/ipc/search';
-import type { EditorView } from '@codemirror/view';
+import { EditorView } from '@codemirror/view';
+import { EditorState } from '@codemirror/state';
 
 const REPO = 'C:\\repo';
 
@@ -476,6 +477,176 @@ describe('the quick-info hover (any indexed symbol)', () => {
 		expect(info!.entries).toHaveLength(1);
 		expect(info!.entries[0]!.text).toBe('int add(int a, int b)');
 		expect(info!.entries[0]!.comment).toBe('/** Adds its arguments. */');
+	});
+
+	it('slices a block kind’s whole body through its end line, a scalar kind none', async () => {
+		const files: Record<string, string> = {
+			'C:/repo/src/point.h':
+				'typedef struct {\n    int x;\n    int y;\n} Point;\n\nint area(const Point *p)\n{\n\treturn p->x * p->y;\n}\nint z;\n'
+		};
+		const src = source([{ kind: 'struct', name: 'Point', path: 'src/point.h', line: 0, endLine: 3 }]);
+		src.read = async (path: string) => files[path.split('\\').join('/')] ?? null;
+		const info = await quickInfoFor(src, 'Point');
+		expect(info!.entries[0]!.body).toBe('typedef struct {\n    int x;\n    int y;\n} Point;');
+		expect(info!.entries[0]!.text).toBe('typedef struct {', 'the declaration line still rides along');
+
+		const fn = source([{ kind: 'function', name: 'area', path: 'src/point.h', line: 5, endLine: 8 }]);
+		fn.read = async (path: string) => files[path.split('\\').join('/')] ?? null;
+		const info2 = await quickInfoFor(fn, 'area');
+		expect(info2!.entries[0]!.body).toBe('int area(const Point *p)\n{\n\treturn p->x * p->y;\n}');
+
+		const scalar = source([{ kind: 'variable', name: 'z', path: 'src/point.h', line: 9 }]);
+		scalar.read = async (path: string) => files[path.split('\\').join('/')] ?? null;
+		const info3 = await quickInfoFor(scalar, 'z');
+		expect(info3!.entries[0]!.body).toBe('');
+		expect(info3!.entries[0]!.text).toBe('int z;');
+
+		const outline = source([{ kind: 'function', name: 'outline_only', path: 'src/point.h', line: 5 }]);
+		outline.read = async (path: string) => files[path.split('\\').join('/')] ?? null;
+		expect((await quickInfoFor(outline, 'outline_only'))!.entries[0]!.body).toBe('', 'no end line, no body');
+	});
+
+	it('shows the body whole in the tooltip and a variable its declaration line', async () => {
+		const bodyInfo = {
+			name: 'add',
+			entries: [
+				{
+					kind: 'function',
+					path: 'src/main.c',
+					line: 1,
+					text: 'int add(int a, int b)',
+					comment: '/** Adds its arguments. */',
+					body: 'int add(int a, int b)\n{\n\treturn a + b;\n}'
+				}
+			]
+		};
+		const dom = quickInfoDom(bodyInfo);
+		const body = dom.querySelector('.ggs-symbol-hover-body')!;
+		expect(body.textContent).toBe('int add(int a, int b)\n{\n\treturn a + b;\n}');
+		expect(dom.querySelectorAll('.ggs-symbol-hover-code')).toHaveLength(1, 'the signature rides inside the body, not beside it');
+
+		const lineInfo: typeof bodyInfo = {
+			name: 'z',
+			entries: [{ kind: 'variable', path: 'src/point.h', line: 9, text: 'int z;', comment: '', body: '' }]
+		};
+		const line = quickInfoDom(lineInfo);
+		expect(line.querySelector('.ggs-symbol-hover-body')).toBeNull();
+		expect(line.querySelector('.ggs-symbol-hover-code')!.textContent).toBe('int z;');
+	});
+
+	it('reads the hover site: a call is the function, a value position the variable', () => {
+		expect(hoverKindHint('total(a, b);', 0, 5)).toBe('function');
+		expect(hoverKindHint('int total(int a, int b)', 4, 9)).toBe('function', 'the definition line reads as the function too');
+		expect(hoverKindHint('int total = 0;', 4, 9)).toBe('variable');
+		expect(hoverKindHint('total = total + 1;', 8, 13)).toBe('variable');
+		expect(hoverKindHint('if (total == 3) {', 5, 10)).toBe('variable', 'a comparison is still the value');
+		expect(hoverKindHint('struct Point {', 7, 12)).toBe('struct');
+		expect(hoverKindHint('typedef struct tagRect Rect;', 23, 26)).toBe('struct', 'the tag keyword reaches past the tag name');
+		expect(hoverKindHint('enum State s;', 5, 10)).toBe('enum');
+		expect(hoverKindHint('Size canvas;', 0, 4)).toBeNull('a bare type name is undecided');
+	});
+
+	it('a hovered variable leads over a same-named function, a call site leads with the function', async () => {
+		resetQuickInfoCache();
+		const files: Record<string, string> = {
+			'C:/repo/src/math.c': 'int total(int a, int b)\n{\n\treturn a + b;\n}\n',
+			'C:/repo/src/main.c': 'void step(void) {\n    int total = 0;\n    total = total + 1;\n    step2(total);\n}\n'
+		};
+		// The lookup answers the function FIRST — the kind the hover site asks for must
+		// still lead.
+		const defs: WsSymbol[] = [
+			{ kind: 'function', name: 'total', path: 'src/math.c', line: 0, endLine: 3 },
+			{ kind: 'variable', name: 'total', path: 'src/main.c', line: 1 }
+		];
+		const src = source(defs);
+		src.read = async (path: string) => files[path.split('\\').join('/')] ?? null;
+		const atValue = await quickInfoFor(src, 'total', 'C:/repo/src/main.c', 2, 'variable');
+		expect(atValue!.entries[0]!.kind).toBe('variable');
+		expect(atValue!.entries[0]!.text).toBe('    int total = 0;');
+		const atCall = await quickInfoFor(src, 'total', 'C:/repo/src/main.c', 0, 'function');
+		expect(atCall!.entries[0]!.kind).toBe('function');
+		expect(atCall!.entries[0]!.body).toBe('int total(int a, int b)\n{\n\treturn a + b;\n}');
+	});
+
+	it('hovering inside a definition ranks that definition first', async () => {
+		resetQuickInfoCache();
+		const files: Record<string, string> = {
+			'C:/repo/src/point.h': 'struct Point {\n    int x;\n    int y;\n};\n'
+		};
+		const defs: WsSymbol[] = [
+			{ kind: 'struct', name: 'Point', path: 'src/point.h', line: 0, endLine: 3 },
+			{ kind: 'function', name: 'Point', path: 'src/other.c', line: 0, endLine: 1 }
+		];
+		const src = source(defs);
+		src.read = async (path: string) => files[path.split('\\').join('/')] ?? null;
+		const info = await quickInfoFor(src, 'Point', 'C:/repo/src/point.h', 2, null);
+		expect(info!.entries[0]!.kind).toBe('struct');
+		expect(info!.entries[0]!.body).toBe('struct Point {\n    int x;\n    int y;\n};');
+	});
+
+	it('carries the definition body whole up to the caps', () => {
+		const text = 'int f(void)\n{\n\treturn 1;\n}\nint g;\n';
+		expect(symbolBodyAt(text, 0, 3)).toBe('int f(void)\n{\n\treturn 1;\n}');
+		expect(symbolBodyAt(text, 0, 0)).toBe('', 'an end line at the line names no body');
+		expect(symbolBodyAt(text, 0, undefined)).toBe('');
+		expect(symbolBodyAt(text, 0, 400)).toBe('int f(void)\n{\n\treturn 1;\n}\nint g;', 'an end line past the file clamps to the last line');
+		const long = Array.from({ length: 800 }, (_, i) => `row ${i}`).join('\n');
+		expect(symbolBodyAt(long, 0, 799).split('\n')).toHaveLength(600);
+	});
+
+	it('spans the tooltip over the hovered word', () => {
+		const view = {
+			state: { wordAt: (pos: number) => (pos === 12 ? { from: 10, to: 17 } : null) }
+		} as unknown as EditorView;
+		expect(wordRangeAt(view, 12)).toEqual({ from: 10, to: 17 });
+		expect(wordRangeAt(view, 0)).toBeNull();
+	});
+
+	it('keeps the tooltip alive while the pointer travels to it and onto it', () => {
+		const view = new EditorView({
+			state: EditorState.create({ doc: 'x\n', extensions: [hoverKeepAliveExtension()] }),
+			parent: document.body
+		});
+		const tip = document.createElement('div');
+		tip.className = 'cm-tooltip';
+		const inner = document.createElement('div');
+		inner.className = 'ggs-symbol-hover';
+		tip.appendChild(inner);
+		view.dom.appendChild(tip);
+		tip.getBoundingClientRect = () =>
+			({ left: 100, right: 300, top: 50, bottom: 150, width: 200, height: 100, x: 100, y: 50, toJSON: () => ({}) }) as DOMRect;
+		let reached = 0;
+		view.dom.addEventListener('mousemove', () => {
+			reached++;
+		});
+		const move = (x: number, y: number, buttons = 0): MouseEvent => {
+			reached = 0;
+			const event = new MouseEvent('mousemove', { clientX: x, clientY: y, buttons, bubbles: true });
+			inner.dispatchEvent(event);
+			return event;
+		};
+
+		move(200, 160);
+		expect(reached).toBe(0, 'the gap between the hovered word and the tooltip');
+		move(200, 100);
+		expect(reached).toBe(0, 'inside the tooltip itself');
+		move(200, 210);
+		expect(reached).toBe(1, 'past the zone below');
+		move(200, 20);
+		expect(reached).toBe(1, 'past the zone above');
+		move(330, 100);
+		expect(reached).toBe(1, 'sideways off the tooltip');
+		move(200, 160, 1);
+		expect(reached).toBe(1, 'a drag must keep selecting');
+
+		tip.remove();
+		// The tooltip is gone; a move inside the editor passes through untouched. Dispatched
+		// on the view itself — the detached tooltip's pane is no longer in any propagation
+		// path.
+		reached = 0;
+		view.dom.dispatchEvent(new MouseEvent('mousemove', { clientX: 200, clientY: 100, buttons: 0, bubbles: true }));
+		expect(reached).toBe(1, 'no tooltip stands, nothing is swallowed');
+		view.destroy();
 	});
 
 	it('skips macro definitions, answers nothing without any, and re-uses the lookup', async () => {

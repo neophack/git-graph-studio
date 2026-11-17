@@ -22,7 +22,9 @@ export const SYMBOL_ICONS: Record<string, string> = {
 	interface: 'symbol-interface',
 	enum: 'symbol-enum',
 	module: 'symbol-module',
-	type: 'symbol-parameter'
+	type: 'symbol-parameter',
+	variable: 'symbol-variable',
+	macro: 'symbol-snippet'
 };
 
 

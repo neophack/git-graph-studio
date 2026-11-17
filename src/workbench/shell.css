@@ -886,11 +886,14 @@ body.resizing iframe { pointer-events: none; }
 .cm-editor .cm-tooltip-autocomplete ul li[aria-selected] { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
 .cm-editor .cm-indent-markers { --indent-marker-bg-color: var(--vscode-editorIndentGuide-background); }
 /* The quick-info hover (macro and symbol): the head names the symbol, each entry its doc
-   comment, declaration line and location — the location a button that opens the
-   definition, styled as VS Code's hover links are. */
+   comment, body whole (block kinds — the pane scrolls over it) or declaration line, and
+   location — the location a button that opens the definition, styled as VS Code's hover
+   links are. */
 .ggs-symbol-hover { max-width: 640px; font-family: var(--vscode-font-family); font-size: 12px; }
 .ggs-symbol-hover-head { display: flex; align-items: center; gap: 6px; padding: 2px 0 5px; font-weight: 600; }
 .ggs-symbol-hover-code, .ggs-symbol-hover-comment { margin: 3px 0; padding: 4px 8px; background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.1)); border-radius: 3px; font-family: var(--vscode-editor-font-family, monospace); font-size: var(--vscode-editor-font-size, 12px); white-space: pre; overflow-x: auto; max-width: 100%; }
+/* A definition body shows whole whatever its length — the pane scrolls over the cap. */
+.ggs-symbol-hover-code.ggs-symbol-hover-body { max-height: 340px; overflow-y: auto; }
 .ggs-symbol-hover-comment { color: var(--vscode-descriptionForeground); }
 .ggs-symbol-hover-loc { display: inline-block; margin: 1px 0 2px; padding: 0; border: none; background: none; color: var(--vscode-textLink-foreground); font-family: var(--vscode-font-family); font-size: 11px; cursor: pointer; text-align: left; }
 button.ggs-symbol-hover-loc:hover { text-decoration: underline; color: var(--vscode-textLink-activeForeground); }

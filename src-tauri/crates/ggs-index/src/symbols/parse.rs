@@ -233,11 +233,17 @@ const JAVA_QUERY: &str = r#"
 const C_QUERY: &str = r#"
 (function_definition declarator: (function_declarator declarator: (identifier) @def.function))
 (function_definition declarator: (pointer_declarator declarator: (function_declarator declarator: (identifier) @def.function)))
-(struct_specifier name: (type_identifier) @def.struct)
-(enum_specifier name: (type_identifier) @def.enum)
+(struct_specifier name: (type_identifier) @def.struct body: (field_declaration_list))
+(enum_specifier name: (type_identifier) @def.enum body: (enumerator_list))
 (type_definition declarator: (type_identifier) @def.type)
 (preproc_def name: (identifier) @def.macro)
 (preproc_function_def name: (identifier) @def.macro)
+(declaration declarator: (identifier) @def.variable)
+(declaration declarator: (init_declarator declarator: (identifier) @def.variable))
+(declaration declarator: (pointer_declarator declarator: (identifier) @def.variable))
+(declaration declarator: (init_declarator declarator: (pointer_declarator declarator: (identifier) @def.variable)))
+(declaration declarator: (array_declarator declarator: (identifier) @def.variable))
+(declaration declarator: (init_declarator declarator: (array_declarator declarator: (identifier) @def.variable)))
 (call_expression function: (identifier) @call)
 (preproc_include path: (string_literal) @import)
 "#;
@@ -249,12 +255,18 @@ const CPP_QUERY: &str = r#"
 (function_definition declarator: (pointer_declarator declarator: (function_declarator declarator: (field_identifier) @def.method)))
 (function_definition declarator: (function_declarator declarator: (qualified_identifier) @def.method))
 (function_definition declarator: (pointer_declarator declarator: (function_declarator declarator: (qualified_identifier) @def.method)))
-(struct_specifier name: (type_identifier) @def.struct)
-(class_specifier name: (type_identifier) @def.class)
-(enum_specifier name: (type_identifier) @def.enum)
+(struct_specifier name: (type_identifier) @def.struct body: (field_declaration_list))
+(class_specifier name: (type_identifier) @def.class body: (field_declaration_list))
+(enum_specifier name: (type_identifier) @def.enum body: (enumerator_list))
 (type_definition declarator: (type_identifier) @def.type)
 (preproc_def name: (identifier) @def.macro)
 (preproc_function_def name: (identifier) @def.macro)
+(declaration declarator: (identifier) @def.variable)
+(declaration declarator: (init_declarator declarator: (identifier) @def.variable))
+(declaration declarator: (pointer_declarator declarator: (identifier) @def.variable))
+(declaration declarator: (init_declarator declarator: (pointer_declarator declarator: (identifier) @def.variable)))
+(declaration declarator: (array_declarator declarator: (identifier) @def.variable))
+(declaration declarator: (init_declarator declarator: (array_declarator declarator: (identifier) @def.variable)))
 (call_expression function: (identifier) @call)
 (call_expression function: (field_expression field: (field_identifier) @call))
 (call_expression function: (qualified_identifier) @call)
@@ -540,7 +552,15 @@ fn symbol_of(
         _ => capture_kind,
     };
     let (line, column) = {
-        let p = name_node.start_position();
+        // A C/C++ typedef's name sits on its last line (`} Size;`); the definition begins
+        // where the type begins — a hover of the name slices from the `typedef` keyword
+        // through the end instead of the last line alone.
+        let typedef_start = if matches!(lang, Lang::C | Lang::Cpp) && kind == "type" {
+            scope.filter(|s| s.kind() == "type_definition").map(|s| s.start_position())
+        } else {
+            None
+        };
+        let p = typedef_start.unwrap_or_else(|| name_node.start_position());
         (p.row, p.column)
     };
     // A preprocessor directive's node includes its trailing newline: an end at column 0
@@ -1266,5 +1286,47 @@ macro_rules! sq { ($e:expr) => { $e * $e } }
         let file = parse_file("def unseen\n", "rb");
         assert!(file.symbols.is_empty());
         assert!(file.calls.is_empty());
+    }
+
+    #[test]
+    fn c_struct_bodies_and_variables() {
+        // The body is what separates a struct definition from a use: `struct Point origin;`
+        // declares a variable of the type and must not also index as a second "struct Point"
+        // — the bodyless use entry carries no end line, so a hover ranking it first showed a
+        // declaration line where the whole struct body belongs. Variables — plain, pointer,
+        // array, local and static-local — index too, so hovering the variable finds its own
+        // declaration and not only a same-named function.
+        let text = "struct Point {\n    int x;\n    int y;\n};\n\ntypedef struct {\n    int w;\n    int h;\n} Size;\n\ntypedef struct tagRect {\n    int l;\n    int r;\n} Rect;\n\nint total(int a, int b) { return a + b; }\n\nint counter = 5;\nstatic char *name = NULL;\nint arr[10];\nstruct Point origin;\n\nvoid step(void) {\n    int total = 0;\n    total = total + 1;\n    static int calls = 0;\n}\n";
+        let file = parse_file(text, "c");
+        assert_eq!(
+            kinds(&file),
+            vec![
+                ("struct", "Point"),
+                ("type", "Size"),
+                ("struct", "tagRect"),
+                ("type", "Rect"),
+                ("function", "total"),
+                ("variable", "counter"),
+                ("variable", "name"),
+                ("variable", "arr"),
+                ("variable", "origin"),
+                ("function", "step"),
+                ("variable", "total"),
+                ("variable", "calls"),
+            ]
+        );
+        let point = &file.symbols[0];
+        assert_eq!(point.end_line, 3, "the body rides along — a hover slices it whole");
+        let size = &file.symbols[1];
+        assert_eq!((size.line, size.end_line), (5, 8), "the anonymous typedef's type spans to its name");
+        let rect = &file.symbols[2];
+        assert_eq!((rect.line, rect.end_line), (10, 13));
+        for variable in &file.symbols[5..] {
+            if variable.kind == "variable" {
+                assert_eq!(variable.end_line, variable.line, "a declaration is its own line");
+            }
+        }
+        let local_total = &file.symbols[10];
+        assert_eq!(local_total.line, 23, "the local inside step, not the function");
     }
 }
