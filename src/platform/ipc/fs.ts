@@ -3,7 +3,7 @@
 // list every walk reuses, and the desktop transfer pair — the ggs-fs crate's commands
 // behind the app's adapters. The result shapes live here once; the Explorer, the editors,
 // the viewers and the compare tools all import them from this module.
-import { invoke } from './core';
+import { invoke, type Channel } from './core';
 
 /** One entry of a `list_dir` answer: name, workspace-absolute path, kind and size. The
  *  optional second-line facts (the remote files page's rows, docs/remote-client-plan.md
@@ -67,6 +67,27 @@ export const readFile = (path: string) => invoke<FileContents>('read_file', { pa
 export const readFileRaw = (path: string, encoding?: string) => invoke<ArrayBuffer | Uint8Array>('read_file_raw', { path, encoding });
 export const readFileBase64 = (path: string) => invoke<string>('read_file_base64', { path });
 export const readFileChunk = (path: string, offset: number, len: number) => invoke<FileChunk>('read_file_chunk', { path, offset, len });
+/** The raw-bytes read (`read_file_bytes_raw`): the answer IS the bytes, no base64 — the
+ *  image viewer's whole-file read, the media viewer's no-protocol fallback and any hot
+ *  byte path skip the 1.33× text inflation and the webview's per-character decode loop.
+ *  offset/len absent reads the whole file (backend-capped like read_file_base64). Keys
+ *  the caller omits stay off the wire (writeFile's convention). */
+export const readFileBytesRaw = (path: string, offset?: number, len?: number) =>
+	invoke<ArrayBuffer | Uint8Array>('read_file_bytes_raw', { path, ...(offset !== undefined && { offset }), ...(len !== undefined && { len }) });
+
+/** One push of the hex viewer's byte search (`hex_search`, streamed over its Channel):
+ *  the scan's progress, a batch of hit offsets (ascending), or the final tally. */
+export type ByteSearchEvent =
+	| { type: 'progress'; scanned: number; total: number }
+	| { type: 'batch'; offsets: number[] }
+	| { type: 'done'; hits: number; elapsedMs: number; cancelled: boolean };
+
+/** The hex viewer's backend byte search (module 7): memchr-fast and streamed — the
+ *  searched bytes never cross the bridge. A newer search or `hexSearchCancel` retires
+ *  the running one, which still ends with `done { cancelled: true }`. */
+export const hexSearch = (path: string, needle: number[], onEvent: Channel<ByteSearchEvent>) =>
+	invoke<void>('hex_search', { path, needle, onEvent });
+export const hexSearchCancel = () => invoke<void>('hex_search_cancel');
 export const patchFile = (path: string, edits: { offset: number; byte: number }[]) => invoke<void>('patch_file', { path, edits });
 export const fileProbe = (path: string) => invoke<FileProbe>('file_probe', { path });
 export const encodings = () => invoke<[string, string][]>('encodings');

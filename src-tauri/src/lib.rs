@@ -343,6 +343,7 @@ mod desktop {
             .manage(ggs_elf::ElfState::default())
 .manage(ggs_csv::CsvState::default())
             .manage(ggs_dmp::DumpState::default())
+            .manage(std::sync::Arc::new(ggs_fs::search::ByteSearchState::default()))
             .manage(ext_gallery::GalleryInstallState::default())
             .manage(app_update::AppUpdateState::default())
             // A clone of the app's one host (`ext_process::host()`), not a second,
@@ -578,6 +579,9 @@ mod desktop {
                 cmd_fs::read_file_base64,
                 cmd_media::media_info,
                 cmd_fs::read_file_chunk,
+                cmd_fs::read_file_bytes_raw,
+                cmd_fs::hex_search,
+                cmd_fs::hex_search_cancel,
                 cmd_fs::patch_file,
                 cmd_fs::write_file,
                 cmd_fs::fs_write_chunk,

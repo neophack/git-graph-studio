@@ -94,6 +94,55 @@ pub async fn read_file_chunk(path: String, offset: u64, len: u32) -> Result<File
     read_chunk(&path, offset, len)
 }
 
+/// The same read as `read_file_chunk`, but the bytes cross as a raw IPC payload instead
+/// of a base64 string inside JSON: the image viewer's whole-file read and the media
+/// viewer's no-protocol fallback skip the 1.33× text inflation and the webview's
+/// per-character decode loop (the hex slabs stay on `read_file_chunk` — they need its
+/// file-size field). `offset`/`len` absent reads the whole file, capped like
+/// `read_file_base64` — a data-URL-scale file is all the viewers show.
+#[tauri::command]
+pub async fn read_file_bytes_raw(
+    path: String,
+    offset: Option<u64>,
+    len: Option<u32>,
+) -> Result<tauri::ipc::Response, String> {
+    /// The whole-file read's cap — the image viewer's old base64 contract. An explicit
+    /// `len` serves its caller's own policy (the hex slabs, the media fallback's cap).
+    const MAX_WHOLE: u64 = 32 * 1024 * 1024;
+    tauri::async_runtime::spawn_blocking(move || read_bytes(&path, offset.unwrap_or(0), len, MAX_WHOLE).map(tauri::ipc::Response::new))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The hex viewer's byte search (module 7): the file is scanned backend-side with
+/// memchr's substring search, the hit offsets streaming over `on_event` — the searched
+/// bytes never cross the bridge (they used to ride up in 1 MiB base64 chunks for a
+/// naive byte-compare in the webview, principle 4's violation). A newer search (or
+/// `hex_search_cancel`) retires the running one, which still ends with
+/// `done { cancelled: true }` so the view never waits on a search that will not finish.
+#[tauri::command]
+pub async fn hex_search(
+    state: State<'_, std::sync::Arc<ggs_fs::search::ByteSearchState>>,
+    path: String,
+    needle: Vec<u8>,
+    on_event: tauri::ipc::Channel<ggs_fs::search::ByteSearchEvent>,
+) -> Result<(), String> {
+    let generation = state.next();
+    let state = std::sync::Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut sink = crate::events::ChannelSink(on_event);
+        ggs_fs::search::search_bytes(Path::new(&path), &needle, &|| !state.is_current(generation), &mut sink)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Stop the running byte search (the hex view closing or clearing its box calls this).
+#[tauri::command]
+pub fn hex_search_cancel(state: State<'_, std::sync::Arc<ggs_fs::search::ByteSearchState>>) {
+    state.cancel();
+}
+
 /// Write the bytes a hex-editor session changed back in place; everything else of the
 /// file is left untouched on disk, exactly as it was read.
 #[tauri::command]

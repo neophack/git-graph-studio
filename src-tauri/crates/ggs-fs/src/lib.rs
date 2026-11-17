@@ -2,14 +2,16 @@
 //! chunked reads and patches, the no-clobber copy engine ("name (copy).ext"), the
 //! streaming import/export transfer engine with cancellation, the confined chunked
 //! uploads, `zip_tree` (the export and the remote download pack through it), the media
-//! file metadata (module 7's video/audio viewer probes through `media`) and the
-//! `.gitignore`-aware parallel tree walk every consumer (Quick Open, search, the symbol
+//! file metadata (module 7's video/audio viewer probes through `media`), the hex
+//! viewer's streamed byte-pattern search (`search`), and the `.gitignore`-aware
+//! parallel tree walk every consumer (Quick Open, search, the symbol
 //! index, the analysis engine) shares — the exclusion policy stays ONE list here.
 //!
 //! Allowed dependencies: ggs-base, ggs-text (encoding), ignore, rayon, trash, zip,
-//! base64. No tauri — the wire upload path and the zip walk are plain calls.
+//! base64, memchr. No tauri — the wire upload path and the zip walk are plain calls.
 
 pub mod media;
+pub mod search;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -206,6 +208,45 @@ pub fn read_chunk(path: &str, offset: u64, len: u32) -> Result<FileChunk, String
         size,
         base64: base64::engine::general_purpose::STANDARD.encode(bytes),
     })
+}
+
+/// `read_chunk`'s raw half: the bytes themselves, unencoded (the `read_file_bytes_raw`
+/// command's payload — no base64 text inflating the bridge). `len` absent reads the rest
+/// of the file, capped at `max` — the whole-file viewers' contract.
+pub fn read_bytes(path: &str, offset: u64, len: Option<u32>, max: u64) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+    let size = file.metadata().map_err(|e| format!("{path}: {e}"))?.len();
+    let start = offset.min(size);
+    let want = match len {
+        Some(len) => u64::from(len).min(size - start),
+        None => {
+            let rest = size - start;
+            if rest > max {
+                return Err(format!(
+                    "{path} is {} MB; the read caps whole-file loads at {} MB",
+                    size / (1024 * 1024),
+                    max / (1024 * 1024)
+                ));
+            }
+            rest
+        }
+    };
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| format!("{path}: {e}"))?;
+    let mut buf = vec![0u8; want as usize];
+    let mut filled = 0;
+    // A short read is not EOF (a file shrinking mid-read is the honest case): fill what
+    // can be filled and truncate to it.
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) => return Err(format!("{path}: {e}")),
+        }
+    }
+    buf.truncate(filled);
+    Ok(buf)
 }
 
 /// One changed byte of an in-place hex edit, at its absolute file offset.
@@ -972,6 +1013,26 @@ mod file_list_tests {
         // A start past the end reads nothing.
         let past = read_chunk(&path, 200, 16).unwrap();
         assert_eq!(past.base64, "");
+    }
+
+    #[test]
+    fn read_bytes_pages_clamps_and_caps_the_whole_file_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.bin");
+        fs::write(&path, (0..100u8).collect::<Vec<_>>()).unwrap();
+        let path = path.to_string_lossy().into_owned();
+
+        // A window reads exactly its bytes, unencoded.
+        assert_eq!(read_bytes(&path, 10, Some(4), 32).unwrap(), vec![10, 11, 12, 13]);
+        // A window past the end clamps to it; a start past the end reads nothing.
+        assert_eq!(read_bytes(&path, 98, Some(4096), 32).unwrap(), vec![98, 99]);
+        assert_eq!(read_bytes(&path, 200, Some(16), 32).unwrap(), Vec::<u8>::new());
+        // The whole-file form reads the rest, and refuses past the caller's cap.
+        assert_eq!(read_bytes(&path, 0, None, 200).unwrap().len(), 100);
+        assert!(read_bytes(&path, 0, None, 50).is_err());
+        // An offset with the whole-file form reads the tail, cap measured on the rest.
+        assert_eq!(read_bytes(&path, 60, None, 100).unwrap().len(), 40);
+        assert!(read_bytes(&dir.path().join("gone.bin").to_string_lossy(), 0, None, 100).is_err());
     }
 
     #[test]

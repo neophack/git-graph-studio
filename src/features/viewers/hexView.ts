@@ -1,6 +1,7 @@
 // The hex editor a binary file opens in: rows of offset, hex and ASCII columns, paged
 // through `read_file_chunk` so a multi-gigabyte file is never read whole, and a byte-search
-// box that scans the file in chunks in the background and jumps between hits. The layout
+// box the BACKEND scans the file for (`hex_search`, memchr over 4 MiB windows streamed
+// over a Channel — the searched bytes never cross the bridge), jumping between hits. The layout
 // follows a hex editor's table: a ruled-off offset column, a one-digit ruler over the
 // byte columns, hex bytes in 4/8-byte groups, and a compact ASCII pane behind a second
 // rule; the row width is the widest of 4..64 bytes that fits the window (or one pinned
@@ -25,7 +26,8 @@
 // end. A data inspector line under the rows reads the caret byte as u8..u64, floats
 // and text.
 
-import { patchFile, readFileChunk } from '../../platform/ipc/fs';
+import { patchFile, readFileChunk, hexSearch, hexSearchCancel, type ByteSearchEvent } from '../../platform/ipc/fs';
+import { Channel } from '../../platform/ipc/core';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { t, tf } from '../../platform/i18n';
 import { attachWheel, type Disposable } from '../../scroll/input';
@@ -41,8 +43,6 @@ import {
 // 64 decoded slabs (4 MiB) — enough that normal paging never re-reads, small enough
 // that a scroll across a multi-gigabyte file cannot grow the renderer without bound.
 const SLAB_CACHE_LIMIT = 64;
-/** Search reads the file in these many bytes at a time. */
-const SEARCH_CHUNK = 1024 * 1024;
 
 function hexRow(offset: number, bytes: Uint8Array, highlight: Uint8Array, cursor = -1, edited?: ReadonlyMap<number, number>, bytesPerRow = bytes.length, digits = OFFSET_DIGITS, selection?: readonly [number, number]): HTMLElement {
 	const classes = (hit: boolean, at: boolean, changed: boolean, selected: boolean, extra = '') =>
@@ -182,6 +182,9 @@ export class HexView {
 	/** A scan is in flight for the current needle — the counter shows "Searching…" until
 	 *  it lands, instead of "No results" while the chunks are still streaming in. */
 	private searchRunning = false;
+	/** The backend scan's completion fraction while it runs (null until the first
+	 *  progress push) — the counter reads "Searching… 42%" over a huge file. */
+	private searchProgress: number | null = null;
 	/** The slab cache's generation: a save() (and a destroy) bump it so a slab read still
 	 *  in flight never lands its pre-save bytes into the cleared cache. */
 	private slabGen = 0;
@@ -375,6 +378,10 @@ export class HexView {
 		this.scrollbar.dispose();
 		window.removeEventListener('mouseup', this.onWindowMouseUp);
 		this.searchToken++;
+		// A search still streaming stops on the backend too: its late events would only
+		// meet the dead view's token guard while the scan burns IO to no end.
+		if (this.searchRunning) void hexSearchCancel().catch(() => undefined);
+		this.searchRunning = false;
 		this.slabGen++;
 		this.slabs.clear();
 		this.slabValues.clear();
@@ -631,7 +638,8 @@ export class HexView {
 		if (!this.searchNeedle) {
 			label.textContent = '';
 		} else if (this.searchRunning) {
-			label.textContent = this.hits.length ? `${this.hits.length} found…` : 'Searching…';
+			const pct = this.searchProgress === null ? '' : ` ${Math.floor(this.searchProgress * 100)}%`;
+			label.textContent = this.hits.length ? `${this.hits.length} found…${pct}` : `Searching…${pct}`;
 		} else {
 			label.textContent = this.hits.length ? `${this.hitIndex + 1} of ${this.hits.length}` : 'No results';
 		}
@@ -639,6 +647,9 @@ export class HexView {
 
 	private clearSearch(): void {
 		this.searchToken++;
+		if (this.searchRunning) void hexSearchCancel().catch(() => undefined);
+		this.searchRunning = false;
+		this.searchProgress = null;
 		this.searchNeedle = null;
 		this.searchedText = '';
 		this.hits = [];
@@ -650,53 +661,48 @@ export class HexView {
 	}
 
 	/** Starts a scan of the whole file for the search box's needle (an unchanged needle
-	 *  is repeated with Enter instead - see the search box's keydown handler). */
+	 *  is repeated with Enter instead - see the search box's keydown handler). The scan
+	 *  runs backend-side (memchr over 4 MiB windows) and only the hit offsets cross the
+	 *  bridge — the file no longer rides up in 1 MiB base64 chunks for a webview
+	 *  byte-compare, which made a multi-gigabyte binary a minutes-long stall. */
 	private search(): void {
 		const needle = parseNeedle(this.searchBox.value);
 		if (!needle) {
 			this.clearSearch();
 			return;
 		}
-		this.searchToken++;
-		const token = this.searchToken;
+		const token = ++this.searchToken;
 		this.searchNeedle = needle;
 		this.searchedText = this.searchBox.value;
 		this.hits = [];
 		this.hitIndex = -1;
 		this.searchRunning = true;
+		this.searchProgress = null;
 		this.updateCount();
 		this.sizer.querySelector('.hex-body')?.remove();
 		this.draw();
-		void (async () => {
-			let offset = 0;
-			let carry = new Uint8Array(0);
-			while (offset < this.size && token === this.searchToken) {
-				let chunk: Uint8Array;
-				try {
-					chunk = decodeBase64((await readFileChunk(this.path, offset, SEARCH_CHUNK)).base64);
-				} catch {
-					if (token === this.searchToken) this.searchRunning = false;
-					return;
-				}
-				if (token !== this.searchToken) return;
-				const joined = new Uint8Array(carry.length + chunk.length);
-				joined.set(carry);
-				joined.set(chunk, carry.length);
-				for (let pos = findNeedle(joined, needle, 0); pos >= 0; pos = findNeedle(joined, needle, pos + 1)) {
-					this.hits.push(offset - carry.length + pos);
-				}
-				// A match can straddle the boundary; carry the tail back into the next round.
-				carry = joined.subarray(Math.max(0, joined.length - needle.length + 1));
-				offset += chunk.length;
+		const channel = new Channel<ByteSearchEvent>((event) => {
+			if (token !== this.searchToken) return;
+			if (event.type === 'batch') {
+				this.hits.push(...event.offsets);
+				this.updateCount();
+			} else if (event.type === 'progress') {
+				this.searchProgress = event.total > 0 ? event.scanned / event.total : null;
+				this.updateCount();
+			} else {
+				this.searchRunning = false;
+				this.updateCount();
+				// Land on the first hit - unless the user already stepped through the
+				// partial results while the scan was still running.
+				if (this.hits.length && this.hitIndex < 0) this.gotoHit(0);
+			}
+		});
+		hexSearch(this.path, Array.from(needle), channel).catch(() => {
+			if (token === this.searchToken) {
+				this.searchRunning = false;
 				this.updateCount();
 			}
-			if (token !== this.searchToken) return;
-			this.searchRunning = false;
-			this.updateCount();
-			// Land on the first hit - unless the user already stepped through the
-			// partial results while the scan was still running.
-			if (this.hits.length && this.hitIndex < 0) this.gotoHit(0);
-		})();
+		});
 	}
 
 	/** Scrolls to hit `index` (wrapping) and repaints with the highlight the rows need. */

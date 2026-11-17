@@ -49,7 +49,7 @@ beforeAll(() => {
 
 beforeEach(() => {
 	backend.on('media_info', ({ path } = {} as never) => (String(path).toLowerCase().endsWith('.flac') ? FLAC_INFO : MP4_INFO));
-	backend.on('read_file_base64', () => 'AAAA');
+	backend.on('read_file_bytes_raw', () => new Uint8Array([0, 0, 0]));
 	// No folder tree, no git: the open path is the media routing's alone here.
 	backend.on('list_dir', () => []);
 });
@@ -98,7 +98,7 @@ describe('media viewer', () => {
 		expect(backend.callsTo('file_probe')).toHaveLength(0);
 		// The streaming source is the protocol URL, not a whole-file read.
 		expect(video.src).toContain('ggsmedia.localhost');
-		expect(backend.callsTo('read_file_base64')).toHaveLength(0);
+		expect(backend.callsTo('read_file_bytes_raw')).toHaveLength(0);
 	});
 
 	it('answers the information panel from the container probe', async () => {
@@ -187,7 +187,7 @@ describe('media viewer', () => {
 		// The protocol URL was set; the element's error asks the byte read.
 		video.dispatchEvent(new Event('error'));
 		await flush();
-		expect(backend.callsTo('read_file_base64')).toHaveLength(1);
+		expect(backend.callsTo('read_file_bytes_raw')).toHaveLength(1);
 		expect(video.src).toBe('blob:mocked');
 		// A second failure past the byte read is a codec the webview lacks: the message
 		// names the system player, and its action hands off.
@@ -212,7 +212,7 @@ describe('media viewer', () => {
 		const message = document.querySelector<HTMLElement>('.media-message')!;
 		expect(message.hidden).toBe(false);
 		expect(message.textContent).toContain('system player');
-		expect(backend.callsTo('read_file_base64')).toHaveLength(0);
+		expect(backend.callsTo('read_file_bytes_raw')).toHaveLength(0);
 	});
 
 	it('reloads in place when the file changes on disk', async () => {

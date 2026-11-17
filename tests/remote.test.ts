@@ -1158,7 +1158,10 @@ describe('path gate roots', () => {
 			'devtree_open',
 			'elf_open',
 			'dump_open',
-			'dump_scan'
+			'dump_scan',
+			// The raw-bytes read and the backend byte search read `path` the same way.
+			'read_file_bytes_raw',
+			'hex_search'
 		]) {
 			expect(() => gateInvoke(command, { path: outside }, [root]), command).toThrow(/outside the folders/);
 			expect(() => gateInvoke(command, { path: inside }, [root]), command).not.toThrow();

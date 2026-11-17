@@ -110,6 +110,8 @@ export const PATH_GATED: Record<
 	read_file_raw: { args: ['path'] },
 	read_file_base64: { args: ['path'] },
 	read_file_chunk: { args: ['path'] },
+	read_file_bytes_raw: { args: ['path'] },
+	hex_search: { args: ['path'] },
 	file_probe: { args: ['path'] },
 	file_fingerprint: { args: ['path'] },
 	patch_file: { args: ['path'] },

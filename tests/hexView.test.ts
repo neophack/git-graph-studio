@@ -1,13 +1,13 @@
 // The hex viewer: rows are paged from read_file_chunk (16 bytes each, offset + hex + ASCII),
-// only the rows the scroll model (scroll/) has in view are drawn, and the search box scans
-// the file for text or hex-byte needles.
+// only the rows the scroll model (scroll/) has in view are drawn, and the search box's
+// needle is scanned backend-side (`hex_search`, its hits streaming over the Channel).
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { bytesPerRowFor, HexView } from '../src/features/viewers';
 import { EditorGroup } from '../src/features/editor';
 import { settings } from '../src/platform/settings';
-import { backend } from './tauriMock';
+import { backend, Channel } from './tauriMock';
 import { flush } from './helpers';
 
 function b64(bytes: Uint8Array): string {
@@ -494,7 +494,7 @@ describe('hex view', () => {
 		keydown(box, 'Enter');
 		await flush();
 		expect(count()).toBe('1 of 3');
-		const reads = backend.callsTo('read_file_chunk').length;
+		const scans = backend.callsTo('hex_search').length;
 		// The needle is unchanged: Enter walks the hits (wrapping) instead of rescanning.
 		keydown(box, 'Enter');
 		expect(count()).toBe('2 of 3');
@@ -502,18 +502,21 @@ describe('hex view', () => {
 		expect(count()).toBe('3 of 3');
 		keydown(box, 'Enter');
 		expect(count()).toBe('1 of 3');
-		expect(backend.callsTo('read_file_chunk').length).toBe(reads);
+		expect(backend.callsTo('hex_search').length).toBe(scans);
 		// A changed needle starts a new scan.
 		box.value = 'aa';
 		keydown(box, 'Enter');
 		await flush();
 		expect(count()).toBe('1 of 297');
-		expect(backend.callsTo('read_file_chunk').length).toBeGreaterThan(reads);
+		expect(backend.callsTo('hex_search').length).toBeGreaterThan(scans);
 	});
 
 	it('reports a hit at a search-chunk boundary exactly once', async () => {
-		// The scan reads 1 MiB chunks; 0xAB 0xCD sits mid-chunk, straddling the boundary
-		// (last byte of chunk 0 + first of chunk 1) and past it: 3 hits, never duplicated.
+		// The backend scans in 4 MiB windows whose tail overlap finds a straddling needle
+		// exactly once (pinned crate-side); the view must consume the batches the same way
+		// whatever the offsets — 0xAB 0xCD sits mid-file, straddling the old 1 MiB chunk
+		// boundary (last byte of one chunk + first of the next) and past it: 3 hits, never
+		// duplicated.
 		const SIZE = 1024 * 1024 + 64;
 		const bytes = new Uint8Array(SIZE);
 		bytes.set([0xab, 0xcd], 500);
@@ -695,36 +698,42 @@ describe('hex view', () => {
 		}
 		(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = TrackingObserver;
 		try {
-			// 5 MiB: the search has five chunks to stream.
-			const big = new Uint8Array(5 * 1024 * 1024).fill(0x11);
+			const big = new Uint8Array(64).fill(0x11);
 			backend.on('read_file_chunk', (args) => ({
 				size: big.length,
 				base64: b64(big.subarray(Number(args.offset), Number(args.offset) + Number(args.len)))
 			}));
+			// A search that never settles (the backend scan still running when the view
+			// goes): destroy must cancel it backend-side, or it would burn IO to no end.
+			backend.on('hex_search', ({ onEvent }) => {
+				(onEvent as Channel<{ type: string }>).send({ type: 'progress', scanned: 1, total: 100 });
+				return new Promise(() => undefined);
+			});
 			const view = new HexView('/tmp/big.bin');
 			await view.load();
 			document.body.append(view.root);
 			const box = view.root.querySelector('.hex-search') as HTMLInputElement;
 			box.value = 'ab';
 			keydown(box, 'Enter');
+			expect(view.root.querySelector('.hex-search-count')!.textContent).toContain('Searching…');
 			view.destroy();
 			expect(disconnected).toBe(2); // the view's own and the drawn scrollbar's
 			expect(view.root.isConnected).toBe(false);
 			expect((view as unknown as { slabs: Map<number, unknown> }).slabs.size).toBe(0);
-			await flush(10);
-			// The slab read plus the one in-flight chunk - not the whole five-chunk scan.
-			expect(backend.callsTo('read_file_chunk').length).toBeLessThan(4);
+			expect(backend.callsTo('hex_search_cancel')).toHaveLength(1);
 		} finally {
 			(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = realObserver;
 		}
 	});
 
 	it('closing the hex tab destroys the view, stopping its in-flight search', async () => {
-		const big = new Uint8Array(5 * 1024 * 1024).fill(0x11);
+		const big = new Uint8Array(64).fill(0x11);
 		backend.on('read_file_chunk', (args) => ({
 			size: big.length,
 			base64: b64(big.subarray(Number(args.offset), Number(args.offset) + Number(args.len)))
 		}));
+		// The scan never answers: the tab's close is what stops it.
+		backend.on('hex_search', () => new Promise(() => undefined));
 		const group = new EditorGroup(document.getElementById('editorGroup')!);
 		await group.openHex('/tmp/big.bin');
 		const box = document.querySelector('.hex-search') as HTMLInputElement;
@@ -732,7 +741,7 @@ describe('hex view', () => {
 		keydown(box, 'Enter');
 		await group.close();
 		await flush(10);
-		expect(backend.callsTo('read_file_chunk').length).toBeLessThan(4);
+		expect(backend.callsTo('hex_search_cancel')).toHaveLength(1);
 		expect(document.querySelector('.hex-view')).toBeNull();
 	});
 

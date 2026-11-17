@@ -23,6 +23,8 @@ rayon.workspace = true
 trash.workspace = true
 zip = { workspace = true }
 base64.workspace = true
+# The byte search's substring scan (search.rs).
+memchr.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

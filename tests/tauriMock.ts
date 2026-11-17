@@ -130,11 +130,69 @@ export function dispatchScripted(command: string, args: Record<string, unknown> 
 	if (!handler && command === 'scm_diff') {
 		handler = (callArgs) => mockScmDiff(callArgs);
 	}
+	// The hex viewer's byte search: the real answer is the backend's memchr scan, but a
+	// test that only scripts the chunk reads keeps working — the mock assembles the file
+	// through them and pushes the real event shapes over the channel argument. A scripted
+	// `hex_search` answers instead, as any command's does.
+	if (!handler && command === 'hex_search') {
+		handler = (callArgs) => mockHexSearch(callArgs);
+	}
+	// The cancel is a recorded no-op.
+	if (!handler && command === 'hex_search_cancel') {
+		handler = () => undefined;
+	}
+	// The raw-bytes read: a test that scripted `read_file_base64` (or the chunk reads)
+	// keeps working — its bytes cross unencoded, exactly as the real command answers.
+	if (!handler && command === 'read_file_bytes_raw') {
+		handler = (callArgs) => mockReadFileBytesRaw(callArgs);
+	}
 	// A map that overrides `get` with its own defaulting layer still answers; only a truly
 	// unhandled command throws.
 	handler ??= backend.handlers.get(command);
 	if (!handler) throw new Error(`unhandled invoke: ${command}`);
 	return Promise.resolve(handler(args));
+}
+
+/** A base64 payload's bytes, for the mock's raw channels. */
+function decodeBase64Text(base64: string): Uint8Array {
+	const binary = atob(base64);
+	const bytes = new Uint8Array(binary.length);
+	for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+	return bytes;
+}
+
+/** The mock's byte search (`hex_search`): the file's bytes come from the scripted chunk
+ *  reads (test files are small), scanned plainly, and the pushes mirror the backend's —
+ *  the ascending offsets in a batch, one progress, the done tally. */
+function mockHexSearch(args: Record<string, unknown>): unknown {
+	const channel = args.onEvent as Channel<{ type: string }>;
+	const needle = args.needle as number[];
+	const chunk = backend.handlers.get('read_file_chunk');
+	if (!chunk) throw new Error('unhandled invoke: hex_search (script read_file_chunk for the bytes)');
+	const first = chunk({ path: args.path, offset: 0, len: 512 * 1024 * 1024 }) as { base64: string };
+	const bytes = decodeBase64Text(first.base64);
+	const offsets: number[] = [];
+	outer: for (let i = 0; i + needle.length <= bytes.length; i++) {
+		for (let j = 0; j < needle.length; j++) if (bytes[i + j] !== needle[j]) continue outer;
+		offsets.push(i);
+	}
+	for (let at = 0; at < offsets.length; at += 1024) channel.send({ type: 'batch', offsets: offsets.slice(at, at + 1024) });
+	channel.send({ type: 'progress', scanned: bytes.length, total: bytes.length });
+	channel.send({ type: 'done', hits: offsets.length, elapsedMs: 0, cancelled: false });
+	return undefined;
+}
+
+/** The mock's raw-bytes read (`read_file_bytes_raw`): the scripted `read_file_base64`
+ *  (or, lacking it, the chunk reads) supplies the bytes, crossing unencoded. */
+function mockReadFileBytesRaw(args: Record<string, unknown>): unknown {
+	const asBase64 = backend.handlers.get('read_file_base64');
+	if (asBase64) return decodeBase64Text(asBase64({ path: args.path }) as string);
+	const chunk = backend.handlers.get('read_file_chunk');
+	if (chunk) {
+		const answer = chunk({ path: args.path, offset: args.offset ?? 0, len: args.len ?? 512 * 1024 * 1024 }) as { base64: string };
+		return decodeBase64Text(answer.base64);
+	}
+	throw new Error('unhandled invoke: read_file_bytes_raw');
 }
 
 /** The mock's own line diff for `scm_diff`, shaped exactly like the backend's answer

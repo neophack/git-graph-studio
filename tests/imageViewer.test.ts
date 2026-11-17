@@ -217,7 +217,7 @@ function size(element: HTMLElement, width: number, height: number): void {
 }
 
 async function openImage(name = 'photo.png', natural = NATURAL) {
-	backend.on('read_file_base64', () => PNG);
+	backend.on('read_file_bytes_raw', () => new Uint8Array(Buffer.from(PNG, 'base64')));
 	const group = new EditorGroup(document.getElementById('editorGroup')!);
 	group.setRoot(REPO);
 	const path = `${REPO}\\${name}`;
@@ -456,10 +456,11 @@ describe('image viewer', () => {
 		const reload = () => (group as unknown as { reloadIfClean: (p: string) => Promise<void> }).reloadIfClean(path);
 		const src = image.src;
 		await reload();
-		expect(backend.callsTo('read_file_base64')).toHaveLength(2);
+		expect(backend.callsTo('read_file_bytes_raw')).toHaveLength(2);
 		expect(image.src).toBe(src); // same bytes: nothing re-decoded
-		const edited = PNG.slice(0, -6) + 'AAAAAA';
-		backend.on('read_file_base64', () => edited);
+		const edited = new Uint8Array(Buffer.from(PNG, 'base64'));
+		edited[edited.length - 1] = edited[edited.length - 1]! ^ 0xff;
+		backend.on('read_file_bytes_raw', () => edited);
 		await reload();
 		expect(image.src).not.toBe(src);
 		image.dispatchEvent(new Event('load'));
@@ -467,7 +468,7 @@ describe('image viewer', () => {
 	});
 
 	it('shows a read failure in the stage', async () => {
-		backend.on('read_file_base64', () => { throw `${REPO}\\huge.png: too large to preview`; });
+		backend.on('read_file_bytes_raw', () => { throw `${REPO}\\huge.png: too large to preview`; });
 		const group = new EditorGroup(document.getElementById('editorGroup')!);
 		group.setRoot(REPO);
 		await group.openFile(`${REPO}\\huge.png`);

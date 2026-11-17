@@ -428,7 +428,13 @@ decode hands off to the system player.
   the no-protocol fallback (the remote shells), the decode failure degrading to the system
   player — and the in-place reload on a disk change)
 - Backend: `src-tauri/crates/ggs-text/` (the viewer engine), byte comparison in the
-  `ggs-index` crate's `hexdiff`, chunked reads via `ggs-fs` (the `cmd_fs.rs` adapters),
+  `ggs-index` crate's `hexdiff`, chunked reads via `ggs-fs` (the `cmd_fs.rs` adapters —
+  `read_file_bytes_raw` answers raw IPC bytes, no base64: the image viewer's whole-file
+  read and the media fallback skip the webview's per-character decode loop; the hex
+  slabs keep `read_file_chunk` for its file-size field), the hex viewer's byte search
+  in the `ggs-fs` crate's `search` module
+  (memchr over 4 MiB windows, the hit offsets streaming over a Channel with generation
+  cancellation — the searched bytes never cross the bridge),
   the media facts and the streaming protocol via the `ggs-fs` crate's `media` module behind
   `src-tauri/src/cmd_media.rs` — `media_info` (the header parsers: MP4/MOV/M4A box walk with
   the moov at the tail, Matroska/WebM EBML, RIFF WAV/AVI, FLAC, MP3 with the Xing frame

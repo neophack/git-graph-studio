@@ -13,7 +13,7 @@
 import { openPath } from '@tauri-apps/plugin-opener';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { mediaInfo, mediaSrcUrl, type MediaInfo } from '../../platform/ipc/media';
-import { readFileBase64 } from '../../platform/ipc/fs';
+import { readFileBytesRaw } from '../../platform/ipc/fs';
 import { t, tf } from '../../platform/i18n';
 import { mediaMime } from '../../platform/markdown';
 import { actionButton, basename, dirname, el, formatBytes, notify, showContextMenu, type MenuEntry } from '../../platform/ui/index';
@@ -237,14 +237,16 @@ export class MediaView {
 			return false;
 		}
 		try {
-			const base64 = await readFileBase64(this.path);
+			// The bytes cross raw (no base64 text, no per-character decode loop): the file
+			// lands as one ArrayBuffer, wrapped straight into the blob URL. The known size
+			// rides as the length when the facts answered; without them the whole-file read
+			// (backend-capped) still serves.
+			const raw = size > 0 ? await readFileBytesRaw(this.path, 0, size) : await readFileBytesRaw(this.path);
 			if (token !== this.loadToken || this.disposed) return false;
 			this.releaseBlob();
 			this.usingProtocol = false;
 			this.bytesTried = true;
-			const binary = atob(base64);
-			const bytes = new Uint8Array(binary.length);
-			for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+			const bytes = raw instanceof Uint8Array ? new Uint8Array(raw) : new Uint8Array(raw);
 			this.blobUrl = URL.createObjectURL(new Blob([bytes], { type: mediaMime(basename(this.path)) ?? 'application/octet-stream' }));
 			this.video.src = this.blobUrl;
 			this.hideMessage();

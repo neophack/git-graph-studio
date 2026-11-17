@@ -28,7 +28,7 @@
 // image / colour / path, the folder's images as a gallery (natural order, n / total), and
 // a reload in place when the file changes on disk — the view kept when the size did not.
 
-import { listDir, readFileBase64 } from '../../platform/ipc/fs';
+import { listDir, readFileBytesRaw } from '../../platform/ipc/fs';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { t, tf, type LocaleKey } from '../../platform/i18n';
 import { imageMime } from '../../platform/markdown';
@@ -84,38 +84,35 @@ function samePath(a: string, b: string): boolean {
 	return norm(a) === norm(b);
 }
 
-/** A cheap identity of a payload: its length and a strided sample of its characters — what
- *  a reload compares instead of holding a second copy of the bytes. */
-function fingerprint(base64: string): string {
+/** A cheap identity of a payload: its length and a strided sample of its bytes — what
+ *  a reload compares instead of holding a second copy of them. */
+function fingerprint(bytes: Uint8Array): string {
 	let hash = 2166136261;
-	const stride = Math.max(1, Math.floor(base64.length / 4096));
-	for (let i = 0; i < base64.length; i += stride) hash = Math.imul(hash ^ base64.charCodeAt(i), 16777619);
-	for (let i = Math.max(0, base64.length - 1024); i < base64.length; i++) hash = Math.imul(hash ^ base64.charCodeAt(i), 16777619);
-	return `${base64.length}:${(hash >>> 0).toString(16)}`;
+	const stride = Math.max(1, Math.floor(bytes.length / 4096));
+	for (let i = 0; i < bytes.length; i += stride) hash = Math.imul(hash ^ bytes[i]!, 16777619);
+	for (let i = Math.max(0, bytes.length - 1024); i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i]!, 16777619);
+	return `${bytes.length}:${(hash >>> 0).toString(16)}`;
 }
 
 function hex2(value: number): string {
 	return value.toString(16).padStart(2, '0').toUpperCase();
 }
 
-/** The decoded bytes of a base64 payload: its length minus the padding. */
-function decodedLength(base64: string): number {
-	const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
-	return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
-}
-
-/** A blob URL for the image (one decoded copy, shared by the image and its navigator
- *  thumbnail) — or the data URL where the platform has no object URLs. */
-function imageUrl(base64: string, mime: string): string {
-	if (typeof URL.createObjectURL !== 'function' || typeof atob !== 'function') return `data:${mime};base64,${base64}`;
-	try {
-		const binary = atob(base64);
-		const bytes = new Uint8Array(binary.length);
-		for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-		return URL.createObjectURL(new Blob([bytes], { type: mime }));
-	} catch {
-		return `data:${mime};base64,${base64}`;
+/** A blob URL for the image (the read bytes as one Blob, shared by the image and its
+ *  navigator thumbnail) — or the data URL where the platform has no object URLs. The
+ *  bytes cross the bridge raw (`read_file_bytes_raw`): no base64 text, no per-character
+ *  decode loop in the webview. */
+function imageUrl(bytes: Uint8Array<ArrayBuffer>, mime: string): string {
+	if (typeof URL.createObjectURL === 'function') {
+		try {
+			return URL.createObjectURL(new Blob([bytes], { type: mime }));
+		} catch {
+			// falls through to the data URL
+		}
 	}
+	let binary = '';
+	for (let at = 0; at < bytes.length; at += 0x8000) binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+	return `data:${mime};base64,${btoa(binary)}`;
 }
 
 function releaseUrl(url: string | null): void {
@@ -400,10 +397,10 @@ export class ImageView {
 
 	private async read(keep: boolean): Promise<void> {
 		const token = ++this.loadToken;
-		let data: string;
+		let bytes: Uint8Array<ArrayBuffer>;
 		try {
-			data = await readFileBase64(this.path);
-			if (typeof data !== 'string') throw new Error(t('image.decodeFailed'));
+			const raw = await readFileBytesRaw(this.path);
+			bytes = raw instanceof Uint8Array ? new Uint8Array(raw) : new Uint8Array(raw);
 		} catch (error) {
 			if (token === this.loadToken && !this.disposed) {
 				const reason = error instanceof Error ? error.message : String(error);
@@ -414,12 +411,12 @@ export class ImageView {
 		}
 		if (token !== this.loadToken || this.disposed) return;
 		// A reload of unchanged bytes (a watcher echo, a window refocus) changes nothing.
-		const stamp = fingerprint(data);
+		const stamp = fingerprint(bytes);
 		if (keep && stamp === this.stamp && this.url) return;
 		this.stamp = stamp;
-		this.bytes = decodedLength(data);
+		this.bytes = bytes.length;
 		const previous = this.url;
-		this.url = imageUrl(data, this.mime);
+		this.url = imageUrl(bytes, this.mime);
 		this.keepView = keep && this.natural.width > 0;
 		this.sampler = undefined;
 		this.image.src = this.url;

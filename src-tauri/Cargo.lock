@@ -2086,6 +2086,7 @@ dependencies = [
  "ggs-base",
  "ggs-text",
  "ignore",
+ "memchr",
  "rayon",
  "serde",
  "serde_json",
