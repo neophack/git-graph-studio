@@ -8,6 +8,7 @@
 // from `viewer_symbols` once the rows are up, so neither ever blocks the first paint.
 
 import { indexedClose, indexedLines, indexedOpen, viewerClose, viewerHighlight, viewerLines, viewerOpen, viewerSymbols, type ViewerOpenInfo, type ViewerOutlineSymbol } from '../../platform/ipc/viewer';
+import { fileProbe } from '../../platform/ipc/fs';
 import { listen, type UnlistenFn } from '../../platform/ipc/core';
 
 import { DocFindController, type DocFindHost, type DocFindMatch } from '../editor';
@@ -87,6 +88,9 @@ export class FastView {
 	readonly scroll: ScrollModel;
 	private readonly scrollbar: Scrollbar;
 	private open: (ViewerOpenInfo & { indexed: boolean }) | null = null;
+	/** The open file's path and its last seen size — the watcher's reload gate (`reloadIfChanged`). */
+	private path: string | null = null;
+	private lastProbeSize: number | null = null;
 	/** The window-fetch command of the open document's family (rope or indexed). */
 	private linesCommand: typeof viewerLines = viewerLines;
 	/** True while the open document serves through the indexed, memory-bounded backend. */
@@ -192,6 +196,15 @@ export class FastView {
 		}
 		if (this.open) void (this.open.indexed ? indexedClose(this.open.docId) : viewerClose(this.open.docId));
 		this.open = { ...info, indexed: this.indexed };
+		this.path = path;
+		// The reload gate's baseline: a fresh probe of the file as it stands now, so the
+		// first watcher batch compares against the size this view was opened with.
+		this.lastProbeSize = null;
+		void fileProbe(path)
+			.then((probe) => {
+				if (!this.disposed && this.open?.docId === info.docId) this.lastProbeSize = probe.size;
+			})
+			.catch(() => undefined);
 		this.symbols = [];
 		this.wantedTokens = null;
 		this.cache.clear();
@@ -486,6 +499,27 @@ export class FastView {
 		if (this.open) this.open.lineCount = lineCount;
 		this.scroll.setRowCount(lineCount);
 		this.layout();
+	}
+
+	/** The watcher's external-change reload: a cheap probe gates it (a batch naming the
+	 *  file whose size has not moved is not a reload — the probe is a stat, never a read
+	 *  of a file this view exists to avoid loading whole), and the re-open keeps the
+	 *  scroll model's top — the rows re-render where the reader was, so a reload never
+	 *  jumps to the file head. */
+	async reloadIfChanged(): Promise<boolean> {
+		if (!this.path || this.disposed || !this.open) return false;
+		let size: number;
+		try {
+			size = (await fileProbe(this.path)).size;
+		} catch {
+			return false; // deleted or unreadable: the tab keeps what it shows
+		}
+		if (this.disposed) return false;
+		if (this.lastProbeSize !== null && size !== this.lastProbeSize) {
+			return this.openFile(this.path, { indexed: this.indexed });
+		}
+		this.lastProbeSize = size;
+		return false;
 	}
 
 	/* ---------- The whole-file find bar (docFind.ts), find without replace ---------- */

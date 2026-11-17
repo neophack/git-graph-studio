@@ -457,3 +457,44 @@ describe('the fast viewer whole-file find (docFind.ts)', () => {
 		view.dispose();
 	});
 });
+
+describe('the fast viewer\u2019s external-change reload', () => {
+	function setup(probeSize: number): void {
+		backend.on('viewer_open', () => ({ ...OPEN, lineCount: 100_000 }));
+		backend.on('viewer_close', () => undefined);
+		backend.on('viewer_symbols', () => []);
+		backend.on('viewer_lines', ({ start, end }) => linesResult(start as number, end as number));
+		backend.on('file_probe', () => ({ size: probeSize, binary: false }));
+	}
+
+	it('re-opens the file when the disk moved, keeping the reader\u2019s place', async () => {
+		setup(1000);
+		const view = mount();
+		await view.openFile('C:\repo\huge.txt');
+		await flush(); // the gate's baseline probe
+		// A batch naming the file with an unchanged size is not a reload: no re-open.
+		expect(await view.reloadIfChanged()).toBe(false);
+		expect(backend.callsTo('viewer_open')).toHaveLength(1);
+		// The reader scrolled somewhere; the reload lands the fresh rows there, not at the head.
+		view.scroll.setTop(5000);
+		await flush();
+		backend.on('file_probe', () => ({ size: 2000, binary: false }));
+		expect(await view.reloadIfChanged()).toBe(true);
+		expect(backend.callsTo('viewer_open')).toHaveLength(2);
+		expect(view.scroll.top).toBe(5000);
+		view.dispose();
+	});
+
+	it('keeps the tab as it is when the file vanished or the probe fails', async () => {
+		setup(1000);
+		const view = mount();
+		await view.openFile('C:\repo\huge.txt');
+		await flush();
+		backend.on('file_probe', () => {
+			throw new Error('no such file');
+		});
+		expect(await view.reloadIfChanged()).toBe(false);
+		expect(backend.callsTo('viewer_open')).toHaveLength(1);
+		view.dispose();
+	});
+});

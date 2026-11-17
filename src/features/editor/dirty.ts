@@ -506,6 +506,13 @@ export const dirtyMethods: ThisType<EditorGroup> = {
 			await editor.media.reload();
 			return;
 		}
+		// A fast-view tab re-opens its file when the disk really moved (the view's own size
+		// gate) — the reader's place is the scroll model's top and the re-open keeps it, so
+		// the fresh rows land where the reader was instead of at the file head.
+		if (editor.fast) {
+			if (await editor.fast.reloadIfChanged()) this.flashReloadedTab(editor);
+			return;
+		}
 		const view = editor.view;
 		if (!view) return;
 		try {

@@ -212,7 +212,31 @@ describe('Copy Deleted / Changed Lines', () => {
 	});
 });
 
-describe('the diff editor’s per-change revert arrows', () => {
+describe('the diff editor\u2019s landing position', () => {
+	it('opening a diff lands on its first change, the counter reading it as current', async () => {
+		// VS Code's diff editor opens at its first change. The landing runs once — the
+		// first answer that finds the panes standing — and never again: the second open of
+		// the same tab (the row's re-click re-reading a clean tab) and every later answer
+		// keep the reader's place, and the cursor the landing set is what makes it visible.
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		const left = 'a\nb\nc\nd\ne\nf\ng\nh\n';
+		const right = 'a\nB!\nc\nd\ne\nf\nG!\nh\n';
+		const editor = await openWorkingDiff(group, left, right);
+		expect(editor.diffRanges).toHaveLength(2);
+		expect(editor.merge!.b.state.selection.main.head).toBe(editor.diffRanges![0]!.fromB);
+		expect(texts('.diff-count')).toEqual(['1 / 2']);
+		// A later answer — the debounced re-diff an edit asks for — must not move the
+		// cursor again: park it on the second change, edit at the document's tail, wait
+		// the re-ask out, and find the cursor where it was parked.
+		const second = editor.diffRanges![1]!.fromB;
+		editor.merge!.b.dispatch({ selection: { anchor: second } });
+		editor.merge!.b.dispatch({ changes: { from: editor.merge!.b.state.doc.length, insert: 'tail\n' } });
+		await new Promise((resolve) => setTimeout(resolve, RENDER + 300));
+		expect(editor.merge!.b.state.selection.main.head).toBe(second);
+	});
+});
+
+describe('the diff editor\u2019s per-change revert arrows', () => {
 	it('a stale hunk against a re-read (shorter) base still reverts instead of throwing', async () => {
 		// The arrows outlive their answer across a rebuild: diffReload re-reads both sides
 		// and re-mounts the panes while the PREVIOUS answer's hunks still stand, so the

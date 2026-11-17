@@ -900,20 +900,49 @@ export const openMethods: ThisType<EditorGroup> = {
 			if (!view) return 0;
 			const head = view.state.selection.main.head;
 			let index = 0;
+			// The changes strictly at or before the cursor's line start: the cursor sitting ON
+			// a change's first line is "in" that change (1/N for the first), not the next one.
 			for (const range of rangesNow()) {
-				if (range.fromB > head) break;
-				index++;
+				if (range.toB <= head) index++;
+				else break;
 			}
 			return Math.min(index, hunks.length);
 		};
 		/** Applies a backend answer: the views repaint, the badge and the counter follow,
 		 *  and the context menu's change ranges mirror for the concerns outside this
 		 *  closure. */
+		let answered = false;
 		const applyDiff = (answer: LineDiffData): void => {
+			answered = true;
 			hunkStats = answer;
 			hunks = answer.hunks;
 			diffHandle?.setDiff(hunks);
 			refreshChangeInfo();
+			jumpToFirstChange();
+		};
+		/** The open's landing (VS Code's diff editor opens at its first change): once, on
+		 *  the first answer that finds the panes standing, the modified pane moves its
+		 *  cursor to the first change and scrolls it in. Every later answer — an edit's
+		 *  re-diff, the ignore toggles' re-ask, the watcher's re-read — keeps the reader's
+		 *  place, and a comparison with no changes consumes the landing silently. An
+		 *  answer that beat the first render waits: the render's own landing call below
+		 *  finishes it the moment the panes stand. */
+		let jumpPending = true;
+		const jumpToFirstChange = (): void => {
+			if (!jumpPending || !answered) return;
+			const pane = editor.view ?? editor.merge?.b ?? null;
+			if (!pane) return;
+			jumpPending = false;
+			if (hunks.length === 0) return;
+			const first = rangesNow()[0];
+			if (!first) return;
+			const anchor = Math.min(first.fromB, pane.state.doc.length);
+			// The scroll rides only where a real viewport stands (a hidden or unmeasured
+			// pane has none — jsdom among them, where the effect's scroll machinery would
+			// also poison the pane's own posAtCoords heuristic that the context menu reads).
+			const effects = pane.scrollDOM.clientHeight > 0 ? [EditorView.scrollIntoView(anchor, { y: 'start', yMargin: 5 })] : [];
+			pane.dispatch({ selection: { anchor }, effects });
+			updateCounter();
 		};
 		/** Asks the backend for the diff of the two sides as they stand — the sides'
 		 *  resolved texts ride along (they are what the panes show, and a revision read
@@ -1082,6 +1111,12 @@ export const openMethods: ThisType<EditorGroup> = {
 			// The viewer overlays the panes this render replaces — it leaves first, so no
 			// stale panel survives a layout switch or a follow-the-file rebuild.
 			viewer?.close();
+			// The reader's place across a rebuild: the watcher's re-read, the layout switch
+			// and the ignore toggles re-mount the panes wholesale, and a bare rebuild parks
+			// them at the file head. The scroll offsets carry over — restored right after
+			// the new views stand, before any content settles over them.
+			const keepTopA = editor.merge?.a?.scrollDOM.scrollTop ?? null;
+			const keepTopB = editor.merge?.b?.scrollDOM.scrollTop ?? editor.view?.scrollDOM.scrollTop ?? null;
 			const buffer = editor.dirty ? editor.view?.state.doc.toString() ?? editor.merge?.b?.state.doc.toString() : undefined;
 			detachScrollSync?.();
 			detachScrollSync = null;
@@ -1285,6 +1320,16 @@ export const openMethods: ThisType<EditorGroup> = {
 				overviews.push(attachOverviewRuler(editor.view, inlineMarks));
 			}
 			refreshOverviews();
+			// The place carries over (see the capture above): the write runs after the new
+			// views' first flush, so CodeMirror's measure pass never reads a half-restored
+			// scroller. First render has no previous panes — nothing to carry.
+			const restoreTop = (view: EditorView | null | undefined, top: number | null): void => {
+				if (!view || top === null) return;
+				view.requestMeasure({ read: () => null, write: () => { view.scrollDOM.scrollTop = top; } });
+			};
+			restoreTop(editor.merge?.a, keepTopA);
+			restoreTop(editor.merge?.b ?? editor.view, keepTopB);
+			jumpToFirstChange();
 			if (editable) {
 				// The saved baseline is the loaded text — kept across a rebuild (an unsaved
 				// buffer must stay dirty against it), replaced by the buffer itself when clean.

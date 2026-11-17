@@ -494,6 +494,35 @@ describe('editor group', () => {
 		expect(diff.dirty).toBe(true);
 	});
 
+	it('a working-tree diff\u2019s rebuild keeps the reader\u2019s place (the watcher\u2019s re-read never parks at the head)', async () => {
+		// The re-read re-mounts both panes wholesale; a bare rebuild parks them at the file
+		// head and every external modification yanked the comparison back to line 1. The
+		// scroll offsets carry across the rebuild instead — the place the reader was.
+		const store: Record<string, string> = { 'C:\\repo\\src/a.ts': 'first\n' };
+		backend.on('read_file_at', ({ revision, path }) => revision === '*'
+			? { contents: store[`C:\\repo\\${String(path)}`] ?? '', binary: false, size: 20, encoding: 'utf8', eol: 'lf' }
+			: { contents: `${revision}:${String(path)}\n`, binary: false, size: 20, encoding: 'utf8', eol: 'lf' });
+		files(store);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openDiff({
+			kind: 'diff', id: 'w2', title: 'a.ts (Working Tree)',
+			left: { revision: 'HEAD', path: 'src/a.ts', label: 'HEAD', exists: true },
+			right: { revision: '*', path: 'src/a.ts', label: 'Working Tree', exists: true }
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		const diff = (group as unknown as { open: Editor[] }).open.find((e) => e.input.kind === 'diff')!;
+		diff.merge!.a!.scrollDOM.scrollTop = 350;
+		diff.merge!.b!.scrollDOM.scrollTop = 400;
+		store['C:\\repo\\src/a.ts'] = 'changed on disk\n';
+		await group.reloadIfClean('C:\\repo\\src\\a.ts');
+		await new Promise((resolve) => setTimeout(resolve, 60));
+		// The new panes stand where the old ones did — and not at the file head (the old
+		// code's answer, scroll 0, fails this).
+		expect(diff.merge!.a!.scrollDOM.scrollTop).toBe(350);
+		expect(diff.merge!.b!.scrollDOM.scrollTop).toBe(400);
+	});
+
 	it('clicking an already-open diff again re-reads a clean tab and keeps a dirty buffer', async () => {
 		// The Source Control row's second click used to re-activate the tab with the
 		// comparison it opened with: the file's new state stayed invisible until the tab
