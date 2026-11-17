@@ -8,7 +8,7 @@ import { assocApply, contextMenuApply } from '../platform/ipc/assoc';
 import { settingsRead, settingsWrite } from '../platform/ipc/settings';
 
 import { hook } from './hooks';
-import { load, save } from './state';
+import { load, save, syncJumpList } from './state';
 import { setLocale, t } from './i18n';
 import { el, notify } from './ui';
 
@@ -481,7 +481,12 @@ export function updateSetting<K extends keyof AppSettings>(key: K, value: AppSet
 	settings[key] = value;
 	save('appSettings', persisted());
 	if (key === 'theme') applyTheme();
-	if (key === 'locale') setLocale(String(value));
+	if (key === 'locale') {
+		setLocale(String(value));
+		// The shell's own New Window label follows the display language: the taskbar jump
+		// list re-renders in it (the recents themselves are language-free).
+		syncJumpList();
+	}
 	if (key === 'fontSize') applyFontSize();
 	if (key === 'density') applyDensity();
 	if (key === 'fileAssociations') applyFileAssociations();

@@ -5,6 +5,7 @@
 
 import { jumpListApply } from './ipc/assoc';
 import { t } from './i18n';
+import { hook } from './hooks';
 
 const PREFIX = 'ggstudio.';
 
@@ -84,10 +85,12 @@ export function clearRecents(): void {
 
 /** Push the recents and the New Window label at the OS shell — the Windows taskbar's
  *  right-click jump list (every other platform's backend answers a no-op). Fire and
- *  forget: a refusal (a remote session's, the machine-level integrations being the PC's
- *  own) or a shell failure just leaves the list stale; nothing here is worth a toast. */
+ *  forget: a shell failure just leaves the list stale; nothing here is worth a toast. A
+ *  remote session never reaches for it at all — the taskbar is the PC's own shell (the
+ *  path gate refuses the command), so its boots and root attaches do not spend an
+ *  invoke the PC would refuse. */
 export function syncJumpList(): void {
-	if (typeof localStorage === 'undefined') return;
+	if (typeof localStorage === 'undefined' || hook('session').remote()) return;
 	void jumpListApply(recentFolders(), t('workbench.newWindow')).catch(() => undefined);
 }
 

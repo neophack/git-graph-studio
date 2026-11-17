@@ -8,6 +8,7 @@ import { TitleBar } from '../src/workbench/titlebar';
 import { Panel } from '../src/workbench/panel';
 import { DEFAULT_SETTINGS, SETTING_DEFS, settings, updateSetting } from '../src/platform/settings';
 import { setLocale, t } from '../src/platform/i18n';
+import { provideHook } from '../src/platform/hooks';
 import { backend } from './tauriMock';
 import { click, flush, hover, menuLabels, texts, type } from './helpers';
 
@@ -108,6 +109,25 @@ describe('persisted state', () => {
 		state.clearRecents();
 		expect(backend.callsTo('jump_list_apply').at(-1)!.folders).toEqual([]);
 		expect(backend.callsTo('jump_list_apply').length).toBe(before + 4);
+	});
+
+	it('a display-language change re-renders the jump list in the new language', () => {
+		updateSetting('locale', 'zh-cn');
+		expect(backend.callsTo('jump_list_apply').at(-1)!.newWindowLabel).toBe('新建窗口');
+		updateSetting('locale', 'en');
+		expect(backend.callsTo('jump_list_apply').at(-1)!.newWindowLabel).toBe('New Window');
+	});
+
+	it('a remote session never reaches for the PC taskbar', () => {
+		// The taskbar is the PC's own shell — the path gate refuses the command — so a
+		// session's boots and root attaches must not spend an invoke the PC refuses.
+		provideHook('session', { remote: () => true, frontendId: () => 'remote/1', frontendClass: () => 'remote', addressedHere: (frontend) => frontend.startsWith('remote') });
+		const before = backend.callsTo('jump_list_apply').length;
+		state.rememberFolder('/r');
+		expect(backend.callsTo('jump_list_apply').length).toBe(before);
+		provideHook('session', { remote: () => false, frontendId: () => 'main', frontendClass: () => 'main', addressedHere: (frontend) => frontend === 'main' });
+		state.rememberFolder('/r2');
+		expect(backend.callsTo('jump_list_apply').length).toBe(before + 1);
 	});
 
 	it('round-trips the command palette\'s MRU of executed commands', () => {
