@@ -148,9 +148,9 @@ jobs:
     name: Studio tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: npm
@@ -183,7 +183,7 @@ jobs:
     timeout-minutes: 120
     if: github.event_name != 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # The tests' tempdirs on the D: scratch, out of Defender's profile-temp scanning
       # path. Set from a step, not a job-level env: the `runner` context is not available
@@ -225,7 +225,7 @@ jobs:
           cache-workspace-crates: true
           save-if: github.ref == 'refs/heads/main'
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: npm
@@ -271,10 +271,10 @@ jobs:
 
       - name: Upload the cargo build timings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: studio-windows-test-timings
-          path: src-tauri/cargo-timings/**/*.html
+          path: target/studio/cargo/cargo-timings/**/*.html
           if-no-files-found: warn
 
   # The Linux backend test gate, native on the runner (the Windows job's sibling; the
@@ -285,7 +285,7 @@ jobs:
     timeout-minutes: 60
     if: github.event_name != 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install the Linux build dependencies
         run: |
@@ -308,7 +308,7 @@ jobs:
           cache-workspace-crates: true
           save-if: github.ref == 'refs/heads/main'
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: npm
@@ -348,10 +348,10 @@ jobs:
 
       - name: Upload the cargo build timings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: studio-linux-native-test-timings
-          path: src-tauri/cargo-timings/**/*.html
+          path: target/studio/cargo/cargo-timings/**/*.html
           if-no-files-found: warn
 
   # The macOS backend test gate (the owner's direction, 2026-10-14: macOS tests too — the
@@ -366,7 +366,7 @@ jobs:
     timeout-minutes: 90
     if: github.event_name != 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # The pinned toolchain (rust-toolchain.toml); keep ref and file in sync on a bump.
       # Components explicit — the Windows test job's note tells why.
@@ -383,7 +383,7 @@ jobs:
           cache-workspace-crates: true
           save-if: github.ref == 'refs/heads/main'
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: npm
@@ -423,10 +423,10 @@ jobs:
 
       - name: Upload the cargo build timings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: studio-darwin-test-timings
-          path: src-tauri/cargo-timings/**/*.html
+          path: target/studio/cargo/cargo-timings/**/*.html
           if-no-files-found: warn
 
   # GGS Remote's daemon (extensions-src/ggs-remote/daemon, a crate of its own the app never
@@ -443,7 +443,7 @@ jobs:
       run:
         working-directory: extensions-src/ggs-remote/daemon
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # The pinned toolchain (rust-toolchain.toml, docs/ci-speed-plan.md P1 #6); keep the
       # ref and the file in sync when bumping — a mismatch makes rustup install both.
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -474,7 +474,7 @@ jobs:
       run:
         working-directory: extensions-src/ggs-remote/hub
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # The pinned toolchain (rust-toolchain.toml), as in every Rust job here.
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
@@ -509,7 +509,7 @@ jobs:
       GGS_BUNDLE_GIT_GRAPH: ${{ github.event_name == 'push' && '1' || inputs.bundle-git-graph == false && '0' || '1' }}
       GGS_BUNDLE_CLAUDE_CODE: ${{ github.event_name == 'push' && '1' || inputs.bundle-claude-code == false && '0' || '1' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # The build's scratch on the runner's D: drive, out of Defender's profile-temp
       # scanning path (see the test job's note for the original diagnosis). A step, not a
@@ -550,7 +550,7 @@ jobs:
           cache-workspace-crates: true
           save-if: github.ref == 'refs/heads/main'
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: npm
@@ -647,15 +647,15 @@ jobs:
       # exactly when the numbers are wanted.
       - name: Upload the cargo build timings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: studio-windows-timings
-          path: src-tauri/cargo-timings/**/*.html
+          path: target/studio/cargo/cargo-timings/**/*.html
           if-no-files-found: warn
 
       # Only the installers themselves are artefacts: bundle/ also keeps each bundler's
       # work files, which must never reach the release page.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: studio-windows-x64
           path: |
@@ -709,9 +709,9 @@ jobs:
             artifact: studio-linux-rpm
             runner: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: npm
@@ -744,7 +744,7 @@ jobs:
       # The container's cargo target and registries, cached across runs via the /cache
       # volume scripts/docker/studio-linux-build.sh redirects everything into.
       - name: Cache the container build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.ggs-linux-cache
           key: studio-${{ matrix.cache }}-${{ hashFiles('src-tauri/Cargo.lock') }}
@@ -763,7 +763,20 @@ jobs:
             --load \
             -t ggs-linux-builder-${{ matrix.cache }} \
             -f scripts/docker/Dockerfile.studio-linux scripts/docker
+          # Create the cache dir as the runner before docker sees it: on a cache miss
+          # the daemon would create a missing bind-mount host dir root-owned, and the
+          # runner-uid container below could not write into /cache.
+          mkdir -p "$HOME/.ggs-linux-cache"
+          # Run as the runner's own uid: everything the build writes into the /cache
+          # volume stays runner-owned, which the cache save's tar can read. The
+          # container's default root wrote files the runner could not open ("Cannot
+          # open: Permission denied" - the arm64 leg's "Failed to save" loop: the save
+          # failed, the next run missed the key, root files piled up, the save failed
+          # again). HOME=/tmp stands in for the uid's missing passwd entry (rpmbuild
+          # writes its build tree under $HOME; npm reads $HOME/.npmrc).
           docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
             -v "$PWD:/repo" \
             -v "$HOME/.ggs-linux-cache:/cache" \
             -e BUNDLES=${{ matrix.bundles }} \
@@ -792,19 +805,19 @@ jobs:
       # its work tree (deb: control/, data.tar.gz, debian-binary, md5sums, the staged
       # binary and desktop file; rpm: the same under <name>-<version>-<arch>/), which must
       # never reach the release page.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: matrix.bundles == 'deb'
         with:
           name: ${{ matrix.artifact }}
           path: target/studio/bundle-linux/deb/*.deb
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: matrix.bundles == 'rpm'
         with:
           name: ${{ matrix.artifact }}
           path: target/studio/bundle-rpm/rpm/*.rpm
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: matrix.measure == true
         with:
           name: studio-linux-metrics
@@ -828,7 +841,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # The pinned toolchain (rust-toolchain.toml); keep ref and file in sync on a bump.
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -846,7 +859,7 @@ jobs:
           cache-workspace-crates: true
           save-if: github.ref == 'refs/heads/main'
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: npm
@@ -901,7 +914,7 @@ jobs:
       # Only the dmg is an artefact: bundle/dmg/ also keeps the create-dmg staging
       # (bundle_dmg.sh, template.applescript, eula-resources-template.xml, Info.plist,
       # icon.icns) and bundle/macos/ the raw .app, which must never reach the release page.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact }}
           path: |
