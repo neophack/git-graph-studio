@@ -33,7 +33,7 @@ beforeEach(() => {
 
 describe('the file associations setting', () => {
 	it('defaults to the recommended formats', () => {
-		expect(DEFAULT_SETTINGS.fileAssociations).toEqual(['blf', 'asc', 'bin', 'hex']);
+		expect(DEFAULT_SETTINGS.fileAssociations).toEqual(['blf', 'asc', 'bin', 'hex', 'dmp', 'mdmp']);
 		expect(isSettingModified('fileAssociations')).toBe(false);
 	});
 

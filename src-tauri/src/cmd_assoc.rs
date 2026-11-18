@@ -36,8 +36,8 @@ const CATALOG: &[(&str, &str, bool)] = &[
     ("asc", "application/x-vector-asc", true),
     ("bin", "application/octet-stream", true),
     ("hex", "application/x-hex", true),
-    ("dmp", "application/x-minidump", false),
-    ("mdmp", "application/x-minidump", false),
+    ("dmp", "application/x-minidump", true),
+    ("mdmp", "application/x-minidump", true),
     ("log", "text/plain", false),
     ("md", "text/markdown", false),
     ("json", "application/json", false),
@@ -832,7 +832,7 @@ mod tests {
             .filter(|e| e.recommended)
             .map(|e| e.ext.as_str())
             .collect();
-        assert_eq!(recommended, ["blf", "asc", "bin", "hex"]);
+        assert_eq!(recommended, ["blf", "asc", "bin", "hex", "dmp", "mdmp"]);
         assert!(catalog.iter().any(|e| e.ext == "json" && !e.recommended));
     }
 
