@@ -158,7 +158,7 @@ guarantees the window is never a blank dark rectangle.
   is declared here and lives in its concern file), `src/workbench/layout.ts` (activity bar,
   sidebar/sash, extension views), `src/workbench/menus.ts`, `src/workbench/boot.ts` (first
   paint, command registration, the wiring pass incl. the window-level drag-drop routing),
-  `src/workbench/lifecycle.ts` (folder open/close, snapshots, fs-change refreshes; the menus' folder opens — Open Folder, Open Recent — win a NEW window once the current one shows something, `openElsewhere`, the drop's rule; an empty window or a mirror viewer driving keeps it in place),
+  `src/workbench/lifecycle.ts` (folder open/close, snapshots, fs-change refreshes; the menus' folder opens — Open Folder, Open Recent — win a NEW window once the current one shows something, `openElsewhere`, the drop's rule; an empty window or a mirror viewer driving keeps it in place; the deferred services' start rides the painted frame on a visible page and the microtask queue on a hidden one — a hidden page's rAF is suspended, and a start that waited for it would leave the watcher uninstalled and the status bar's dot gray forever),
   `src/workbench/index.ts` (the facade that Object.assigns the concerns onto the prototype —
   import the directory, not the file),
   `src/workbench/titlebar.ts`, `src/workbench/statusbar.ts` (the status bar's items include

@@ -108,6 +108,26 @@ describe('the boot sequence', () => {
 		expect(backend.callsTo('post_first_paint').length).toBe(1);
 	});
 
+	it('starts the deferred services on a hidden page too — rAF is suspended there', async () => {
+		// A page opened while hidden or occluded (a phone mirror driving this window, the
+		// liveness reload of a minimized one) paints no frame, so its rAF never fires — the
+		// watcher install would never start and the status bar's dot would sit gray forever
+		// waiting for the push that never comes. Hidden runs the start on the microtask queue
+		// (scheduleRefresh's own idiom), so the invoke lands without any frame at all.
+		await until(() => backend.callsTo('post_first_paint').length === 1); // the boot's own start
+		Reflect.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+		try {
+			backend.calls.length = 0;
+			await workbench.openFolder(REPO_B);
+			// Two zero-delay rounds only — the frame timer (~16.7 ms) has not fired; the call
+			// must already be here, and exactly once for this open.
+			await flush(2);
+			expect(backend.callsTo('post_first_paint').length).toBe(1);
+		} finally {
+			Reflect.deleteProperty(document, 'hidden');
+		}
+	});
+
 	it('applies the folder the launch already opened, without a second round trip', async () => {
 		const openCallsBefore = backend.callsTo('open_folder').length;
 		workbench.dispose();

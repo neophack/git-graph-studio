@@ -237,10 +237,19 @@ export const lifecycleMethods: ThisType<Workbench> = {
 		// `git status` is the slowest part of opening a folder, and the tree above renders
 		// without it: the SCM refresh and the branch head it fetches wait for the first painted
 		// frame, so the full-tree scan and the head subprocess no longer compete with the graph
-		// view's boot for the CPU. The same signal starts the backend's own deferred services
-		// (the symbol/analysis indexes and the file watcher).
+		// view's boot for the CPU. The same frame starts the backend's own deferred services
+		// (the file watcher) — except when the page is hidden or occluded, where rAF is
+		// suspended and would never fire: the install would never start and the watcher dot
+		// would sit gray forever waiting for the push that never comes (a phone mirror driving
+		// this window, the liveness reload of a minimized one). scheduleRefresh's own idiom
+		// applies: hidden runs the start on the microtask queue — nothing is painting to
+		// compete with.
+		if (document.hidden) {
+			queueMicrotask(() => void postFirstPaint().catch(() => undefined));
+		} else {
+			requestAnimationFrame(() => void postFirstPaint().catch(() => undefined));
+		}
 		requestAnimationFrame(() => {
-			void postFirstPaint().catch(() => undefined);
 			if (anyRepo) void this.scm.refresh();
 		});
 		if (state.layout.sidebarVisible) this.showView(this.activeView);
