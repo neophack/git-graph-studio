@@ -463,6 +463,89 @@ describe('transport', () => {
 		expect(frameMsgpack<{ saver: boolean }>(listen).saver).toBe(false);
 	});
 
+	// The relay restarts (its webview reloaded, its link flapped): the daemon notices the
+	// session and re-ensures a fresh relay, the socket survives and invokes stay stateless —
+	// but the relay-side subscriptions died with the old process's state. Without a resync
+	// the session receives no events at all from then on (the PC's opens, closes and
+	// presence words all die at the fresh relay): the sync turns one-way and the phone's
+	// presence table then expires the PC and shuts the gate besides (2026-11-18:
+	// 网页的页面和桌面应用的操作不同步，导致打开文件又消失了).
+	it('re-establishes every event subscription after the relay restarts', async () => {
+		const { transport, socket } = await connected();
+		const seen: unknown[] = [];
+		const sync = transport.listen('studio://workbench-sync', (e) => seen.push(e.payload));
+		const pty = transport.listen('studio://pty-output-1', () => undefined);
+		await new Promise((r) => setTimeout(r, 20));
+		expect(socket.frames().filter((f) => f.type === T.LISTEN)).toHaveLength(2);
+		socket.sent.length = 0;
+		socket.deliver(down(msgpackFrame(T.NOTICE, { kind: 'relay-restarted', instance: 'ggs-1' })));
+		await flush();
+		// The readiness barrier first: one ATTACH — the daemon's attach waits for the new
+		// relay to be ready — and never a LISTEN before it (the daemon silently drops
+		// relay-bound frames while no relay is connected; only invokes answer with an error).
+		const attach = socket.frames().filter((f) => f.type === T.ATTACH);
+		expect(attach).toHaveLength(1);
+		expect(frameMsgpack(attach[0])).toEqual({ instance: 'ggs-1' });
+		expect(socket.frames().some((f) => f.type === T.LISTEN)).toBe(false);
+		socket.deliver(down(msgpackFrame(T.ATTACHED, { instance: 'ggs-1', version: '0.1.10', assetBase: '', ggsBase: '', frontendId: 'remote/3' })));
+		await flush();
+		// The relay answered through the ATTACH: every live subscription re-crosses with
+		// its own stream id (events route to the handlers already registered) and its tier.
+		const relistens = socket.frames().filter((f) => f.type === T.LISTEN);
+		expect(relistens.map((f) => f.stream)).toEqual([sync, pty]);
+		expect(relistens.every((f) => frameMsgpack<{ saver: boolean }>(f).saver === false)).toBe(true);
+		// And an event on the old stream id still reaches its handler — the resync rides
+		// the listener table, it does not rebuild one.
+		socket.deliver(down(jsonFrame(T.EVENT, { event: 'studio://workbench-sync', id: 1, payload: { k: 'open' } }, sync)));
+		await flush();
+		expect(seen).toEqual([{ k: 'open' }]);
+	});
+
+	it('never replays a subscription that left while the relay was restarting', async () => {
+		const { transport, socket } = await connected();
+		const sync = transport.listen('studio://workbench-sync', () => undefined);
+		const gone = transport.listen('studio://pty-output-1', () => undefined);
+		await new Promise((r) => setTimeout(r, 20));
+		socket.deliver(down(msgpackFrame(T.NOTICE, { kind: 'relay-restarted' })));
+		await flush();
+		transport.unlisten(gone);
+		await flush();
+		socket.sent.length = 0;
+		socket.deliver(down(msgpackFrame(T.ATTACHED, { instance: 'ggs-1', version: '', assetBase: '', ggsBase: '', frontendId: 'remote/3' })));
+		await flush();
+		const relistens = socket.frames().filter((f) => f.type === T.LISTEN);
+		expect(relistens.map((f) => f.stream)).toEqual([sync]);
+	});
+
+	it('retries the resync when the barrier ATTACH fails, and queues a second restart behind the round in flight', async () => {
+		const { transport, socket } = await connected();
+		transport.listen('studio://workbench-sync', () => undefined);
+		await new Promise((r) => setTimeout(r, 20));
+		socket.sent.length = 0;
+		socket.deliver(down(msgpackFrame(T.NOTICE, { kind: 'relay-restarted' })));
+		await flush();
+		expect(socket.frames().filter((f) => f.type === T.ATTACH)).toHaveLength(1);
+		// The relay never came up: the daemon's attach-failed notice ends the round, and
+		// the bounded ladder sends the barrier again.
+		socket.deliver(down(msgpackFrame(T.NOTICE, { kind: 'attach-failed', instance: 'ggs-1', message: 'the window did not answer in time' })));
+		await flush();
+		expect(socket.frames().filter((f) => f.type === T.ATTACH)).toHaveLength(2);
+		// A restart that lands while a round is in flight queues exactly one more round:
+		// the replays stay serialized — duplicate LISTENs on a live relay would double its
+		// events (its old backend listener leaks underneath the overwrite).
+		socket.deliver(down(msgpackFrame(T.NOTICE, { kind: 'relay-restarted' })));
+		await flush();
+		expect(socket.frames().filter((f) => f.type === T.ATTACH)).toHaveLength(2);
+		socket.deliver(down(msgpackFrame(T.ATTACHED, { instance: 'ggs-1', version: '', assetBase: '', ggsBase: '', frontendId: 'remote/3' })));
+		await flush();
+		// The first round's replay, and the queued round's barrier already out.
+		expect(socket.frames().filter((f) => f.type === T.LISTEN)).toHaveLength(1);
+		expect(socket.frames().filter((f) => f.type === T.ATTACH)).toHaveLength(3);
+		socket.deliver(down(msgpackFrame(T.ATTACHED, { instance: 'ggs-1', version: '', assetBase: '', ggsBase: '', frontendId: 'remote/3' })));
+		await flush();
+		expect(socket.frames().filter((f) => f.type === T.LISTEN)).toHaveLength(2);
+	});
+
 	it('grants credit every 256 KB consumed', async () => {
 		const { socket } = await connected();
 		socket.deliver(down(makeFrame(T.EVENT, Enc.Json, new Uint8Array(300 * 1024).fill(32), 99)));
@@ -721,7 +804,13 @@ describe('relay engine', () => {
 			listen: (async (event: string, handler: (e: { event: string; id: number; payload: unknown }) => void) => {
 				listeners.set(event, handler);
 				every.push([event, handler]);
-				return () => unlistened.push(event);
+				return () => {
+					unlistened.push(event);
+					// The real backend's unlisten retires the subscription: a fired event
+					// never reaches an unhooked handler again (the replay-replace test).
+					const at = every.findIndex(([name, h]) => name === event && h === handler);
+					if (at >= 0) every.splice(at, 1);
+				};
 			}) as never,
 			emit: vi.fn(async () => undefined) as never,
 			emitTo: emitTo as never,
@@ -996,6 +1085,24 @@ describe('relay engine', () => {
 		expect(unlistened).toContain('ext-host-request');
 		expect(invoke).toHaveBeenCalledWith('remote_host_frontend_gone', { frontend: 'remote/2' });
 		expect(relay.sessionCount()).toBe(1);
+	});
+
+	it('a replayed LISTEN for the same stream replaces its subscription — the old backend listener never leaks (the relay-restart resync)', async () => {
+		const { relay, sent, unlistened, fire } = engine();
+		relay.receive(encodeFrame({ ...msgpackFrame(T.LISTEN, { event: 'studio://workbench-sync' }, 5), session: 7 }));
+		await new Promise((r) => setTimeout(r, 5));
+		// The browser's resync replays the subscription with the SAME stream id after the
+		// relay restarted: the previous backend listener must be unhooked, not left beside
+		// the new one doubling every event.
+		relay.receive(encodeFrame({ ...msgpackFrame(T.LISTEN, { event: 'studio://workbench-sync' }, 5), session: 7 }));
+		await new Promise((r) => setTimeout(r, 5));
+		expect(unlistened).toContain('studio://workbench-sync');
+		sent.length = 0;
+		fire('studio://workbench-sync', { by: 'main', k: 'open', path: 'a.ts' });
+		await new Promise((r) => setTimeout(r, 5));
+		const events = sent.filter((f) => f.type === T.EVENT);
+		expect(events).toHaveLength(1);
+		expect(events[0].session).toBe(7);
 	});
 
 	it('hands a session-addressed host request to that session only — two users never cross', async () => {

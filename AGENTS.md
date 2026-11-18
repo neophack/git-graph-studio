@@ -2427,6 +2427,24 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   `tests/remote.test.ts` pins the accounting, the compression, the merge and the slim
   envelope; the daemon's `conn.rs` tests pin raw compression with and without the
   client's cap.
+  **The relay-restart subscription resync** (2026-11-18, the owner's report: 网页的页面和
+  桌面应用的操作不同步，导致打开文件又消失了): the relay's per-session state — every
+  event subscription a browser page established with LISTEN frames — lives only in the
+  relay webview, while the browser's socket and the stateless invoke path survive a relay
+  restart, so a restarted relay left the page looking healthy while it received no events
+  at all: the PC's opens, closes and presence announcements died at the fresh relay (the
+  workbench sync turned one-way), the phone's presence table then expired the PC and shut
+  K11's gate besides, and the deferred closes the phone formed while alone flushed late —
+  closing files the PC had re-opened in the deaf window. The Transport now rebuilds the
+  subscriptions on the daemon's `relay-restarted` notice: one ATTACH crosses first as a
+  READINESS BARRIER (the daemon's attach waits for the relay to be ready; relay-bound
+  frames sent before that are silently dropped — only invokes answer with an error), and
+  the round's ATTACHED replays every live LISTEN with its own stream id, so events route
+  to the handlers already registered. Replays are strictly serialized (one round at a
+  time — duplicate LISTENs on a live relay would double its events), attach-failed or a
+  timed-out round retries on a bounded ladder, and a notice landing mid-round queues
+  exactly one more; the relay replaces a same-stream replayed LISTEN by unhooking the
+  previous backend listener first (`tests/remote.test.ts`).
   **The replica's file transfers** (2026-10-13): the mirrored Explorer's context menu is the
   PC's own — and since the desktop gained its own transfer rows (module 3's rewrite), the
   PC hides them while a viewer watches (`transferMenuShown` over the hostStub's cached

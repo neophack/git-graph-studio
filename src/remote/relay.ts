@@ -540,6 +540,11 @@ export class RelayEngine {
 			this.fsBuffers.delete(listenKey);
 			return;
 		}
+		// A replayed LISTEN for a stream this session already holds (the browser's
+		// relay-restart resync re-sends its subscriptions with the same stream ids)
+		// REPLACES the previous subscription: without this, the old backend listener
+		// would leak underneath the overwrite and forward every event twice.
+		state.listeners.get(stream)?.();
 		state.listeners.set(stream, unlisten);
 	}
 

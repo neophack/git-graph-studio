@@ -91,6 +91,12 @@ const HIDDEN_HEARTBEAT_MS = 60_000;
 /** The daemon answers a failed ATTACH with NOTICE{kind:'attach-failed'} alone — never
  *  ATTACHED, never CLOSE — so a connect with no answer at all must still give up. */
 const ATTACH_TIMEOUT_MS = 30_000;
+/** The relay-restart resync's own round deadline: the daemon's ATTACH waits up to 20 s
+ *  for the relay to be ready (RELAY_WAIT), and the answer must fit beside it. */
+const RESYNC_TIMEOUT_MS = 30_000;
+/** How many rounds the resync ladder climbs before standing down — a relay that never
+ *  comes back ends here; the next `relay-restarted` notice (or a page reload) re-arms. */
+const RESYNC_ATTEMPTS = 5;
 
 export class Transport {
 	private ws?: WebSocket;
@@ -114,6 +120,15 @@ export class Transport {
 	private heartbeat?: ReturnType<typeof setInterval>;
 	private retryMs = 500;
 	private closedForGood = false;
+	/** The relay-restart resync (§8.3): a `relay-restarted` notice arms it, one ATTACH
+	 *  round trip is the readiness barrier, and the round's ATTACHED replays every live
+	 *  LISTEN. `resyncPending` — a restart is waiting on a round; `resyncFlying` — the
+	 *  barrier ATTACH is out; `resyncAttempts`/`resyncTimer` — the bounded ladder for a
+	 *  round that died unheard (no ATTACHED, no attach-failed). */
+	private resyncPending = false;
+	private resyncFlying = false;
+	private resyncAttempts = 0;
+	private resyncTimer: ReturnType<typeof setTimeout> | null = null;
 	/** This session's wire accounting (traffic.ts) — totals, per frame type, per command
 	 *  and event; the Traffic page renders it live. */
 	readonly stats: TrafficStats = newTrafficStats();
@@ -258,6 +273,12 @@ export class Transport {
 	/** Stop for good (navigating away). */
 	shutdown(): void {
 		this.closedForGood = true;
+		this.resyncFlying = false;
+		this.resyncPending = false;
+		if (this.resyncTimer !== null) {
+			clearTimeout(this.resyncTimer);
+			this.resyncTimer = null;
+		}
 		clearInterval(this.heartbeat);
 		this.ws?.close(1000);
 	}
@@ -393,6 +414,61 @@ export class Transport {
 		}
 		this.reconnecting = false;
 		if (retry && !this.closedForGood) void this.reconnect();
+	}
+
+	// ---- the relay-restart resync ----
+
+	/** The relay came up anew (the daemon's `relay-restarted` notice): its per-session
+	 *  state — every event subscription this page established with LISTEN frames — died
+	 *  with the old process, while this socket survived and the invoke path is stateless,
+	 *  so the session looks healthy while receiving no events at all. The PC's opens,
+	 *  closes and presence words die at the fresh relay: the workbench sync turns one-way,
+	 *  the presence table then expires the PC (its gate shuts besides), and the closes the
+	 *  phone forms while alone are recorded and flush late — files the PC re-opened in the
+	 *  deaf window close out from under their reader (2026-11-18: 网页的页面和桌面应用的
+	 *  操作不同步，导致打开文件又消失了). The subscriptions must cross again. */
+	private relayRestarted(): void {
+		this.resyncPending = true;
+		this.resyncAttempts = 0;
+		this.resyncSoon();
+	}
+
+	/** One round: the barrier ATTACH goes first, never a LISTEN beside it — the daemon's
+	 *  attach waits for the new relay to be READY before answering, while relay-bound
+	 *  frames sent before that are silently dropped (only invokes answer with an error),
+	 *  so a LISTEN sent at notice time could race the relay's own startup and vanish. */
+	private resyncSoon(): void {
+		if (this.resyncFlying || !this.resyncPending || this.closedForGood) return;
+		this.resyncFlying = true;
+		this.resyncPending = false;
+		this.sendNow([msgpackFrame(T.ATTACH, { instance: this.options.instance })]);
+		this.resyncTimer = setTimeout(() => this.resyncRoundEnded(false), RESYNC_TIMEOUT_MS);
+	}
+
+	/** The barrier answered (`up`, its ATTACHED) or died (attach-failed, or the round's
+	 *  own timeout): up replays every live subscription with its own stream id — the
+	 *  events route to the handlers already registered — either way a queued round or a
+	 *  bounded retry follows. Replays stay serialized (one round at a time): duplicate
+	 *  LISTENs on a live relay would double its events. */
+	private resyncRoundEnded(up: boolean): void {
+		if (!this.resyncFlying) return;
+		this.resyncFlying = false;
+		if (this.resyncTimer !== null) {
+			clearTimeout(this.resyncTimer);
+			this.resyncTimer = null;
+		}
+		if (this.closedForGood) return;
+		if (up) {
+			this.resyncAttempts = 0;
+			for (const [stream, spec] of this.listenSpecs) {
+				this.send(msgpackFrame(T.LISTEN, { event: spec.event, ...(spec.target === undefined ? {} : { target: spec.target }), saver: this.options.dataSaver ?? false }, stream));
+			}
+		} else if (++this.resyncAttempts >= RESYNC_ATTEMPTS) {
+			return; // the ladder stands down; the next notice (or a page reload) re-arms it
+		} else {
+			this.resyncPending = true;
+		}
+		if (this.resyncPending) this.resyncSoon();
 	}
 
 	// ---- uplink ----
@@ -545,6 +621,8 @@ export class Transport {
 			case T.ATTACHED: {
 				this.attachedInfo = frameMsgpack<Attached>(frame);
 				for (const waiter of this.attachWaiters.splice(0)) waiter.resolve(this.attachedInfo);
+				// A resync round's barrier answered: the relay is up — replay the LISTENs.
+				this.resyncRoundEnded(true);
 				return;
 			}
 			case T.RESULT: {
@@ -615,7 +693,10 @@ export class Transport {
 				// or boot() waits on the splash forever.
 				if (notice.kind === 'attach-failed') {
 					for (const waiter of this.attachWaiters.splice(0)) waiter.reject(new Error(notice.message ?? 'the window did not answer in time'));
+					// A resync round's barrier died the same way — the ladder retries.
+					this.resyncRoundEnded(false);
 				}
+				if (notice.kind === 'relay-restarted') this.relayRestarted();
 				for (const handler of this.noticeHandlers) {
 					try {
 						handler(notice);
