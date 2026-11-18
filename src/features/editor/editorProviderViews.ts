@@ -108,10 +108,12 @@ export function extensionProviderExtensions(path: string): Extension[] {
 export interface MacroHoverEntry {
 	/** Repo-relative, forward slashes — the index's own spelling. */
 	path: string;
-	/** 0-based declaration line. */
+	/** 0-based declaration line — the directive's own line, wherever the file keeps it now. */
 	line: number;
 	/** The `#define …` directive's text, or '' when the file could not be read. */
 	text: string;
+	/** The doc comment above the directive, or '' when there is none. */
+	comment: string;
 }
 
 /** Where the hover's data comes from, injected so tests and the mount share one path:
@@ -168,15 +170,61 @@ export function symbolBodyAt(contents: string, line: number, endLine: number | u
 	return trimmed.slice(0, HOVER_BODY_MAX_CHARS);
 }
 
+/** A preprocessor directive line (`#define`, `#if`, … — the C family's `#`-keyword rows). */
+const PREPROC_ROW = /^\s*#\s*\w/;
+
+/** Whether `line` textually ends on a line continuation: an unescaped trailing backslash
+ *  (`\`-newline), the preprocessor's own continuation rule — a doubled `\\\\` is an
+ *  escaped backslash, not a continuation. */
+function continues(line: string): boolean {
+	const t = line.replace(/\s+$/, '');
+	return t.endsWith('\\') && !t.endsWith('\\\\');
+}
+
+/** The last 0-based row a `#define` at `from` naturally reaches: itself, plus one row per
+ *  `\`-continued line above the first line that ends clean. The index's own end line is
+ *  trusted only this far — a stale entry (a file the index has not re-read yet) must never
+ *  pull the declaration below the directive into a macro's hover. */
+function directiveEnd(lines: string[], from: number): number {
+	let end = from;
+	while (end + 1 < lines.length && continues(lines[end]!)) end++;
+	return end;
+}
+
 /** The directive a definition names: its lines from the declaration through the end line
- *  (a `\`-continued macro's continuations), trimmed of trailing blank lines and capped. */
+ *  (a `\`-continued macro's continuations), trimmed of trailing blank lines and capped —
+ *  and, for a preprocessor directive, cut at the directive's own last continuation line,
+ *  whatever end line a stale index entry carries. */
 export function macroValueAt(contents: string, line: number, endLine: number | undefined): string {
 	const lines = contents.split('\n');
 	const from = Math.min(Math.max(0, line), lines.length - 1);
-	const to = Math.min(Math.max(endLine ?? line, from), from + MACRO_VALUE_LINES - 1, lines.length - 1);
+	let to = Math.min(Math.max(endLine ?? line, from), from + MACRO_VALUE_LINES - 1, lines.length - 1);
+	if (PREPROC_ROW.test(lines[from]!)) to = Math.min(to, directiveEnd(lines, from));
 	const text = lines.slice(from, to + 1).join('\n');
 	const trimmed = text.replace(/\s+$/, '');
 	return trimmed.slice(0, MACRO_VALUE_CHARS);
+}
+
+/** Whether `row` is the directive that defines `name` — `#define NAME` / `#define NAME(`
+ *  (the C family) or `macro_rules! NAME` (Rust). */
+function namesDirective(row: string, name: string): boolean {
+	return new RegExp(`^\\s*#\\s*define\\s+${name}(?![\\w])`).test(row)
+		|| new RegExp(`^\\s*macro_rules!\\s*${name}(?![\\w])`).test(row);
+}
+
+/** The line `contents` actually defines `name`'s macro on: the index's line when it still
+ *  names the directive, else the first line that does (the index's lines drift while a
+ *  file's re-read lags — a watcher-missed save, a multi-root path mismatch), or -1 when
+ *  the file no longer defines the name. */
+export function macroDirectiveLine(contents: string, name: string, line: number): number {
+	const lines = contents.split('\n');
+	const at = Math.min(Math.max(0, line), lines.length - 1);
+	if (!/^[\w]+$/.test(name)) return at;
+	if (namesDirective(lines[at] ?? '', name)) return at;
+	for (let i = 0; i < lines.length; i++) {
+		if (namesDirective(lines[i] ?? '', name)) return i;
+	}
+	return -1;
 }
 
 /** The comment block that ends on the line above `line`: consecutive `//`, `///`, `/*`
@@ -195,51 +243,70 @@ export function precedingComment(contents: string, line: number): string {
 	return picked.join('\n').slice(0, QUICK_INFO_COMMENT_CHARS).trim();
 }
 
-const macroLookupCache = new Map<string, { at: number; entries: MacroHoverEntry[] }>();
+const macroLookupCache = new Map<string, { at: number; defs: WsSymbol[] }>();
 
 /** Drop every cached lookup answer: the tests reset it between cases. */
 export function resetMacroHoverCache(): void {
 	macroLookupCache.clear();
 }
 
-function cacheMacroEntries(key: string, entries: MacroHoverEntry[]): MacroHoverEntry[] {
+function cacheMacroDefs(key: string, defs: WsSymbol[]): WsSymbol[] {
 	// Refresh the insertion order, then drop the oldest entry past the cap.
 	macroLookupCache.delete(key);
-	macroLookupCache.set(key, { at: Date.now(), entries });
+	macroLookupCache.set(key, { at: Date.now(), defs });
 	if (macroLookupCache.size > MACRO_LOOKUP_CACHE_MAX) {
 		macroLookupCache.delete(macroLookupCache.keys().next().value!);
 	}
-	return entries;
+	return defs;
 }
 
 /** The macro definitions of `name`, each with its directive text — empty when the name
- *  declares no macro (the hover answers nothing) or the index has none. */
+ *  declares no macro (the hover answers nothing) or the index has none. The index's
+ *  lookup is cached for the TTL, but the text is sliced fresh from the file on every
+ *  hover and validated against it: the entry's line is re-aligned onto the directive
+ *  the file has now, the slice is cut at the directive's own last continuation line,
+ *  and the comment above rides along — so a stale index entry shows the macro and its
+ *  comment, never the declaration that happens to sit on the drifted lines. */
 export async function macroHoverEntries(source: MacroHoverSource, name: string): Promise<MacroHoverEntry[]> {
 	const root = source.root();
 	if (!root) return [];
 	const key = `${root}\u0000${name}`;
 	const cached = macroLookupCache.get(key);
-	if (cached && Date.now() - cached.at < MACRO_LOOKUP_TTL_MS) return cached.entries;
 	let defs: WsSymbol[];
-	try {
-		defs = await source.lookup(name);
-	} catch {
-		return [];
+	if (cached && Date.now() - cached.at < MACRO_LOOKUP_TTL_MS) {
+		defs = cached.defs;
+	} else {
+		try {
+			defs = await source.lookup(name);
+		} catch {
+			return [];
+		}
+		defs = cacheMacroDefs(key, defs.filter((def) => def.kind === 'macro').slice(0, MACRO_HOVER_MAX_DEFS));
 	}
-	const macros = defs.filter((def) => def.kind === 'macro').slice(0, MACRO_HOVER_MAX_DEFS);
-	if (macros.length === 0) return cacheMacroEntries(key, []);
 	const entries: MacroHoverEntry[] = [];
-	for (const def of macros) {
+	for (const def of defs) {
 		let text = '';
+		let comment = '';
+		let line = def.line;
 		try {
 			const contents = await source.read(joinPath(root, def.path));
-			if (contents !== null) text = macroValueAt(contents, def.line, def.endLine);
+			if (contents !== null) {
+				const at = macroDirectiveLine(contents, def.name, def.line);
+				if (at >= 0) {
+					// The end line rides the same drift the start realigned by; the
+					// directive's own continuation end caps whatever is left of it.
+					const drift = at - def.line;
+					text = macroValueAt(contents, at, Math.max(at, (def.endLine ?? def.line) + drift));
+					comment = precedingComment(contents, at);
+					line = at;
+				}
+			}
 		} catch {
 			text = '';
 		}
-		entries.push({ path: def.path, line: def.line, text });
+		entries.push({ path: def.path, line, text, comment });
 	}
-	return cacheMacroEntries(key, entries);
+	return entries;
 }
 
 /** The word under `pos` resolves to its indexed macros: the hover entries, or null when
@@ -260,6 +327,18 @@ export function macroHoverDom(name: string, entries: MacroHoverEntry[], open?: (
 	head.textContent = entries.length > 1 ? `${name} — ${entries.length} ${t('symbols.hover.definitions')}` : name;
 	dom.appendChild(head);
 	for (const entry of entries) {
+		if (entry.comment) {
+			const comment = document.createElement('pre');
+			comment.className = 'ggs-symbol-hover-comment';
+			comment.textContent = entry.comment;
+			dom.appendChild(comment);
+		}
+		if (entry.text) {
+			const code = document.createElement('pre');
+			code.className = 'ggs-symbol-hover-code';
+			code.textContent = entry.text;
+			dom.appendChild(code);
+		}
 		const loc = open
 			? document.createElement('button')
 			: document.createElement('div');
@@ -270,12 +349,6 @@ export function macroHoverDom(name: string, entries: MacroHoverEntry[], open?: (
 			loc.addEventListener('click', () => open(entry.path, entry.line));
 		}
 		dom.appendChild(loc);
-		if (entry.text) {
-			const code = document.createElement('pre');
-			code.className = 'ggs-symbol-hover-code';
-			code.textContent = entry.text;
-			dom.appendChild(code);
-		}
 	}
 	return dom;
 }

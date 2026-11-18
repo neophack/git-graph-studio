@@ -409,7 +409,7 @@ describe('the macro hover', () => {
 			}
 		} as unknown as EditorView;
 		const macros = source([{ kind: 'macro', name: 'MAX_LEN', path: 'inc/conf.h', line: 2 }]);
-		expect(await macroHoverFor(macros, view, 12)).toEqual([{ path: 'inc/conf.h', line: 2, text: '#define MAX_LEN 256' }]);
+		expect(await macroHoverFor(macros, view, 12)).toEqual([{ path: 'inc/conf.h', line: 2, text: '#define MAX_LEN 256', comment: '' }]);
 		const noWord = { state: { wordAt: () => null, sliceDoc: () => '' } } as unknown as EditorView;
 		expect(await macroHoverFor(macros, noWord, 12)).toBeNull();
 
@@ -419,12 +419,50 @@ describe('the macro hover', () => {
 		expect(dom.querySelector('.ggs-symbol-hover-code')!.textContent).toBe('#define MAX_LEN 256');
 
 		const several = macroHoverDom('MAX_LEN', [
-			{ path: 'inc/conf.h', line: 2, text: '#define MAX_LEN 256' },
-			{ path: 'src/other.h', line: 0, text: '' }
+			{ path: 'inc/conf.h', line: 2, text: '#define MAX_LEN 256', comment: '' },
+			{ path: 'src/other.h', line: 0, text: '', comment: '' }
 		]);
 		expect(several.querySelector('.ggs-symbol-hover-head')!.textContent).toContain('2');
 		expect(several.querySelectorAll('.ggs-symbol-hover-loc')).toHaveLength(2);
 		expect(several.querySelectorAll('.ggs-symbol-hover-code')).toHaveLength(1, 'an unread file shows its location only');
+	});
+
+	it('bounds a directive slice at its last continuation — a stale end line never shows what follows the macro', () => {
+		const aboveStruct = '#define MAX_LEN 256\nstruct Config {\n    int a;\n};\n';
+		expect(macroValueAt(aboveStruct, 0, 1)).toBe('#define MAX_LEN 256', 'a single-line define ends on its own line');
+		expect(macroValueAt(aboveStruct, 0, 7)).toBe('#define MAX_LEN 256', 'an end line deep into the struct cuts at the directive');
+		const cont = '#define WIDE(a) \\\n    step(a); \\\n    step(a + 1)\nstruct S {\n};\n';
+		expect(macroValueAt(cont, 0, 5)).toBe('#define WIDE(a) \\\n    step(a); \\\n    step(a + 1)', 'the continuations ride, the struct below never');
+		const rust = 'macro_rules! sq {\n    ($e:expr) => { $e * $e }\n}\nstruct Config { a: u32 }\n';
+		expect(macroValueAt(rust, 0, 2)).toBe('macro_rules! sq {\n    ($e:expr) => { $e * $e }\n}', 'a macro_rules body is no preprocessor directive — its own end line stands');
+	});
+
+	it('re-aligns a stale index line onto the directive the file has now', async () => {
+		const drifted = source([{ kind: 'macro', name: 'MAX_LEN', path: 'inc/conf.h', line: 0 }]);
+		// The index still names the pre-edit layout, where the define sat on line 0; the
+		// file has a doc comment above it now, so line 0 is the comment — the hover must
+		// find the directive, not render whatever drifted lines hold.
+		files[CONF_H] = '/* the cap. */\n#define MAX_LEN 256\n#define GROW(n) ((n) * 2)\n';
+		const entries = await macroHoverEntries(drifted, 'MAX_LEN');
+		expect(entries).toEqual([
+			{ path: 'inc/conf.h', line: 1, text: '#define MAX_LEN 256', comment: '/* the cap. */' }
+		]);
+		delete files[CONF_H];
+	});
+
+	it('drops the text when the file no longer defines the name', async () => {
+		const gone = source([{ kind: 'macro', name: 'MAX_LEN', path: 'src/main.c', line: 0 }]);
+		const entries = await macroHoverEntries(gone, 'MAX_LEN');
+		expect(entries).toEqual([{ path: 'src/main.c', line: 0, text: '', comment: '' }]);
+	});
+
+	it('shows the directive with the comment block above it', () => {
+		const dom = macroHoverDom('MAX_LEN', [
+			{ path: 'inc/conf.h', line: 2, text: '#define MAX_LEN 256', comment: '/* the cap. */\n// second row' }
+		]);
+		expect(dom.querySelector('.ggs-symbol-hover-comment')!.textContent).toBe('/* the cap. */\n// second row');
+		const bare = macroHoverDom('MAX_LEN', [{ path: 'inc/conf.h', line: 2, text: '#define MAX_LEN 256', comment: '' }]);
+		expect(bare.querySelector('.ggs-symbol-hover-comment')).toBeNull();
 	});
 });
 
