@@ -890,20 +890,36 @@ export const openMethods: ThisType<EditorGroup> = {
 		let hunks: readonly DiffHunkData[] = [];
 		let hunkStats: LineDiffData = { binary: false, hunks: [], additions: 0, deletions: 0 };
 		let diffHandle: TextDiffView | null = null;
+		/** The reader's place in the panes, remembered across the hidden spells a tab
+		 *  switch puts the pane through: a display:none pane reads its scrollTop as 0
+		 *  and clamps every write to the top, so the live values cannot carry a hidden
+		 *  span — the panes' scroll events keep these current while visible, and the
+		 *  show-again pass (the diff observer below) restores them. */
+		let memTopA: number | null = null;
+		let memTopB: number | null = null;
 		/** The in-flight hunks request's sequence: only the newest answer applies (an
 		 *  edit's debounced recompute supersedes the one before it). */
 		let hunksSeq = 0;
 		let hunksTimer: number | null = null;
 		const rangesNow = (): { fromA: number; toA: number; fromB: number; toB: number }[] => diffHandle?.ranges() ?? [];
+		/** The position the reader is looking at: the cursor while it stands inside the
+		 *  viewport (a jump, a click or the landing put it there), the first visible line
+		 *  once the reader scrolled away from it — the counter names the change being
+		 *  looked at, not the one a cursor parked pages away still remembers. */
+		const viewedPos = (view: EditorView): number => {
+			const head = view.state.selection.main.head;
+			const top = view.visibleRanges.length > 0 ? view.visibleRanges[0]!.from : view.viewport.from;
+			return head >= top && head <= view.viewport.to ? head : top;
+		};
 		const at = (): number => {
 			const view = editor.view ?? editor.merge?.b ?? null;
 			if (!view) return 0;
-			const head = view.state.selection.main.head;
+			const probe = viewedPos(view);
 			let index = 0;
-			// The changes strictly at or before the cursor's line start: the cursor sitting ON
-			// a change's first line is "in" that change (1/N for the first), not the next one.
+			// The changes strictly at or before the probe: a probe ON a change's first line
+			// is "in" that change (1/N for the first), not the next one.
 			for (const range of rangesNow()) {
-				if (range.toB <= head) index++;
+				if (range.toB <= probe) index++;
 				else break;
 			}
 			return Math.min(index, hunks.length);
@@ -1003,13 +1019,15 @@ export const openMethods: ThisType<EditorGroup> = {
 			const view = editor.view ?? editor.merge?.b ?? null;
 			const ranges = rangesNow();
 			if (!view || ranges.length === 0) return;
-			const head = view.state.selection.main.head;
-			const next = ranges.find((range) => range.fromB > head);
+			// The arrows step from what the reader is looking at — a view scrolled away
+			// from the parked cursor steps from the view, the same anchor the counter reads.
+			const probe = viewedPos(view);
+			const next = ranges.find((range) => range.fromB > probe);
 			const index = direction === 1
 				? ranges.indexOf(next!) === -1 ? ranges.length - 1 : ranges.indexOf(next!)
 				: (() => {
 					let at = ranges.length - 1;
-					while (at >= 0 && ranges[at]!.fromB >= head) at--;
+					while (at >= 0 && ranges[at]!.fromB >= probe) at--;
 					return Math.max(at, 0);
 				})();
 			const anchor = Math.min(ranges[index]!.fromB, view.state.doc.length);
@@ -1113,10 +1131,18 @@ export const openMethods: ThisType<EditorGroup> = {
 			viewer?.close();
 			// The reader's place across a rebuild: the watcher's re-read, the layout switch
 			// and the ignore toggles re-mount the panes wholesale, and a bare rebuild parks
-			// them at the file head. The scroll offsets carry over — restored right after
-			// the new views stand, before any content settles over them.
-			const keepTopA = editor.merge?.a?.scrollDOM.scrollTop ?? null;
-			const keepTopB = editor.merge?.b?.scrollDOM.scrollTop ?? editor.view?.scrollDOM.scrollTop ?? null;
+			// them at the file head. The live offsets carry over while the pane stands
+			// measurable; the memory serves the rebuilds that start while it is hidden — a
+			// display:none pane reads every scrollTop as 0 — so a zero live read defers to
+			// whatever the panes' scroll events last remembered (null before any scroll,
+			// which is the top and needs no restore either).
+			const pickTop = (live: number | null, mem: number | null): number | null =>
+				live === null || live === 0 ? mem ?? live : live;
+			const keepTopA = pickTop(editor.merge?.a?.scrollDOM.scrollTop ?? null, memTopA);
+			const keepTopB = pickTop(
+				editor.merge?.b?.scrollDOM.scrollTop ?? editor.view?.scrollDOM.scrollTop ?? null,
+				memTopB,
+			);
 			const buffer = editor.dirty ? editor.view?.state.doc.toString() ?? editor.merge?.b?.state.doc.toString() : undefined;
 			detachScrollSync?.();
 			detachScrollSync = null;
@@ -1331,6 +1357,17 @@ export const openMethods: ThisType<EditorGroup> = {
 			};
 			restoreTop(editor.merge?.a, keepTopA);
 			restoreTop(editor.merge?.b ?? editor.view, keepTopB);
+			// The panes' scroll events feed the place memory (memTopA/B above) and re-read
+			// the counter: a scroll names new content being viewed that a cursor parked
+			// elsewhere never moves to. Pane A drives pane B through the scroll sync,
+			// whose write lands as pane B's own scroll event — this one listener on the
+			// counter's reference pane covers both.
+			const followPane = editor.view ?? editor.merge?.b ?? null;
+			followPane?.scrollDOM.addEventListener('scroll', () => {
+				if (editor.merge?.a) memTopA = editor.merge.a.scrollDOM.scrollTop;
+				if (followPane) memTopB = followPane.scrollDOM.scrollTop;
+				updateCounter();
+			});
 			jumpToFirstChange();
 			if (editable) {
 				// The saved baseline is the loaded text — kept across a rebuild (an unsaved
@@ -1380,7 +1417,31 @@ export const openMethods: ThisType<EditorGroup> = {
 			lastSplit = split;
 			render(split);
 		});
+		/** A hidden pane (its tab switched away) reads zero wide — no layout opinion. The
+		 *  flag carries the hidden spell so the return pass puts the reader's place back
+		 *  before any width-driven flip rebuilds the panes under it: the flip the old
+		 *  zero-width reading forced here rebuilt the views while unmeasurable, and a
+		 *  hidden pane clamps every scroll write to the top — the tab came back parked on
+		 *  the first change, wherever the reader had scrolled. */
+		let hiddenPane = false;
 		editor.diffObserver = new ResizeObserver(() => {
+			if (host.clientWidth === 0) {
+				hiddenPane = true;
+				return;
+			}
+			if (hiddenPane) {
+				hiddenPane = false;
+				// The panes stood through the hide: put the remembered place back — a
+				// display:none pane may have lost its scroll — and re-read the counter
+				// against the view the reader returns to.
+				const restore = (view: EditorView | null, top: number | null): void => {
+					if (!view || top === null) return;
+					view.requestMeasure({ read: () => null, write: () => { view.scrollDOM.scrollTop = top; } });
+				};
+				restore(editor.merge?.a ?? null, memTopA);
+				restore(editor.view ?? editor.merge?.b ?? null, memTopB);
+				updateCounter();
+			}
 			// A pinned layout stays; the pane width only rules until the user chooses.
 			if (manualSplit !== undefined) return;
 			const want = !diffInlineShell() && host.clientWidth >= DIFF_SPLIT_MIN_WIDTH;

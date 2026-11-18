@@ -234,6 +234,71 @@ describe('the diff editor\u2019s landing position', () => {
 		await new Promise((resolve) => setTimeout(resolve, RENDER + 300));
 		expect(editor.merge!.b.state.selection.main.head).toBe(second);
 	});
+
+	it('the counter names the change being viewed, never a cursor the view cannot see', async () => {
+		// A scroll moves the view and never the cursor: the badge reads the first visible
+		// line once the cursor sits outside the viewport (jsdom's unmeasured viewport
+		// covers only the document's head, so a cursor parked deep below is outside it —
+		// exactly the scrolled-away shape; the cursor-based counter showed "3 / 3").
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		const left = Array.from({ length: 1200 }, (_, i) => `line ${i}`).join('\n');
+		const right = left.split('\n').map((text, i) =>
+			i === 2 || i === 500 || i === 1100 ? `changed ${i}` : text).join('\n');
+		const editor = await openWorkingDiff(group, left, right);
+		expect(editor.diffRanges).toHaveLength(3);
+		// The landing leaves the cursor on the first change, inside the view: 1 / 3.
+		expect(texts('.diff-count')).toEqual(['1 / 3']);
+		// Park the cursor on the third change, far outside the viewport: the counter
+		// keeps naming the viewed content (the top), not the parked cursor.
+		editor.merge!.b.dispatch({ selection: { anchor: editor.diffRanges![2]!.fromB } });
+		expect(texts('.diff-count')).toEqual(['1 / 3']);
+	});
+
+	it('a tab switch round trip keeps the reader\u2019s place: no rebuild while hidden, the scroll restored on return', async () => {
+		// Switching the tab away hides the pane, and a hidden pane reads zero wide. The
+		// old zero-width pass rebuilt the views while unmeasurable — a display:none pane
+		// clamps every scroll write to the top — so every return parked the diff on its
+		// first change. The views must stand through the hide, and the remembered place
+		// (the panes' scroll events keep it current) comes back with the show.
+		const fires: (() => void)[] = [];
+		const realRO = globalThis.ResizeObserver;
+		(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+			constructor(callback: () => void) { fires.push(() => callback()); }
+			observe(): void { /* the test drives the observations */ }
+			disconnect(): void { /* no-op */ }
+			unobserve(): void { /* no-op */ }
+		};
+		try {
+			const group = new EditorGroup(document.getElementById('editorGroup')!);
+			const editor = await openWorkingDiff(group, 'a\nb\nc\nd\ne\nf\ng\nh\n', 'a\nB!\nc\nd\ne\nf\nG!\nh\n');
+			expect(editor.diffRanges).toHaveLength(2);
+			// Park the reader on the second change, mid-scroll, as a drag through the diff
+			// leaves them (jsdom fires no scroll on the write, so the event is dispatched).
+			editor.merge!.b.dispatch({ selection: { anchor: editor.diffRanges![1]!.fromB } });
+			editor.merge!.b.scrollDOM.scrollTop = 480;
+			editor.merge!.b.scrollDOM.dispatchEvent(new Event('scroll'));
+			expect(texts('.diff-count')).toEqual(['2 / 2']);
+			const paneA = editor.merge!.a;
+			const paneB = editor.merge!.b;
+			// The tab switch away: the hidden pass rebuilds nothing.
+			fires[0]!();
+			expect(editor.merge!.a).toBe(paneA);
+			expect(editor.merge!.b).toBe(paneB);
+			// A display:none pane loses its scroll with no event to re-read it from; the
+			// show pass puts the remembered place back and re-reads the counter.
+			paneB.scrollDOM.scrollTop = 0;
+			const host = editor.pane.querySelector<HTMLElement>('.cm-merge-view')!;
+			Object.defineProperty(host, 'clientWidth', { value: 1280, configurable: true });
+			fires[0]!();
+			await new Promise((resolve) => setTimeout(resolve, RENDER * 2));
+			expect(editor.merge!.a).toBe(paneA);
+			expect(editor.merge!.b).toBe(paneB);
+			expect(paneB.scrollDOM.scrollTop).toBe(480);
+			expect(texts('.diff-count')).toEqual(['2 / 2']);
+		} finally {
+			(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = realRO;
+		}
+	});
 });
 
 describe('the diff editor\u2019s per-change revert arrows', () => {
