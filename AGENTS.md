@@ -3169,9 +3169,27 @@ Conventions:
 - **Conventional Commits**: `feat:`, `fix:`, `docs:`, `test:`, `build:`, `perf:`,
   `refactor:`, `chore:`; optional scopes name the module or layer (`feat(scm): …`,
   `fix(tauri): …`, `build(ci): …`).
-- One logical change per commit; the subject says what changed for the user or the build,
-  the body says why and names the invariant or plan section that motivated it. Commit
-  messages are written in English — never Chinese.
+- **Commit message format — title plus bullets, English only** (never Chinese):
+  - **Title** (the first line): `<type>(<scope>): <what changed>` — imperative mood,
+    ≤ 72 characters, no trailing period, it says what changed for the user or the build.
+  - **Body**: one blank line after the title, then a bullet list — one `- ` item per
+    distinct change or behavior. Each bullet is a complete English sentence: what changed,
+    in which file or function, and why (the invariant, the plan section or the report that
+    motivated it). Put the most important fact in the first bullet.
+  - Example:
+
+    ```text
+    feat(scm): the commit input keeps its draft across a refresh
+
+    - `commitInput.ts` moves the draft message into the view state, so a background
+      refresh no longer clears text the user is still typing.
+    - The draft is restored only when the refresh did not complete a commit; a finished
+      commit still empties the box.
+    - Tests: `tests/scm.test.ts` pins the draft's survival and the commit's clear.
+    ```
+
+- One logical change per commit — if the bullets would describe two unrelated changes,
+  split the commit.
 - **Never commit**: `target/`, `out/`, anything `prepare.mjs` regenerates, `metrics.json`.
 - Branch model (plan §9): `main` is always releasable; milestone branches are `ggs/mN-*`;
   one PR per task. A PR is mergeable when the checks in
