@@ -1141,9 +1141,11 @@ export const openMethods: ThisType<EditorGroup> = {
 			// a dirty buffer, and a clean pane loses nothing by going read-only).
 			const editable = savePath !== null && !ignore.whitespace && !ignore.case;
 			// The modified pane's extensions: the counter rides every layout; an editable
-			// pane tracks the dirty mark against its saved baseline and takes Ctrl+S.
+			// pane tracks the dirty mark against its saved baseline and takes Ctrl+S. No
+			// minimap on either diff pane — the plain scrollbar with the change map over
+			// its inner edge is VS Code's diff shape (file compare and git compare alike).
 			const bExtensions = [
-				...baseExtensions(!editable),
+				...baseExtensions(!editable, '', { minimap: false }),
 				languageSlot.of(languageSupport ?? []),
 				diffKeys,
 				// Both panes hover macros: the base side is read-only but a hover is a read,

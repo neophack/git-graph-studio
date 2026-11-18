@@ -304,7 +304,9 @@ function pastEndExtension(): Extension {
 	});
 }
 
-export function baseExtensions(readOnly: boolean, path = ''): Extension[] {
+/** `minimap: false` builds an editable editor without the map — the diff panes (file and
+ *  git compare) keep the plain scrollbar the change map rides, VS Code's own diff shape. */
+export function baseExtensions(readOnly: boolean, path = '', { minimap = true }: { minimap?: boolean } = {}): Extension[] {
 	return [
 		lineNumbers(),
 		highlightActiveLineGutter(),
@@ -332,7 +334,7 @@ export function baseExtensions(readOnly: boolean, path = ''): Extension[] {
 		// lean. The wheel is not a decoration — every surface that scrolls file content gets
 		// Zed's, read-only panes included.
 		wheelExtension(),
-		...(readOnly ? [] : [bracketColorsExtension(), stickyScrollExtension(), minimapExtension()]),
+			...(readOnly ? [] : [bracketColorsExtension(), stickyScrollExtension(), ...(minimap ? [minimapExtension()] : [])]),
 		vscodeHighlighting,
 		// Read-only stays VS Code's read-only editor: the content DOM keeps its focusability
 		// (`editable: false` would drop it, and no key — Ctrl+C, Ctrl+F — would ever reach

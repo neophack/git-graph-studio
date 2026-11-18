@@ -5,7 +5,7 @@ import { EditorGroup, type Editor, type EditorInput } from '../src/features/edit
 import { editorSupplementsFrozen } from '../src/features/editor/editorExtras';
 import { workspaceFileCache } from '../src/features/editor/navigate';
 import { fileIcon } from '../src/platform/fileIcons';
-import { settings } from '../src/platform/settings';
+import { settings, updateSetting } from '../src/platform/settings';
 import { el } from '../src/platform/ui';
 import { backend } from './tauriMock';
 import { click, flush, key, menuItem, menuLabels, notificationButton, notifications, rightClick, texts } from './helpers';
@@ -169,6 +169,31 @@ describe('editor group', () => {
 		await group.openFile('C:\\repo\\a\\x.ts');
 		await group.openFile('C:\\repo\\b\\x.ts');
 		expect(texts('.tab .description')).toEqual(['a', 'b']);
+	});
+
+	it('the diff panes keep the plain scrollbar — no minimap on either side', async () => {
+		// The minimap setting is on (the default), so an ordinary editable file mounts the
+		// map; a comparison — file compare and a git working-tree diff alike, both editable
+		// on the modified side — shows none of it: the native scrollbar with the change map
+		// over its inner edge is the diff's own shape (VS Code shows no minimap there).
+		updateSetting('minimap', true);
+		backend.on('read_file_at', ({ revision, path }) => ({ contents: `${revision}:${path}\n`, binary: false, size: 5 }));
+		files({ 'C:\\repo\\a.ts': 'a\n' });
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot('C:\\repo');
+		await group.openDiff({
+			kind: 'diff', id: 'd-minimap', title: 'a.ts (Working Tree)',
+			left: { revision: ':index', path: 'a.ts', label: 'Index', exists: true },
+			right: { revision: '*', path: 'a.ts', label: 'Working Tree', exists: true }
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(document.querySelectorAll('.cm-mergeView .cm-editor')).toHaveLength(2);
+		expect(document.querySelectorAll('.cm-minimap')).toHaveLength(0);
+		// The contrast: the same file opened as an editor mounts exactly one map.
+		await group.openFile('C:\\repo\\a.ts');
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(document.querySelectorAll('.cm-minimap')).toHaveLength(1);
+		updateSetting('minimap', true);
 	});
 
 	it('the diff panes hover a macro with its #define value, like a text editor', async () => {
