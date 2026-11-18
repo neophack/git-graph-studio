@@ -74,10 +74,21 @@ export interface DiffSideSpec {
 	text?: string;
 }
 
-/** One changed line of a `scm_diff` hunk, its text as the file carries it. */
+/** A run of characters within a changed line that differs from its twin on the other
+ *  side — the inline highlight VS Code paints inside a changed line. The offsets are
+ *  UTF-16 code units into the line's own `text`. */
+export interface DiffSpanData {
+	start: number;
+	end: number;
+}
+
+/** One changed line of a `scm_diff` hunk, its text as the file carries it. `spans`
+ *  carries the character-level difference against the line's twin in the same hunk
+ *  (empty when the line has no twin or the pair was skipped as too far apart). */
 export interface DiffLineData {
 	kind: 'deleted' | 'added';
 	text: string;
+	spans?: DiffSpanData[];
 }
 
 /** One git-computed change: a run of deleted lines replaced by a run of added ones

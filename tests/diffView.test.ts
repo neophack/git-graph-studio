@@ -5,6 +5,11 @@
 // backend answers — resized modification, insertion, git's top-of-file `@@ -0,0`
 // spelling, deletion — and that the unchanged-gap pill folds the same lines on both
 // panes (an empty side's anchor must not steal a line into the wrong gap).
+//
+// The inline character marks: a paired line's spans (the backend's character-level
+// diff of the line against its twin) paint over exactly the differing characters in
+// both panes and the unified layout's deleted block — a one-character edit shows as
+// that character, the way VS Code's word-diff reads.
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { EditorView } from '@codemirror/view';
@@ -129,8 +134,8 @@ describe('the split diff pane alignment (SpacerWidget)', () => {
 
 	it('destroy leaves the host empty even with several children (the host children are a live collection)', () => {
 		// A host that outlives the diff (the folder compare's detail slot) keeps no shell
-		// behind — and removing inside a `for..of` over the live `host.children` skips every
-		// other child, so the loop must read firstChild instead.
+		// behind — and removing inside a `for..of` over the live `host.children` skips
+		// every other child, so the loop must read firstChild instead.
 		const diff = mount('a\nb', 'a\nc', [hunk(2, 1, 2, 1, [{ kind: 'deleted', text: 'b' }, { kind: 'added', text: 'c' }])]);
 		const host = diff.a!.dom.closest('.cm-mergeView')!.parentElement!;
 		host.appendChild(document.createElement('div')); // a stray sibling of the view's root
@@ -138,5 +143,88 @@ describe('the split diff pane alignment (SpacerWidget)', () => {
 		diff.destroy();
 		expect(host.children.length).toBe(0);
 		host.remove();
+	});
+});
+
+describe('the inline character marks (the backend\u2019s per-line spans)', () => {
+	const mounted: TextDiffView[] = [];
+	const mount = (split: boolean, leftDoc: string, rightDoc: string, hunks: DiffHunkData[]): TextDiffView => {
+		const host = document.createElement('div');
+		document.body.appendChild(host);
+		const handle = mountTextDiffView(host, { split, leftDoc, rightDoc, hunks, collapse: false, aExtensions: [], bExtensions: [] });
+		mounted.push(handle);
+		return handle;
+	};
+
+	afterEach(() => {
+		for (const handle of mounted.splice(0)) handle.destroy();
+	});
+
+	it('a paired one-character edit marks exactly that character on both panes', () => {
+		const diff = mount(true, 'let value = 1;\n', 'let value = 2;\n', [
+			hunk(1, 1, 1, 1, [
+				{ kind: 'deleted', text: 'let value = 1;', spans: [{ start: 12, end: 13 }] },
+				{ kind: 'added', text: 'let value = 2;', spans: [{ start: 12, end: 13 }] }
+			])
+		]);
+		expect(diff.a!.dom.querySelector('.cm-diff-char-del')!.textContent).toBe('1');
+		expect(diff.b!.dom.querySelector('.cm-diff-char-ins')!.textContent).toBe('2');
+		// One mark per pane — the rest of the line carries no inline wash.
+		expect(diff.a!.dom.querySelectorAll('.cm-diff-char-del')).toHaveLength(1);
+		expect(diff.b!.dom.querySelectorAll('.cm-diff-char-ins')).toHaveLength(1);
+	});
+
+	it('a line without spans paints no inline marks', () => {
+		const diff = mount(true, 'a\nb', 'a\nc', [hunk(2, 1, 2, 1, [{ kind: 'deleted', text: 'b' }, { kind: 'added', text: 'c' }])]);
+		expect(diff.a!.dom.querySelector('.cm-diff-char-del')).toBeNull();
+		expect(diff.b!.dom.querySelector('.cm-diff-char-ins')).toBeNull();
+	});
+
+	it('a span past what the pane\u2019s line holds clamps into the line, never outside it', () => {
+		// The spans answer the backend's pair; until the next answer lands an edit may
+		// have shortened the line under them. The mark may shrink but never cross the
+		// line's end (a mark crossing a line break would break CodeMirror's drawing).
+		const diff = mount(true, 'ab\n', 'axb\n', [
+			hunk(1, 1, 1, 1, [
+				{ kind: 'deleted', text: 'ab', spans: [{ start: 1, end: 99 }] },
+				{ kind: 'added', text: 'axb', spans: [{ start: 1, end: 2 }] }
+			])
+		]);
+		expect(diff.a!.dom.querySelector('.cm-diff-char-del')!.textContent).toBe('b');
+	});
+
+	it('the unified layout segments the deleted block\u2019s rows by the same spans', () => {
+		const diff = mount(false, 'x = 1;\nb', 'x = 2;\nb', [
+			hunk(1, 1, 1, 1, [
+				{ kind: 'deleted', text: 'x = 1;', spans: [{ start: 4, end: 5 }] },
+				{ kind: 'added', text: 'x = 2;', spans: [{ start: 4, end: 5 }] }
+			])
+		]);
+		const row = diff.b!.dom.querySelector('.cm-diff-del-row')!;
+		expect(row).not.toBeNull();
+		// The row reads whole as `x = 1;` with only the `1` wrapped in the char mark.
+		expect(row.textContent).toBe('x = 1;');
+		expect(row.querySelector('.cm-diff-char-del')!.textContent).toBe('1');
+		// And the editor side marks its own twin the same way.
+		expect(diff.b!.dom.querySelector('.cm-content .cm-diff-char-ins')!.textContent).toBe('2');
+	});
+
+	it('setDiff repaints the widget when only the spans changed', () => {
+		// The widget's eq compares the spans too — same texts with different highlights
+		// must re-render, or a fresh backend answer would keep the old segmentation.
+		const diff = mount(false, 'x = 1;\nb', 'x = 2;\nb', [
+			hunk(1, 1, 1, 1, [
+				{ kind: 'deleted', text: 'x = 1;', spans: [{ start: 0, end: 1 }] },
+				{ kind: 'added', text: 'x = 2;', spans: [{ start: 0, end: 1 }] }
+			])
+		]);
+		expect(diff.b!.dom.querySelector('.cm-diff-del-row .cm-diff-char-del')!.textContent).toBe('x');
+		diff.setDiff([
+			hunk(1, 1, 1, 1, [
+				{ kind: 'deleted', text: 'x = 1;', spans: [{ start: 4, end: 6 }] },
+				{ kind: 'added', text: 'x = 2;', spans: [{ start: 5, end: 6 }] }
+			])
+		]);
+		expect(diff.b!.dom.querySelector('.cm-diff-del-row .cm-diff-char-del')!.textContent).toBe('1;');
 	});
 });

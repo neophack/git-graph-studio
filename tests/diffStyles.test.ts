@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 
 const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'workbench', 'shell.css'), 'utf8');
 
-const DIFF_CLASSES = ['cm-diff-ins', 'cm-diff-del', 'cm-diff-del-block', 'cm-diff-del-row', 'cm-diff-unchanged', 'cm-diff-spacer-row', 'cm-merge-revert'];
+const DIFF_CLASSES = ['cm-diff-ins', 'cm-diff-del', 'cm-diff-char-ins', 'cm-diff-char-del', 'cm-diff-del-block', 'cm-diff-del-row', 'cm-diff-unchanged', 'cm-diff-spacer-row', 'cm-merge-revert'];
 
 /** Every comma-separated selector of every rule in the stylesheet (comments stripped). */
 function selectors(): string[] {
@@ -46,7 +46,16 @@ describe('diff decoration styles', () => {
 	it('changed lines wear the VS Code diff palette in both layouts', () => {
 		expect(css).toMatch(/\.cm-diff-ins\s*\{[^}]*--vscode-diffEditor-insertedLineBackground/);
 		expect(css).toMatch(/\.cm-diff-del\s*\{[^}]*--vscode-diffEditor-removedLineBackground/);
-		expect(css).toMatch(/\.cm-diff-del-row\s*\{[^}]*--vscode-diffEditor-removedTextBackground/);
+		expect(css).toMatch(/\.cm-diff-del-row\s*\{[^}]*--vscode-diffEditor-removedLineBackground/);
+	});
+
+	it('the inline character marks wear the deeper text-level backgrounds', () => {
+		// VS Code's word-diff layering: the line wash first, the changed character runs
+		// over it in the text-level backgrounds — a one-character edit shows as that
+		// character. The deleted row is the line wash (not the text background) so the
+		// run over it stays visible in the unified layout's block too.
+		expect(css).toMatch(/\.cm-diff-char-ins\s*\{[^}]*--vscode-diffEditor-insertedTextBackground/);
+		expect(css).toMatch(/\.cm-diff-char-del\s*\{[^}]*--vscode-diffEditor-removedTextBackground/);
 	});
 
 	it('removed lines dim their text to the theme\u2019s diff foreground', () => {
@@ -58,11 +67,14 @@ describe('diff decoration styles', () => {
 		expect(del).toMatch(/!\s*important/);
 		expect(ruleBody('.editor-pane .cm-diff-del-row')).toMatch(/--vscode-diffEditor-removedTextForeground/);
 		// Every shipped theme defines the token — an undefined one would leave the removed
-		// side at full brightness on that theme.
+		// side at full brightness on that theme — and the text-level backgrounds the
+		// inline character marks paint with (an undefined one silently drops the marks).
 		const themes = ['dark-plus', 'dark-modern', 'hc-black', 'light-modern', 'nord', 'monokai'];
 		for (const theme of themes) {
 			const themeCss = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'static', 'theme', `${theme}.css`), 'utf8');
 			expect(themeCss, theme).toMatch(/--vscode-diffEditor-removedTextForeground:\s*#/);
+			expect(themeCss, theme).toMatch(/--vscode-diffEditor-removedTextBackground:\s*#/);
+			expect(themeCss, theme).toMatch(/--vscode-diffEditor-insertedTextBackground:\s*#/);
 		}
 	});
 

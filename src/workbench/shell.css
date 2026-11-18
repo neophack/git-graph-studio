@@ -940,10 +940,18 @@ button.ggs-symbol-hover-loc:hover { text-decoration: underline; color: var(--vsc
    first) — the !important beats the syntax spans, so a removed line greys out whole. */
 .editor-pane .cm-diff-ins { background: var(--vscode-diffEditor-insertedLineBackground); border-left: 3px solid var(--vscode-diffEditorGutter-insertedLineBackground); }
 .editor-pane .cm-diff-del { background: var(--vscode-diffEditor-removedLineBackground); border-left: 3px solid var(--vscode-diffEditorGutter-removedLineBackground); color: var(--vscode-diffEditor-removedTextForeground, inherit) !important; }
+/* The inline character runs inside a changed line (VS Code's word-diff): the deeper
+   text-level backgrounds over the line's own wash, so a one-character edit shows as
+   that character. The deleted side keeps its whole-line dim — the run's background
+   still reads through it, in the panes and the unified rows alike. */
+.editor-pane .cm-diff-char-ins { background: var(--vscode-diffEditor-insertedTextBackground); }
+.editor-pane .cm-diff-char-del { background: var(--vscode-diffEditor-removedTextBackground); }
 /* The unified layout's deleted-line block: the widget rides above the hunk's new lines,
-   its rows painted like deleted lines in the removed palette. */
+   its rows painted like the split's deleted lines — the line wash, with the inline
+   character runs over it in the deeper text background (the same grammar the panes
+   paint, so the block reads no differently from its split twin). */
 .editor-pane .cm-diff-del-block { background: var(--vscode-diffEditor-removedLineBackground); }
-.editor-pane .cm-diff-del-row { font-family: var(--vscode-editor-font-family, monospace); font-size: var(--vscode-editor-font-size, 13px); line-height: inherit; white-space: pre; background: var(--vscode-diffEditor-removedTextBackground); border-left: 3px solid var(--vscode-diffEditorGutter-removedLineBackground); color: var(--vscode-diffEditor-removedTextForeground, inherit) !important; min-height: 1.4em; }
+.editor-pane .cm-diff-del-row { font-family: var(--vscode-editor-font-family, monospace); font-size: var(--vscode-editor-font-size, 13px); line-height: inherit; white-space: pre; background: var(--vscode-diffEditor-removedLineBackground); border-left: 3px solid var(--vscode-diffEditorGutter-removedLineBackground); color: var(--vscode-diffEditor-removedTextForeground, inherit) !important; min-height: 1.4em; }
 /* The unchanged-gap pill: centred, quiet, pointer-rounded — a click hands the lines back. */
 .cm-diff-unchanged { display: block; width: 100%; box-sizing: border-box; text-align: center; background: var(--vscode-editorWidget-background); color: var(--vscode-descriptionForeground); border: none; border-radius: 4px; font-size: 11px; padding: 1px 0; cursor: pointer; }
 .cm-diff-unchanged:hover { background: var(--vscode-list-hoverBackground); }

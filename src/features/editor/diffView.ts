@@ -1,7 +1,9 @@
 // The text diff view: the backend's git-computed hunks (`scm_diff`, the gix engine)
 // painted as line decorations over CodeMirror views — a split of two panes, or the
 // unified single editor whose deleted lines ride a block widget above their new
-// position. The frontend never diffs: this module only draws what the backend answered
+// position. Paired lines carry the backend's character-level spans as inline marks
+// (VS Code's word-diff), so a one-character edit highlights that character. The
+// frontend never diffs: this module only draws what the backend answered
 // and maps it through the user's edits until the next answer lands. A hunk whose sides
 // differ in line count pads the shorter pane with blank spacer rows, so the identical
 // code after every hunk stays side by side. Unchanged gaps collapse into an "unchanged
@@ -12,7 +14,7 @@
 import { ChangeSet, EditorState, Range, RangeSet, StateEffect, StateField, type Extension, type Text } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, WidgetType } from '@codemirror/view';
 
-import type { DiffHunkData } from '../../platform/ipc/scm';
+import type { DiffHunkData, DiffSpanData } from '../../platform/ipc/scm';
 import { el, icon } from '../../platform/ui/index';
 import type { TextDiffView } from './types';
 
@@ -70,15 +72,35 @@ function hunkSpan(doc: Text, hunk: DiffHunkData, side: 'old' | 'new'): { from: n
 }
 
 /** One side's hunk marks: every occupied line of every hunk, `cm-diff-del` on the base
- *  pane and `cm-diff-ins` on the modified one. */
+ *  pane and `cm-diff-ins` on the modified one — plus, where the backend paired a line
+ *  with its twin across the hunk, the inline `cm-diff-char-*` marks over exactly the
+ *  characters that differ (VS Code's word-diff: a one-character edit highlights that
+ *  character, not a whole-line wash). The span offsets are UTF-16 into the line's own
+ *  text — CodeMirror's own coordinate — clamped into the line the pane holds so an
+ *  edited document never paints outside it. */
 function buildMarks(doc: Text, hunks: readonly DiffHunkData[], side: 'old' | 'new'): DecorationSet {
 	const marks: Range<Decoration>[] = [];
-	const deco = Decoration.line({ class: side === 'old' ? 'cm-diff-del' : 'cm-diff-ins' });
+	const lineDeco = Decoration.line({ class: side === 'old' ? 'cm-diff-del' : 'cm-diff-ins' });
+	const charDeco = Decoration.mark({ class: side === 'old' ? 'cm-diff-char-del' : 'cm-diff-char-ins' });
 	for (const hunk of hunks) {
-		const start = side === 'old' ? hunk.oldStart : hunk.newStart;
-		const lines = side === 'old' ? hunk.oldLines : hunk.newLines;
+		const start = Math.min(Math.max(side === 'old' ? hunk.oldStart : hunk.newStart, 1), doc.lines);
+		const lines = Math.max(Math.min(side === 'old' ? hunk.oldLines : hunk.newLines, doc.lines - start + 1), 0);
 		for (let line = start; line < start + lines; line++) {
-			marks.push(deco.range(lineStart(doc, line)));
+			marks.push(lineDeco.range(lineStart(doc, line)));
+		}
+		// The hunk's lines walk the deleted block then the added one; each entry of this
+		// pane's side claims the next line number the block spans.
+		let index = 0;
+		for (const entry of hunk.lines) {
+			if ((entry.kind === 'deleted') !== (side === 'old')) continue;
+			if (index >= lines) break;
+			const line = doc.line(start + index);
+			for (const span of entry.spans ?? []) {
+				const from = Math.min(Math.max(line.from + span.start, line.from), line.to);
+				const to = Math.min(line.from + span.end, line.to);
+				if (to > from) marks.push(charDeco.range(from, to));
+			}
+			index++;
 		}
 	}
 	return RangeSet.of(marks, true);
@@ -89,7 +111,7 @@ function buildMarks(doc: Text, hunks: readonly DiffHunkData[], side: 'old' | 'ne
 function buildDeletedBlocks(doc: Text, hunks: readonly DiffHunkData[]): Range<Decoration>[] {
 	const blocks: Range<Decoration>[] = [];
 	for (const hunk of hunks) {
-		const deleted = hunk.lines.filter((line) => line.kind === 'deleted').map((line) => line.text);
+		const deleted = hunk.lines.filter((line) => line.kind === 'deleted').map((line) => ({ text: line.text, spans: line.spans }));
 		if (deleted.length === 0) continue;
 		const at = hunk.newLines > 0 ? lineStart(doc, hunk.newStart) : anchorAt(doc, hunk.newStart);
 		blocks.push(Decoration.widget({ widget: new DeletedLinesWidget(deleted), block: true }).range(at));
@@ -182,26 +204,56 @@ class UnchangedWidget extends WidgetType {
 	}
 }
 
+/** One deleted row of the unified layout's block: its unchanged runs as plain text and
+ *  the differing characters wrapped in the same `cm-diff-char-del` mark the panes
+ *  paint — the inline highlight survives the unified layout too. */
+function deletedRow(text: string, spans?: readonly DiffSpanData[]): HTMLElement {
+	const parts: (string | HTMLElement)[] = [];
+	let at = 0;
+	for (const span of spans ?? []) {
+		// The spans answer the backend's own line text; anything past what this row
+		// holds (never expected) is skipped rather than spilling outside the line.
+		if (span.start < at || span.end > text.length || span.end <= span.start) continue;
+		if (span.start > at) parts.push(text.slice(at, span.start));
+		parts.push(el('span', 'cm-diff-char-del', [text.slice(span.start, span.end)]));
+		at = span.end;
+	}
+	parts.push(text.slice(at) || (parts.length === 0 ? '\u200b' : ''));
+	return el('div', 'cm-diff-del-row', parts);
+}
+
 /** The deleted lines of one hunk, shown above their new position in the unified
  *  layout — the rows themselves styled like deleted lines. */
 class DeletedLinesWidget extends WidgetType {
-	constructor(readonly lines: readonly string[]) {
+	constructor(
+		readonly rows: readonly { text: string; spans?: readonly DiffSpanData[] }[],
+	) {
 		super();
 	}
 
 	get lineBreaks(): number {
-		return Math.max(this.lines.length - 1, 0);
+		return Math.max(this.rows.length - 1, 0);
 	}
 
 	eq(other: DeletedLinesWidget): boolean {
-		return other.lines.length === this.lines.length && other.lines.every((line, i) => line === this.lines[i]);
+		return (
+			this.rows.length === other.rows.length &&
+			this.rows.every(
+				(row, i) =>
+					row.text === other.rows[i]!.text &&
+					(row.spans ?? []).length === (other.rows[i]!.spans ?? []).length &&
+					(row.spans ?? []).every(
+						(span, j) => span.start === other.rows[i]!.spans![j]!.start && span.end === other.rows[i]!.spans![j]!.end,
+					),
+			)
+		);
 	}
 
 	toDOM(): HTMLElement {
 		return el(
 			'div',
 			'cm-diff-del-block',
-			this.lines.map((line) => el('div', 'cm-diff-del-row', [line || '\u200b'])),
+			this.rows.map((row) => deletedRow(row.text, row.spans)),
 		);
 	}
 }
