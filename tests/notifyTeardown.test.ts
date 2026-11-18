@@ -34,4 +34,30 @@ describe('the toast countdown against a torn-down DOM', () => {
 		// ...and reaching here is the point: no unhandled ReferenceError crossed the run.
 		expect(notificationEntries().map((entry) => entry.message)).toEqual(['Survives the teardown']);
 	});
+
+	it('stops when the whole environment is gone — window and clearInterval went with the document', async () => {
+		// The 2026-11-18 Studio run's only failure: the guard against a deleted document
+		// cleared through `window`, and the teardown deletes that beside the document —
+		// the guard itself threw `window is not defined`, an unhandled error for the
+		// worker. The tick must stop through its armed binding instead.
+		clearAllNotifications();
+		notify('info', 'Survives the whole teardown');
+		const holder = globalThis as unknown as Record<string, unknown>;
+		const doc = holder.document;
+		const win = holder.window;
+		const originalClear = holder.clearInterval as (id: unknown) => void;
+		delete holder.document;
+		delete holder.window;
+		delete holder.clearInterval;
+		try {
+			await new Promise((resolve) => setTimeout(resolve, 300)); // the tick interval is 100 ms
+		} finally {
+			holder.document = doc;
+			holder.window = win;
+			holder.clearInterval = originalClear;
+		}
+		// Reaching here is the point: the tick cleared through the binding it kept at
+		// arm time and threw nothing into the run.
+		expect(notificationEntries().map((entry) => entry.message)).toEqual(['Survives the whole teardown']);
+	});
 });

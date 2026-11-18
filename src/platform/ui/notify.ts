@@ -91,6 +91,11 @@ export function notify(kind: NotificationKind, message: string, actions: Notific
 	let remaining = INFO_TOAST_MS;
 	let lastTick = 0;
 	let ticking: number | null = null;
+	// The countdown's clear, bound while the environment that armed it is alive: a toast
+	// can outlive that environment (the test suite's jsdom teardown deletes the globals
+	// mid-suite), and the teardown takes `window` and `clearInterval` with `document` —
+	// the bound function is the only clear the tick can still reach.
+	const armedClear = countsDown ? window.clearInterval.bind(window) : null;
 	let hovered = false;
 	const selectionHeld = (): boolean => {
 		const selection = document.getSelection();
@@ -101,12 +106,24 @@ export function notify(kind: NotificationKind, message: string, actions: Notific
 	const tick = (): void => {
 		// The interval can outlive the DOM it was drawn in (a test environment tears the
 		// jsdom globals away mid-suite while a toast's countdown is still armed — the
-		// 2026-11-16 Release run's only failure): a timer callback that throws is an
-		// unhandled error for the whole process, so the tick stops itself instead.
+		// 2026-11-16 Release run's only failure, and the 2026-11-18 Studio run's: that
+		// first guard cleared through `window`, which the teardown deletes beside the
+		// document, so the guard itself threw `window is not defined`). A timer callback
+		// that throws is an unhandled error for the whole process, so the tick stops
+		// itself instead, through whichever clear survived: the suite's overridden
+		// `clearInterval` global when only the document was removed
+		// (tests/notifyTeardown.test.ts pins that path), the arming environment's bound
+		// clear when the globals went with it.
 		if (typeof document === 'undefined') {
-			if (ticking !== null) {
-				window.clearInterval(ticking);
-				ticking = null;
+			const id = ticking;
+			ticking = null;
+			if (id !== null) {
+				try {
+					if (typeof globalThis.clearInterval === 'function') globalThis.clearInterval(id);
+					else armedClear?.(id);
+				} catch {
+					// The environment is gone past reaching; the stop is the point.
+				}
 			}
 			return;
 		}
@@ -124,7 +141,8 @@ export function notify(kind: NotificationKind, message: string, actions: Notific
 		if (bar) bar.style.width = `${Math.max(0, (remaining / INFO_TOAST_MS) * 100)}%`;
 	};
 	function dismiss(): void {
-		if (ticking !== null) window.clearInterval(ticking);
+		if (ticking !== null) armedClear?.(ticking);
+		ticking = null;
 		document.removeEventListener('visibilitychange', onVisibility);
 		toast.remove();
 		onDismiss?.();
