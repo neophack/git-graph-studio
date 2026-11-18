@@ -525,6 +525,10 @@ export class EditorGroup {
 
 	declare goToIndexedDefinition: (name: string, currentPath: string | null, view: EditorView) => Promise<boolean> ;
 
+	/** The scope half of Go-to-Definition (navigate.ts): the enclosing function's own
+	 *  parameter or local for the name at the cursor, over the live buffer. */
+	declare goToScopeDefinition: (name: string, currentPath: string | null, view: EditorView, at: number) => Promise<boolean> ;
+
 	declare pickDefinition: (defs: WsSymbol[], currentPath: string | null, view: EditorView) => Promise<boolean> ;
 
 	declare jumpToDefinition: (target: WsSymbol, currentPath: string | null, view: EditorView) => Promise<boolean> ;

@@ -39,6 +39,27 @@ export interface SymbolIndexStatus {
 export type SymbolIndexEvent = { kind: 'progress'; done: number; total: number } | { kind: 'done'; files: number; symbols: number; cancelled: boolean };
 
 export const symbolLookup = (name: string) => invoke<WsSymbol[]>('symbol_lookup', { name });
+
+/** One scope-local definition `symbol_scope_lookup` answers: a parameter or local
+ *  variable of the enclosing function, parsed out of the caller's live buffer. */
+export interface ScopeDefinition {
+	/** `variable` for a local, `parameter` for a function parameter. */
+	kind: string;
+	name: string;
+	/** 0-based line and character column of the declaration's name. */
+	line: number;
+	column: number;
+	/** 0-based line the local's reach ends on (the enclosing function's end). */
+	scopeEnd: number;
+}
+
+/** The scope-local definitions of `name` covering `line` of `text`, innermost scope
+ *  first — a name declared inside the enclosing function is that local or parameter,
+ *  never a same-named global. Empty means the site is outside every local's scope and
+ *  the caller falls back to `symbolLookup`'s global answer. */
+export const symbolScopeLookup = (name: string, line: number, text: string, ext: string) =>
+	invoke<ScopeDefinition[]>('symbol_scope_lookup', { name, line, text, ext });
+
 export const symbolTree = () => invoke<TreeFile[] | null>('symbol_tree');
 export const symbolReferences = (name: string) => invoke<SymbolRefFile[]>('symbol_references', { name });
 export const symbolsRebuild = (onEvent: Channel<SymbolIndexEvent>) => invoke<SymbolIndexStatus | null>('symbols_rebuild', { onEvent });

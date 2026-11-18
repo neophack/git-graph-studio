@@ -2,7 +2,7 @@ import type { EditorView } from '@codemirror/view';
 import { listFiles } from '../../platform/ipc/fs';
 import { viewerClose, viewerOpen, type ViewerOutlineSymbol } from '../../platform/ipc/viewer';
 import { findReferences, workspaceSymbols } from '../../platform/ipc/search';
-import { symbolLookup, symbolReferences } from '../../platform/ipc/symbols';
+import { symbolLookup, symbolReferences, symbolScopeLookup } from '../../platform/ipc/symbols';
 import type { WsSymbol } from '../search/types';
 import { dirname, joinPath, notify, quickPick, relativeTo, toPosix } from '../../platform/ui/index';
 import { isCodeExtension } from '../../platform/fileIcons';
@@ -76,6 +76,10 @@ export const navigateMethods: ThisType<EditorGroup> = {
 		if (!word) return;
 		const name = view.state.sliceDoc(word.from, word.to);
 		const currentPath = editor.input.kind === 'file' ? editor.input.path : null;
+		// The scope answer first (2026-11-18): a name declared inside the enclosing
+		// function of the cursor is that parameter or local — the jump stays in this
+		// file and the global index is never asked, so a same-named global cannot win.
+		if (await this.goToScopeDefinition(name, currentPath, view, at)) return;
 		if (this.rootPath && await this.goToIndexedDefinition(name, currentPath, view)) return;
 		const pattern = new RegExp(
 			'^(?:\\s*(?:export|declare|default|pub|public|private|protected|internal|static|async|abstract|unsafe|extern|virtual|override|final)\\s+)*'
@@ -114,6 +118,25 @@ export const navigateMethods: ThisType<EditorGroup> = {
 		}
 		if (inThisFile !== null) this.revealPosition(view, inThisFile.line, inThisFile.column);
 		else notify('info', `No definition found for '${name}'.`);
+	},
+
+	/** The scope half of Go-to-Definition: the backend parses the live buffer and
+	 *  answers the enclosing function's parameters and locals for the name at the
+	 *  cursor's line; the first hit is the jump. False when the site is outside every
+	 *  local's scope — or the backend predates the scope command (the scripted fake in
+	 *  the tests rejects it) — and the global index path takes over. */
+	async goToScopeDefinition(name: string, currentPath: string | null, view: EditorView, at: number): Promise<boolean> {
+		if (!currentPath) return false;
+		try {
+			const defs = await symbolScopeLookup(name, view.state.doc.lineAt(at).number - 1, view.state.doc.toString(), currentPath.split('.').pop() ?? '');
+			if (defs.length > 0) {
+				this.revealPosition(view, defs[0]!.line + 1, defs[0]!.column + 1);
+				return true;
+			}
+		} catch {
+			// No scope answer available: the index lookup follows.
+		}
+		return false;
 	},
 
 	async goToIndexedDefinition(name: string, currentPath: string | null, view: EditorView): Promise<boolean> {
@@ -156,10 +179,25 @@ export const navigateMethods: ThisType<EditorGroup> = {
 		const name = view.state.sliceDoc(word.from, word.to);
 		const currentPath = editor.input.kind === 'file' ? editor.input.path : null;
 		let defs: WsSymbol[] = [];
-		try {
-			defs = (await symbolLookup(name)) ?? [];
-		} catch {
-			defs = [];
+		// The scope answer first: a name declared inside the enclosing function of the
+		// cursor is that parameter or local — the popup shows those definitions alone
+		// (this file's own), read out of the live buffer. The entry's path is this
+		// file's workspace-relative spelling, so the popup's body slice reads it.
+		if (currentPath && this.rootPath) {
+			try {
+				const scopeDefs = await symbolScopeLookup(name, view.state.doc.lineAt(at).number - 1, view.state.doc.toString(), currentPath.split('.').pop() ?? '');
+				const relative = toPosix(relativeTo(this.rootPath, currentPath));
+				defs = scopeDefs.map((d) => ({ kind: d.kind, name: d.name, path: relative, line: d.line, column: d.column }));
+			} catch {
+				defs = [];
+			}
+		}
+		if (defs.length === 0) {
+			try {
+				defs = (await symbolLookup(name)) ?? [];
+			} catch {
+				defs = [];
+			}
 		}
 		if (defs.length === 0) {
 			try {

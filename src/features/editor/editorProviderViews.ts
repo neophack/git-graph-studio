@@ -15,8 +15,9 @@
 import { hoverTooltip, ViewPlugin, EditorView, keymap, type TooltipView } from '@codemirror/view';
 import { Facet, type Extension } from '@codemirror/state';
 import { t } from '../../platform/i18n';
-import { joinPath } from '../../platform/ui/index';
+import { joinPath, relativeTo } from '../../platform/ui/index';
 import type { WsSymbol } from '../../platform/ipc/search';
+import type { ScopeDefinition } from '../../platform/ipc/symbols';
 import { extensionDefinitionFor, extensionDefinitionOpener, extensionHoverFor, hasExtensionDefinitions, hasExtensionHovers } from './editorHovers';
 
 /** The open file's path, so the provider call names the right document. */
@@ -123,6 +124,11 @@ export interface MacroHoverSource {
 	lookup(name: string): Promise<WsSymbol[]>;
 	read(path: string): Promise<string | null>;
 	open?(path: string, line: number): void;
+	/** The scope-aware half (2026-11-18): the enclosing function's parameters and locals
+	 *  for a name at a line of `text` — the group passes the live buffer, the backend
+	 *  parses it per call. Optional: a source without it (a diff tab holds no file of
+	 *  its own; the tests' fakes) answers only the global index. */
+	scopeLookup?(name: string, line: number, text: string): Promise<ScopeDefinition[]>;
 }
 
 /** How many directive lines and characters one hover entry shows. */
@@ -348,7 +354,7 @@ function hintMatchesKind(kind: string, hint: string): boolean {
 		case 'enum':
 			return kind === 'enum';
 		case 'variable':
-			return kind === 'variable' || kind === 'constant' || kind === 'field' || kind === 'property';
+			return kind === 'variable' || kind === 'constant' || kind === 'field' || kind === 'property' || kind === 'parameter';
 		default:
 			return kind === hint;
 	}
@@ -402,6 +408,43 @@ export async function quickInfoFor(source: MacroHoverSource, name: string, curre
 		entries.push({ kind: def.kind, path: def.path, line: def.line, text, comment, body });
 	}
 	if (entries.length === 0) return cacheQuickInfo(key, null);
+	return cacheQuickInfo(key, { name, entries });
+}
+
+/** The scope-local quick info: when the hovered site sits inside a function that
+ *  declares the name — one of its parameters or locals — that definition IS the answer,
+ *  and a same-named global never appears (2026-11-18, the owner's direction: 局部变量
+ *  只显示局部范围的定义). The declaration line is sliced from the passed buffer text —
+ *  the editor's own document, so an unsaved edit shows as written and no disk read
+ *  happens at all. Null when the site is outside every local's scope, or the source
+ *  carries no scope lookup: the caller falls back to the global index answer. */
+export async function scopeQuickInfoFor(source: MacroHoverSource, name: string, line: number, text: string, currentPath: string): Promise<SymbolQuickInfo | null> {
+	const root = source.root();
+	if (!root || !source.scopeLookup) return null;
+	const key = `scope\u0000${currentPath}\u0000${text.length}\u0000${line}\u0000${name}`;
+	const cached = quickInfoCache.get(key);
+	if (cached && Date.now() - cached.at < MACRO_LOOKUP_TTL_MS) return cached.info;
+	let defs: ScopeDefinition[];
+	try {
+		defs = await source.scopeLookup(name, line, text);
+	} catch {
+		return null;
+	}
+	if (!defs || defs.length === 0) return cacheQuickInfo(key, null);
+	const lines = text.split('\n');
+	const entries: SymbolQuickInfoEntry[] = defs.slice(0, QUICK_INFO_MAX_DEFS).map((def) => {
+		const at = Math.min(Math.max(0, def.line), lines.length - 1);
+		return {
+			kind: def.kind,
+			// The definitions are this file's own; the location click rides the same
+			// open the index entries use — a same-file reveal at the declaration.
+			path: relativeTo(root, currentPath),
+			line: def.line,
+			text: (lines[at] ?? '').trim(),
+			comment: precedingComment(text, def.line),
+			body: '',
+		};
+	});
 	return cacheQuickInfo(key, { name, entries });
 }
 
@@ -525,8 +568,20 @@ export function symbolHoverExtension(source: MacroHoverSource): Extension[] {
 				};
 			}
 			const hoverLine = view.state.doc.lineAt(range.from);
+			const currentPath = view.state.facet(pathSlot);
+			// The scope answer first: a name declared inside the hovered function is that
+			// local or parameter — the global index never gets asked, so a same-named
+			// function in another scope cannot outrank it.
+			const scopeInfo = await scopeQuickInfoFor(source, name, hoverLine.number - 1, view.state.doc.toString(), currentPath);
+			if (scopeInfo) {
+				return {
+					pos: range.from,
+					end: range.to,
+					create: (): TooltipView => ({ dom: quickInfoDom(scopeInfo, open) })
+				};
+			}
 			const hint = hoverKindHint(hoverLine.text, range.from - hoverLine.from, range.to - hoverLine.from);
-			const info = await quickInfoFor(source, name, view.state.facet(pathSlot), hoverLine.number - 1, hint);
+			const info = await quickInfoFor(source, name, currentPath, hoverLine.number - 1, hint);
 			if (!info) return null;
 			return {
 				pos: range.from,

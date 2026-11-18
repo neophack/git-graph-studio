@@ -10,6 +10,8 @@
 
 use std::sync::Arc;
 
+use serde::Serialize;
+
 use tauri::ipc::Channel;
 use tauri::State;
 
@@ -121,4 +123,45 @@ pub async fn symbol_references(
     let root = resolve_root(roots.inner(), repo)?;
     ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
     references_for(&symbol_index, &root, &name)
+}
+
+/// One scope-local definition: a parameter or local variable declared inside the
+/// enclosing function of the use site, in the file whose text the caller passes —
+/// the editor's live buffer, so an unsaved edit answers as written.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeDefinition {
+    /// `variable` for a local, `parameter` for a function parameter.
+    pub kind: String,
+    pub name: String,
+    /// 0-based line and byte column of the declaration's name.
+    pub line: usize,
+    pub column: usize,
+    /// The 0-based line the local's reach ends on (the enclosing function's end).
+    pub scope_end: usize,
+}
+
+/// The scope-local definitions of `name` covering `line` of `text` (the per-file half of
+/// the hover and Go-to-Definition, 2026-11-18): a name declared inside the enclosing
+/// function is that local or parameter, never a same-named global from the index. The
+/// parse runs over the passed text with the passed extension — no folder, no index, no
+/// disk read — and an empty answer means the site is outside every local's scope: the
+/// caller falls back to `symbol_lookup`'s global declarations. Innermost scope first.
+#[tauri::command]
+pub async fn symbol_scope_lookup(
+    name: String,
+    line: usize,
+    text: String,
+    ext: String,
+) -> Vec<ScopeDefinition> {
+    ggs_index::symbols::parse::scope_definitions(&text, &ext, line, &name)
+        .into_iter()
+        .map(|s| ScopeDefinition {
+            kind: s.kind.to_owned(),
+            name: s.name,
+            line: s.line,
+            column: s.column,
+            scope_end: s.scope.map(|(_, to)| to).unwrap_or(s.end_line),
+        })
+        .collect()
 }

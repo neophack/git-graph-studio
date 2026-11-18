@@ -658,6 +658,18 @@
 					];
 					return [];
 				},
+				// The scope-aware half (2026-11-18): the live buffer of hover.c parsed per
+				// call — inside tick the local `measure` IS the answer, so the hover and the
+				// jumps never consult the global list above. The declaration sits one line
+				// above the use (hoverMeasureVarLine is the use line), its reach ends at '}'.
+				symbol_scope_lookup: ({ name, line }) => {
+					const declaration = hoverMeasureVarLine - 1;
+					const use = Number(line);
+					if (use >= declaration && use <= hoverMeasureVarLine + 1 && name === 'measure') {
+						return [{ kind: 'variable', name: 'measure', line: declaration, column: hoverLines[declaration].indexOf('measure'), scopeEnd: hoverMeasureVarLine + 1 }];
+					}
+					return [];
+				},
 				workspace_symbols: ({ query }) => scrollHandlers.symbol_lookup({ name: query }),
 				read_file_raw: ({ path }) => {
 					// The raw channel's frame: 8-byte little-endian header length, the JSON
@@ -881,9 +893,10 @@
 				await sleep(600);
 				const tipForAway = document.querySelector('.cm-tooltip');
 				check('quick-info hover', 'moving away dismisses it as before', true, !tipForAway || !tipForAway.isConnected);
-				// A same-named function and a local variable: at a value position the hover
-				// must lead with the VARIABLE's own declaration — the index holds both and the
-				// mock answers the function first, so the order below is the ranking's doing.
+				// A same-named function and a local variable: the scope answer (the scripted
+				// symbol_scope_lookup) names the LOCAL alone — the hover shows exactly one
+				// entry, the local's own declaration line, and the global function never
+				// appears beside it (2026-11-18, the scope-aware pass).
 				const measureLine = Array.from(scroller.querySelectorAll('.cm-line')).find((l) => l.textContent.includes('measure = measure + 1'));
 				if (!measureLine) throw new Error('no measure use line rendered');
 				let mnode = null, mOff = 0;
@@ -907,9 +920,9 @@
 					if (measureTip) break;
 				}
 				if (!measureTip) throw new Error('the measure tooltip never came up');
-				const firstLoc = measureTip.querySelector('.ggs-symbol-hover-loc');
-				check('quick-info hover', 'a value position leads with the variable, not the same-named function', true,
-					Boolean(firstLoc) && firstLoc.textContent === 'hover.c:' + (hoverMeasureVarLine + 1));
+				const measureLocs = measureTip.querySelectorAll('.ggs-symbol-hover-loc');
+				check('quick-info hover', 'inside tick the scope answer is the local alone — one entry, the local declaration line', true,
+					measureLocs.length === 1 && measureLocs[0].textContent === 'hover.c:' + hoverMeasureVarLine);
 				// The stickiness checks need the tooltip POSITIONED — the manager places it on
 				// the view's measure pass, and an occluded window never produces the frame
 				// (rAF stalls; the tooltip then stands parked at -10000px with a real content

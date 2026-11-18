@@ -53,7 +53,10 @@ const MAGIC: &[u8; 6] = b"GGSIDX";
 /// Format 3: the C/C++ queries index variables and require a struct/enum/class body —
 /// a version-2 file holds the old shapes (no variables, every `struct T` use indexed as
 /// a definition) and is rebuilt from scratch the same way.
-const VERSION: u8 = 3;
+/// Format 4 (2026-11-18): scope-local declarations — a function's parameters and locals —
+/// no longer ride the global index (they resolve per file against their scope), so a
+/// version-3 file holds names and entries the global index must not serve and is rebuilt.
+const VERSION: u8 = 4;
 /// The interned-name id a symbol without a container carries.
 const NO_CONTAINER: u32 = u32::MAX;
 /// Full builds report progress every this many files; also the cancellation checkpoint.

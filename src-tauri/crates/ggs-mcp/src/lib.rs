@@ -2000,7 +2000,7 @@ mod tests {
 
         let status = call(&server, "index_status", json!({}));
         assert!(status.contains("state \"ready\""), "{status}");
-        assert!(status.contains("symbols 5"), "{status}");
+        assert!(status.contains("symbols 6"), "{status}");
     }
 
     /// Token economy's entry rung: whatever the workspace's size, `project_overview`
@@ -2011,10 +2011,10 @@ mod tests {
         let (_dir, server) = scratch_server();
         let overview = call(&server, "project_overview", json!({}));
         assert!(
-            overview.contains("index \"ready\" — 3 indexed file(s), 5 symbol(s)"),
+            overview.contains("index \"ready\" — 3 indexed file(s), 6 symbol(s)"),
             "{overview}"
         );
-        assert!(overview.contains("languages (symbols): rs 5"), "{overview}");
+        assert!(overview.contains("languages (symbols): rs 6"), "{overview}");
         assert!(overview.contains("kinds: function 5"), "{overview}");
         assert!(
             overview.contains("top directories by symbols"),
@@ -2025,7 +2025,7 @@ mod tests {
             "{overview}"
         );
         assert!(
-            overview.contains("(root) — 1 file(s), 1 symbol(s)"),
+            overview.contains("(root) — 1 file(s), 2 symbol(s)"),
             "{overview}"
         );
         assert!(overview.contains("hub files by declarations"), "{overview}");
@@ -2055,9 +2055,9 @@ mod tests {
     fn directory_tree_walks_levels_ranked_and_scoped() {
         let (_dir, server) = scratch_server();
         let root = call(&server, "directory_tree", json!({}));
-        assert!(root.contains("(root) — 3 file(s), 5 symbol(s):"), "{root}");
+        assert!(root.contains("(root) — 3 file(s), 6 symbol(s):"), "{root}");
         assert!(root.contains("src/ — 2 file(s), 4 symbol(s)"), "{root}");
-        assert!(root.contains("other.rs — 1 symbol(s)"), "{root}");
+        assert!(root.contains("other.rs — 2 symbol(s)"), "{root}");
 
         let deep = call(
             &server,

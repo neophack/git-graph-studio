@@ -2,10 +2,14 @@
 //! index and the whole Code Analysis module. Where the viewer's outline scan (viewer/outline)
 //! sees line prefixes, this layer sees the syntax tree — so a declaration carries its column,
 //! its range, the class or impl it sits in, its visibility, its parameter count and its
-//! cyclomatic complexity, and a file additionally yields its call sites and imports. Each
-//! grammar is a Cargo feature (plan §3.1's single sanctioned exception to the pure-Rust
-//! rule); a language whose feature is off falls back to the outline scan, which stays the
-//! extractor for everything the grammars do not cover.
+//! cyclomatic complexity. It also separates the scopes: a function's parameters and local
+//! variables are extracted with their enclosing function's range (2026-11-18, the owner's
+//! direction: 函数传参的变量要能识别，局部变量只显示局部范围的定义) and ride [`ParsedFile::locals`],
+//! answered per file through [`scope_definitions`]; the global declarations ride `symbols`
+//! and are the only ones the workspace index stores. Each grammar is a Cargo feature
+//! (plan §3.1's single sanctioned exception to the pure-Rust rule); a language whose feature
+//! is off falls back to the outline scan, which stays the extractor for everything the
+//! grammars do not cover.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -38,6 +42,12 @@ pub struct ParsedSymbol {
     pub nesting: u32,
     /// The declaration's first line, capped — what a call graph node shows on hover.
     pub signature: String,
+    /// The enclosing function's 0-based line range, for the declarations that live inside
+    /// one: the function's parameters and its local variables. `None` for everything
+    /// file-scope or type-scope — the workspace index holds only those, and a local is
+    /// resolved per file against its scope (2026-11-18, the owner's direction: a hovered
+    /// local shows its own scope's definition, never a same-named global).
+    pub scope: Option<(usize, usize)>,
 }
 
 /// One call expression: the callee's spelling and, when the grammar names an object, the
@@ -51,10 +61,13 @@ pub struct CallSite {
 }
 
 /// A file's full analysis extraction. The symbol store consumes `symbols`; the analysis
-/// engine consumes all three.
+/// engine consumes all three. The scope-local declarations (a function's parameters and
+/// its local variables) ride `locals` — never the workspace index, whose names are the
+/// global ones; the scope-aware hover and Go-to-Definition read `locals` per file.
 #[derive(Default, Clone, Debug)]
 pub struct ParsedFile {
     pub symbols: Vec<ParsedSymbol>,
+    pub locals: Vec<ParsedSymbol>,
     pub calls: Vec<CallSite>,
     pub imports: Vec<String>,
 }
@@ -163,6 +176,11 @@ const RUST_QUERY: &str = r#"
 (call_expression function: (scoped_identifier name: (identifier) @call))
 (macro_invocation macro: (identifier) @call)
 (use_declaration) @import
+(parameter pattern: (identifier) @def.param)
+(parameter pattern: (mut_pattern (identifier) @def.param))
+(closure_parameters (identifier) @def.param)
+(let_declaration pattern: (identifier) @def.variable)
+(let_declaration pattern: (mut_pattern (identifier) @def.variable))
 "#;
 
 const PYTHON_QUERY: &str = r#"
@@ -173,6 +191,12 @@ const PYTHON_QUERY: &str = r#"
 (import_statement (dotted_name) @import)
 (import_from_statement module_name: (dotted_name) @import)
 (import_from_statement module_name: (relative_import) @import)
+(parameters (identifier) @def.param)
+(parameters (default_parameter name: (identifier) @def.param))
+(parameters (typed_parameter (identifier) @def.param))
+(parameters (typed_default_parameter name: (identifier) @def.param))
+(assignment left: (identifier) @def.variable)
+(for_statement left: (identifier) @def.variable)
 "#;
 
 const GO_QUERY: &str = r#"
@@ -182,6 +206,9 @@ const GO_QUERY: &str = r#"
 (call_expression function: (identifier) @call)
 (call_expression function: (selector_expression field: (field_identifier) @call))
 (import_spec path: (interpreted_string_literal) @import)
+(parameter_declaration name: (identifier) @def.param)
+(short_var_declaration left: (expression_list (identifier) @def.variable))
+(var_declaration (var_spec name: (identifier) @def.variable))
 "#;
 
 const JAVASCRIPT_QUERY: &str = r#"
@@ -196,6 +223,10 @@ const JAVASCRIPT_QUERY: &str = r#"
 (call_expression function: (member_expression property: (property_identifier) @call))
 (call_expression function: (identifier) @call arguments: (arguments (string) @import.req))
 (new_expression constructor: (identifier) @call.new)
+(formal_parameters (identifier) @def.param)
+(formal_parameters (assignment_pattern left: (identifier) @def.param))
+(variable_declaration (variable_declarator name: (identifier) @def.variable))
+(lexical_declaration (variable_declarator name: (identifier) @def.variable))
 "#;
 
 /// TypeScript, TSX and the grammar shapes share one query (all name classes with a
@@ -216,6 +247,10 @@ const TYPESCRIPT_QUERY: &str = r#"
 (call_expression function: (member_expression property: (property_identifier) @call))
 (call_expression function: (identifier) @call arguments: (arguments (string) @import.req))
 (new_expression constructor: (identifier) @call.new)
+(formal_parameters (required_parameter pattern: (identifier) @def.param))
+(formal_parameters (optional_parameter pattern: (identifier) @def.param))
+(variable_declaration (variable_declarator name: (identifier) @def.variable))
+(lexical_declaration (variable_declarator name: (identifier) @def.variable))
 "#;
 
 const JAVA_QUERY: &str = r#"
@@ -228,6 +263,8 @@ const JAVA_QUERY: &str = r#"
 (method_invocation name: (identifier) @call)
 (object_creation_expression type: (type_identifier) @call.new)
 (import_declaration (scoped_identifier) @import)
+(formal_parameter name: (identifier) @def.param)
+(local_variable_declaration (variable_declarator name: (identifier) @def.variable))
 "#;
 
 const C_QUERY: &str = r#"
@@ -246,6 +283,9 @@ const C_QUERY: &str = r#"
 (declaration declarator: (init_declarator declarator: (array_declarator declarator: (identifier) @def.variable)))
 (call_expression function: (identifier) @call)
 (preproc_include path: (string_literal) @import)
+(parameter_declaration declarator: (identifier) @def.param)
+(parameter_declaration declarator: (pointer_declarator declarator: (identifier) @def.param))
+(parameter_declaration declarator: (array_declarator declarator: (identifier) @def.param))
 "#;
 
 const CPP_QUERY: &str = r#"
@@ -271,6 +311,10 @@ const CPP_QUERY: &str = r#"
 (call_expression function: (field_expression field: (field_identifier) @call))
 (call_expression function: (qualified_identifier) @call)
 (preproc_include path: (string_literal) @import)
+(parameter_declaration declarator: (identifier) @def.param)
+(parameter_declaration declarator: (pointer_declarator declarator: (identifier) @def.param))
+(parameter_declaration declarator: (reference_declarator (identifier) @def.param))
+(parameter_declaration declarator: (array_declarator declarator: (identifier) @def.param))
 "#;
 
 const CSHARP_QUERY: &str = r#"
@@ -286,6 +330,8 @@ const CSHARP_QUERY: &str = r#"
 (invocation_expression function: (member_access_expression name: (identifier) @call))
 (object_creation_expression type: (identifier) @call.new)
 (using_directive) @import
+(parameter name: (identifier) @def.param)
+(local_declaration_statement (variable_declaration (variable_declarator name: (identifier) @def.variable)))
 "#;
 
 fn query_text(lang: Lang) -> &'static str {
@@ -366,11 +412,37 @@ pub fn parse_symbols(text: &str, ext: &str) -> Vec<ParsedSymbol> {
     parse_file(text, ext).symbols
 }
 
+/// The scope-local declarations covering `line` whose name is `name`, the innermost
+/// scope first — the per-file half of the hover and Go-to-Definition: a name declared
+/// inside the enclosing function of the use site is that local or parameter, never a
+/// same-named global from the index. `text` is the caller's live buffer (the editor's
+/// own document, so an unsaved edit answers as written); an empty answer means the site
+/// is outside every local's scope and the caller falls back to the index.
+pub fn scope_definitions(text: &str, ext: &str, line: usize, name: &str) -> Vec<ParsedSymbol> {
+    let mut hits: Vec<ParsedSymbol> = parse_file(text, ext)
+        .locals
+        .into_iter()
+        .filter(|s| {
+            s.name == name
+                && s.scope
+                    .is_some_and(|(from, to)| from <= line && line <= to)
+        })
+        .collect();
+    // The tightest scope leads: a parameter or local of the innermost function beats a
+    // same-named one an enclosing function declares (the closure case).
+    hits.sort_by_key(|s| {
+        s.scope.map_or(usize::MAX, |(from, to)| to.saturating_sub(from))
+    });
+    hits.truncate(8);
+    hits
+}
+
 /// The declarations, call sites and imports of a file — the Code Analysis engine's input.
 pub fn parse_file(text: &str, ext: &str) -> ParsedFile {
     let Some(lang) = lang_of(ext) else {
         return ParsedFile {
             symbols: outline_fallback(text, ext),
+            locals: Vec::new(),
             calls: Vec::new(),
             imports: Vec::new(),
         };
@@ -378,6 +450,7 @@ pub fn parse_file(text: &str, ext: &str) -> ParsedFile {
     if language(lang).is_none() {
         return ParsedFile {
             symbols: outline_fallback(text, ext),
+            locals: Vec::new(),
             calls: Vec::new(),
             imports: Vec::new(),
         };
@@ -402,8 +475,19 @@ pub fn parse_file(text: &str, ext: &str) -> ParsedFile {
             let capture = query.capture_names()[cap.index as usize];
             let text_of = |node: tree_sitter::Node| &text[node.byte_range()];
             if let Some(kind) = capture.strip_prefix("def.") {
-                if out.symbols.len() < MAX_SYMBOLS {
-                    out.symbols.push(symbol_of(lang, kind, node, text));
+                // A JS/TS declarator with a function value is already indexed as the
+                // function (`const f = () => …`); the plain-variable pattern matches the
+                // same node and would double-list it.
+                if shadowed_by_function(lang, kind, node) {
+                    continue;
+                }
+                let symbol = symbol_of(lang, kind, node, text);
+                if symbol.scope.is_some() {
+                    if out.locals.len() < MAX_SYMBOLS {
+                        out.locals.push(symbol);
+                    }
+                } else if out.symbols.len() < MAX_SYMBOLS {
+                    out.symbols.push(symbol);
                 }
             } else if capture == "call" || capture == "call.new" {
                 let mut name = text_of(node).to_owned();
@@ -477,6 +561,7 @@ fn outline_fallback(text: &str, ext: &str) -> Vec<ParsedSymbol> {
             complexity: 1,
             nesting: 0,
             signature: String::new(),
+            scope: None,
         })
         .collect()
 }
@@ -549,6 +634,7 @@ fn symbol_of(
         // A Rust or Python function with a container is a method — the grammars have no
         // separate node for it.
         Lang::Rust | Lang::Python if capture_kind == "function" && container.is_some() => "method",
+        _ if capture_kind == "param" => "parameter",
         _ => capture_kind,
     };
     let (line, column) = {
@@ -566,16 +652,7 @@ fn symbol_of(
     // A preprocessor directive's node includes its trailing newline: an end at column 0
     // of the next row means the directive's own last row is one above (`#define` and its
     // `\` continuations all report the line after them otherwise).
-    let end_line = scope
-        .map(|d| {
-            let end = d.end_position();
-            if end.column == 0 {
-                end.row.saturating_sub(1)
-            } else {
-                end.row
-            }
-        })
-        .unwrap_or(line);
+    let end_line = scope.map(end_row_of).unwrap_or(line);
     let params = decl
         .and_then(|d| d.child_by_field_name("parameters"))
         .map(|p| p.named_child_count())
@@ -591,6 +668,15 @@ fn symbol_of(
         })
         .unwrap_or_default();
     let exported = exported_of(lang, scope, &name, text);
+    // The scope a local lives in: the innermost enclosing function-like node's line
+    // range. Parameters and variables are the captures this applies to — every other
+    // kind is file- or type-scope by construction. `None` marks the declaration global.
+    let scope = if matches!(capture_kind, "param" | "variable") {
+        enclosing_scope(lang, name_node)
+            .map(|f| (f.start_position().row, end_row_of(f)))
+    } else {
+        None
+    };
     ParsedSymbol {
         kind,
         name,
@@ -603,7 +689,97 @@ fn symbol_of(
         complexity,
         nesting,
         signature,
+        scope,
     }
+}
+
+/// The last 0-based row a node's text ends on: an end at column 0 of the next row means
+/// the node's own last row is one above (a node whose text carries the trailing newline).
+fn end_row_of(node: tree_sitter::Node) -> usize {
+    let end = node.end_position();
+    if end.column == 0 {
+        end.row.saturating_sub(1)
+    } else {
+        end.row
+    }
+}
+
+/// The innermost enclosing function-like node of a declaration — the scope its local
+/// names live in. The first function-like ancestor wins (a nested function's locals
+/// belong to the nested function); reaching the file root finds none and the name is
+/// global. Parameters always find one; a variable at file scope finds none.
+fn enclosing_scope(lang: Lang, from: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    let mut node = from.parent();
+    while let Some(current) = node {
+        if is_scope(lang, current.kind()) {
+            return Some(current);
+        }
+        node = current.parent();
+    }
+    None
+}
+
+/// The node kinds whose bodies carry scope-local names, per language: plain functions
+/// and methods, plus the lambdas/closures whose bodies are scopes of their own.
+fn is_scope(lang: Lang, kind: &str) -> bool {
+    match lang {
+        Lang::Rust => matches!(kind, "function_item" | "closure_expression"),
+        Lang::Python => matches!(kind, "function_definition" | "lambda"),
+        Lang::Go => matches!(
+            kind,
+            "function_declaration" | "method_declaration" | "func_literal"
+        ),
+        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => matches!(
+            kind,
+            "function_declaration"
+                | "generator_function_declaration"
+                | "function_expression"
+                | "generator_function_expression"
+                | "arrow_function"
+                | "method_definition"
+        ),
+        Lang::Java => matches!(
+            kind,
+            "method_declaration"
+                | "constructor_declaration"
+                | "compact_constructor_declaration"
+                | "lambda_expression"
+        ),
+        Lang::C => matches!(kind, "function_definition"),
+        Lang::Cpp => matches!(kind, "function_definition" | "lambda_expression"),
+        Lang::CSharp => matches!(
+            kind,
+            "method_declaration"
+                | "constructor_declaration"
+                | "local_function_statement"
+                | "lambda_expression"
+                | "anonymous_method_expression"
+                | "accessor_declaration"
+                | "operator_declaration"
+        ),
+    }
+}
+
+/// Whether this capture names a declarator the function-valued patterns already indexed:
+/// a JS/TS `const f = () => …` is the function `f`, and its plain-variable twin is noise.
+fn shadowed_by_function(
+    lang: Lang,
+    capture_kind: &str,
+    node: tree_sitter::Node,
+) -> bool {
+    if capture_kind != "variable" || !matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx) {
+        return false;
+    }
+    let declarator = node.parent();
+    declarator
+        .filter(|d| d.kind() == "variable_declarator")
+        .and_then(|d| d.child_by_field_name("value"))
+        .is_some_and(|value| {
+            matches!(
+                value.kind(),
+                "arrow_function" | "function_expression" | "generator_function_expression"
+            )
+        })
 }
 
 /// Walk up from a declaration to the type that contains it. A Go method's container is its
@@ -1293,9 +1469,10 @@ macro_rules! sq { ($e:expr) => { $e * $e } }
         // The body is what separates a struct definition from a use: `struct Point origin;`
         // declares a variable of the type and must not also index as a second "struct Point"
         // — the bodyless use entry carries no end line, so a hover ranking it first showed a
-        // declaration line where the whole struct body belongs. Variables — plain, pointer,
-        // array, local and static-local — index too, so hovering the variable finds its own
-        // declaration and not only a same-named function.
+        // declaration line where the whole struct body belongs. File-scope variables —
+        // plain, pointer, array — index as globals; the locals inside a function body ride
+        // `locals` with the enclosing function's range instead (2026-11-18: a local's
+        // definition resolves within its scope, and the index keeps only globals).
         let text = "struct Point {\n    int x;\n    int y;\n};\n\ntypedef struct {\n    int w;\n    int h;\n} Size;\n\ntypedef struct tagRect {\n    int l;\n    int r;\n} Rect;\n\nint total(int a, int b) { return a + b; }\n\nint counter = 5;\nstatic char *name = NULL;\nint arr[10];\nstruct Point origin;\n\nvoid step(void) {\n    int total = 0;\n    total = total + 1;\n    static int calls = 0;\n}\n";
         let file = parse_file(text, "c");
         assert_eq!(
@@ -1311,8 +1488,6 @@ macro_rules! sq { ($e:expr) => { $e * $e } }
                 ("variable", "arr"),
                 ("variable", "origin"),
                 ("function", "step"),
-                ("variable", "total"),
-                ("variable", "calls"),
             ]
         );
         let point = &file.symbols[0];
@@ -1321,12 +1496,133 @@ macro_rules! sq { ($e:expr) => { $e * $e } }
         assert_eq!((size.line, size.end_line), (5, 8), "the anonymous typedef's type spans to its name");
         let rect = &file.symbols[2];
         assert_eq!((rect.line, rect.end_line), (10, 13));
-        for variable in &file.symbols[5..] {
-            if variable.kind == "variable" {
-                assert_eq!(variable.end_line, variable.line, "a declaration is its own line");
-            }
+        for variable in file.symbols[5..].iter().filter(|s| s.kind == "variable") {
+            assert_eq!(variable.end_line, variable.line, "a declaration is its own line");
+            assert_eq!(variable.scope, None, "file-scope variables are global");
         }
-        let local_total = &file.symbols[10];
-        assert_eq!(local_total.line, 23, "the local inside step, not the function");
+        // The scope locals: the parameters of the global `total` function and the locals
+        // inside step — each with its enclosing function's range. `total` the local is
+        // distinct from `total` the global function above.
+        let locals: Vec<(&str, (usize, usize))> = file
+            .locals
+            .iter()
+            .map(|s| (s.name.as_str(), s.scope.unwrap()))
+            .collect();
+        assert_eq!(
+            locals,
+            vec![("a", (15, 15)), ("b", (15, 15)), ("total", (22, 26)), ("calls", (22, 26))]
+        );
+    }
+
+    /// The scope-aware answers the hover and Go-to-Definition ask per file: a use inside
+    /// a function resolves to that function's parameters and locals, a use outside every
+    /// scope answers empty (the caller falls back to the global index).
+    #[test]
+    fn scope_definitions_answer_the_enclosing_function_only() {
+        let text = "int total(int a, int b) { return a + b; }\nint use = total(1, 2);\nvoid step(int first) {\n    int total = 0;\n    total = total + first;\n    if (total > 0) { helper(total); }\n}\n";
+        // Inside step, `total` is the local (line 4's use), never the global function.
+        let hits = scope_definitions(text, "c", 4, "total");
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].kind, hits[0].line), ("variable", 3));
+        // The parameter `first` is found from its use, with the whole function as reach.
+        let first = scope_definitions(text, "c", 4, "first");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].kind, "parameter");
+        assert_eq!(first[0].scope, Some((2, 6)));
+        // The parameter's own declaration line answers too.
+        assert_eq!(scope_definitions(text, "c", 2, "first").len(), 1);
+        // Inside `total`'s one-line body its parameters answer; a name the scope does
+        // not declare answers empty.
+        assert_eq!(scope_definitions(text, "c", 0, "a").len(), 1);
+        assert_eq!(scope_definitions(text, "c", 0, "helper").len(), 0);
+        // A file-scope site resolves nothing locally — `total(` there is the global
+        // function the index holds, and `a` reaches nowhere.
+        assert!(scope_definitions(text, "c", 1, "total").is_empty());
+        assert!(scope_definitions(text, "c", 1, "a").is_empty());
+        // The if-block's use is still the local's scope.
+        assert_eq!(scope_definitions(text, "c", 5, "total").len(), 1);
+    }
+
+    #[test]
+    fn parameters_index_as_scope_locals_in_every_grammar() {
+        // Rust: plain and `mut` parameters, closure parameters, `let` locals.
+        let rust = parse_file("fn go(mut n: u32) { let m = n; let mut k = m; }\nfn bind() { |x| x }\n", "rs");
+        let names: Vec<(&str, &str)> = rust.locals.iter().map(|s| (s.kind, s.name.as_str())).collect();
+        assert!(names.contains(&("parameter", "n")), "{names:?}");
+        assert!(names.contains(&("variable", "m")), "{names:?}");
+        assert!(names.contains(&("variable", "k")), "{names:?}");
+        assert!(names.contains(&("parameter", "x")), "{names:?} (closure parameter)");
+
+        // Python: parameters and assignment/for targets; `self.x = …` is no declaration.
+        let py = parse_file("def run(a, b=1):\n    total = 0\n    for item in seq:\n        pass\n", "py");
+        let names: Vec<&str> = py.locals.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"a") && names.contains(&"b"), "{names:?}");
+        assert!(names.contains(&"total"), "{names:?}");
+        assert!(names.contains(&"item"), "{names:?}");
+
+        // Go: parameters, `:=` and `var` declarations.
+        let go = parse_file("func f(n int) {\n    m := n\n    var k int = m\n}\n", "go");
+        let names: Vec<(&str, &str)> = go.locals.iter().map(|s| (s.kind, s.name.as_str())).collect();
+        assert!(names.contains(&("parameter", "n")), "{names:?}");
+        assert!(names.contains(&("variable", "m")), "{names:?}");
+        assert!(names.contains(&("variable", "k")), "{names:?}");
+
+        // TypeScript: required/optional parameters and let/const locals.
+        let ts = parse_file("function f(x: number, y?: string) {\n  const a = x;\n  let b = a;\n}\n", "ts");
+        let names: Vec<(&str, &str)> = ts.locals.iter().map(|s| (s.kind, s.name.as_str())).collect();
+        assert!(names.contains(&("parameter", "x")) && names.contains(&("parameter", "y")), "{names:?}");
+        assert!(names.contains(&("variable", "a")) && names.contains(&("variable", "b")), "{names:?}");
+
+        // JavaScript: plain and defaulted parameters, `var` locals.
+        let js = parse_file("function f(x, y = 1) {\n  var z = x;\n}\n", "js");
+        let names: Vec<(&str, &str)> = js.locals.iter().map(|s| (s.kind, s.name.as_str())).collect();
+        assert!(names.contains(&("parameter", "x")) && names.contains(&("parameter", "y")), "{names:?}");
+        assert!(names.contains(&("variable", "z")), "{names:?}");
+
+        // Java and C#: formal parameters and local declarations.
+        let java = parse_file("class S {\n  void run(Task t) {\n    int n = 1;\n  }\n}\n", "java");
+        let names: Vec<(&str, &str)> = java.locals.iter().map(|s| (s.kind, s.name.as_str())).collect();
+        assert!(names.contains(&("parameter", "t")), "{names:?}");
+        assert!(names.contains(&("variable", "n")), "{names:?}");
+        let cs = parse_file("class S {\n  void Run(int t) {\n    int n = 1;\n  }\n}\n", "cs");
+        let names: Vec<(&str, &str)> = cs.locals.iter().map(|s| (s.kind, s.name.as_str())).collect();
+        assert!(names.contains(&("parameter", "t")), "{names:?}");
+        assert!(names.contains(&("variable", "n")), "{names:?}");
+
+        // C++: by-value, pointer and reference parameters.
+        let cpp = parse_file("void f(int n, char *p, const std::string &s) { int local = n; }\n", "cpp");
+        let names: Vec<&str> = cpp.locals.iter().map(|s| s.name.as_str()).collect();
+        for want in ["n", "p", "s", "local"] {
+            assert!(names.contains(&want), "{names:?}");
+        }
+    }
+
+    #[test]
+    fn globals_stay_global_and_js_function_shorthand_is_not_doubled() {
+        // File-scope assignments and declarations ride `symbols` (globals); a JS/TS
+        // function-valued declarator is the function only — its plain-variable twin is
+        // dropped, while a plain const (`util`) is the global variable it is.
+        let py = parse_file("RATE = 5\n\ndef f():\n    local = RATE\n", "py");
+        assert_eq!(kinds(&py), vec![("variable", "RATE"), ("function", "f")]);
+        assert_eq!(py.locals.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["local"]);
+
+        let js = parse_file("const util = require('./util');\nconst handler = function (e) { return e; };\nconst arrow = () => 1;\nlet plain = 2;\n", "js");
+        let names: Vec<(&str, &str)> = js.symbols.iter().map(|s| (s.kind, s.name.as_str())).collect();
+        assert!(names.contains(&("variable", "util")), "{names:?}");
+        assert!(names.contains(&("variable", "plain")), "{names:?}");
+        assert_eq!(
+            names.iter().filter(|(_, name)| *name == "handler").count(),
+            1,
+            "{names:?} — the function, once"
+        );
+        assert_eq!(
+            names.iter().filter(|(_, name)| *name == "arrow").count(),
+            1,
+            "{names:?} — the arrow function, once"
+        );
+        // The only local is the anonymous function's own parameter `e` — the
+        // function-valued declarators themselves never appear twice.
+        let locals: Vec<&str> = js.locals.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(locals, vec!["e"]);
     }
 }

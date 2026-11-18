@@ -13,7 +13,7 @@ import { buildTree, subtreeCounts, SymbolDatabaseView } from '../src/features/se
 import { fileSymbolItems, workspaceSymbolItems } from '../src/workbench';
 import { backend } from './tauriMock';
 import { click, flush, key, texts } from './helpers';
-import { hoverKindHint, macroHoverDom, macroHoverEntries, macroHoverFor, macroValueAt, precedingComment, quickInfoDom, quickInfoFor, resetMacroHoverCache, resetQuickInfoCache, symbolBodyAt, wordRangeAt, hoverKeepAliveExtension, type MacroHoverSource } from '../src/features/editor/editorProviderViews';
+import { hoverKindHint, macroHoverDom, macroHoverEntries, macroHoverFor, macroValueAt, precedingComment, quickInfoDom, quickInfoFor, resetMacroHoverCache, resetQuickInfoCache, scopeQuickInfoFor, symbolBodyAt, wordRangeAt, hoverKeepAliveExtension, type MacroHoverSource } from '../src/features/editor/editorProviderViews';
 import { buildPeekDom, definitionWindow } from '../src/features/editor/peek';
 import type { WsSymbol } from '../src/platform/ipc/search';
 import { EditorView } from '@codemirror/view';
@@ -803,6 +803,112 @@ describe('Peek Definition through the index', () => {
 		await flush(4);
 		expect(document.querySelector('.ggs-peek')).toBeNull();
 		expect(document.querySelector('.notification')?.textContent).toContain('alpha');
+	});
+});
+
+describe('Scope-aware definitions (2026-11-18)', () => {
+	// The C file the scope tests live in: a global function `total` with a file-scope
+	// call site, a local `total` and a parameter `first` inside `step`.
+	const C_TEXT = 'int total(int a, int b) { return a + b; }\nint use = total(1, 2);\n\nvoid step(int first) {\n    int total = 0;\n    total = total + first;\n}\n';
+
+	it('Go to Definition jumps to the enclosing function local, never the global', async () => {
+		scriptFiles({ [`${REPO}\\main.c`]: C_TEXT });
+		// The scope command answers the local; the global index would answer the
+		// same-named function — it must not be asked at all.
+		backend.on('symbol_scope_lookup', ({ name, ext }) => {
+			expect(name).toBe('total');
+			expect(ext).toBe('c');
+			return [{ kind: 'variable', name: 'total', line: 4, column: 8, scopeEnd: 6 }];
+		});
+		backend.on('symbol_lookup', () => {
+			throw new Error('the global index must not be asked for a scoped name');
+		});
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot(REPO);
+		await group.openFile(`${REPO}\\main.c`);
+		const view = group.activeView!;
+		// The cursor sits on the use of the local `total` inside step (line 6, 1-based;
+		// column 4 is its first letter).
+		view.dispatch({ selection: { anchor: view.state.doc.line(6).from + 4 } });
+		await group.goToDefinition();
+		await flush(4);
+		// The tab never moves; the cursor lands on the local's declaration line.
+		expect(document.querySelector('.tab.active .label')!.textContent).toBe('main.c');
+		const line = view.state.doc.lineAt(view.state.selection.main.head);
+		expect(line.text).toBe('    int total = 0;');
+		expect(backend.callsTo('symbol_scope_lookup')).toHaveLength(1);
+	});
+
+	it('falls back to the index when the site is outside every local scope', async () => {
+		scriptFiles({ [`${REPO}\\main.c`]: C_TEXT, [`${REPO}\\src\\total.c`]: 'int total(int a, int b) { return 0; }\n' });
+		backend.on('symbol_scope_lookup', ({ name }) => {
+			expect(name).toBe('total');
+			return [];
+		});
+		backend.on('symbol_lookup', () => [{ kind: 'function', name: 'total', path: 'src/total.c', line: 0 }]);
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot(REPO);
+		await group.openFile(`${REPO}\\main.c`);
+		const view = group.activeView!;
+		// Line 2 is file scope: the call site of the global function.
+		view.dispatch({ selection: { anchor: view.state.doc.line(2).from + 10 } });
+		await group.goToDefinition();
+		await flush(4);
+		expect(document.querySelector('.tab.active .label')!.textContent).toBe('total.c');
+	});
+
+	it('the hover shows the scoped declaration alone and slices it from the buffer', async () => {
+		resetQuickInfoCache();
+		const reads: string[] = [];
+		const source: MacroHoverSource = {
+			root: () => 'C:\\repo',
+			lookup: async () => {
+				throw new Error('the index must not be asked when a local answers');
+			},
+			read: async (path) => {
+				reads.push(path);
+				return null;
+			},
+			scopeLookup: async (name, line, text) => {
+				expect(line).toBe(5);
+				expect(text.split('\n')[5]).toContain('total = total + first');
+				return [{ kind: 'variable', name, line: 4, column: 8, scopeEnd: 6 }];
+			}
+		};
+		const info = await scopeQuickInfoFor(source, 'total', 5, C_TEXT, `${REPO}\\main.c`);
+		expect(info).not.toBeNull();
+		expect(info!.entries).toHaveLength(1);
+		expect(info!.entries[0]!.text).toBe('int total = 0;');
+		expect(info!.entries[0]!.path).toBe('main.c');
+		expect(info!.entries[0]!.line).toBe(4);
+		expect(reads).toHaveLength(0);
+		// And a source without the scope lookup (a diff tab, the tests' older fakes)
+		// answers nothing locally — the caller falls back to the index path.
+		const bare: MacroHoverSource = { root: () => 'C:\\repo', lookup: async () => [], read: async () => null };
+		expect(await scopeQuickInfoFor(bare, 'total', 5, C_TEXT, `${REPO}\\main.c`)).toBeNull();
+	});
+
+	it('Peek Definition shows the local with this file as its own path', async () => {
+		scriptFiles({ [`${REPO}\\main.c`]: C_TEXT });
+		backend.on('symbol_scope_lookup', ({ name }) => {
+			expect(name).toBe('first');
+			return [{ kind: 'parameter', name: 'first', line: 3, column: 18, scopeEnd: 6 }];
+		});
+		const group = new EditorGroup(document.getElementById('editorGroup')!);
+		group.setRoot(REPO);
+		await group.openFile(`${REPO}\\main.c`);
+		const view = group.activeView!;
+		view.dispatch({ selection: { anchor: view.state.doc.line(6).from + 20 } });
+		await group.peekDefinition();
+		await flush(4);
+		const peek = document.querySelector('.ggs-peek');
+		expect(peek).not.toBeNull();
+		expect(peek!.querySelector('.ggs-peek-name')!.textContent).toBe('first');
+		expect(peek!.querySelector('.ggs-peek-kind')!.textContent).toBe('parameter');
+		// Opening the local stays in this file — the declaration is its own.
+		click(peek!.querySelector('.ggs-peek-open'));
+		await flush(4);
+		expect(document.querySelector('.tab.active .label')!.textContent).toBe('main.c');
 	});
 });
 
