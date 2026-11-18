@@ -320,11 +320,21 @@ mod tests {
     #[test]
     fn raw_frames_compress_when_deflate_is_on() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let conn = Conn::new(1, "sid".into(), "hash".into(), "/".into(), "127.0.0.1".parse().unwrap());
+        let conn = Conn::new(
+            1,
+            "sid".into(),
+            "hash".into(),
+            "/".into(),
+            "127.0.0.1".parse().unwrap(),
+        );
         conn.go_live(tx, true);
 
         let text = "read me, compress me. ".repeat(200);
-        conn.push(Frame::new(ty::RESULT, super::super::frame::Enc::Raw, text.as_bytes().to_vec()));
+        conn.push(Frame::new(
+            ty::RESULT,
+            super::super::frame::Enc::Raw,
+            text.as_bytes().to_vec(),
+        ));
         let mut frames = drain(&mut rx);
         assert_eq!(frames.len(), 1);
         assert!(frames[0].has(flag::COMPRESSED));
@@ -341,7 +351,11 @@ mod tests {
                 (state >> 16) as u8
             })
             .collect();
-        conn.push(Frame::new(ty::RESULT, super::super::frame::Enc::Raw, noise.clone()));
+        conn.push(Frame::new(
+            ty::RESULT,
+            super::super::frame::Enc::Raw,
+            noise.clone(),
+        ));
         let frames = drain(&mut rx);
         assert_eq!(frames.len(), 1);
         assert!(!frames[0].has(flag::COMPRESSED));
@@ -349,9 +363,19 @@ mod tests {
 
         // A client that never advertised deflate keeps raw bytes verbatim.
         let (tx2, mut rx2) = mpsc::unbounded_channel();
-        let plain = Conn::new(2, "sid".into(), "hash".into(), "/".into(), "127.0.0.1".parse().unwrap());
+        let plain = Conn::new(
+            2,
+            "sid".into(),
+            "hash".into(),
+            "/".into(),
+            "127.0.0.1".parse().unwrap(),
+        );
         plain.go_live(tx2, false);
-        plain.push(Frame::new(ty::RESULT, super::super::frame::Enc::Raw, text.as_bytes().to_vec()));
+        plain.push(Frame::new(
+            ty::RESULT,
+            super::super::frame::Enc::Raw,
+            text.as_bytes().to_vec(),
+        ));
         let frames = drain(&mut rx2);
         assert_eq!(frames.len(), 1);
         assert!(!frames[0].has(flag::COMPRESSED));

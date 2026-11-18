@@ -299,11 +299,30 @@ jobs:
       # ~250 packages the runner image does not carry. The action installs the same
       # packages from cached .debs (under a minute warm; the version input is the cache
       # key's manual epoch — bump it when the package list changes).
+      #
+      # The epoch is 1.1 since 2026-11-19: the first 1.0 run's fresh install 404'd
+      # (the Ubuntu archive rolled gstreamer point releases between the runner's index
+      # snapshot and the fetch), and the action still saved its EMPTY cache under the
+      # 1.0 key — a poisoned key every later run would restore and skip installing, so
+      # the epoch moves and the guard below keeps any recurrence green.
       - name: Install the Linux build dependencies
         uses: awalsh128/cache-apt-pkgs-action@v1.6.3
         with:
           packages: libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
-          version: 1.0
+          version: 1.1
+      # The guard: the apt action reports success even when its install fetched nothing
+      # (the 1.0 poisoning above), and glib-sys's build script is where the absence
+      # surfaces minutes later as a bare pkg-config error. One probe here, and the
+      # plain-install fallback heals it — the slow path once, instead of a failed run.
+      - name: Verify the Linux build dependencies
+        run: |
+          if pkg-config --exists glib-2.0; then
+            echo "glib-2.0 answers pkg-config — the cached install is complete"
+          else
+            echo "::warning::the apt cache restored an incomplete set — installing plainly"
+            sudo apt-get update
+            sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+          fi
 
       # The pinned toolchain (rust-toolchain.toml); keep ref and file in sync on a bump.
       # Components explicit — the Windows test job's note tells why.
