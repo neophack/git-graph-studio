@@ -1069,9 +1069,14 @@ GET /w/A/v/0.2.0/assets/workbench-3f9a.js
 
 开启时：关闭小地图、粘性滚动、悬停预取、Markdown 远程图片、插件图标；终端合帧 50 ms；watcher 1 s；搜索每批 100 条。`navigator.connection.saveData` 为真或 `effectiveType` 为 `2g/3g` 时提示开启。
 
-### 10.5 流量度量
+### 10.5 流量度量与最省流量（2026-11-18 落地）
 
-- 传输层按帧类型累计上下行字节，在远程设置页显示“本次会话：↑x KB ↓y MB”。
+- **流量统计**：传输层按帧类型累计上下行字节（`src/remote/traffic.ts` 的账本：总上下行、双向分帧类型、压缩前后的 plain/wire 对照、按主体分桶——`invoke <命令>` 与其应答成对计入、`event <事件名>` 按订阅计、channel 独立一桶）。展示是**流量页**（`src/remote/trafficPage.ts`，复用设置页外壳全屏页面）：顶部为总上下行、实时速率（每秒差分）、压缩节省百分比与连接时长，其下为按帧类型表和来源表（前 14 条 + 其他折叠），右上清零按钮就地清空 Transport 的计数字段。入口：导航抽屉偏好区行、抽屉页脚（本身可点）与 `remote.traffic` 命令。
+- **上行压缩**：浏览器→守护进程的每一帧在 256 字节阈值之上都尝试 deflate（JSON、MessagePack 与 Raw 一视同仁——压缩不变小的原始载荷保持原字节），经保序 promise 链发出（LISTEN→INVOKE、按键、EMIT 的顺序不变）；Relay 对入站帧本就逐帧 inflate。此前只有守护进程的下行压缩，上行从未启用。
+- **下行 Raw 压缩**（daemon `ws/conn.rs`）：`emit` 对 Enc::Raw 也尝试压缩——远程会话读到的文件字节多为可折叠文本；压缩不变小则保持原样。`deflate: false` 的探针客户端不受影响。
+- **watcher 合帧**（§10.3 落地）：Relay 对每个订阅的 `studio://fs-changed` 批次按 100 ms 合帧——同 root 的路径取并集、标志取或，另一 root 的批次冲刷待帧另起新批，形状不合的载荷原样透传（宁胖不损）；省流订阅 1 s。
+- **省流档**：`LISTEN` 携带 `saver` 标志（浏览器把 `dataSaverPreferred()` 盖在每个订阅上），该订阅的 watcher 合帧窗口 1 s、终端合帧 50 ms（默认 16 ms）。
+- **瘦事件信封**：带 `saver` 字段的 LISTEN（新浏览器标记）让 Relay 只转发 `{id, payload}`——浏览器从自己的订阅表重建事件名（transport 的 dispatch 补 `spec.event`）；旧浏览器保持完整 `{event, id, payload}`。旧守护进程不解析 LISTEN 载荷照转、旧 Relay 忽略多余字段，任何新旧搭配都退化为现有字节而非破坏。
 - `scripts/probes/remote-traffic.mjs`：Playwright 跑标准动作集（登录 → 选窗口 → 打开仓库 → 打开 5 个文件 → 搜索 → 打开 Git Graph → 开终端执行 `git log -20` → 打开模块分析），记录冷启动与二次访问的字节数到 `metrics.json.remote.traffic`。遵守原则 6：**只度量，不设构建门禁**，§1 的数字是目标，不在 CI 中卡死。
 
 ---

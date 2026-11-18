@@ -235,9 +235,12 @@ export async function inflate(frame: Frame): Promise<Frame> {
 	return { ...frame, flags: frame.flags & ~FLAG.COMPRESSED, payload };
 }
 
-/** Compress a frame's payload when it pays (§6.1): above the threshold, JSON / MessagePack. */
+/** Compress a frame's payload when it pays (§6.1): above the threshold, any encoding —
+ *  a binary payload the deflate cannot shrink keeps its bytes (the result is compared),
+ *  so the attempt costs CPU alone, and text-like raw payloads (the file bytes an editor
+ *  writes or reads) collapse like JSON does. */
 export async function deflate(frame: Frame): Promise<Frame> {
-	if (frame.payload.length <= COMPRESS_THRESHOLD || encOf(frame) === Enc.Raw) return frame;
+	if (frame.payload.length <= COMPRESS_THRESHOLD) return frame;
 	const payload = await (await codec()).deflate(frame.payload);
 	if (payload.length >= frame.payload.length) return frame;
 	return { ...frame, flags: frame.flags | FLAG.COMPRESSED, payload };

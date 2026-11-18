@@ -2,7 +2,7 @@
 // codec against the daemon's shared vectors, the transport over a fake WebSocket (HELLO /
 // ATTACH, invokes, channels, events, credit, batching, close codes), the Tauri shims, and the
 // Relay engine that runs inside the instance.
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { webcrypto as nodeWebcrypto } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -354,11 +354,88 @@ describe('transport', () => {
 		void transport.call('pty_write', { id: 1, data: 'l' });
 		void transport.call('pty_write', { id: 1, data: 's' });
 		void transport.call('pty_write', { id: 1, data: '\r' });
+		// The uplink crosses the ordered compression chain: microtasks later, the leading
+		// keystroke has gone and the followers are inside the window.
+		await flush();
 		expect(socket.sent.length).toBe(before + 1);
 		await new Promise((r) => setTimeout(r, 30));
 		const batch = socket.sent[before + 1];
 		expect(batch.length).toBe(2);
 		expect(batch.map((f) => frameJson<{ a: { data: string } }>(f).a.data)).toEqual(['s', '\r']);
+	});
+
+	it('compresses a large uplink invoke and keeps the send order', async () => {
+		const { transport, socket } = await connected();
+		const body_ = 'the quick brown fox jumps over the lazy dog. '.repeat(40);
+		void transport.call('ping_pong', {});
+		void transport.call('write_file', { path: '/repo/a.txt', data: body_ });
+		await new Promise((r) => setTimeout(r, 40));
+		const invokes = socket.frames().filter((f) => f.type === T.INVOKE);
+		expect(invokes).toHaveLength(2);
+		// Order preserved through the async compression chain, the small frame untouched,
+		// the large one smaller on the wire with its body intact.
+		expect(invokes[0]!.flags & FLAG.COMPRESSED).toBeFalsy();
+		expect(invokes[1]!.flags & FLAG.COMPRESSED).toBeTruthy();
+		const body = frameJson<{ c: string; a: { data: string } }>(await inflate(invokes[1]!));
+		expect(body.a.data).toBe(body_);
+		expect(transport.stats.upPlain).toBeGreaterThan(transport.stats.up);
+	});
+
+	it('attempts raw uplink payloads too — compressible text shrinks, noise keeps its bytes', async () => {
+		const { transport, socket } = await connected();
+		const text = new TextEncoder().encode('source code that repeats itself over and over. '.repeat(20));
+		void transport.call('fs_write_chunk', text);
+		const noise = new Uint8Array(2048);
+		crypto.getRandomValues(noise);
+		void transport.call('fs_write_chunk', noise);
+		await new Promise((r) => setTimeout(r, 60));
+		const invokes = socket.frames().filter((f) => f.type === T.INVOKE);
+		expect(invokes[0]!.flags & FLAG.COMPRESSED).toBeTruthy();
+		// The deflate made it no smaller: the original payload crossed (the check keeps it).
+		expect(invokes[1]!.flags & FLAG.COMPRESSED).toBeFalsy();
+		expect(invokes[1]!.payload.length).toBeGreaterThanOrEqual(2048);
+	});
+
+	it('accounts traffic by frame type and by subject', async () => {
+		const { transport, socket } = await connected();
+		const channelStream = transport.allocStream();
+		transport.registerChannel(channelStream, () => undefined);
+		const listenStream = transport.listen('studio://git-output', () => undefined);
+		const call = transport.call('list_dir', { path: '/repo' });
+		await new Promise((r) => setTimeout(r, 20));
+		const invoke = socket.frames().find((f) => f.type === T.INVOKE)!;
+		socket.deliver(
+			down(jsonFrame(T.RESULT, ['a.rs'], invoke.stream)),
+			down(jsonFrame(T.CHAN_DATA, { n: 1 }, channelStream)),
+			down(jsonFrame(T.EVENT, { event: 'studio://git-output', id: 1, payload: 'x' }, listenStream))
+		);
+		await flush();
+		await expect(call).resolves.toEqual(['a.rs']);
+		const stats = transport.stats;
+		expect(stats.up).toBeGreaterThan(0);
+		expect(stats.down).toBeGreaterThan(0);
+		expect(stats.upByType.get(T.INVOKE)?.frames).toBe(1);
+		expect(stats.upByType.get(T.LISTEN)?.frames).toBe(1);
+		expect(stats.downByType.get(T.RESULT)?.frames).toBe(1);
+		// A command and its answer land in one bucket; channel data and the event speak
+		// for themselves.
+		expect(stats.byName.get('invoke list_dir')?.frames).toBe(2);
+		expect(stats.byName.get('channel')?.frames).toBe(1);
+		expect(stats.byName.get('event studio://git-output')?.frames).toBe(1);
+		// The totals stay wire-sized; plain ≥ wire while anything compressed.
+		expect(stats.upPlain).toBeGreaterThanOrEqual(stats.up);
+		expect(stats.downPlain).toBeGreaterThanOrEqual(stats.down);
+	});
+
+	it('reconstructs the event name of a slim envelope from its subscription', async () => {
+		const { transport, socket } = await connected();
+		const events: { event: string; payload: unknown }[] = [];
+		const listenStream = transport.listen('studio://git-output', (e) => events.push({ event: e.event, payload: e.payload }));
+		await new Promise((r) => setTimeout(r, 20));
+		// The Relay's slim envelope: no `event` field — the subscription knows the name.
+		socket.deliver(down(jsonFrame(T.EVENT, { id: 7, payload: 'quiet' }, listenStream)));
+		await flush();
+		expect(events).toEqual([{ event: 'studio://git-output', payload: 'quiet' }]);
 	});
 
 	it('delivers channel messages and events', async () => {
@@ -370,12 +447,20 @@ describe('transport', () => {
 		const listenStream = transport.listen('studio://git-output', (e) => events.push(e.payload));
 		await new Promise((r) => setTimeout(r, 20));
 		const listen = socket.frames().find((f) => f.type === T.LISTEN)!;
-		expect(frameMsgpack(listen)).toEqual({ event: 'studio://git-output' });
+		expect(frameMsgpack(listen)).toEqual({ event: 'studio://git-output', saver: false });
 		expect(listen.stream).toBe(listenStream);
 		socket.deliver(down(jsonFrame(T.CHAN_DATA, { kind: 'batch', n: 1 }, stream)), down(jsonFrame(T.EVENT, { event: 'studio://git-output', id: 4, payload: 'git status' }, listenStream)));
 		await flush();
 		expect(channelMessages).toEqual([{ kind: 'batch', n: 1 }]);
 		expect(events).toEqual(['git status']);
+	});
+
+	it('carries the data-saver tier on every LISTEN', async () => {
+		const { transport, socket } = await connected();
+		transport.listen('studio://fs-changed', () => undefined);
+		await new Promise((r) => setTimeout(r, 20));
+		const listen = socket.frames().find((f) => f.type === T.LISTEN)!;
+		expect(frameMsgpack<{ saver: boolean }>(listen).saver).toBe(false);
 	});
 
 	it('grants credit every 256 KB consumed', async () => {
@@ -978,6 +1063,80 @@ describe('relay engine', () => {
 		const events = sent.filter((f) => f.type === T.EVENT);
 		expect(events.length).toBe(2);
 		expect(frameJson<{ payload: string }>(events[1]).payload).toBe('bc');
+	});
+
+	/** §10.3's watcher merge: a stage or commit's burst of debounced batches crosses as
+	 *  one frame per root — the union of the paths, the flags ORed. */
+	// The coalescing tests below run on fake timers: a failing assertion must not strand
+	// the fake clock over the rest of the suite.
+	afterEach(() => vi.useRealTimers());
+
+	it('merges the watcher burst per root within the 100 ms window', async () => {
+		vi.useFakeTimers();
+		const { relay, sent, listeners } = engine();
+		relay.receive(encodeFrame({ ...msgpackFrame(T.LISTEN, { event: 'studio://fs-changed' }, 13), session: 4 }));
+		await vi.advanceTimersByTimeAsync(0);
+		const handler = listeners.get('studio://fs-changed')!;
+		const events = () => sent.filter((f) => f.type === T.EVENT);
+		const fire = (root: string, paths: string[], gitChanged = false) =>
+			handler({ event: 'studio://fs-changed', id: 1, payload: { root, paths, gitChanged, truncated: false } });
+
+		fire('C:/r', ['a.ts']);
+		fire('C:/r', ['b.ts'], true);
+		await vi.advanceTimersByTimeAsync(50);
+		expect(events()).toHaveLength(0); // inside the 100 ms window: nothing yet
+		await vi.advanceTimersByTimeAsync(60);
+		const merged = events();
+		expect(merged).toHaveLength(1); // one frame for the burst, the union
+		const body = frameJson<{ event: string; payload: { root: string; paths: string[]; gitChanged: boolean } }>(merged[0]!);
+		expect(body.payload).toEqual({ root: 'C:/r', paths: ['a.ts', 'b.ts'], gitChanged: true, truncated: false });
+		expect(body.event).toBe('studio://fs-changed'); // a browser without the saver field keeps its envelope
+
+		// A batch of another root flushes the pending one at once and opens its own.
+		fire('C:/other', ['c.ts']);
+		await vi.advanceTimersByTimeAsync(200);
+		const roots = events().map((f) => frameJson<{ payload: { root: string } }>(f).payload.root);
+		expect(roots).toEqual(['C:/r', 'C:/other']);
+		// A payload that is not the shape the merge knows crosses untouched — a lossy
+		// merge would be worse than a fat frame.
+		handler({ event: 'studio://fs-changed', id: 2, payload: { surprise: true } });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(frameJson<{ payload: { surprise: boolean } }>(events().at(-1)!).payload).toEqual({ surprise: true });
+		vi.useRealTimers();
+	});
+
+	/** The saver tier (§10.4): a `saver: true` LISTEN waits a full second, and the
+	 *  envelopes drop the event name a slim browser reconstructs from its subscription. */
+	it('waits a second for a saver watcher, 50 ms for a saver terminal, and slims the envelopes', async () => {
+		vi.useFakeTimers();
+		const { relay, sent, listeners } = engine();
+		relay.receive(encodeFrame({ ...msgpackFrame(T.LISTEN, { event: 'studio://fs-changed', saver: true }, 13), session: 4 }));
+		relay.receive(encodeFrame({ ...msgpackFrame(T.LISTEN, { event: 'studio://pty-output-9', saver: true }, 15), session: 4 }));
+		await vi.advanceTimersByTimeAsync(0);
+		const fsListener = listeners.get('studio://fs-changed')!;
+		const ptyListener = listeners.get('studio://pty-output-9')!;
+		const events = () => sent.filter((f) => f.type === T.EVENT);
+		fsListener({ event: 'studio://fs-changed', id: 1, payload: { root: 'C:/s', paths: ['d.ts'], gitChanged: false, truncated: false } });
+		ptyListener({ event: 'studio://pty-output-9', id: 1, payload: 'k' });
+		expect(events()).toHaveLength(1); // the terminal's leading edge never waits
+		expect(frameJson<{ event?: string }>(events()[0]!).event).toBeUndefined(); // the slim envelope
+		await vi.advanceTimersByTimeAsync(150);
+		expect(events()).toHaveLength(1); // the watcher's 1 s window still holds it
+		await vi.advanceTimersByTimeAsync(900);
+		const watcher = frameJson<{ event?: string; id: number; payload: { paths: string[] } }>(events().at(-1)!);
+		expect(watcher.payload.paths).toEqual(['d.ts']);
+		expect(watcher.event).toBeUndefined(); // the slim envelope: no name on the wire
+
+		// The saver terminal: 50 ms between the echo and the burst's flush.
+		ptyListener({ event: 'studio://pty-output-9', id: 1, payload: 'e' });
+		expect(events()).toHaveLength(3); // a fresh quiet gap's leading chunk leaves at once
+		ptyListener({ event: 'studio://pty-output-9', id: 1, payload: 'f' });
+		await vi.advanceTimersByTimeAsync(49);
+		expect(events()).toHaveLength(3); // the saver window is 50 ms, not 16
+		await vi.advanceTimersByTimeAsync(2);
+		expect(events()).toHaveLength(4);
+		expect(frameJson<{ payload: string }>(events().at(-1)!).payload).toBe('f');
+		vi.useRealTimers();
 	});
 
 	/** The 2026-10-16 response-latency pass: the canonical re-check rides a table in the

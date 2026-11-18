@@ -175,11 +175,14 @@ impl Conn {
     }
 
     /// Split first, then compress each fragment: compression is per frame on the wire, so a
-    /// receiver inflates every frame before it joins a fragment chain.
+    /// receiver inflates every frame before it joins a fragment chain. Every encoding
+    /// attempts compression — a raw payload the deflate cannot shrink keeps its bytes (the
+    /// result is compared), and the raw file bytes a remote session reads (read_file_raw,
+    /// downloads, hex slabs) are mostly text that collapses like JSON does.
     fn emit(inner: &mut Inner, frame: Frame, counted: bool) {
         for mut part in frame.split(MAX_PAYLOAD) {
             if inner.deflate {
-                part.compress(false);
+                part.compress(true);
             }
             inner.seq = inner.seq.wrapping_add(1);
             part.seq = inner.seq;
@@ -309,6 +312,49 @@ mod tests {
         let frames = drain(&mut rx);
         assert_eq!(frames.iter().map(|f| f.seq).collect::<Vec<_>>(), vec![1, 2]);
         assert!(frames.iter().all(|f| f.session == 0));
+    }
+
+    /// Every encoding attempts compression once the client advertised deflate (2026-11-18):
+    /// the raw file bytes a remote session reads are mostly text that collapses like JSON
+    /// does, and a payload the deflate cannot shrink keeps its bytes.
+    #[test]
+    fn raw_frames_compress_when_deflate_is_on() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let conn = Conn::new(1, "sid".into(), "hash".into(), "/".into(), "127.0.0.1".parse().unwrap());
+        conn.go_live(tx, true);
+
+        let text = "read me, compress me. ".repeat(200);
+        conn.push(Frame::new(ty::RESULT, super::super::frame::Enc::Raw, text.as_bytes().to_vec()));
+        let mut frames = drain(&mut rx);
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].has(flag::COMPRESSED));
+        frames[0].decompress().unwrap();
+        assert_eq!(frames[0].payload, text.as_bytes());
+
+        // Incompressible raw stays itself: the compressed form was no smaller.
+        let mut state = 0x1234_5678u32;
+        let noise: Vec<u8> = (0..4096)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state >> 16) as u8
+            })
+            .collect();
+        conn.push(Frame::new(ty::RESULT, super::super::frame::Enc::Raw, noise.clone()));
+        let frames = drain(&mut rx);
+        assert_eq!(frames.len(), 1);
+        assert!(!frames[0].has(flag::COMPRESSED));
+        assert_eq!(frames[0].payload, noise);
+
+        // A client that never advertised deflate keeps raw bytes verbatim.
+        let (tx2, mut rx2) = mpsc::unbounded_channel();
+        let plain = Conn::new(2, "sid".into(), "hash".into(), "/".into(), "127.0.0.1".parse().unwrap());
+        plain.go_live(tx2, false);
+        plain.push(Frame::new(ty::RESULT, super::super::frame::Enc::Raw, text.as_bytes().to_vec()));
+        let frames = drain(&mut rx2);
+        assert_eq!(frames.len(), 1);
+        assert!(!frames[0].has(flag::COMPRESSED));
     }
 
     #[test]

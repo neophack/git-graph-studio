@@ -9,8 +9,8 @@
 // watches it: what only a browser session can do — the window switcher, transfers, the
 // traffic readout, Data Saver — stays with the browser.
 import { commands } from '../platform/commands';
-import { formatBytes, notify, quickPick } from '../platform/ui';
-import { t, tf, onLocaleChange } from '../platform/i18n';
+import { notify, quickPick } from '../platform/ui';
+import { t, onLocaleChange } from '../platform/i18n';
 import { installActionSheet } from './actionSheet';
 import { installStayGuard, leavingPage, uninstallStayGuard } from './backStack';
 import { installLongPress } from './gestures';
@@ -25,6 +25,7 @@ import { goWindowsPicker, openWindowSwitcher, watchLifecycle } from './windowSwi
 import { connectionLooksSlow, dataSaverPreferred, setDataSaver } from './dataSaver';
 import { remoteEnv } from './session';
 import { installPhoneSettingsEntry } from './settingsPage';
+import { openTrafficPage } from './trafficPage';
 import { remoteHostStatus } from '../platform/ipc/remote';
 import { modeUrl } from './mirror/uiMode';
 import { pageStackOfClass } from './app/deviceClass';
@@ -146,10 +147,7 @@ function registerCommands(): void {
 		id: 'remote.traffic',
 		title: 'This session: ↑ … ↓ …',
 		category: 'Remote',
-		run: () => {
-			const stats = remoteEnv()?.transport.stats;
-			if (stats) notify('info', tf('remote.traffic', formatBytes(stats.up), formatBytes(stats.down)));
-		}
+		run: () => openTrafficPage()
 	});
 }
 

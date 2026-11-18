@@ -517,6 +517,9 @@
 .ggs-switch.on { background: var(--vscode-button-background); border-color: transparent; }
 .ggs-switch.on i { left: 18px; background: var(--vscode-button-foreground, #fff); }
 .ggs-drawer-footer { flex: none; padding: 12px 20px; font-size: 12px; color: var(--vscode-descriptionForeground); border-top: 1px solid var(--ggs-sep, var(--vscode-panel-border)); }
+/* A button when the drawer renders it as the Traffic page's opener. */
+button.ggs-drawer-footer { display: block; width: 100%; text-align: left; background: none; border-left: 0; border-right: 0; border-bottom: 0; font: inherit; color: inherit; }
+button.ggs-drawer-footer:active { background: var(--vscode-list-hoverBackground); }
 
 /* ---------- The phone's Settings page (settingsPage.ts) ---------- */
 /* A full-screen page, not a dialog: the desktop Settings window's two panes cannot fit a
@@ -598,6 +601,33 @@
 }
 .ggs-settings-value .codicon-chevron-right { font-size: 14px; opacity: 0.6; }
 .ggs-settings-row > .codicon-chevron-right { font-size: 14px; opacity: 0.6; }
+
+/* ---------- The Traffic page (trafficPage.ts, §10.5) ---------- */
+/* The settings page's own shell reused; only the summary cells and the two tables are new. */
+.ggs-traffic-body .ggs-settings-heading:first-child { padding-top: 14px; }
+.ggs-traffic-summary {
+	display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+	padding: 4px 12px 6px;
+}
+.ggs-traffic-cell {
+	display: flex; flex-direction: column; gap: 3px; padding: 10px 12px;
+	border-radius: 12px; background: var(--vscode-sideBar-background);
+	min-width: 0;
+}
+.ggs-traffic-cell .name { font-size: 11px; color: var(--vscode-descriptionForeground); }
+.ggs-traffic-cell .value { font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ggs-traffic-table { width: calc(100% - 24px); margin: 2px 12px 10px; border-collapse: collapse; font-size: 13px; }
+.ggs-traffic-table th {
+	text-align: left; padding: 6px 8px; font-weight: 500; font-size: 11px;
+	color: var(--vscode-descriptionForeground); border-bottom: 1px solid var(--ggs-sep, var(--vscode-panel-border));
+}
+.ggs-traffic-table th:not(:first-child), .ggs-traffic-table td:not(:first-child) { text-align: right; white-space: nowrap; }
+.ggs-traffic-table td {
+	padding: 6px 8px; border-bottom: 1px solid var(--ggs-sep, var(--vscode-panel-border));
+	overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 0;
+}
+.ggs-traffic-table td:not(:first-child) { max-width: none; }
+.ggs-traffic-note { padding: 2px 20px 10px; font-size: 12px; color: var(--vscode-descriptionForeground); }
 /* The number stepper sheet: − value + in a row a thumb can hit. */
 .ggs-number-picker { display: flex; align-items: center; gap: 10px; padding: 10px 20px 18px; }
 .ggs-number-picker button {

@@ -19,6 +19,7 @@ import { setDataSaver } from './dataSaver';
 import { BUILTIN_VIEWS, currentPage, extensionContainers, goTo, launchers, pageIcon, type PageId } from './pages';
 import { remoteEnv } from './session';
 import { openSettingsPage } from './settingsPage';
+import { openTrafficPage } from './trafficPage';
 import { codicon, toggleSwitch } from './widgets';
 
 let open: { root: HTMLElement; release: () => void } | null = null;
@@ -183,7 +184,10 @@ export function openDrawer(menus: () => MenuDefinition[]): void {
 		closeDrawer();
 		if (document.documentElement.hasAttribute('data-remote-shell')) openSettingsPage();
 		else void commands.execute('workbench.openSettings');
-	})];
+	}), ...(env ? [row(codicon('pulse'), t('remote.traffic.page'), () => {
+		closeDrawer();
+		openTrafficPage();
+	})] : [])];
 
 	const body = document.createElement('div');
 	body.className = 'ggs-drawer-body';
@@ -195,10 +199,15 @@ export function openDrawer(menus: () => MenuDefinition[]): void {
 		section(t('remote.drawer.preferences'), settingsRows)
 	);
 
-	const footer = document.createElement('div');
+	const footer = document.createElement('button');
 	footer.className = 'ggs-drawer-footer';
+	footer.type = 'button';
 	const stats = env?.transport.stats;
 	footer.textContent = stats ? tf('remote.traffic', formatBytes(stats.up), formatBytes(stats.down)) : t('remote.drawer.local');
+	if (stats) footer.addEventListener('click', () => {
+		closeDrawer();
+		openTrafficPage();
+	});
 
 	panel.append(header, body, footer);
 	root.appendChild(panel);

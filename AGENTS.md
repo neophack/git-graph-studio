@@ -2393,6 +2393,40 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   daemon `ws/frame.rs`). `tests/remoteTraffic.test.ts` measures the modelled wire against
   the legacy recorder: streaming chat 11×, virtualized scroll 12.7×, JS animation 28.8×,
   combined 19.6× — each scenario ends with the copy's DOM equal to the PC's.
+  **The workbench link's traffic accounting and wire economy** (2026-11-18, the owner's
+  direction: 增加一个前端和rust后端通信流量统计在远程页面上显示,并优化流量到最省流量 —
+  plan §10.5 landed): the Transport keeps the session's wire ledger (`src/remote/traffic.ts`
+  — totals, per-frame-type bytes both directions, the compression's plain-vs-wire pair,
+  and per-subject buckets where the frame names its subject: `invoke <cmd>` pairs each
+  call with its RESULT, `event <name>` rides the subscription, channel data its own
+  bucket), and the **Traffic page** (`trafficPage.ts`, reusing the settings page's shell)
+  renders it live — the rate row diffed once a second, the type table, the top-14
+  subjects folding into Other, a reset that zeroes the Transport's fields in place —
+  reached from the drawer's Preferences row and its tappable footer, and the
+  `remote.traffic` command (`tests/remoteTrafficPage.test.ts`). The economy half pulls
+  every lever the codec already had: **uplink compression** (§10.5's other half — only
+  the daemon's downlink compressed before): every uplink frame above the 256-byte
+  threshold deflates through an ordered promise chain (JSON, MessagePack AND raw — a
+  payload deflate cannot shrink keeps its bytes, so saving a file from a phone ships the
+  source, not the source times four), the Relay inflating every inbound frame as it
+  already did; **downlink raw compression** (daemon `conn.rs`): `emit` attempts deflate
+  on Enc::Raw too — the file bytes a remote session reads are mostly text that collapses
+  like JSON — probes advertising `deflate: false` are untouched; **the watcher merge**
+  (§10.3, previously specced and unimplemented): the Relay coalesces each subscription's
+  `studio://fs-changed` batches for 100 ms into one frame — same root unions its paths,
+  the flags OR, a batch of another root flushes the pending one, a payload that is not
+  the watcher's shape crosses untouched rather than lossy; **the saver tier**
+  (`LISTEN`'s `saver` flag, the Transport stamping `dataSaverPreferred()` on every
+  subscription): a data-saver session's watcher batches wait one second and its
+  terminals coalesce at 50 ms instead of 16; and **the slim event envelope**: a LISTEN
+  carrying `saver` (present, true or false — the new-browser marker) makes the Relay
+  forward `{id, payload}` without the event name the browser reconstructs from its own
+  subscription table (dispatch fills `spec.event`), while a legacy browser keeps the
+  full `{event, id, payload}` — old daemons forward the field unparsed, old relays
+  ignore it, so every mixed pairing degrades to today's bytes, never to breakage.
+  `tests/remote.test.ts` pins the accounting, the compression, the merge and the slim
+  envelope; the daemon's `conn.rs` tests pin raw compression with and without the
+  client's cap.
   **The replica's file transfers** (2026-10-13): the mirrored Explorer's context menu is the
   PC's own — and since the desktop gained its own transfer rows (module 3's rewrite), the
   PC hides them while a viewer watches (`transferMenuShown` over the hostStub's cached

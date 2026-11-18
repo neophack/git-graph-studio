@@ -5,7 +5,9 @@
 import {
 	canDeflate,
 	CHANNEL_PREFIX,
+	COMPRESS_THRESHOLD,
 	decodeFrames,
+	deflate,
 	encodeFrames,
 	encodeRawInvoke,
 	Enc,
@@ -14,6 +16,7 @@ import {
 	type Frame,
 	frameJson,
 	frameMsgpack,
+	HEADER_LEN,
 	inflate,
 	jsonFrame,
 	makeFrame,
@@ -22,6 +25,7 @@ import {
 	T
 } from './frame';
 import { leavingPage } from './backStack';
+import { countBytes, frameBytes, nameKey, newTrafficStats, type TrafficStats } from './traffic';
 
 export interface Attached {
 	instance: string;
@@ -54,7 +58,7 @@ export interface Notice {
 	message?: string;
 }
 
-type Pending = { resolve(value: unknown): void; reject(error: unknown): void };
+type Pending = { resolve(value: unknown): void; reject(error: unknown): void; cmd: string };
 export type EventHandler = (event: { event: string; id: number; payload: unknown }) => void;
 
 export interface TransportOptions {
@@ -110,7 +114,9 @@ export class Transport {
 	private heartbeat?: ReturnType<typeof setInterval>;
 	private retryMs = 500;
 	private closedForGood = false;
-	readonly stats = { up: 0, down: 0, byType: new Map<number, number>() };
+	/** This session's wire accounting (traffic.ts) — totals, per frame type, per command
+	 *  and event; the Traffic page renders it live. */
+	readonly stats: TrafficStats = newTrafficStats();
 	instances: InstanceInfo[] = [];
 	/** The PC's recently opened folders, most recent first — every WINDOWS frame carries
 	 *  them (the daemon's recent.json), and the Open Folder browser offers them first. */
@@ -181,7 +187,7 @@ export class Transport {
 			frame = jsonFrame(T.INVOKE, headers ? { c: cmd, a: args ?? {}, h: headers } : { c: cmd, a: args ?? {} }, stream);
 		}
 		return new Promise((resolve, reject) => {
-			this.pending.set(stream, { resolve, reject });
+			this.pending.set(stream, { resolve, reject, cmd });
 			this.send(frame);
 		});
 	}
@@ -198,7 +204,10 @@ export class Transport {
 		const stream = this.allocStream();
 		this.listeners.set(stream, handler);
 		this.listenSpecs.set(stream, { event, target });
-		this.send(msgpackFrame(T.LISTEN, target === undefined ? { event } : { event, target }, stream));
+		// `saver` rides every LISTEN: the Relay reads it as the coalescing window's tier
+		// (data-saver batches merge coarser) and — its mere presence — as a browser that
+		// reconstructs event names itself, so event envelopes cross without them.
+		this.send(msgpackFrame(T.LISTEN, { event, ...(target === undefined ? {} : { target }), saver: this.options.dataSaver ?? false }, stream));
 		return stream;
 	}
 
@@ -388,26 +397,46 @@ export class Transport {
 
 	// ---- uplink ----
 
+	/** Every uplink frame passes through this chain in send order: compression is
+	 *  asynchronous (the platform's CompressionStream), and LISTEN-before-INVOKE,
+	 *  keystroke order, EMIT ordering all ride this same sequence — one async step per
+	 *  frame, the order the caller made them in. */
+	private wireChain: Promise<void> = Promise.resolve();
+
 	private send(frame: Frame): void {
-		this.stats.up += frame.payload.length + 20;
-		const small = frame.payload.length <= BATCH_MAX && (frame.type === T.INVOKE || frame.type === T.EMIT);
+		this.wireChain = this.wireChain.then(() => this.sendWire(frame));
+	}
+
+	/** Compress what pays, account for it, then hand it to the batching sender. */
+	private async sendWire(frame: Frame): Promise<void> {
+		const plain = frame.payload.length;
+		const wire =
+			frame.payload.length > COMPRESS_THRESHOLD
+				? await deflate(frame)
+				: frame;
+		this.stats.up += wire.payload.length + HEADER_LEN;
+		this.stats.upPlain += plain + HEADER_LEN;
+		countBytes(this.stats.upByType, frame.type, wire.payload.length + HEADER_LEN);
+		if (frame.type === T.INVOKE) countBytes(this.stats.byName, nameKey('invoke', this.pending.get(frame.stream)?.cmd ?? '?'), wire.payload.length + HEADER_LEN);
+		else if (frame.type === T.CHAN_CLOSE) countBytes(this.stats.byName, 'channel', wire.payload.length + HEADER_LEN);
+		const small = wire.payload.length <= BATCH_MAX && (wire.type === T.INVOKE || wire.type === T.EMIT);
 		if (!small) {
 			this.flushBatch();
-			this.sendNow([frame]);
+			this.sendNow([wire]);
 			return;
 		}
 		if (!this.batchOpen) {
 			// Leading edge: the first keystroke goes at once; the ones that follow within the
 			// window share one message (§6.4).
 			this.batchOpen = true;
-			this.sendNow([frame]);
+			this.sendNow([wire]);
 			setTimeout(() => {
 				this.batchOpen = false;
 				this.flushBatch();
 			}, BATCH_WINDOW_MS);
 			return;
 		}
-		this.batch.push(frame);
+		this.batch.push(wire);
 	}
 
 	private flushBatch(): void {
@@ -441,7 +470,19 @@ export class Transport {
 		}
 		this.stats.down += data.byteLength;
 		for (const frame of frames) {
-			this.stats.byType.set(frame.type, (this.stats.byType.get(frame.type) ?? 0) + frame.payload.length);
+			countBytes(this.stats.downByType, frame.type, frameBytes(frame.payload.length));
+			// A compressed frame's plain size is its inflated length, known only after the
+			// decode below; the wire size counts here either way.
+			if (!(frame.flags & FLAG.COMPRESSED)) this.stats.downPlain += frameBytes(frame.payload.length);
+			// Name attribution while the cheap facts are at hand: a RESULT's command is the
+			// pending call's own, channel data speaks for itself, an event's name rides the
+			// subscription (attributed after its payload decodes, in the chain below).
+			if (frame.type === T.RESULT) {
+				const cmd = this.pending.get(frame.stream)?.cmd;
+				if (cmd) countBytes(this.stats.byName, nameKey('invoke', cmd), frameBytes(frame.payload.length));
+			} else if (frame.type === T.CHAN_DATA) {
+				countBytes(this.stats.byName, 'channel', frameBytes(frame.payload.length));
+			}
 			if (frame.seq) {
 				this.lastSeq = frame.seq;
 				this.consumed += frame.payload.length;
@@ -459,7 +500,14 @@ export class Transport {
 			// and nothing for the next message on its key to append onto.
 			this.inflateChain = this.inflateChain.then(async () => {
 				try {
-					this.dispatch(frame.flags & FLAG.COMPRESSED ? await inflate(frame) : frame);
+					const whole = frame.flags & FLAG.COMPRESSED ? await inflate(frame) : frame;
+					if (frame.flags & FLAG.COMPRESSED) this.stats.downPlain += frameBytes(whole.payload.length);
+					if (whole.type === T.EVENT) {
+						const spec = this.listenSpecs.get(frame.stream);
+						const name = spec?.event ?? safeEventName(whole);
+						countBytes(this.stats.byName, nameKey('event', name), frameBytes(frame.payload.length));
+					}
+					this.dispatch(whole);
 				} catch {
 					this.joiner.fail(frame);
 				}
@@ -538,7 +586,11 @@ export class Transport {
 				const handler = this.listeners.get(frame.stream);
 				if (!handler) return;
 				try {
-					handler(frameJson(frame));
+					// The envelope may omit its own name (the slim one the Relay sends a browser
+					// that reconstructs it): the subscription knows the event either way.
+					const body = frameJson<{ event?: string; id?: number; payload: unknown }>(frame);
+					const spec = this.listenSpecs.get(frame.stream);
+					handler({ event: spec?.event ?? body.event ?? '', id: body.id ?? 0, payload: body.payload });
 				} catch {
 					/* a listener's failure is its own */
 				}
@@ -600,6 +652,17 @@ export class Transport {
 export function basePathOf(pathname: string): string {
 	const match = /^(.*\/)w\/[^/]+\/v\/[^/]+\/[^/]*$/.exec(pathname);
 	return match ? match[1] : '/';
+}
+
+/** The event name of an EVENT frame's JSON body, for the one attribution that has no
+ *  subscription to read — defensive: a body that parses wrong names the misc bucket. */
+function safeEventName(frame: Frame): string {
+	try {
+		const body = frameJson<{ event?: unknown }>(frame);
+		return typeof body.event === 'string' ? body.event : 'event';
+	} catch {
+		return 'event';
+	}
 }
 
 /** The instance id of a workbench URL. */

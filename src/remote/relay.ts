@@ -33,8 +33,15 @@ const HOST_REQUEST_EVENT = 'ext-host-request';
 const HOST_STATE_EVENT = 'ext-host-state';
 /** Terminal output is coalesced per subscription for this long (§6.4) — the trailing
  *  edge only: the first chunk after a quiet gap leaves at once (a key's echo never
- *  waits the window; what follows within it shares one frame). */
+ *  waits the window; what follows within it shares one frame). Data Saver's tier (§10.4)
+ *  is coarser: refresh rate trades for bytes. */
 const PTY_COALESCE_MS = 16;
+const PTY_COALESCE_SAVER_MS = 50;
+/** The watcher's batches merge per subscription for this long (§10.3): a stage or commit
+ *  fires a burst of debounced `.git` batches — one frame carries the union, the refresh
+ *  reads the same settled state. Data Saver: one second. */
+const FS_COALESCE_MS = 100;
+const FS_COALESCE_SAVER_MS = 1000;
 /** The gate's policy answers are served while a refresh runs in the background — a
  *  path-carrying invoke never blocks on the policy fetch (the roots change rarely). */
 const POLICY_FRESH_MS = 3000;
@@ -128,6 +135,20 @@ interface SessionState {
 	attachedAt: number;
 }
 
+/** The watcher batch the fs coalescer merges: the shape `onFsChanged` reads (lifecycle.ts). */
+interface FsBatch {
+	root: string;
+	paths: string[];
+	gitChanged: boolean;
+	truncated: boolean;
+}
+
+/** One subscription's accumulating watcher batch — the union its flush sends. */
+interface FsPending extends FsBatch {
+	id: number;
+	timer: ReturnType<typeof setTimeout>;
+}
+
 export interface RelayDeps {
 	invoke: typeof invoke;
 	listen: typeof listen;
@@ -151,6 +172,8 @@ export class RelayEngine {
 	private readonly joiner = new Reassembler((reason) => console.warn(`[ggs] remote link: ${reason}`));
 	private chain: Promise<void> = Promise.resolve();
 	private readonly ptyBuffers = new Map<string, { frameFor: (text: string) => Frame; text: string; timer: ReturnType<typeof setTimeout> }>();
+	/** The watcher batches accumulating per subscription (`session:stream`). */
+	private readonly fsBuffers = new Map<string, FsPending>();
 	/** Streams whose UNLISTEN arrived while their LISTEN's round trip was still in flight
 	 *  (`session:stream`) — the completing listen unhooks instead of storing. */
 	private readonly droppedListens = new Set<string>();
@@ -475,28 +498,35 @@ export class RelayEngine {
 		const { session, stream } = frame;
 		// The payload is the session's own bytes: decode defensively (runInvoke's shape) —
 		// a non-map or a non-string event is one dropped frame, never a thrown chain step.
-		let decoded: { event?: unknown; target?: unknown };
+		let decoded: { event?: unknown; target?: unknown; saver?: unknown };
 		try {
-			decoded = frameMsgpack<{ event?: unknown; target?: unknown }>(frame) ?? {};
+			decoded = frameMsgpack<{ event?: unknown; target?: unknown; saver?: unknown }>(frame) ?? {};
 		} catch {
 			return;
 		}
 		if (typeof decoded.event !== 'string') return;
 		const { event, target } = decoded as { event: string; target?: unknown };
+		// A browser that sends `saver` is a new one: it reconstructs event names from its own
+		// subscriptions, so the envelopes below cross without them — and `saver: true` puts
+		// the subscription on the coarser coalescing tier (§10.4).
+		const slim = typeof decoded.saver === 'boolean';
+		const saver = decoded.saver === true;
 		const state = this.session(session);
 		state.events.set(stream, event);
 		const listenKey = `${session}:${stream}`;
 		const pty = event.startsWith('studio://pty-output-');
+		const fs = event === 'studio://fs-changed';
 		const unlisten = await this.deps.listen(
 			event,
 			(e) => {
 				if (!this.sessions.get(session)?.listeners.has(stream)) return;
 				if (event === HOST_REQUEST_EVENT && this.hostRequestTarget((e.payload as { frontend?: string })?.frontend) !== session) return;
 				if (event === HOST_STATE_EVENT && (e.payload as { frontend?: string }).frontend !== undefined && (e.payload as { frontend?: string }).frontend !== `remote/${session}`) return;
-				if (pty && typeof e.payload === 'string') return this.coalescePty(session, stream, e.event, e.id, e.payload);
+				if (pty && typeof e.payload === 'string') return this.coalescePty(session, stream, event, e.id, e.payload, slim, saver ? PTY_COALESCE_SAVER_MS : PTY_COALESCE_MS);
+				if (fs) return this.coalesceFs(session, stream, e.id, e.payload, slim, saver ? FS_COALESCE_SAVER_MS : FS_COALESCE_MS);
 				// Split like a result: an event can outgrow one frame (the replica's snapshot of
 				// the PC window, §22), and the daemon refuses a frame past MAX_PAYLOAD.
-				this.send(splitFrame(jsonFrame(T.EVENT, { event: e.event, id: e.id, payload: e.payload }, stream, 0, session)));
+				this.send(splitFrame(this.eventFrame(e.event, e.id, e.payload, stream, session, slim)));
 			},
 			target ? { target: target as never } : undefined
 		);
@@ -507,15 +537,65 @@ export class RelayEngine {
 		// nobody reads, until the session itself ended).
 		if (!this.sessions.has(session) || this.droppedListens.delete(listenKey)) {
 			unlisten();
+			this.fsBuffers.delete(listenKey);
 			return;
 		}
 		state.listeners.set(stream, unlisten);
 	}
 
+	/** The EVENT frame for one forwarded event: a slim browser's envelope omits the name it
+	 *  already holds in its subscription table. */
+	private eventFrame(event: string, id: number, payload: unknown, stream: number, session: number, slim: boolean): Frame {
+		return jsonFrame(T.EVENT, slim ? { id, payload } : { event, id, payload }, stream, 0, session);
+	}
+
+	/** The watcher's batches, merged per subscription (§10.3): batches of one root within
+	 *  the window share one frame (the union of their paths, the flags ORed — `onFsChanged`
+	 *  reads the union exactly as it would have read the pieces); a batch of another root
+	 *  flushes the pending one and opens its own. The first batch's frame leaves when the
+	 *  window closes, never before — a debounce, not a rate limit. */
+	private coalesceFs(session: number, stream: number, id: number, payload: unknown, slim: boolean, windowMs: number): void {
+		const key = `${session}:${stream}`;
+		const event = 'studio://fs-changed';
+		const batch = payload as Partial<FsBatch> | null;
+		if (!batch || typeof batch.root !== 'string' || !Array.isArray(batch.paths)) {
+			// Not the shape the merge knows: it crosses untouched rather than lossy.
+			return this.send(splitFrame(this.eventFrame(event, id, payload, stream, session, slim)));
+		}
+		const flushPending = (): void => {
+			const pending = this.fsBuffers.get(key);
+			if (!pending) return;
+			this.fsBuffers.delete(key);
+			clearTimeout(pending.timer);
+			this.send(
+				splitFrame(
+					this.eventFrame(event, pending.id, { root: pending.root, paths: pending.paths, gitChanged: pending.gitChanged, truncated: pending.truncated }, stream, session, slim)
+				)
+			);
+		};
+		const pending = this.fsBuffers.get(key);
+		if (pending && pending.root === batch.root) {
+			for (const path of batch.paths as string[]) if (!pending.paths.includes(path)) pending.paths.push(path);
+			pending.gitChanged = pending.gitChanged || batch.gitChanged === true;
+			pending.truncated = pending.truncated || batch.truncated === true;
+			return;
+		}
+		if (pending) flushPending();
+		this.fsBuffers.set(key, {
+			root: batch.root,
+			paths: [...(batch.paths as string[])],
+			gitChanged: batch.gitChanged === true,
+			truncated: batch.truncated === true,
+			id,
+			timer: setTimeout(flushPending, windowMs)
+		});
+	}
+
 	/** Terminal output, leading edge first: the chunk that opens a quiet gap's burst
 	 *  leaves at once (a key's echo never waits), what follows within the window shares
-	 *  one frame (§6.4). */
-	private coalescePty(session: number, stream: number, event: string, id: number, text: string): void {
+	 *  one frame (§6.4; the window itself is the subscription's tier — Data Saver waits
+	 *  longer). */
+	private coalescePty(session: number, stream: number, event: string, id: number, text: string, slim: boolean, windowMs: number): void {
 		const key = `${session}:${stream}`;
 		const pending = this.ptyBuffers.get(key);
 		if (pending) {
@@ -524,14 +604,14 @@ export class RelayEngine {
 		}
 		const entry = {
 			text: '',
-			frameFor: (all: string) => jsonFrame(T.EVENT, { event, id, payload: all }, stream, 0, session),
+			frameFor: (all: string) => jsonFrame(T.EVENT, slim ? { id, payload: all } : { event, id, payload: all }, stream, 0, session),
 			timer: setTimeout(() => {
 				this.ptyBuffers.delete(key);
 				// Split like every other egress: a firehose that pushes more than
 				// MAX_PAYLOAD through one window makes a frame the daemon refuses — which
 				// dropped the link.
 				if (entry.text) this.send(splitFrame(entry.frameFor(entry.text)));
-			}, PTY_COALESCE_MS)
+			}, windowMs)
 		};
 		this.ptyBuffers.set(key, entry);
 		// The leading chunk splits like the trailing flush: one read can outgrow a frame.
@@ -541,6 +621,14 @@ export class RelayEngine {
 	private dropListener(session: number, stream: number): void {
 		const state = this.sessions.get(session);
 		if (!state) return;
+		const listenKey = `${session}:${stream}`;
+		// A subscription leaving with a batch still open: nothing reads the stream anymore,
+		// so the merge dies with it — no flush, no timer.
+		const fs = this.fsBuffers.get(listenKey);
+		if (fs) {
+			clearTimeout(fs.timer);
+			this.fsBuffers.delete(listenKey);
+		}
 		const unlisten = state.listeners.get(stream);
 		// `events` carries the stream while a LISTEN was processed for it; its absence of
 		// a stored listener then means the listen round trip is still in flight.
@@ -550,9 +638,9 @@ export class RelayEngine {
 		if (!unlisten && listening) {
 			// Mark the in-flight listen so its own completion unhooks instead of adopting
 			// the slot of a stream nobody subscribes to anymore.
-			this.droppedListens.add(`${session}:${stream}`);
+			this.droppedListens.add(listenKey);
 		} else {
-			this.droppedListens.delete(`${session}:${stream}`);
+			this.droppedListens.delete(listenKey);
 		}
 	}
 
@@ -588,6 +676,12 @@ export class RelayEngine {
 		for (const unlisten of state.listeners.values()) unlisten();
 		this.sessions.delete(session);
 		this.joiner.dropSession(session);
+		for (const [key, pending] of [...this.fsBuffers]) {
+			if (key.startsWith(`${session}:`)) {
+				clearTimeout(pending.timer);
+				this.fsBuffers.delete(key);
+			}
+		}
 		void this.deps.invoke('remote_host_frontend_gone', { frontend: `remote/${session}` }).catch(() => undefined);
 	}
 
