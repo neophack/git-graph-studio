@@ -237,6 +237,15 @@ export function quickInput(options: QuickInputOptions): Promise<string | null> {
 		});
 		input.addEventListener('keydown', (event) => {
 			event.stopPropagation();
+			// The browser's find keys are claimed while a quick input is up: the filter box IS
+			// the search, and the webview's own find bar must not rise over it. The
+			// stopPropagation above keeps the workbench's document key handler from preventing
+			// this default, so the claim lands here — Ctrl+F / Ctrl+G / Ctrl+Shift+G (find
+			// bar, find next / previous) and F3.
+			if (event.key === 'F3' || ((event.ctrlKey || event.metaKey) && (event.key === 'f' || event.key === 'F' || event.key === 'g' || event.key === 'G'))) {
+				event.preventDefault();
+				return;
+			}
 			if (event.key === 'Enter') {
 				event.preventDefault();
 				if (list) {

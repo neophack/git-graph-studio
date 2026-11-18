@@ -815,6 +815,28 @@
 				check('code editor', 'PageDown moves the caret about one viewport (CodeMirror native)', (n) => n >= Math.floor(viewport / lineHeight) - 3 && n <= Math.floor(viewport / lineHeight) + 1, caret - 1);
 			});
 
+			/* ----- the quick input: entrance centring and the browser find keys (real animation/layout) ----- */
+			await surface('quick input', async () => {
+				const { quickInput } = await import('/src/platform/ui/quickInput.ts');
+				// The card is appended synchronously inside quickInput's executor, so the first
+				// measurement below lands inside the entrance animation — the state a transform
+				// keyframe used to break: the card lost its translateX(-50%) centre for the run.
+				const pending = quickInput({ placeholder: 'quick input probe', items: [{ label: 'alpha', value: 'a' }] });
+				const card = document.querySelector('.quick-input');
+				if (!card) throw new Error('no quick input card');
+				const centreX = (node) => rect(node).left + rect(node).width / 2;
+				const want = window.innerWidth / 2;
+				check('quick input', 'the card is centred mid-animation, on the frame it opens', (x) => Math.abs(x - want) <= 2, centreX(card));
+				await sleep(300);
+				check('quick input', 'and centred once the animation settled', (x) => Math.abs(x - want) <= 2, centreX(card));
+				// Ctrl+F over the open quick input must be claimed (preventDefault) — the
+				// webview's own find bar never rises over the filter box.
+				const findEvent = key(card.querySelector('input'), 'f', { ctrlKey: true });
+				check('quick input', 'Ctrl+F is swallowed (preventDefault), no webview find bar', (v) => v === true, findEvent.defaultPrevented);
+				key(card.querySelector('input'), 'Escape');
+				check('quick input', 'Escape closes it', (v) => v === true, await Promise.race([pending.then(() => true), sleep(1000).then(() => false)]));
+			});
+
 			/* ----- the quick-info hover: real pointer geometry jsdom cannot express ----- */
 			await surface('quick-info hover', async () => {
 				await openFromTree('hover.c');

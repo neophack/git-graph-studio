@@ -736,11 +736,17 @@ body.resizing iframe { pointer-events: none; }
 .status-left { display: flex; align-items: center; padding-left: 4px; overflow: hidden; }
 .status-right { display: flex; align-items: center; margin-left: auto; padding-right: 4px; }
 
-/* The palette rises in place (M7 7.2) - colourless motion, under the 150 ms line. */
+/* The palette rises in place (M7 7.2) - colourless motion, under the 150 ms line. The rise
+   rides margin-top, never transform: a transform keyframe replaces the base transform for
+   the animation's whole run, so the desktop card lost its translateX(-50%) centre for the
+   150 ms — it sat with its left edge at mid-window and snapped back at the end (the
+   left-right twitch on open) — and the phone's full-screen form (remote.css) centres
+   through left: 0, which a translateX keyframe would shove half a screen away. margin-top
+   touches neither centre. */
 .quick-input { animation: quick-in var(--motion-normal) var(--ease-out); }
 @keyframes quick-in {
-	from { opacity: 0; transform: translateY(2px); }
-	to { opacity: 1; transform: translateY(0); }
+	from { opacity: 0; margin-top: 2px; }
+	to { opacity: 1; margin-top: 0; }
 }
 
 /* ---------- Notifications ---------- */

@@ -168,6 +168,18 @@ describe('quick input', () => {
 		expect(await pending).toBeNull();
 	});
 
+	it('claims the browser find keys so the webview find bar never rises over it', async () => {
+		const pending = quickInput({});
+		const input = document.querySelector<HTMLInputElement>('.quick-input input')!;
+		expect(key(input, 'f', { ctrlKey: true }).defaultPrevented).toBe(true);
+		expect(key(input, 'F', { ctrlKey: true, shiftKey: true }).defaultPrevented).toBe(true);
+		expect(key(input, 'g', { ctrlKey: true }).defaultPrevented).toBe(true);
+		expect(key(input, 'F3').defaultPrevented).toBe(true);
+		expect(key(input, 'a').defaultPrevented).toBe(false);
+		key(input, 'Escape');
+		expect(await pending).toBeNull();
+	});
+
 	it('filters a pick list and navigates with the keyboard', async () => {
 		const pending = quickPick([
 			{ label: 'main', value: 'main', description: 'HEAD' },
