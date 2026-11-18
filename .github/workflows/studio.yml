@@ -271,7 +271,7 @@ jobs:
 
       - name: Upload the cargo build timings
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: studio-windows-test-timings
           path: target/studio/cargo/cargo-timings/**/*.html
@@ -348,7 +348,7 @@ jobs:
 
       - name: Upload the cargo build timings
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: studio-linux-native-test-timings
           path: target/studio/cargo/cargo-timings/**/*.html
@@ -423,7 +423,7 @@ jobs:
 
       - name: Upload the cargo build timings
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: studio-darwin-test-timings
           path: target/studio/cargo/cargo-timings/**/*.html
@@ -647,7 +647,7 @@ jobs:
       # exactly when the numbers are wanted.
       - name: Upload the cargo build timings
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: studio-windows-timings
           path: target/studio/cargo/cargo-timings/**/*.html
@@ -655,7 +655,7 @@ jobs:
 
       # Only the installers themselves are artefacts: bundle/ also keeps each bundler's
       # work files, which must never reach the release page.
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: studio-windows-x64
           path: |
@@ -805,19 +805,19 @@ jobs:
       # its work tree (deb: control/, data.tar.gz, debian-binary, md5sums, the staged
       # binary and desktop file; rpm: the same under <name>-<version>-<arch>/), which must
       # never reach the release page.
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: matrix.bundles == 'deb'
         with:
           name: ${{ matrix.artifact }}
           path: target/studio/bundle-linux/deb/*.deb
           if-no-files-found: error
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: matrix.bundles == 'rpm'
         with:
           name: ${{ matrix.artifact }}
           path: target/studio/bundle-rpm/rpm/*.rpm
           if-no-files-found: error
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: matrix.measure == true
         with:
           name: studio-linux-metrics
@@ -914,7 +914,7 @@ jobs:
       # Only the dmg is an artefact: bundle/dmg/ also keeps the create-dmg staging
       # (bundle_dmg.sh, template.applescript, eula-resources-template.xml, Info.plist,
       # icon.icns) and bundle/macos/ the raw .app, which must never reach the release page.
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: |

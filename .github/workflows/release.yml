@@ -205,12 +205,12 @@ jobs:
           Copy-Item README.md $stage/
           Compress-Archive -Path $stage -DestinationPath "target/packages/ggs-remote-hub-$version-windows-x64.zip"
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: hub-package-${{ matrix.os }}
           path: extensions-src/ggs-remote/hub/target/packages/*.deb
           if-no-files-found: ignore
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: hub-package-${{ matrix.os }}-misc
           path: |
@@ -224,7 +224,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download every installer
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           pattern: studio-*
           merge-multiple: true
@@ -232,7 +232,7 @@ jobs:
 
       # The Hub's standalone packages join the same release (and its checksums).
       - name: Download the hub packages
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           pattern: hub-package-*
           merge-multiple: true
