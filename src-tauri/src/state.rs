@@ -114,8 +114,17 @@ impl LaunchState {
 /// The open roots' file watchers, plus the installs the OS refused. A refused install
 /// never produces a `FolderWatcher`, so its refusal is recorded here to keep the status
 /// bar's dot honest — that is the state where the automatic refreshes do not exist at all.
+/// The open roots' file watchers, plus the installs the OS refused. A refused install
+/// never produces a `FolderWatcher`, so its refusal is recorded here to keep the status
+/// bar's dot honest — that is the state where the automatic refreshes do not exist at all.
+/// The third cell holds the installs in flight, so the first-paint drain and the status
+/// query's re-arm never install the same root's watch twice.
 #[derive(Default)]
-pub struct Watchers(Mutex<Vec<FolderWatcher>>, Mutex<Vec<crate::watcher::WatcherStatus>>);
+pub struct Watchers(
+    Mutex<Vec<FolderWatcher>>,
+    Mutex<Vec<crate::watcher::WatcherStatus>>,
+    Mutex<std::collections::HashSet<String>>,
+);
 
 impl Watchers {
     /// End every watch (a folder close, or the window before a new folder installs its
@@ -125,6 +134,26 @@ impl Watchers {
     pub fn clear(&self) {
         self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
         self.1.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+    }
+
+    /// Claim the install of one root: false when an install of the same root is already
+    /// in flight, so a racing second starter (the first-paint drain beside the status
+    /// query's re-arm) skips instead of installing a duplicate watch — two live watches
+    /// would emit every batch twice, and every refresh twice after that.
+    pub fn begin_install(&self, root: &str) -> bool {
+        self.2
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(root.to_owned())
+    }
+
+    /// Release the claim (the install thread has landed its watch, recorded its refusal,
+    /// or dropped it as a switched-away root's). The next starter may begin.
+    pub fn end_install(&self, root: &str) {
+        self.2
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(root);
     }
 
     /// Install one root's watch. A refusal recorded earlier for the same root (the
@@ -182,6 +211,13 @@ impl DeferredServices {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
 
+    /// The roots waiting for their `post_first_paint`, without consuming them: the status
+    /// query's re-arm reads this to leave a legitimately pending install alone (its own
+    /// first-paint drain owns it) and re-arm only the ones nothing is waiting for.
+    pub fn pending(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+
     /// Closing the folder (or switching to single-file mode) drops any pending roots.
     pub fn clear(&self) {
         self.0.lock().unwrap().clear();
@@ -214,6 +250,17 @@ mod deferred_services_tests {
         pending.record(vec!["a".to_owned()]);
         pending.clear();
         assert!(pending.take().is_empty());
+    }
+
+    #[test]
+    fn pending_peeks_without_consuming_the_record() {
+        let pending = DeferredServices::default();
+        assert!(pending.pending().is_empty());
+        pending.record(vec!["a".to_owned(), "b".to_owned()]);
+        // The peek answers the waiting roots and leaves them for the drain.
+        assert_eq!(pending.pending(), vec!["a".to_owned(), "b".to_owned()]);
+        assert_eq!(pending.take(), vec!["a".to_owned(), "b".to_owned()]);
+        assert!(pending.pending().is_empty());
     }
 }
 
@@ -254,6 +301,19 @@ mod watchers_tests {
         // The folder switch drops everything, refusals included: they name closed roots.
         watchers.clear();
         assert!(watchers.status().is_empty());
+    }
+
+    #[test]
+    fn an_install_claim_admits_one_starter_until_it_is_released() {
+        let watchers = Watchers::default();
+        // The first starter claims the root; the racing second (the first-paint drain
+        // beside the status query's re-arm) is refused — one watch per root, not two.
+        assert!(watchers.begin_install("C:\\repo"));
+        assert!(!watchers.begin_install("C:\\repo"));
+        assert!(watchers.begin_install("C:\\other"));
+        // The thread's end releases the claim, whichever way it landed.
+        watchers.end_install("C:\\repo");
+        assert!(watchers.begin_install("C:\\repo"));
     }
 }
 

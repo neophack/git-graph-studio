@@ -369,12 +369,18 @@ use crate::test_git_helpers::ScratchGit;
 }
 
 /// One open root's background service: the file watcher, off the calling thread. Shared
-/// by `post_first_paint` so the folder and workspace open paths start identical services.
-/// The symbol and analysis indexes are NOT built here: a large tree's indexes are the
+/// by `post_first_paint` so the folder and workspace open paths start identical services,
+/// and by `fs_watcher_status`'s re-arm so an install that never landed starts again. The
+/// symbol and analysis indexes are NOT built here: a large tree's indexes are the
 /// heaviest memory the app holds, so they load on the first query that needs them (the
 /// command adapters' `ensure_*`) and `index_lease` releases them once idle.
-fn start_root_services(app: &tauri::AppHandle, root: &str) {
+pub(crate) fn start_root_services(app: &tauri::AppHandle, root: &str) {
     use tauri::{Emitter, Manager};
+    // One install per root at a time: the drain beside the re-arm (or two racing
+    // queries) must not leave two live watches emitting every batch twice.
+    if !app.state::<crate::state::Watchers>().begin_install(root) {
+        return;
+    }
     let symbol_index = app
         .state::<std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>()
         .inner()
@@ -428,6 +434,9 @@ fn start_root_services(app: &tauri::AppHandle, root: &str) {
                 }
             }
         }
+        // The claim rides the thread's whole body and releases whichever way it landed,
+        // so the next starter (a reopen, the status query's re-arm) may begin.
+        app.state::<crate::state::Watchers>().end_install(&watch_root);
     });
 }
 

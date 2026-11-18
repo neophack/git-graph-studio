@@ -12,8 +12,8 @@ import { SETTINGS_EVENT, THEME_EVENT } from '../platform/settings';
 import * as state from '../platform/state';
 import { isWindowDragging } from '../platform/windowDrag';
 import { basename, notify } from '../platform/ui/index';
-import { FsChange, OpenedPaths, REFRESH_ECHO_MS, joinRepo, whenIdle } from './workbench';
-import { fsWatcherStatus } from '../platform/ipc/fs';
+import { FsChange, OpenedPaths, REFRESH_ECHO_MS, WATCHER_RETRY_BASE_MS, WATCHER_RETRY_LIMIT, joinRepo, whenIdle } from './workbench';
+import { fsWatcherStatus, type WatcherReport } from '../platform/ipc/fs';
 
 /** The lifecycle concern of Workbench — assigned onto the prototype by the module facade (index.ts). */
 export const lifecycleMethods: ThisType<Workbench> = {
@@ -152,7 +152,7 @@ export const lifecycleMethods: ThisType<Workbench> = {
 		this.search.setRoots([]);
 		this.scm.setRepo(null);
 		this.statusBar.setRepo(false);
-		this.statusBar.setWatcherStatus([]); // no folder: no watcher to indicate
+		this.noteWatcherStatus([]); // no folder: no watcher to indicate, no retry pending
 		this.extensionHost.noteWorkspaceChanged([]);
 		// The window is the file: hide the side bar and the terminal, like a single-file editor.
 		state.layout.sidebarVisible = false;
@@ -284,7 +284,7 @@ export const lifecycleMethods: ThisType<Workbench> = {
 		this.editors.setRoot(null);
 		this.scm.setRepo(null);
 		this.statusBar.setRepo(false);
-		this.statusBar.setWatcherStatus([]); // no open folder: no watcher to indicate
+		this.noteWatcherStatus([]); // no open folder: no watcher to indicate, no retry pending
 		this.extensionHost.noteWorkspaceChanged([]);
 		ExtensionHost.workspaceFolders = [];
 	},
@@ -385,6 +385,11 @@ export const lifecycleMethods: ThisType<Workbench> = {
 			window.clearTimeout(this.contextTimer);
 			this.contextTimer = null;
 		}
+		// The watcher retry's backoff timer goes with the workbench too.
+		if (this.watcherRetryTimer !== null) {
+			window.clearTimeout(this.watcherRetryTimer);
+			this.watcherRetryTimer = null;
+		}
 		document.removeEventListener(THEME_EVENT, this.onThemeChangedBound);
 	},
 
@@ -466,6 +471,39 @@ export const lifecycleMethods: ThisType<Workbench> = {
 			});
 	},
 
+	/** The status bar's watcher dot, plus the retry that keeps it honest: every status —
+	 *  a query's answer or a `studio://watcher-status` push — renders through here, and a
+	 *  report that still says starting re-invokes `post_first_paint` on a backoff. The
+	 *  install is fire-once (the first-paint drain), so the hiccup that lost it — an
+	 *  invoke swallowed on a busy page, a drain racing a folder switch — used to leave
+	 *  the dot gray for the rest of the session; the backend's status query re-arms such
+	 *  roots too, and this retry reaches it between queries. A green or red answer (or no
+	 *  folder) resets the attempt count: those states say something, and only gray with
+	 *  nothing answering it is worth retrying. */
+	noteWatcherStatus(reports: WatcherReport[] | null): void {
+		this.statusBar.setWatcherStatus(reports);
+		if (this.disposed) return;
+		const starting = Array.isArray(reports) && reports.some((report) => report.starting);
+		if (!starting) {
+			if (this.watcherRetryTimer !== null) {
+				window.clearTimeout(this.watcherRetryTimer);
+				this.watcherRetryTimer = null;
+			}
+			this.watcherRetryAttempts = 0;
+			return;
+		}
+		if (this.watcherRetryTimer !== null || this.watcherRetryAttempts >= WATCHER_RETRY_LIMIT) return;
+		const delay = WATCHER_RETRY_BASE_MS << this.watcherRetryAttempts;
+		this.watcherRetryAttempts++;
+		this.watcherRetryTimer = window.setTimeout(() => {
+			this.watcherRetryTimer = null;
+			if (this.disposed || !this.repoPath) return;
+			void postFirstPaint()
+				.catch(() => undefined)
+				.then(() => this.refreshWatcherStatus());
+		}, delay);
+	},
+
 	/** The status bar's watcher dot: the backend's live report, queried at every folder
 	 *  open (and once at boot through the restored folder's open). The backend's own
 	 *  install / refusal / degrade pushes carry the flips between, so there is no polling.
@@ -473,9 +511,9 @@ export const lifecycleMethods: ThisType<Workbench> = {
 	 *  the dot off. */
 	async refreshWatcherStatus(): Promise<void> {
 		try {
-			this.statusBar.setWatcherStatus(await fsWatcherStatus());
+			this.noteWatcherStatus(await fsWatcherStatus());
 		} catch {
-			this.statusBar.setWatcherStatus(null);
+			this.noteWatcherStatus(null);
 		}
 	},
 

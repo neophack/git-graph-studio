@@ -469,6 +469,45 @@ describe('a stale session restore', () => {
 	});
 });
 
+describe('the watcher dot\u2019s retry of a starting report nothing answers', () => {
+	it('re-invokes post_first_paint on the backoff and re-queries; a live answer stops the ladder', async () => {
+		await until(() => backend.callsTo('post_first_paint').length === 1); // the boot's own start
+		// The lost-install shape: the dot's answer says starting with no install behind
+		// it. noteWatcherStatus is the push listener's own path, so this drives both the
+		// query answer and a push the same way.
+		const starting = { root: REPO_A, running: false, error: null, starting: true };
+		backend.handlers.set('fs_watcher_status', () => [starting]);
+		backend.calls.length = 0;
+		workbench.noteWatcherStatus([starting]);
+		// The first backoff tick (1 s out) drains and then re-queries; the still-starting
+		// answer arms the next tick, whose timer the live answer below clears.
+		await until(() => backend.callsTo('post_first_paint').length >= 1, 40, 4000);
+		expect(backend.callsTo('fs_watcher_status').length).toBeGreaterThanOrEqual(1);
+		backend.handlers.set('fs_watcher_status', () => [{ root: REPO_A, running: true, error: null, starting: false }]);
+		await until(() => workbench.watcherRetryTimer === null, 40, 4000);
+		// The live answer reset the ladder: a later starting report backoffs from 1 s
+		// again, not from wherever the abandoned ladder stood.
+		const drainCount = backend.callsTo('post_first_paint').length;
+		workbench.noteWatcherStatus([starting]);
+		expect(workbench.watcherRetryTimer).not.toBeNull();
+		backend.handlers.set('fs_watcher_status', () => [{ root: REPO_A, running: true, error: null, starting: false }]);
+		await until(() => workbench.watcherRetryTimer === null, 40, 4000);
+		expect(backend.callsTo('post_first_paint').length).toBeGreaterThanOrEqual(drainCount);
+	});
+
+	it('a no-folder answer clears a pending retry', async () => {
+		await until(() => backend.callsTo('post_first_paint').length === 1); // the boot's own start
+		workbench.noteWatcherStatus([{ root: REPO_A, running: false, error: null, starting: true }]);
+		expect(workbench.watcherRetryTimer).not.toBeNull();
+		workbench.noteWatcherStatus([]);
+		expect(workbench.watcherRetryTimer).toBeNull();
+		// The cleared timer never fires its drain.
+		backend.calls.length = 0;
+		await new Promise((resolve) => setTimeout(resolve, 1100));
+		expect(backend.callsTo('post_first_paint').length).toBe(0);
+	});
+});
+
 describe('external changes the watcher could not list in full', () => {
 	it('reloads every clean tab under the root, not just the active one', async () => {
 		await workbench.editors.openFile(`${REPO_A}\\a.txt`);

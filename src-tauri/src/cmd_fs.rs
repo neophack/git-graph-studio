@@ -403,10 +403,34 @@ pub(crate) fn watcher_reports(switch: &crate::state::FolderSwitch<'_>) -> Vec<Wa
 }
 
 /// The status bar's watcher dot: one entry per open root. The frontend refreshes it at
-/// every folder open and on the `studio://watcher-status` pushes between them.
+/// every folder open and on the `studio://watcher-status` pushes between them. A root
+/// answering starting while nothing is pending for it — an install that never landed
+/// (a first-paint invoke lost on a busy page, a drain racing a folder switch) — is
+/// re-armed right here: the install is fire-once, so without this the dot would sit gray
+/// for the rest of the session, the state where the automatic refreshes are gone and
+/// nothing says so. A root still waiting in `deferred` is left alone: its own
+/// `post_first_paint` drain owns it and must not be preempted ahead of the first paint.
 #[tauri::command]
 pub fn fs_watcher_status(app: tauri::AppHandle) -> Vec<WatcherReport> {
-    watcher_reports(&crate::state::FolderSwitch::from_app(&app))
+    let switch = crate::state::FolderSwitch::from_app(&app);
+    let reports = watcher_reports(&switch);
+    for root in roots_needing_rearm(&switch) {
+        crate::boot::start_root_services(&app, &root);
+    }
+    reports
+}
+
+/// The open roots whose install never landed: reported starting, with nothing pending in
+/// `deferred` for them (a pending root's own drain owns the install). Pure, so the
+/// decision is unit-tested without a Tauri app; the command turns each into a
+/// `start_root_services` call, whose install claim folds racing starters into one.
+pub(crate) fn roots_needing_rearm(switch: &crate::state::FolderSwitch<'_>) -> Vec<String> {
+    let pending = switch.deferred.pending();
+    watcher_reports(switch)
+        .into_iter()
+        .filter(|report| report.starting && !pending.contains(&report.root))
+        .map(|report| report.root)
+        .collect()
 }
 
 /// The extension-platform roots a remote session's `ext_fs` may ALSO reach, beyond the open
@@ -1221,7 +1245,7 @@ mod revision_read_tests {
 
 #[cfg(test)]
 mod watcher_status_tests {
-    use super::watcher_reports;
+    use super::{roots_needing_rearm, watcher_reports};
     use crate::state::StateSet;
     use crate::watcher::{FolderWatcher, WatcherStatus};
 
@@ -1279,5 +1303,34 @@ mod watcher_status_tests {
         let report = &watcher_reports(&state.switch())[0];
         assert!(!report.running && !report.starting);
         assert_eq!(report.error.as_deref(), Some("the watched tree was removed"));
+    }
+
+    #[test]
+    fn the_rearm_takes_a_starting_root_with_nothing_pending_and_leaves_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().display().to_string();
+        let other = tempfile::tempdir().unwrap();
+        let other_root = other.path().display().to_string();
+        let state = StateSet::default();
+        state.roots.set(vec![root.clone(), other_root.clone()]);
+        // Both installs still wait for their first-paint drain: that drain owns them, so
+        // neither is re-armed (the install must not be preempted ahead of the paint).
+        state.deferred.record(vec![root.clone(), other_root.clone()]);
+        assert!(roots_needing_rearm(&state.switch()).is_empty());
+        // The lost-install shape: one root's record was drained and no watch ever landed
+        // (the first-paint invoke the busy page swallowed), while the other still waits
+        // legitimately — only the lost one is re-armed.
+        state.deferred.record(vec![other_root.clone()]);
+        assert_eq!(roots_needing_rearm(&state.switch()), vec![root.clone()]);
+        // A live watch and a refusal are answers, not gaps: neither is re-armed.
+        let watcher = FolderWatcher::new(&root, |_| {}, |_| {}).unwrap();
+        state.watchers.push(watcher);
+        state.deferred.take();
+        state.watchers.record_refusal(WatcherStatus {
+            root: other_root.clone(),
+            running: false,
+            error: Some("too many watches".to_owned()),
+        });
+        assert!(roots_needing_rearm(&state.switch()).is_empty());
     }
 }

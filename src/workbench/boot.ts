@@ -502,7 +502,7 @@ export const bootMethods: ThisType<Workbench> = {
 		void listen<FsChange>(FS_CHANGED_EVENT, (event) => this.onFsChanged(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
 		// The status bar's watcher dot follows the backend's own pushes (an install's
 		// answer, a refusal, a mid-life degrade) between the folder opens' queries.
-		void listen<WatcherReport[]>('studio://watcher-status', (event) => this.statusBar.setWatcherStatus(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
+		void listen<WatcherReport[]>('studio://watcher-status', (event) => this.noteWatcherStatus(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);
 		// The symbol index's builds report from the backend (an open's resume, a watcher's
 		// incremental update, this command's own rebuild): the status item follows them all.
 		void listen<SymbolIndexStatus>('studio://symbol-index', (event) => this.statusBar.setSymbols(event.payload)).then((unlisten) => this.trackUnlisten(unlisten)).catch(() => undefined);

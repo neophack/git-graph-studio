@@ -5,7 +5,7 @@
 
 import { Channel } from '../platform/ipc/core';
 import { bootStage } from '../platform/ipc/app';
-import { encodings, listFiles, readFile } from '../platform/ipc/fs';
+import { encodings, listFiles, readFile, type WatcherReport } from '../platform/ipc/fs';
 import { workspaceSymbols } from '../platform/ipc/search';
 import { symbolLookup, symbolsRebuild, type SymbolIndexEvent } from '../platform/ipc/symbols';
 import { viewerClose, viewerOpen } from '../platform/ipc/viewer';
@@ -77,6 +77,13 @@ export type { SymbolIndexEvent, SymbolIndexStatus } from '../platform/ipc/symbol
 
 /** How long after a refresh a git-only change batch is taken for that refresh's own echo. */
 export const REFRESH_ECHO_MS = 1500;
+
+/** The watcher dot's retry backoff for a starting report nothing answers (the install
+ *  that never landed): 1 s, 2 s, 4 s, 8 s, 16 s — five tries, then the state stands as
+ *  the backend reports it. Each try re-queries, so a landed install's push or answer
+ *  stops the ladder long before the cap. */
+export const WATCHER_RETRY_BASE_MS = 1000;
+export const WATCHER_RETRY_LIMIT = 5;
 
 
 /** Where the Workbench mounts its parts (docs/remote-client-plan.md §3.1): the desktop
@@ -198,6 +205,12 @@ export class Workbench {
 	activeView: string = state.layout.activeView;
 
 	refreshTimer: number | null = null;
+
+	/** The watcher dot's retry (lifecycle's noteWatcherStatus): the backoff timer while a
+	 *  starting report has no install answering it, and how many attempts have gone out. */
+	watcherRetryTimer: number | null = null;
+
+	watcherRetryAttempts: number = 0;
 
 	constructor(mounts: Partial<WorkbenchMounts> = {}) {
 		const host: WorkbenchMounts = { ...desktopMounts(), ...mounts };
@@ -952,6 +965,8 @@ export class Workbench {
 	declare recheckSwallowedBatch: () => void ;
 
 	declare refreshWatcherStatus: () => Promise<void> ;
+
+	declare noteWatcherStatus: (reports: WatcherReport[] | null) => void;
 
 	hiddenRefreshQueued = false;
 

@@ -303,7 +303,15 @@ no-clobber copy — not a transfer) stay.
   re-check although no path they list changed; each watch also
   carries a live status cell, and a refused install is recorded, so `fs_watcher_status` and
   the `studio://watcher-status` pushes can show the status bar's dot where the automatic
-  refreshes do not exist or have stopped)
+  refreshes do not exist or have stopped; and since 2026-11-18 the install self-heals
+  (2026-11-18, the owner's report: 自动刷新过一段时间就变灰了 — the install is fire-once,
+  so the hiccup that lost it — a first-paint invoke swallowed on a busy page, a drain
+  racing a folder switch — left the dot gray for the rest of the session): the status
+  query re-arms an open root whose report says starting while nothing is pending in
+  `deferred` and no install is in flight (the `Watchers` install claim folds racing
+  starters into one watch), and the frontend's `noteWatcherStatus` re-invokes
+  `post_first_paint` on a 1 s→16 s backoff while a starting report stands, so a lost
+  install converges back to green without a folder switch)
 - Tests: `tests/explorer.test.ts` (the tree, the menus, the drops, the transfer rows'
   environments), `tests/transfer.test.ts` (the wire half over the tauriMock recording —
   the picker-to-upload flow, the no-wire desktop's empty answers), `ggs-fs`'s copy tests
