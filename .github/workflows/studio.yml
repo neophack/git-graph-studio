@@ -11,7 +11,9 @@
 # this repository out.
 #
 # The test jobs compile the dev/test profile only (prepare.mjs --icons-only supplies the
-# one compile-time input, the window icons `generate_context!()` embeds); the installer
+# one compile-time input, the window icons `generate_context!()` embeds — plus zero-byte
+# placeholder sidecar copies, since tauri-build only checks those paths exist at compile
+# time; the real sidecars are the full prepare pass's business); the installer
 # jobs compile release only (tauri build's beforeBuildCommand runs the full prepare: the
 # ggs-node sidecar, the GGS Remote daemon, the marketplace fetch). One backend test pass
 # per platform (the owner's direction, 2026-10-14): test-windows, test-linux (the native
@@ -26,7 +28,10 @@
 # rust-cache keeps the target dirs and the crates.io registry warm across runs (fewer
 # downloads, near-incremental rebuilds; cache-workspace-crates keeps the vendored boa
 # artifacts too); npm downloads are cached the same way through setup-node's cache. The
-# three Linux legs are one compile each - each in its own floor container - because one
+# 10 GB cache budget itself is guarded by the cache-prune job below (2026-11-18): left
+# alone, two generations of the Linux container caches crowded out every rust-cache
+# save and every Rust job ran cold every run. The three Linux legs are one compile
+# each - each in its own floor container - because one
 # binary cannot carry two glibc floors (and the arm64 deb is its own binary).
 #
 # The Linux installers are built in Docker containers whose base image IS the compatibility
@@ -174,9 +179,10 @@ jobs:
   # into parallel jobs — the wall clock is the max of the two, not the sum). This job owns
   # the dev/test compile; the installer job below never waits for it, and a calling
   # workflow (release.yml) still fails unless both sides passed. prepare runs --icons-only:
-  # `generate_context!()` embeds the window icons at compile time, and that is ALL the test
-  # compile needs — the ggs-node sidecar, the GGS Remote daemon and the marketplace fetch
-  # are the installer build's business.
+  # `generate_context!()` embeds the window icons at compile time, the sidecar copies
+  # stage as zero-byte placeholders (tauri-build only checks the paths exist), and that is
+  # ALL the test compile needs — the real sidecars, the GGS Remote daemon and the
+  # marketplace fetch are the installer build's business.
   test-windows:
     name: Studio backend tests (windows-x64)
     runs-on: windows-latest
@@ -223,7 +229,7 @@ jobs:
           key: studio-windows-x64-test
           cache-on-failure: true
           cache-workspace-crates: true
-          save-if: github.ref == 'refs/heads/main'
+          save-if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
 
       - uses: actions/setup-node@v6
         with:
@@ -287,10 +293,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The Linux build dependencies through the apt package cache (2026-11-18, the CI
+      # speed pass): the plain `apt-get update && install` of the WebKitGTK development
+      # set cost 10+ minutes of every run — repository indexes, download and unpack of
+      # ~250 packages the runner image does not carry. The action installs the same
+      # packages from cached .debs (under a minute warm; the version input is the cache
+      # key's manual epoch — bump it when the package list changes).
       - name: Install the Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+        uses: awalsh128/cache-apt-pkgs-action@v1.6.3
+        with:
+          packages: libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+          version: 1.0
 
       # The pinned toolchain (rust-toolchain.toml); keep ref and file in sync on a bump.
       # Components explicit — the Windows test job's note tells why.
@@ -306,7 +319,7 @@ jobs:
           key: studio-linux-native-test
           cache-on-failure: true
           cache-workspace-crates: true
-          save-if: github.ref == 'refs/heads/main'
+          save-if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
 
       - uses: actions/setup-node@v6
         with:
@@ -381,7 +394,7 @@ jobs:
           key: studio-darwin-arm64-test
           cache-on-failure: true
           cache-workspace-crates: true
-          save-if: github.ref == 'refs/heads/main'
+          save-if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
 
       - uses: actions/setup-node@v6
         with:
@@ -453,10 +466,14 @@ jobs:
         with:
           workspaces: extensions-src/ggs-remote/daemon -> ../../../target/studio/ggs-remote
           key: ggs-remote-daemon
-          # Caches are saved from main only (docs/ci-speed-plan.md P1 #5): PR-branch saves
-          # are what pushed the repo past the 10 GB eviction line; a PR still restores
-          # main's cache, which is all it needs for a dependency-unchanged check run.
-          save-if: github.ref == 'refs/heads/main'
+          # Caches are saved from main and release tags only (docs/ci-speed-plan.md P1
+          # #5, tags added 2026-11-18: a workflow_call from release.yml sees github.ref
+          # as the tag, so a `main`-only guard meant release runs — the ones whose
+          # version stamp churns every cache key — never saved, and the first push after
+          # every release ran cold); PR-branch saves are what pushed the repo past the
+          # 10 GB eviction line; a PR still restores main's cache, which is all it needs
+          # for a dependency-unchanged check run.
+          save-if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
       - name: Format
         run: cargo fmt --check
       - name: Lint
@@ -483,7 +500,7 @@ jobs:
         with:
           workspaces: extensions-src/ggs-remote/hub -> ../../../target/studio/ggs-remote-hub
           key: ggs-remote-hub
-          save-if: github.ref == 'refs/heads/main'
+          save-if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
       - name: Format
         run: cargo fmt --check
       - name: Lint
@@ -548,7 +565,7 @@ jobs:
           key: studio-windows-x64-build
           cache-on-failure: true
           cache-workspace-crates: true
-          save-if: github.ref == 'refs/heads/main'
+          save-if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
 
       - uses: actions/setup-node@v6
         with:
@@ -613,22 +630,16 @@ jobs:
           [IO.File]::WriteAllText((Join-Path (Get-Location) 'target/studio/signing.json'), ($merge | ConvertTo-Json -Depth 5))
 
       # The compile-time assets the app's build script verifies on EVERY cargo invocation
-      # — the icons, the sidecar externalBin copies, node-host.cjs / vscode-shim.cjs, the
-      # bundled extensions directory — staged before the timings build touches the app
-      # crate (a missing path fails it with `resource path ... doesn't exist`,
+      # — the icons, the (placeholder) sidecar copies, node-host.cjs / vscode-shim.cjs,
+      # the bundled extensions directory — staged before the build's cargo pass touches
+      # the app crate (a missing path fails it with `resource path ... doesn't exist`,
       # 2026-10-15). `npm ci` stages nothing (the script is prepare:assets, not prepare,
-      # on purpose), and `tauri build` runs its full prepare only as this job's NEXT
-      # step — too late for the compile it pre-warms.
+      # on purpose). The sidecar copies land as placeholders here (2026-11-18, the CI
+      # speed pass): the full prepare that `tauri build` runs as its beforeBuildCommand
+      # below replaces them with the real binaries before anything compiles or packs,
+      # and the placeholders cost a touch instead of a 6+ minute cold sidecar compile.
       - name: Prepare the compile-time assets
         run: node scripts/prepare.mjs --icons-only
-
-      # The release dependency graph's per-crate timings (docs/ci-speed-plan.md P0): a
-      # plain release build with the same profile and features `tauri build` uses, so the
-      # installer build reuses everything this compiled — near-free on a warm cache, real
-      # cold-start numbers otherwise, uploaded below either way.
-      - name: Record the release build timings
-        working-directory: src-tauri
-        run: cargo build --release --timings
 
       - name: Build the installer (NSIS)
         run: npx tauri build --config target/studio/signing.json
@@ -636,22 +647,17 @@ jobs:
       # Size and performance measurement (docs/ggs-development-plan.md M1.7; the budgets
       # were removed 2026-09-15 — sizes are recorded, not gated): the artefact sizes plus
       # the backend's headless probes on this repository itself. The metrics land in
-      # target/studio/metrics.json and are published with the bundles. Continue-on-error
-      # (docs/ci-speed-plan.md P1 #1): a wedged probe or boot-bench is recorded as absent
-      # and never fails the installer build — sizes and installers still upload.
+      # target/studio/metrics.json and are published with the bundles. Release runs only
+      # (2026-11-18, the CI speed pass): on this runner the boot-bench probe never
+      # finished inside its 3-minute quiet-machine budget, so every push-to-main run paid
+      # that timeout as pure wall clock — the deb leg below (matrix.measure) records the
+      # per-push metrics instead. Continue-on-error (docs/ci-speed-plan.md P1 #1): a
+      # wedged probe or boot-bench is recorded as absent and never fails the installer
+      # build — sizes and installers still upload.
       - name: Measure sizes and performance
+        if: inputs.studio-version != ''
         continue-on-error: true
         run: node scripts/measure.mjs --repo .
-
-      # The P0 baseline's build timings, uploaded even when a later step failed — that is
-      # exactly when the numbers are wanted.
-      - name: Upload the cargo build timings
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: studio-windows-timings
-          path: target/studio/cargo/cargo-timings/**/*.html
-          if-no-files-found: warn
 
       # Only the installers themselves are artefacts: bundle/ also keeps each bundler's
       # work files, which must never reach the release page.
@@ -826,6 +832,42 @@ jobs:
           # fail the build either.
           if-no-files-found: warn
 
+  # Cache hygiene (2026-11-18, the CI speed pass): the repository's 10 GB Actions cache
+  # budget was permanently saturated by the Linux container caches alone. Their key
+  # carries hashFiles(Cargo.lock), so every dependency bump orphans the previous
+  # multi-gigabyte generation until eviction — and two full generations (~9 GB beside
+  # the buildkit blobs and the npm caches) is what evicted EVERY rust-cache save: not
+  # one `v0-rust-*` entry ever survived, so every Rust job on every platform ran a full
+  # cold compile on every run (the measured root cause of the 30+ minute critical
+  # path). This job runs once the Linux legs have saved their current generation and
+  # deletes the superseded `studio-linux-*` keys, keeping exactly one generation so
+  # the rust-caches stay under the budget.
+  cache-prune:
+    name: Prune superseded Linux build caches
+    needs: studio-linux
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Delete the studio-linux-* caches this run superseded
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          LOCKHASH: ${{ hashFiles('src-tauri/Cargo.lock') }}
+        run: |
+          for leg in deb deb-arm64 rpm; do
+            keep="studio-linux-${leg}-${LOCKHASH}"
+            stale=$(gh cache list --repo "$REPO" --key "studio-linux-${leg}-" --limit 100 --json id,key --jq ".[] | select(.key != \"${keep}\") | .id")
+            if [ -n "$stale" ]; then
+              echo "deleting superseded ${leg} caches: $(echo $stale | tr '\n' ' ')"
+              gh cache delete $stale --repo "$REPO" || true
+            fi
+          done
+
   # The macOS installers (dmg), built natively; macOS x64 joins on a `full` run.
   studio-macos:
     name: Studio installers (${{ matrix.artifact }})
@@ -857,7 +899,7 @@ jobs:
           key: studio-${{ matrix.artifact }}
           cache-on-failure: true
           cache-workspace-crates: true
-          save-if: github.ref == 'refs/heads/main'
+          save-if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
 
       - uses: actions/setup-node@v6
         with:
@@ -905,9 +947,12 @@ jobs:
       - name: Build the installers (dmg)
         run: npx tauri build --config target/studio/signing.json
 
-      # Continue-on-error as in the Windows job (docs/ci-speed-plan.md P1 #1): the macOS
-      # boot-bench once paid its whole 3-minute-per-run quiet-machine waits too.
+      # Continue-on-error as in the Windows job (docs/ci-speed-plan.md P1 #1), and
+      # release runs only for the same reason (2026-11-18: the macOS boot-bench paid its
+      # whole 3-minute-per-run quiet-machine waits on every push) — the deb leg records
+      # the per-push metrics.
       - name: Measure sizes and performance
+        if: inputs.studio-version != ''
         continue-on-error: true
         run: node scripts/measure.mjs --repo .
 

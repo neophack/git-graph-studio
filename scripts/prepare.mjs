@@ -11,14 +11,14 @@
 //   node scripts/prepare.mjs --icons-only   the compile-time half alone: everything
 //                                           tauri-build verifies on every compile of the
 //                                           app — the seam check, the icons
-//                                           `generate_context!()` embeds, the sidecar
-//                                           copies, node-host.cjs / vscode-shim.cjs and
-//                                           the (empty) bundled extensions directory —
-//                                           and nothing of the installer build (no
-//                                           marketplace fetch, no daemon, no packing;
-//                                           docs/ci-speed-plan.md P2, extended
-//                                           2026-10-15 when the test jobs hit the
-//                                           resources half of that verification too)
+//                                           `generate_context!()` embeds, the (placeholder)
+//                                           sidecar copies, node-host.cjs / vscode-shim.cjs
+//                                           and the (empty) bundled extensions directory —
+//                                           and nothing of the installer build (no sidecar
+//                                           compilation, no marketplace fetch, no daemon, no
+//                                           packing; the placeholders are replaced by the
+//                                           real binaries on the full pass; docs/
+//                                           ci-speed-plan.md P2 and the 2026-11-18 CI pass)
 //
 // The bundled VSIX packages the installer carries are the marketplace's per-architecture
 // builds (Open VSX — fetched by scripts/fetch-marketplace-extensions.mjs; no package has a
@@ -31,7 +31,7 @@
 import { checkSeams } from './check-seams.mjs';
 import { fetchMarketplacePackages } from './fetch-marketplace-extensions.mjs';
 import { buildNodeHost } from './node-host-bundle.mjs';
-import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 
 // The seam rules first: nothing under src/ or static/ may name the git-graph-rs extension's
 // artifacts (it is a plugin; the app's only interface to it is the extension platform), so a
@@ -97,11 +97,13 @@ const TRIPLES = {
 	'darwin-arm64': 'aarch64-apple-darwin'
 };
 const exeSuffix = process.platform === 'win32' ? '.exe' : '';
-function stageSidecar(built, name) {
+function sidecarPath(name) {
 	const triple = TRIPLES[`${process.platform}-${process.arch}`] ?? `${process.platform}-${process.arch}`;
-	const sidecarDir = join(out, 'bundled', 'binaries');
-	mkdirSync(sidecarDir, { recursive: true });
-	copyFileSync(built, join(sidecarDir, `${name}-${triple}${exeSuffix}`));
+	return join(out, 'bundled', 'binaries', `${name}-${triple}${exeSuffix}`);
+}
+function stageSidecar(built, name) {
+	mkdirSync(join(out, 'bundled', 'binaries'), { recursive: true });
+	copyFileSync(built, sidecarPath(name));
 }
 
 /* A sidecar package's own binary, built through cargo (target-dir resolved the way
@@ -131,18 +133,34 @@ function sidecarBinary(bin, profile) {
  *    P2-8/P2-9): ggs-node (the pretend Node runtime, the default `node`-backend host,
  *    whose N-API host loads a package's `.node`) builds on its own ggs-node profile,
  *    ggs-bash (Windows-only) on release. A package's own `.node` addon arrives inside
- *    its VSIX — nothing of any plugin compiles here anymore. */
-const nodeRuntimeBin = sidecarBinary('ggs-node', 'ggs-node');
-// ggs-config (module 19): the one-command Remote Access setup, shipped on every
-// platform (the restructure's P2-11) — release like ggs-bash.
-const ggsConfigBin = sidecarBinary('ggs-config', 'release');
-// GGS Bash (module 18, Windows-only since 2026-10-14) is its own package now (the
-// restructure's P2-8): built here and staged as an externalBin copy like ggs-node —
-// the app crate no longer compiles the shell at all.
-const ggsBashBin = process.platform === 'win32' ? sidecarBinary('ggs-bash', 'release') : null;
+ *    its VSIX — nothing of any plugin compiles here anymore.
+ *
+ * The compile-time half (--icons-only) stages EMPTY placeholder copies under the
+ * externalBin names instead of building the real binaries (2026-11-18, the CI speed
+ * pass): tauri-build's build script only copies these paths beside the target binary —
+ * nothing compiles or runs their contents — and the full prepare pass below rebuilds
+ * and re-stages the real binaries before `tauri build` compiles or packs anything.
+ * The test suites never consume these copies either: every spawn resolves the sidecar
+ * through GGS_ENGINE_HOST or the cargo-built binary beside the test binaries
+ * (ggs-base sidecar::resolve_host), so a placeholder costs nothing but a touch. */
+if (iconsOnly) {
+	mkdirSync(join(out, 'bundled', 'binaries'), { recursive: true });
+	for (const name of process.platform === 'win32'
+		? ['ggs-node', 'ggs-bash', 'ggs-config']
+		: ['ggs-node', 'ggs-config']) {
+		writeFileSync(sidecarPath(name), '');
+	}
+} else {
+	const nodeRuntimeBin = sidecarBinary('ggs-node', 'ggs-node');
+	// ggs-config (module 19): the one-command Remote Access setup, shipped on every
+	// platform (the restructure's P2-11) — release like ggs-bash.
+	const ggsConfigBin = sidecarBinary('ggs-config', 'release');
+	// GGS Bash (module 18, Windows-only since 2026-10-14) is its own package now (the
+	// restructure's P2-8): built here and staged as an externalBin copy like ggs-node —
+	// the app crate no longer compiles the shell at all.
+	const ggsBashBin = process.platform === 'win32' ? sidecarBinary('ggs-bash', 'release') : null;
 
-/* The sidecar copies Tauri bundles (staged below). */
-{
+	/* The sidecar copies Tauri bundles (staged below). */
 	stageSidecar(nodeRuntimeBin, 'ggs-node');
 	if (ggsBashBin) stageSidecar(ggsBashBin, 'ggs-bash');
 	stageSidecar(ggsConfigBin, 'ggs-config');

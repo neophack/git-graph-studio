@@ -179,3 +179,50 @@ tauri、boa、ureq / rustls / ring（TLS）、aes-gcm（AEAD 不应该手写）�
 5. P3 高优先级：boa 的 bytemuck、num_enum、time，zip 特性。
 6. P2 其余，以及 P3 中优先级。
 7. P3 后续项，视 P0 数据决定。
+
+## 6. 2026-11-18 第二轮:缓存配额挤占与关键路径削减
+
+P1/P2 落地后 push-to-main 稳态 ~32 min。对 44227666571 / 44248533814 两个 run 的 job/step 级测量发现两个此前不可见的问题:
+
+### 根因一:rust-cache 的保存从未存活过,所有 Rust job 每次全冷
+
+`gh cache list` 里没有任何 `v0-rust-*` 条目——虽然 8 个 Rust job 每次都在 main 上保存。配额被
+Linux 容器缓存独占:它们的 key 带 `hashFiles(Cargo.lock)`,依赖一变旧的一代(每腿 ~1.3–2 GB × 3
+腿)就成了孤儿,直到被逐才让位,两代并存 ~9.2 GB + buildkit blob + npm 就把 10 GB 配额打满,rust-cache
+保存(Windows 侧数 GB)一落地就被逐。实测两次 run 的 rust-cache 恢复都是 "No cache
+found",Windows installer 32 min 里 ggs-node sidecar 冷编译 5m50s、release 全冷 8m35s、daemon
+冷编译 3m04s 全由此而来。修法:新增 `cache-prune` job(needs: studio-linux),每轮删掉被本轮
+取代的 `studio-linux-*` 旧代 key,稳态只留一代(~5.3 GB),给 rust-cache 腾出 ~4.5 GB。
+
+### 根因二:Windows installer(关键路径 31–32 min)装了大量非构建工作
+
+- `--icons-only` 名不副实:在早退前把 ggs-node(ggs-node profile,冷 5m50s)、ggs-config、
+  ggs-bash 三个 sidecar 全编一遍 + 两次 vite 打包,而 tauri-build 在编译期只对 externalBin 路径
+  做"存在并复制"检查——测试与占位毫无冲突(所有运行时 spawn 走 `GGS_ENGINE_HOST` 或 cargo 自建
+  的 profile 目录二进制)。prepare.mjs 的 icons-only 路径改为 touch 三个零字节占位(实测整步
+  7m19s → 3.1s,含 tauri icon 和两次 vite 打包);完整 prepare 路径仍在 `tauri build` 的
+  beforeBuildCommand 里编真二进制并覆盖占位。
+- "Record the release build timings"(`cargo build --release --timings`,8m35s)是纯测量的
+  预编译,P0 基线已完成使命,删除(测试 job 的 `cargo test --timings` 产物保留)。
+- measure 步骤里 Windows/macOS 的 boot-bench 在 CI 静默机上永远 3 min 超时记 absent——
+  纯耗墙钟。Windows/macOS 的 measure 改为仅 release 运行(`inputs.studio-version != ''`),
+  每次 push 的 metrics 由 deb 腿(matrix.measure)继续记录。
+- test-linux 的 apt-get 装 WebKitGTK 开发套件每轮 10m29s,换 `awalsh128/cache-apt-pkgs-action`
+  (命中时从缓存 .deb 安装,<1 min)。
+- 发版运行(release.yml 的 workflow_call)里 `github.ref` 是 tag,`save-if: …
+  == 'refs/heads/main'` 恒假——发版(恰好 bump Cargo.lock/版本)从不保存缓存,发版后第一次
+  push 必然全冷。save-if 改为 main 或 tag。
+
+### 预期
+
+| 项 | 之前 | 之后(冷) | 之后(暖) |
+| -- | ---- | -------- | -------- |
+| studio-windows(installer) | 31–32 min | ~18 min | ~6–8 min |
+| test-linux | 21–22 min | ~9 min | ~4 min |
+| test-windows / test-macos | 16–23 / 18–19 min | ~12 / ~13 min | ~5 min |
+| 总墙钟(push to main) | 32 min | **~18 min** | **~10–13 min** |
+
+配额仍然装不下全部 rust-cache(总需求 ~11 GB > 剩余 ~4.5 GB),LRU 会优先保住最常被触达的
+(关键路径的 windows-build 优先);若仍见冷腿,下一步是把 Linux 容器缓存里的 cargo target
+做保存前裁剪。rust-cache 的 key 还会因 runner 镜像更新预装工具链而偶发失效(环境 key 记了
+1.97.1+1.99.1 两个版本),属自愈型,一次冷运行后恢复。
