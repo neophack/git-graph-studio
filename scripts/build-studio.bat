@@ -13,12 +13,14 @@ rem                                      packages in target\studio\bundled\app-r
 rem   scripts\build-studio.bat dev      run the app in dev mode
 rem   scripts\build-studio.bat debug    cargo debug build of the Tauri backend
 rem
-rem The release path is tuned for the LOCAL edit-compile loop (2026-11-18, the one-line
-rem -change pass; docs/ci-speed-plan.md): a steady-state one-line Rust edit used to cost
-rem 3m26s, of which the NSIS LZMA compression was ~80s, the second full prepare pass
-rem ~15s and the vite passes ~35s even when the frontend never changed. The measures,
-rem all local-only (cargo env overrides and a tauri --config merge — src-tauri/
-rem Cargo.toml, tauri.conf.json, tauri dev, plain cargo and CI are untouched):
+rem The release path is tuned for the LOCAL edit-compile loop (2026-11-19, the
+rem one-line-change pass; docs/ci-speed-plan.md §7): a steady-state one-line Rust
+rem edit used to cost 3m26s, of which the NSIS LZMA compression was ~80s, the two
+rem vite passes ~35s even when the frontend never changed, a duplicated full prepare
+rem ~15s and the cargo rebuild+link 77s. The measures, all local-only (cargo env
+rem overrides and a tauri --config merge — src-tauri/Cargo.toml, tauri.conf.json,
+rem tauri dev, plain cargo and CI are untouched), take that edit pass to ~17s
+rem (measured):
 rem   - vite runs only when the frontend changed (scripts\vite-if-changed.mjs stamps
 rem     the dist dir; a Rust-only edit skips both passes)
 rem   - ONE prepare pass: tauri build's beforeBuildCommand is overridden (via the same
@@ -26,8 +28,16 @@ rem     merge file) to prepare-only, and this script no longer runs its own full
 rem     ahead of it
 rem   - NSIS compression none (the installer is ~2.5x larger and packs in seconds —
 rem     fine for a local smoke build; CI's published installers keep LZMA)
-rem   - LTO off + rust-lld (the release env overrides and the linker; the first build
-rem     after this change recompiles the release tree once for the new fingerprints)
+rem   - LTO off + rust-lld + incremental release compilation (the release env
+rem     overrides and the linker; the app crate's one-line recompile drops 77s ->
+rem     44s -> 6.6s with the incremental cache warm, at ~0.9 GB under
+rem     target\studio\cargo\release\incremental)
+rem The FIRST build after this change recompiles the whole release tree once for the
+rem new fingerprints (RUSTFLAGS churns every profile) — ~90 min on a cold machine
+rem without Defender exclusions (the CI jobs exclude the workspace, cargo and rustup
+rem dirs; Add-MpPreference -ExclusionPath does the same locally and cuts cold builds
+rem by a large factor), then one ~3m30s pass warms the incremental cache, and every
+rem one-line edit after that lands in ~17s.
 
 rem The script lives in scripts\; everything else expects the repository root.
 cd /d "%~dp0.."
@@ -76,7 +86,12 @@ echo [3/3] Building release installers (the extension packages ride along as res
 rem rust-lld links the release binary markedly faster than MSVC's link.exe (CI's test
 rem job measured it first); scoped to this release path because RUSTFLAGS churns every
 rem profile's fingerprints — tauri dev and plain cargo keep link.exe and their caches.
+rem Incremental release compilation (off by cargo's default for release): a one-line
+rem edit recompiles the changed crate incrementally instead of whole-crate (measured
+rem 2026-11-18: the app crate's edit pass dropped by half again), at ~1-2 GB of
+rem incremental cache under target\studio\cargo\release\incremental.
 set RUSTFLAGS=-Clinker=rust-lld
+set CARGO_INCREMENTAL=1
 if not exist target\studio mkdir target\studio
 call node -e "require('fs').writeFileSync('target/studio/build-local.json', JSON.stringify({build:{beforeBuildCommand:'node scripts/prepare.mjs --build'},bundle:{windows:{nsis:{compression:'none'}}}}, null, 2))"
 if errorlevel 1 goto :fail

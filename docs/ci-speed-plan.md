@@ -226,3 +226,27 @@ found",Windows installer 32 min 里 ggs-node sidecar 冷编译 5m50s、release �
 (关键路径的 windows-build 优先);若仍见冷腿,下一步是把 Linux 容器缓存里的 cargo target
 做保存前裁剪。rust-cache 的 key 还会因 runner 镜像更新预装工具链而偶发失效(环境 key 记了
 1.97.1+1.99.1 两个版本),属自愈型,一次冷运行后恢复。
+
+## 7. 2026-11-19 本地构建的"改一行"通道:3m26s → 17s
+
+`scripts\build-studio.bat`(及其 .sh 姊妹)的稳态单行 Rust 改动实测 3m26s,构成:NSIS 的 LZMA
+压缩 ~80s、两遍 vite ~35s(前端没改也照跑)、重复的完整 prepare ~15s(脚本 step 2 一遍 +
+tauri build 的 beforeBuildCommand 再一遍)、cargo 重编+链接 77s。四项措施(全部只作用于本地
+脚本——cargo 环境变量覆盖 + tauri --config 合并,src-tauri/Cargo.toml、tauri.conf.json、
+tauri dev、裸 cargo、CI 全部不受影响):
+
+1. **vite 按需构建**(`scripts/vite-if-changed.mjs`):dist 里落一个 stamp(最近一次触碰前端的
+   commit + 脏标记),纯 Rust 改动两遍 vite 全跳过。
+2. **prepare 只跑一遍**:--config 合并把 beforeBuildCommand 覆盖为 prepare-only,脚本不再
+   自己先跑一遍全量 prepare。
+3. **NSIS compression=none**(同一份合并文件):本地验证包 ~2.5 倍大、秒级打包;CI 发布包
+   保留 LZMA。
+4. **lto=off + rust-lld + release 增量编译**:cargo 阶段 77s(thin LTO + link.exe)→ 44s
+   (lto=off + lld)→ **6.6s**(增量缓存热后),增量缓存占 ~0.9 GB
+   (target/studio/cargo/release/incremental)。
+
+实测链:基线 B(单行 lib 改动)3m26s → o2(前三项 + lld/lto)1m45s → i2(再加增量)**17.0s**
+(≈1/12);增量缓存预热一遍 3m25s。一次性代价:RUSTFLAGS 换指纹后的全量重编在这台机器上
+~96 分钟(无 Defender 排除时被实时扫描放大——CI 的 job 都排除了工作区/cargo/rustup 目录,
+本地 `Add-MpPreference -ExclusionPath` 同理,冷编可大幅缩短)。改前端的编辑落在 ~50-65s
+(vite 会真跑)。副作用仅本地:安装包不压缩、exe 无 LTO(略大略慢)、lld 链接。
