@@ -53,20 +53,20 @@ if [ ! -d node_modules ]; then
 	npm install
 fi
 
-# The LOCAL speed diet for this script's release compiles (docs/ci-speed-plan.md): thin
+# The LOCAL speed diet for this script's release compiles (docs/ci-speed-plan.md): no
 # LTO and 16 codegen units instead of the size diet's fat LTO + one unit — the main
 # binary, the ggs-node sidecar and the GGS Remote daemon (whose packer inherits this
-# environment) compile to a fraction of the time, at a slightly larger exe. CI's
-# published installers keep the size diet: these are cargo's env overrides, so
+# environment) compile to a fraction of the time, at a larger exe. CI's published
+# installers keep the size diet: these are cargo's env overrides, so
 # src-tauri/Cargo.toml is untouched and every other build (tauri dev, plain cargo, CI)
 # is unaffected. GGS_BUNDLE_GGS_REMOTE=0 skips the daemon release compile entirely.
-export CARGO_PROFILE_RELEASE_LTO=thin
+# The one-line-change pass (2026-11-18, the .bat's twin) also runs ONE prepare pass
+# (tauri build's beforeBuildCommand overridden to prepare-only below) and builds the
+# frontend only when it changed (scripts/vite-if-changed.mjs).
+export CARGO_PROFILE_RELEASE_LTO=off
 export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
-export CARGO_PROFILE_GGS_NODE_LTO=thin
+export CARGO_PROFILE_GGS_NODE_LTO=off
 export CARGO_PROFILE_GGS_NODE_CODEGEN_UNITS=16
-
-echo "[2/3] Preparing the app assets (target/studio)"
-npm run prepare:assets
 
 case "${1:-}" in
 dev)
@@ -79,7 +79,13 @@ debug)
 	echo "Done. Binary: target/studio/cargo/debug/git-graph-studio"
 	;;
 *)
+	echo "[2/3] Building the frontend (skipped when it has not changed)"
+	node scripts/vite-if-changed.mjs
 	echo "[3/3] Building release installers (the extension packages ride along as resources)"
+	# The ONE prepare pass: the merge below overrides beforeBuildCommand to prepare-only
+	# (this script no longer runs its own full pass ahead of tauri build, which used to
+	# duplicate every prepare step — sidecar checks, daemon, marketplace, VSIX packs).
+	PREPARE_ONLY_BUILD='{"build":{"beforeBuildCommand":"node scripts/prepare.mjs --build"}}'
 	# Signing follows the environment, never the sources (scripts/signing.mjs): with the
 	# Apple credentials exported, `tauri build` signs and notarizes; without them the
 	# macOS build still gets its ad-hoc bundle seal — a bundle with no signature of its
@@ -87,6 +93,9 @@ debug)
 	# (the 0.1.5 bug), a sealed ad-hoc one merely as unverified.
 	if [ "$(uname -s)" = Darwin ]; then
 		node scripts/signing.mjs macos
+		# The local speed keys merge into the signing file (which may carry real
+		# credentials — never rewrite it wholesale).
+		node -e "const f='target/studio/signing.json',fs=require('fs');const c=JSON.parse(fs.readFileSync(f,'utf8'));Object.assign(c.build||(c.build={}),JSON.parse(process.argv[1]).build);fs.writeFileSync(f,JSON.stringify(c,null,2))" "$PREPARE_ONLY_BUILD"
 		# Tauri's DMG step leaks scratch volumes when it fails (Finder holding the
 		# mounted copy past the script's three detach retries); start clean.
 		node scripts/recover-dmg.mjs --clean-only
@@ -105,7 +114,7 @@ debug)
 		# built nor bundled (the file doubles as the --config merge, signing's own
 		# slot — Linux needs nothing of it).
 		mkdir -p target/studio
-		printf '%s\n' '{}' > target/studio/signing.json
+		printf '%s\n' "$PREPARE_ONLY_BUILD" > target/studio/signing.json
 		npx tauri build --config target/studio/signing.json
 	fi
 	echo

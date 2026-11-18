@@ -12,6 +12,22 @@ rem   scripts\build-studio.bat          release build, installers in target\stud
 rem                                      packages in target\studio\bundled\app-resources\extensions\ (git-graph-rs.vsix, claude-remote.vsix)
 rem   scripts\build-studio.bat dev      run the app in dev mode
 rem   scripts\build-studio.bat debug    cargo debug build of the Tauri backend
+rem
+rem The release path is tuned for the LOCAL edit-compile loop (2026-11-18, the one-line
+rem -change pass; docs/ci-speed-plan.md): a steady-state one-line Rust edit used to cost
+rem 3m26s, of which the NSIS LZMA compression was ~80s, the second full prepare pass
+rem ~15s and the vite passes ~35s even when the frontend never changed. The measures,
+rem all local-only (cargo env overrides and a tauri --config merge — src-tauri/
+rem Cargo.toml, tauri.conf.json, tauri dev, plain cargo and CI are untouched):
+rem   - vite runs only when the frontend changed (scripts\vite-if-changed.mjs stamps
+rem     the dist dir; a Rust-only edit skips both passes)
+rem   - ONE prepare pass: tauri build's beforeBuildCommand is overridden (via the same
+rem     merge file) to prepare-only, and this script no longer runs its own full pass
+rem     ahead of it
+rem   - NSIS compression none (the installer is ~2.5x larger and packs in seconds —
+rem     fine for a local smoke build; CI's published installers keep LZMA)
+rem   - LTO off + rust-lld (the release env overrides and the linker; the first build
+rem     after this change recompiles the release tree once for the new fingerprints)
 
 rem The script lives in scripts\; everything else expects the repository root.
 cd /d "%~dp0.."
@@ -33,31 +49,38 @@ rem builds offline without the marketplace pair - claude-remote still packs.
 if not defined GGS_SKIP_MARKETPLACE_FETCH set GGS_REQUIRE_MARKETPLACE=1
 
 rem The LOCAL speed diet for this script's release compiles (docs/ci-speed-plan.md):
-rem thin LTO and 16 codegen units instead of the size diet's fat LTO + one unit, which
+rem no LTO and 16 codegen units instead of the size diet's fat LTO + one unit, which
 rem cuts the main binary's, the ggs-node sidecar's and the GGS Remote daemon's release
-rem compiles to a fraction (the daemon's packer and tauri build inherit this
-rem environment) at a slightly larger exe. CI's published installers keep the size
-rem diet - these are cargo's env overrides, so src-tauri/Cargo.toml is untouched and
-rem every other build (tauri dev, plain cargo, CI) is unaffected. GGS_BUNDLE_GGS_REMOTE=0
+rem builds to a fraction (the daemon's packer and tauri build inherit this
+rem environment) at a larger exe. CI's published installers keep the size diet - these
+rem are cargo's env overrides, so src-tauri/Cargo.toml is untouched and every other
+rem build (tauri dev, plain cargo, CI) is unaffected. GGS_BUNDLE_GGS_REMOTE=0
 rem skips the daemon release compile entirely for a quicker local iteration.
-set CARGO_PROFILE_RELEASE_LTO=thin
+set CARGO_PROFILE_RELEASE_LTO=off
 set CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
-set CARGO_PROFILE_GGS_NODE_LTO=thin
+set CARGO_PROFILE_GGS_NODE_LTO=off
 set CARGO_PROFILE_GGS_NODE_CODEGEN_UNITS=16
 
 echo [1/3] Installing app dependencies
 if not exist node_modules call npm install
 if errorlevel 1 goto :fail
 
-echo [2/3] Preparing the app assets (target\studio)
-call npm run prepare:assets
-if errorlevel 1 goto :fail
-
 if "%~1"=="dev" goto :devmode
 if "%~1"=="debug" goto :debugmode
 
+echo [2/3] Building the frontend (skipped when it has not changed)
+call node scripts\vite-if-changed.mjs
+if errorlevel 1 goto :fail
+
 echo [3/3] Building release installers (the extension packages ride along as resources)
-call npx tauri build
+rem rust-lld links the release binary markedly faster than MSVC's link.exe (CI's test
+rem job measured it first); scoped to this release path because RUSTFLAGS churns every
+rem profile's fingerprints — tauri dev and plain cargo keep link.exe and their caches.
+set RUSTFLAGS=-Clinker=rust-lld
+if not exist target\studio mkdir target\studio
+call node -e "require('fs').writeFileSync('target/studio/build-local.json', JSON.stringify({build:{beforeBuildCommand:'node scripts/prepare.mjs --build'},bundle:{windows:{nsis:{compression:'none'}}}}, null, 2))"
+if errorlevel 1 goto :fail
+call npx tauri build --config target\studio\build-local.json
 if errorlevel 1 goto :fail
 echo.
 echo Done. Installers are in target\studio\cargo\release\bundle\
