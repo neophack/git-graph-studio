@@ -51,6 +51,12 @@ ed25519-dalek = "2"
 sha2 = "0.10"
 tempfile = "3"
 
+# Dependencies carry no debuginfo in dev/test builds, as in the daemon's and the app
+# workspace's Cargo.toml (docs/ci-speed-plan.md P1 #4) — the relay's own crates keep
+# their debuginfo locally.
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 opt-level = 3
 lto = "fat"

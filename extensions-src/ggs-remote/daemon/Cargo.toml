@@ -78,6 +78,15 @@ tempfile = "3"
 # The across-crates end-to-end (tests/hub_link.rs): a real Hub against this real daemon.
 ggs-remote-hub = { path = "../hub" }
 
+# Dependencies carry no debuginfo in dev/test builds — the same policy as the app
+# workspace's (src-tauri/Cargo.toml, docs/ci-speed-plan.md P1 #4): this workspace's own
+# crates keep their debuginfo for local debugging, but full dependency debuginfo was
+# what pushed the target directory to multiple GB (measured 2026-11-18: 4.6 GB of
+# debug/ for a tray daemon, the bulk of it dependency PDBs and rlib debuginfo nobody
+# steps into).
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 opt-level = "s"
 lto = "fat"

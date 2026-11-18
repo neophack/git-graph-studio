@@ -42,7 +42,7 @@
 //                              the build (CI sets this implicitly through CI=true)
 //   GGS_SKIP_MARKETPLACE_FETCH=1  no network at all: only fresh cache is used
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 export const DEFAULT_GALLERY = process.env.GGS_MARKETPLACE_URL || 'https://open-vsx.org';
@@ -169,6 +169,18 @@ async function fetchOne(spec, { base, cacheDir, targetPlatform, ttlHours, requir
 			fetchedAt: Date.now()
 		};
 		writeMeta(metaPath, meta);
+		// One version per package per platform is all the cache ever serves (meta.json
+		// names the live file, and the unreachable-registry fallback serves that same
+		// last-known build — never an older one), so drop the superseded copies the
+		// moment a new one lands: claude-code's ~170 MB per version otherwise piles up
+		// forever (measured 2026-11-18: 1.2 GB of cache, seven claude-code generations).
+		// Other target platforms' files stay — a container/deb build shares this cache
+		// through the repository mount and packs its own platform's packages.
+		for (const name of readdirSync(dir)) {
+			if (name.startsWith(`${spec.slug}-`) && name.endsWith(`@${targetPlatform}.vsix`) && name !== meta.file) {
+				rmSync(join(dir, name), { force: true });
+			}
+		}
 		return { selected: true, ...meta, path: final, fromCache: false };
 	} catch (reason) {
 		return staleOrFailure(cached, dir, spec, String(reason), { require });

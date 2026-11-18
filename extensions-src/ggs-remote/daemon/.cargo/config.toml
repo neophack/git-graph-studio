@@ -1,0 +1,8 @@
+# Build artifacts go to the repository's target/studio (never into the source tree,
+# never into a shadow target/ of this crate's own — the same mapping CI's rust-cache
+# and scripts/prepare.mjs use; before this file, a plain `cargo test` run from this
+# directory compiled a SECOND full dependency tree under daemon/target, which
+# accumulated to 62 GB beside the 6 GB one the explicit --target-dir builds kept warm
+# — measured 2026-11-18, the disk-space pass).
+[build]
+target-dir = "../../../target/studio/ggs-remote"

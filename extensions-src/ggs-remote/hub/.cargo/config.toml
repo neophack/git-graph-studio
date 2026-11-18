@@ -1,0 +1,5 @@
+# Build artifacts go to the repository's target/studio (never into a shadow target/
+# of this crate's own) — the same mapping CI's rust-cache uses for this workspace;
+# see the daemon's config.toml for how the duplication was found (2026-11-18).
+[build]
+target-dir = "../../../target/studio/ggs-remote-hub"
