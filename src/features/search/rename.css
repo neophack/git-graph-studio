@@ -1,0 +1,72 @@
+/* The rename dialog's own affordances — the overlay/card vocabulary follows the Settings
+   dialog's (shell.css); only this page's pieces render here. */
+
+.rename-overlay {
+	position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, 0.32);
+	display: flex; align-items: center; justify-content: center;
+}
+.rename-dialog {
+	width: min(640px, calc(100vw - 48px)); max-height: min(720px, calc(100vh - 48px));
+	display: flex; flex-direction: column;
+	background: var(--vscode-editorWidget-background, #202020);
+	color: var(--vscode-editorWidget-foreground, #ccc);
+	border: 1px solid var(--vscode-editorWidget-border, #454545);
+	border-radius: 3px; overflow: hidden;
+}
+.rename-header {
+	display: flex; align-items: center; gap: 12px; padding: 8px 12px;
+	border-bottom: 1px solid var(--vscode-panel-border, #2b2b2b); flex: none;
+}
+.rename-title { font-size: 13px; font-weight: 600; flex: none; }
+.rename-close {
+	background: transparent; border: none; color: inherit; cursor: pointer;
+	padding: 4px; border-radius: 3px; margin-left: auto;
+}
+.rename-close:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.25)); }
+
+.rename-form {
+	display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
+	border-bottom: 1px solid var(--vscode-panel-border, #2b2b2b); flex: none;
+}
+.rename-row { display: flex; align-items: center; gap: 8px; }
+.rename-row label { width: 110px; flex: none; font-size: 12px; color: var(--vscode-descriptionForeground); }
+.rename-row .input { flex: 1; min-width: 0; height: 26px; }
+.rename-row .input[readonly] { color: var(--vscode-descriptionForeground); }
+.rename-actions { display: flex; gap: 8px; margin-top: 2px; }
+.rename-actions .button { min-width: 96px; }
+
+.rename-results { flex: 1; min-height: 0; overflow: auto; padding: 6px 12px 10px; font-size: 12px; }
+.rename-empty, .rename-done { padding: 6px 0; color: var(--vscode-descriptionForeground); }
+.rename-failed { padding: 4px 0; color: var(--vscode-errorForeground, #f66); }
+.rename-conflicts {
+	border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+	background: var(--vscode-inputValidation-errorBackground, rgba(190, 17, 0, 0.12));
+	border-radius: 3px; padding: 6px 8px; margin-bottom: 8px;
+}
+.rename-conflict-line { padding: 2px 0; }
+
+.rename-file-head {
+	display: flex; align-items: center; gap: 4px; width: 100%; text-align: left;
+	background: none; border: none; padding: 2px 4px; border-radius: 3px; cursor: pointer;
+	color: var(--vscode-sideBar-foreground); font-size: 12px; white-space: nowrap; overflow: hidden;
+}
+.rename-file-head:hover { background: var(--vscode-toolbar-hoverBackground); }
+.rename-twistie {
+	width: 16px; flex: none; display: inline-flex; align-items: center; justify-content: center;
+	color: var(--vscode-descriptionForeground); font-size: 14px; line-height: 1;
+}
+.rename-sites { padding-left: 22px; }
+.rename-site {
+	display: block; width: 100%; text-align: left; background: none; border: none;
+	padding: 1px 6px; border-radius: 3px; cursor: pointer;
+	color: var(--vscode-descriptionForeground); font-size: 11px;
+	font-family: var(--vscode-editor-font-family, monospace);
+}
+.rename-site:hover { background: var(--vscode-list-hoverBackground); color: var(--vscode-sideBar-foreground); }
+
+.rename-out-files { padding: 2px 0 0 14px; color: var(--vscode-descriptionForeground); }
+
+.rename-note {
+	flex: none; border-top: 1px solid var(--vscode-panel-border, #2b2b2b);
+	padding: 6px 12px; font-size: 11px; color: var(--vscode-descriptionForeground);
+}

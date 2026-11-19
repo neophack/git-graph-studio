@@ -1,21 +1,23 @@
-// The Relations panel (module 5) - an expandable reference tree over the bottom
-// panel: the symbol under the cursor as the root of an expandable reference tree. The
-// workbench feeds the root (debounced there); every `+` drills one ring deeper through
-// `symbol_relation_children`, in either direction (refs to the root, refs the root
-// makes). An expansion caches per node - a collapse keeps the fetched ring, re-expanding
+// The Relations panel (module 5) - an expandable relation tree over the bottom
+// panel: the symbol under the cursor as the root of an expandable relation tree. The
+// workbench feeds the root (debounced there, or picked by hand from the index); every `+`
+// drills one ring deeper through `symbol_relation_children`, in any of the three
+// directions (refs to the root, refs the root makes, and the members declared inside it).
+// An expansion caches per node - a collapse keeps the fetched ring, re-expanding
 // never re-asks - and a generation counter drops the answers a root or direction switch
 // left behind. A ring the backend cut short (the node cap / time budget) says so in a
 // faint closing line; an edge that aggregates several reference sites carries a `×N`
-// badge; and resting on any symbol row floats the declaration card - the
+// badge (a contains ring's members carry no sites at all - each member IS its own
+// declaration); and resting on any symbol row floats the declaration card - the
 // definition's first lines with its "kind in file at line N" caption.
 
 import { readFile } from '../../platform/ipc/fs';
 import { symbolLookup, symbolRelationChildren, type RelationDirection, type RelationNode } from '../../platform/ipc/symbols';
-import type { WsSymbol } from '../../platform/ipc/search';
+import { workspaceSymbols, type WsSymbol } from '../../platform/ipc/search';
 
 import { t, tf } from '../../platform/i18n';
 import { KIND_ICONS } from './contextView';
-import { actionButton, el, escapeHtml, icon } from '../../platform/ui/index';
+import { actionButton, el, escapeHtml, icon, quickInput, type QuickPickSource } from '../../platform/ui/index';
 
 import './relations.css';
 
@@ -41,6 +43,10 @@ const DECL_DELAY = 300;
  *  many characters, past either the text ends with an ellipsis. */
 const DECL_MAX_LINES = 6;
 const DECL_MAX_CHARS = 400;
+
+/** How many ranked names the root picker asks the index for per keystroke - the empty
+ *  query's answer is the picker's opening list. */
+const PICKER_LIMIT = 50;
 
 /** One expandable row and its ring's bookkeeping. */
 interface RelationRow {
@@ -90,8 +96,10 @@ export class RelationsView {
 	private readonly rootChip: HTMLButtonElement;
 	private readonly dirTo: HTMLButtonElement;
 	private readonly dirFrom: HTMLButtonElement;
+	private readonly dirContains: HTMLButtonElement;
 	private readonly treeHost: HTMLElement;
 	private readonly pinButton: HTMLButtonElement;
+	private readonly pickButton: HTMLButtonElement;
 
 	private pinned = false;
 	private root: RelationRoot | null = null;
@@ -132,6 +140,8 @@ export class RelationsView {
 		this.dirTo.addEventListener('click', () => this.setDirection('refsTo'));
 		this.dirFrom = el('button', 'rel-dir');
 		this.dirFrom.addEventListener('click', () => this.setDirection('refsFrom'));
+		this.dirContains = el('button', 'rel-dir');
+		this.dirContains.addEventListener('click', () => this.setDirection('contains'));
 		this.header = el('div', 'rel-header');
 		this.treeHost = el('div', 'rel-tree');
 		this.body = el('div', 'rel-body');
@@ -139,7 +149,10 @@ export class RelationsView {
 		this.element = el('div', 'panel-body rel-panel', [this.body]);
 		this.element.hidden = true;
 		this.pinButton = actionButton('pin', t('relations.pin'), () => this.togglePin());
-		this.actions = el('div', 'actions', [this.pinButton]);
+		// The root picker: any symbol of the index becomes the tree's root, without the
+		// cursor's help. The English literal localizes through the shared display table.
+		this.pickButton = actionButton('search', 'Choose a symbol…', () => void this.openSymbolPicker());
+		this.actions = el('div', 'actions', [this.pinButton, this.pickButton]);
 		// The card survives over everything (it lives in the overlays host), so any press
 		// outside it - a page tab, the editor, the palette - dismisses it, and Escape does
 		// too.
@@ -217,6 +230,40 @@ export class RelationsView {
 		this.onNeedRoot?.();
 	}
 
+	/** The root picker: a pick list over the persistent index - every keystroke asks
+	 *  `workspace_symbols` for the ranked names, the empty query opening on the index's
+	 *  hot ones. Picking a row re-roots the tree at that symbol (the current direction
+	 *  re-asks at once); Escape or an outside press leaves the view exactly as it was. */
+	private async openSymbolPicker(): Promise<void> {
+		// The pick's value is the definition's coordinates - two same-named definitions
+		// sit apart in the list, and the map hands the picked row back whole.
+		const picks = new Map<string, WsSymbol>();
+		const source: QuickPickSource = {
+			query: async (query, onPartial, isCancelled) => {
+				const rows = (await workspaceSymbols(query, PICKER_LIMIT)) ?? [];
+				const items = rows.map((row) => {
+					const key = `${row.path}:${row.line}`;
+					picks.set(key, row);
+					return {
+						label: row.name,
+						description: `${row.path}:${row.line + 1}`,
+						icon: KIND_ICONS[row.kind] ?? 'symbol-variable',
+						value: key
+					};
+				});
+				if (!isCancelled()) onPartial(items);
+				return items;
+			}
+		};
+		const value = await quickInput({
+			title: 'Choose a symbol…',
+			placeholder: 'Type a symbol name — the index answers as you type.',
+			items: source
+		});
+		const chosen = value !== null ? picks.get(value) : undefined;
+		if (chosen) this.setRoot({ kind: chosen.kind, name: chosen.name, path: chosen.path, line: chosen.line });
+	}
+
 	private render(): void {
 		this.body.textContent = '';
 		if (!this.root) {
@@ -236,8 +283,11 @@ export class RelationsView {
 		this.dirFrom.textContent = t('relations.refsFrom');
 		this.dirFrom.classList.toggle('active', this.direction === 'refsFrom');
 		this.dirFrom.setAttribute('aria-pressed', this.direction === 'refsFrom' ? 'true' : 'false');
+		this.dirContains.textContent = t('relations.contains');
+		this.dirContains.classList.toggle('active', this.direction === 'contains');
+		this.dirContains.setAttribute('aria-pressed', this.direction === 'contains' ? 'true' : 'false');
 		this.header.textContent = '';
-		this.header.append(this.rootChip, el('div', 'rel-directions', [this.dirTo, this.dirFrom]));
+		this.header.append(this.rootChip, el('div', 'rel-directions', [this.dirTo, this.dirFrom, this.dirContains]));
 		this.treeHost.textContent = '';
 		this.body.append(this.header, this.treeHost);
 		if (this.rootLoading) {
@@ -249,11 +299,19 @@ export class RelationsView {
 			return;
 		}
 		if (this.rootRows.length === 0) {
-			this.treeHost.appendChild(el('div', 'rel-empty', [this.direction === 'refsTo' ? t('relations.emptyTo') : t('relations.emptyFrom')]));
+			this.treeHost.appendChild(el('div', 'rel-empty', [this.emptyRingText(this.root.name)]));
 			return;
 		}
 		for (const entry of this.rootRows) this.treeHost.append(entry.row, entry.childrenHost);
 		if (this.rootTruncated) this.treeHost.appendChild(this.truncatedLine());
+	}
+
+	/** The empty ring's wording: each refs direction keeps its own key, and the members'
+	 *  ring says what was found to hold nothing, naming the enclosing symbol. */
+	private emptyRingText(name: string): string {
+		if (this.direction === 'refsTo') return t('relations.emptyTo');
+		if (this.direction === 'refsFrom') return t('relations.emptyFrom');
+		return tf('relations.containsEmpty', name);
 	}
 
 	/** The faint closing line a cut-short ring ends with. */
@@ -265,13 +323,17 @@ export class RelationsView {
 		const twistie = node.hasChildren ? el('button', 'rel-twistie') : el('span', 'rel-twistie leaf');
 		const name = el('button', 'rel-name', [node.name]);
 		name.title = t('relations.openDef');
-		const edge = el('button', 'rel-edge', [`${baseName(node.edgePath)}:${node.edgeLine + 1}`]);
-		edge.title = `${node.edgePath}:${node.edgeLine + 1}`;
+		// A contains ring's member IS its own declaration: the edge's site is the
+		// member's definition, so the row carries no reference-site column and reads as
+		// a definition, and the aggregated-site count can never arise.
+		const member = node.edgeKind === 'member';
+		const edge = member ? null : el('button', 'rel-edge', [`${baseName(node.edgePath)}:${node.edgeLine + 1}`]);
+		if (edge) edge.title = `${node.edgePath}:${node.edgeLine + 1}`;
 		// Several reference sites behind one edge: the faint count says how many, its title
 		// spelling it out. A single site earns no badge.
 		const count = node.edgeCount > 1 ? el('span', 'rel-edge-count', [`×${node.edgeCount}`]) : null;
 		if (count) count.title = tf('relations.edgeCount', node.edgeCount);
-		const row = el('div', 'rel-row', [
+		const row = el('div', member ? 'rel-row rel-member' : 'rel-row', [
 			twistie,
 			icon(KIND_ICONS[node.kind] ?? 'symbol-variable'),
 			node.container ? el('span', 'rel-container', [`${node.container}·`]) : null,
@@ -288,14 +350,16 @@ export class RelationsView {
 			twistie.addEventListener('click', () => void this.toggleExpand(entry));
 		}
 		name.addEventListener('click', () => this.onOpen?.(node.path, node.line + 1));
-		edge.addEventListener('click', () => this.onOpen?.(node.edgePath, node.edgeLine + 1));
+		if (edge) edge.addEventListener('click', () => this.onOpen?.(node.edgePath, node.edgeLine + 1));
 		// The row's double click is the reference-site jump - unless it landed on the name
 		// (its own click already opened the definition; a fast double click must not also
-		// drag the editor to the reference site).
+		// drag the editor to the reference site). A member row holds no site: the double
+		// click lands on the member's definition, the same jump its name makes.
 		row.addEventListener('dblclick', (event) => {
 			const target = event.target as HTMLElement | null;
 			if (target?.closest('.rel-name') || target?.closest('.rel-twistie')) return;
-			this.onOpen?.(node.edgePath, node.edgeLine + 1);
+			if (member) this.onOpen?.(node.path, node.line + 1);
+			else this.onOpen?.(node.edgePath, node.edgeLine + 1);
 		});
 		this.wireDeclHover(row, node.name, node.path, node.line);
 		return entry;
@@ -338,8 +402,10 @@ export class RelationsView {
 			entry.childrenHost.textContent = '';
 			if (entry.children.length === 0) {
 				// The optimistic hasChildren misfired; `loaded` keeps the next expansion from
-				// asking the same empty ring again.
-				entry.childrenHost.appendChild(el('div', 'rel-row rel-note', [t('relations.noChildren')]));
+				// asking the same empty ring again. A contains ring says what holds nothing.
+				entry.childrenHost.appendChild(
+					el('div', 'rel-row rel-note', [this.direction === 'contains' ? tf('relations.containsEmpty', entry.node.name) : t('relations.noChildren')])
+				);
 			} else {
 				for (const child of entry.children) entry.childrenHost.append(child.row, child.childrenHost);
 			}

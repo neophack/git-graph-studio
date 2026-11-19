@@ -1,8 +1,10 @@
-// The Relations panel (module 5): the cursor symbol's expandable reference tree over the
+// The Relations panel (module 5): the cursor symbol's expandable relation tree over the
 // bottom panel — the root chip's definition jump, the per-node `+` drill-down with its
-// cached rings, the empty-ring and depth-cap notes, the direction switch, the cut-short
-// ring's closing line, the reference-site count badge, the hover's declaration card, and
-// the workbench wiring (the palette command, the panel page, the zh-cn pairs).
+// cached rings, the empty-ring and depth-cap notes, the three-way direction switch (refs
+// to, refs from, and the members a type declares), the cut-short ring's closing line, the
+// reference-site count badge, the member rows that read as definitions, the hover's
+// declaration card, the root picker over the index, and the workbench wiring (the palette
+// command, the panel page, the zh-cn pairs).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -12,8 +14,9 @@ import { trText } from '../src/platform/i18n';
 import { updateSetting } from '../src/platform/settings';
 import { Workbench } from '../src/workbench';
 import { backend } from './tauriMock';
-import { click, flush, hover, key, texts } from './helpers';
+import { click, flush, hover, key, texts, type } from './helpers';
 import type { RelationAnswer, RelationNode } from '../src/platform/ipc/symbols';
+import type { WsSymbol } from '../src/platform/ipc/search';
 
 const ROOT = { kind: 'function', name: 'alpha', path: 'src/a.ts', line: 0 };
 
@@ -25,6 +28,13 @@ const CHILDREN: RelationNode[] = [
 
 const FROM_CHILDREN: RelationNode[] = [
 	{ kind: 'function', name: 'callee', container: null, path: 'src/e.ts', line: 1, edgePath: 'src/a.ts', edgeLine: 2, edgeKind: 'call', edgeCount: 1, hasChildren: false }
+];
+
+/** A contains ring's members: each member IS its own declaration - the edge site is the
+ *  member's definition, edgeKind is 'member', and the count never aggregates. */
+const MEMBERS: RelationNode[] = [
+	{ kind: 'method', name: 'load', container: null, path: 'src/cfg.ts', line: 4, edgePath: 'src/cfg.ts', edgeLine: 4, edgeKind: 'member', edgeCount: 1, hasChildren: true },
+	{ kind: 'variable', name: 'cap', container: null, path: 'src/cfg.ts', line: 8, edgePath: 'src/cfg.ts', edgeLine: 8, edgeKind: 'member', edgeCount: 1, hasChildren: false }
 ];
 
 const DEEP: RelationNode = { kind: 'function', name: 'deep', container: null, path: 'src/e.ts', line: 8, edgePath: 'src/c.ts', edgeLine: 7, edgeKind: 'call', edgeCount: 1, hasChildren: false };
@@ -232,7 +242,7 @@ describe('the drill-down', () => {
 		expect(texts('.rel-row .rel-name', view.element)).toContain('deep');
 
 		const directions = view.element.querySelectorAll('.rel-dir');
-		expect(texts('.rel-dir', view.element)).toEqual(['References to', 'References from']);
+		expect(texts('.rel-dir', view.element)).toEqual(['References to', 'References from', 'Contains']);
 		click(directions[1]);
 		await flush(6);
 		// The root's ring was re-asked with the flipped direction, and the old expansion
@@ -313,6 +323,183 @@ describe('the cut-short ring and the count badge', () => {
 		expect(rowOf(view.element, 'cap').querySelector('.rel-edge-count')!.textContent).toBe('×2');
 		// A single reference site carries no badge at all.
 		expect(rowOf(view.element, 'load').querySelector('.rel-edge-count')).toBeNull();
+	});
+});
+
+describe('the contains direction', () => {
+	it('switches through three direction segments and re-asks with contains', async () => {
+		backend.on('symbol_relation_children', ({ direction }) => (direction === 'contains' ? answer(MEMBERS) : answer(CHILDREN)));
+		const view = mountView();
+		view.setRoot(ROOT);
+		await flush(4);
+
+		const segments = view.element.querySelectorAll('.rel-dir');
+		expect(texts('.rel-dir', view.element)).toEqual(['References to', 'References from', 'Contains']);
+		// The root's first ring rode refsTo; the third segment picks contains and re-asks.
+		expect(backend.callsTo('symbol_relation_children')[0]).toMatchObject({ direction: 'refsTo' });
+		click(segments[2]);
+		await flush(4);
+		expect(backend.callsTo('symbol_relation_children')[1]).toMatchObject({ name: 'alpha', direction: 'contains' });
+		expect(segments[2]!.classList.contains('active')).toBe(true);
+		expect(segments[2]!.getAttribute('aria-pressed')).toBe('true');
+		expect(segments[0]!.classList.contains('active')).toBe(false);
+		expect(texts('.rel-row .rel-name', view.element)).toEqual(['load', 'cap']);
+	});
+
+	it('renders a member ring as definitions: no site column, no badge, the name and the double click open the member', async () => {
+		backend.on('symbol_relation_children', ({ direction }) => (direction === 'contains' ? answer(MEMBERS) : answer(CHILDREN)));
+		const view = mountView();
+		const opened: { path: string; line: number }[] = [];
+		view.onOpen = (path, line) => opened.push({ path, line });
+		view.setRoot(ROOT);
+		await flush(4);
+		click(view.element.querySelectorAll('.rel-dir')[2]);
+		await flush(4);
+
+		// The member row carries no reference-site column and no count badge, and reads as
+		// a definition (its own kind icon, the definition-styled name).
+		expect(texts('.rel-row .rel-edge', view.element)).toEqual([]);
+		expect(view.element.querySelector('.rel-edge-count')).toBeNull();
+		const load = rowOf(view.element, 'load');
+		expect(load.classList.contains('rel-member')).toBe(true);
+		expect(load.querySelector('.codicon')!.className).toContain('symbol-method');
+
+		// The name click opens the member's own definition; the row's double click lands on
+		// the same place (a member holds no separate reference site).
+		click(load.querySelector('.rel-name'));
+		expect(opened.at(-1)).toEqual({ path: 'src/cfg.ts', line: 5 });
+		load.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+		expect(opened.at(-1)).toEqual({ path: 'src/cfg.ts', line: 5 });
+	});
+
+	it('answers an empty contains ring by naming the enclosing symbol, at the root and inside an expansion', async () => {
+		let alphaRing: RelationNode[] = [];
+		backend.on('symbol_relation_children', ({ name, direction }) => {
+			if (direction !== 'contains') return answer([]);
+			return name === 'alpha' ? answer(alphaRing) : answer([]);
+		});
+		const view = mountView();
+		view.setRoot(ROOT);
+		await flush(4);
+		const segments = view.element.querySelectorAll('.rel-dir');
+		click(segments[2]);
+		await flush(4);
+		expect(view.element.querySelector('.rel-tree .rel-empty')!.textContent).toBe('No members are declared inside alpha.');
+
+		// A ring with a member arrives; that member's own expansion hangs empty, and the
+		// note names the node it hung under.
+		alphaRing = [MEMBERS[0]!];
+		click(segments[0]);
+		await flush(4);
+		click(segments[2]);
+		await flush(4);
+		expect(texts('.rel-row .rel-name', view.element)).toEqual(['load']);
+		click(rowOf(view.element, 'load').querySelector('button.rel-twistie')!);
+		await flush(6);
+		const host = rowOf(view.element, 'load').nextElementSibling!;
+		expect(host.querySelector('.rel-note')!.textContent).toBe('No members are declared inside load.');
+
+		// The refs directions keep their own empty words.
+		click(segments[0]);
+		await flush(4);
+		expect(view.element.querySelector('.rel-tree .rel-empty')!.textContent).toContain('Nothing references this symbol');
+	});
+
+	it('keeps the failed-fetch wording while the backend answers no members ring', async () => {
+		backend.on('symbol_relation_children', ({ direction }) => {
+			if (direction === 'contains') throw new Error('direction unknown');
+			return answer(CHILDREN);
+		});
+		const view = mountView();
+		view.setRoot(ROOT);
+		await flush(4);
+		click(view.element.querySelectorAll('.rel-dir')[2]);
+		await flush(4);
+		expect(view.element.querySelector('.rel-tree .rel-empty')!.textContent).toContain('did not answer');
+	});
+});
+
+describe('the root symbol picker', () => {
+	const CATALOGUE: WsSymbol[] = [
+		{ kind: 'function', name: 'alpha', path: 'src/a.ts', line: 0 },
+		{ kind: 'class', name: 'Config', path: 'src/cfg.ts', line: 3 },
+		{ kind: 'method', name: 'load', container: 'Config', path: 'src/c.ts', line: 4 }
+	];
+
+	beforeEach(() => {
+		// The quick input hangs off the overlays host the workbench shell owns; a bare
+		// mounted view supplies its own.
+		if (!document.getElementById('overlays')) {
+			const host = document.createElement('div');
+			host.id = 'overlays';
+			document.body.appendChild(host);
+		}
+	});
+
+	afterEach(() => {
+		// A picker a test died inside must not leak into the next one.
+		document.getElementById('overlays')?.remove();
+	});
+
+	/** The index's ranked answers: the query filters the catalogue by name. */
+	function scriptIndex(): void {
+		backend.on('workspace_symbols', ({ query }) => {
+			const needle = String(query).toLowerCase();
+			return CATALOGUE.filter((row) => row.name.toLowerCase().includes(needle));
+		});
+	}
+
+	it('opens on the index over the empty query, filters per keystroke, and a pick re-roots the tree', async () => {
+		scriptIndex();
+		backend.on('symbol_relation_children', ({ name, direction }) => (name === 'Config' ? answer(MEMBERS) : answer(CHILDREN)));
+		const view = mountView();
+		view.setRoot(ROOT);
+		await flush(4);
+
+		// The picker rides beside the pin, in the view's own actions.
+		const pick = view.actions.querySelectorAll('.action-btn')[1]!;
+		expect(pick.title).toContain('Choose a symbol');
+		click(pick);
+		await flush(4);
+		// The opening list is the empty query's ranked names.
+		expect(backend.callsTo('workspace_symbols')).toEqual([{ query: '', limit: 50 }]);
+		expect(texts('.quick-input .row .label')).toEqual(['alpha', 'Config', 'load']);
+		expect(texts('.quick-input .row .description')).toEqual(['src/a.ts:1', 'src/cfg.ts:4', 'src/c.ts:5']);
+		expect(document.querySelectorAll('.quick-input .row')[1]!.querySelector('.codicon')!.className).toContain('symbol-class');
+
+		// Typing re-asks the index per keystroke; the list narrows.
+		type(document.querySelector<HTMLInputElement>('.quick-input input')!, 'conf');
+		await flush(4);
+		expect(backend.callsTo('workspace_symbols')[1]).toMatchObject({ query: 'conf', limit: 50 });
+		expect(texts('.quick-input .row .label')).toEqual(['Config']);
+
+		// The pick closes the list and re-roots the tree: the ring re-asks at the chosen
+		// symbol's own coordinates, in the direction the view already holds.
+		click(document.querySelectorAll('.quick-input .row')[0]);
+		await flush(6);
+		expect(document.querySelector('.quick-input')).toBeNull();
+		expect(view.element.querySelector('.rel-root-name')!.textContent).toBe('Config');
+		expect(view.element.querySelector('.rel-root-loc')!.textContent).toBe('src/cfg.ts:4');
+		expect(backend.callsTo('symbol_relation_children').at(-1)).toMatchObject({ name: 'Config', path: 'src/cfg.ts', line: 3, direction: 'refsTo' });
+		expect(texts('.rel-row .rel-name', view.element)).toEqual(['load', 'cap']);
+	});
+
+	it('leaves the view exactly as it was when the pick closes without a choice', async () => {
+		scriptIndex();
+		backend.on('symbol_relation_children', () => answer(CHILDREN));
+		const view = mountView();
+		view.setRoot(ROOT);
+		await flush(4);
+		const asks = backend.callsTo('symbol_relation_children').length;
+
+		click(view.actions.querySelectorAll('.action-btn')[1]);
+		await flush(4);
+		expect(document.querySelector('.quick-input')).not.toBeNull();
+		key(document.querySelector('.quick-input input')!, 'Escape');
+		await flush(4);
+		expect(document.querySelector('.quick-input')).toBeNull();
+		expect(view.element.querySelector('.rel-root-name')!.textContent).toBe('alpha');
+		expect(backend.callsTo('symbol_relation_children')).toHaveLength(asks);
 	});
 });
 

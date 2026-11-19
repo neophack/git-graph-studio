@@ -12,6 +12,7 @@ pub mod index;
 pub mod mask;
 pub mod parse;
 pub mod relations;
+pub mod rename;
 pub mod store;
 
 /// One declaration in the workspace index: what Go-to-Definition, Find References, Quick

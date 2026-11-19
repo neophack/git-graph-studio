@@ -364,18 +364,28 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   scheduled refresh; `workbench.showSymbolWindow`, Alt+L),
   `src/features/search/relationsView.ts` + `relations.css` (the Relation panel page —
   the expandable reference tree over `symbol_relation_children`: the cursor
-  symbol as the root chip (click = the definition), the refsTo / refsFrom direction toggle,
+  symbol as the root chip (click = the definition), the refsTo / refsFrom / contains
+  direction toggle (contains = the members declared inside the subject, member rows
+  reading as definitions),
   every node row a `+` expander that lazily fetches its ring (cached per node, the
   best-effort `hasChildren` misfire answered by a remembered empty ring, 8 rings deep),
   the edge part and a row double-click jumping to the reference site through `onOpen`,
   pin stopping the cursor follow; a ring's `truncated` answer renders a cut-short note,
   `edgeCount > 1` renders a ×N badge (2026-11-20, per-counterpart edge aggregation), and
   hovering a node floats the declaration card — `symbolLookup` + `readFile` sliced to the
-  definition's first lines, cached per `name|path`;
+  definition's first lines, cached per `name|path`; the pick button opens the quick input
+  over `workspaceSymbols`, rooting the tree on any symbol without moving the cursor;
   `followRelationSymbol` mirrors `followContextSymbol`'s
   gate/debounce/generation beside it in workbench.ts; `workbench.showRelations`;
   the dev harness's `?relations=1` surface scripts the whole tree — mask escape hatch,
-  counts, truncation, the tooltip — for eyeballing)
+  counts, truncation, the tooltip — for eyeballing),
+  `src/features/search/renameView.ts` + `rename.css` (the rename dialog over
+  `symbol_rename_preview` / `symbol_rename_apply` — `symbols.rename` opens it with the
+  cursor word: the preview groups every site by file (`rename.locations` headlines,
+  sites jumping through `onOpen`), the conflict list disables the apply, and the result
+  reports the apply's per-file outcomes; the Explorer owns F2, so the command is
+  palette-reachable only; the dev harness's `?rename=1` surface scripts preview and
+  apply for eyeballing)
 - Backend: the `ggs-index` crate (`src-tauri/crates/ggs-index/`) — `scan` (the shared
   matcher / glob / searchable-read vocabulary), `search` (the rayon-parallelised streaming
   text search), `replace`, `compare` (the folder comparison), `hexdiff` (the byte
@@ -398,7 +408,18 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   `edge_count` accumulating every valid site at its earliest `edge_line`, a 250 ms
   wall-clock budget checked every 32 files / 256 hits (a time-slice discipline) answering
   `RelationAnswer { nodes, truncated }` — the cap and the
-  budget both set `truncated`) and `symbols::cache` (the in-memory fallback) — behind the
+  budget both set `truncated`; the third direction `contains` answers the root's members
+  over the store's `members_of` (container-intern scan, member edges carrying the
+  member's own declaration, `hasChildren` peeking whether the member is itself a
+  container — nested types drill)),
+  `symbols::rename` (the rename engine, 2026-11-20: the plan unions the old name's
+  declarations with its masked reference sites and the conflicts refuse all-or-nothing —
+  the new name already declared, the same name, not found, over the site cap — while the
+  apply re-plans fresh, rewrites word-boundary at the recorded lines through the
+  encoding-detected text (an in-memory round-trip guard; EOL and BOM preserved
+  byte-exact, GB18030-class encodings survive their comments intact), re-scans each
+  written file and restores its original bytes when the verification fails, one file's
+  failure never touching the others) and `symbols::cache` (the in-memory fallback) — behind the
   `src-tauri/src/cmd_search.rs` / `cmd_symbols.rs` command adapters (the
   `#[tauri::command]` halves; progress crosses the ggs-base push seams, cancellation is
   the generation counter; every query runs `cmd_symbols::ensure_symbols` first — the

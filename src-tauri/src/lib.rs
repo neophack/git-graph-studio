@@ -20,26 +20,20 @@ mod test_git_helpers;
 #[cfg(test)]
 mod test_isolated_store;
 
-/// The app's adapters over ggs-base's EventSink / BatchSink — the only place a domain
-/// push crosses into tauri (docs/architecture-restructure-plan.md §4.7, P3-1).
-pub mod events;
-pub mod can_commands;
-pub mod cmd_dbc;
-pub mod cmd_elf;
-pub mod cmd_dts;
-pub mod csv_commands;
-pub mod dump_commands;
-pub mod viewer_commands;
 /// The app's own update channel (2026-11-10): the repository's newest release, this
 /// platform's installer downloaded through the marketplace's streaming progress and
 /// mirror setting, then launched (Windows) or mounted/revealed (macOS/Linux).
 pub mod app_update;
+pub mod can_commands;
 pub mod cmd_analysis;
 /// The app-instance domain: "New Window" spawns another GGS — the multi-open entry every
 /// platform shares (macOS needs it most: activating a bundled app's icon only focuses the
 /// running instance, so the new one goes through `open -n`).
 pub mod cmd_app;
 pub mod cmd_assoc;
+pub mod cmd_dbc;
+pub mod cmd_dts;
+pub mod cmd_elf;
 pub mod cmd_ext;
 pub mod cmd_fs;
 pub mod cmd_fuzzy;
@@ -48,14 +42,19 @@ pub mod cmd_providers;
 pub mod cmd_scm;
 pub mod cmd_search;
 pub mod cmd_symbols;
-/// The symbol and analysis indexes' on-demand lifetime: the idle sweeper that releases
-/// them (and trims the heap) once no query uses them.
-pub mod index_lease;
+pub mod csv_commands;
+pub mod dump_commands;
+/// The app's adapters over ggs-base's EventSink / BatchSink — the only place a domain
+/// push crosses into tauri (docs/architecture-restructure-plan.md §4.7, P3-1).
+pub mod events;
 /// The frame host's child processes (`nodeShims.ts` maps them onto the Node API): one real
 /// process surface a sandboxed frame cannot have on its own.
 pub mod ext_child;
 pub mod ext_gallery;
 pub mod ext_process;
+/// The symbol and analysis indexes' on-demand lifetime: the idle sweeper that releases
+/// them (and trims the heap) once no query uses them.
+pub mod index_lease;
 /// Which frontend answers a backend's host request, and the registration journal a late
 /// frontend replays (docs/ggs-remote-plan.md §8.6 #1).
 pub mod mcp;
@@ -67,24 +66,27 @@ pub mod remote_debug;
 pub mod remote_host;
 #[cfg(test)]
 mod stage_bench;
+pub mod viewer_commands;
 pub mod watcher;
 
 pub use desktop::{ensure_main_window, run};
-pub mod state;
 pub mod boot;
 pub mod cli;
+pub mod state;
 pub mod window;
 
 mod desktop {
+    use crate::cli::{
+        cli_help, launch_path_of, parse_startup_actions, wants_blank_window, wants_help,
+    };
+    use crate::window::{apply_webkit_compat, boot_started, revalidate_assets, stamp};
     use crate::{
-        can_commands, viewer_commands, cmd_analysis, cmd_app, cmd_assoc, cmd_dbc, cmd_dts, cmd_elf, cmd_ext, cmd_fs, cmd_fuzzy, cmd_media, cmd_providers, csv_commands, dump_commands,
-        cmd_scm, cmd_search, cmd_symbols, ext_child, ext_gallery, ext_process, mcp, measure,
-        pty, remote_debug, remote_host,
-        app_update,
+        app_update, can_commands, cmd_analysis, cmd_app, cmd_assoc, cmd_dbc, cmd_dts, cmd_elf,
+        cmd_ext, cmd_fs, cmd_fuzzy, cmd_media, cmd_providers, cmd_scm, cmd_search, cmd_symbols,
+        csv_commands, dump_commands, ext_child, ext_gallery, ext_process, mcp, measure, pty,
+        remote_debug, remote_host, viewer_commands,
     };
     use ggs_base::workspace::WorkspaceRoots;
-    use crate::cli::{cli_help, launch_path_of, parse_startup_actions, wants_blank_window, wants_help};
-    use crate::window::{apply_webkit_compat, boot_started, revalidate_assets, stamp};
     use std::sync::Mutex;
 
     /// The user-level `settings.json` (~/.ggs/settings.json): the form writes it, and a hand
@@ -141,11 +143,11 @@ mod desktop {
             .first()
             .cloned()
             .expect("tauri.conf.json declares the main window");
-                tauri::WebviewWindowBuilder::from_config(app, &config)?
-                    .visible(visible)
-                    .on_web_resource_request(revalidate_assets)
-                    .build()
-                    .inspect(|_| remote_debug::note_main_window_created())
+        tauri::WebviewWindowBuilder::from_config(app, &config)?
+            .visible(visible)
+            .on_web_resource_request(revalidate_assets)
+            .build()
+            .inspect(|_| remote_debug::note_main_window_created())
     }
 
     /// Show the desktop window, building it first when this instance has none (the Remote
@@ -794,6 +796,8 @@ mod desktop {
                 cmd_symbols::symbol_tree,
                 cmd_symbols::symbol_file_outline,
                 cmd_symbols::symbol_relation_children,
+                cmd_symbols::symbol_rename_preview,
+                cmd_symbols::symbol_rename_apply,
                 cmd_analysis::analysis_status,
                 cmd_analysis::analysis_rebuild,
                 cmd_analysis::analysis_module_graph,
@@ -1007,7 +1011,10 @@ mod opened_paths_tests {
             &[]
         ));
         assert_eq!(state.roots.list().len(), 0);
-        assert_eq!(state.launch.startup_workspace().as_deref(), Some(ws.as_str()));
+        assert_eq!(
+            state.launch.startup_workspace().as_deref(),
+            Some(ws.as_str())
+        );
     }
 }
 
@@ -1157,9 +1164,10 @@ mod repo_root_tests {
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(repo.join("src").join("deep")).unwrap();
         std::fs::create_dir_all(repo.join(".git")).unwrap();
-        let root =
-            ggs_base::workspace::find_repo_root(&repo.join("src").join("deep").display().to_string())
-                .unwrap();
+        let root = ggs_base::workspace::find_repo_root(
+            &repo.join("src").join("deep").display().to_string(),
+        )
+        .unwrap();
         assert_eq!(std::path::Path::new(&root), repo.as_path());
         // A `.git` file (a worktree or submodule checkout) counts too; nothing above is found.
         let worktree = dir.path().join("wt");

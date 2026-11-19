@@ -279,6 +279,69 @@ impl SymbolStore {
             .collect()
     }
 
+    /// The declarations whose container is `container` — the relation window's `contains`
+    /// direction. The container is an interned name, so one binary search finds its id and
+    /// one scan copies only the hits, path-then-line sorted (the store's own order), at
+    /// most `limit`.
+    pub fn members_of(&self, container: &str, limit: usize) -> Vec<(String, FileOutlineRow)> {
+        let mut hits: Vec<(String, FileOutlineRow)> = Vec::new();
+        if limit == 0 {
+            return hits;
+        }
+        let Ok(id) = self.names.binary_search_by(|n| n.as_str().cmp(container)) else {
+            return hits;
+        };
+        for file in &self.files {
+            for symbol in &file.symbols {
+                if symbol.container_id != id as u32 {
+                    continue;
+                }
+                hits.push((
+                    file.path.clone(),
+                    FileOutlineRow {
+                        kind: kind_name(symbol.kind),
+                        name: self.names[symbol.name_id as usize].clone(),
+                        container: (symbol.container_id != NO_CONTAINER)
+                            .then(|| self.names[symbol.container_id as usize].clone()),
+                        line: symbol.line as usize,
+                        end_line: symbol.end_line as usize,
+                        refs: self
+                            .refs
+                            .get(symbol.name_id as usize)
+                            .and_then(|files| files.as_ref())
+                            .map_or(0, |files| files.len()),
+                    },
+                ));
+                if hits.len() >= limit {
+                    return hits;
+                }
+            }
+        }
+        hits
+    }
+
+    /// Which of `names` are themselves containers — the `contains` ring's `has_children`
+    /// peek: one scan answers the whole ring instead of one members query per member.
+    pub fn container_names_among(&self, names: &[&str]) -> HashSet<String> {
+        let wanted: HashSet<&str> = names.iter().copied().collect();
+        let mut found = HashSet::new();
+        if wanted.is_empty() {
+            return found;
+        }
+        for file in &self.files {
+            for symbol in &file.symbols {
+                if symbol.container_id == NO_CONTAINER {
+                    continue;
+                }
+                let name = &self.names[symbol.container_id as usize];
+                if wanted.contains(name.as_str()) {
+                    found.insert(name.clone());
+                }
+            }
+        }
+        found
+    }
+
     /// The files whose text contains `name` as a word, or `None` when the occurrence list is
     /// absent or untrusted — the caller then scans everything, exactly like before.
     pub fn files_containing(&self, name: &str) -> Option<Vec<String>> {
@@ -1293,7 +1356,10 @@ mod tests {
             (rows[1].name.as_str(), rows[1].kind, rows[1].line),
             ("beta", "method", 2)
         );
-        assert_eq!(rows[1].end_line, 2, "the definition's body extent rides along");
+        assert_eq!(
+            rows[1].end_line, 2,
+            "the definition's body extent rides along"
+        );
         assert_eq!(rows[1].container.as_deref(), Some("Thing"));
         assert_eq!(rows[1].refs, 1, "beta occurs only where it is declared");
         assert!(store.file_symbols("missing.rs").is_none());

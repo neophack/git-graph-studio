@@ -12,6 +12,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { openPath, openUrl } from '@tauri-apps/plugin-opener';
 import { resolveTerminalPath } from '../features/terminal/links';
+import { openRenameDialog } from '../features/search';
 import { type AnalysisStatus } from '../features/analysis';
 import type { AnalysisToolId } from '../features/analysis';
 import { commands } from '../platform/commands';
@@ -269,6 +270,33 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'workbench.gotoLine', title: 'Go to Line/Column...', category: 'Go', keybinding: 'Ctrl+G', enabled: () => this.editors.activeView !== null, run: () => this.quickOpen(':') });
 		register({ id: 'editor.findReferences', title: 'Find References', category: 'Go', keybinding: 'Shift+F12', enabled: () => this.editors.activeView !== null, run: () => void this.editors.findReferences() });
 		register({ id: 'symbols.rebuild', title: 'Rebuild Symbol Index', category: 'Go', enabled: hasRepo, run: () => void this.rebuildSymbolIndex() });
+		// The rename dialog opens with the cursor's word prefilled as the read-only current
+		// name (a rename always names the whole symbol); no default keybinding — F2 is the
+		// Explorer tree's own inline file rename, and its keydown bubbles to the document
+		// unclaimed, so a registry F2 here would fire both renames on one press. The site
+		// rows' jumps join the workspace root exactly like the relations page's.
+		register({
+			id: 'symbols.rename',
+			title: 'Rename Symbol',
+			category: 'Go',
+			enabled: hasRepo,
+			run: () => {
+				const view = editorView();
+				let word = '';
+				if (view) {
+					const position = view.state.selection.main.head;
+					const line = view.state.doc.lineAt(position);
+					const found = view.state.wordAt(Math.min(Math.max(line.from, position), line.to));
+					if (found) word = view.state.sliceDoc(found.from, found.to);
+				}
+				openRenameDialog({ old: word }, {
+					onOpen: (path, line) => {
+						if (this.repoPath) void this.editors.openFile(/^([a-zA-Z]:[\\/]|\\|\/)/.test(path) || !this.repoPath ? path : joinRepo(this.repoPath, path), { line });
+					}
+				});
+			}
+		});
+		registerZhCnText({ 'Rename Symbol': '重命名符号' });
 		register({ id: 'editor.callTree', title: 'Show Call Tree', category: 'Go', enabled: () => this.editors.activeView !== null, run: () => void this.editors.openCallTreeAtCursor() });
 		register({ id: 'editor.formatDocument', title: 'Format Document', category: 'Editor', keybinding: 'Ctrl+Shift+I', enabled: () => this.editors.activeView !== null, run: () => void this.formatActiveDocument() });
 		register({ id: 'editor.toggleBookmark', title: 'Toggle Bookmark', category: 'Edit', keybinding: 'Ctrl+Alt+B', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.toggleBookmark() });

@@ -52,10 +52,15 @@ that shows the definition of the symbol under the cursor. Two classic windows
 complete the set: a **Symbol Window** sidebar page (the active file's imports and its
 outline as icon rows — click jumps, the cursor's enclosing symbol stays highlighted) and
 a **Relation** panel page (the symbol under the cursor as the root of an expandable
-reference tree: who references it, what it references, every node a `+` away from its own
-ring, jumping to any reference site — reference counts badge each edge, a cut-short note
-reports truncation, and hovering a node floats its declaration, all over scans that skip
-comments and strings). The declarations are extracted by
+reference tree: who references it, what it references, and — for a type — what it
+declares, every node a `+` away from its own ring, jumping to any reference site;
+reference counts badge each edge, a cut-short note reports truncation, hovering a node
+floats its declaration, a picker roots the tree on any symbol, and all scans skip
+comments and strings). Renaming rides the same index: a preview lists every definition
+and reference site grouped by file, conflicts refuse all-or-nothing, and the apply
+rewrites files in place with word-boundary precision — encoding, line endings and BOM
+preserved, every rewritten file re-verified with the original restored on any doubt
+(`Rename Symbol` in the palette). The declarations are extracted by
 a tree-sitter parser layer (one grammar per language, each behind a Cargo feature), so every
 symbol carries its column, range, enclosing type and complexity.
 

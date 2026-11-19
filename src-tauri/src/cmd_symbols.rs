@@ -20,7 +20,10 @@ use ggs_index::scan::{read_searchable, FileMatches};
 use ggs_index::symbols::index::{
     references_for, tree_from, IndexStatus, SymbolIndex, SymbolIndexEvent, TreeFile,
 };
-use ggs_index::symbols::relations::{relation_children, RelationAnswer, RelationDirection, RelationNode};
+use ggs_index::symbols::relations::{
+    relation_children, RelationAnswer, RelationDirection, RelationNode,
+};
+use ggs_index::symbols::rename::{rename_apply, rename_plan, RenameOutcome, RenamePlan};
 use ggs_index::symbols::WorkspaceSymbol;
 
 use ggs_base::workspace::WorkspaceRoots;
@@ -189,7 +192,9 @@ fn imports_of(root: &str, path: &str) -> Vec<FileOutlineImport> {
 /// The first line `name` occurs on (0-based), 0 when it never does — the tolerant answer
 /// for a module path the source spells differently from its parsed import name.
 fn import_line(text: &str, name: &str) -> usize {
-    text.lines().position(|line| line.contains(name)).unwrap_or(0)
+    text.lines()
+        .position(|line| line.contains(name))
+        .unwrap_or(0)
 }
 
 /// The open file's outline over the persistent index — the outline pane and the relation
@@ -258,11 +263,63 @@ pub async fn symbol_relation_children(
         .with_store(&root, |store| {
             relation_children(&root, store, &name, &path, line, direction)
         })
-        .unwrap_or_else(|| Ok(RelationAnswer { nodes: Vec::new(), truncated: false }))?;
+        .unwrap_or_else(|| {
+            Ok(RelationAnswer {
+                nodes: Vec::new(),
+                truncated: false,
+            })
+        })?;
     Ok(RelationAnswerDto {
         nodes: answer.nodes,
         truncated: answer.truncated,
     })
+}
+
+/// What `symbol_rename_preview` answers: every site the rename would rewrite and the
+/// reasons it must not run — an empty `conflicts` list means the apply is safe. The
+/// types are the rename engine's own (serde camelCase), the frontend's contract
+/// verbatim.
+#[tauri::command]
+pub async fn symbol_rename_preview(
+    app: tauri::AppHandle,
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, Arc<SymbolIndex>>,
+    old_name: String,
+    new_name: String,
+    repo: Option<String>,
+) -> Result<RenamePlan, String> {
+    let root = resolve_root(roots.inner(), repo)?;
+    ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
+    match symbol_index.with_store(&root, |store| {
+        rename_plan(&root, store, &old_name, &new_name)
+    }) {
+        Some(plan) => plan,
+        None => Err("No index is resident for the open folder".to_owned()),
+    }
+}
+
+/// Apply a rename the preview planned: a fresh plan runs first (a stale preview never
+/// drives a rewrite), any conflict refuses the whole operation, and the per-file
+/// failures — a vanished file, an encoding that does not round-trip, a site whose line
+/// no longer holds the old name — come back in the outcome while the other files still
+/// apply.
+#[tauri::command]
+pub async fn symbol_rename_apply(
+    app: tauri::AppHandle,
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, Arc<SymbolIndex>>,
+    old_name: String,
+    new_name: String,
+    repo: Option<String>,
+) -> Result<RenameOutcome, String> {
+    let root = resolve_root(roots.inner(), repo)?;
+    ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
+    match symbol_index.with_store(&root, |store| {
+        rename_apply(&root, store, &old_name, &new_name)
+    }) {
+        Some(outcome) => outcome,
+        None => Err("No index is resident for the open folder".to_owned()),
+    }
 }
 
 /// One scope-local definition: a parameter or local variable declared inside the

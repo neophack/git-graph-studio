@@ -13,7 +13,7 @@
 .rel-root:hover { background: var(--vscode-toolbar-hoverBackground); }
 .rel-root-name { font-weight: 600; color: var(--vscode-sideBar-foreground); }
 .rel-root-loc { color: var(--vscode-descriptionForeground); font-size: 11px; }
-.rel-directions { display: inline-flex; margin-left: auto; flex: none; }
+.rel-directions { display: inline-flex; gap: 2px; margin-left: auto; flex: none; }
 .rel-dir {
 	background: none; border: 1px solid transparent; padding: 1px 8px; border-radius: 3px;
 	color: var(--vscode-descriptionForeground); font-size: 11px; white-space: nowrap;
@@ -49,6 +49,9 @@
 	color: var(--vscode-descriptionForeground); font-size: 11px; flex: none;
 }
 .rel-edge:hover { color: var(--vscode-textLink-foreground); background: var(--vscode-toolbar-hoverBackground); }
+/* A contains ring's member row: the member IS its declaration, so the row reads as a
+   definition - the name carries the weight, and there is no reference-site column. */
+.rel-row.rel-member .rel-name { font-weight: 600; }
 .rel-edge-count {
 	flex: none; padding: 0 5px; border-radius: 8px; font-size: 10px; line-height: 15px;
 	color: var(--vscode-descriptionForeground); background: var(--vscode-toolbar-hoverBackground);

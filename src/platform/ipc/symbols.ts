@@ -121,11 +121,44 @@ export interface RelationAnswer {
 	truncated: boolean;
 }
 
-/** `refsTo`: the symbols that reference the subject. `refsFrom`: the symbols the subject references. */
-export type RelationDirection = 'refsTo' | 'refsFrom';
+/** `refsTo`: the symbols that reference the subject. `refsFrom`: the symbols the subject references.
+ *  `contains`: the members and nested types declared inside the subject. */
+export type RelationDirection = 'refsTo' | 'refsFrom' | 'contains';
 
 /** The children of one relation node — the next ring of the relation
  *  graph, computed over the persistent index. The subject is a definition: the symbol under
  *  the cursor with the location the context-symbol resolution reported for it. */
 export const symbolRelationChildren = (name: string, path: string, line: number, direction: RelationDirection) =>
 	invoke<RelationAnswer>('symbol_relation_children', { name, path, line, direction });
+
+/** One site a rename plans to rewrite: the identifier occurrence at a 0-based line and
+ *  character column, rewritten word-boundary exact. */
+export interface RenameSite {
+	/** Repo-relative path. */
+	path: string;
+	line: number;
+	column: number;
+}
+
+/** What `symbol_rename_preview` answers: every site the rename would rewrite and the
+ *  reasons it must not run — an empty `conflicts` means the apply is safe. */
+export interface RenamePlan {
+	name: string;
+	sites: RenameSite[];
+	files: number;
+	conflicts: string[];
+}
+
+export const symbolRenamePreview = (oldName: string, newName: string) =>
+	invoke<RenamePlan>('symbol_rename_preview', { oldName, newName });
+
+/** What `symbol_rename_apply` answers: the applied totals and the per-file failures —
+ *  a file that failed its post-write verification is left byte-identical. */
+export interface RenameOutcome {
+	applied: number;
+	files: string[];
+	errors: { path: string; message: string }[];
+}
+
+export const symbolRenameApply = (oldName: string, newName: string) =>
+	invoke<RenameOutcome>('symbol_rename_apply', { oldName, newName });

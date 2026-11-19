@@ -1708,6 +1708,146 @@
 			}
 		</script>
 		<script type="module">
+			// The rename mode (?rename=1): the rename dialog (module 5) over a scripted two-file
+			// C fixture whose preview answer is DERIVED from the sources — a word-boundary scan
+			// with comment spans masked — so the comment trap verifies by eye: beta.c carries a
+			// commented alpha call (line 4, 1-based) that must stay out of the plan's sites,
+			// beside the block comment naming alpha on line 1. The apply half toggles between
+			// the clean answer and a one-file failure, and every site-row jump logs below.
+			if (new URLSearchParams(location.search).has('rename')) {
+				// A clean boot per distinct query string, the scroll mode's rule.
+				if (sessionStorage.getItem('rename-clean') !== location.search) {
+					sessionStorage.setItem('rename-clean', location.search);
+					localStorage.clear();
+					location.reload();
+				}
+				const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+				const waitFor = async (ready, ms = 15000) => {
+					const end = Date.now() + ms;
+					while (Date.now() < end) {
+						if (ready()) return true;
+						await sleep(100);
+					}
+					return ready();
+				};
+
+				/* ---------- the fixture: two C files, alpha everywhere a rename would land ---------- */
+
+				const FILES = {
+					'alpha.c': [
+						'/* alpha.c — the definition (line 1 names alpha inside a comment). */',
+						'void alpha(int n) {',
+						'    (void)n;',
+						'}'
+					].join('\n'),
+					// beta.c: the real call site is line 3 (1-based); the commented call on line 4
+					// is the trap — a leak shows it in the plan's sites and the apply's count.
+					'beta.c': [
+						'/* beta calls alpha once; one more alpha( call hides in a comment below. */',
+						'void beta(int n) {',
+						'    alpha(n);',
+						'    /* alpha(n + 1); — the comment trap: this line must not join the plan. */',
+						'}'
+					].join('\n')
+				};
+
+				// The preview's own half: word-boundary occurrences over the fixture with `//`
+				// tails and `/* ... */` spans blanked first, so a comment mask leak betrays
+				// itself as the commented line's site (0-based line/column, the wire's shape).
+				const scanSites = (name) => {
+					const sites = [];
+					const word = new RegExp('\\b' + String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'g');
+					for (const [path, text] of Object.entries(FILES)) {
+						const lines = text.split('\n');
+						for (let i = 0; i < lines.length; i++) {
+							const code = lines[i].replace(/\/\/.*$/, '').replace(/\/\*[\s\S]*?\*\//g, (m) => ' '.repeat(m.length));
+							for (const match of code.matchAll(word)) {
+								sites.push({ path, line: i, column: match.index });
+							}
+						}
+					}
+					return sites;
+				};
+
+				/* ---------- the scripted commands, over whatever backend the page runs ---------- */
+
+				let failNext = false;
+				const renameHandlers = {
+					symbol_rename_preview: ({ oldName }) => {
+						const sites = scanSites(oldName);
+						return { name: oldName, sites, files: new Set(sites.map((s) => s.path)).size, conflicts: [] };
+					},
+					symbol_rename_apply: ({ oldName }) => {
+						const sites = scanSites(oldName);
+						if (failNext) {
+							// The one-file failure: beta.c refused its write, everything else applied.
+							const applied = sites.filter((s) => s.path !== 'beta.c');
+							return {
+								applied: applied.length,
+								files: [...new Set(applied.map((s) => s.path))],
+								errors: [{ path: 'beta.c', message: 'post-write verification failed — the file was left untouched' }]
+							};
+						}
+						return { applied: sites.length, files: [...new Set(sites.map((s) => s.path))], errors: [] };
+					}
+				};
+				const baseInvoke = window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
+				window.__TAURI_INTERNALS__.invoke = (command, args) => {
+					const handler = Object.prototype.hasOwnProperty.call(renameHandlers, command) ? renameHandlers[command] : null;
+					if (!handler) return baseInvoke(command, args);
+					return Promise.resolve(handler(args || {}));
+				};
+
+				/* ---------- the stage: explanation, the failure toggle, jump log, the dialog ---------- */
+
+				await waitFor(() => document.querySelectorAll('#statusbar .status-item').length > 0, 30000);
+				const { openRenameDialog } = await import('/src/features/search/renameView.ts');
+
+				const opens = [];
+				const openLog = document.createElement('span');
+				openLog.style.cssText = 'margin-left:auto;color:#8ec07c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+
+				const button = (label, title) => {
+					const b = document.createElement('button');
+					b.textContent = label;
+					b.title = title;
+					b.style.cssText = 'font:11px monospace;padding:2px 10px;cursor:pointer;background:#333;color:#ddd;border:1px solid #555;border-radius:3px;';
+					return b;
+				};
+				const failToggle = button('next apply: succeeds', 'flip to make the next apply answer beta.c as failed');
+				failToggle.addEventListener('click', () => {
+					failNext = !failNext;
+					failToggle.textContent = failNext ? 'next apply: beta.c fails' : 'next apply: succeeds';
+				});
+
+				const bar = document.createElement('div');
+				bar.style.cssText = 'display:flex;gap:8px;align-items:center;padding:4px 10px;';
+				bar.append(document.createTextNode('rename:'), failToggle, openLog);
+
+				const note = document.createElement('div');
+				note.style.cssText = 'padding:4px 10px;color:#aaa;border-bottom:1px solid #444;line-height:1.5;';
+				note.textContent = 'RENAME FIXTURE (?rename=1) — the dialog below runs against the scripted plan: type a new name (e.g. gamma) and Preview. ' +
+					'Verify by eye: the plan lists alpha.c line 2 and beta.c line 3 (1-based, the real sites) and NOTHING from the comment lines 1 and 4 of beta.c — ' +
+					'a comment-mask leak would show a 3:1-based beta.c site there; the file heads fold; a site row logs its 1-based jump on the right; ' +
+					'the toggle makes the next Apply answer the one-file failure (the red beta.c line under the totals). Nothing is written to any file.';
+
+				const stage = document.createElement('div');
+				stage.id = 'rename-stage';
+				stage.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:8999;display:flex;flex-direction:column;' +
+					'background:var(--vscode-editor-background,#1e1e1e);color:var(--vscode-foreground,#ccc);border-top:2px solid #007acc;';
+				stage.append(note, bar);
+				document.body.appendChild(stage);
+
+				openRenameDialog({ old: 'alpha' }, {
+					onOpen: (path, line) => {
+						opens.push(path + ':' + line);
+						openLog.textContent = 'jumps: ' + opens.length + ' — last: ' + path + ':' + line + ' (1-based)';
+						console.log('[rename] open ' + path + ':' + line);
+					}
+				});
+			}
+		</script>
+		<script type="module">
 			// The full mode (?full=1): the harness's complete functional pass — every module's
 			// own self-test checks (the "all buttons" sweep the Help menu's Run Module
 			// Self-Tests page runs, executed here against the live workbench), then the two

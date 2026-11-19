@@ -1,13 +1,17 @@
 //! The relation queries behind the Relation window: one subject
-//! definition's inbound ring (`refsTo` — who references it) and outbound ring (`refsFrom`
-//! — what its body references), every child carried with the reference site that produced
-//! the edge. Inbound rides the same occurrence-narrowed whole-word scan Find References
+//! definition's inbound ring (`refsTo` — who references it), outbound ring (`refsFrom`
+//! — what its body references), and member ring (`contains` — the declarations whose
+//! container is the subject, the type's own fold-out), every child carried with the
+//! reference site that produced the edge. Inbound rides the same occurrence-narrowed
+//! whole-word scan Find References
 //! speaks, and the store's per-file def intervals attribute each raw hit to the definition
 //! that owns its line — so a declaration line is skipped and a call inside a caller's body
 //! names that caller. Hits the file's comment/string mask covers
 //! ([`crate::symbols::mask`]) are the comment's or string's own words, not code,
 //! and go. Outbound reads the subject's own file once and resolves every distinct word of
-//! its body — unmasked body words — against the store's declarations. Repeated sites of
+//! its body — unmasked body words — against the store's declarations. `contains` is a pure
+//! store query (the container is an interned name, `SymbolStore::members_of`) and needs no
+//! file reads at all. Repeated sites of
 //! one edge merge into the single node whose `edge_count` accumulates and whose
 //! `edge_line` keeps the earliest site — the callers-and-calls count, one node per
 //! counterpart. Nothing here materializes the index: each step asks
@@ -106,10 +110,12 @@ impl Budget {
 }
 
 /// `refsTo`: who references the subject. `refsFrom`: what the subject references.
+/// `contains`: the members declared inside the subject.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RelationDirection {
     RefsTo,
     RefsFrom,
+    Contains,
 }
 
 impl RelationDirection {
@@ -118,6 +124,7 @@ impl RelationDirection {
         match value {
             "refsTo" => Ok(RelationDirection::RefsTo),
             "refsFrom" => Ok(RelationDirection::RefsFrom),
+            "contains" => Ok(RelationDirection::Contains),
             other => Err(format!("unknown relation direction: {other}")),
         }
     }
@@ -188,9 +195,9 @@ pub fn relation_children_budgeted(
     let budget = Budget::after(budget_ms);
     match direction {
         RelationDirection::RefsTo => refs_to(root, store, name, MAX_NODES, true, &budget),
-        RelationDirection::RefsFrom => {
-            refs_from(store, name, path, line, MAX_NODES, true, &budget)
-        }
+        RelationDirection::RefsFrom => refs_from(store, name, path, line, MAX_NODES, true, &budget),
+        // A pure store query: no file read, no wall-clock budget to respect.
+        RelationDirection::Contains => contains_members(store, name, MAX_NODES, true),
     }
 }
 
@@ -467,8 +474,60 @@ fn refs_from(
 /// the direction with limit 1 and its flags off, which reads just the node's own file
 /// (the bounded read) and stops at the first unmasked edge.
 fn has_refs_from_children(store: &SymbolStore, target: &DefRow, budget: &Budget) -> bool {
-    refs_from(store, &target.name, &target.path, target.line, 1, false, budget)
-        .is_ok_and(|answer| !answer.nodes.is_empty())
+    refs_from(
+        store,
+        &target.name,
+        &target.path,
+        target.line,
+        1,
+        false,
+        budget,
+    )
+    .is_ok_and(|answer| !answer.nodes.is_empty())
+}
+
+/* ---------- contains ---------- */
+
+/// The subject's members: every declaration whose container is the subject's name, one
+/// store query (`members_of` — the container is an interned name, so the filter runs
+/// inside the store and only the hits leave it), path-then-line sorted, the node cap the
+/// ceiling — one member past it marks the ring truncated, never silently shortened. The
+/// edge is the member's own declaration (`edge_kind: "member"`, one site per member), and
+/// `has_children` peeks whether the member's name is itself a container — the nested-type
+/// fold-out the window drills into next (`container_names_among`, one scan for the whole
+/// ring). A root nothing declares members of — a plain function, an unknown name —
+/// answers the empty ring.
+fn contains_members(
+    store: &SymbolStore,
+    name: &str,
+    limit: usize,
+    with_flags: bool,
+) -> Result<RelationAnswer, String> {
+    let mut rows = store.members_of(name, limit.saturating_add(1));
+    let truncated = rows.len() > limit;
+    rows.truncate(limit);
+    let drillable = if with_flags && !rows.is_empty() {
+        let names: Vec<&str> = rows.iter().map(|(_, row)| row.name.as_str()).collect();
+        store.container_names_among(&names)
+    } else {
+        HashSet::new()
+    };
+    let nodes = rows
+        .into_iter()
+        .map(|(path, row)| RelationNode {
+            kind: row.kind.to_owned(),
+            container: row.container,
+            edge_count: 1,
+            edge_kind: "member".to_owned(),
+            edge_line: row.line,
+            edge_path: path.clone(),
+            has_children: with_flags && drillable.contains(&row.name),
+            line: row.line,
+            name: row.name,
+            path,
+        })
+        .collect();
+    Ok(RelationAnswer { nodes, truncated })
 }
 
 /// The subject's definition row: the exact `(path, line, name)` hit in that file's
@@ -513,73 +572,314 @@ fn keywords_for(path: &str) -> &'static [&'static str] {
 }
 
 const C_KEYWORDS: &[&str] = &[
-    "auto", "break", "case", "char", "const", "continue", "default", "do", "double",
-    "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long",
-    "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct",
-    "switch", "typedef", "union", "unsigned", "void", "volatile", "while",
+    "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
+    "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register",
+    "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef",
+    "union", "unsigned", "void", "volatile", "while",
 ];
 
 const CPP_KEYWORDS: &[&str] = &[
-    "auto", "bool", "break", "case", "catch", "char", "class", "const", "continue",
-    "default", "delete", "do", "double", "else", "enum", "explicit", "extern", "false",
-    "float", "for", "friend", "goto", "if", "inline", "int", "long", "mutable",
-    "namespace", "new", "nullptr", "operator", "private", "protected", "public",
-    "register", "return", "short", "signed", "sizeof", "static", "struct", "switch",
-    "template", "this", "throw", "true", "try", "typedef", "typename", "union",
-    "unsigned", "using", "virtual", "void", "volatile", "while",
+    "auto",
+    "bool",
+    "break",
+    "case",
+    "catch",
+    "char",
+    "class",
+    "const",
+    "continue",
+    "default",
+    "delete",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "explicit",
+    "extern",
+    "false",
+    "float",
+    "for",
+    "friend",
+    "goto",
+    "if",
+    "inline",
+    "int",
+    "long",
+    "mutable",
+    "namespace",
+    "new",
+    "nullptr",
+    "operator",
+    "private",
+    "protected",
+    "public",
+    "register",
+    "return",
+    "short",
+    "signed",
+    "sizeof",
+    "static",
+    "struct",
+    "switch",
+    "template",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typedef",
+    "typename",
+    "union",
+    "unsigned",
+    "using",
+    "virtual",
+    "void",
+    "volatile",
+    "while",
 ];
 
 const RUST_KEYWORDS: &[&str] = &[
-    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else",
-    "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match",
-    "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct",
-    "super", "trait", "true", "type", "unsafe", "use", "where", "while",
+    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern",
+    "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub",
+    "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type",
+    "unsafe", "use", "where", "while",
 ];
 
 const PYTHON_KEYWORDS: &[&str] = &[
-    "and", "as", "assert", "async", "await", "break", "class", "continue", "def",
-    "del", "elif", "else", "except", "False", "finally", "for", "from", "global", "if",
-    "import", "in", "is", "lambda", "None", "nonlocal", "not", "or", "pass", "raise",
-    "return", "True", "try", "while", "with", "yield",
+    "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif",
+    "else", "except", "False", "finally", "for", "from", "global", "if", "import", "in", "is",
+    "lambda", "None", "nonlocal", "not", "or", "pass", "raise", "return", "True", "try", "while",
+    "with", "yield",
 ];
 
 const GO_KEYWORDS: &[&str] = &[
-    "break", "case", "chan", "const", "continue", "default", "defer", "else",
-    "fallthrough", "false", "for", "func", "go", "goto", "if", "import", "interface",
-    "map", "nil", "package", "range", "return", "select", "struct", "switch", "true",
-    "type", "var",
+    "break",
+    "case",
+    "chan",
+    "const",
+    "continue",
+    "default",
+    "defer",
+    "else",
+    "fallthrough",
+    "false",
+    "for",
+    "func",
+    "go",
+    "goto",
+    "if",
+    "import",
+    "interface",
+    "map",
+    "nil",
+    "package",
+    "range",
+    "return",
+    "select",
+    "struct",
+    "switch",
+    "true",
+    "type",
+    "var",
 ];
 
 const JS_KEYWORDS: &[&str] = &[
-    "abstract", "as", "async", "await", "break", "case", "catch", "class", "const",
-    "continue", "debugger", "declare", "default", "delete", "do", "else", "enum",
-    "export", "extends", "false", "finally", "for", "from", "function", "get", "if",
-    "implements", "import", "in", "infer", "instanceof", "interface", "is", "keyof",
-    "let", "namespace", "new", "null", "of", "private", "protected", "public",
-    "readonly", "return", "set", "static", "super", "switch", "this", "throw", "true",
-    "try", "type", "typeof", "undefined", "var", "void", "while", "yield",
+    "abstract",
+    "as",
+    "async",
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "declare",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "from",
+    "function",
+    "get",
+    "if",
+    "implements",
+    "import",
+    "in",
+    "infer",
+    "instanceof",
+    "interface",
+    "is",
+    "keyof",
+    "let",
+    "namespace",
+    "new",
+    "null",
+    "of",
+    "private",
+    "protected",
+    "public",
+    "readonly",
+    "return",
+    "set",
+    "static",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "type",
+    "typeof",
+    "undefined",
+    "var",
+    "void",
+    "while",
+    "yield",
 ];
 
 const JAVA_KEYWORDS: &[&str] = &[
-    "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class",
-    "continue", "default", "do", "double", "else", "enum", "extends", "false", "final",
-    "finally", "float", "for", "if", "implements", "import", "instanceof", "int",
-    "interface", "long", "native", "new", "null", "package", "private", "protected",
-    "public", "return", "short", "static", "super", "switch", "synchronized", "this",
-    "throw", "throws", "transient", "true", "try", "void", "volatile", "while",
+    "abstract",
+    "assert",
+    "boolean",
+    "break",
+    "byte",
+    "case",
+    "catch",
+    "char",
+    "class",
+    "continue",
+    "default",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "extends",
+    "false",
+    "final",
+    "finally",
+    "float",
+    "for",
+    "if",
+    "implements",
+    "import",
+    "instanceof",
+    "int",
+    "interface",
+    "long",
+    "native",
+    "new",
+    "null",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "short",
+    "static",
+    "super",
+    "switch",
+    "synchronized",
+    "this",
+    "throw",
+    "throws",
+    "transient",
+    "true",
+    "try",
+    "void",
+    "volatile",
+    "while",
 ];
 
 const CSHARP_KEYWORDS: &[&str] = &[
-    "abstract", "as", "async", "await", "base", "bool", "break", "byte", "case",
-    "catch", "char", "checked", "class", "const", "continue", "decimal", "default",
-    "delegate", "do", "double", "else", "enum", "event", "explicit", "extern", "false",
-    "finally", "fixed", "float", "for", "foreach", "goto", "if", "implicit", "in",
-    "int", "interface", "internal", "is", "lock", "long", "namespace", "new", "null",
-    "object", "operator", "out", "override", "params", "private", "protected", "public",
-    "readonly", "ref", "return", "sbyte", "sealed", "short", "sizeof", "stackalloc",
-    "static", "string", "struct", "switch", "this", "throw", "true", "try", "typeof",
-    "uint", "ulong", "unchecked", "unsafe", "ushort", "using", "var", "virtual", "void",
-    "volatile", "when", "while", "yield",
+    "abstract",
+    "as",
+    "async",
+    "await",
+    "base",
+    "bool",
+    "break",
+    "byte",
+    "case",
+    "catch",
+    "char",
+    "checked",
+    "class",
+    "const",
+    "continue",
+    "decimal",
+    "default",
+    "delegate",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "event",
+    "explicit",
+    "extern",
+    "false",
+    "finally",
+    "fixed",
+    "float",
+    "for",
+    "foreach",
+    "goto",
+    "if",
+    "implicit",
+    "in",
+    "int",
+    "interface",
+    "internal",
+    "is",
+    "lock",
+    "long",
+    "namespace",
+    "new",
+    "null",
+    "object",
+    "operator",
+    "out",
+    "override",
+    "params",
+    "private",
+    "protected",
+    "public",
+    "readonly",
+    "ref",
+    "return",
+    "sbyte",
+    "sealed",
+    "short",
+    "sizeof",
+    "stackalloc",
+    "static",
+    "string",
+    "struct",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "uint",
+    "ulong",
+    "unchecked",
+    "unsafe",
+    "ushort",
+    "using",
+    "var",
+    "virtual",
+    "void",
+    "volatile",
+    "when",
+    "while",
+    "yield",
 ];
 
 #[cfg(test)]
@@ -645,7 +945,14 @@ mod tests {
         ]);
         let root = store.root().to_owned();
 
-        let nodes = children(&store, &root, "alpha", "src/a.c", 1, RelationDirection::RefsTo);
+        let nodes = children(
+            &store,
+            &root,
+            "alpha",
+            "src/a.c",
+            1,
+            RelationDirection::RefsTo,
+        );
         // The util.h prototype sits outside every def interval (skipped unattributed);
         // alpha's own declaration line (a.c line 1) and wrap's two same-line calls
         // (deduped) leave exactly the two callers, earliest edge first.
@@ -721,7 +1028,11 @@ mod tests {
             5,
             RelationDirection::RefsFrom,
         );
-        assert_eq!(nodes.len(), 2, "alpha twice collapses, locals never resolve");
+        assert_eq!(
+            nodes.len(),
+            2,
+            "alpha twice collapses, locals never resolve"
+        );
         assert_eq!(
             (
                 nodes[0].name.as_str(),
@@ -815,7 +1126,7 @@ mod tests {
         assert!(nodes.is_empty());
     }
 
-    /// The direction parses only the two wire spellings; anything else is an error.
+    /// The direction parses only the wire spellings; anything else is an error.
     #[test]
     fn direction_parses_the_wire_spelling_only() {
         assert_eq!(
@@ -826,8 +1137,142 @@ mod tests {
             RelationDirection::parse("refsFrom"),
             Ok(RelationDirection::RefsFrom)
         );
+        assert_eq!(
+            RelationDirection::parse("contains"),
+            Ok(RelationDirection::Contains)
+        );
         assert!(RelationDirection::parse("sideways").is_err());
         assert!(RelationDirection::parse("").is_err());
+    }
+
+    /// The contains ring: a receiver type's methods across files, path-then-line sorted,
+    /// every edge the member's own declaration (`member`, one site), leaves not drillable.
+    #[test]
+    fn contains_lists_members_across_files_sorted() {
+        let (_dir, store) = seeded(&[
+            (
+                "a.go",
+                "package app\n\ntype Widget struct{}\nfunc (w Widget) Draw() {}\n",
+            ),
+            ("b.go", "package app\n\nfunc (w Widget) Spin() {}\n"),
+        ]);
+        let nodes = children(
+            &store,
+            store.root(),
+            "Widget",
+            "a.go",
+            2,
+            RelationDirection::Contains,
+        );
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(
+            (
+                nodes[0].name.as_str(),
+                nodes[0].kind.as_str(),
+                nodes[0].container.as_deref(),
+                nodes[0].path.as_str(),
+                nodes[0].line,
+                nodes[0].edge_path.as_str(),
+                nodes[0].edge_line,
+                nodes[0].edge_kind.as_str(),
+                nodes[0].edge_count
+            ),
+            (
+                "Draw",
+                "method",
+                Some("Widget"),
+                "a.go",
+                3,
+                "a.go",
+                3,
+                "member",
+                1
+            )
+        );
+        assert_eq!(
+            (
+                nodes[1].name.as_str(),
+                nodes[1].path.as_str(),
+                nodes[1].line
+            ),
+            ("Spin", "b.go", 2)
+        );
+        assert!(!nodes[0].has_children);
+        assert!(!nodes[1].has_children);
+    }
+
+    /// A member whose name is itself a container drills — the peek is the same members
+    /// query (a method named after another type) — while a leaf stays closed; a member
+    /// past the cap marks the ring truncated.
+    #[test]
+    fn contains_drills_into_nested_types_and_marks_truncation() {
+        let (_dir, store) = seeded(&[(
+            "a.go",
+            "package app\n\ntype Hub struct{}\nfunc (h Hub) Run() {}\n\ntype Port struct{}\nfunc (p Port) Hub() {}\nfunc (p Port) Open() {}\n",
+        )]);
+        let nodes = children(
+            &store,
+            store.root(),
+            "Port",
+            "a.go",
+            5,
+            RelationDirection::Contains,
+        );
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(
+            (
+                nodes[0].name.as_str(),
+                nodes[0].has_children,
+                nodes[1].name.as_str(),
+                nodes[1].has_children
+            ),
+            ("Hub", true, "Open", false)
+        );
+
+        // The cap: a type with MAX_NODES + 1 members truncates and says so.
+        let mut big = String::from("package app\n\ntype Massive struct{}\n");
+        for i in 0..=MAX_NODES {
+            big.push_str(&format!("func (m Massive) M{i:03}() {{}}\n"));
+        }
+        let (_big_dir, big_store) = seeded(&[("big.go", big.as_str())]);
+        let ans = answer(
+            &big_store,
+            big_store.root(),
+            "Massive",
+            "big.go",
+            2,
+            RelationDirection::Contains,
+        );
+        assert_eq!(ans.nodes.len(), MAX_NODES);
+        assert!(ans.truncated);
+    }
+
+    /// A root nothing declares members of — a plain function's name, an unknown name —
+    /// answers the empty ring, not an error.
+    #[test]
+    fn contains_answers_empty_for_a_memberless_root() {
+        let (_dir, store) = seeded(&[(
+            "a.go",
+            "package app\n\ntype Hub struct{}\nfunc (h Hub) Run() {}\n",
+        )]);
+        let nodes = children(
+            &store,
+            store.root(),
+            "Run",
+            "a.go",
+            3,
+            RelationDirection::Contains,
+        );
+        assert!(nodes.is_empty());
+        let nodes = children(
+            &store,
+            store.root(),
+            "nowhere",
+            "a.go",
+            0,
+            RelationDirection::Contains,
+        );
+        assert!(nodes.is_empty());
     }
 
     /// The ring truncates at the cap: 505 callers of one hub yield exactly 500 nodes,
@@ -850,7 +1295,9 @@ mod tests {
         );
         assert_eq!(nodes.len(), MAX_NODES);
         assert_eq!(nodes[0].name, "caller000");
-        assert!(nodes.windows(2).all(|pair| pair[0].edge_line <= pair[1].edge_line));
+        assert!(nodes
+            .windows(2)
+            .all(|pair| pair[0].edge_line <= pair[1].edge_line));
         assert!(nodes
             .iter()
             .all(|node| node.edge_kind == "call" && node.path == "big.c"));
@@ -872,7 +1319,14 @@ mod tests {
             ),
         ]);
         let root = store.root().to_owned();
-        let nodes = children(&store, &root, "alpha", "src/a.c", 0, RelationDirection::RefsTo);
+        let nodes = children(
+            &store,
+            &root,
+            "alpha",
+            "src/a.c",
+            0,
+            RelationDirection::RefsTo,
+        );
         assert_eq!(nodes.len(), 1, "only delta's real call survives");
         assert_eq!(
             (nodes[0].name.as_str(), nodes[0].line, nodes[0].edge_line),
@@ -891,7 +1345,14 @@ mod tests {
             ),
         ]);
         let root = store.root().to_owned();
-        let nodes = children(&store, &root, "alpha", "src/a.c", 0, RelationDirection::RefsTo);
+        let nodes = children(
+            &store,
+            &root,
+            "alpha",
+            "src/a.c",
+            0,
+            RelationDirection::RefsTo,
+        );
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].name, "gamma");
     }
