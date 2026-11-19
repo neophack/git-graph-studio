@@ -1,7 +1,10 @@
 //! Start at login, and come back after a crash (docs/ggs-remote-plan.md §7.12): a Windows
 //! scheduled task (logon trigger, restart on failure — a service would run in session 0,
 //! without a tray), a macOS LaunchAgent with `KeepAlive`, a Linux XDG autostart entry (plus
-//! a systemd user unit example in the README for crash restarts). The binary itself is
+//! a systemd user unit example in the README for crash restarts). The registered command
+//! runs the stable copy in `~/.ggs/remote/bin` (`login_start_binary`), never the extension
+//! directory this CLI was spawned from — a login start holding a version's extension
+//! directory blocked every bundled upgrade of it on Windows. The binary itself is
 //! `windows_subsystem = "windows"` on Windows, so a login start allocates no console — the
 //! black window the task used to show; main.rs reattaches one on demand for terminal runs.
 
@@ -13,6 +16,32 @@ const AGENT_LABEL: &str = "dev.ggs.remote";
 
 fn exe() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|e| format!("locate the daemon executable: {e}"))
+}
+
+/// The binary the login start runs: the stable installed copy in `~/.ggs/remote/bin`
+/// whenever one exists — never the extension directory the CLI itself runs from. A login
+/// start naming an extension directory pinned that version's directory for the daemon's
+/// whole life: every bundled upgrade then had to move a directory the login-started
+/// daemon was running out of, and Windows refuses to rename a directory holding a
+/// running exe — the upgrade failed at every boot and the login console the owner
+/// reported (2026-11-19) never went away. The stable copy is replaced in place, never
+/// renamed away, so the login start survives every extension upgrade and holds no store
+/// directory. Before the first install there is no stable copy; the current exe stands
+/// in, exactly as it always did.
+fn login_start_binary(paths: Option<&crate::paths::Paths>, current: PathBuf) -> PathBuf {
+    match paths.map(crate::client::installed_binary) {
+        Some(installed) if installed.is_file() => installed,
+        _ => current,
+    }
+}
+
+/// The login start's binary, resolving the paths here (the callers' signatures stay as
+/// they are): the stable copy when it exists, the running exe otherwise.
+fn login_start_exe() -> Result<PathBuf, String> {
+    Ok(login_start_binary(
+        crate::paths::Paths::resolve().ok().as_ref(),
+        exe()?,
+    ))
 }
 
 pub fn apply(enabled: bool) -> Result<(), String> {
@@ -61,7 +90,7 @@ fn task_xml(exe: &str) -> String {
 #[cfg(windows)]
 fn enable() -> Result<(), String> {
     use std::os::windows::process::CommandExt;
-    let exe = exe()?;
+    let exe = login_start_exe()?;
     let xml = task_xml(&exe.to_string_lossy());
     let file = std::env::temp_dir().join(format!("ggs-remote-task-{}.xml", std::process::id()));
     // schtasks reads the XML as UTF-16 LE with a BOM.
@@ -143,7 +172,7 @@ fn agent_path() -> Result<PathBuf, String> {
 
 #[cfg(target_os = "macos")]
 fn enable() -> Result<(), String> {
-    let exe = exe()?;
+    let exe = login_start_exe()?;
     let esc = |s: &str| {
         s.replace('&', "&amp;")
             .replace('<', "&lt;")
@@ -193,7 +222,7 @@ fn desktop_path() -> Result<PathBuf, String> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn enable() -> Result<(), String> {
-    let exe = exe()?;
+    let exe = login_start_exe()?;
     let entry = format!(
         "[Desktop Entry]\nType=Application\nName=GGS Remote\nComment=Remote access to Git Graph Studio\nExec=\"{}\" run\nX-GNOME-Autostart-enabled=true\nNoDisplay=true\n",
         exe.display()
@@ -221,5 +250,35 @@ mod tests {
         let xml = super::task_xml(r#"C:\A&B\ggs-remote.exe"#);
         assert!(xml.contains("C:\\A&amp;B\\ggs-remote.exe"));
         assert!(xml.contains("<RestartOnFailure>"));
+    }
+}
+
+#[cfg(test)]
+mod login_start_tests {
+    use super::login_start_binary;
+    use crate::paths::Paths;
+    use std::path::PathBuf;
+
+    #[test]
+    fn the_login_start_runs_the_stable_copy_once_one_is_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: tmp.path().to_path_buf(),
+            ggs_home: tmp.path().to_path_buf(),
+        };
+        let current =
+            PathBuf::from("/extensions/ggs.ggs-remote-0.1.3/bin/win32-x64/ggs-remote.exe");
+        // Before the first install there is no stable copy: the running exe stands in,
+        // exactly as the registration always did.
+        assert_eq!(login_start_binary(Some(&paths), current.clone()), current);
+        assert_eq!(login_start_binary(None, current.clone()), current);
+        // Once the stable copy exists the login start names it alone — the extension
+        // directory is never pinned by the scheduled task, the LaunchAgent or the
+        // desktop entry, so no upgrade of the extension has to move a directory the
+        // login-started daemon lives in.
+        let installed = crate::client::installed_binary(&paths);
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, b"daemon").unwrap();
+        assert_eq!(login_start_binary(Some(&paths), current), installed);
     }
 }

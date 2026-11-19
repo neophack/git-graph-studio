@@ -259,6 +259,95 @@
         assert!(refresh_bundled_installs_in(&exts, &packages).is_empty());
     }
 
+    /// The upgrade of an old directory a running binary holds (the login-started GGS
+    /// Remote daemon inside its old extension version's `bin/` — the one process no app
+    /// owns and no swap can ask to exit, 2026-11-19): the new install lands BESIDE the
+    /// held one instead of failing at every boot, the listing serves the newer version,
+    /// and once the holder is gone the next boot's sweep retires the leftover. The
+    /// no-sharing handle holds the directory exactly the way a running exe does.
+    #[cfg(windows)]
+    #[test]
+    fn an_upgrade_lands_beside_a_held_old_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let old = make_vsix(tmp.path(), "demo", "acme", "1.0.0", false);
+        install_from_vsix_into(&exts, &old, true).unwrap();
+        let held = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(exts.join("acme.demo-1.0.0/package.json"))
+                .unwrap()
+        };
+
+        let bundled = make_vsix(tmp.path(), "demo", "acme", "1.2.0", true);
+        let (capabilities, manifest) = bundled_of(&bundled).unwrap();
+        let packages = [BundledPackage {
+            id: capabilities.id.clone(),
+            path: bundled.clone(),
+            manifest,
+            capabilities,
+        }];
+        let outcomes = refresh_bundled_installs_in(&exts, &packages);
+        assert_eq!(outcomes.len(), 1);
+        assert!(outcomes[0].is_ok(), "{outcomes:?}");
+        assert!(exts.join("acme.demo-1.2.0/data/payload.bin").exists());
+        // The held directory stays whole, beside the new install — never gutted.
+        assert!(exts.join("acme.demo-1.0.0/package.json").exists());
+        assert_eq!(
+            installed_dir(&exts, "acme.demo").unwrap(),
+            exts.join("acme.demo-1.2.0")
+        );
+
+        // The daemon exits: a later boot sweeps the leftover away, and leaves the
+        // current install alone.
+        drop(held);
+        assert!(refresh_bundled_installs_in(&exts, &packages).is_empty());
+        assert!(!exts.join("acme.demo-1.0.0").exists());
+        assert!(exts.join("acme.demo-1.2.0/data/payload.bin").exists());
+    }
+
+    /// The leftover a blocked upgrade leaves behind is swept by a later boot even when
+    /// that boot has nothing to upgrade or refresh — cross-platform, so the sweep itself
+    /// is proven wherever the suite runs (the held-directory half above is Windows-only).
+    #[test]
+    fn a_leftover_of_a_blocked_upgrade_is_swept_by_a_later_boot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exts = tmp.path().join("extensions");
+        std::fs::create_dir_all(&exts).unwrap();
+        let old = make_vsix(tmp.path(), "demo", "acme", "1.0.0", false);
+        install_from_vsix_into(&exts, &old, true).unwrap();
+        let bundled = make_vsix(tmp.path(), "demo", "acme", "1.2.0", true);
+        let (capabilities, manifest) = bundled_of(&bundled).unwrap();
+        let packages = [BundledPackage {
+            id: capabilities.id.clone(),
+            path: bundled.clone(),
+            manifest,
+            capabilities,
+        }];
+        let outcomes = refresh_bundled_installs_in(&exts, &packages);
+        assert_eq!(outcomes.len(), 1);
+        assert!(outcomes[0].is_ok(), "{outcomes:?}");
+        // The leftover the held directory became: still standing beside the new install.
+        std::fs::create_dir_all(exts.join("acme.demo-1.0.0/bin/win32-x64")).unwrap();
+        std::fs::write(exts.join("acme.demo-1.0.0/bin/win32-x64/ggs-remote.exe"), b"held").unwrap();
+        assert_eq!(
+            installed_dir(&exts, "acme.demo").unwrap(),
+            exts.join("acme.demo-1.2.0")
+        );
+
+        // A boot with nothing to upgrade and nothing to refresh still sweeps it.
+        assert!(refresh_bundled_installs_in(&exts, &packages).is_empty());
+        assert!(!exts.join("acme.demo-1.0.0").exists());
+        assert!(exts.join("acme.demo-1.2.0/data/payload.bin").exists());
+        assert_eq!(
+            installed_dir(&exts, "acme.demo").unwrap(),
+            exts.join("acme.demo-1.2.0")
+        );
+    }
+
     #[test]
     fn an_install_newer_than_the_bundled_package_is_never_downgraded() {
         let tmp = tempfile::tempdir().unwrap();

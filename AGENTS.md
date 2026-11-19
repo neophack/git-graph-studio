@@ -778,7 +778,13 @@ stays uninstalled: the boot pass brings only *installed* packages current — a 
 newer than an install upgrades it forward-only (the install hides the Extensions view's
 bundled offer, so this is the id's only update channel), and the same version unpacked
 from an older build is refreshed by its recorded build stamp — but nothing installs from
-nothing.
+nothing. The swap is per-directory best-effort since 2026-11-19: an install directory a
+running binary holds (ggs-remote's login-started daemon inside an old extension version's
+`bin/` — the one process no app owns and no swap can ask to exit) no longer blocks the
+refresh — the newer version lands BESIDE the held directory, the listing serves the
+newest, and the next boot's sweep retires the leftover once its holder is gone; only the
+same-version refresh, whose staged directory must take the held one's exact name, still
+waits for a freer boot.
 
 **The AI provider bridge** (2026-09-29): the claude-code backend runs under a chosen
 model provider — the official Claude service or any Anthropic-compatible endpoint
@@ -2675,7 +2681,11 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   never opens a desktop once for the `ggs-remote` VSIX to exist: the daemon installs,
   starts and registers its login autostart inside the same command (the bare
   `ggs-config` sidecar keeps the extract-from-VSIX path — it cannot reach the app-side
-  install); `find_daemon` carries the installed extension's directory alongside the
+  install); the login start itself names the stable copy in `~/.ggs/remote/bin`
+  (`autostart.rs`'s `login_start_binary`, 2026-11-19), never the extension directory the
+  CLI was spawned from — a login-started daemon holding a version's extension directory
+  blocked every bundled upgrade of it on Windows (the boot-console report of that day);
+  `find_daemon` carries the installed extension's directory alongside the
   running copy too, so every `ggs config` re-records it and the daemon's retirement
   check never goes stale on a box where no window's activation refreshes the path; and
   `bind` is honoured in every TLS mode — the daemon's `effective_bind` no longer narrows

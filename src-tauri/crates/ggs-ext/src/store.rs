@@ -451,8 +451,11 @@ pub fn bundled_vsix_packages_in(roots: &[PathBuf]) -> Vec<std::path::PathBuf> {
 /// that rebuilt the package without bumping it); an installed NEWER version is never
 /// downgraded; and nothing is installed that was not installed already — a deliberate
 /// uninstall survives every launch. The replacement carries the replaced install's own
-/// builtin flag. Run before any backend starts — a running binary holds its directory.
-/// Returns one line per refreshed, upgraded or failed package, for the boot log.
+/// builtin flag. Run before any backend starts — a running binary holds its directory —
+/// except the one binary no app owns: a login-started daemon living inside an old
+/// extension version's directory, which the swap lands beside instead (see
+/// `replace_install`) and this pass's sweep retires once it is gone. Returns one line per
+/// refreshed, upgraded or failed package, for the boot log.
 pub fn refresh_bundled_installs_in(
     dir: &Path,
     packages: &[BundledPackage],
@@ -477,6 +480,15 @@ pub fn refresh_bundled_installs_in(
         let Some(meta) = install_meta(&newest_dir) else {
             continue; // an install whose own metadata cannot be read is left as it is
         };
+        // A prior upgrade may have landed beside a stale directory it could not retire —
+        // a running binary held it (the login-started GGS Remote daemon inside an old
+        // extension version's directory, the one process the swap cannot ask to exit).
+        // Once the holder is gone this sweep retires the leftover; while it is not, the
+        // sweep silently waits for the next boot. Only directories older than the newest
+        // install, and only this id's own.
+        for leftover in dirs.iter().filter(|d| **d != newest_dir) {
+            retire_stale(leftover);
+        }
         let outcome = match compare_versions(newest, version) {
             std::cmp::Ordering::Greater => continue,
             std::cmp::Ordering::Less => {
@@ -512,10 +524,14 @@ pub fn refresh_bundled_installs_in(
 /// is renamed in — under its own `{id}-{version}` name, which in an upgrade differs from the
 /// stale ones (the listing derives an install's version from its directory name). On Windows
 /// a directory holding a running binary refuses the rename as a whole — the install app's
-/// upgrade launches the new app while the old one's backend is still exiting — so the swap
-/// retries for a few seconds before giving up (the next boot tries again: the recorded build
-/// still differs, the version still differs). `builtin` carries the replaced install's own
-/// flag.
+/// upgrade launches the new app while the old one's backend is still exiting — so each rename
+/// retries for a few seconds. A stale directory still held after the patience (the
+/// login-started GGS Remote daemon inside an old extension version's directory — the one
+/// process this swap cannot ask to exit, 2026-11-19) no longer blocks the swap: the new
+/// install lands beside it and the listing serves the newer version, and the next boot's
+/// sweep retires the leftover once nothing holds it. The one exception is the same-version
+/// refresh, whose staged directory must take the held one's exact name — that still waits
+/// for the next boot. `builtin` carries the replaced install's own flag.
 fn replace_install(
     dir: &Path,
     stale: &[PathBuf],
@@ -531,6 +547,7 @@ fn replace_install(
         let info = install_from_vsix_into(&scratch, package, builtin)?;
         let staged = scratch.join(format!("{}-{}", info.id, info.version));
         record_bundled_stamp(&staged, package);
+        let target = dir.join(format!("{}-{}", info.id, info.version));
         let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
         for (index, old) in stale.iter().enumerate() {
             let aside = scratch.join(format!("stale-{index}"));
@@ -545,11 +562,25 @@ fn replace_install(
                         attempt += 1;
                         std::thread::sleep(std::time::Duration::from_millis(250));
                     }
-                    Err(e) => return Err(format!("the install is in use ({e}); close every Git Graph Studio window and start it again")),
+                    Err(e) => {
+                        // The same-version refresh renames the staged directory in under
+                        // this very name; a directory still held under it leaves the swap
+                        // nowhere to land. An upgrade never collides — its target name
+                        // differs — so there the held directory simply stays beside the
+                        // new install until the sweep retires it.
+                        if old == &target {
+                            for (old, aside) in &moved {
+                                let _ = std::fs::rename(aside, old);
+                            }
+                            return Err(format!(
+                                "the install is in use ({e}); close every Git Graph Studio window and start it again"
+                            ));
+                        }
+                        break;
+                    }
                 }
             }
         }
-        let target = dir.join(format!("{}-{}", info.id, info.version));
         if let Err(e) = std::fs::rename(&staged, &target) {
             // Put the old installs back rather than leave none.
             for (old, aside) in &moved {
@@ -561,6 +592,21 @@ fn replace_install(
     })();
     let _ = std::fs::remove_dir_all(&scratch);
     result
+}
+
+/// Move an install directory out of the listing's way and delete it, whole: the rename
+/// either takes the directory untouched or refuses (Windows: a running binary inside),
+/// so a held directory is never gutted by a partial delete. Best-effort and silent —
+/// the callers' next attempt is simply the next boot. The dot-name keeps the leftover
+/// out of the version listing while it waits for its delete.
+fn retire_stale(stale: &Path) {
+    let Some(name) = stale.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let aside = stale.with_file_name(format!(".retired-{name}-{}", std::process::id()));
+    if std::fs::rename(stale, &aside).is_ok() {
+        let _ = std::fs::remove_dir_all(&aside);
+    }
 }
 
 /// An extension's own storage directories — VS Code's `globalStorageUri`, `storageUri`
@@ -744,8 +790,12 @@ pub fn install_from_vsix_into(dir: &Path, vsix: &Path, builtin: bool) -> Result<
                 return Err(format!("{id} {existing} is already installed"))
             }
             std::cmp::Ordering::Less => {
-                remove_dir_all_retrying(&existing_dir)
-                    .map_err(|e| format!("remove old {id} {existing}: {e}"))?;
+                // An older version's directory a running binary holds (the GGS Remote
+                // daemon inside its old extension directory — the one process no install
+                // can ask to exit) must not block the upgrade: retire it when nothing
+                // holds it, otherwise leave it whole for the boot pass's sweep — the
+                // listing serves the newest version either way.
+                retire_stale(&existing_dir);
             }
         }
     }
