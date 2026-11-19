@@ -1689,11 +1689,15 @@ Everything that turns the source tree into installers: asset assembly into
 - Signing: installer signing is decided from CI secrets, never in the sources —
   `scripts/signing.mjs` writes the `tauri build --config` merge file each build reads
   (the ad-hoc bundle seal when no secrets are configured; a quarantined download of it
-  meets Gatekeeper's un-bypassable "damaged" verdict on Sequoia — the 0.1.5 dmg, with no
-  seal at all, shipped exactly that way — so `scripts/install-macos.sh` (2026-09-30) is
-  the account-less macOS install channel: a curl download sets no quarantine attribute,
-  so what it installs opens on the first click; Homebrew is no way round it either,
-  brew stamping its own quarantine onto every cask), and `scripts/gen-signing-secrets.mjs`
+  meets Gatekeeper's "damaged" verdict on Sequoia — no dialog escape, but the attribute
+  itself is removable by hand (`xattr -dr com.apple.quarantine` on the installed .app;
+  the README's install section documents the line and release.yml's release body carries
+  it, 2026-11-19) — the 0.1.5 dmg, with no seal at all, shipped exactly that way — so
+  `scripts/install-macos.sh` (2026-09-30) is the account-less macOS install channel:
+  a curl download sets no quarantine attribute, so what it installs opens on the first
+  click, and the script auto-strips any quarantine it nevertheless finds on the installed
+  bundle (2026-11-19, was warning-and-fail); Homebrew is no way round it either, brew
+  stamping its own quarantine onto every cask), and `scripts/gen-signing-secrets.mjs`
   turns the local
   certificate files into exactly the secret values GitHub expects (`--apply` pushes them
   with `gh secret set`). macOS: Developer ID certificate (`APPLE_CERTIFICATE` /

@@ -276,11 +276,13 @@ it, so the floor is the webview's, not glibc's.
 
 Without the Apple signing secrets (below) the dmg carries only the ad-hoc bundle seal, and
 a **browser-downloaded** dmg is quarantined by macOS — Sequoia's Gatekeeper answers that
-with the un-bypassable "*damaged, move it to the Trash*" dialog (the right-click → Open
-and "Open Anyway" escapes only exist for apps a Developer ID has signed; Homebrew is no
+with the "*damaged, move it to the Trash*" dialog (no right-click → Open and no "Open
+Anyway"; those escapes only exist for apps a Developer ID has signed, and Homebrew is no
 way round either, since brew stamps its own quarantine onto every cask install). The
 account-less install channel is the installer script — **curl sets no quarantine
-attribute, so what it installs opens on the first click**, no manual `xattr -dr`:
+attribute, so what it installs opens on the first click**, and any quarantine that
+lands anyway is cleared automatically at the end of the install — no manual
+`xattr -dr`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/neophack/git-graph-studio/main/scripts/install-macos.sh | sh
@@ -291,8 +293,18 @@ SHA256 against the release's `SHA256SUMS`, and copies the app to `/Applications`
 `~/Applications` when that is not writable); pass a version (`bash scripts/install-macos.sh
 0.1.7`) or set `GGS_INSTALL_DIR` to choose the target. The manual equivalent is
 downloading the dmg with `curl -LO` yourself — the same effect, since only browsers
-quarantine. Once the Developer ID and notarization secrets are configured, the
-browser-downloaded dmg opens directly and the script becomes unnecessary.
+quarantine.
+
+Already installed a browser-downloaded dmg? The quarantine attribute rode along with it —
+one command clears it, after which the app opens on the next click:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/Git Graph Studio.app"
+```
+
+(point the path at `~/Applications` if that is where the app landed). Once the Developer ID
+and notarization secrets are configured, the browser-downloaded dmg opens directly and the
+script becomes unnecessary.
 
 ### Code signing
 
@@ -300,11 +312,12 @@ Signing is decided from repository **secrets**, never from the sources:
 [`scripts/signing.mjs`](scripts/signing.mjs) writes the `tauri build --config` merge each
 installer build reads. With the secrets configured the installers are fully signed;
 without them the builds degrade instead of failing — macOS to the ad-hoc bundle seal,
-which a quarantined (browser-downloaded) copy meets as the un-bypassable *damaged*
-verdict on Sequoia — right-click → Open is gone, and "Open Anyway" only ever applied to
-signed-but-unnotarized apps — so [the installer script](#installing-a-macos-release) is
-the account-less channel while no secrets exist; Windows and Linux degrade to unsigned
-as before.
+which a quarantined (browser-downloaded) copy meets as the *damaged* verdict on Sequoia —
+right-click → Open is gone, and "Open Anyway" only ever applied to signed-but-unnotarized
+apps — so [the installer script](#installing-a-macos-release) is the account-less channel
+while no secrets exist (a browser-installed copy stays rescuable by hand: the
+`xattr -dr com.apple.quarantine` line that section documents); Windows and Linux degrade
+to unsigned as before.
 
 Generate the secret values from the local certificate files in one step — base64, the
 signing identity derived from the P12, the GPG export — and `--apply` pushes them

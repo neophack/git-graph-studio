@@ -5,7 +5,9 @@
 # com.apple.quarantine attribute (only LSFileQuarantineEnabled apps — browsers,
 # Mail, AirDrop — do), so an app this script installs is never handed to
 # Gatekeeper and opens on the first click: no "damaged" dialog, no manual
-# `xattr -dr`. That is the account-less answer for the ad-hoc sealed dmg the CI
+# `xattr -dr` — and any quarantine that lands on the bundle anyway is stripped
+# automatically at the end of the install. That is the account-less answer for
+# the ad-hoc sealed dmg the CI
 # publishes while no Developer ID / notarization secrets are configured
 # (scripts/signing.mjs); a browser download of the same dmg stays blocked, and
 # Homebrew is no way round it either — brew 7 stamps its own quarantine onto
@@ -114,11 +116,15 @@ ditto "${mount_point}/${app_name}.app" "${dest}/${app_name}.app"
 hdiutil detach "$mount_point" -quiet >/dev/null 2>&1 || true
 mount_point=
 
+# Nothing in this path sets a quarantine attribute, but belt and braces: if one
+# lands on the bundle anyway (a corporate DLP stamp, an exotic ditto source),
+# the fix runs here — automatically, at install time — instead of ending the
+# install on a warning (2026-11-19; the check used to fail the install and
+# print the xattr line for the user to run by hand).
 if xattr -p com.apple.quarantine "${dest}/${app_name}.app" >/dev/null 2>&1; then
-	echo "install-macos: WARNING: the installed app carries a quarantine attribute" >&2
-	echo "  (nothing in this path sets one — please report this). Remove it with:" >&2
-	echo "  xattr -dr com.apple.quarantine '${dest}/${app_name}.app'" >&2
-	exit 1
+	echo "==> clearing a quarantine attribute found on the installed app"
+	xattr -dr com.apple.quarantine "${dest}/${app_name}.app" ||
+		die "cannot clear the quarantine attribute — run it by hand: xattr -dr com.apple.quarantine '${dest}/${app_name}.app'"
 fi
 
 echo "==> done: ${dest}/${app_name}.app (v${version})"
