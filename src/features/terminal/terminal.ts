@@ -203,7 +203,7 @@ export class TerminalView {
 		this.visible = true;
 		await this.syncSessions();
 		if (this.sessions.length === 0) {
-			await this.create();
+			await this.spawnIfEmpty();
 		} else {
 			this.activate(this.active ?? this.sessions[0]!);
 		}
@@ -476,8 +476,34 @@ export class TerminalView {
 
 	/** One new shell. `cwd` spawns it IN the folder (the Explorer's "Open in Integrated
 	 *  Terminal"); without one the backend opens it at the workspace root, the plain
-	 *  new-terminal behavior. */
+	 *  new-terminal behavior. One create at a time: the id draw and the spawn are one
+	 *  atomic step — two concurrent creates used to read the same fresh id base (the
+	 *  base is read before `liveSessionIds` settles), request the SAME id twice, and
+	 *  the backend refused the second with "already owned by a running session". */
 	async create(cwd?: string): Promise<void> {
+		return this.enqueueCreate(() => this.createNow(cwd));
+	}
+
+	/** The create queue: one create at a time, a task's failure swallowed so one refused
+	 *  spawn never poisons the next (the task itself reports its own error to the user). */
+	private createChain: Promise<unknown> = Promise.resolve();
+
+	private enqueueCreate<T>(task: () => Promise<T>): Promise<T> {
+		const run = this.createChain.then(task, task);
+		this.createChain = run.then(() => undefined, () => undefined);
+		return run;
+	}
+
+	/** shown()'s first-open spawn: when the queue reaches it, the emptiness is re-checked,
+	 *  so a second shown() (a boot auto-open racing a user click, both waiting out xterm's
+	 *  lazy chunk) queued behind the first spawns nothing. */
+	private spawnIfEmpty(): Promise<void> {
+		return this.enqueueCreate(async () => {
+			if (this.sessions.length === 0) await this.createNow();
+		});
+	}
+
+	private async createNow(cwd?: string): Promise<void> {
 		const { term, fit, search, links, element } = await this.makeTerm();
 		const id = await this.nextFreeId();
 		const row = el('div', 'row');
@@ -519,9 +545,12 @@ export class TerminalView {
 	 *  instance's live list holds (`pickSessionId`), so a spawn never asks the backend
 	 *  for a number a running shell — this page's own, another window's, an adopted
 	 *  one — already owns. The backend refuses a live replacement regardless; the check
-	 *  keeps that refusal unobservable. */
+	 *  keeps that refusal unobservable. The base is read after the list settles — the
+	 *  create queue makes that read serial anyway, but the pick never builds on a base
+	 *  read before an await. */
 	private async nextFreeId(): Promise<number> {
-		const id = pickSessionId(this.nextId, await liveSessionIds());
+		const live = await liveSessionIds();
+		const id = pickSessionId(this.nextId, live);
 		this.nextId = id + 1;
 		return id;
 	}

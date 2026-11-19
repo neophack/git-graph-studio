@@ -126,6 +126,46 @@ describe('the terminal page mirrors the instance\'s terminals (§8.6 #5)', () =>
 		expect(view.sessionCount()).toBe(1);
 	});
 
+	it('two concurrent creates draw two different ids — never one id twice', async () => {
+		// The "Terminal N is already owned by a running session" refusal: two creates
+		// started together used to read the same fresh id base before the live list
+		// settled and requested the SAME id twice; the backend accepted the first and
+		// refused the second. The create queue makes the draw and the spawn one step.
+		const view = new TerminalView();
+		await Promise.all([view.create(), view.create()]);
+		const ids = backend.callsTo('pty_create').map((call) => call.id);
+		expect(ids).toHaveLength(2);
+		expect(new Set(ids).size).toBe(2);
+		expect(view.sessionCount()).toBe(2);
+	});
+
+	it('two concurrent shown() calls open one terminal, not two colliding spawns', async () => {
+		// A boot auto-open racing a user click, both waiting out xterm's lazy chunk:
+		// each shown() queues a first-open spawn behind the other's, and the queue's
+		// re-check lets only the first through.
+		const view = new TerminalView();
+		await Promise.all([view.shown(), view.shown()]);
+		expect(backend.callsTo('pty_create')).toHaveLength(1);
+		expect(view.sessionCount()).toBe(1);
+	});
+
+	it('a failed spawn does not poison the create queue — the next create still opens a shell', async () => {
+		let refused = true;
+		backend.on('pty_create', () => {
+			if (refused) {
+				refused = false;
+				throw new Error('Terminal 1 is already owned by a running session');
+			}
+			return 'git-bash';
+		});
+		const view = new TerminalView();
+		await view.create();
+		expect(view.sessionCount()).toBe(1); // the refused shell stays as its exited row
+		await view.create();
+		expect(backend.callsTo('pty_create')).toHaveLength(2);
+		expect(view.sessionCount()).toBe(2);
+	});
+
 	it('a shell opened for a folder spawns IN it — the cwd rides pty_create, not a cd line', async () => {
 		// The Explorer's "Open in Integrated Terminal": the shell's own working directory
 		// is the folder, the way VS Code's terminal opens — no `cd` typed into a shell
