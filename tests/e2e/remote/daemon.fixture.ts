@@ -12,8 +12,8 @@ import { test as base, expect } from '@playwright/test';
 
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
 const exe = process.platform === 'win32' ? '.exe' : '';
-export const daemonExe = process.env.GGS_REMOTE_DAEMON_EXE ?? resolve(root, 'extensions-src/ggs-remote/daemon/target/release', `ggs-remote${exe}`);
-export const hubExe = process.env.GGS_REMOTE_HUB_EXE ?? resolve(root, 'extensions-src/ggs-remote/hub/target/release', `ggs-remote-hub${exe}`);
+export const daemonExe = process.env.GGS_REMOTE_DAEMON_EXE ?? resolve(root, 'target/studio/ggs-remote/release', `ggs-remote${exe}`);
+export const hubExe = process.env.GGS_REMOTE_HUB_EXE ?? resolve(root, 'target/studio/ggs-remote-hub/release', `ggs-remote-hub${exe}`);
 export const appExe = process.env.GGS_REMOTE_APP_EXE ?? resolve(root, 'target/studio/cargo/debug', `git-graph-studio${exe}`);
 export const PASSWORD = 'e2e-probe-kayak-42';
 

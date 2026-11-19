@@ -15,7 +15,7 @@ const root = resolve(fileURLToPath(new URL('.', import.meta.url)), '..', '..');
 const exe = process.platform === 'win32' ? '.exe' : '';
 const daemonExe = process.argv.includes('--daemon')
 	? resolve(root, process.argv[process.argv.indexOf('--daemon') + 1])
-	: resolve(root, 'extensions-src/ggs-remote/daemon/target/release', `ggs-remote${exe}`);
+	: resolve(root, 'target/studio/ggs-remote/release', `ggs-remote${exe}`);
 const keep = process.argv.includes('--keep');
 const PASSWORD = 'memory-probe-kayak-42';
 const home = resolve(root, 'target/studio/remote-memory');

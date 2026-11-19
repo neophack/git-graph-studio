@@ -22,7 +22,7 @@ const arg = (name, fallback) => {
 const exe = process.platform === 'win32' ? '.exe' : '';
 const hubExe = process.argv.includes('--hub')
 	? process.argv[process.argv.indexOf('--hub') + 1]
-	: resolve(root, 'extensions-src/ggs-remote/hub/target/release', `ggs-remote-hub${exe}`);
+	: resolve(root, 'target/studio/ggs-remote-hub/release', `ggs-remote-hub${exe}`);
 const TUNNELS = arg('--tunnels', 500);
 const SESSIONS = arg('--sessions', 2000);
 const SECONDS = arg('--seconds', 30);

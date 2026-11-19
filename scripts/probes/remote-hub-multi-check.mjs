@@ -26,7 +26,7 @@ const arg = (name, fallback) => {
 const exe = process.platform === 'win32' ? '.exe' : '';
 const appExe = arg('--app', resolve(root, 'target/studio/cargo/debug', `git-graph-studio${exe}`));
 const daemonExe = arg('--daemon', resolve(root, 'target/studio/ggs-remote/release', `ggs-remote${exe}`));
-const hubExe = arg('--hub', resolve(root, 'extensions-src/ggs-remote/hub/target/release', `ggs-remote-hub${exe}`));
+const hubExe = arg('--hub', resolve(root, 'target/studio/ggs-remote-hub/release', `ggs-remote-hub${exe}`));
 const keep = process.argv.includes('--keep');
 const PASSWORD_A = 'hub-multi-tangerine-42';
 const PASSWORD_A2 = 'hub-multi-rotated-99';

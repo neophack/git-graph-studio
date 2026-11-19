@@ -205,12 +205,17 @@ jobs:
       - name: Build the windows zip
         if: runner.os == 'Windows'
         shell: pwsh
+        # The crate's .cargo/config.toml pins [build] target-dir to the repository's
+        # target/studio/ggs-remote-hub (one target dir per remote crate, 2026-11-18) — the
+        # binary lands there, never in a shadow target/ of the crate's own, so the build
+        # says so explicitly and the copy reads the same place (studio.yml's hub job and
+        # its rust-cache use this mapping too).
         run: |
-          cargo build --release
+          cargo build --release --target-dir ../../../target/studio/ggs-remote-hub
           $version = "${{ needs.resolve-tag.outputs.version }}"
           $stage = "target/packages/stage/ggs-remote-hub-$version-windows-x64"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item target/release/ggs-remote-hub.exe $stage/
+          Copy-Item ../../../target/studio/ggs-remote-hub/release/ggs-remote-hub.exe $stage/
           Copy-Item deploy/hub.example.toml "$stage/hub.toml.example"
           Copy-Item README.md $stage/
           Compress-Archive -Path $stage -DestinationPath "target/packages/ggs-remote-hub-$version-windows-x64.zip"

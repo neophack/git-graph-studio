@@ -20,7 +20,7 @@ const arg = (name, fallback) => {
 };
 const exe = process.platform === 'win32' ? '.exe' : '';
 const appExe = arg('--app', resolve(root, 'target/studio/cargo/debug', `git-graph-studio${exe}`));
-const daemonExe = arg('--daemon', resolve(root, 'extensions-src/ggs-remote/daemon/target/release', `ggs-remote${exe}`));
+const daemonExe = arg('--daemon', resolve(root, 'target/studio/ggs-remote/release', `ggs-remote${exe}`));
 const folder = arg('--folder', root);
 const keep = process.argv.includes('--keep');
 const EDGE = process.platform === 'win32' ? 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe' : null;

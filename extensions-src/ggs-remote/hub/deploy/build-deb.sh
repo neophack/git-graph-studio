@@ -18,16 +18,21 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 crate=$(dirname "$here")
 target=x86_64-unknown-linux-musl
+# The crate's .cargo/config.toml pins [build] target-dir to the repository's
+# target/studio/ggs-remote-hub (one target dir per remote crate, 2026-11-18) — the binary
+# lands there, never in a shadow target/ of this crate's own. CARGO_TARGET_DIR overrides
+# the config, so it overrides this default too.
+target_dir=${CARGO_TARGET_DIR:-"$crate/../../../target/studio/ggs-remote-hub"}
 out="$crate/target/packages"
 mkdir -p "$out"
 
 version=${VERSION:-$(awk -F'"' '/^version/ {print $2; exit}' "$crate/Cargo.toml")}
-binary="$crate/target/$target/release/ggs-remote-hub"
+binary="$target_dir/$target/release/ggs-remote-hub"
 
 if [ -n "${PREBUILT:-}" ]; then
 	binary=$PREBUILT
 else
-	cargo build --release --target "$target" --manifest-path "$crate/Cargo.toml"
+	cargo build --release --target "$target" --target-dir "$target_dir" --manifest-path "$crate/Cargo.toml"
 fi
 [ -x "$binary" ] || { echo "no binary at $binary" >&2; exit 1; }
 
