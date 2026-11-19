@@ -164,8 +164,8 @@ fn large_file_probe() -> (u64, f64, f64, f64, usize) {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_git_helpers::ScratchGit;
     use super::*;
+    use crate::test_git_helpers::ScratchGit;
 
     #[test]
     fn measures_a_plain_folder_and_a_repository() {

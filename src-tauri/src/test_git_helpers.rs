@@ -30,7 +30,6 @@ impl ScratchGit for Scratch {
         git
     }
 
-
     /// A fresh non-bare repository with one commit on `main`.
     fn repo(&self, name: &str) -> Git {
         let path = self.path(name);
@@ -40,8 +39,6 @@ impl ScratchGit for Scratch {
         commit(&git, "README.md", "hello\n", "Initial commit");
         git
     }
-
-
 }
 
 pub fn write(git: &Git, file: &str, content: &str) {
@@ -52,14 +49,12 @@ pub fn write(git: &Git, file: &str, content: &str) {
     fs::write(path, content).unwrap();
 }
 
-
 pub fn commit(git: &Git, file: &str, content: &str, message: &str) -> String {
     write(git, file, content);
     git.run(&["add", "--", file]).unwrap();
     git.run(&["commit", "-q", "-m", message]).unwrap();
     head(git)
 }
-
 
 pub fn head(git: &Git) -> String {
     git.output(&["rev-parse", "HEAD"])
@@ -68,14 +63,9 @@ pub fn head(git: &Git) -> String {
         .to_owned()
 }
 
-
-
 pub fn subject(git: &Git, spec: &str) -> String {
     git.output(&["log", "-1", "--format=%s", spec])
         .unwrap()
         .trim()
         .to_owned()
 }
-
-
-

@@ -16,9 +16,13 @@ pub fn ext_child_spawn(
     spec: ChildSpawnSpec,
     on_event: Channel<Value>,
 ) -> Result<Value, String> {
-    child::spawn_child(&spec, &ext_id, Box::new(move |event| {
-        let _ = on_event.send(event);
-    }))
+    child::spawn_child(
+        &spec,
+        &ext_id,
+        Box::new(move |event| {
+            let _ = on_event.send(event);
+        }),
+    )
 }
 
 /// Write raw bytes to a child's stdin (the frame sends them base64-encoded).

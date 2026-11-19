@@ -14,14 +14,14 @@ use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
 use tauri::State;
 
+use ggs_analysis::diagram::ModuleDiagram;
+use ggs_analysis::imports::ImportGraph;
 use ggs_analysis::index::{
     run_dead_code, run_metrics, run_security, security_scan_files, AnalysisIndexEvent,
     AnalysisStatus, DeadCodeEvent, MetricsEvent, SecurityEvent,
 };
-use ggs_analysis::imports::ImportGraph;
 use ggs_analysis::modules::{self, ModuleGraph};
 use ggs_analysis::AnalysisData;
-use ggs_analysis::diagram::ModuleDiagram;
 
 use ggs_base::sink::BatchSink;
 use ggs_base::workspace::WorkspaceRoots;
@@ -249,8 +249,7 @@ pub async fn analysis_security(
         let mut hook = |data: &ggs_analysis::AnalysisData| {
             let files = data.files();
             if files.len() > streamed {
-                let (scan, found) =
-                    security_scan_files(data, &root, &files[streamed..], &mut sink);
+                let (scan, found) = security_scan_files(data, &root, &files[streamed..], &mut sink);
                 scanned += scan;
                 findings += found;
                 streamed = files.len();

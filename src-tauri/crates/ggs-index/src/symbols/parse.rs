@@ -429,16 +429,13 @@ pub fn scope_definitions(text: &str, ext: &str, line: usize, name: &str) -> Vec<
     let mut hits: Vec<ParsedSymbol> = parse_file(text, ext)
         .locals
         .into_iter()
-        .filter(|s| {
-            s.name == name
-                && s.scope
-                    .is_some_and(|(from, to)| from <= line && line <= to)
-        })
+        .filter(|s| s.name == name && s.scope.is_some_and(|(from, to)| from <= line && line <= to))
         .collect();
     // The tightest scope leads: a parameter or local of the innermost function beats a
     // same-named one an enclosing function declares (the closure case).
     hits.sort_by_key(|s| {
-        s.scope.map_or(usize::MAX, |(from, to)| to.saturating_sub(from))
+        s.scope
+            .map_or(usize::MAX, |(from, to)| to.saturating_sub(from))
     });
     hits.truncate(8);
     hits
@@ -657,7 +654,9 @@ fn symbol_of(
         // where the type begins — a hover of the name slices from the `typedef` keyword
         // through the end instead of the last line alone.
         let typedef_start = if matches!(lang, Lang::C | Lang::Cpp) && kind == "type" {
-            scope.filter(|s| s.kind() == "type_definition").map(|s| s.start_position())
+            scope
+                .filter(|s| s.kind() == "type_definition")
+                .map(|s| s.start_position())
         } else {
             None
         };
@@ -806,12 +805,10 @@ fn is_scope(lang: Lang, kind: &str) -> bool {
 
 /// Whether this capture names a declarator the function-valued patterns already indexed:
 /// a JS/TS `const f = () => …` is the function `f`, and its plain-variable twin is noise.
-fn shadowed_by_function(
-    lang: Lang,
-    capture_kind: &str,
-    node: tree_sitter::Node,
-) -> bool {
-    if capture_kind != "variable" || !matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx) {
+fn shadowed_by_function(lang: Lang, capture_kind: &str, node: tree_sitter::Node) -> bool {
+    if capture_kind != "variable"
+        || !matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx)
+    {
         return false;
     }
     let declarator = node.parent();
@@ -1200,16 +1197,25 @@ mod tests {
             .iter()
             .map(|s| (s.name.as_str(), s.scope.unwrap()))
             .collect();
-        assert!(locals.contains(&("cb", (2, 5))), "{locals:?} — cb is run's own parameter");
+        assert!(
+            locals.contains(&("cb", (2, 5))),
+            "{locals:?} — cb is run's own parameter"
+        );
         assert!(locals.contains(&("code", (2, 5))), "{locals:?}");
         assert!(
-            !file.locals.iter().any(|s| s.name == "ctx" || s.name == "total" || s.name == "n"),
+            !file
+                .locals
+                .iter()
+                .any(|s| s.name == "ctx" || s.name == "total" || s.name == "n"),
             "{:?} — type-position parameter names own no scope",
             locals
         );
         // A hover of `cb` inside run resolves to run's own parameter.
         let hits = scope_definitions(text, "c", 3, "cb");
-        assert_eq!((hits.len(), hits[0].kind, hits[0].line), (1, "parameter", 2));
+        assert_eq!(
+            (hits.len(), hits[0].kind, hits[0].line),
+            (1, "parameter", 2)
+        );
         // The prototype's `total` never answers inside run — the scope half finds none
         // and, with the index clean, the global fallback cannot show the parameter row.
         assert!(scope_definitions(text, "c", 3, "total").is_empty());
@@ -1220,7 +1226,10 @@ mod tests {
         assert_eq!(kinds(&file), vec![("class", "Ops"), ("method", "step")]);
         let names: Vec<&str> = file.locals.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"cb"), "{names:?}");
-        assert!(!names.contains(&"n") && !names.contains(&"ctx"), "{names:?}");
+        assert!(
+            !names.contains(&"n") && !names.contains(&"ctx"),
+            "{names:?}"
+        );
     }
 
     fn kinds(file: &ParsedFile) -> Vec<(&str, &str)> {
@@ -1483,9 +1492,16 @@ macro_rules! sq { ($e:expr) => { $e * $e } }
         assert_eq!(max_size.signature, "#define MAX_SIZE 100");
         assert!(max_size.exported, "a #define is not static");
         let multi = &file.symbols[2];
-        assert_eq!((multi.line, multi.end_line), (2, 4), "the continuations ride along");
+        assert_eq!(
+            (multi.line, multi.end_line),
+            (2, 4),
+            "the continuations ride along"
+        );
         let feature = &file.symbols[3];
-        assert_eq!(feature.signature, "#define FEATURE", "a bare define has no value");
+        assert_eq!(
+            feature.signature, "#define FEATURE",
+            "a bare define has no value"
+        );
     }
 
     #[test]
@@ -1579,13 +1595,23 @@ macro_rules! sq { ($e:expr) => { $e * $e } }
             ]
         );
         let point = &file.symbols[0];
-        assert_eq!(point.end_line, 3, "the body rides along — a hover slices it whole");
+        assert_eq!(
+            point.end_line, 3,
+            "the body rides along — a hover slices it whole"
+        );
         let size = &file.symbols[1];
-        assert_eq!((size.line, size.end_line), (5, 8), "the anonymous typedef's type spans to its name");
+        assert_eq!(
+            (size.line, size.end_line),
+            (5, 8),
+            "the anonymous typedef's type spans to its name"
+        );
         let rect = &file.symbols[2];
         assert_eq!((rect.line, rect.end_line), (10, 13));
         for variable in file.symbols[5..].iter().filter(|s| s.kind == "variable") {
-            assert_eq!(variable.end_line, variable.line, "a declaration is its own line");
+            assert_eq!(
+                variable.end_line, variable.line,
+                "a declaration is its own line"
+            );
             assert_eq!(variable.scope, None, "file-scope variables are global");
         }
         // The scope locals: the parameters of the global `total` function and the locals
@@ -1598,7 +1624,12 @@ macro_rules! sq { ($e:expr) => { $e * $e } }
             .collect();
         assert_eq!(
             locals,
-            vec![("a", (15, 15)), ("b", (15, 15)), ("total", (22, 26)), ("calls", (22, 26))]
+            vec![
+                ("a", (15, 15)),
+                ("b", (15, 15)),
+                ("total", (22, 26)),
+                ("calls", (22, 26))
+            ]
         );
     }
 
@@ -1634,15 +1665,28 @@ macro_rules! sq { ($e:expr) => { $e * $e } }
     #[test]
     fn parameters_index_as_scope_locals_in_every_grammar() {
         // Rust: plain and `mut` parameters, closure parameters, `let` locals.
-        let rust = parse_file("fn go(mut n: u32) { let m = n; let mut k = m; }\nfn bind() { |x| x }\n", "rs");
-        let names: Vec<(&str, &str)> = rust.locals.iter().map(|s| (s.kind, s.name.as_str())).collect();
+        let rust = parse_file(
+            "fn go(mut n: u32) { let m = n; let mut k = m; }\nfn bind() { |x| x }\n",
+            "rs",
+        );
+        let names: Vec<(&str, &str)> = rust
+            .locals
+            .iter()
+            .map(|s| (s.kind, s.name.as_str()))
+            .collect();
         assert!(names.contains(&("parameter", "n")), "{names:?}");
         assert!(names.contains(&("variable", "m")), "{names:?}");
         assert!(names.contains(&("variable", "k")), "{names:?}");
-        assert!(names.contains(&("parameter", "x")), "{names:?} (closure parameter)");
+        assert!(
+            names.contains(&("parameter", "x")),
+            "{names:?} (closure parameter)"
+        );
 
         // Python: parameters and assignment/for targets; `self.x = …` is no declaration.
-        let py = parse_file("def run(a, b=1):\n    total = 0\n    for item in seq:\n        pass\n", "py");
+        let py = parse_file(
+            "def run(a, b=1):\n    total = 0\n    for item in seq:\n        pass\n",
+            "py",
+        );
         let names: Vec<&str> = py.locals.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"a") && names.contains(&"b"), "{names:?}");
         assert!(names.contains(&"total"), "{names:?}");
@@ -1650,35 +1694,76 @@ macro_rules! sq { ($e:expr) => { $e * $e } }
 
         // Go: parameters, `:=` and `var` declarations.
         let go = parse_file("func f(n int) {\n    m := n\n    var k int = m\n}\n", "go");
-        let names: Vec<(&str, &str)> = go.locals.iter().map(|s| (s.kind, s.name.as_str())).collect();
+        let names: Vec<(&str, &str)> = go
+            .locals
+            .iter()
+            .map(|s| (s.kind, s.name.as_str()))
+            .collect();
         assert!(names.contains(&("parameter", "n")), "{names:?}");
         assert!(names.contains(&("variable", "m")), "{names:?}");
         assert!(names.contains(&("variable", "k")), "{names:?}");
 
         // TypeScript: required/optional parameters and let/const locals.
-        let ts = parse_file("function f(x: number, y?: string) {\n  const a = x;\n  let b = a;\n}\n", "ts");
-        let names: Vec<(&str, &str)> = ts.locals.iter().map(|s| (s.kind, s.name.as_str())).collect();
-        assert!(names.contains(&("parameter", "x")) && names.contains(&("parameter", "y")), "{names:?}");
-        assert!(names.contains(&("variable", "a")) && names.contains(&("variable", "b")), "{names:?}");
+        let ts = parse_file(
+            "function f(x: number, y?: string) {\n  const a = x;\n  let b = a;\n}\n",
+            "ts",
+        );
+        let names: Vec<(&str, &str)> = ts
+            .locals
+            .iter()
+            .map(|s| (s.kind, s.name.as_str()))
+            .collect();
+        assert!(
+            names.contains(&("parameter", "x")) && names.contains(&("parameter", "y")),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&("variable", "a")) && names.contains(&("variable", "b")),
+            "{names:?}"
+        );
 
         // JavaScript: plain and defaulted parameters, `var` locals.
         let js = parse_file("function f(x, y = 1) {\n  var z = x;\n}\n", "js");
-        let names: Vec<(&str, &str)> = js.locals.iter().map(|s| (s.kind, s.name.as_str())).collect();
-        assert!(names.contains(&("parameter", "x")) && names.contains(&("parameter", "y")), "{names:?}");
+        let names: Vec<(&str, &str)> = js
+            .locals
+            .iter()
+            .map(|s| (s.kind, s.name.as_str()))
+            .collect();
+        assert!(
+            names.contains(&("parameter", "x")) && names.contains(&("parameter", "y")),
+            "{names:?}"
+        );
         assert!(names.contains(&("variable", "z")), "{names:?}");
 
         // Java and C#: formal parameters and local declarations.
-        let java = parse_file("class S {\n  void run(Task t) {\n    int n = 1;\n  }\n}\n", "java");
-        let names: Vec<(&str, &str)> = java.locals.iter().map(|s| (s.kind, s.name.as_str())).collect();
+        let java = parse_file(
+            "class S {\n  void run(Task t) {\n    int n = 1;\n  }\n}\n",
+            "java",
+        );
+        let names: Vec<(&str, &str)> = java
+            .locals
+            .iter()
+            .map(|s| (s.kind, s.name.as_str()))
+            .collect();
         assert!(names.contains(&("parameter", "t")), "{names:?}");
         assert!(names.contains(&("variable", "n")), "{names:?}");
-        let cs = parse_file("class S {\n  void Run(int t) {\n    int n = 1;\n  }\n}\n", "cs");
-        let names: Vec<(&str, &str)> = cs.locals.iter().map(|s| (s.kind, s.name.as_str())).collect();
+        let cs = parse_file(
+            "class S {\n  void Run(int t) {\n    int n = 1;\n  }\n}\n",
+            "cs",
+        );
+        let names: Vec<(&str, &str)> = cs
+            .locals
+            .iter()
+            .map(|s| (s.kind, s.name.as_str()))
+            .collect();
         assert!(names.contains(&("parameter", "t")), "{names:?}");
         assert!(names.contains(&("variable", "n")), "{names:?}");
 
         // C++: by-value, pointer and reference parameters.
-        let cpp = parse_file("void f(int n, char *p, const std::string &s) { int local = n; }\n", "cpp");
+        let cpp = parse_file(
+            "void f(int n, char *p, const std::string &s) { int local = n; }\n",
+            "cpp",
+        );
         let names: Vec<&str> = cpp.locals.iter().map(|s| s.name.as_str()).collect();
         for want in ["n", "p", "s", "local"] {
             assert!(names.contains(&want), "{names:?}");
@@ -1692,10 +1777,20 @@ macro_rules! sq { ($e:expr) => { $e * $e } }
         // dropped, while a plain const (`util`) is the global variable it is.
         let py = parse_file("RATE = 5\n\ndef f():\n    local = RATE\n", "py");
         assert_eq!(kinds(&py), vec![("variable", "RATE"), ("function", "f")]);
-        assert_eq!(py.locals.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["local"]);
+        assert_eq!(
+            py.locals
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["local"]
+        );
 
         let js = parse_file("const util = require('./util');\nconst handler = function (e) { return e; };\nconst arrow = () => 1;\nlet plain = 2;\n", "js");
-        let names: Vec<(&str, &str)> = js.symbols.iter().map(|s| (s.kind, s.name.as_str())).collect();
+        let names: Vec<(&str, &str)> = js
+            .symbols
+            .iter()
+            .map(|s| (s.kind, s.name.as_str()))
+            .collect();
         assert!(names.contains(&("variable", "util")), "{names:?}");
         assert!(names.contains(&("variable", "plain")), "{names:?}");
         assert_eq!(

@@ -19,7 +19,7 @@ use tauri::ipc::Channel;
 
 use ggs_ext::gallery::{
     download_to_temp, github_download_url, github_mirror, github_release_raw, version_of_tag,
-    GithubAsset, GalleryProgress, GITHUB_API,
+    GalleryProgress, GithubAsset, GITHUB_API,
 };
 
 /// The repository this application updates from — the one `help.repository` opens.
@@ -83,7 +83,10 @@ fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     };
     let (left, right) = (tuple(a), tuple(b));
     for at in 0..left.len().max(right.len()) {
-        let (l, r) = (left.get(at).copied().unwrap_or(0), right.get(at).copied().unwrap_or(0));
+        let (l, r) = (
+            left.get(at).copied().unwrap_or(0),
+            right.get(at).copied().unwrap_or(0),
+        );
         if l != r {
             return l.cmp(&r);
         }
@@ -94,9 +97,7 @@ fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
 /// The repository's newest release as an update offer — `None` when this running
 /// version is the newest (or the tag reads as no version at all: nothing to offer).
 #[tauri::command]
-pub async fn app_update_check(
-    app: tauri::AppHandle,
-) -> Result<Option<AppUpdate>, String> {
+pub async fn app_update_check(app: tauri::AppHandle) -> Result<Option<AppUpdate>, String> {
     let current = app.package_info().version.to_string();
     tauri::async_runtime::spawn_blocking(move || -> Result<Option<AppUpdate>, String> {
         let release = github_release_raw(GITHUB_API, APP_REPO)?;
@@ -143,23 +144,24 @@ pub async fn app_update_install(
     let mirror = github_mirror(mirror)?;
     state.cancelled.store(false, Ordering::Relaxed);
     let cancelled = Arc::clone(&state.cancelled);
-    let path = tauri::async_runtime::spawn_blocking(move || -> Result<std::path::PathBuf, String> {
-        let url = github_download_url(mirror.as_deref(), &download_url)?;
-        let name = download_url
-            .rsplit('/')
-            .next()
-            .filter(|stem| !stem.is_empty())
-            .unwrap_or("installer")
-            .to_owned();
-        download_to_temp(&url, &name, &mut |tick| {
-            if cancelled.load(Ordering::Relaxed) {
-                return false;
-            }
-            on_progress.send(tick).is_ok()
+    let path =
+        tauri::async_runtime::spawn_blocking(move || -> Result<std::path::PathBuf, String> {
+            let url = github_download_url(mirror.as_deref(), &download_url)?;
+            let name = download_url
+                .rsplit('/')
+                .next()
+                .filter(|stem| !stem.is_empty())
+                .unwrap_or("installer")
+                .to_owned();
+            download_to_temp(&url, &name, &mut |tick| {
+                if cancelled.load(Ordering::Relaxed) {
+                    return false;
+                }
+                on_progress.send(tick).is_ok()
+            })
         })
-    })
-    .await
-    .map_err(|e| format!("the download was cancelled: {e}"))??;
+        .await
+        .map_err(|e| format!("the download was cancelled: {e}"))??;
     finish_update(&app, &path)
 }
 
@@ -198,18 +200,33 @@ fn finish_update(
             .spawn()
             .map_err(|e| format!("launch the installer: {e}"))?;
         app.exit(0);
-        return Ok(UpdateInstallOutcome { launched: true, path: shown });
+        return Ok(UpdateInstallOutcome {
+            launched: true,
+            path: shown,
+        });
     }
     // Windows, dev: nothing to install over — the file shows in Explorer instead.
     #[cfg(windows)]
     if cfg!(debug_assertions) {
-        let _ = std::process::Command::new("explorer").arg(format!("/select,{shown}")).spawn();
-        return Ok(UpdateInstallOutcome { launched: false, path: shown });
+        let _ = std::process::Command::new("explorer")
+            .arg(format!("/select,{shown}"))
+            .spawn();
+        return Ok(UpdateInstallOutcome {
+            launched: false,
+            path: shown,
+        });
     }
     // macOS mounts the .dmg, Linux hands the .deb/.rpm to its package installer.
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
     let _ = std::process::Command::new(opener).arg(path).spawn();
-    Ok(UpdateInstallOutcome { launched: false, path: shown })
+    Ok(UpdateInstallOutcome {
+        launched: false,
+        path: shown,
+    })
 }
 
 #[cfg(test)]
@@ -219,7 +236,9 @@ mod tests {
     fn asset(name: &str) -> GithubAsset {
         GithubAsset {
             name: name.to_owned(),
-            browser_download_url: format!("https://github.com/neophack/git-graph-studio/releases/download/v0.2.0/{name}"),
+            browser_download_url: format!(
+                "https://github.com/neophack/git-graph-studio/releases/download/v0.2.0/{name}"
+            ),
         }
     }
 
@@ -248,7 +267,11 @@ mod tests {
             ("linux", "aarch64") => picked.name.contains("_arm64.deb"),
             _ => false,
         };
-        assert!(ok, "{} is not this platform's installer ({OS} {ARCH})", picked.name);
+        assert!(
+            ok,
+            "{} is not this platform's installer ({OS} {ARCH})",
+            picked.name
+        );
     }
 
     #[test]
@@ -265,13 +288,28 @@ mod tests {
     /// The version gate: strictly newer offers, the same or older does not.
     #[test]
     fn only_a_newer_release_is_an_update() {
-        assert_eq!(compare_versions("0.2.0", "0.1.16"), std::cmp::Ordering::Greater);
-        assert_eq!(compare_versions("0.1.16", "0.1.16"), std::cmp::Ordering::Equal);
-        assert_eq!(compare_versions("0.1.15", "0.1.16"), std::cmp::Ordering::Less);
-        assert_eq!(compare_versions("1.0.0", "0.9.9"), std::cmp::Ordering::Greater);
+        assert_eq!(
+            compare_versions("0.2.0", "0.1.16"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("0.1.16", "0.1.16"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_versions("0.1.15", "0.1.16"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_versions("1.0.0", "0.9.9"),
+            std::cmp::Ordering::Greater
+        );
         // Unparseable sorts below: a weird tag never downgrades the gate into offering.
         assert_eq!(compare_versions("", "0.1.16"), std::cmp::Ordering::Less);
-        assert_eq!(compare_versions("0.1.16-beta.1", "0.1.16"), std::cmp::Ordering::Equal);
+        assert_eq!(
+            compare_versions("0.1.16-beta.1", "0.1.16"),
+            std::cmp::Ordering::Equal
+        );
     }
 
     #[test]

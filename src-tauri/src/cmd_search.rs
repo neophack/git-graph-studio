@@ -193,7 +193,9 @@ pub async fn search_replace_one(
     preserve_case: Option<bool>,
 ) -> Result<Vec<SearchMatch>, String> {
     if Path::new(&path).is_absolute() || path.split(['/', '\\']).any(|segment| segment == "..") {
-        return Err(format!("{path}: only a workspace-relative result path is accepted"));
+        return Err(format!(
+            "{path}: only a workspace-relative result path is accepted"
+        ));
     }
     let root = repo
         .or_else(|| roots.inner().first())
@@ -337,8 +339,14 @@ mod replace_files_tests {
         let root = dir.path().display().to_string();
         let cache = ggs_fs::FileListCache::default();
 
-        let files = replace_files(Some(vec!["README.md".to_owned()]), &cache, &root, None, None)
-            .unwrap();
+        let files = replace_files(
+            Some(vec!["README.md".to_owned()]),
+            &cache,
+            &root,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(files, ["README.md"]);
 
         // The include path `docs/README.md` (a separator-carrying glob) names its own file.
@@ -366,9 +374,8 @@ mod replace_files_tests {
         let root = dir.path().display().to_string();
         let cache = ggs_fs::FileListCache::default();
         for escape in ["../outside.txt", "src/../../a.txt"] {
-            let err =
-                replace_files(Some(vec![escape.to_owned()]), &cache, &root, None, None)
-                    .unwrap_err();
+            let err = replace_files(Some(vec![escape.to_owned()]), &cache, &root, None, None)
+                .unwrap_err();
             assert!(err.contains("workspace-relative"), "{escape}: {err}");
         }
     }

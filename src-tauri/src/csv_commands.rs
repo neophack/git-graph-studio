@@ -48,9 +48,11 @@ pub async fn csv_rows(
     let doc = state
         .get(doc_id)
         .ok_or_else(|| "this data table was closed".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || Ok(ggs_csv::rows_of(&doc, start, end, sort.as_ref())))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(ggs_csv::rows_of(&doc, start, end, sort.as_ref()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// How far the background walk has come — what the view polls to extend its scroll

@@ -53,7 +53,10 @@ fn request_path(request: &tauri::http::Request<Vec<u8>>) -> Option<String> {
     }
     // The URL's leading slash is not part of the path: a Windows drive arrives as
     // `/C:/…`, a POSIX absolute as `/home/…`, a UNC as `\\server\…`.
-    if trimmed.as_bytes().get(1) == Some(&b':') || trimmed.starts_with("\\\\") || trimmed.starts_with('/') {
+    if trimmed.as_bytes().get(1) == Some(&b':')
+        || trimmed.starts_with("\\\\")
+        || trimmed.starts_with('/')
+    {
         Some(trimmed.to_string())
     } else {
         Some(format!("/{trimmed}"))
@@ -85,7 +88,11 @@ fn range_window(header: Option<&str>, size: u64) -> Option<Window> {
         (size.saturating_sub(n), size.saturating_sub(1))
     } else {
         let start: u64 = start_text.parse().ok()?;
-        let end = if end_text.is_empty() { size.saturating_sub(1) } else { end_text.parse().ok()? };
+        let end = if end_text.is_empty() {
+            size.saturating_sub(1)
+        } else {
+            end_text.parse().ok()?
+        };
         if start > end {
             return None; // `bytes=5-2` is malformed, not a window
         }
@@ -118,9 +125,15 @@ fn content_type(path: &str) -> &'static str {
 /// The response body: the request's path decoded, confined to an open root, ranged and
 /// window-capped. The variants the webview never plays from still carry a status it can
 /// show (403 outside the roots, 404 gone, 416 past the end).
-fn media_response(request: &tauri::http::Request<Vec<u8>>, roots: &[String]) -> tauri::http::Response<Vec<u8>> {
+fn media_response(
+    request: &tauri::http::Request<Vec<u8>>,
+    roots: &[String],
+) -> tauri::http::Response<Vec<u8>> {
     let not_found = |status: u16, body: &'static str| {
-        tauri::http::Response::builder().status(status).body(body.as_bytes().to_vec()).unwrap()
+        tauri::http::Response::builder()
+            .status(status)
+            .body(body.as_bytes().to_vec())
+            .unwrap()
     };
     let Some(path) = request_path(request) else {
         return not_found(404, "no path");
@@ -171,7 +184,10 @@ fn media_response(request: &tauri::http::Request<Vec<u8>>, roots: &[String]) -> 
         .header("Accept-Ranges", "bytes")
         .header("Content-Length", length.to_string());
     if status == 206 {
-        builder = builder.header("Content-Range", format!("bytes {start}-{window_end}/{size}"));
+        builder = builder.header(
+            "Content-Range",
+            format!("bytes {start}-{window_end}/{size}"),
+        );
     }
     let mut file = match std::fs::File::open(&path) {
         Ok(file) => file,
@@ -246,7 +262,10 @@ mod media_command_tests {
             .uri("http://ggsmedia.localhost/C%3A%5Crepo%5Cclip%20one.mp4")
             .body(Vec::new())
             .unwrap();
-        assert_eq!(request_path(&request).as_deref(), Some("C:\\repo\\clip one.mp4"));
+        assert_eq!(
+            request_path(&request).as_deref(),
+            Some("C:\\repo\\clip one.mp4")
+        );
         let posix = tauri::http::Request::builder()
             .uri("ggsmedia://localhost/home/user/clip.mp4")
             .body(Vec::new())
@@ -259,10 +278,18 @@ mod media_command_tests {
         let dir = std::env::temp_dir().join(format!("ggs-media-proto-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("clip.bin");
-        std::fs::write(&file, (0..100_000u32).map(|i| (i % 251) as u8).collect::<Vec<_>>()).unwrap();
+        std::fs::write(
+            &file,
+            (0..100_000u32).map(|i| (i % 251) as u8).collect::<Vec<_>>(),
+        )
+        .unwrap();
         // The spelling the webview hands over: a Windows drive path (`C:\…`) or the POSIX
         // absolute form — `request_path` strips the URL's leading slash from both.
-        let path = if cfg!(windows) { file.to_str().unwrap().replace('/', "\\") } else { file.to_str().unwrap().to_string() };
+        let path = if cfg!(windows) {
+            file.to_str().unwrap().replace('/', "\\")
+        } else {
+            file.to_str().unwrap().to_string()
+        };
         let open = roots(&[&path]);
 
         let make_with = |range: Option<&str>, file: &str| {
@@ -278,7 +305,10 @@ mod media_command_tests {
         // A mid-file window: 206, the asked range spelled back, exactly 1000 bytes.
         let response = media_response(&make(Some("bytes=1000-1999")), &open);
         assert_eq!(response.status(), 206);
-        assert_eq!(response.headers()["Content-Range"], "bytes 1000-1999/100000");
+        assert_eq!(
+            response.headers()["Content-Range"],
+            "bytes 1000-1999/100000"
+        );
         assert_eq!(response.body().len(), 1000);
 
         // An open-ended range caps at the serving window, not the whole file.
@@ -303,7 +333,11 @@ mod media_command_tests {
         // An empty file answers 200 with an empty body, whatever was asked.
         let empty = dir.join("empty.bin");
         std::fs::write(&empty, b"").unwrap();
-        let empty_path = if cfg!(windows) { empty.to_str().unwrap().replace('/', "\\") } else { empty.to_str().unwrap().to_string() };
+        let empty_path = if cfg!(windows) {
+            empty.to_str().unwrap().replace('/', "\\")
+        } else {
+            empty.to_str().unwrap().to_string()
+        };
         let empty_roots = roots(&[&empty_path]);
         for range in [None, Some("bytes=0-"), Some("bytes=-10")] {
             let response = media_response(&make_with(range, &empty_path), &empty_roots);
@@ -324,7 +358,9 @@ mod media_command_tests {
             }
             for byte in path.bytes() {
                 match byte {
-                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'.' | b'-' | b'_' => out.push(byte as char),
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'.' | b'-' | b'_' => {
+                        out.push(byte as char)
+                    }
                     _ => out.push_str(&format!("%{byte:02X}")),
                 }
             }

@@ -34,7 +34,9 @@ const SUMMARY_THROTTLE: Duration = Duration::from_millis(500);
 
 // ---- the control messages: ggs-remote-proto's ONE copy (the app and the daemon
 // link the same crate; the daemon's test vectors pin the bytes) ----
-pub use ggs_remote_proto::{decode, encode, AssetKind, FromInstance, LaunchSpec, Summary, SummaryTab, ToInstance};
+pub use ggs_remote_proto::{
+    decode, encode, AssetKind, FromInstance, LaunchSpec, Summary, SummaryTab, ToInstance,
+};
 
 // ---- the endpoint ----
 
@@ -297,7 +299,12 @@ fn handle(app: &AppHandle, message: ToInstance, out: &mpsc::UnboundedSender<From
                 reply_asset(&out, req, status, &content_type, body);
             });
         }
-        ToInstance::FetchFile { req, path, zip, paths } => {
+        ToInstance::FetchFile {
+            req,
+            path,
+            zip,
+            paths,
+        } => {
             let (app, out) = (app.clone(), out.clone());
             let paths = paths.clone();
             tauri::async_runtime::spawn_blocking(move || {
@@ -581,7 +588,10 @@ fn serve_file(
     if paths.len() >= 2 {
         let roots = download_roots(app);
         let targets: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-        if !targets.iter().all(|target| download_allowed(target, &roots)) {
+        if !targets
+            .iter()
+            .all(|target| download_allowed(target, &roots))
+        {
             return fail(403);
         }
         let name = targets

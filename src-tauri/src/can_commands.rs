@@ -7,8 +7,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use ggs_can::{CanFindResult, CanFrameFilter, CanFrameLine, CanIntervals, CanLogCount,
-    CanLogState, CanLogStats, CanOpenResult, CanProgress};
+use ggs_can::{
+    CanFindResult, CanFrameFilter, CanFrameLine, CanIntervals, CanLogCount, CanLogState,
+    CanLogStats, CanOpenResult, CanProgress,
+};
 use tauri::ipc::Channel;
 
 /// The statistics of a `.blf` or `.asc` CAN log on disk. The walk runs on the blocking
@@ -69,12 +71,10 @@ pub async fn convert_can_log(
 ) -> Result<u64, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let from_path = Path::new(&from);
-        let mut reporter = ggs_can::ProgressReporter::reporting(
-            ggs_can::total_bytes_of(from_path),
-            move |p| {
+        let mut reporter =
+            ggs_can::ProgressReporter::reporting(ggs_can::total_bytes_of(from_path), move |p| {
                 let _ = on_progress.send(p);
-            },
-        );
+            });
         ggs_can::convert_log(from_path, Path::new(&to), &format, &mut reporter)
     })
     .await
@@ -138,11 +138,9 @@ pub async fn can_log_count(
     let doc = state
         .get(doc_id)
         .ok_or_else(|| "this log view was closed".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || {
-        Ok(ggs_can::count_of(&doc, filter.as_ref()))
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || Ok(ggs_can::count_of(&doc, filter.as_ref())))
+        .await
+        .map_err(|e| e.to_string())?
 }
 /// Find in the raw log — the raw view's search bar (Ctrl+F): every frame whose id or
 /// payload matches the hex query, in log order, as positions of the current row space (a
@@ -158,11 +156,9 @@ pub async fn can_log_find(
     let doc = state
         .get(doc_id)
         .ok_or_else(|| "this log view was closed".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || {
-        ggs_can::find_of(&doc, &query, filter.as_ref())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || ggs_can::find_of(&doc, &query, filter.as_ref()))
+        .await
+        .map_err(|e| e.to_string())?
 }
 /// Releases a raw-log document's frames when its tab closes.
 #[tauri::command]

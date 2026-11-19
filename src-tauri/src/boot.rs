@@ -7,9 +7,9 @@
 use ggs_base::workspace::{find_repo_root, WorkspaceRoots};
 
 use crate::cmd_fs::{watcher_reports, WATCHER_STATUS_EVENT};
-use crate::state::{FolderSwitch, LaunchState, StartupAction};
 #[cfg(test)]
 use crate::state::StateSet;
+use crate::state::{FolderSwitch, LaunchState, StartupAction};
 #[cfg(test)]
 use ggs_base::workspace::is_repo_below;
 
@@ -103,7 +103,11 @@ fn apply_index_changes(
         }
         return;
     }
-    index.apply_changes(Some(std::sync::Arc::clone(&sink)), root, change.paths.clone());
+    index.apply_changes(
+        Some(std::sync::Arc::clone(&sink)),
+        root,
+        change.paths.clone(),
+    );
     analysis.apply_changes(Some(sink), root, change.paths.clone());
 }
 
@@ -185,7 +189,9 @@ mod index_changes_tests {
                 ggs_analysis::index::ANALYSIS_INDEX_EVENT
             ]
         );
-        assert!(events.iter().all(|(_, payload)| payload["state"] == "empty"));
+        assert!(events
+            .iter()
+            .all(|(_, payload)| payload["state"] == "empty"));
         drop(events);
         // The next query resumes and repairs: the index is never stale for minutes.
         index.ensure_blocking(None, &root).unwrap();
@@ -249,7 +255,12 @@ fn start_watcher(
             // The caches are stale the moment anything changed; the next Quick Open / search /
             // Go to Definition re-walks. The webview decides what to refresh from the batch.
             file_list.invalidate();
-            if change.paths.iter().any(|p| ggs_index::scan::is_symbol_source(p)) || change.truncated {
+            if change
+                .paths
+                .iter()
+                .any(|p| ggs_index::scan::is_symbol_source(p))
+                || change.truncated
+            {
                 symbols.invalidate();
             }
             let sink = std::sync::Arc::new(crate::events::TauriEvents(app.clone()));
@@ -269,8 +280,8 @@ fn start_watcher(
 
 #[cfg(test)]
 mod open_folder_impl_tests {
-use crate::test_git_helpers::ScratchGit;
     use super::*;
+    use crate::test_git_helpers::ScratchGit;
 
     /// Opening a subfolder of a repository resolves to the repository root - both in the
     /// answer the frontend applies and in the root `post_first_paint` will later start
@@ -311,10 +322,7 @@ use crate::test_git_helpers::ScratchGit;
         .unwrap();
         assert!(!opened.is_repo);
         assert_eq!(opened.root, plain.display().to_string());
-        assert_eq!(
-            state.deferred.take(),
-            vec![plain.display().to_string()]
-        );
+        assert_eq!(state.deferred.take(), vec![plain.display().to_string()]);
     }
 
     /// A path that is not a folder at all (missing, or a file) is refused before anything in
@@ -324,23 +332,15 @@ use crate::test_git_helpers::ScratchGit;
         let scratch = ggs_testkit::Scratch::new("open-folder-missing");
         let state = StateSet::default();
         state.roots.set(vec!["C:\\already\\open".to_owned()]);
-        state
-            .deferred
-            .record(vec!["C:\\already\\open".to_owned()]);
+        state.deferred.record(vec!["C:\\already\\open".to_owned()]);
         let missing = scratch.path("does-not-exist");
         let result = tauri::async_runtime::block_on(open_folder_impl(
             &state.switch(),
             &missing.display().to_string(),
         ));
         assert!(result.is_err());
-        assert_eq!(
-            state.roots.list(),
-            vec!["C:\\already\\open".to_owned()]
-        );
-        assert_eq!(
-            state.deferred.take(),
-            vec!["C:\\already\\open".to_owned()]
-        );
+        assert_eq!(state.roots.list(), vec!["C:\\already\\open".to_owned()]);
+        assert_eq!(state.deferred.take(), vec!["C:\\already\\open".to_owned()]);
     }
 
     /// A rapid reopen of a different folder replaces the previous one - both in `repos` and
@@ -407,7 +407,10 @@ pub(crate) fn start_root_services(app: &tauri::AppHandle, root: &str) {
         // The status bar's dot rides every transition: the install's answer (running or
         // refused) is its flip away from starting, a degrade pushes its own.
         let emit_status = |app: &tauri::AppHandle| {
-            let _ = app.emit(WATCHER_STATUS_EVENT, watcher_reports(&FolderSwitch::from_app(app)));
+            let _ = app.emit(
+                WATCHER_STATUS_EVENT,
+                watcher_reports(&FolderSwitch::from_app(app)),
+            );
         };
         match start_watcher(&app, &file_list, &symbols, &index, &analysis, &watch_root) {
             Ok(watch) => {
@@ -425,18 +428,21 @@ pub(crate) fn start_root_services(app: &tauri::AppHandle, root: &str) {
                 // flight records nothing: it would name a folder nobody has open.
                 let switch = FolderSwitch::from_app(&app);
                 if switch.roots.list().contains(&watch_root) {
-                    switch.watchers.record_refusal(crate::watcher::WatcherStatus {
-                        root: watch_root.clone(),
-                        running: false,
-                        error: Some(error),
-                    });
+                    switch
+                        .watchers
+                        .record_refusal(crate::watcher::WatcherStatus {
+                            root: watch_root.clone(),
+                            running: false,
+                            error: Some(error),
+                        });
                     emit_status(&app);
                 }
             }
         }
         // The claim rides the thread's whole body and releases whichever way it landed,
         // so the next starter (a reopen, the status query's re-arm) may begin.
-        app.state::<crate::state::Watchers>().end_install(&watch_root);
+        app.state::<crate::state::Watchers>()
+            .end_install(&watch_root);
     });
 }
 
@@ -496,8 +502,8 @@ pub async fn open_workspace(
 ) -> Result<OpenedWorkspace, String> {
     let folders = FolderSwitch::from_app(&app);
     let text = std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
-    let parsed: WorkspaceFile =
-        serde_json::from_str(&ggs_base::jsonc::strip(&text)).map_err(|e| format!("parse {path}: {e}"))?;
+    let parsed: WorkspaceFile = serde_json::from_str(&ggs_base::jsonc::strip(&text))
+        .map_err(|e| format!("parse {path}: {e}"))?;
     let base = std::path::Path::new(&path)
         .parent()
         .map(std::path::Path::to_path_buf)

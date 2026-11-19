@@ -78,7 +78,8 @@ pub async fn dump_preview(
         let want = size.min(cap) as usize;
         use std::io::{Read, Seek, SeekFrom};
         let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-        file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| e.to_string())?;
         let mut buf = vec![0u8; want];
         let mut filled = 0;
         while filled < buf.len() {
@@ -151,10 +152,17 @@ mod tests {
         .expect("serialize");
         assert_eq!(json["kind"], "done");
         assert_eq!(json["entries"], 12);
-        assert_eq!(json["elapsedMs"], 3200, "the view reads elapsedMs, never elapsed_ms");
+        assert_eq!(
+            json["elapsedMs"], 3200,
+            "the view reads elapsedMs, never elapsed_ms"
+        );
         assert_eq!(json["cancelled"], false);
-        let progress =
-            serde_json::to_value(DumpEvent::Progress { scanned: 1, total: 2, entries: 3 }).expect("serialize");
+        let progress = serde_json::to_value(DumpEvent::Progress {
+            scanned: 1,
+            total: 2,
+            entries: 3,
+        })
+        .expect("serialize");
         assert_eq!(progress["kind"], "progress");
     }
 }

@@ -286,6 +286,9 @@ mod tests {
         // A flag is a flag (launch_path_of skips every `--` word), a path beside it stays
         // the path, and a bare flag launch opens nothing.
         assert_eq!(launch_path_of(&args(&["--new-window"])), None);
-        assert_eq!(launch_path_of(&args(&["--new-window", "Z:/no/such/dir"])), None);
+        assert_eq!(
+            launch_path_of(&args(&["--new-window", "Z:/no/such/dir"])),
+            None
+        );
     }
 }

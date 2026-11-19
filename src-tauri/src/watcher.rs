@@ -152,13 +152,20 @@ pub(crate) struct StatusCell {
 
 impl StatusCell {
     fn new(root: &str) -> Self {
-        Self { root: root.to_owned(), running: AtomicBool::new(true), error: Mutex::new(None) }
+        Self {
+            root: root.to_owned(),
+            running: AtomicBool::new(true),
+            error: Mutex::new(None),
+        }
     }
 
     /// Record a watch failure; answers whether this was the first one, so the caller
     /// pushes the status event on the transition and not on every repeat.
     pub(crate) fn mark_degraded(&self, error: String) -> bool {
-        let mut slot = self.error.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut slot = self
+            .error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if slot.is_some() {
             return false;
         }
@@ -172,7 +179,11 @@ impl StatusCell {
         WatcherStatus {
             root: self.root.clone(),
             running: self.running.load(Ordering::SeqCst),
-            error: self.error.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone(),
+            error: self
+                .error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
         }
     }
 }
@@ -328,7 +339,11 @@ fn debounce_loop(
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
         }
-        if !batch.paths.is_empty() || batch.git_changed || batch.git_index_changed || batch.truncated {
+        if !batch.paths.is_empty()
+            || batch.git_changed
+            || batch.git_index_changed
+            || batch.truncated
+        {
             batch.root = root_label.to_owned();
             on_change(batch);
         }
@@ -383,10 +398,16 @@ mod tests {
         assert!(!quiet.git_index_changed);
         assert!(quiet.paths.is_empty());
         fold_path(&mut quiet, root, &under(root, ".git/index.lock"));
-        assert!(!quiet.git_index_changed, "the lock is the write's transient half");
+        assert!(
+            !quiet.git_index_changed,
+            "the lock is the write's transient half"
+        );
         fold_path(&mut quiet, root, &under(root, ".git/index"));
         assert!(quiet.git_index_changed);
-        assert!(!quiet.git_changed, "an index rewrite is not a HEAD/refs change");
+        assert!(
+            !quiet.git_changed,
+            "an index rewrite is not a HEAD/refs change"
+        );
         assert!(quiet.paths.is_empty());
         for signal in [
             "HEAD",
@@ -524,7 +545,9 @@ mod tests {
         while !(seen.iter().any(|p| p == "src/main.rs") && seen.iter().any(|p| p == "README.md")) {
             let batch = rx
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .unwrap_or_else(|_| panic!("the written files are reported within 5 s, got {seen:?}"));
+                .unwrap_or_else(|_| {
+                    panic!("the written files are reported within 5 s, got {seen:?}")
+                });
             seen.extend(batch.paths);
             git_changed |= batch.git_changed;
         }

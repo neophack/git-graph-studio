@@ -8,8 +8,6 @@ use std::sync::Mutex;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tauri::{AppHandle as TauriAppHandle, Emitter, Manager};
 
-
-
 struct PtySession {
     /// Distinguishes this session from an earlier one created under the same frontend id: the
     /// reader thread only removes the map entry while it still owns that generation.
@@ -111,7 +109,9 @@ pub struct PtyState {
 /// command behind a poisoned mutex — the "every terminal fails until the app restarts"
 /// signature. The map itself is always consistent enough for these short sections.
 fn lock_sessions(state: &Mutex<PtyState>) -> std::sync::MutexGuard<'_, PtyState> {
-    state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Whether the session's shell is still running — `try_wait` answering `None`. A wait
@@ -130,7 +130,9 @@ fn session_is_alive(session: &mut PtySession) -> bool {
 /// keeps that reader silent while the newer session speaks.
 fn refuse_live_replacement(existing: Option<&mut PtySession>, id: u32) -> Result<(), String> {
     if existing.map(session_is_alive).unwrap_or(false) {
-        return Err(format!("Terminal {id} is already owned by a running session"));
+        return Err(format!(
+            "Terminal {id} is already owned by a running session"
+        ));
     }
     Ok(())
 }
@@ -336,7 +338,9 @@ fn generation_may_speak(current: Option<u64>, gen: u64) -> bool {
 /// handle.
 #[tauri::command]
 pub async fn pty_write(app: TauriAppHandle, id: u32, data: String) -> Result<(), String> {
-    let writer = with_session(&app, id, |session| Ok(std::sync::Arc::clone(&session.writer)))?;
+    let writer = with_session(&app, id, |session| {
+        Ok(std::sync::Arc::clone(&session.writer))
+    })?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut writer = writer
             .lock()
@@ -403,7 +407,10 @@ pub fn pty_tail(app: TauriAppHandle, id: u32, bytes: Option<usize>) -> Result<St
     let state = app.state::<Mutex<PtyState>>();
     let sessions = lock_sessions(&state);
     let session = sessions.sessions.get(&id).ok_or("no such terminal")?;
-    let tail = session.tail.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tail = session
+        .tail
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let want = bytes.unwrap_or(TAIL_BYTES).min(TAIL_BYTES);
     let mut start = tail.len().saturating_sub(want);
     while !tail.is_char_boundary(start) {
@@ -644,7 +651,10 @@ fn decode_pty_chunk(carry: &mut Vec<u8>, chunk: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{close_session, decode_pty_chunk, gather_batch, push_tail, resolve_cwd, shell_command, size_changed, PtySession, TAIL_BYTES};
+    use super::{
+        close_session, decode_pty_chunk, gather_batch, push_tail, resolve_cwd, shell_command,
+        size_changed, PtySession, TAIL_BYTES,
+    };
 
     #[test]
     fn a_same_size_resize_is_no_change_and_a_real_one_is() {
@@ -879,7 +889,8 @@ mod tests {
             }
         }
         let status = child.try_wait().unwrap();
-        assert!(status.is_none(),
+        assert!(
+            status.is_none(),
             "the shell exited: {status:?}; output: {output:?}"
         );
         assert!(!output.is_empty(), "no prompt arrived");
@@ -911,7 +922,10 @@ mod tests {
             .map(|p| p.to_string_lossy().into_owned())
             .expect("a home directory exists on every CI host");
         assert_eq!(resolve_cwd(None, "Z:\\no-such-workspace-ggs"), home);
-        assert_eq!(resolve_cwd(Some("Z:\\no-such-folder-ggs"), "Z:\\no-such-workspace-ggs"), home);
+        assert_eq!(
+            resolve_cwd(Some("Z:\\no-such-folder-ggs"), "Z:\\no-such-workspace-ggs"),
+            home
+        );
     }
 
     #[test]
@@ -974,7 +988,10 @@ mod tests {
         // one silences, and NO entry keeps speaking — a killed session's reader announcement
         // is the frontend's cue to retire a session it created (the three close/reap
         // commits' semantics, kept).
-        assert!(super::generation_may_speak(None, 3), "no entry: the id is free to speak");
+        assert!(
+            super::generation_may_speak(None, 3),
+            "no entry: the id is free to speak"
+        );
         assert!(
             super::generation_may_speak(Some(3), 3),
             "this generation owns the id"
@@ -1042,4 +1059,3 @@ mod tests {
         assert!(super::refuse_live_replacement(Some(&mut session), 9).is_ok());
     }
 }
-

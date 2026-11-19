@@ -3,7 +3,6 @@
 //! handshake and a command round trip. The runtime's own protocol tests live in the
 //! ggs-node package (crates/ggs-node/tests/it); this is the app's half of the seam.
 
-
 use std::io::Write;
 
 use ggs_ext::process::ExtHost;
@@ -19,10 +18,21 @@ fn the_process_host_runs_a_ggs_node_backend_end_to_end() {
     // builds this suite (its own integration tests keep CARGO_BIN_EXE_ggs-node honest):
     // the test binary runs from <target>/debug/deps, the sidecar sits one directory up.
     let exe = std::env::current_exe().expect("the test binary's path");
-    let profile_dir = exe.parent().and_then(|deps| deps.parent()).expect("the target profile directory");
-    let sidecar_name = if cfg!(windows) { "ggs-node.exe" } else { "ggs-node" };
+    let profile_dir = exe
+        .parent()
+        .and_then(|deps| deps.parent())
+        .expect("the target profile directory");
+    let sidecar_name = if cfg!(windows) {
+        "ggs-node.exe"
+    } else {
+        "ggs-node"
+    };
     let sidecar = profile_dir.join(sidecar_name);
-    assert!(sidecar.is_file(), "the ggs-node sidecar is missing beside the test binaries: {}", sidecar.display());
+    assert!(
+        sidecar.is_file(),
+        "the ggs-node sidecar is missing beside the test binaries: {}",
+        sidecar.display()
+    );
     std::env::set_var("GGS_ENGINE_HOST", profile_dir);
 
     let tmp = tempfile::tempdir().unwrap();

@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use ggs_dbc::{DbcState, DecodedSignal, DbcDocument};
+use ggs_dbc::{DbcDocument, DbcState, DecodedSignal};
 use tauri::State;
 
 /// The answer `dbc_open` carries: the whole document (a database is small — messages,

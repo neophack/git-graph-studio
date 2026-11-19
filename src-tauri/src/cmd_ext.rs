@@ -13,14 +13,13 @@ use std::path::{Path, PathBuf};
 
 use tauri::Manager;
 
-use ggs_ext::vsix::read_vsix_manifest;
 use ggs_ext::store::ext_storage_paths_in;
+use ggs_ext::vsix::read_vsix_manifest;
 use ggs_ext::{
     bundled_offer, bundled_packages_in, bundled_vsix_packages_in, ext_fs_core,
-    ext_page_file_chunk_core, ext_page_revision_bytes_core, find_installed,
-    install_from_vsix_into, install_missing_bundled_in, list_installed, load_code_from,
-    node_env, refresh_bundled_installs_in, safe_join, uninstall, ExtInfo, ExtNodeEnv,
-    ExtPageBytes,
+    ext_page_file_chunk_core, ext_page_revision_bytes_core, find_installed, install_from_vsix_into,
+    install_missing_bundled_in, list_installed, load_code_from, node_env,
+    refresh_bundled_installs_in, safe_join, uninstall, ExtInfo, ExtNodeEnv, ExtPageBytes,
 };
 
 pub fn extensions_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -316,7 +315,10 @@ pub fn ext_read_file_base64(
 
 /// The extension's loadable code map — what the host hands the frame at activation.
 #[tauri::command]
-pub fn ext_load_code(app: tauri::AppHandle, ext_id: String) -> Result<ggs_ext::ExtCodeBundle, String> {
+pub fn ext_load_code(
+    app: tauri::AppHandle,
+    ext_id: String,
+) -> Result<ggs_ext::ExtCodeBundle, String> {
     let dir = extensions_dir(&app)?;
     let root = ggs_ext::installed_dir(&dir, &ext_id)?;
     load_code_from(&root)

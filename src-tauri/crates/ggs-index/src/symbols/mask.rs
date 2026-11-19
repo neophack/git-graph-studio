@@ -253,7 +253,10 @@ mod tests {
         let m = mask(text);
         assert!(!m.is_masked(0, 4));
         assert!(m.is_masked(1, 12));
-        assert!(m.is_masked(2, 0), "everything after the open quote is string");
+        assert!(
+            m.is_masked(2, 0),
+            "everything after the open quote is string"
+        );
     }
 
     #[test]
@@ -290,9 +293,15 @@ mod tests {
         // before the comment stays live, the comment masks, and the next line is code.
         let text = "int R = 0; alpha(R); // R\"(unclosed\nalpha(2);\n";
         let m = mask(text);
-        assert!(!m.is_masked(0, 11), "the plain call before the comment is live");
+        assert!(
+            !m.is_masked(0, 11),
+            "the plain call before the comment is live"
+        );
         assert!(m.is_masked(0, 21), "the // comment masks");
-        assert!(!m.is_masked(1, 0), "the line comment never leaks into line 1");
+        assert!(
+            !m.is_masked(1, 0),
+            "the line comment never leaks into line 1"
+        );
     }
 
     #[test]

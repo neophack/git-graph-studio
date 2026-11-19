@@ -56,7 +56,9 @@ pub fn remote_sessions_awake(awake: bool) {
     /// the token is only ever fed back to `endActivity:`), so moving it between threads
     /// is what the API is designed for; objc2's blanket non-`Send` is conservatism about
     /// ObjC objects at large, not a real constraint here.
-    struct Token(objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>);
+    struct Token(
+        objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>,
+    );
     unsafe impl Send for Token {}
 
     static HELD: std::sync::Mutex<Option<Token>> = std::sync::Mutex::new(None);

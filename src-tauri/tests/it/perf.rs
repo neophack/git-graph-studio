@@ -15,10 +15,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
+use ggs_base::workspace::find_repo_root;
 use ggs_ext::process::ExtHost;
 use ggs_git::ops as scm_ops;
 use ggs_git::runner::Git;
-use ggs_base::workspace::find_repo_root;
 use serde_json::{json, Value};
 
 const ENGINE_ID: &str = "perf.git-graph-rs";

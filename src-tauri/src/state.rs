@@ -132,8 +132,14 @@ impl Watchers {
     /// old folder emitting `studio://fs-changed`). The refusals go with them: they name
     /// the closed folder's roots.
     pub fn clear(&self) {
-        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
-        self.1.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        self.1
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
     }
 
     /// Claim the install of one root: false when an install of the same root is already
@@ -160,7 +166,10 @@ impl Watchers {
     /// workspace reopened after the OS once refused the watch) is superseded by it.
     pub fn push(&self, watcher: FolderWatcher) {
         let root = watcher.status().root;
-        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(watcher);
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(watcher);
         self.1
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -170,7 +179,10 @@ impl Watchers {
     /// Record one refused install (the OS answered the watch request with an error). A
     /// second record for the same root replaces the first — only the latest cause shows.
     pub fn record_refusal(&self, status: crate::watcher::WatcherStatus) {
-        let mut refused = self.1.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut refused = self
+            .1
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         refused.retain(|entry| entry.root != status.root);
         refused.push(status);
     }
@@ -185,7 +197,13 @@ impl Watchers {
             .iter()
             .map(|watcher| watcher.status())
             .collect();
-        all.extend(self.1.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().cloned());
+        all.extend(
+            self.1
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .cloned(),
+        );
         all
     }
 }
@@ -270,7 +288,11 @@ mod watchers_tests {
     use crate::watcher::{FolderWatcher, WatcherStatus};
 
     fn refusal(root: &str, error: &str) -> WatcherStatus {
-        WatcherStatus { root: root.to_owned(), running: false, error: Some(error.to_owned()) }
+        WatcherStatus {
+            root: root.to_owned(),
+            running: false,
+            error: Some(error.to_owned()),
+        }
     }
 
     #[test]
@@ -297,7 +319,11 @@ mod watchers_tests {
         watchers.record_refusal(refusal(&root, "first"));
         watchers.record_refusal(refusal(&root, "second"));
         let statuses = watchers.status();
-        assert_eq!(statuses.len(), 2, "the installed watch and the refusal both list");
+        assert_eq!(
+            statuses.len(),
+            2,
+            "the installed watch and the refusal both list"
+        );
         // The folder switch drops everything, refusals included: they name closed roots.
         watchers.clear();
         assert!(watchers.status().is_empty());
@@ -339,13 +365,13 @@ impl FolderSwitch<'_> {
         use tauri::Manager;
         FolderSwitch {
             roots: app.state::<ggs_base::workspace::WorkspaceRoots>().inner(),
-            file_list_cache: app
-                .state::<std::sync::Arc<ggs_fs::FileListCache>>()
-                .inner(),
+            file_list_cache: app.state::<std::sync::Arc<ggs_fs::FileListCache>>().inner(),
             symbol_cache: app
                 .state::<std::sync::Arc<ggs_index::symbols::cache::SymbolCache>>()
                 .inner(),
-            search: app.state::<std::sync::Arc<ggs_index::search::SearchState>>().inner(),
+            search: app
+                .state::<std::sync::Arc<ggs_index::search::SearchState>>()
+                .inner(),
             symbol_index: app
                 .state::<std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>()
                 .inner(),

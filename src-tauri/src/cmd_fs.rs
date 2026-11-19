@@ -4,15 +4,17 @@
 
 use ggs_fs::*;
 use ggs_fs::{cached_file_list, walk_files};
-use ggs_git::revision::{parse_status_branch, repo_folder_name, revision_file_bytes, write_temp_blob, HeadInfo};
+use ggs_git::revision::{
+    parse_status_branch, repo_folder_name, revision_file_bytes, write_temp_blob, HeadInfo,
+};
 
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ggs_git::runner::Git;
 use ggs_base::workspace::WorkspaceRoots;
+use ggs_git::runner::Git;
 use tauri::State;
 
 /// One directory level of the Explorer tree, folders first, then files, both alphabetically
@@ -109,9 +111,11 @@ pub async fn read_file_bytes_raw(
     /// The whole-file read's cap — the image viewer's old base64 contract. An explicit
     /// `len` serves its caller's own policy (the hex slabs, the media fallback's cap).
     const MAX_WHOLE: u64 = 32 * 1024 * 1024;
-    tauri::async_runtime::spawn_blocking(move || read_bytes(&path, offset.unwrap_or(0), len, MAX_WHOLE).map(tauri::ipc::Response::new))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        read_bytes(&path, offset.unwrap_or(0), len, MAX_WHOLE).map(tauri::ipc::Response::new)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// The hex viewer's byte search (module 7): the file is scanned backend-side with
@@ -131,7 +135,12 @@ pub async fn hex_search(
     let state = std::sync::Arc::clone(state.inner());
     tauri::async_runtime::spawn_blocking(move || {
         let mut sink = crate::events::ChannelSink(on_event);
-        ggs_fs::search::search_bytes(Path::new(&path), &needle, &|| !state.is_current(generation), &mut sink)
+        ggs_fs::search::search_bytes(
+            Path::new(&path),
+            &needle,
+            &|| !state.is_current(generation),
+            &mut sink,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -207,11 +216,7 @@ pub async fn write_file(
 /// finally Windows-1252), so a mixed-encoding diff does not show replacement characters
 /// on one side. A path absent at the revision keeps the "does not exist" error the
 /// editors' missing-side handling keys off.
-fn revision_file_contents(
-    git: &Git,
-    revision: &str,
-    path: &str,
-) -> Result<FileContents, String> {
+fn revision_file_contents(git: &Git, revision: &str, path: &str) -> Result<FileContents, String> {
     match revision_file_bytes(git, revision, path)? {
         None => Err(format!("The file \"{path}\" does not exist in {revision}")),
         Some(bytes) => Ok(decode(bytes, None)),
@@ -337,12 +342,7 @@ pub fn fs_write_chunk(
     let total: u64 = header("x-ggs-total")?
         .parse()
         .map_err(|_| "bad x-ggs-total")?;
-    let open: Vec<PathBuf> = roots
-        .inner()
-        .list()
-        .iter()
-        .map(PathBuf::from)
-        .collect();
+    let open: Vec<PathBuf> = roots.inner().list().iter().map(PathBuf::from).collect();
     if !upload_allowed(Path::new(&path), &open) {
         return Err(format!("{path}: uploads land inside the open folders only"));
     }
@@ -354,7 +354,10 @@ pub fn fs_write_chunk(
 /// these locally (no session header) and enforces the boundary before forwarding an
 /// invoke — the app's own commands stay unconfined for the desktop window that runs them.
 #[tauri::command]
-pub fn remote_paths_policy(roots: State<'_, WorkspaceRoots>, launch: State<'_, crate::state::LaunchState>) -> Vec<String> {
+pub fn remote_paths_policy(
+    roots: State<'_, WorkspaceRoots>,
+    launch: State<'_, crate::state::LaunchState>,
+) -> Vec<String> {
     let mut open: Vec<String> = roots.inner().list();
     if let Some(file) = launch.inner().single_file() {
         open.push(file);
@@ -389,16 +392,33 @@ pub(crate) fn watcher_reports(switch: &crate::state::FolderSwitch<'_>) -> Vec<Wa
         .roots
         .list()
         .into_iter()
-        .map(|root| match live.iter().find(|status| status.root == root) {
-            Some(status) if status.running => WatcherReport { root, running: true, error: None, starting: false },
-            Some(status) => WatcherReport {
-                root,
-                running: false,
-                error: Some(status.error.clone().unwrap_or_else(|| "the file watcher stopped".to_owned())),
-                starting: false,
+        .map(
+            |root| match live.iter().find(|status| status.root == root) {
+                Some(status) if status.running => WatcherReport {
+                    root,
+                    running: true,
+                    error: None,
+                    starting: false,
+                },
+                Some(status) => WatcherReport {
+                    root,
+                    running: false,
+                    error: Some(
+                        status
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "the file watcher stopped".to_owned()),
+                    ),
+                    starting: false,
+                },
+                None => WatcherReport {
+                    root,
+                    running: false,
+                    error: None,
+                    starting: true,
+                },
             },
-            None => WatcherReport { root, running: false, error: None, starting: true },
-        })
+        )
         .collect()
 }
 
@@ -510,12 +530,7 @@ pub fn fs_upload_offset(
     path: String,
     size: u64,
 ) -> Result<u64, String> {
-    let open: Vec<PathBuf> = roots
-        .inner()
-        .list()
-        .iter()
-        .map(PathBuf::from)
-        .collect();
+    let open: Vec<PathBuf> = roots.inner().list().iter().map(PathBuf::from).collect();
     if !upload_allowed(Path::new(&path), &open) {
         return Err(format!("{path}: uploads land inside the open folders only"));
     }
@@ -663,7 +678,10 @@ mod paste_tests {
             false,
         )
         .unwrap_err();
-        assert!(err.contains("pastes land inside the open folders only"), "{err}");
+        assert!(
+            err.contains("pastes land inside the open folders only"),
+            "{err}"
+        );
         let err = paste_confined(
             &open,
             &[outside.display().to_string()],
@@ -671,7 +689,10 @@ mod paste_tests {
             true,
         )
         .unwrap_err();
-        assert!(err.contains("pastes land inside the open folders only"), "{err}");
+        assert!(
+            err.contains("pastes land inside the open folders only"),
+            "{err}"
+        );
         assert!(outside.exists(), "the refused source was never touched");
 
         // So is a destination outside them — the paste never lands at all.
@@ -684,7 +705,10 @@ mod paste_tests {
             true,
         )
         .unwrap_err();
-        assert!(err.contains("pastes land inside the open folders only"), "{err}");
+        assert!(
+            err.contains("pastes land inside the open folders only"),
+            "{err}"
+        );
         assert!(!dest.join("a.txt").exists());
 
         // An escape past the root with `..` is caught by the canonical check, not the spelling.
@@ -699,7 +723,10 @@ mod paste_tests {
             false,
         )
         .unwrap_err();
-        assert!(err.contains("pastes land inside the open folders only"), "{err}");
+        assert!(
+            err.contains("pastes land inside the open folders only"),
+            "{err}"
+        );
     }
 }
 
@@ -798,7 +825,10 @@ mod session_log_tests {
 }
 
 #[tauri::command]
-pub fn create_file(cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>, path: String) -> Result<(), String> {
+pub fn create_file(
+    cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
+    path: String,
+) -> Result<(), String> {
     cache.invalidate();
     let target = checked(&path)?;
     if target.exists() {
@@ -811,7 +841,10 @@ pub fn create_file(cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>, path
 }
 
 #[tauri::command]
-pub fn create_folder(cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>, path: String) -> Result<(), String> {
+pub fn create_folder(
+    cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
+    path: String,
+) -> Result<(), String> {
     cache.invalidate();
     let target = checked(&path)?;
     if target.exists() {
@@ -821,7 +854,11 @@ pub fn create_folder(cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>, pa
 }
 
 #[tauri::command]
-pub fn rename_path(cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>, from: String, to: String) -> Result<(), String> {
+pub fn rename_path(
+    cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
+    from: String,
+    to: String,
+) -> Result<(), String> {
     cache.invalidate();
     rename(&from, &to)
 }
@@ -883,11 +920,15 @@ fn paste_confined(
     let confined = |path: &str| upload_allowed(Path::new(path), open);
     for source in sources {
         if !confined(source) {
-            return Err(format!("{source}: pastes land inside the open folders only"));
+            return Err(format!(
+                "{source}: pastes land inside the open folders only"
+            ));
         }
     }
     if !confined(dest_dir) {
-        return Err(format!("{dest_dir}: pastes land inside the open folders only"));
+        return Err(format!(
+            "{dest_dir}: pastes land inside the open folders only"
+        ));
     }
     if move_entries {
         move_into_paths(sources, dest_dir)
@@ -906,12 +947,7 @@ pub fn fs_paste_copy(
     dest_dir: String,
 ) -> Result<Vec<String>, String> {
     cache.invalidate();
-    let open: Vec<PathBuf> = roots
-        .inner()
-        .list()
-        .iter()
-        .map(PathBuf::from)
-        .collect();
+    let open: Vec<PathBuf> = roots.inner().list().iter().map(PathBuf::from).collect();
     paste_confined(&open, &sources, &dest_dir, false)
 }
 
@@ -925,12 +961,7 @@ pub fn fs_paste_move(
     dest_dir: String,
 ) -> Result<Vec<String>, String> {
     cache.invalidate();
-    let open: Vec<PathBuf> = roots
-        .inner()
-        .list()
-        .iter()
-        .map(PathBuf::from)
-        .collect();
+    let open: Vec<PathBuf> = roots.inner().list().iter().map(PathBuf::from).collect();
     paste_confined(&open, &sources, &dest_dir, true)
 }
 
@@ -953,7 +984,9 @@ pub async fn list_files(
     let root = repo
         .or_else(|| roots.inner().first())
         .ok_or_else(|| "No folder is open".to_string())?;
-    Ok(cached_file_list(cache.inner(), &root, TTL, walk_files).as_ref().clone())
+    Ok(cached_file_list(cache.inner(), &root, TTL, walk_files)
+        .as_ref()
+        .clone())
 }
 
 /* ---------- Hot exit: backups of unsaved buffers ---------- */
@@ -1035,7 +1068,8 @@ mod backup_tests {
         let dir = tempfile::tempdir().unwrap();
         ggs_text::backup::write_into(dir.path(), "C:\\repo\\a.txt", "draft one".into()).unwrap();
         ggs_text::backup::write_into(dir.path(), "C:\\repo\\b.txt", "draft two".into()).unwrap();
-        ggs_text::backup::write_into(dir.path(), "C:\\repo\\a.txt", "draft one, newer".into()).unwrap();
+        ggs_text::backup::write_into(dir.path(), "C:\\repo\\a.txt", "draft one, newer".into())
+            .unwrap();
         let listed = ggs_text::backup::list_in(dir.path());
         assert_eq!(
             listed.iter().map(|b| b.path.as_str()).collect::<Vec<_>>(),
@@ -1169,7 +1203,12 @@ mod remote_gate_tests {
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::write(repo.join("a.txt"), b"x").unwrap();
         let repo_form = canonical_display(&repo).unwrap();
-        let join = |name: &str| Path::new(&repo_form).join(name).to_string_lossy().into_owned();
+        let join = |name: &str| {
+            Path::new(&repo_form)
+                .join(name)
+                .to_string_lossy()
+                .into_owned()
+        };
         let outside = dir.path().join("elsewhere");
         std::fs::create_dir_all(&outside).unwrap();
         let confined = vec![repo.clone()];
@@ -1184,7 +1223,10 @@ mod remote_gate_tests {
         );
         assert_eq!(answered[0].as_deref(), Some(join("a.txt").as_str()));
         assert_eq!(answered[1].as_deref(), Some(join("new.txt").as_str()));
-        assert_eq!(answered[2], None, "no existence oracle outside the boundary");
+        assert_eq!(
+            answered[2], None,
+            "no existence oracle outside the boundary"
+        );
 
         // A symlink inside the open folder resolves to wherever it really points — the
         // answer that lets the gate refuse a link aimed at ~/.ggs. Windows symlinks need
@@ -1260,11 +1302,15 @@ mod watcher_status_tests {
         assert!(watcher_reports(&state.switch()).is_empty());
         // Both installs wait for the first painted frame: starting, never an error.
         state.roots.set(vec![root.clone(), other_root.clone()]);
-        state.deferred.record(vec![root.clone(), other_root.clone()]);
+        state
+            .deferred
+            .record(vec![root.clone(), other_root.clone()]);
         let reports = watcher_reports(&state.switch());
         assert_eq!(reports.len(), 2);
         assert!(
-            reports.iter().all(|report| report.starting && !report.running && report.error.is_none()),
+            reports
+                .iter()
+                .all(|report| report.starting && !report.running && report.error.is_none()),
             "{reports:?}"
         );
         // One watch installed, one refused: the refused root carries the cause, the
@@ -1281,8 +1327,14 @@ mod watcher_status_tests {
         let reports = watcher_reports(&state.switch());
         assert_eq!(reports.len(), 2);
         let installed = reports.iter().find(|report| report.root == root).unwrap();
-        assert!(installed.running && !installed.starting && installed.error.is_none(), "{reports:?}");
-        let refused = reports.iter().find(|report| report.root == other_root).unwrap();
+        assert!(
+            installed.running && !installed.starting && installed.error.is_none(),
+            "{reports:?}"
+        );
+        let refused = reports
+            .iter()
+            .find(|report| report.root == other_root)
+            .unwrap();
         assert!(!refused.running && !refused.starting);
         assert_eq!(refused.error.as_deref(), Some("too many watches"));
     }
@@ -1302,7 +1354,10 @@ mod watcher_status_tests {
         assert!(cell.mark_degraded("the watched tree was removed".into()));
         let report = &watcher_reports(&state.switch())[0];
         assert!(!report.running && !report.starting);
-        assert_eq!(report.error.as_deref(), Some("the watched tree was removed"));
+        assert_eq!(
+            report.error.as_deref(),
+            Some("the watched tree was removed")
+        );
     }
 
     #[test]
@@ -1315,7 +1370,9 @@ mod watcher_status_tests {
         state.roots.set(vec![root.clone(), other_root.clone()]);
         // Both installs still wait for their first-paint drain: that drain owns them, so
         // neither is re-armed (the install must not be preempted ahead of the paint).
-        state.deferred.record(vec![root.clone(), other_root.clone()]);
+        state
+            .deferred
+            .record(vec![root.clone(), other_root.clone()]);
         assert!(roots_needing_rearm(&state.switch()).is_empty());
         // The lost-install shape: one root's record was drained and no watch ever landed
         // (the first-paint invoke the busy page swallowed), while the other still waits

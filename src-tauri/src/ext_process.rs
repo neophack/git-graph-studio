@@ -196,7 +196,9 @@ pub fn ext_webview_hosted(
     if !ext_routing::is_session(&frontend) {
         return Ok(None); // only a remote session hosts a page beside the desktop's own
     }
-    Ok(ext_routing::webview_hosted(&ext_id, &frontend, &stream, hosted))
+    Ok(ext_routing::webview_hosted(
+        &ext_id, &frontend, &stream, hosted,
+    ))
 }
 
 /// Push one host event into a backend (`ggs.hostEvent`): the same event objects a frame
@@ -257,16 +259,11 @@ pub fn ext_node_runtime() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-pub fn ext_process_stop(
-    state: tauri::State<'_, ExtHost>,
-    ext_id: String,
-) -> Result<(), String> {
+pub fn ext_process_stop(state: tauri::State<'_, ExtHost>, ext_id: String) -> Result<(), String> {
     state.stop(&ext_id)
 }
 
 #[tauri::command]
-pub fn ext_process_status(
-    state: tauri::State<'_, ExtHost>,
-) -> Result<Vec<ProcessInfo>, String> {
+pub fn ext_process_status(state: tauri::State<'_, ExtHost>) -> Result<Vec<ProcessInfo>, String> {
     Ok(state.status())
 }

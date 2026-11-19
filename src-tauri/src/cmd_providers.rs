@@ -15,12 +15,11 @@
 use std::path::Path;
 
 use ggs_providers::{
-    apply_save, effective_choice, fetch_gateway_models, ggs_home,
-    import_ccswitch_entries, list_answer, probe_key, provider_change, read_store,
-    remove_profile, scan_ccswitch_candidates, set_active, set_instance_choice,
-    test_gateway_connection, usage_answer, write_store, ClaudeMcpStatus, CcSwitchCandidate,
-    ConnectionReport, ProviderInput, ProviderList, ProviderUsageHour, BRIDGED_EXT_IDS,
-    PROVIDERS_EVENT, STORE_LOCK,
+    apply_save, effective_choice, fetch_gateway_models, ggs_home, import_ccswitch_entries,
+    list_answer, probe_key, provider_change, read_store, remove_profile, scan_ccswitch_candidates,
+    set_active, set_instance_choice, test_gateway_connection, usage_answer, write_store,
+    CcSwitchCandidate, ClaudeMcpStatus, ConnectionReport, ProviderInput, ProviderList,
+    ProviderUsageHour, BRIDGED_EXT_IDS, PROVIDERS_EVENT, STORE_LOCK,
 };
 
 /// The withdrawal pass over Claude's redirected settings, logged where a developer
@@ -141,7 +140,8 @@ fn restart_bridged_backends(app: &tauri::AppHandle) {
 /// from succeeding; the extension store's log is where a missing registration is
 /// diagnosable.
 pub fn apply_claude_integration(folders: &[String]) {
-    let result = ggs_providers::apply_claude_integration(folders, std::env::current_exe().ok().as_deref());
+    let result =
+        ggs_providers::apply_claude_integration(folders, std::env::current_exe().ok().as_deref());
     if let Err(error) = result {
         eprintln!("[providers] claude integration: {error}");
         ggs_ext::log_extensions(&format!("claude integration: {error}"));
@@ -163,7 +163,10 @@ pub fn provider_list() -> Result<ProviderList, String> {
 /// the fresh process spawns with the new provider environment. A window running
 /// another provider is not restarted: the change never reaches its environment.
 #[tauri::command]
-pub fn provider_save(app: tauri::AppHandle, profile: ProviderInput) -> Result<ProviderList, String> {
+pub fn provider_save(
+    app: tauri::AppHandle,
+    profile: ProviderInput,
+) -> Result<ProviderList, String> {
     let _guard = STORE_LOCK.lock().unwrap();
     let home = ggs_home()?;
     let mut store = read_store(&home)?;

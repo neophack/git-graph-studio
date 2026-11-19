@@ -126,7 +126,11 @@ fn scm_diff_impl(
 ) -> Result<LineDiff, String> {
     let (old, left_binary) = diff_side_text(left, repo_path)?;
     let (new, right_binary) = diff_side_text(right, repo_path)?;
-    if left_binary || right_binary || diff::looks_binary(old.as_bytes()) || diff::looks_binary(new.as_bytes()) {
+    if left_binary
+        || right_binary
+        || diff::looks_binary(old.as_bytes())
+        || diff::looks_binary(new.as_bytes())
+    {
         return Ok(LineDiff {
             binary: true,
             ..LineDiff::default()
@@ -1285,9 +1289,7 @@ mod tests {
         .unwrap();
         assert_eq!((d.additions, d.deletions), (2, 0));
     }
-
 }
-
 
 #[cfg(test)]
 mod blame_tests {
@@ -1347,6 +1349,4 @@ summary Version of a.txt from a.txt
         assert_eq!(lines[0].author, "Ada");
         assert_eq!(lines[0].summary, "sha256 commit");
     }
-
-
 }

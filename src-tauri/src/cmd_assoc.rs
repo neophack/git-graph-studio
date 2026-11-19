@@ -317,15 +317,17 @@ mod jump_list {
     use super::JumpListItem;
     use windows::core::{Interface, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, VARIANT_BOOL};
-    use windows::Win32::System::Com::StructuredStorage::{PROPVARIANT, PROPVARIANT_0_0, PROPVARIANT_0_0_0};
+    use windows::Win32::Storage::EnhancedStorage::{
+        PKEY_AppUserModel_IsDestListSeparator, PKEY_Title,
+    };
+    use windows::Win32::System::Com::StructuredStorage::{
+        PROPVARIANT, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
+    };
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemAlloc, CoUninitialize, CLSCTX_INPROC_SERVER,
         COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::System::Variant::{VT_BOOL, VT_LPWSTR};
-    use windows::Win32::Storage::EnhancedStorage::{
-        PKEY_AppUserModel_IsDestListSeparator, PKEY_Title,
-    };
     use windows::Win32::UI::Shell::Common::{IObjectArray, IObjectCollection};
     use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
     use windows::Win32::UI::Shell::{
@@ -338,7 +340,9 @@ mod jump_list {
     impl Drop for ComGuard {
         fn drop(&mut self) {
             if self.0 {
-                unsafe { CoUninitialize(); }
+                unsafe {
+                    CoUninitialize();
+                }
             }
         }
     }
@@ -361,7 +365,9 @@ mod jump_list {
         let mut value = PROPVARIANT::default();
         value.Anonymous.Anonymous = core::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
             vt: VT_LPWSTR,
-            Anonymous: PROPVARIANT_0_0_0 { pwszVal: PWSTR(ptr) },
+            Anonymous: PROPVARIANT_0_0_0 {
+                pwszVal: PWSTR(ptr),
+            },
             ..Default::default()
         });
         Ok(value)
@@ -447,7 +453,10 @@ mod jump_list {
                             .cast()
                             .map_err(|e| format!("jump list: the separator store: {e}"))?;
                         store
-                            .SetValue(&PKEY_AppUserModel_IsDestListSeparator, &propvariant_bool(true))
+                            .SetValue(
+                                &PKEY_AppUserModel_IsDestListSeparator,
+                                &propvariant_bool(true),
+                            )
                             .map_err(|e| format!("jump list: the separator flag: {e}"))?;
                         store
                             .Commit()

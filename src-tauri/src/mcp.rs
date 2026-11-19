@@ -2,7 +2,7 @@
 //! tool catalogue, both over ggs-mcp's own halves. The server itself is headless —
 //! `ggs --mcp <folder>` dispatches to `ggs_mcp::run` from the composition root.
 
-use ggs_mcp::{catalogue_infos, read_mcp_log, mcp_log_path, McpLogEntry, McpToolInfo};
+use ggs_mcp::{catalogue_infos, mcp_log_path, read_mcp_log, McpLogEntry, McpToolInfo};
 
 /// The bridge's recent calls for the MCP page's log list — newest first, capped.
 #[tauri::command]

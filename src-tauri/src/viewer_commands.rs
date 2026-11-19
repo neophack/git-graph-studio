@@ -239,8 +239,7 @@ pub async fn viewer_reload(
     if let Some((from, total)) = tail {
         ggs_text::viewer::spawn_tail(
             &handle,
-            Some(Arc::new(crate::events::TauriEvents(app))
-                as Arc<dyn ggs_base::sink::EventSink>),
+            Some(Arc::new(crate::events::TauriEvents(app)) as Arc<dyn ggs_base::sink::EventSink>),
             doc_id,
             path.display().to_string(),
             from,

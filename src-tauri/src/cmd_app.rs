@@ -370,10 +370,7 @@ mod tests {
                 None,
                 true
             ),
-            (
-                "/usr/bin/ggs".to_owned(),
-                vec!["--new-window".to_owned()]
-            )
+            ("/usr/bin/ggs".to_owned(), vec!["--new-window".to_owned()])
         );
         // The Remote Access daemon's plain prefix asks for no blank: the folder it appends
         // (or the restore the window's own boot runs) decides what shows.

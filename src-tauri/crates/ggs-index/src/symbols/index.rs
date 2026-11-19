@@ -712,23 +712,31 @@ mod tests {
         // hot.rs: 400 whole-word hits of the name; quiet.rs: one, alphabetically after.
         let mut hot = String::new();
         for line in 1..=400 {
-            hot.push_str(&format!("fn line{line}() {{ alpha + {line}; }}
-"));
+            hot.push_str(&format!(
+                "fn line{line}() {{ alpha + {line}; }}
+"
+            ));
         }
         write(dir.path(), "hot.rs", &hot);
-        write(dir.path(), "quiet.rs", "fn alpha() {}
-");
+        write(
+            dir.path(),
+            "quiet.rs",
+            "fn alpha() {}
+",
+        );
         let root = dir.path().display().to_string();
 
         // The window stores the prefix of the stream; the total counts every hit.
-        let (files, total) =
-            scan_references_bounded(&root, "alpha", None, 100, "").unwrap();
+        let (files, total) = scan_references_bounded(&root, "alpha", None, 100, "").unwrap();
         assert_eq!(total, 401);
         let stored: usize = files.iter().map(|f| f.matches.len()).sum();
         assert_eq!(stored, 100);
         assert_eq!(files[0].path, "hot.rs", "path order survives the window");
         // SearchMatch lines are 1-based; the stream's head is hot.rs's first line.
-        assert_eq!(files[0].matches[0].line, 1, "the window is the stream's head");
+        assert_eq!(
+            files[0].matches[0].line, 1,
+            "the window is the stream's head"
+        );
 
         // The prefix narrows every phase: only the prefixed files scan and count.
         let (files, total) =

@@ -11,7 +11,10 @@ use std::sync::Arc;
 use ggs_ext::ExtInfo;
 use tauri::ipc::Channel;
 
-use ggs_ext::gallery::{download_vsix, gallery_url, get, lookup, search, GalleryEntry, GalleryProgress, GallerySearch, ASSET_CAP, FEATURED};
+use ggs_ext::gallery::{
+    download_vsix, gallery_url, get, lookup, search, GalleryEntry, GalleryProgress, GallerySearch,
+    ASSET_CAP, FEATURED,
+};
 
 /// The in-flight marketplace download's cancel flag: the install toast's Cancel sets it
 /// through `ext_gallery_install_cancel`, the download loop reads it on every progress
@@ -92,17 +95,18 @@ pub async fn ext_gallery_install(
     let cancelled = Arc::clone(&cancel.cancelled);
     // Download and read the manifest off the UI thread; the backend stop and the install
     // follow once the id is known (the two things that touch shared state).
-    let downloaded = tauri::async_runtime::spawn_blocking(move || -> Result<(PathBuf, String), String> {
-        let package = download_vsix(&base, &download_url, &mut |tick| {
-            if cancelled.load(Ordering::Relaxed) {
-                return false;
-            }
-            on_progress.send(tick).is_ok()
-        })?;
-        package_with_id(package)
-    })
-    .await
-    .map_err(|e| format!("the download was cancelled: {e}"))?;
+    let downloaded =
+        tauri::async_runtime::spawn_blocking(move || -> Result<(PathBuf, String), String> {
+            let package = download_vsix(&base, &download_url, &mut |tick| {
+                if cancelled.load(Ordering::Relaxed) {
+                    return false;
+                }
+                on_progress.send(tick).is_ok()
+            })?;
+            package_with_id(package)
+        })
+        .await
+        .map_err(|e| format!("the download was cancelled: {e}"))?;
     install_verified(app, state, downloaded).await
 }
 
