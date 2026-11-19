@@ -427,7 +427,9 @@ function hintMatchesKind(kind: string, hint: string): boolean {
 		case 'enum':
 			return kind === 'enum';
 		case 'variable':
-			return kind === 'variable' || kind === 'constant' || kind === 'field' || kind === 'property' || kind === 'parameter';
+			// A parameter never reaches the index (it resolves through the scope half or
+			// not at all), so it must not rank as a value site's answer here either.
+			return kind === 'variable' || kind === 'constant' || kind === 'field' || kind === 'property';
 		default:
 			return kind === hint;
 	}

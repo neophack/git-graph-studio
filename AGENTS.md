@@ -375,7 +375,16 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   `symbol_scope_lookup` parses the caller's live buffer per call (no folder, no disk read)
   and answers the scope-local definitions covering a use site, innermost first; the hover,
   Go-to-Definition and Peek ask it before the global lookup, so a local resolves inside its
-  scope and a same-named global is never served there (a v3 symbols.bin is rebuilt).
+  scope and a same-named global is never served there (a v3 symbols.bin is rebuilt). A
+  parameter whose enclosing-function walk finds no function sits in a TYPE position — a
+  prototype's, a function-pointer typedef's, a callback parameter's inner list (the C/C++
+  param scope climbs the declarator chains: `c_family_param_scope`) — and owns nothing at
+  all: no scope, no index row. Before 2026-11-19 such rows rode the global index (stored
+  under the KINDS fallback kind) and the hover's fallback showed one as another function's
+  parameter whenever the hovered local's declaration form escaped the query — the owner's
+  report that started this; a v4 store is rebuilt for the same reason, and the C/C++
+  queries now capture function-pointer parameters and locals (`int (*cb)(void)`) so the
+  scope half answers them instead of falling through.
 
 ### 6. Editor Suite
 

@@ -286,6 +286,9 @@ const C_QUERY: &str = r#"
 (parameter_declaration declarator: (identifier) @def.param)
 (parameter_declaration declarator: (pointer_declarator declarator: (identifier) @def.param))
 (parameter_declaration declarator: (array_declarator declarator: (identifier) @def.param))
+(parameter_declaration declarator: (function_declarator declarator: (parenthesized_declarator (pointer_declarator declarator: (identifier) @def.param))))
+(declaration declarator: (function_declarator declarator: (parenthesized_declarator (pointer_declarator declarator: (identifier) @def.variable))))
+(declaration declarator: (init_declarator declarator: (function_declarator declarator: (parenthesized_declarator (pointer_declarator declarator: (identifier) @def.variable)))))
 "#;
 
 const CPP_QUERY: &str = r#"
@@ -315,6 +318,10 @@ const CPP_QUERY: &str = r#"
 (parameter_declaration declarator: (pointer_declarator declarator: (identifier) @def.param))
 (parameter_declaration declarator: (reference_declarator (identifier) @def.param))
 (parameter_declaration declarator: (array_declarator declarator: (identifier) @def.param))
+(parameter_declaration declarator: (function_declarator declarator: (parenthesized_declarator (pointer_declarator declarator: (identifier) @def.param))))
+(parameter_declaration declarator: (function_declarator declarator: (parenthesized_declarator (reference_declarator (identifier) @def.param))))
+(declaration declarator: (function_declarator declarator: (parenthesized_declarator (pointer_declarator declarator: (identifier) @def.variable))))
+(declaration declarator: (init_declarator declarator: (function_declarator declarator: (parenthesized_declarator (pointer_declarator declarator: (identifier) @def.variable)))))
 "#;
 
 const CSHARP_QUERY: &str = r#"
@@ -486,6 +493,14 @@ pub fn parse_file(text: &str, ext: &str) -> ParsedFile {
                     if out.locals.len() < MAX_SYMBOLS {
                         out.locals.push(symbol);
                     }
+                } else if kind == "param" {
+                    // A parameter never lives at file scope: one whose enclosing-function
+                    // walk finds nothing sits in a TYPE position — a prototype's, a
+                    // function-pointer typedef's, a callback parameter's inner list. It
+                    // defines nothing anywhere (not a local, not a global); indexing it
+                    // made the hover's global fallback show another function's parameter
+                    // for a name the scope half could not capture (2026-11-19).
+                    continue;
                 } else if out.symbols.len() < MAX_SYMBOLS {
                     out.symbols.push(symbol);
                 }
@@ -672,8 +687,12 @@ fn symbol_of(
     // range. Parameters and variables are the captures this applies to — every other
     // kind is file- or type-scope by construction. `None` marks the declaration global.
     let scope = if matches!(capture_kind, "param" | "variable") {
-        enclosing_scope(lang, name_node)
-            .map(|f| (f.start_position().row, end_row_of(f)))
+        let f = if matches!(lang, Lang::C | Lang::Cpp) && capture_kind == "param" {
+            c_family_param_scope(lang, name_node)
+        } else {
+            enclosing_scope(lang, name_node)
+        };
+        f.map(|f| (f.start_position().row, end_row_of(f)))
     } else {
         None
     };
@@ -717,6 +736,31 @@ fn enclosing_scope(lang: Lang, from: tree_sitter::Node) -> Option<tree_sitter::N
         node = current.parent();
     }
     None
+}
+
+/// A C-family parameter's function: the declarator chains decide. The name climbs its
+/// own declarators (`int a`, `char *buf`, `int (*cb)(void)`) to its
+/// `parameter_declaration`, whose `parameter_list`'s parent climbs the HOST's
+/// declarators — the first non-declarator node is the enclosing function definition (a
+/// real parameter of it) or a declaration / typedef / field_declaration, meaning the
+/// parameter names a TYPE position: a prototype's, a function-pointer typedef's, or a
+/// callback parameter's inner list (`int (*cb)(void *ctx)` — `ctx` belongs to the
+/// callback's own signature, not the host). Such a name owns no scope at all, and
+/// [`parse_file`] drops it instead of indexing it as another function's parameter.
+fn c_family_param_scope(lang: Lang, from: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    let mut node = from.parent()?;
+    while node.kind().ends_with("declarator") {
+        node = node.parent()?;
+    }
+    if node.kind() != "parameter_declaration" {
+        return None;
+    }
+    // parameter_declaration → parameter_list → the host's declarator chain.
+    let mut host = node.parent()?.parent()?;
+    while host.kind().ends_with("declarator") {
+        host = host.parent()?;
+    }
+    is_scope(lang, host.kind()).then_some(host)
 }
 
 /// The node kinds whose bodies carry scope-local names, per language: plain functions
@@ -1134,6 +1178,50 @@ fn unquote(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A parameter without an enclosing function is a TYPE position's name — a
+    /// prototype's, a function-pointer typedef's, a callback parameter's inner list —
+    /// and defines nothing anywhere: it owns no scope and no index entry. Before this,
+    /// such rows rode the global index (stored as kind "function", the KINDS table's
+    /// fallback) and the hover's fallback showed one as ANOTHER function's parameter
+    /// whenever the hovered local's declaration form escaped the query (2026-11-19,
+    /// the owner's report: hover 的局部变量显示了别的函数的传参).
+    #[test]
+    fn type_position_parameters_own_no_scope_and_no_index() {
+        let text = "typedef int (*handler_t)(void *ctx, int code);\nint compute(int total, int n);\nstatic int run(int (*cb)(void *ctx), int code) {\n    int r = cb(0, code);\n    return r;\n}\n";
+        let file = parse_file(text, "c");
+        // The global index holds only the real declarations — no parameter rows.
+        assert_eq!(kinds(&file), vec![("function", "run")]);
+        // The scope locals: `cb` (the host's function-pointer parameter, host scope) and
+        // `code` of the function — never `ctx` (the callback's own signature) and never
+        // the typedef's or prototype's names.
+        let locals: Vec<(&str, (usize, usize))> = file
+            .locals
+            .iter()
+            .map(|s| (s.name.as_str(), s.scope.unwrap()))
+            .collect();
+        assert!(locals.contains(&("cb", (2, 5))), "{locals:?} — cb is run's own parameter");
+        assert!(locals.contains(&("code", (2, 5))), "{locals:?}");
+        assert!(
+            !file.locals.iter().any(|s| s.name == "ctx" || s.name == "total" || s.name == "n"),
+            "{:?} — type-position parameter names own no scope",
+            locals
+        );
+        // A hover of `cb` inside run resolves to run's own parameter.
+        let hits = scope_definitions(text, "c", 3, "cb");
+        assert_eq!((hits.len(), hits[0].kind, hits[0].line), (1, "parameter", 2));
+        // The prototype's `total` never answers inside run — the scope half finds none
+        // and, with the index clean, the global fallback cannot show the parameter row.
+        assert!(scope_definitions(text, "c", 3, "total").is_empty());
+        // C++ mirrors: a class-declared method's parameters are type positions too, and
+        // a callback reference parameter belongs to its host.
+        let cpp = "class Ops {\n    int step(int n);\n};\nint Ops::step(int (*cb)(void *ctx)) {\n    return cb(0);\n}\n";
+        let file = parse_file(cpp, "cpp");
+        assert_eq!(kinds(&file), vec![("class", "Ops"), ("method", "step")]);
+        let names: Vec<&str> = file.locals.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"cb"), "{names:?}");
+        assert!(!names.contains(&"n") && !names.contains(&"ctx"), "{names:?}");
+    }
 
     fn kinds(file: &ParsedFile) -> Vec<(&str, &str)> {
         file.symbols

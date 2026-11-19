@@ -56,7 +56,10 @@ const MAGIC: &[u8; 6] = b"GGSIDX";
 /// Format 4 (2026-11-18): scope-local declarations — a function's parameters and locals —
 /// no longer ride the global index (they resolve per file against their scope), so a
 /// version-3 file holds names and entries the global index must not serve and is rebuilt.
-const VERSION: u8 = 4;
+/// Format 5 (2026-11-19): parameters without an enclosing function — a prototype's, a
+/// function-pointer typedef's — own nothing and are no longer indexed at all; a
+/// version-4 file holds them stored under the KINDS fallback kind and is rebuilt.
+const VERSION: u8 = 5;
 /// The interned-name id a symbol without a container carries.
 const NO_CONTAINER: u32 = u32::MAX;
 /// Full builds report progress every this many files; also the cancellation checkpoint.
