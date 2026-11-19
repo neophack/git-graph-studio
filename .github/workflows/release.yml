@@ -108,6 +108,16 @@ jobs:
     needs: resolve-tag
     uses: ./.github/workflows/studio.yml
     secrets: inherit
+    # The grant the called workflow's jobs may never exceed: studio.yml's cache-prune
+    # deletes superseded studio-linux-* caches under actions: write, and a called
+    # workflow may not elevate beyond its caller — without this block every Release
+    # dispatch died as a 4-second startup_failure before a single job started
+    # (2026-11-19, run 44433763609; the push-triggered Studio runs never saw it,
+    # because a direct run grants its own job-level scopes). contents: read is every
+    # other called job's whole need (checkout alone).
+    permissions:
+      actions: write
+      contents: read
     with:
       full: ${{ inputs.full == true }}
       studio-version: ${{ needs.resolve-tag.outputs.version }}
