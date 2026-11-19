@@ -108,15 +108,14 @@ jobs:
     needs: resolve-tag
     uses: ./.github/workflows/studio.yml
     secrets: inherit
-    # The grant the called workflow's jobs may never exceed: studio.yml's cache-prune
-    # deletes superseded studio-linux-* caches under actions: write, and a called
-    # workflow may not elevate beyond its caller — without this block every Release
-    # dispatch died as a 4-second startup_failure before a single job started
-    # (2026-11-19, run 44433763609; the push-triggered Studio runs never saw it,
-    # because a direct run grants its own job-level scopes). contents: read is every
-    # other called job's whole need (checkout alone).
+    # The grant the called workflow's jobs may never exceed: contents: read is every
+    # called job's whole need (checkout alone). This block once carried actions: write
+    # for studio.yml's cache-prune (2026-11-19, run 44433763609 — without it every
+    # Release dispatch died as a 4-second startup_failure before a single job started;
+    # a direct push run never saw that, because it grants its own job-level scopes);
+    # prune was retired with the Linux build cache it guarded the same day, and the
+    # caller's grant shrunk with it.
     permissions:
-      actions: write
       contents: read
     with:
       full: ${{ inputs.full == true }}
@@ -257,13 +256,21 @@ jobs:
       # SHA256SUMS lists exactly the files attached to the release. Only installers and
       # metrics.json are taken - the v0.1.1 release carried every bundler work file that
       # had slipped into an artifact, so this filter stays as the release page's guard.
+      # The installers are version-gated too (2026-11-19): a warm build cache once handed
+      # the artifact the previous releases' bundles (v0.1.21 shipped 0.1.19/0.1.20 debs
+      # and rpms), and an extension-only filter passes those straight through. metrics.json
+      # and the hub packages carry no such ambiguity beyond the version every hub file
+      # already names.
       - name: Flatten and checksum
+        env:
+          VERSION: ${{ needs.resolve-tag.outputs.version }}
         run: |
           mkdir flat
           find artifacts -type f \( \
-            -name '*.exe' -o -name '*.deb' -o -name '*.rpm' \
-            -o -name '*.dmg' -o -name 'metrics.json' \) -exec cp {} flat/ \;
-          find hubpkgs -type f -exec cp {} flat/ \;
+            \( -name "*${VERSION}*" \( \
+              -name '*.exe' -o -name '*.deb' -o -name '*.rpm' -o -name '*.dmg' \
+            \) \) -o -name 'metrics.json' \) -exec cp {} flat/ \;
+          find hubpkgs -type f -name "*${VERSION}*" -exec cp {} flat/ \;
           cd flat
           sha256sum * > SHA256SUMS
           ls -l
@@ -290,6 +297,24 @@ jobs:
         with:
           tag_name: v${{ needs.resolve-tag.outputs.version }}
           name: Git Graph Studio v${{ needs.resolve-tag.outputs.version }}
+          # The install hint the auto-generated notes never carry: while the signing
+          # secrets are unconfigured the macOS dmg has only the ad-hoc seal, so a
+          # browser-downloaded copy is quarantined — README § Installing a macOS release.
+          body: |
+            **macOS**: while the dmg carries only the ad-hoc seal (no Developer ID), a
+            browser-downloaded copy is quarantined. After dragging **Git Graph Studio.app**
+            to `/Applications`, clear it once:
+
+            ```
+            xattr -dr com.apple.quarantine "/Applications/Git Graph Studio.app"
+            ```
+
+            Or skip quarantine entirely — install with curl, which never sets it
+            (and clears any it finds):
+
+            ```
+            curl -fsSL https://raw.githubusercontent.com/neophack/git-graph-studio/main/scripts/install-macos.sh | sh
+            ```
           generate_release_notes: true
           draft: false
           files: flat/*

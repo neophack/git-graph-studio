@@ -28,9 +28,12 @@
 # rust-cache keeps the target dirs and the crates.io registry warm across runs (fewer
 # downloads, near-incremental rebuilds; cache-workspace-crates keeps the vendored boa
 # artifacts too); npm downloads are cached the same way through setup-node's cache. The
-# 10 GB cache budget itself is guarded by the cache-prune job below (2026-11-18): left
-# alone, two generations of the Linux container caches crowded out every rust-cache
-# save and every Rust job ran cold every run. The three Linux legs are one compile
+# Linux container legs carry NOTHING across runs (2026-11-19, the owner's direction):
+# the /cache target dir this workflow once persisted through ~/.ggs-linux-cache is
+# per-run scratch now — its cross-run carry-forward shipped the v0.1.21 release's stale
+# 0.1.19/0.1.20 installers (tauri's bundler only ever adds to its output dir) and grew
+# the repo to its 10 GB cache quota, evicting every rust-cache; the cache-prune job
+# that guarded those caches was retired with them. The three Linux legs are one compile
 # each - each in its own floor container - because one
 # binary cannot carry two glibc floors (and the arm64 deb is its own binary).
 #
@@ -45,8 +48,9 @@
 # references turn into GLIBC_2.39 version entries at link time) that no Ubuntu 22.04 /
 # Debian 12 machine could load. The costs that pushed CI to the native runner are paid
 # differently now: buildx's GitHub cache keeps the image's apt layers warm across runs
-# (the old path rebuilt them every run), and actions/cache warms the in-container compile
-# through the /cache volume. The runner is ubuntu-latest on purpose - with containers the
+# (the old path rebuilt them every run), while the in-container compile itself runs cold
+# each time (2026-11-19, the owner's direction — no cross-run carry-forward; see the
+# cache policy note above). The runner is ubuntu-latest on purpose - with containers the
 # floor comes from the base image, not the runner, so a `latest` flip cannot move it (and
 # the ubuntu-22.04 runner image retired 2026-09-17 anyway). The in-container pass fails
 # the build if the binary ever asks for a newer glibc than its container's floor.
@@ -766,14 +770,14 @@ jobs:
       # the container's own release build, and a calling workflow still fails unless the
       # test job passed.
 
-      # The container's cargo target and registries, cached across runs via the /cache
-      # volume scripts/docker/studio-linux-build.sh redirects everything into.
-      - name: Cache the container build
-        uses: actions/cache@v5
-        with:
-          path: ~/.ggs-linux-cache
-          key: studio-${{ matrix.cache }}-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: studio-${{ matrix.cache }}-
+      # No cross-run cache for the in-container build (2026-11-19, the owner's direction):
+      # the /cache volume this job once persisted into ~/.ggs-linux-cache carried previous
+      # builds' target dir forward, and two things rode that carry-forward — every stale
+      # installer tauri's bundler left beside the new one's (the v0.1.21 release shipped
+      # 0.1.19/0.1.20 debs and rpms) and an unbounded growth that reached the repo's 10 GB
+      # cache quota and evicted every rust-cache. Each Linux leg now compiles cold inside
+      # its container; the /cache volume below is per-run scratch (still off the slow
+      # repository mount), and the buildx layer cache keeps the image's apt installs warm.
 
       # buildx with the GitHub cache keeps the image's apt layers warm across runs - the
       # cold rebuild of those layers every run is exactly why the container path was
@@ -788,22 +792,15 @@ jobs:
             --load \
             -t ggs-linux-builder-${{ matrix.cache }} \
             -f scripts/docker/Dockerfile.studio-linux scripts/docker
-          # Create the cache dir as the runner before docker sees it: on a cache miss
-          # the daemon would create a missing bind-mount host dir root-owned, and the
-          # runner-uid container below could not write into /cache.
-          mkdir -p "$HOME/.ggs-linux-cache"
-          # Run as the runner's own uid: everything the build writes into the /cache
-          # volume stays runner-owned, which the cache save's tar can read. The
-          # container's default root wrote files the runner could not open ("Cannot
-          # open: Permission denied" - the arm64 leg's "Failed to save" loop: the save
-          # failed, the next run missed the key, root files piled up, the save failed
-          # again). HOME=/tmp stands in for the uid's missing passwd entry (rpmbuild
-          # writes its build tree under $HOME; npm reads $HOME/.npmrc).
+          # Run as the runner's own uid, /cache bound to the runner's own per-run temp
+          # (exists already and runner-owned — no mkdir dance, nothing survives the run).
+          # HOME=/tmp stands in for the uid's missing passwd entry (rpmbuild writes its
+          # build tree under $HOME; npm reads $HOME/.npmrc).
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -e HOME=/tmp \
             -v "$PWD:/repo" \
-            -v "$HOME/.ggs-linux-cache:/cache" \
+            -v "$RUNNER_TEMP:/cache" \
             -e BUNDLES=${{ matrix.bundles }} \
             -e OUT_DIR=${{ matrix.out }} \
             -e GGS_REQUIRE_MARKETPLACE=1 \
@@ -850,42 +847,6 @@ jobs:
           # The measure step is continue-on-error; a metrics.json it never wrote must not
           # fail the build either.
           if-no-files-found: warn
-
-  # Cache hygiene (2026-11-18, the CI speed pass): the repository's 10 GB Actions cache
-  # budget was permanently saturated by the Linux container caches alone. Their key
-  # carries hashFiles(Cargo.lock), so every dependency bump orphans the previous
-  # multi-gigabyte generation until eviction — and two full generations (~9 GB beside
-  # the buildkit blobs and the npm caches) is what evicted EVERY rust-cache save: not
-  # one `v0-rust-*` entry ever survived, so every Rust job on every platform ran a full
-  # cold compile on every run (the measured root cause of the 30+ minute critical
-  # path). This job runs once the Linux legs have saved their current generation and
-  # deletes the superseded `studio-linux-*` keys, keeping exactly one generation so
-  # the rust-caches stay under the budget.
-  cache-prune:
-    name: Prune superseded Linux build caches
-    needs: studio-linux
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      actions: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Delete the studio-linux-* caches this run superseded
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          LOCKHASH: ${{ hashFiles('src-tauri/Cargo.lock') }}
-        run: |
-          for leg in deb deb-arm64 rpm; do
-            keep="studio-linux-${leg}-${LOCKHASH}"
-            stale=$(gh cache list --repo "$REPO" --key "studio-linux-${leg}-" --limit 100 --json id,key --jq ".[] | select(.key != \"${keep}\") | .id")
-            if [ -n "$stale" ]; then
-              echo "deleting superseded ${leg} caches: $(echo $stale | tr '\n' ' ')"
-              gh cache delete $stale --repo "$REPO" || true
-            fi
-          done
 
   # The macOS installers (dmg), built natively; macOS x64 joins on a `full` run.
   studio-macos:

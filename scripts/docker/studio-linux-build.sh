@@ -18,6 +18,10 @@ set -euo pipefail
 : "${GLIBC_FLOOR:=}"
 # Caches on the volume, not on the (slow, Windows-backed) repository mount. CARGO_TARGET_DIR
 # also keeps the Linux artifacts out of target/studio/cargo, which the Windows MSVC builds own.
+# CI's /cache is per-run scratch (nothing restores into it since 2026-11-19 — its cross-run
+# carry-forward once shipped stale previous-version installers); the LOCAL path
+# (scripts/build-studio-linux.bat) mounts the named volume ggs-studio-linux-cache, which does
+# persist across builds — hence the bundle wipe below.
 export CARGO_HOME=/cache/cargo
 export CARGO_TARGET_DIR=/cache/target
 export npm_config_cache=/cache/npm
@@ -40,6 +44,14 @@ echo "[container] app dependencies (adds the linux esbuild/tauri-cli binaries)"
 npm install --no-audit --no-fund
 
 echo "[container] building the installers ($BUNDLES; Rust release build + bundling)"
+# Drop the bundler's previous output first: on the LOCAL named volume the dir persists
+# across builds, and tauri build only ever adds to it — every earlier version's
+# installers stayed beside the current one's, rode the cp below into the artifact, and
+# the v0.1.21 release shipped 0.1.19 and 0.1.20 debs and rpms that way (2026-11-19,
+# CI's then-persistent /cache; CI's /cache is per-run scratch now, this wipe keeps the
+# local path just as clean). Exactly this run's bundles are what the copy sees; the
+# compile cache beside it is untouched.
+rm -rf "$CARGO_TARGET_DIR/release/bundle"
 # tauri build runs prepare.mjs and the Vite build itself (beforeBuildCommand); the
 # marketplace extension packages it packs are fetched right here, from the registry or
 # the target/studio/marketplace-cache on the repository mount.
