@@ -1,0 +1,41 @@
+/* The Symbol Window sidebar page's own affordances — the shared row vocabulary lives in
+   the workbench shell's stylesheet; only this page's pieces render here. */
+
+.symbol-window { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.sw-header {
+	display: flex; align-items: center; gap: 8px; padding: 6px 12px; flex: none;
+	border-bottom: 1px solid var(--vscode-panel-border);
+}
+.sw-title { font-size: 12px; color: var(--vscode-descriptionForeground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sw-filter {
+	flex: 1; max-width: 260px; height: 24px; padding: 0 8px; border-radius: 4px;
+	background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, transparent); font-size: 12px;
+}
+.sw-list { flex: 1; min-height: 0; overflow: auto; padding: 4px 0 12px; }
+.sw-empty { color: var(--vscode-descriptionForeground); padding: 12px 20px; }
+.sw-section {
+	display: flex; align-items: center; gap: 6px; height: var(--row-height);
+	padding-left: 8px; white-space: nowrap; cursor: pointer;
+	color: var(--vscode-sideBar-foreground);
+}
+.sw-section:hover { background: var(--vscode-list-hoverBackground); }
+.sw-section .twistie { width: 16px; flex: none; font-size: 14px; display: inline-flex; justify-content: center; }
+.sw-section-label { font-weight: 600; }
+.sw-import-row {
+	display: flex; align-items: center; gap: 6px; height: var(--row-height);
+	padding-left: 30px; white-space: nowrap; cursor: pointer;
+	color: var(--vscode-descriptionForeground);
+}
+.sw-import-row:hover { color: var(--vscode-textLink-foreground); background: var(--vscode-list-hoverBackground); }
+.sw-row {
+	display: flex; align-items: center; gap: 6px; height: var(--row-height);
+	padding-left: 8px; padding-right: 12px; white-space: nowrap; cursor: pointer;
+	color: var(--vscode-sideBar-foreground);
+}
+.sw-row:hover { background: var(--vscode-list-hoverBackground); }
+.sw-row .sw-container { color: var(--vscode-descriptionForeground); font-size: 11px; }
+.sw-row .sw-name { overflow: hidden; text-overflow: ellipsis; }
+.sw-row .sw-line { margin-left: auto; color: var(--vscode-descriptionForeground); font-size: 11px; }
+.sw-row:hover .sw-name { color: var(--vscode-textLink-foreground); }
+.sw-row.current { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }

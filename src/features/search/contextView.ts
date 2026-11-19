@@ -1,4 +1,4 @@
-// The Context Window (plan M4 4.7) - Source Insight's signature panel: the definition of the
+// The Context Window (plan M4 4.7): the definition of the
 // symbol under the cursor, pinned over the bottom panel. The workbench feeds it from the
 // editor's cursor changes (debounced there); this view only renders what it is handed, keeps
 // a pin that stops the auto-following, and opens the definition in the editor on click.

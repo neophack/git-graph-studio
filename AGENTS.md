@@ -338,9 +338,10 @@ fails to answer, loads the pre-lowered entries the TS scan runs over.
 
 ### 5. Workspace Search
 
-Workspace-wide search & replace with streaming results, and Source Insight-style symbol
+Workspace-wide search & replace with streaming results, and symbol
 navigation (Go-to-Definition, Find References, Call Tree, Quick Open's `@` / `#` symbol
-modes, the Context Window) over the persistent workspace symbol index: interned names,
+modes, the Context Window, the Symbol Window sidebar page, the Relation panel page)
+over the persistent workspace symbol index: interned names,
 per-file fingerprints and per-name occurrence lists under `~/.ggs/index/`, updated
 file-by-file by the watcher. **Nothing is indexed on open** (2026-10-22, the owner's
 direction: 打开大的项目会导致内存占用极高，我不要打开时候就分析项目，而是使用某个分析功能就开始分析，
@@ -351,7 +352,30 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   results' focus and the per-row replace styles), `src/features/search/callTree.ts`, `src/features/search/contextView.ts` (the Context
   Window panel page - the definition of the symbol under the cursor),
   `src/features/search/symbolDbView.ts` (the Symbol Database page - the index as a collapsible
-  folder / file / symbol tree with reference counts, filter and rebuild)
+  folder / file / symbol tree with reference counts, filter and rebuild),
+  `src/features/search/symbolWindowView.ts` + `symbolWindow.css` (the Symbol Window sidebar
+  page — the classic outline pane: the active file's imports and its index outline
+  as icon rows with the container prefix, click jumping through `onOpen`, the filter box,
+  and the cursor's enclosing-symbol row highlighted from the cached [line, end_line] spans —
+  a same-file cursor move only swaps the highlight class, never re-queries, and a highlight
+  CHANGE scrolls the row into view (hidden page never scrolls); the include rows jump to
+  their own line since 2026-11-20, the line riding `symbol_file_outline`'s
+  `FileOutlineImport`; reload rides the showView hook, the active-tab change and the
+  scheduled refresh; `workbench.showSymbolWindow`, Alt+L),
+  `src/features/search/relationsView.ts` + `relations.css` (the Relation panel page —
+  the expandable reference tree over `symbol_relation_children`: the cursor
+  symbol as the root chip (click = the definition), the refsTo / refsFrom direction toggle,
+  every node row a `+` expander that lazily fetches its ring (cached per node, the
+  best-effort `hasChildren` misfire answered by a remembered empty ring, 8 rings deep),
+  the edge part and a row double-click jumping to the reference site through `onOpen`,
+  pin stopping the cursor follow; a ring's `truncated` answer renders a cut-short note,
+  `edgeCount > 1` renders a ×N badge (2026-11-20, per-counterpart edge aggregation), and
+  hovering a node floats the declaration card — `symbolLookup` + `readFile` sliced to the
+  definition's first lines, cached per `name|path`;
+  `followRelationSymbol` mirrors `followContextSymbol`'s
+  gate/debounce/generation beside it in workbench.ts; `workbench.showRelations`;
+  the dev harness's `?relations=1` surface scripts the whole tree — mask escape hatch,
+  counts, truncation, the tooltip — for eyeballing)
 - Backend: the `ggs-index` crate (`src-tauri/crates/ggs-index/`) — `scan` (the shared
   matcher / glob / searchable-read vocabulary), `search` (the rayon-parallelised streaming
   text search), `replace`, `compare` (the folder comparison), `hexdiff` (the byte
@@ -359,7 +383,22 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   `.scm` query per language over defs, call sites and imports, each grammar behind a
   `grammar-*` Cargo feature, the outline scan as the fallback), `symbols::store` (the
   compact on-disk store), `symbols::index` (the per-root databases, the build / resume /
-  rebuild, the reference scan) and `symbols::cache` (the in-memory fallback) — behind the
+  rebuild, the reference scan), `symbols::mask` (the code mask — the comment/string/char-
+  literal byte spans of one text plus its line-start table, the scanner discipline:
+  loop-based, escape-aware, unclosed literals degrade to end-of-text; every relation scan
+  filters its hits through it so a name inside a comment or a string is never a reference),
+  `symbols::relations` (the Relation window's query engine,
+  2026-11-19: `relation_children` over one root — refsTo attributes every occurrence of
+  the name to its innermost enclosing def via the store's per-file [line, end_line] spans
+  (the declaration line's own hit and unattributed hits skip, a hit inside the root's body
+  is the kept recursion node), refsFrom word-scans
+  the root def's body for indexed names (call when followed by `(`, use otherwise, same-file
+  def preferred as the target), `hasChildren` an exact peek for narrow names and refsFrom,
+  optimistic for hot names; 2026-11-20, one node per counterpart with
+  `edge_count` accumulating every valid site at its earliest `edge_line`, a 250 ms
+  wall-clock budget checked every 32 files / 256 hits (a time-slice discipline) answering
+  `RelationAnswer { nodes, truncated }` — the cap and the
+  budget both set `truncated`) and `symbols::cache` (the in-memory fallback) — behind the
   `src-tauri/src/cmd_search.rs` / `cmd_symbols.rs` command adapters (the
   `#[tauri::command]` halves; progress crosses the ggs-base push seams, cancellation is
   the generation counter; every query runs `cmd_symbols::ensure_symbols` first — the

@@ -26,7 +26,7 @@ import { ExtensionsPanel } from '../features/extensions';
 import { clearBookmarks, listBookmarks, toggleBookmark } from '../features/editor';
 import { loadUserKeybindings, renderKeybindingsEditor, userKeybindingFor } from '../platform/keybindings';
 import { Panel } from './panel';
-import { SearchView } from '../features/search';
+import { SearchView, SymbolWindowView } from '../features/search';
 import { SourceControlView } from '../features/scm';
 import { t } from '../platform/i18n';
 import { hook } from '../platform/hooks';
@@ -41,7 +41,7 @@ import { extFileDataUrl } from '../platform/extAssets';
 
 import type { MenuDefinition } from './titlebar';
 
-export type ViewId = 'explorer' | 'search' | 'scm' | 'extensions' | 'analysis';
+export type ViewId = 'explorer' | 'search' | 'scm' | 'extensions' | 'analysis' | 'symbolWindow';
 
 /** One debounced burst of external file changes, as the backend watcher reports it. */
 export interface FsChange {
@@ -154,7 +154,7 @@ export class Workbench {
 
 	readonly panelSash: HTMLElement;
 
-	readonly views: Record<ViewId, HTMLElement> = { explorer: el('div', 'view'), search: el('div', 'view'), scm: el('div', 'view'), extensions: el('div', 'view'), analysis: el('div', 'view') };
+	readonly views: Record<ViewId, HTMLElement> = { explorer: el('div', 'view'), search: el('div', 'view'), scm: el('div', 'view'), extensions: el('div', 'view'), analysis: el('div', 'view'), symbolWindow: el('div', 'view') };
 
 	readonly activityItems: Record<string, HTMLElement> = {};
 
@@ -181,6 +181,8 @@ export class Workbench {
 	readonly extensions: ExtensionsPanel;
 
 	readonly analysis: AnalysisView;
+
+	readonly symbolWindow: SymbolWindowView;
 
 	readonly extensionHost: ExtensionHost;
 
@@ -232,6 +234,7 @@ export class Workbench {
 		this.search = new SearchView(this.views.search);
 		this.scm = new SourceControlView(this.views.scm, commands);
 		this.analysis = new AnalysisView(this.views.analysis);
+		this.symbolWindow = new SymbolWindowView(this.views.symbolWindow);
 		this.extensionHost = new ExtensionHost();
 		// The SCM view's contributed entries (the graph button and the Gerrit actions) run
 		// through the host like the palette's — with their menu arguments (the repository a
@@ -729,9 +732,15 @@ export class Workbench {
 
 	contextTimer: number | null = null;
 
+	/** The Relations page's follow: the same debounce/generation discipline the Context
+	 *  Window keeps, over its own root (never the context view's). */
+	relationTimer: number | null = null;
+
 	readonly onThemeChangedBound = () => this.extensionHost.noteThemeChanged();
 
 	contextGeneration = 0;
+
+	relationGeneration = 0;
 
 	followContextSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): void {
 		// The view only follows while it is the one being looked at (or pinned to a symbol);
@@ -789,6 +798,51 @@ export class Workbench {
 
 		this.panel.context.show({ kind: def.kind, name: def.name, path: absolute, line: def.line, fragment });
 
+	}
+
+	followRelationSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): void {
+		// The Relations page follows the cursor only while the panel is up, it is the page
+		// being looked at and its root is not pinned - never a background query per keystroke.
+		if (!this.panel.isVisible() || this.panel.activeView() !== 'relations' || this.panel.relations.isPinned()) return;
+		if (this.relationTimer !== null) window.clearTimeout(this.relationTimer);
+		const generation = ++this.relationGeneration;
+		this.relationTimer = window.setTimeout(() => {
+			this.relationTimer = null;
+			if (generation !== this.relationGeneration) return;
+			void this.resolveRelationSymbol(editor);
+		}, 150);
+	}
+
+	async resolveRelationSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): Promise<void> {
+		const view = this.editors.activeView;
+		if (!editor || editor.kind !== 'file' || !view || !this.repoPath) {
+			this.panel.relations.setRoot(null);
+			return;
+		}
+		const line = view.state.doc.line(Math.min(Math.max(1, editor.line), view.state.doc.lines));
+		const at = Math.min(Math.max(line.from, line.from + editor.column - 1), line.to);
+		const word = view.state.wordAt(at);
+		if (!word) {
+			this.panel.relations.setRoot(null);
+			return;
+		}
+		const name = view.state.sliceDoc(word.from, word.to);
+		let defs: { kind: string; name: string; path: string; line: number }[] = [];
+		try {
+			defs = (await symbolLookup(name)) ?? [];
+		} catch {
+			defs = [];
+		}
+		if (defs.length === 0) {
+			this.panel.relations.setRoot(null);
+			return;
+		}
+		// A same-file definition outranks the first hit; the index speaks repo-relative
+		// paths and the relation backend expects them, so the definition crosses as
+		// reported (the view's open callback joins the root, not here).
+		const wanted = editor.path ? editor.path.replaceAll('\\', '/').toLowerCase() : '';
+		const def = defs.find((candidate) => joinRepo(this.repoPath!, candidate.path).replaceAll('\\', '/').toLowerCase() === wanted) ?? defs[0]!;
+		this.panel.relations.setRoot({ kind: def.kind, name: def.name, path: def.path, line: def.line });
 	}
 
 	/** F6 (M7 7.4): cycle the keyboard through the workbench's parts - activity bar, side

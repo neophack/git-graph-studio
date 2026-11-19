@@ -239,6 +239,13 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'workbench.showScm', title: 'Source Control', category: 'View', keybinding: 'Ctrl+Shift+G', run: () => this.showView('scm') });
 		register({ id: 'workbench.showExtensions', title: 'Extensions', category: 'View', keybinding: 'Ctrl+Shift+X', run: () => this.showView('extensions') });
 		register({ id: 'workbench.showAnalysis', title: 'Analysis', category: 'View', keybinding: 'Ctrl+Shift+A', run: () => this.showView('analysis') });
+		register({ id: 'workbench.showSymbolWindow', title: 'Symbol Window', category: 'View', keybinding: 'Alt+L', run: () => this.showView('symbolWindow') });
+		// The new view's and its activity-bar tooltip's zh-cn twins (the localization sweep
+		// reads the command title through trText, as it does every registry title).
+		registerZhCnText({
+			'Symbol Window': '符号窗口',
+			'Symbols (Alt+L)': '符号 (Alt+L)'
+		});
 		register({ id: 'analysis.showModules', title: 'Module Analysis', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('modules') });
 		register({ id: 'analysis.showMetrics', title: 'Complexity & Hotspots', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('metrics') });
 		register({ id: 'analysis.showDeadCode', title: 'Dead Code', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('deadcode') });
@@ -281,6 +288,10 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'view.zenMode', title: 'Toggle Zen Mode', category: 'View', keybinding: 'Ctrl+K Z', run: () => this.toggleZenMode() });
 		register({ id: 'workbench.showOutput', title: 'Output', category: 'View', run: () => this.panel.show('output') });
 		register({ id: 'workbench.showContext', title: 'Context', category: 'View', run: () => this.panel.show('context') });
+		register({ id: 'workbench.showRelations', title: 'Relations', category: 'View', run: () => this.panel.show('relations') });
+		// The panel page's zh-cn twin (the localization sweep reads the command title
+		// through trText, as it does every registry title).
+		registerZhCnText({ 'Relations': '关系' });
 		register({ id: 'workbench.showSymbolDatabase', title: 'Symbol Database', category: 'View', enabled: hasRepo, run: () => void this.editors.openSymbolDatabase() });
 		register({ id: 'workbench.focusNextPart', title: 'Focus Next Part', category: 'View', keybinding: 'F6', run: () => this.focusNextPart() });
 		register({ id: 'terminal.toggle', title: 'Toggle Terminal', category: 'Terminal', keybinding: 'Ctrl+`', run: () => this.panel.toggle('terminal') });
@@ -434,6 +445,13 @@ export const bootMethods: ThisType<Workbench> = {
 			this.extensionHost.noteTabsChanged();
 			this.statusBar.setEditor(editor);
 			this.followContextSymbol(editor);
+			// The Relations page follows the same payload; its own gate (the page being the
+			// active one, the root not pinned) lives inside followRelationSymbol.
+			this.followRelationSymbol(editor);
+			// The Symbol Window follows the active editor's file and cursor line (0-based,
+			// the same payload the context window follows); no editor clears it.
+			if (editor?.kind === 'file' && editor.path) this.symbolWindow.setFile(editor.path, editor.line);
+			else this.symbolWindow.setFile(null);
 			if (editor?.kind === 'file' && editor.path) {
 				// explorer.autoReveal: the active file reveals in the tree when the Explorer is
 				// watching; opened elsewhere, the reveal is owed the moment the view returns
@@ -494,6 +512,22 @@ export const bootMethods: ThisType<Workbench> = {
 		this.statusBar.onSymbolsClick = () => void commands.execute('symbols.rebuild');
 		this.panel.context.onOpenDefinition = (definition) => {
 			void this.editors.openFile(definition.path, { line: definition.line + 1 });
+		};
+		// The Relations window's jumps: a definition (the root chip, a row's name) or a
+		// reference site (a row's edge, the row's double click) opens at the 1-based line;
+		// the index speaks repo-relative paths, so an open joins the workspace root.
+		this.panel.relations.onOpen = (path, line) => {
+			void this.editors.openFile(/^([a-zA-Z]:[\\/]|\\|\/)/.test(path) || !this.repoPath ? path : joinRepo(this.repoPath, path), { line });
+		};
+		// The page's own activation re-resolves the cursor symbol right away (the debounced
+		// follow only rides editor changes): the live selection is the payload.
+		this.panel.relations.onNeedRoot = () => {
+			const view = this.editors.activeView;
+			const input = this.editors.activeInput;
+			if (input?.kind !== 'file' || !view) return;
+			const position = view.state.selection.main.head;
+			const line = view.state.doc.lineAt(position);
+			this.followRelationSymbol({ kind: 'file', path: input.path, line: line.number, column: position - line.from + 1 });
 		};
 
 		document.addEventListener('keydown', this.onKeyDownBound);

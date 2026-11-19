@@ -792,6 +792,8 @@ mod desktop {
                 cmd_symbols::symbol_scope_lookup,
                 cmd_symbols::symbol_references,
                 cmd_symbols::symbol_tree,
+                cmd_symbols::symbol_file_outline,
+                cmd_symbols::symbol_relation_children,
                 cmd_analysis::analysis_status,
                 cmd_analysis::analysis_rebuild,
                 cmd_analysis::analysis_module_graph,

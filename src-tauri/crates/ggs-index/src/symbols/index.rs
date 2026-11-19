@@ -337,6 +337,18 @@ impl SymbolIndex {
         Some(names)
     }
 
+    /// Run one read-only query against the root's store under its short lock: the answer
+    /// is computed inside and only the result leaves — the same bargain
+    /// `symbols_with_refs` makes (its whole-index clone also runs under the lock). A
+    /// multi-step query (the relation window) keeps the lock for the computation's
+    /// length so its per-file reads stay consistent. `None` when nothing is indexed
+    /// for the root.
+    pub fn with_store<R>(&self, root: &str, query: impl FnOnce(&SymbolStore) -> R) -> Option<R> {
+        let store = self.store(root)?;
+        let guard = store.lock().unwrap();
+        Some(query(&guard))
+    }
+
     /// One file's outline rows (line order, containers carried, per-name occurrence
     /// counts), or `None` when nothing is indexed for the root or no file sits at
     /// `path` — the MCP server's `file_outline` reads it.

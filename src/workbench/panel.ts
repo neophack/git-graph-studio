@@ -7,14 +7,14 @@
 import { gitOutputClear, gitOutputLog } from '../platform/ipc/scm';
 import { listen } from '../platform/ipc/core';
 
-import { ContextView } from '../features/search';
+import { ContextView, RelationsView } from '../features/search';
 import { TerminalView } from '../features/terminal';
 import { t } from '../platform/i18n';
 import { SETTINGS_EVENT } from '../platform/settings';
 import { actionButton, el, icon } from '../platform/ui/index';
 import { hook } from '../platform/hooks';
 
-export type PanelViewId = 'terminal' | 'output' | 'context';
+export type PanelViewId = 'terminal' | 'output' | 'context' | 'relations';
 
 /** The Output view's channels, in the picker: the built-in "Git" one first, then the
  *  extensions' (creation order; a name collisions gets the owning extension in brackets). */
@@ -144,6 +144,9 @@ export class Panel {
 	readonly output: OutputView;
 	/** Source Insight's Context Window (M4 4.7): the symbol-under-the-cursor's definition. */
 	readonly context: ContextView;
+	/** The Relation window (module 5): the cursor symbol's expandable
+	 *  reference tree, in either direction. */
+	readonly relations: RelationsView;
 	private readonly element: HTMLElement;
 	private readonly tabs: HTMLElement;
 	private readonly actionsHost: HTMLElement;
@@ -161,9 +164,10 @@ export class Panel {
 		this.terminal = new TerminalView();
 		this.output = new OutputView();
 		this.context = new ContextView();
+		this.relations = new RelationsView();
 		this.tabs = el('div', 'panel-tabs');
 		this.tabs.setAttribute('role', 'tablist');
-		for (const [id, view] of [['terminal', 'terminal'], ['output', 'output'], ['context', 'context']] as [PanelViewId, string][]) {
+		for (const [id, view] of [['terminal', 'terminal'], ['output', 'output'], ['context', 'context'], ['relations', 'relations']] as [PanelViewId, string][]) {
 			const tab = el('span', 'panel-title', [t(`panel.${view}` as 'panel.terminal')]);
 			tab.dataset['view'] = id;
 			tab.setAttribute('role', 'tab');
@@ -179,7 +183,7 @@ export class Panel {
 			this.actionsHost,
 			el('div', 'actions', [this.maximizeButton, actionButton('close', 'Hide Panel (Ctrl+J)', () => this.hide())])
 		]);
-		element.append(header, this.terminal.element, this.output.element, this.context.element);
+		element.append(header, this.terminal.element, this.output.element, this.context.element, this.relations.element);
 		this.terminal.onEmpty = () => this.hide();
 		this.render();
 	}
@@ -192,6 +196,7 @@ export class Panel {
 	 *  not outlive it (a second workbench would relabel a dead panel forever). */
 	dispose(): void {
 		document.removeEventListener(SETTINGS_EVENT, this.onSettingsChanged);
+		this.relations.dispose();
 	}
 
 	activeView(): PanelViewId {
@@ -211,6 +216,9 @@ export class Panel {
 		else if (view === 'output') {
 			this.terminal.hidden();
 			void this.output.shown();
+		} else if (view === 'relations') {
+			this.terminal.hidden();
+			this.relations.shown();
 		} else {
 			this.terminal.hidden();
 			this.context.shown();
@@ -265,12 +273,23 @@ export class Panel {
 		this.terminal.element.hidden = this.active !== 'terminal';
 		this.output.element.hidden = this.active !== 'output';
 		this.context.element.hidden = this.active !== 'context';
+		this.relations.element.hidden = this.active !== 'relations';
 		this.actionsHost.innerHTML = '';
-		this.actionsHost.appendChild(this.active === 'terminal' ? this.terminal.actions : this.active === 'output' ? this.output.actions : this.context.actions);
+		this.actionsHost.appendChild(
+			this.active === 'terminal' ? this.terminal.actions
+			: this.active === 'output' ? this.output.actions
+			: this.active === 'relations' ? this.relations.actions
+			: this.context.actions
+		);
 	}
 
 	private renderTabLabels(): void {
-		const labels: Record<PanelViewId, string> = { terminal: t('panel.terminal'), output: t('panel.output'), context: t('panel.context') };
+		const labels: Record<PanelViewId, string> = {
+			terminal: t('panel.terminal'),
+			output: t('panel.output'),
+			context: t('panel.context'),
+			relations: t('panel.relations')
+		};
 		for (const tab of this.tabs.children) {
 			const view = (tab as HTMLElement).dataset['view'] as PanelViewId | undefined;
 			if (view) tab.textContent = labels[view];

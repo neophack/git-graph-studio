@@ -1,0 +1,74 @@
+/* The Relations panel's own affordances — the shared row vocabulary lives in the
+   workbench shell's stylesheet; only this page's pieces render here. */
+
+.rel-panel { display: flex; flex-direction: column; min-height: 0; }
+.rel-body { flex: 1; min-height: 0; overflow: auto; padding: 4px 10px 8px; }
+.rel-empty { color: var(--vscode-descriptionForeground); padding: 8px 0; display: flex; align-items: center; gap: 6px; }
+.rel-header { display: flex; align-items: center; gap: 8px; padding: 2px 0 6px; }
+.rel-root {
+	display: inline-flex; align-items: center; gap: 6px; background: none; border: none;
+	padding: 1px 6px; border-radius: 3px; color: var(--vscode-sideBar-foreground); font-size: 12px;
+	overflow: hidden;
+}
+.rel-root:hover { background: var(--vscode-toolbar-hoverBackground); }
+.rel-root-name { font-weight: 600; color: var(--vscode-sideBar-foreground); }
+.rel-root-loc { color: var(--vscode-descriptionForeground); font-size: 11px; }
+.rel-directions { display: inline-flex; margin-left: auto; flex: none; }
+.rel-dir {
+	background: none; border: 1px solid transparent; padding: 1px 8px; border-radius: 3px;
+	color: var(--vscode-descriptionForeground); font-size: 11px; white-space: nowrap;
+}
+.rel-dir:hover { background: var(--vscode-toolbar-hoverBackground); }
+.rel-dir.active {
+	color: var(--vscode-panelTitle-activeForeground);
+	border-color: var(--vscode-panel-border);
+	background: var(--vscode-toolbar-hoverBackground);
+}
+.rel-tree { min-height: 0; }
+.rel-row {
+	display: flex; align-items: center; gap: 6px; height: var(--row-height);
+	padding-right: 12px; white-space: nowrap; color: var(--vscode-sideBar-foreground);
+}
+.rel-row:hover { background: var(--vscode-list-hoverBackground); }
+.rel-row > .codicon { flex: none; font-size: 14px; }
+.rel-twistie {
+	width: 16px; flex: none; display: inline-flex; align-items: center; justify-content: center;
+	background: none; border: none; padding: 0; color: var(--vscode-descriptionForeground);
+	font-size: 14px; line-height: 1;
+}
+.rel-twistie:hover { color: var(--vscode-sideBar-foreground); }
+.rel-twistie.leaf { cursor: default; }
+.rel-container { color: var(--vscode-descriptionForeground); font-size: 11px; }
+.rel-name {
+	background: none; border: none; padding: 0; color: var(--vscode-sideBar-foreground);
+	overflow: hidden; text-overflow: ellipsis;
+}
+.rel-row:hover .rel-name { color: var(--vscode-textLink-foreground); }
+.rel-edge {
+	margin-left: auto; background: none; border: none; padding: 0 2px; border-radius: 3px;
+	color: var(--vscode-descriptionForeground); font-size: 11px; flex: none;
+}
+.rel-edge:hover { color: var(--vscode-textLink-foreground); background: var(--vscode-toolbar-hoverBackground); }
+.rel-edge-count {
+	flex: none; padding: 0 5px; border-radius: 8px; font-size: 10px; line-height: 15px;
+	color: var(--vscode-descriptionForeground); background: var(--vscode-toolbar-hoverBackground);
+	cursor: default;
+}
+.rel-children { padding-left: 16px; }
+.rel-children[hidden] { display: none; }
+.rel-row.rel-note { color: var(--vscode-descriptionForeground); font-size: 11px; height: auto; padding: 2px 0; }
+.rel-row.rel-note:hover { background: none; }
+/* The hover's declaration card: the definition's
+   opening lines over its "kind in file at line N" caption, floating over everything. */
+.rel-decl {
+	position: fixed; z-index: 200; max-width: 480px; padding: 6px 8px 5px; border-radius: 5px;
+	background: var(--vscode-editorHoverWidget-background, #252526);
+	color: var(--vscode-editorHoverWidget-foreground, #cccccc);
+	border: 1px solid var(--vscode-editorHoverWidget-border, #454545);
+	box-shadow: 0 2px 8px var(--vscode-widget-shadow); font-size: 12px;
+}
+.rel-decl-code {
+	margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.5;
+	white-space: pre; overflow-x: auto; max-width: 100%;
+}
+.rel-decl-meta { margin-top: 4px; color: var(--vscode-descriptionForeground); font-size: 11px; white-space: nowrap; }

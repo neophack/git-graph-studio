@@ -43,12 +43,19 @@ Connection), pulls the gateway's model catalogue (NewAPI / OneAPI `/v1/models`),
 imports an existing **cc-switch** configuration (keys sealed on import, the one
 cc-switch points at becoming active).
 
-Code navigation rides a persistent symbol index (Source Insight's model): the workspace's
+Code navigation rides a persistent symbol index: the workspace's
 declarations and their occurrences indexed once under `~/.ggs/index/`, resumed on open and
 updated file-by-file as files change — powering Go-to-Definition (with a list on ambiguous
 names), Find References narrowed to the files that contain the word, Quick Open's `@`
 (file symbols) and `#` (workspace symbols) modes, the Call Tree, and a Context Window panel
-that shows the definition of the symbol under the cursor. The declarations are extracted by
+that shows the definition of the symbol under the cursor. Two classic windows
+complete the set: a **Symbol Window** sidebar page (the active file's imports and its
+outline as icon rows — click jumps, the cursor's enclosing symbol stays highlighted) and
+a **Relation** panel page (the symbol under the cursor as the root of an expandable
+reference tree: who references it, what it references, every node a `+` away from its own
+ring, jumping to any reference site — reference counts badge each edge, a cut-short note
+reports truncation, and hovering a node floats its declaration, all over scans that skip
+comments and strings). The declarations are extracted by
 a tree-sitter parser layer (one grammar per language, each behind a Cargo feature), so every
 symbol carries its column, range, enclosing type and complexity.
 

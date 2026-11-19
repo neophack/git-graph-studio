@@ -63,3 +63,69 @@ export const symbolScopeLookup = (name: string, line: number, text: string, ext:
 export const symbolTree = () => invoke<TreeFile[] | null>('symbol_tree');
 export const symbolReferences = (name: string) => invoke<SymbolRefFile[]>('symbol_references', { name });
 export const symbolsRebuild = (onEvent: Channel<SymbolIndexEvent>) => invoke<SymbolIndexStatus | null>('symbols_rebuild', { onEvent });
+
+/** One definition `symbol_file_outline` answers: the file's own symbol from the index. */
+export interface FileOutlineSymbol {
+	kind: string;
+	name: string;
+	/** The enclosing type for a method, null otherwise. */
+	container: string | null;
+	/** 0-based declaration line. */
+	line: number;
+	/** 0-based last line of the definition body; equals `line` when the end is unknown. */
+	endLine: number;
+}
+
+/** One import of the outline's file: the imported name and its 0-based line. */
+export interface FileOutlineImport {
+	name: string;
+	line: number;
+}
+
+/** What `symbol_file_outline` answers for one file: the index's per-file outline and
+ *  the file's imports (include/module names with their lines) in source order. */
+export interface FileOutline {
+	symbols: FileOutlineSymbol[];
+	imports: FileOutlineImport[];
+}
+
+/** The open file's outline over the persistent index — null when no folder is open. */
+export const symbolFileOutline = (path: string) => invoke<FileOutline | null>('symbol_file_outline', { path });
+
+/** One node of a relation tree (`symbol_relation_children`): a symbol that references
+ *  the subject (`refsTo`) or that the subject's body references (`refsFrom`), carried
+ *  with the reference site that produced the edge. */
+export interface RelationNode {
+	kind: string;
+	name: string;
+	/** The enclosing type for a method, null otherwise. */
+	container: string | null;
+	/** Repo-relative path and 0-based line of the node's own definition. */
+	path: string;
+	line: number;
+	/** The earliest reference site this edge came from (repo-relative, 0-based). */
+	edgePath: string;
+	edgeLine: number;
+	/** `call` when the site is a call site, `use` for any other reference. */
+	edgeKind: string;
+	/** How many reference sites this edge aggregates — 1 for a single site. */
+	edgeCount: number;
+	/** Whether expanding this node again yields children (best effort). */
+	hasChildren: boolean;
+}
+
+/** What `symbol_relation_children` answers: the children of one relation node and
+ *  whether the ring was cut short (the time budget or the node cap ran out). */
+export interface RelationAnswer {
+	nodes: RelationNode[];
+	truncated: boolean;
+}
+
+/** `refsTo`: the symbols that reference the subject. `refsFrom`: the symbols the subject references. */
+export type RelationDirection = 'refsTo' | 'refsFrom';
+
+/** The children of one relation node — the next ring of the relation
+ *  graph, computed over the persistent index. The subject is a definition: the symbol under
+ *  the cursor with the location the context-symbol resolution reported for it. */
+export const symbolRelationChildren = (name: string, path: string, line: number, direction: RelationDirection) =>
+	invoke<RelationAnswer>('symbol_relation_children', { name, path, line, direction });

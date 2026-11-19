@@ -131,6 +131,10 @@ pub struct FileOutlineRow {
     pub container: Option<String>,
     /// 0-based, the index's own coordinate.
     pub line: usize,
+    /// 0-based last line of the definition body; equals `line` when the parser could
+    /// not bound it (the outline fallback). The relation window's interval attribution
+    /// and the MCP server's body reads both need it.
+    pub end_line: usize,
     /// How many files contain the name (the occurrence list length); untrusted lists
     /// report 0, the same honesty `symbols_with_refs` keeps.
     pub refs: usize,
@@ -355,6 +359,7 @@ impl SymbolStore {
                     container: (symbol.container_id != NO_CONTAINER)
                         .then(|| self.names[symbol.container_id as usize].clone()),
                     line: symbol.line as usize,
+                    end_line: symbol.end_line as usize,
                     refs: refs_of(symbol.name_id),
                 })
                 .collect(),
@@ -1278,15 +1283,17 @@ mod tests {
                 rows[0].name.as_str(),
                 rows[0].kind,
                 rows[0].line,
+                rows[0].end_line,
                 rows[0].container.as_deref()
             ),
-            ("alpha", "function", 0, None)
+            ("alpha", "function", 0, 0, None)
         );
         assert_eq!(rows[0].refs, 2, "alpha occurs in both files");
         assert_eq!(
             (rows[1].name.as_str(), rows[1].kind, rows[1].line),
             ("beta", "method", 2)
         );
+        assert_eq!(rows[1].end_line, 2, "the definition's body extent rides along");
         assert_eq!(rows[1].container.as_deref(), Some("Thing"));
         assert_eq!(rows[1].refs, 1, "beta occurs only where it is declared");
         assert!(store.file_symbols("missing.rs").is_none());

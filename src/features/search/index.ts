@@ -5,4 +5,6 @@
 export * from './searchView';
 export * from './callTree';
 export * from './contextView';
+export * from './relationsView';
 export * from './symbolDbView';
+export * from './symbolWindowView';

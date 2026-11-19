@@ -54,6 +54,7 @@ export const layoutMethods: ThisType<Workbench> = {
 		add('search', icon('search'), 'Search (Ctrl+Shift+F)', () => this.toggleView('search'));
 		add('scm', icon('source-control'), 'Source Control (Ctrl+Shift+G)', () => this.toggleView('scm'));
 		add('analysis', icon('graph'), 'Analysis (Ctrl+Shift+A)', () => this.toggleView('analysis'));
+		add('symbolWindow', icon('symbol-structure'), 'Symbols (Alt+L)', () => this.toggleView('symbolWindow'));
 		add('extensions', icon('extensions'), 'Extensions (Ctrl+Shift+X)', () => this.toggleView('extensions'));
 		this.activitySpacer = el('div', 'activity-spacer');
 		this.activityBar.appendChild(this.activitySpacer);
@@ -81,7 +82,7 @@ export const layoutMethods: ThisType<Workbench> = {
 		}
 		if (!state.layout.sidebarVisible) this.activityItems[this.activeView]?.classList.remove('active');
 		for (const [id, item] of Object.entries(this.activityItems)) {
-			if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis' || id === 'extensions' || this.isExtensionView(id)) item.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
+			if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis' || id === 'symbolWindow' || id === 'extensions' || this.isExtensionView(id)) item.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
 		}
 		this.installSash(this.sidebarSash, 'horizontal', (delta, start) => {
 			state.layout.sidebarWidth = Math.max(170, Math.min(window.innerWidth - 400, start + delta));
@@ -148,7 +149,7 @@ export const layoutMethods: ThisType<Workbench> = {
 			container.element.style.display = id === view ? 'flex' : 'none';
 			if (id === view) visibleExtViews = container.viewIds;
 		}
-		for (const [id, item] of Object.entries(this.activityItems)) if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis' || id === 'extensions' || this.isExtensionView(id)) item.classList.toggle('active', id === view);
+		for (const [id, item] of Object.entries(this.activityItems)) if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis' || id === 'symbolWindow' || id === 'extensions' || this.isExtensionView(id)) item.classList.toggle('active', id === view);
 		// The views of the container just left stop being visible; the selected one's start.
 		for (const viewId of this.lastVisibleExtViews) this.extensionHost.noteViewVisible(viewId, false);
 		for (const viewId of visibleExtViews) this.extensionHost.noteViewVisible(viewId, true);
@@ -157,6 +158,7 @@ export const layoutMethods: ThisType<Workbench> = {
 		if (view === 'scm') void this.scm.refresh();
 		if (view === 'extensions') void this.extensions.refresh();
 		if (view === 'analysis') void this.analysis.refresh();
+		if (view === 'symbolWindow') void this.symbolWindow.refresh();
 		// explorer.autoReveal: a file that became the active editor while the Explorer was
 		// elsewhere (boot.ts parked it) reveals the moment the view returns.
 		if (view === 'explorer' && this.pendingReveal) {
@@ -180,7 +182,7 @@ export const layoutMethods: ThisType<Workbench> = {
 		this.sidebar.hidden = !state.layout.sidebarVisible;
 		this.sidebarSash.hidden = !state.layout.sidebarVisible;
 		for (const [id, item] of Object.entries(this.activityItems)) {
-			if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis' || id === 'extensions' || this.isExtensionView(id)) item.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
+			if (id === 'explorer' || id === 'search' || id === 'scm' || id === 'analysis' || id === 'symbolWindow' || id === 'extensions' || this.isExtensionView(id)) item.classList.toggle('active', state.layout.sidebarVisible && id === this.activeView);
 		}
 		state.saveLayout();
 		// The bar's return shows the Explorer again: the reveal a file opened elsewhere was

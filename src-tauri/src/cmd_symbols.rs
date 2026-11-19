@@ -16,10 +16,11 @@ use tauri::ipc::Channel;
 use tauri::State;
 
 use ggs_base::sink::BatchSink;
-use ggs_index::scan::FileMatches;
+use ggs_index::scan::{read_searchable, FileMatches};
 use ggs_index::symbols::index::{
     references_for, tree_from, IndexStatus, SymbolIndex, SymbolIndexEvent, TreeFile,
 };
+use ggs_index::symbols::relations::{relation_children, RelationAnswer, RelationDirection, RelationNode};
 use ggs_index::symbols::WorkspaceSymbol;
 
 use ggs_base::workspace::WorkspaceRoots;
@@ -125,6 +126,145 @@ pub async fn symbol_references(
     references_for(&symbol_index, &root, &name)
 }
 
+/// One row of `symbol_file_outline`'s answer: the file's own definition with its body's
+/// extent.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FileOutlineSymbol {
+    pub kind: String,
+    pub name: String,
+    pub container: Option<String>,
+    /// 0-based declaration line.
+    pub line: usize,
+    /// 0-based last line of the definition body; equals `line` when the end is unknown.
+    pub end_line: usize,
+}
+
+/// One row of `symbol_file_outline`'s imports: the imported name and the 0-based line
+/// its name first appears on (0 when the text never shows it).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FileOutlineImport {
+    pub name: String,
+    pub line: usize,
+}
+
+/// What `symbol_file_outline` answers: the index's per-file outline and the file's
+/// import/include names with their lines, in source order.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FileOutline {
+    pub symbols: Vec<FileOutlineSymbol>,
+    pub imports: Vec<FileOutlineImport>,
+}
+
+/// The imports come from a live parse of the file as it sits on disk (the index carries
+/// no imports), bounded like every searchable read: beyond 1 MiB, or for a file that
+/// vanished or is binary, the answer is empty and the symbols above stay the index's own.
+/// The parse layer carries no import positions, so each name's line is its first
+/// occurrence in the same text the parse read.
+const IMPORT_PARSE_CAP: usize = 1024 * 1024;
+
+fn imports_of(root: &str, path: &str) -> Vec<FileOutlineImport> {
+    let Some(ext) = path.rsplit_once('.').map(|(_, ext)| ext.to_owned()) else {
+        return Vec::new();
+    };
+    let Some((bytes, _)) = read_searchable(&std::path::Path::new(root).join(path)) else {
+        return Vec::new();
+    };
+    if bytes.len() > IMPORT_PARSE_CAP {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    ggs_index::symbols::parse::parse_file(&text, &ext)
+        .imports
+        .into_iter()
+        .map(|name| FileOutlineImport {
+            line: import_line(&text, &name),
+            name,
+        })
+        .collect()
+}
+
+/// The first line `name` occurs on (0-based), 0 when it never does — the tolerant answer
+/// for a module path the source spells differently from its parsed import name.
+fn import_line(text: &str, name: &str) -> usize {
+    text.lines().position(|line| line.contains(name)).unwrap_or(0)
+}
+
+/// The open file's outline over the persistent index — the outline pane and the relation
+/// window's subject list read it. `null` when no folder is open (the same contract
+/// `symbol_tree` keeps); empty symbols when the file is not (yet) indexed.
+#[tauri::command]
+pub async fn symbol_file_outline(
+    app: tauri::AppHandle,
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, Arc<SymbolIndex>>,
+    path: String,
+    repo: Option<String>,
+) -> Result<Option<FileOutline>, String> {
+    let root = match resolve_root(roots.inner(), repo) {
+        Ok(root) => root,
+        Err(_) => return Ok(None),
+    };
+    ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
+    let symbols = symbol_index
+        .file_symbols(&root, &path)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| FileOutlineSymbol {
+            kind: row.kind.to_owned(),
+            name: row.name,
+            container: row.container,
+            line: row.line,
+            end_line: row.end_line,
+        })
+        .collect();
+    let imports = imports_of(&root, &path);
+    Ok(Some(FileOutline { symbols, imports }))
+}
+
+/// One ring of the relation window: the definitions referencing
+/// the subject (`refsTo`) or referenced by its body (`refsFrom`), every node carried
+/// with the earliest reference site that produced the edge and how many sites it
+/// aggregates. The query runs inside `with_store`'s short lock so its per-file reads
+/// stay consistent; `truncated` says the ring was cut short (the time budget or the
+/// node cap ran out with unshown nodes left).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RelationAnswerDto {
+    pub nodes: Vec<RelationNode>,
+    pub truncated: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn symbol_relation_children(
+    app: tauri::AppHandle,
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, Arc<SymbolIndex>>,
+    name: String,
+    path: String,
+    line: usize,
+    direction: String,
+    repo: Option<String>,
+) -> Result<RelationAnswerDto, String> {
+    let root = resolve_root(roots.inner(), repo)?;
+    ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
+    let direction = RelationDirection::parse(&direction)?;
+    // A root without a resident index answers the empty ring; the relation query itself
+    // ran inside the store's short lock and its result alone leaves it.
+    let answer = symbol_index
+        .with_store(&root, |store| {
+            relation_children(&root, store, &name, &path, line, direction)
+        })
+        .unwrap_or_else(|| Ok(RelationAnswer { nodes: Vec::new(), truncated: false }))?;
+    Ok(RelationAnswerDto {
+        nodes: answer.nodes,
+        truncated: answer.truncated,
+    })
+}
+
 /// One scope-local definition: a parameter or local variable declared inside the
 /// enclosing function of the use site, in the file whose text the caller passes —
 /// the editor's live buffer, so an unsaved edit answers as written.
@@ -164,4 +304,36 @@ pub async fn symbol_scope_lookup(
             scope_end: s.scope.map(|(_, to)| to).unwrap_or(s.end_line),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The outline's imports carry their first line: each name lands on the line the
+    /// source spells it on — an include on line 0 included — and source order holds.
+    #[test]
+    fn imports_carry_their_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = "#include \"sys.h\"\n#define WIDE 1\n#include \"util.h\"\nint main(void)\n{\n    return 0;\n}\n";
+        std::fs::write(dir.path().join("main.c"), text).unwrap();
+        let root = dir.path().display().to_string();
+        let imports = imports_of(&root, "main.c");
+        assert_eq!(
+            imports
+                .iter()
+                .map(|import| (import.name.as_str(), import.line))
+                .collect::<Vec<_>>(),
+            vec![("sys.h", 0), ("util.h", 2)]
+        );
+    }
+
+    /// A name the text never shows answers line 0 rather than nothing; a JS import on
+    /// line 0 keeps its own 0-based line.
+    #[test]
+    fn import_lines_degrade_to_zero_and_keep_line_zero() {
+        assert_eq!(import_line("int a;\n", "nowhere.h"), 0);
+        assert_eq!(import_line("import x from './x';\n", "./x"), 0);
+        assert_eq!(import_line("#pragma once\n#include \"a.h\"\n", "a.h"), 1);
+    }
 }

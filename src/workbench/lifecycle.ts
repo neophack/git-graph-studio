@@ -159,7 +159,7 @@ export const lifecycleMethods: ThisType<Workbench> = {
 		this.sidebar.hidden = true;
 		this.sidebarSash.hidden = true;
 		if (this.panel.isVisible()) this.panel.toggle();
-		for (const id of ['explorer', 'search', 'scm', 'analysis', 'extensions']) this.activityItems[id]?.classList.remove('active');
+		for (const id of ['explorer', 'search', 'scm', 'analysis', 'extensions', 'symbolWindow']) this.activityItems[id]?.classList.remove('active');
 		state.saveLayout();
 		document.title = `${basename(path)} - Git Graph Studio`;
 		this.titleBar.setFolderName(basename(path));
@@ -561,6 +561,10 @@ export const lifecycleMethods: ThisType<Workbench> = {
 		this.lastRefreshAt = performance.now();
 		void this.scm.refresh(); // its repo_head feeds the status bar (see scm.onHead)
 		void this.explorer.refresh();
+		// The Symbol Window re-pulls its one file on every refresh burst (a save's own, a
+		// watcher batch, a focus return): the view asks once per burst and stands down
+		// when hidden or without a file.
+		void this.symbolWindow.refresh();
 		const active = this.editors.activeInput;
 		if (active?.kind === 'file') void this.editors.reloadIfClean(active.path);
 	},

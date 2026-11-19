@@ -1481,4 +1481,29 @@ export const en = {
 	'workbench.encoding.pickReopen': 'Select File Encoding to Reopen File',
 	'workbench.encoding.pickSave': 'Select File Encoding to Save with',
 	'folderCompare.delete.confirm': 'Delete {0}?',
+	// The Symbol Window sidebar page (module 5): the active file's imports and its
+	// indexed outline.
+	'symbols.window.filter': 'Filter symbols',
+	'symbols.window.empty': 'Open a file to see its symbols.',
+	'symbols.window.imports': 'Includes / Imports',
+	'symbols.window.noIndex': 'No symbols indexed for this file.',
+	// The Relations panel (module 5): the cursor symbol's expandable reference tree over
+	// the bottom panel, in either direction.
+	'panel.relations': 'Relations',
+	'relations.refsTo': 'References to',
+	'relations.refsFrom': 'References from',
+	'relations.hint': 'Place the cursor on a symbol to see its reference tree here.',
+	'relations.loading': 'Loading…',
+	'relations.failed': 'The symbol index did not answer.',
+	'relations.emptyTo': 'Nothing references this symbol.',
+	'relations.emptyFrom': 'This symbol references nothing the index holds.',
+	'relations.noChildren': 'No further references',
+	'relations.maxDepth': 'Maximum tree depth reached',
+	'relations.pin': 'Pin the relations window to the current symbol',
+	'relations.unpin': 'Unpin the relations window',
+	'relations.openDef': 'Open the definition in the editor',
+	'relations.openEdge': 'Open the reference site',
+	'relations.truncated': 'More references exist — the list was cut short.',
+	'relations.edgeCount': '{0} reference sites',
+	'relations.declAt': '{0} in {1} at line {2}',
 };
