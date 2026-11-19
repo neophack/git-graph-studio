@@ -97,7 +97,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 						...tags.map((t2) => ({ label: t2, description: 'tag', icon: 'tag', value: 'tag:' + t2 }))
 					];
 					if (items.length === 0) {
-						notify('info', 'There are no branches or tags to checkout.');
+						notify('info', t('scm.checkout.none'));
 						return;
 					}
 					items.push({ label: t('scm.checkoutDetached.pick'), description: undefined, icon: 'git-commit', value: 'detached:' });
@@ -172,7 +172,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 					},
 					{
 						label: 'Push (Force With Lease)', run: () => void (async () => {
-							if (!(await confirmDialog('Force-push the current branch to its upstream? Commits the remote has that this push does not contain become unreachable there.', 'Force Push'))) return;
+							if (!(await confirmDialog(t('scm.forcePush.confirm'), 'Force Push'))) return;
 							run(() => scmPush(null, false, true, repo));
 						})()
 					},
@@ -258,7 +258,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 					'separator',
 					{
 						label: 'Create Branch...', run: () => void (async () => {
-							const name = await quickInput({ placeholder: 'Branch name', title: 'Please provide a new branch name', validate: validateSubRef });
+							const name = await quickInput({ placeholder: 'Branch name', title: t('scm.branch.provideName'), validate: validateSubRef });
 							if (name) run(() => scmCreateBranch(name.trim(), null, repo));
 						})()
 					},
@@ -266,7 +266,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 						label: 'Create Branch From...', run: () => void (async () => {
 							const from = await pickBranchIn(repo, 'Select a ref to create the branch from');
 							if (!from) return;
-							const name = await quickInput({ placeholder: 'Branch name', title: `Please provide a new branch name (from ${from.name})`, validate: validateSubRef });
+							const name = await quickInput({ placeholder: 'Branch name', title: tf('scm.branch.provideNameFrom', from.name), validate: validateSubRef });
 							if (name) run(() => scmCreateBranch(name.trim(), from.name, repo));
 						})()
 					},
@@ -274,7 +274,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 						label: 'Rename Branch...', run: () => void (async () => {
 							const branch = await pickBranchIn(repo, 'Select a branch to rename', (b) => !b.remote);
 							if (!branch) return;
-							const name = await quickInput({ placeholder: 'Branch name', title: `Please provide a new name for '${branch.name}'`, value: branch.name, validate: validateSubRef });
+							const name = await quickInput({ placeholder: 'Branch name', title: tf('scm.branch.provideRename', branch.name), value: branch.name, validate: validateSubRef });
 							if (name && name.trim() !== branch.name) run(() => gitOp('scm_rename_branch', { oldName: branch.name, newName: name.trim() }));
 						})()
 					},
@@ -297,7 +297,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 									run(() => gitOp('scm_delete_branch', { branchName: branch.name, force: true }));
 									return;
 								}
-								if (!(await confirmDialog(`Delete the branch '${branch.name}'? Commits only reachable from it will be lost.`, 'Delete Branch'))) return;
+								if (!(await confirmDialog(tf('scm.deleteBranch.confirm', branch.name), 'Delete Branch'))) return;
 								run(() => gitOp('scm_delete_branch', { branchName: branch.name, force: false }));
 							})()
 						},
@@ -330,7 +330,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 						label: 'Remove Remote', run: () => void (async () => {
 							const remotes = await scmRemotes(repo);
 							if (remotes.length === 0) {
-								notify('info', 'The repository has no remotes.');
+								notify('info', t('scm.remotes.none'));
 								return;
 							}
 							const chosen = await quickPick(remotes.map((r) => ({ label: r.name, description: r.url, icon: 'cloud', value: r.name })), 'Pick a remote to remove');
@@ -341,7 +341,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 						label: 'All Remotes...', run: () => void (async () => {
 							const remotes = await scmRemotes(repo);
 							if (remotes.length === 0) {
-								notify('info', 'The repository has no remotes.');
+								notify('info', t('scm.remotes.none'));
 								return;
 							}
 							const chosen = await quickPick(remotes.map((r) => ({ label: r.name, description: r.url, icon: 'cloud', value: r.name })), 'Pick a remote to copy its URL or delete it');
@@ -354,7 +354,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 							], remote.name);
 							if (action === 'copy') {
 								await writeText(remote.url);
-								notify('info', `The URL of '${remote.name}' is on the clipboard.`);
+								notify('info', tf('scm.remote.urlOnClipboard', remote.name));
 							} else if (action === 'delete') {
 								run(() => gitOp('scm_delete_remote', { name: remote.name }));
 							}
@@ -402,7 +402,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 					{
 						label: 'Drop Stash...', run: () => void (async () => {
 							const stash = await pickStashIn(repo, 'Pick a stash to drop');
-							if (stash && (await confirmDialog(`Drop the stash '${stash.message}'? This cannot be undone.`, 'Drop Stash'))) {
+							if (stash && (await confirmDialog(tf('scm.dropStash.confirm', stash.message), 'Drop Stash'))) {
 								run(() => gitOp('scm_drop_stash', { selector: stash.selector }));
 							}
 						})()
@@ -427,7 +427,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 						label: 'Delete Tag', run: () => void (async () => {
 							const tags = await scmTags(repo);
 							if (tags.length === 0) {
-								notify('info', 'The repository has no tags.');
+								notify('info', t('scm.tags.none'));
 								return;
 							}
 							const chosen = await quickPick(tags.map((t2) => ({ label: t2, icon: 'tag', value: t2 })), 'Select a tag to delete');
@@ -438,7 +438,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 						label: 'Delete Remote Tag...', run: () => void (async () => {
 							const tags = await scmTags(repo);
 							if (tags.length === 0) {
-								notify('info', 'The repository has no tags.');
+								notify('info', t('scm.tags.none'));
 								return;
 							}
 							const tag = await quickPick(tags.map((t2) => ({ label: t2, icon: 'tag', value: t2 })), 'Select a tag to delete from the remote');
@@ -466,7 +466,7 @@ export const menusMethods: ThisType<SourceControlView> = {
 			'separator',
 			{
 				label: 'Amend Last Commit', run: () => void (async () => {
-					if (!(await confirmDialog('Amend the last commit with the staged changes (the message is kept)?', 'Amend'))) return;
+					if (!(await confirmDialog(t('scm.amend.confirm'), 'Amend'))) return;
 					run(() => scmAmendLastCommit(repo));
 				})()
 			},
@@ -475,15 +475,15 @@ export const menusMethods: ThisType<SourceControlView> = {
 					const remote = await pickRemoteIn(repo, 'Pick the Gerrit remote');
 					if (!remote) return;
 					const installed = await gerritInstallHook(remote.name, repo);
-					notify('info', installed ? 'The Gerrit commit-msg hook was installed.' : 'The Gerrit commit-msg hook is already installed.');
+					notify('info', installed ? t('scm.gerrit.hookInstalled') : t('scm.gerrit.hookPresent'));
 					await this.refresh();
 				})()
 			},
 			{
 				label: 'Reset Current Branch to Remote (Soft)', run: () => void (async () => {
-					if (!(await confirmDialog('Soft-reset the current branch to its upstream? Your local commits are kept as staged changes.', 'Reset'))) return;
+					if (!(await confirmDialog(t('scm.softReset.confirm'), 'Reset'))) return;
 					const upstream = await scmResetToRemote(repo);
-					notify('info', `The current branch was reset to ${upstream}; its changes are staged.`);
+					notify('info', tf('scm.softReset.done', upstream));
 					await this.refresh();
 					this.onChanged?.();
 				})()
@@ -493,8 +493,8 @@ export const menusMethods: ThisType<SourceControlView> = {
 					const remote = await pickRemoteIn(repo, 'Pick the Gerrit remote');
 					if (!remote) return;
 					const url = await gerritPushRef(remote.name, repo);
-					if (url) notify('info', `Pushed for review: ${url}`, [{ label: 'Open Change', run: () => void openUrl(url) }]);
-					else notify('info', `Pushed the current branch to ${remote.name} for review.`);
+					if (url) notify('info', tf('scm.gerrit.pushedForReview', url), [{ label: 'Open Change', run: () => void openUrl(url) }]);
+					else notify('info', tf('scm.gerrit.pushed', remote.name));
 				})()
 			}
 		];

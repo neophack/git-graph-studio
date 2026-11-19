@@ -242,7 +242,13 @@ language are user data under `~/.ggs/`; theme and UI quality are enforced, not h
   pseudo-category collects them, the search box names its result count, and the enum schemas' i18n-key labels
   translate through `t()`),
   `src/platform/i18n.ts` (`t(key)`, en / zh-cn; the string tables live in `src/platform/i18n/{en,zh-cn}.ts`, the
-  English table the key set is typed against), `src/themeMetrics.ts` (WCAG contrast per theme),
+  English table the key set is typed against; and `trText`, the English-text display table
+  every rendering primitive localizes through — menus' labels (contextMenu), notification
+  bodies and buttons (notify, the centre replay in statusbar), quick input's
+  titles/placeholders/validate errors/pick-row descriptions, `actionButton` tooltips, editor
+  tab labels, and the diff side headers' label word — so a view may pass its English literal
+  and the zh-cn session still shows Chinese; the table lives beside the command-title pairs
+  in `zhCnText`, extended by `registerZhCnText` for extension manifests), `src/themeMetrics.ts` (WCAG contrast per theme),
   `src/uiMetrics.ts` (layout invariants)
 - Backend: `src-tauri/src/cmd_assoc.rs` (the File Associations setting: OS-level
   "open with" registration per platform — HKCU ProgIds + RegisteredApplications on

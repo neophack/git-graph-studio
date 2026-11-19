@@ -10,7 +10,7 @@ import { type HeadInfo, repoHead } from '../platform/ipc/revision';
 import type { WatcherReport } from '../platform/ipc/fs';
 
 import { ENCODING_LABELS } from '../features/editor';
-import { t, tf } from '../platform/i18n';
+import { t, tf, trText } from '../platform/i18n';
 import { SETTINGS_EVENT, settings } from '../platform/settings';
 import { clearAllNotifications, clearNotification, el, icon, labelWithIcons, notificationEntries, onNotificationsChange, tooltip, type CentreEntry } from '../platform/ui/index';
 
@@ -220,11 +220,13 @@ export class StatusBar {
 		const row = el('div', 'notification-centre-row');
 		row.appendChild(icon(entry.kind));
 		row.appendChild(el('div', 'body', [
-			el('div', 'message', [entry.message]),
+			// The centre replays every toast's stored English text through the same
+			// display table the live toast localized with.
+			el('div', 'message', [trText(entry.message)]),
 			el('div', 'time', [ago(entry.at)])
 		]));
 		const clear = el('button', 'icon-button', [icon('close')]);
-		clear.title = 'Clear Notification';
+		clear.title = trText('Clear Notification');
 		clear.addEventListener('click', () => clearNotification(entry.id));
 		row.appendChild(clear);
 		return row;

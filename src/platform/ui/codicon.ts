@@ -2,6 +2,7 @@
 // button shapes built on them.
 
 import { el } from './dom';
+import { trText } from '../i18n';
 
 /** A codicon glyph (`@vscode/codicons`), the icon font VS Code itself draws with. */
 export function icon(name: string, className = ''): HTMLElement {
@@ -22,11 +23,13 @@ export function labelWithIcons(text: string): (string | HTMLElement)[] {
 	return out;
 }
 
-/** A 22px toolbar button: a codicon with a title, as VS Code's view title actions. */
+/** A 22px toolbar button: a codicon with a title, as VS Code's view title actions. Titles
+ *  arrive as the callers' English text and localize here, beside the menus' labels. */
 export function actionButton(iconName: string, title: string, onClick: (event: MouseEvent) => void): HTMLButtonElement {
 	const button = el('button', 'action-btn', [icon(iconName)]);
-	button.title = title;
-	button.setAttribute('aria-label', title);
+	const label = trText(title);
+	button.title = label;
+	button.setAttribute('aria-label', label);
 	button.addEventListener('click', (event) => {
 		event.stopPropagation();
 		onClick(event);

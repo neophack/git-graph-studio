@@ -84,7 +84,7 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 			])
 		]);
 		if (inTree) row.style.paddingLeft = `${8 + depth * 8}px`;
-		row.title = `${posix} • ${LETTER_TITLE[letter] ?? letter}`;
+		row.title = `${posix} • ${trText(LETTER_TITLE[letter] ?? letter)}`;
 		const id = key + ':' + posix;
 		row.dataset.scmKey = id;
 		if (this.selection.has(id)) row.classList.add('selected');
@@ -102,7 +102,7 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 		}
 		row.appendChild(actions);
 		const decoration = el('span', 'decoration', [letter]);
-		decoration.title = LETTER_TITLE[letter] ?? letter;
+		decoration.title = trText(LETTER_TITLE[letter] ?? letter);
 		row.appendChild(decoration);
 		row.addEventListener('click', (event) => {
 			if (event.ctrlKey || event.metaKey) {
@@ -256,7 +256,7 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 		}
 		row.appendChild(actions);
 		const decoration = el('span', 'decoration', [letter]);
-		decoration.title = LETTER_TITLE[letter] ?? letter;
+		decoration.title = trText(LETTER_TITLE[letter] ?? letter);
 		row.appendChild(decoration);
 		row.addEventListener('click', () => this.subOpenChange(sub, file, key, letter));
 		row.addEventListener('contextmenu', (event) => {
@@ -410,7 +410,7 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 	 *  a discard of the row asks. */
 	async deleteChange(file: ScmChange, absolute: (relative: string) => string): Promise<void> {
 		const label = basename(toPosix(file.path));
-		if (!(await confirmDialog(`Are you sure you want to DELETE ${label}?`, 'Delete File'))) return;
+		if (!(await confirmDialog(tf('scm.deleteFile.confirm', label), 'Delete File'))) return;
 		try {
 			await deletePath(absolute(file.path), false);
 			await this.refresh();
@@ -481,7 +481,7 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 		return confirmDialog(
 			file.untracked
 				? tf('scm.discardUntracked.confirm', label)
-				: `Are you sure you want to discard changes in ${label}?`,
+				: tf('scm.discardOne.confirm', label),
 			file.untracked ? t('scm.discardUntracked.action') : 'Discard Changes'
 		);
 	},
@@ -519,8 +519,8 @@ export const rowActionsMethods: ThisType<SourceControlView> = {
 		const untracked = unstaged.filter((c) => c.untracked);
 		const confirmed = await confirmDialog(
 			untracked.length > 0
-				? `Are you sure you want to discard ALL changes? ${untracked.length} untracked file(s) will be DELETED!\nThis is IRREVERSIBLE!\nYour current working set will be FOREVER LOST.`
-				: `Are you sure you want to discard ALL ${unstaged.length} changes?\nThis is IRREVERSIBLE!\nYour current working set will be FOREVER LOST if you proceed.`,
+				? tf('scm.discardAll.confirmUntracked', untracked.length)
+				: tf('scm.discardAll.confirm', unstaged.length),
 			'Discard All Changes'
 		);
 		if (!confirmed) return;

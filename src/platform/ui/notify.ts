@@ -3,6 +3,7 @@
 
 import { el } from './dom';
 import { actionButton, icon } from './codicon';
+import { trText } from '../i18n';
 
 export type NotificationKind = 'info' | 'warning' | 'error';
 
@@ -64,14 +65,17 @@ export function notify(kind: NotificationKind, message: string, actions: Notific
 	if (centre.length > 100) centre.shift(); // bounded, like the session log
 	for (const listener of centreListeners) listener(centre.length);
 	const container = document.getElementById('notifications')!;
-	const body = el('div', 'message', [message]);
+	// Bodies and button labels arrive as the callers' English text whatever raised them —
+	// a view's confirm, a command's outcome, an extension's message — and localize here,
+	// the one place every notification (and the centre's replay of it) renders through.
+	const body = el('div', 'message', [trText(message)]);
 	const toast = el('div', 'notification', [icon(kind), el('div', 'body', [body])]);
 	const close = actionButton('close', 'Clear Notification', () => dismiss());
 	toast.appendChild(close);
 	if (actions.length > 0) {
 		const buttons = el('div', 'buttons');
 		for (const action of actions) {
-			const button = el('button', 'button', [action.label]);
+			const button = el('button', 'button', [trText(action.label)]);
 			button.addEventListener('click', () => {
 				action.run();
 				dismiss();

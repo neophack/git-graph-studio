@@ -13,6 +13,7 @@ import { coalesced } from '../../platform/coalesce';
 import { loadDiffView, loadHexCompare, loadTextEditor } from '../../platform/lazy';
 import type { HexCompareView } from '../viewers/types';
 
+import { tf } from '../../platform/i18n';
 import { basename, confirmDialog, dirname, el, icon, joinPath, notify, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 
 import type { DirDiffEntry } from '../../platform/ipc/search';
@@ -202,7 +203,7 @@ export class FolderCompareView {
 			}
 		};
 		const remove = async (path: string) => {
-			const confirmed = await confirmDialog(`Delete ${path}?`, 'Delete');
+			const confirmed = await confirmDialog(tf('folderCompare.delete.confirm', path), 'Delete');
 			if (!confirmed) return;
 			try {
 				await deletePath(path, false);

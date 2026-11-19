@@ -2,7 +2,7 @@
 
 import { el } from './dom';
 import { icon } from './codicon';
-import { t } from '../i18n';
+import { t, trText } from '../i18n';
 
 export interface QuickPickItem {
 	label: string;
@@ -89,10 +89,13 @@ export function quickInput(options: QuickInputOptions): Promise<string | null> {
 		const box = el('div', 'quick-input');
 		const input = el('input', 'input');
 		input.type = options.password === true ? 'password' : 'text';
-		input.placeholder = options.placeholder ?? '';
+		// Titles, placeholders and pick labels arrive as the callers' English text whatever
+		// built them — a command's flow, a view's helper, an extension host call — and
+		// localize here, the one place every quick input renders through.
+		input.placeholder = trText(options.placeholder ?? '');
 		input.value = options.value ?? '';
 		input.spellcheck = false;
-		input.setAttribute('aria-label', options.title ?? options.placeholder ?? 'Input');
+		input.setAttribute('aria-label', trText(options.title ?? options.placeholder ?? 'Input'));
 		const hint = el('div', 'hint');
 		// The back entry rides the search box's own row (the owner's 2026-10-18 direction: the
 		// ‹ belongs beside the search box, one row): the remote phone shells draw the quick
@@ -106,7 +109,7 @@ export function quickInput(options: QuickInputOptions): Promise<string | null> {
 		back.setAttribute('aria-label', t('quickInput.back'));
 		back.appendChild(icon('chevron-left'));
 		back.addEventListener('click', () => finish(null));
-		if (options.title) box.appendChild(el('div', 'title', [options.title]));
+		if (options.title) box.appendChild(el('div', 'title', [trText(options.title)]));
 		box.appendChild(el('div', 'qback', [back, input]));
 		box.appendChild(hint);
 		const list = options.items ? el('div', 'list') : null;
@@ -141,9 +144,9 @@ export function quickInput(options: QuickInputOptions): Promise<string | null> {
 			if (searching) {
 				const items = options.items;
 				const status = items && isQuickPickSource(items) ? items.status?.() : null;
-				return status ?? 'Searching…';
+				return status ?? t('quickInput.searching');
 			}
-			return input.value.trim() === '' ? 'No results' : 'No matching results';
+			return input.value.trim() === '' ? t('quickInput.noResults') : t('quickInput.noMatchingResults');
 		};
 
 		const applyRows = (items: QuickPickItem[]) => {
@@ -155,15 +158,15 @@ export function quickInput(options: QuickInputOptions): Promise<string | null> {
 				const existing = rows[i];
 				if (existing && existing.item.value === item.value) {
 					existing.item = item;
-					applyLabelHighlights(existing.element.querySelector<HTMLElement>('.label')!, item.label, item.highlights);
+					applyLabelHighlights(existing.element.querySelector<HTMLElement>('.label')!, trText(item.label), item.highlights);
 				} else {
 					const row = el('div', 'row', [
 						item.icon ? icon(item.icon) : null,
 						el('span', 'label'),
-						item.description ? el('span', 'description', [item.description]) : null,
+						item.description ? el('span', 'description', [trText(item.description)]) : null,
 						item.detail ? el('span', 'decoration', [item.detail]) : null
 					]);
-					applyLabelHighlights(row.querySelector<HTMLElement>('.label')!, item.label, item.highlights);
+					applyLabelHighlights(row.querySelector<HTMLElement>('.label')!, trText(item.label), item.highlights);
 					row.addEventListener('click', () => finish(item.value));
 					if (existing) existing.element.replaceWith(row);
 					else list.appendChild(row);
@@ -227,7 +230,7 @@ export function quickInput(options: QuickInputOptions): Promise<string | null> {
 		};
 		const validate = () => {
 			const error = options.validate ? options.validate(input.value) : null;
-			hint.textContent = error ?? '';
+			hint.textContent = error === null ? '' : trText(error);
 			hint.classList.toggle('error', error !== null);
 			return error === null;
 		};

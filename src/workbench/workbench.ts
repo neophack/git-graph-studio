@@ -642,9 +642,9 @@ export class Workbench {
 	}
 
 	async compareFolders(): Promise<void> {
-		const left = await openDialog({ directory: true, multiple: false, title: 'Choose the left folder' });
+		const left = await openDialog({ directory: true, multiple: false, title: t('dialog.chooseLeftFolder') });
 		if (!left) return;
-		const right = await openDialog({ directory: true, multiple: false, title: 'Choose the right folder' });
+		const right = await openDialog({ directory: true, multiple: false, title: t('dialog.chooseRightFolder') });
 		if (!right) return;
 		const leftPath = Array.isArray(left) ? left[0]! : left;
 		const rightPath = Array.isArray(right) ? right[0]! : right;
@@ -920,7 +920,7 @@ export class Workbench {
 		], 'Select Action', basename(input.path));
 		if (!action) return;
 		const list = await encodings().catch(() => Object.entries(ENCODING_LABELS));
-		const encoding = await quickPick(list.map(([id, label]) => ({ label, value: id })), 'Select File Encoding' + (action === 'reopen' ? ' to Reopen File' : ' to Save with'));
+		const encoding = await quickPick(list.map(([id, label]) => ({ label, value: id })), action === 'reopen' ? t('workbench.encoding.pickReopen') : t('workbench.encoding.pickSave'));
 		if (!encoding) return;
 		if (action === 'reopen') await this.editors.reopenWithEncoding(encoding);
 		else await this.editors.saveWithEncoding(encoding);

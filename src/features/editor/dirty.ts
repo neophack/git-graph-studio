@@ -34,8 +34,8 @@ export function askToSaveMany(labels: string[]): Promise<'save' | 'discard' | 'c
 				resolve(value);
 			}
 		};
-		const list = labels.length > 6 ? `${labels.slice(0, 6).join(', ')} and ${labels.length - 6} more` : labels.join(', ');
-		notify('warning', `Do you want to save the changes to the following ${labels.length} files? ${list}. Your changes will be lost if you don't save them.`, [
+		const list = labels.length > 6 ? tf('editor.save.many.more', labels.slice(0, 6).join(', '), labels.length - 6) : labels.join(', ');
+		notify('warning', tf('editor.save.many.confirm', labels.length, list), [
 			{ label: 'Save All', run: () => settle('save') },
 			{ label: "Don't Save", run: () => settle('discard') },
 			{ label: 'Cancel', run: () => settle('cancel') }
@@ -54,7 +54,7 @@ function askToSave(label: string): Promise<'save' | 'discard' | 'cancel'> {
 			}
 		};
 		// The toast's own close button (or any other dismissal) also cancels.
-		notify('warning', `Do you want to save the changes you made to ${label}? Your changes will be lost if you don't save them.`, [
+		notify('warning', tf('editor.save.one.confirm', label), [
 			{ label: 'Save', run: () => settle('save') },
 			{ label: "Don't Save", run: () => settle('discard') },
 			{ label: 'Cancel', run: () => settle('cancel') }

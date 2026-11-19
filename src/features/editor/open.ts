@@ -858,8 +858,9 @@ export const openMethods: ThisType<EditorGroup> = {
 		toggle('Aa', 'case');
 		// VS Code's side headers: each pane carries its own slim label — `path (revision)` —
 		// above it, injected into the merge view's pane wrappers on every render. A
-		// local-file compare whose label equals the path shows the path alone.
-		const sideText = (side: DiffSide): string => side.label === side.path ? side.path : `${side.path} (${side.label})`;
+		// local-file compare whose label equals the path shows the path alone; the label
+		// word (Working Tree, Staged, Clipboard) resolves through the display table.
+		const sideText = (side: DiffSide): string => side.label === side.path ? side.path : `${side.path} (${trText(side.label)})`;
 		const sideHeader = (side: DiffSide): HTMLElement => el('div', 'diff-side-header', [sideText(side)]);
 		editor.pane.appendChild(el('div', 'diff-header', [toolbar, stats]));
 		editor.languageName = 'Plain Text';

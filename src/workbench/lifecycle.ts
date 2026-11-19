@@ -6,7 +6,7 @@ import { appNewInstance, bootStage, closeFolder, openFolder, openSingleFile, ope
 import { gitInit } from '../platform/ipc/scm';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { ExtensionHost } from '../features/extensions';
-import { tf } from '../platform/i18n';
+import { t, tf } from '../platform/i18n';
 import { hook } from '../platform/hooks';
 import { SETTINGS_EVENT, THEME_EVENT } from '../platform/settings';
 import * as state from '../platform/state';
@@ -94,7 +94,7 @@ export const lifecycleMethods: ThisType<Workbench> = {
 		if (elsewhere && (await elsewhere((path) => this.openFolder(path), this.openFolders()))) return;
 		let selected: string | string[] | null;
 		try {
-			selected = await openDialog({ directory: true, multiple: false, title: 'Open Folder' });
+			selected = await openDialog({ directory: true, multiple: false, title: t('dialog.openFolder') });
 		} catch (error) {
 			notify('error', `Could not open the folder picker: ${String(error)}`);
 			return;
@@ -106,7 +106,7 @@ export const lifecycleMethods: ThisType<Workbench> = {
 	async pickWorkspace(): Promise<void> {
 		let selected: string | string[] | null;
 		try {
-			selected = await openDialog({ multiple: false, title: 'Open Workspace', filters: [{ name: 'Git Graph Studio Workspace', extensions: ['ggs-workspace'] }] });
+			selected = await openDialog({ multiple: false, title: t('dialog.openWorkspace'), filters: [{ name: 'Git Graph Studio Workspace', extensions: ['ggs-workspace'] }] });
 		} catch (error) {
 			notify('error', `Could not open the workspace picker: ${String(error)}`);
 			return;
@@ -118,7 +118,7 @@ export const lifecycleMethods: ThisType<Workbench> = {
 	async pickSingleFile(): Promise<void> {
 		let selected: string | string[] | null;
 		try {
-			selected = await openDialog({ multiple: false, title: 'Open File' });
+			selected = await openDialog({ multiple: false, title: t('dialog.openFile') });
 		} catch (error) {
 			notify('error', `Could not open the file picker: ${String(error)}`);
 			return;

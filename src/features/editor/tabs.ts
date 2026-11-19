@@ -271,7 +271,7 @@ export const tabsMethods: ThisType<EditorGroup> = {
 			// model tells an extension's own page from a file by these).
 			tab.dataset.kind = editor.input.kind;
 			if (editor.input.kind === 'extpage' || editor.input.kind === 'extdetail') tab.dataset.ext = editor.input.extId;
-			tab.title = editor.input.kind === 'file' ? editor.input.path : editor.label;
+			tab.title = editor.input.kind === 'file' ? editor.input.path : trText(editor.label);
 			const iconElement = el('span', 'icon');
 			if (editor.iconSrc) {
 				const image = el('img');
@@ -284,7 +284,7 @@ export const tabsMethods: ThisType<EditorGroup> = {
 				iconElement.appendChild(glyph);
 			}
 			tab.appendChild(iconElement);
-			tab.appendChild(el('span', 'label', [editor.label]));
+			tab.appendChild(el('span', 'label', [trText(editor.label)]));
 			if (editor.input.kind === 'file' && (names.get(editor.label) ?? 0) > 1) {
 				const folder = basename(editor.input.path.slice(0, editor.input.path.length - editor.label.length - 1));
 				if (folder) tab.appendChild(el('span', 'description', [folder]));

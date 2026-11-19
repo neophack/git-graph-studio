@@ -3,6 +3,7 @@
 
 import { invoke } from '../../platform/ipc/core';
 import { gitCommit, gitStageAll, scmRemotes, scmUndoLastCommit, type RemoteInfo } from '../../platform/ipc/scm';
+import { t, trText } from '../../platform/i18n';
 import { confirmDialog, el, icon, notify, quickPick, showContextMenu } from '../../platform/ui/index';
 import { SubRepoState } from './view';
 import type { SourceControlView } from './view';
@@ -39,12 +40,12 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 			}
 		});
 		const action = this.commitAction({ changes: this.changes.length, branch: this.branch, shortHash: this.shortHash, ahead: this.ahead, behind: this.behind, upstream: this.upstream });
-		const commit = el('button', 'button', [icon('check'), 'Commit']);
+		const commit = el('button', 'button', [icon('check'), trText('Commit')]);
 		if (action === 'commit') {
 			// Live whatever the message says: a click without one warns and focuses the box.
 			commit.addEventListener('click', () => void this.commit());
 			const more = el('button', 'button more', [icon('chevron-down')]);
-			more.title = 'More Commit Actions...';
+			more.title = trText('More Commit Actions...');
 			more.addEventListener('click', (event) => {
 				const rect = more.getBoundingClientRect();
 				showContextMenu(rect.left, rect.bottom, [
@@ -68,21 +69,21 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 			// gone - there is no commit to configure.
 			commit.innerHTML = '';
 			if (action === 'publish') {
-				commit.append(icon('cloud-upload'), 'Publish Branch');
-				commit.title = 'Publish the branch to its remote (push, setting the upstream)';
+				commit.append(icon('cloud-upload'), trText('Publish Branch'));
+				commit.title = trText('Publish the branch to its remote (push, setting the upstream)');
 				commit.addEventListener('click', () => void this.publishBranch());
 			} else if (action === 'push') {
 				commit.append(icon('cloud-upload'), `Push ${this.ahead}`);
 				commit.title = `Push ${this.ahead} commit${this.ahead === 1 ? '' : 's'} to ${this.upstream}`;
 				commit.addEventListener('click', () => void this.run('scm_push', { remote: null, setUpstream: false, force: false }));
 			} else if (action === 'sync') {
-				commit.append(icon('sync'), 'Sync Changes', ...(this.ahead > 0 ? [String(this.ahead)] : []));
+				commit.append(icon('sync'), trText('Sync Changes'), ...(this.ahead > 0 ? [String(this.ahead)] : []));
 				commit.title = `Pull ${this.behind} and push ${this.ahead} commits from/to ${this.upstream}`;
 				commit.addEventListener('click', () => void this.run('scm_sync', { rebase: false }));
 			} else {
-				commit.append(icon('check'), 'Commit');
+				commit.append(icon('check'), trText('Commit'));
 				commit.disabled = true;
-				commit.title = 'Nothing to commit - the branch is up to date with its upstream';
+				commit.title = trText('Nothing to commit - the branch is up to date with its upstream');
 			}
 			box.append(input, el('div', 'commit-row single', [commit]));
 		}
@@ -132,18 +133,18 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 		const amend = options.amend === true;
 		const message = this.message.trim();
 		if (message === '' && !amend) {
-			notify('warning', 'Please provide a commit message.');
+			notify('warning', t('scm.commit.needMessage'));
 			this.content.querySelector<HTMLTextAreaElement>('textarea')?.focus();
 			return;
 		}
 		const staged = this.changes.some((c) => c.staged !== null);
 		if (!staged && !amend) {
 			if (options.stagedOnly || this.changes.length === 0) {
-				notify('info', 'There are no changes to commit.');
+				notify('info', t('scm.commit.none'));
 				return;
 			}
 			if (!options.all) {
-				const confirmed = await confirmDialog('There are no staged changes to commit.\n\nWould you like to stage all your changes and commit them directly?', 'Yes', 'info');
+				const confirmed = await confirmDialog(t('scm.commit.noStaged.confirm'), 'Yes', 'info');
 				if (!confirmed) return;
 			}
 		}
@@ -206,12 +207,12 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 		// The same one-button-for-commit-and-push as the main repository's box, over this
 		// submodule's own branch state - the sections read as one product, not two toolkits.
 		const action = this.commitAction({ changes: sub.changes.length, branch: sub.branch, shortHash: sub.shortHash, ahead: sub.ahead, behind: sub.behind, upstream: sub.upstream });
-		const commit = el('button', 'button', [icon('check'), 'Commit']);
+		const commit = el('button', 'button', [icon('check'), trText('Commit')]);
 		if (action === 'commit') {
 			// Live whatever the message says: a click without one warns and focuses the box.
 			commit.addEventListener('click', () => void this.subCommit(sub));
 			const more = el('button', 'button more', [icon('chevron-down')]);
-			more.title = 'More Commit Actions...';
+			more.title = trText('More Commit Actions...');
 			more.addEventListener('click', (event) => {
 				const rect = more.getBoundingClientRect();
 				showContextMenu(rect.left, rect.bottom, [
@@ -233,21 +234,21 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 		} else {
 			commit.innerHTML = '';
 			if (action === 'publish') {
-				commit.append(icon('cloud-upload'), 'Publish Branch');
-				commit.title = 'Publish the branch to its remote (push, setting the upstream)';
+				commit.append(icon('cloud-upload'), trText('Publish Branch'));
+				commit.title = trText('Publish the branch to its remote (push, setting the upstream)');
 				commit.addEventListener('click', () => void this.subPublishBranch(sub));
 			} else if (action === 'push') {
 				commit.append(icon('cloud-upload'), `Push ${sub.ahead}`);
 				commit.title = `Push ${sub.ahead} commit${sub.ahead === 1 ? '' : 's'} to ${sub.upstream}`;
 				commit.addEventListener('click', () => void this.subRun(sub, 'scm_push', { remote: null, setUpstream: false, force: false }));
 			} else if (action === 'sync') {
-				commit.append(icon('sync'), 'Sync Changes', ...(sub.ahead > 0 ? [String(sub.ahead)] : []));
+				commit.append(icon('sync'), trText('Sync Changes'), ...(sub.ahead > 0 ? [String(sub.ahead)] : []));
 				commit.title = `Pull ${sub.behind} and push ${sub.ahead} commits from/to ${sub.upstream}`;
 				commit.addEventListener('click', () => void this.subRun(sub, 'scm_sync', { rebase: false }));
 			} else {
-				commit.append(icon('check'), 'Commit');
+				commit.append(icon('check'), trText('Commit'));
 				commit.disabled = true;
-				commit.title = 'Nothing to commit - the branch is up to date with its upstream';
+				commit.title = trText('Nothing to commit - the branch is up to date with its upstream');
 			}
 			box.append(input, el('div', 'commit-row single', [commit]));
 		}
@@ -259,17 +260,17 @@ export const commitInputMethods: ThisType<SourceControlView> = {
 		const amend = options.amend === true;
 		const message = sub.message.trim();
 		if (message === '' && !amend) {
-			notify('warning', 'Please provide a commit message.');
+			notify('warning', t('scm.commit.needMessage'));
 			return;
 		}
 		const staged = sub.changes.some((c) => c.staged !== null);
 		if (!staged && !amend) {
 			if (options.stagedOnly || sub.changes.length === 0) {
-				notify('info', 'There are no changes to commit.');
+				notify('info', t('scm.commit.none'));
 				return;
 			}
 			if (!options.all) {
-				const confirmed = await confirmDialog('There are no staged changes to commit.\n\nWould you like to stage all your changes and commit them directly?', 'Yes', 'info');
+				const confirmed = await confirmDialog(t('scm.commit.noStaged.confirm'), 'Yes', 'info');
 				if (!confirmed) return;
 			}
 		}

@@ -178,7 +178,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 		await scmPushBranch(remote.name, branch.trim(), false);
 	});
 	add('git.pushForce', 'Push (Force With Lease)', async () => {
-		if (!(await confirmDialog('Force-push the current branch to its upstream? Commits the remote has that this push does not contain become unreachable there.', 'Force Push'))) return;
+		if (!(await confirmDialog(t('scm.forcePush.confirm'), 'Force Push'))) return;
 		await pushCurrent(false, true);
 	});
 	add('git.sync', 'Sync', () => scmSync(false));
@@ -199,7 +199,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 			if (!url) return;
 			let parent: string | string[] | null;
 			try {
-				parent = await openDialog({ directory: true, multiple: false, title: 'Choose a folder to clone into' });
+				parent = await openDialog({ directory: true, multiple: false, title: t('scm.clone.chooseFolder') });
 			} catch (error) {
 				notify('error', String(error));
 				return;
@@ -208,7 +208,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 			const folder = Array.isArray(parent) ? parent[0]! : parent;
 			try {
 				const path = await scmClone(url.trim(), folder, null);
-				notify('info', `Cloned into ${path}`, [{ label: 'Open', run: () => void host.openFolder(path) }]);
+				notify('info', tf('scm.clone.done', path), [{ label: 'Open', run: () => void host.openFolder(path) }]);
 			} catch (error) {
 				notify('error', String(error));
 			}
@@ -229,7 +229,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 			...tags.map((t) => ({ label: t, description: 'tag', icon: 'tag', value: 'tag:' + t }))
 		];
 		if (items.length === 0) {
-			notify('info', 'There are no branches or tags to checkout.');
+			notify('info', t('scm.checkout.none'));
 			return;
 		}
 		// VS Code's trailing affordance: checking a commit out directly, in a detached HEAD.
@@ -246,19 +246,19 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 		await scmCheckout(chosen.replace(/^(branch|tag):/, ''));
 	});
 	add('git.branch', 'Create Branch...', async () => {
-		const name = await quickInput({ placeholder: 'Branch name', title: 'Please provide a new branch name', validate: validateRef });
+		const name = await quickInput({ placeholder: 'Branch name', title: t('scm.branch.provideName'), validate: validateRef });
 		if (name) await scmCreateBranch(name.trim(), null);
 	});
 	add('git.branchFrom', 'Create Branch From...', async () => {
 		const from = await pickBranch('Select a ref to create the branch from');
 		if (!from) return;
-		const name = await quickInput({ placeholder: 'Branch name', title: `Please provide a new branch name (from ${from.name})`, validate: validateRef });
+		const name = await quickInput({ placeholder: 'Branch name', title: tf('scm.branch.provideNameFrom', from.name), validate: validateRef });
 		if (name) await scmCreateBranch(name.trim(), from.name);
 	});
 	add('git.renameBranch', 'Rename Branch...', async () => {
 		const branch = await pickBranch('Select a branch to rename', (b) => !b.remote);
 		if (!branch) return;
-		const name = await quickInput({ placeholder: 'Branch name', title: `Please provide a new name for '${branch.name}'`, value: branch.name, validate: validateRef });
+		const name = await quickInput({ placeholder: 'Branch name', title: tf('scm.branch.provideRename', branch.name), value: branch.name, validate: validateRef });
 		if (name && name.trim() !== branch.name) await gitOp('scm_rename_branch', { oldName: branch.name, newName: name.trim() });
 	});
 	add('git.deleteBranch', 'Delete Branch...', async () => {
@@ -280,7 +280,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 			await gitOp('scm_delete_branch', { branchName: branch.name, force: true });
 			return;
 		}
-		if (!(await confirmDialog(`Delete the branch '${branch.name}'? Commits only reachable from it will be lost.`, 'Delete Branch'))) return;
+		if (!(await confirmDialog(tf('scm.deleteBranch.confirm', branch.name), 'Delete Branch'))) return;
 		await gitOp('scm_delete_branch', { branchName: branch.name, force: false });
 	});
 	add('git.deleteRemoteBranch', 'Delete Remote Branch...', async () => {
@@ -365,7 +365,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 	add('git.removeRemote', 'Remove Remote', async () => {
 		const remotes = await scmRemotes();
 		if (remotes.length === 0) {
-			notify('info', 'The repository has no remotes.');
+			notify('info', t('scm.remotes.none'));
 			return;
 		}
 		const chosen = await quickPick(remotes.map((r) => ({ label: r.name, description: r.url, icon: 'cloud', value: r.name })), 'Pick a remote to remove');
@@ -374,7 +374,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 	add('git.listRemotes', 'All Remotes...', async () => {
 		const remotes = await scmRemotes();
 		if (remotes.length === 0) {
-			notify('info', 'The repository has no remotes.');
+			notify('info', t('scm.remotes.none'));
 			return;
 		}
 		const chosen = await quickPick(remotes.map((r) => ({ label: r.name, description: r.url, icon: 'cloud', value: r.name })), 'Pick a remote to copy its URL or delete it');
@@ -387,7 +387,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 		], remote.name);
 		if (action === 'copy') {
 			await writeText(remote.url);
-			notify('info', `The URL of '${remote.name}' is on the clipboard.`);
+			notify('info', tf('scm.remote.urlOnClipboard', remote.name));
 		} else if (action === 'delete') {
 			await gitOp('scm_delete_remote', { name: remote.name });
 		}
@@ -421,7 +421,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 	add('git.stashPopLatest', 'Pop Latest Stash', () => gitOp('scm_pop_stash', { selector: 'refs/stash@{0}', reinstateIndex: false }));
 	add('git.stashDrop', 'Drop Stash...', async () => {
 		const stash = await pickStash('Pick a stash to drop');
-		if (stash && (await confirmDialog(`Drop the stash '${stash.message}'? This cannot be undone.`, 'Drop Stash'))) {
+		if (stash && (await confirmDialog(tf('scm.dropStash.confirm', stash.message), 'Drop Stash'))) {
 			await gitOp('scm_drop_stash', { selector: stash.selector });
 		}
 	});
@@ -440,7 +440,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 	add('git.deleteTag', 'Delete Tag', async () => {
 		const tags = await scmTags();
 		if (tags.length === 0) {
-			notify('info', 'The repository has no tags.');
+			notify('info', t('scm.tags.none'));
 			return;
 		}
 		const chosen = await quickPick(tags.map((t) => ({ label: t, icon: 'tag', value: t })), 'Select a tag to delete');
@@ -449,7 +449,7 @@ export function registerGitCommands(commands: CommandRegistry, host: GitCommandH
 	add('git.deleteRemoteTag', 'Delete Remote Tag...', async () => {
 		const tags = await scmTags();
 		if (tags.length === 0) {
-			notify('info', 'The repository has no tags.');
+			notify('info', t('scm.tags.none'));
 			return;
 		}
 		const tag = await quickPick(tags.map((t) => ({ label: t, icon: 'tag', value: t })), 'Select a tag to delete from the remote');
