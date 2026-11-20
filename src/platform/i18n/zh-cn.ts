@@ -1509,5 +1509,9 @@ export const zhCn: typeof en = {
 	'symbols.window.locals': '当前函数',
 	'symbols.page.byFolder': '文件夹',
 	'symbols.page.byCategory': '类别',
+	'symbols.hover.members': '成员',
+	'symbols.hover.references': '被 {0} 个文件引用',
+	'symbols.hover.openRelations': '打开关系窗口',
+	'symbols.hover.moreDefinitions': '还有 {0} 个定义',
 	'relations.declAt': '{0} in {1} 第 {2} 行',
 };

@@ -812,7 +812,7 @@ describe('the quick-info hover (any indexed symbol)', () => {
 	it('renders the kind, comment, signature and a location that opens on click', async () => {
 		const info = await quickInfoFor(source([{ kind: 'function', name: 'add', path: 'src/main.c', line: 1 }]), 'add');
 		const opened: string[] = [];
-		const dom = quickInfoDom(info!, (path, line) => opened.push(`${path}@${line}`));
+		const dom = quickInfoDom(info!, { open: (path, line) => opened.push(`${path}@${line}`) });
 		expect(dom.classList.contains('ggs-quick-info')).toBe(true);
 		expect(dom.querySelector('.ggs-symbol-hover-head')!.textContent).toBe('add');
 		expect(dom.querySelector('.ggs-symbol-hover-comment')!.textContent).toBe('/** Adds its arguments. */');
@@ -822,6 +822,103 @@ describe('the quick-info hover (any indexed symbol)', () => {
 
 		const plain = quickInfoDom(info!);
 		expect(plain.querySelector('.ggs-symbol-hover-loc')!.tagName).toBe('DIV', 'no open, no button');
+	});
+
+	it('previews the first type entry’s members over the contains ring, capped', async () => {
+		resetQuickInfoCache();
+		const nodes = Array.from({ length: 14 }, (_, i) => ({
+			kind: 'field',
+			name: `m${i}`,
+			container: 'Point',
+			path: 'src/point.h',
+			line: i + 1,
+			edgePath: 'src/point.h',
+			edgeLine: 0,
+			edgeKind: 'use',
+			edgeCount: 1,
+			hasChildren: false
+		}));
+		backend.on('symbol_relation_children', ({ name, path, line, direction }) => {
+			expect(name).toBe('Point');
+			expect(path).toBe('src/point.h');
+			expect(line).toBe(0);
+			expect(direction).toBe('contains');
+			return { nodes, truncated: true };
+		});
+		const files: Record<string, string> = { 'C:/repo/src/point.h': 'struct Point {\n    int x;\n};\n' };
+		const src = source([{ kind: 'struct', name: 'Point', path: 'src/point.h', line: 0, endLine: 1 }]);
+		src.read = async (path: string) => files[path.split('\\').join('/')] ?? null;
+		const info = await quickInfoFor(src, 'Point');
+		const members = info!.entries[0]!.members;
+		expect(members).toHaveLength(12, 'the cap');
+		expect(members![0]).toEqual({ kind: 'field', name: 'm0', line: 1 });
+		expect(members![11]).toEqual({ kind: 'field', name: 'm11', line: 12 });
+	});
+
+	it('a failed contains ring leaves the members unset and the hover whole', async () => {
+		resetQuickInfoCache();
+		backend.on('symbol_relation_children', () => {
+			throw new Error('the ring is unavailable');
+		});
+		const files: Record<string, string> = { 'C:/repo/src/point.h': 'struct Point {\n    int x;\n};\n' };
+		const src = source([{ kind: 'struct', name: 'Point', path: 'src/point.h', line: 0, endLine: 1 }]);
+		src.read = async (path: string) => files[path.split('\\').join('/')] ?? null;
+		const info = await quickInfoFor(src, 'Point');
+		expect(info).not.toBeNull();
+		expect(info!.entries[0]!.body).toBe('struct Point {\n    int x;', 'the rest of the card answers as before');
+		expect(info!.entries[0]!.members).toBeUndefined();
+	});
+
+	it('a function entry asks for no members', async () => {
+		resetQuickInfoCache();
+		const info = await quickInfoFor(source([{ kind: 'function', name: 'add', path: 'src/main.c', line: 1 }]), 'add');
+		expect(info).not.toBeNull();
+		expect(backend.callsTo('symbol_relation_children')).toHaveLength(0);
+		expect(info!.entries[0]!.members).toBeUndefined();
+	});
+
+	it('carries the reference-file count when the stat answers, undefined when it fails', async () => {
+		resetQuickInfoCache();
+		backend.on('symbol_ref_stats', ({ name }) => {
+			expect(name).toBe('add');
+			return { files: 7 };
+		});
+		const info = await quickInfoFor(source([{ kind: 'function', name: 'add', path: 'src/main.c', line: 1 }]), 'add');
+		expect(info!.refFiles).toBe(7);
+
+		resetQuickInfoCache();
+		backend.on('symbol_ref_stats', () => {
+			throw new Error('the stat is unavailable');
+		});
+		const failed = await quickInfoFor(source([{ kind: 'function', name: 'add', path: 'src/main.c', line: 1 }]), 'add');
+		expect(failed).not.toBeNull();
+		expect(failed!.refFiles).toBeUndefined();
+	});
+
+	it('reports the definition total when the index holds more than the cap', async () => {
+		resetQuickInfoCache();
+		const defs = Array.from({ length: 4 }, (_, i): WsSymbol => ({ kind: 'variable', name: 'dup', path: `src/f${i}.c`, line: 0 }));
+		const info = await quickInfoFor(source(defs), 'dup');
+		expect(info!.entries).toHaveLength(3, 'the rendered cap');
+		expect(info!.total).toBe(4);
+
+		const few = await quickInfoFor(source(defs.slice(0, 2)), 'dup2');
+		expect(few!.entries).toHaveLength(2);
+		expect(few!.total).toBeUndefined('everything renders, no +N');
+	});
+
+	it('the scope-local answer asks for neither members nor stats', async () => {
+		resetQuickInfoCache();
+		const src: MacroHoverSource = {
+			root: () => 'C:\\repo',
+			lookup: async () => [],
+			read: async () => null,
+			scopeLookup: async () => [{ kind: 'variable', name: 'total', line: 4, column: 8, scopeEnd: 6 }]
+		};
+		const info = await scopeQuickInfoFor(src, 'total', 5, 'int total = 0;\n', `${REPO}\\main.c`);
+		expect(info).not.toBeNull();
+		expect(backend.callsTo('symbol_relation_children')).toHaveLength(0);
+		expect(backend.callsTo('symbol_ref_stats')).toHaveLength(0);
 	});
 });
 

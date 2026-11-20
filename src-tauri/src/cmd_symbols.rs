@@ -275,6 +275,45 @@ pub async fn symbol_relation_children(
     })
 }
 
+/// What `symbol_ref_stats` answers: how many files contain the name.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RefStatsDto {
+    pub files: u32,
+}
+
+/// The hover card's reference-files count: how many files of the workspace contain
+/// `name` at all. The store's `ref_count` answers — its trusted occurrence list's file
+/// length, the same number the Symbol Database tree's refs badges show — and the
+/// declaration's own file is included (its text carries the name too). A name the
+/// store never heard of answers 0 files rather than an error: the badge is
+/// informational and nothing keys a decision on the number.
+#[tauri::command]
+pub async fn symbol_ref_stats(
+    app: tauri::AppHandle,
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, Arc<SymbolIndex>>,
+    name: String,
+    repo: Option<String>,
+) -> Result<RefStatsDto, String> {
+    let root = resolve_root(roots.inner(), repo)?;
+    ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
+    Ok(ref_stats_of(symbol_index.inner(), &root, &name))
+}
+
+/// The count inside `with_store`'s short lock, the read discipline
+/// `symbol_relation_children` keeps. `ref_count`'s `None` — a name unknown to the
+/// store — answers 0; so does a store not resident for the root (the sweeper's narrow
+/// race window between `ensure_symbols` and this query), same floor.
+fn ref_stats_of(index: &SymbolIndex, root: &str, name: &str) -> RefStatsDto {
+    RefStatsDto {
+        files: index
+            .with_store(root, |store| store.ref_count(name))
+            .flatten()
+            .unwrap_or(0) as u32,
+    }
+}
+
 /// What `symbol_rename_preview` answers: every site the rename would rewrite and the
 /// reasons it must not run — an empty `conflicts` list means the apply is safe. The
 /// types are the rename engine's own (serde camelCase), the frontend's contract
@@ -483,6 +522,24 @@ mod tests {
             vec!["local"],
             "the brace row is step's last row — its scope still answers"
         );
+    }
+
+    /// `symbol_ref_stats`'s counting half: a name the store knows answers its file
+    /// count — the declaration's own file included, one entry per file however many
+    /// sites it carries — and a name it never heard of answers 0 files. The store is
+    /// the same seeded build the ggs-index tests use (a and b reference each other).
+    #[test]
+    fn ref_stats_counts_files_and_answers_zero_for_an_unknown_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn alpha() { beta(); }\n").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "fn beta() {}\n").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let index = Arc::new(SymbolIndex::with_home(home.path().to_owned()));
+        let root = dir.path().display().to_string();
+        index.build_blocking(None, &root, None).unwrap();
+        assert_eq!(ref_stats_of(&index, &root, "alpha").files, 1);
+        assert_eq!(ref_stats_of(&index, &root, "beta").files, 2);
+        assert_eq!(ref_stats_of(&index, &root, "nowhere").files, 0);
     }
 
     /// A pathological giant function is cut at the cap after the sort, so the earliest

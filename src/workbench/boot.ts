@@ -12,6 +12,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { openPath, openUrl } from '@tauri-apps/plugin-opener';
 import { resolveTerminalPath } from '../features/terminal/links';
+import { setHoverRelationsOpener } from '../features/editor/hoverRelations';
 import { openRenameDialog } from '../features/search';
 import { type AnalysisStatus } from '../features/analysis';
 import type { AnalysisToolId } from '../features/analysis';
@@ -589,6 +590,13 @@ export const bootMethods: ThisType<Workbench> = {
 		this.panel.relations.onOpen = (path, line) => {
 			void this.editors.openFile(/^([a-zA-Z]:[\\/]|\\|\/)/.test(path) || !this.repoPath ? path : joinRepo(this.repoPath, path), { line });
 		};
+		// The hover card's "open the relations window" click: the card's cursor symbol —
+		// the index's own { kind, name, path, line } vocabulary — becomes the Relations
+		// page's root.
+		setHoverRelationsOpener((sym) => {
+			this.panel.show('relations');
+			this.panel.relations.setRoot(sym);
+		});
 		// The page's own activation re-resolves the cursor symbol right away (the debounced
 		// follow only rides editor changes): the live selection is the payload.
 		this.panel.relations.onNeedRoot = () => {

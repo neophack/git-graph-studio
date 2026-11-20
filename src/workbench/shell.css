@@ -903,6 +903,25 @@ body.resizing iframe { pointer-events: none; }
 .ggs-symbol-hover-comment { color: var(--vscode-descriptionForeground); }
 .ggs-symbol-hover-loc { display: inline-block; margin: 1px 0 2px; padding: 0; border: none; background: none; color: var(--vscode-textLink-foreground); font-family: var(--vscode-font-family); font-size: 11px; cursor: pointer; text-align: left; }
 button.ggs-symbol-hover-loc:hover { text-decoration: underline; color: var(--vscode-textLink-activeForeground); }
+/* The entry's kind tag: the raw kind's word, first letter capitalised, in the category
+   views' muted chip shape; the entries it heads keep a breath between them. */
+.ggs-symbol-hover-entry { margin-top: 3px; }
+.ggs-symbol-hover-kind { display: inline-block; margin-bottom: 2px; padding: 0 6px; border-radius: 8px; background: rgba(127, 127, 127, 0.16); color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 16px; }
+/* The members block: a muted section header over one slim row per member — kind glyph,
+   name, and the 1-based line at the far end; a wired row highlights like a list row. */
+.ggs-symbol-hover-members-head { margin: 4px 0 1px; font-size: 11px; color: var(--vscode-descriptionForeground); }
+.ggs-symbol-hover-member { display: flex; align-items: center; gap: 5px; width: 100%; margin: 0; padding: 1px 4px; border: none; border-radius: 3px; background: none; color: inherit; font-family: var(--vscode-font-family); font-size: 11px; text-align: left; }
+button.ggs-symbol-hover-member { cursor: pointer; }
+button.ggs-symbol-hover-member:hover { background: var(--vscode-list-hoverBackground); }
+.ggs-symbol-hover-member-icon { flex: none; font-size: 12px; }
+.ggs-symbol-hover-member-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ggs-symbol-hover-member-line { flex: none; margin-left: auto; color: var(--vscode-descriptionForeground); }
+/* The overflow line (definitions past the rendered cap) and the reference-count footer:
+   both muted; the footer's relations row styles as the hover links above. */
+.ggs-symbol-hover-more { margin-top: 3px; font-size: 11px; color: var(--vscode-descriptionForeground); }
+.ggs-symbol-hover-footer { display: flex; align-items: center; gap: 10px; margin-top: 5px; padding-top: 4px; border-top: 1px solid var(--vscode-editorHoverWidget-border, rgba(127, 127, 127, 0.25)); font-size: 11px; color: var(--vscode-descriptionForeground); }
+.ggs-symbol-hover-relations { padding: 0; border: none; background: none; color: var(--vscode-textLink-foreground); font-family: var(--vscode-font-family); font-size: 11px; cursor: pointer; text-align: left; }
+button.ggs-symbol-hover-relations:hover { text-decoration: underline; color: var(--vscode-textLink-activeForeground); }
 /* The peek-definition popup (CLion's quick definition lookup): anchored over the editor,
    sticky until Escape or a click outside, the head's actions in VS Code's hover-toolbar
    shape, the definitions' chooser a slim list, the body the declaring file's window. */

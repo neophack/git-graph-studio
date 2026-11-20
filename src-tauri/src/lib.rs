@@ -797,6 +797,7 @@ mod desktop {
                 cmd_symbols::symbol_tree,
                 cmd_symbols::symbol_file_outline,
                 cmd_symbols::symbol_relation_children,
+                cmd_symbols::symbol_ref_stats,
                 cmd_symbols::symbol_rename_preview,
                 cmd_symbols::symbol_rename_apply,
                 cmd_analysis::analysis_status,

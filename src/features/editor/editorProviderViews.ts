@@ -17,7 +17,7 @@ import { Facet, type Extension } from '@codemirror/state';
 import { t } from '../../platform/i18n';
 import { joinPath, relativeTo } from '../../platform/ui/index';
 import type { WsSymbol } from '../../platform/ipc/search';
-import type { ScopeDefinition } from '../../platform/ipc/symbols';
+import { symbolRefStats, symbolRelationChildren, type ScopeDefinition } from '../../platform/ipc/symbols';
 import { extensionDefinitionFor, extensionDefinitionOpener, extensionHoverFor, hasExtensionDefinitions, hasExtensionHovers } from './editorHovers';
 
 /** The open file's path, so the provider call names the right document. */
@@ -355,29 +355,17 @@ export function macroHoverDom(name: string, entries: MacroHoverEntry[], open?: (
 
 /* ---------- The quick-info hover: every other indexed symbol ---------- */
 
-/** One non-macro definition the quick-info hover lists: its declaration line, the
- *  comment block above it and — for a block-shaped kind — the definition's whole body,
- *  all sliced off the declaring file. */
-export interface SymbolQuickInfoEntry {
-	kind: string;
-	/** Repo-relative, forward slashes — the index's own spelling. */
-	path: string;
-	/** 0-based declaration line. */
-	line: number;
-	/** The declaration line's text, or '' when the file could not be read. */
-	text: string;
-	/** The doc comment above the declaration, or '' when there is none. */
-	comment: string;
-	/** The definition's whole body through its end line, or '' — a variable, a scalar
-	 *  kind, or an index that names no body shows the declaration line only. */
-	body: string;
-}
+// The card's types and rendering live in ./hoverCard (the data assembly here, the
+// rendering there); the names re-export for the existing importers.
+import { quickInfoDom, type SymbolQuickInfo, type SymbolQuickInfoEntry } from './hoverCard';
+export { quickInfoDom, type HoverCardActions, type HoverMember, type SymbolQuickInfo, type SymbolQuickInfoEntry } from './hoverCard';
 
-/** A hovered name's non-macro answer: the name and up to `QUICK_INFO_MAX_DEFS` entries. */
-export interface SymbolQuickInfo {
-	name: string;
-	entries: SymbolQuickInfoEntry[];
-}
+/** The kinds whose members the hover previews: the relation ring's `contains` answer of
+ *  the first candidate — a type's fields, methods and nested types. Everything else
+ *  (a function, a variable, a macro) carries no member ring and asks nothing. */
+const MEMBER_KINDS = new Set(['struct', 'class', 'interface', 'union', 'record']);
+/** At most this many members one type entry previews. */
+const HOVER_MEMBER_CAP = 12;
 
 const quickInfoCache = new Map<string, { at: number; info: SymbolQuickInfo | null }>();
 
@@ -464,6 +452,9 @@ export async function quickInfoFor(source: MacroHoverSource, name: string, curre
 		};
 		defs.sort((a, b) => rank(b) - rank(a));
 	}
+	// The count rides before the slice: the card reports the definitions past the
+	// rendered cap as +N when the index holds more than it shows.
+	const total = defs.length;
 	defs = defs.slice(0, QUICK_INFO_MAX_DEFS);
 	const entries: SymbolQuickInfoEntry[] = [];
 	for (const def of defs) {
@@ -483,7 +474,30 @@ export async function quickInfoFor(source: MacroHoverSource, name: string, curre
 		entries.push({ kind: def.kind, path: def.path, line: def.line, text, comment, body });
 	}
 	if (entries.length === 0) return cacheQuickInfo(key, null);
-	return cacheQuickInfo(key, { name, entries });
+	// The member preview rides the FIRST candidate only — one contains query per hover,
+	// whatever the entry count, and the TTL cache carries it across repeat hovers. An
+	// empty ring or a failed one leaves `members` unset: the card shows the body alone.
+	const lead = entries[0];
+	const leadDef = defs[0];
+	if (lead && leadDef && MEMBER_KINDS.has(lead.kind)) {
+		try {
+			const answer = await symbolRelationChildren(leadDef.name, leadDef.path, leadDef.line, 'contains');
+			if (answer.nodes.length > 0) {
+				lead.members = answer.nodes.slice(0, HOVER_MEMBER_CAP).map((node) => ({ kind: node.kind, name: node.name, line: node.line }));
+			}
+		} catch {
+			// No index answer (the ring unavailable): the card previews no members.
+		}
+	}
+	// The reference-file count rides the whole answer — how many files the index sees
+	// the name in. A backend without the stat answers nothing and the field stays unset.
+	let refFiles: number | undefined;
+	try {
+		refFiles = (await symbolRefStats(name)).files;
+	} catch {
+		refFiles = undefined;
+	}
+	return cacheQuickInfo(key, { name, entries, total: total > entries.length ? total : undefined, refFiles });
 }
 
 /** The scope-local quick info: when the hovered site sits inside a function that
@@ -521,44 +535,6 @@ export async function scopeQuickInfoFor(source: MacroHoverSource, name: string, 
 		};
 	});
 	return cacheQuickInfo(key, { name, entries });
-}
-
-/** The quick-info tooltip: kind, name, then one entry per definition — its doc comment
- *  (when there is one), its body whole (a block-shaped kind; the pane scrolls) or its
- *  declaration line, and its location, clickable when `open` is wired (the location
- *  rides the same open the workbench's jump uses). */
-export function quickInfoDom(info: SymbolQuickInfo, open?: (path: string, line: number) => void): HTMLElement {
-	const dom = document.createElement('div');
-	dom.className = 'ggs-symbol-hover ggs-quick-info';
-	const head = document.createElement('div');
-	head.className = 'ggs-symbol-hover-head';
-	head.textContent = info.entries.length > 1 ? `${info.name} — ${info.entries.length} ${t('symbols.hover.definitions')}` : info.name;
-	dom.appendChild(head);
-	for (const entry of info.entries) {
-		if (entry.comment) {
-			const comment = document.createElement('pre');
-			comment.className = 'ggs-symbol-hover-comment';
-			comment.textContent = entry.comment;
-			dom.appendChild(comment);
-		}
-		if (entry.body || entry.text) {
-			// A body carries its own signature line, so the declaration pre drops out —
-			// the same text must not show twice.
-			const code = document.createElement('pre');
-			code.className = entry.body ? 'ggs-symbol-hover-code ggs-symbol-hover-body' : 'ggs-symbol-hover-code';
-			code.textContent = entry.body || entry.text;
-			dom.appendChild(code);
-		}
-		const loc = open ? document.createElement('button') : document.createElement('div');
-		loc.className = 'ggs-symbol-hover-loc';
-		loc.textContent = `${entry.path}:${entry.line + 1}`;
-		if (open) {
-			loc.title = t('symbols.hover.openDefinition');
-			loc.addEventListener('click', () => open(entry.path, entry.line));
-		}
-		dom.appendChild(loc);
-	}
-	return dom;
 }
 
 /* ---------- The sticky hover: reaching the tooltip must not dismiss it ---------- */
@@ -652,7 +628,7 @@ export function symbolHoverExtension(source: MacroHoverSource): Extension[] {
 				return {
 					pos: range.from,
 					end: range.to,
-					create: (): TooltipView => ({ dom: quickInfoDom(scopeInfo, open) })
+					create: (): TooltipView => ({ dom: quickInfoDom(scopeInfo, { open }) })
 				};
 			}
 			const hint = hoverKindHint(hoverLine.text, range.from - hoverLine.from, range.to - hoverLine.from);
@@ -661,7 +637,7 @@ export function symbolHoverExtension(source: MacroHoverSource): Extension[] {
 			return {
 				pos: range.from,
 				end: range.to,
-				create: (): TooltipView => ({ dom: quickInfoDom(info, open) })
+				create: (): TooltipView => ({ dom: quickInfoDom(info, { open }) })
 			};
 		}, { hoverTime: 350 }),
 		hoverKeepAliveExtension()

@@ -1523,5 +1523,9 @@ export const en = {
 	'symbols.window.locals': 'Current function',
 	'symbols.page.byFolder': 'Folders',
 	'symbols.page.byCategory': 'Categories',
+	'symbols.hover.members': 'Members',
+	'symbols.hover.references': 'Referenced in {0} file(s)',
+	'symbols.hover.openRelations': 'Open the relations window',
+	'symbols.hover.moreDefinitions': '+{0} more definitions',
 	'relations.declAt': '{0} in {1} at line {2}',
 };

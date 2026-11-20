@@ -68,6 +68,16 @@ export const symbolLocals = (text: string, ext: string, line: number) =>
 
 export const symbolTree = () => invoke<TreeFile[] | null>('symbol_tree');
 export const symbolReferences = (name: string) => invoke<SymbolRefFile[]>('symbol_references', { name });
+
+/** What `symbol_ref_stats` answers: how many files contain `name` at all — the index's
+ *  occurrence list length, the declaration's own file included (the same number the
+ *  Symbol Database tree's refs badges show). */
+export interface RefStats {
+	files: number;
+}
+
+/** The hover card's reference-files count over the persistent index. */
+export const symbolRefStats = (name: string) => invoke<RefStats>('symbol_ref_stats', { name });
 export const symbolsRebuild = (onEvent: Channel<SymbolIndexEvent>) => invoke<SymbolIndexStatus | null>('symbols_rebuild', { onEvent });
 
 /** One definition `symbol_file_outline` answers: the file's own symbol from the index. */

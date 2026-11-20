@@ -64,7 +64,10 @@ rewrites files in place with word-boundary precision — encoding, line endings 
 preserved, every rewritten file re-verified with the original restored on any doubt
 (`Rename Symbol` in the palette). The Symbol Database page can regroup the same index as
 a category view (symbols by kind with counts), and a command switches a symbol between
-its declaration and its definition. The declarations are extracted by
+its declaration and its definition. Hovering any symbol answers quick documentation in
+place: macro directives with their comments, whole function and type bodies, the
+enclosing function's locals first, a type's members listed under the hover, and the
+reference footprint with a jump into the relations window. The declarations are extracted by
 a tree-sitter parser layer (one grammar per language, each behind a Cargo feature), so every
 symbol carries its column, range, enclosing type and complexity.
 
