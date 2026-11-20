@@ -2091,7 +2091,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "trash",
  "zip",
 ]
 
@@ -2161,7 +2160,6 @@ dependencies = [
  "ggs-proto",
  "if-addrs",
  "libloading 0.8.9",
- "serde",
  "serde_json",
  "tempfile",
  "ureq",
@@ -2215,9 +2213,6 @@ dependencies = [
 [[package]]
 name = "ggs-testkit"
 version = "0.0.0"
-dependencies = [
- "tempfile",
-]
 
 [[package]]
 name = "ggs-text"
@@ -5681,11 +5676,9 @@ dependencies = [
  "flate2",
  "fnv",
  "once_cell",
- "plist",
  "regex-syntax",
  "serde",
  "serde_derive",
- "serde_json",
  "thiserror 2.0.20",
  "walkdir",
  "yaml-rust",

@@ -3,9 +3,10 @@
 //! a developer's own ~/.gitconfig) and the small helpers tests build histories with.
 //! A dev-dependency only: nothing here reaches any shipped binary.
 //!
-//! Allowed dependencies: tempfile — deliberately NOTHING else: a dev-dependency
-//! cycle through a domain crate would build two copies of that crate and split every
-//! type in two (the git-returning helpers live in each crate's own test code).
+//! Allowed dependencies: NONE beyond std (`std::env::temp_dir` scratch roots) —
+//! deliberately: a dev-dependency cycle through a domain crate would build two copies
+//! of that crate and split every type in two (the git-returning helpers live in each
+//! crate's own test code).
 
 use std::fs;
 use std::path::PathBuf;

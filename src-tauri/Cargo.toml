@@ -53,7 +53,17 @@ regex = "1"
 zip = { version = "2", default-features = false, features = ["deflate", "deflate64"] }
 # The ggs:// page-serving core's response types (tauri::http re-exports this crate).
 http = "1"
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+# `default-fancy` swaps syntect's Oniguruma (C) engine for the pure-Rust fancy-regex
+# engine — the whole viewer stack stays free of C bindings (plan §3.1). The explicit
+# list is that set minus plist-load, default-themes and html: the viewer loads its
+# syntaxes from the defaults dumps and the YAML the grammar converter emits, and never
+# a `.tmLanguage` plist through syntect (grammar.rs reads those with the plist crate).
+syntect = { version = "5", default-features = false, features = [
+    "parsing",
+    "default-syntaxes",
+    "yaml-load",
+    "regex-fancy",
+] }
 plist = { version = "1", default-features = false, features = ["serde"] }
 fancy-regex = "0.16"
 base64 = "0.23"
@@ -239,9 +249,6 @@ serde_json = { workspace = true }
 portable-pty = { workspace = true }
 ureq = { workspace = true }
 sha2 = { workspace = true }
-# The extension-grammar loader (ggs-text's grammar module): reading a `.tmLanguage` plist
-# (the JSON grammars go through serde_json directly).
-plist = { workspace = true }
 # Extension icons and README images cross the IPC bridge as base64 data URLs (cmd_ext).
 base64 = { workspace = true }
 # The .asc walker's newline scan (can_log.rs): SIMD-accelerated where std's byte-by-byte
@@ -293,6 +300,10 @@ zip = { workspace = true }
 # ScratchDir) — tempfile is test-only, so no binary linking the lib carries it
 # (docs/ci-speed-plan.md P3: one less crate, its fastrand/getrandom included).
 tempfile = { workspace = true }
+# cmd_assoc's tests read the bundled Info.plist back (the CFBundleDocumentTypes merge
+# check); the app's own runtime plist reads are ggs-text's grammar loader, whose crate
+# carries the entry.
+plist = { workspace = true }
 
 # `tauri dev` builds here, and the CAN log walker crunches hundreds of MB/s of text:
 # opt-level 1 keeps incremental builds quick while making the parse loops an order of

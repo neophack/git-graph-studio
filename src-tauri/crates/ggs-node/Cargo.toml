@@ -37,7 +37,6 @@ getrandom = { workspace = true }
 base64 = { workspace = true }
 # The module bytecode cache (require): the compiled tree crosses as bincode.
 bincode = { workspace = true }
-serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

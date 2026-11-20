@@ -7,7 +7,7 @@
 //! parallel tree walk every consumer (Quick Open, search, the symbol
 //! index, the analysis engine) shares — the exclusion policy stays ONE list here.
 //!
-//! Allowed dependencies: ggs-base, ggs-text (encoding), ignore, rayon, trash, zip,
+//! Allowed dependencies: ggs-base, ggs-text (encoding), ignore, rayon, zip,
 //! base64, memchr. No tauri — the wire upload path and the zip walk are plain calls.
 
 pub mod media;
