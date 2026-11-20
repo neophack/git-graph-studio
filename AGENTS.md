@@ -376,29 +376,31 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   collapsed; the hover card's relations jump rides `openGraphRoot`, which pins the graph
   on the hovered symbol and opens the section; 2026-11-20),
   `src/features/search/relationGraph.ts` + `relationGraph.css` (the relation graph — the
-  Symbol Window's lower half, drawn on the Code Analysis module's own mermaid drawing
-  (`../analysis`'s DiagramView — the same mermaid + ELK renderer and the same
-  gitdiagram-class viewer: pan, zoom, fit, keyboard, pinch, zoom bar; the chunk loads
-  through the first draw's dynamic import, so the sidebar's first paint never pays for
-  mermaid, and the static edge stays off the seam graph the analysis page's own search
-  import opens): the ring as a `flowchart TD` source — rounded cards whose labels carry
-  the drill marker (+/−) and the ⋯ a cut-short ring appends, curved edges whose heads
-  land on the referenced card (refsTo's children point down into the root, contains
-  points down, the kinds ride `linkStyle` palette literals — a `var(--…)` fails the
-  render), the aggregating edge's ×N in its label; every drill rebuilds the source, so
-  ELK re-lays the whole graph — the auto-arrange by construction; the pointer's
-  vocabulary is Source Insight's relation window's (2026-11-20, the owner's direction:
+  Symbol Window's lower half, drawn on **@antv/G6** (AntV's graph engine — an established
+  drawing library, per the owner's direction: 不要自己写，要使用库，比如Drawnix; loaded
+  lazily on the first drawing, a chunk the sidebar's first paint never pays for). The
+  layout is Source Insight's relation window's stable tree: slots grow rightward/downward
+  from the root, a placed card never relocates, and the engine is driven **incrementally**
+  — a ring's expansion addNodeData's its cards below the expanded one and a collapse
+  removeNodeData’s them, every other card keeping its exact slot and the camera never
+  moving (点击加号减号要添加减少节点，不要重新刷图; the mermaid round’s whole-graph ELK
+  re-layout was exactly the repaint being rejected, and the module-analysis drawing
+  library itself carries no vanilla mount — Plait renders through React/Angular
+  carriers). The cards speak the SI vocabulary (2026-11-20, the owner’s direction:
   relation的交互和source insight不一致): one click on a card whose label carries the
-  +/− drills its ring — deferred 220 ms, so a double click's first press never expands
+  +/− drills its ring — deferred 220 ms, so a double click’s first press never expands
   on its way to the jump — one click on a ringless card, and the double click on any
   card, open the definition; the right-click menu drills (expand/collapse), re-roots or
-  opens; resting floats the declaration card
-  (its file read resolving through `resolvePath`, the host-joined absolute spelling); a
+  opens; resting floats the declaration card (its file read resolving through
+  `resolvePath`, the host-joined absolute spelling). Cards carry the ⋯ a cut-short ring
+  appends, the root the accent, and an aggregating edge its ×N label (call solid blue,
+  use dashed, member green — palette literals, the canvas cannot read CSS variables); a
   symbol already drawn gains the cross edge instead of a second card (kept while both
   ends stand drawn), a ring naming only drawn symbols leaves the node a leaf, and the
   3-depth cap answers the ⋯ instead of a request; `pinRoot` seeds an explicit pinned
-  root; the dev harness's `?relgraph=1` surface scripts the Symbol Window whole —
-  outline, sash, graph, and the cursor buttons that re-root it — for eyeballing;
+  root; the engine’s own viewport owns the wheel zoom and the drag pan, and Fit frames
+  the whole drawing; the dev harness’s `?relgraph=1` surface scripts the Symbol Window
+  whole — outline, sash, graph, and the cursor buttons that re-root it — for eyeballing;
   2026-11-20),
   `src/features/search/definitionView.ts` + `definition.css` (the Definition panel page —
   2026-11-20, it replaces the relation tree the panel used to host: the clicked symbol's

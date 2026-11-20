@@ -1,11 +1,10 @@
 /* The Relation Graph's own affordances — the controls riding the section head, the
-   resting/loading/failed hint floating over module 17's drawing host, and the
-   declaration card. The drawing itself (`.an-diagram`, its zoombar and the mermaid
-   SVG) is styled by the workbench shell — the same classes the Code Analysis page
-   mounts. */
+   resting hints, and the declaration card. The drawing itself is the @antv/G6 engine's
+   canvas (relationGraph.ts builds it into .rg-stage); the canvas palette lives in
+   relationGraph.ts's themePalette, since the canvas cannot read CSS variables. */
 
 .rg-root { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.rg-root > .an-diagram { flex: 1; min-height: 0; }
+.rg-stage { position: relative; flex: 1; min-height: 0; }
 .rg-controls { display: inline-flex; gap: 2px; align-items: center; }
 .rg-dir {
 	background: none; border: 1px solid transparent; padding: 1px 7px; border-radius: 3px;

@@ -1,19 +1,21 @@
 // The Relation Graph (module 5) — the Symbol Window's lower half: the symbol under the
-// cursor's ring as a mermaid flowchart, drawn on the Code Analysis module's own drawing
-// (`moduleDiagram.ts`'s DiagramView — the same mermaid + ELK renderer, the same
-// gitdiagram-class viewer: pan, zoom, fit, keyboard, pinch). Every expansion rebuilds the
-// flowchart source, so ELK re-lays the whole graph — the auto-arrange by construction, no
-// overlaps ever. The pointer's vocabulary is Source Insight's relation window's: one
-// click on a card whose label carries the +/− drills its ring (the deferred drill, so a
-// double click's first press never expands), one click on a card without a ring — and
-// the double click on any card — opens the definition, a right-click menu drills
-// (expand/collapse), re-roots or opens, and resting floats the declaration card. The
-// direction buttons swap refs to / refs from / contains; a node whose ring the index
-// promises carries the +/− marker in its label (and ⋯ when the ring came back cut
-// short), and an aggregating edge carries its ×N in the label. mermaid loads lazily,
-// shared with module 17's chunk.
+// cursor's ring on an interactive graph, drawn on **@antv/G6** (AntV's graph engine —
+// the established drawing library behind this class of diagram tool, per the owner's
+// direction: 不要自己写，要使用库，比如Drawnix). The engine is driven incrementally:
+// a ring's expansion `addNodeData`s its cards below the expanded one and a collapse
+// `removeNodeData`s them — every other card keeps its exact slot and the camera never
+// moves (点击加号减号要添加减少节点，不要重新刷图). The layout is Source Insight's
+// relation window's stable tree: slots grow rightward/downward from the root and a
+// placed card never relocates. The cards speak the SI vocabulary: a card whose label
+// carries the +/− — the ring's expander — drills on one click (deferred, so a double
+// click's first press never expands), a card without a ring — and the double click on
+// any card — opens the definition, a right-click menu drills, re-roots or opens, and
+// resting floats the declaration card. The engine's own viewport handles the wheel
+// zoom, the drag pan and Fit (`fitView`). The direction buttons swap refs to / refs
+// from / contains; an aggregating edge carries its ×N in its label; a ring cut short
+// (or a card at the 3-depth cap) carries the ⋯. G6 loads lazily on the first drawing
+// (a chunk the sidebar's first paint never pays for).
 
-import type { ModuleDiagram } from '../../platform/ipc/analysis';
 import { readFile } from '../../platform/ipc/fs';
 import { symbolLookup, symbolRelationChildren, type RelationDirection, type RelationNode } from '../../platform/ipc/symbols';
 
@@ -21,11 +23,6 @@ import { t, tf } from '../../platform/i18n';
 import { el, escapeHtml, icon, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 
 import './relationGraph.css';
-
-/** The drawing host's own type — the value itself crosses through the first draw's
- *  dynamic import (module 17's chunk; a static edge back to the analysis facade would
- *  close an import cycle the analysis page's own search import opens). */
-type DiagramView = import('../analysis').DiagramView;
 
 /** What the workbench resolved the symbol under the cursor to (0-based line) — the
  *  graph's root vocabulary, shared with every seeder of it. */
@@ -38,7 +35,19 @@ export interface RelationRoot {
 	line: number;
 }
 
-/** How deep the graph may drill before a node's ring answers the cap instead — the
+/** The card's fixed geometry — the layout's slots, the edges' anchors and the world
+ *  bounds are all counted in these. */
+const NODE_W = 160;
+const NODE_H = 28;
+
+/** One depth level's vertical span. */
+const LEVEL_H = 76;
+
+/** The horizontal gap between neighbouring slots of one depth. */
+const GAP_X = 18;
+
+
+/** How deep the graph may drill before a card's ring answers the cap instead — the
  *  runaway guard for a hot name whose rings never end (the panel tree's is 8). */
 const MAX_DEPTH = 3;
 
@@ -50,9 +59,10 @@ const DECL_DELAY = 300;
  *  instantly; here the whole card is the expander, and the delay is the merge's cost). */
 const CLICK_DRILL_DELAY = 220;
 
-/** One graph node: a symbol's card and its ring's bookkeeping. The drawn structure is a
+/** One graph node: a symbol card and its ring's bookkeeping. The drawn structure is a
  *  strict tree — a ring answer naming a symbol already drawn adds a cross edge instead of
- *  a second card, so the source's node/edge lists never meet a cycle. */
+ *  a second card. A collapsed card's descendants stay in the map (their rings come back
+ *  without a re-fetch) and simply lose their slots. */
 interface GraphNode {
 	key: string;
 	kind: string;
@@ -86,6 +96,13 @@ interface GraphEdge {
 	count: number;
 }
 
+/** A settled slot in world coordinates — the card's top-left corner. Slots are permanent:
+ *  a placed card never moves (the stable tree). */
+interface LayoutPoint {
+	x: number;
+	y: number;
+}
+
 /** The identity key: two same-named definitions are different nodes. */
 function nodeKey(name: string, path: string, line: number): string {
 	return `${name}\u0000${path}\u0000${line}`;
@@ -111,45 +128,11 @@ function fromRelation(node: RelationNode, parentKey: string | null): GraphNode {
 	};
 }
 
-/* ---------- The mermaid source (pure, for the tests) ---------- */
-
 /** One card's label: the drill marker the ring's state carries (+ / −), the container
- *  prefix, the name, and the ⋯ a cut-short ring appends. Quotes become apostrophes —
- *  mermaid's `["…"]` strings have no escape for them. */
-export function relationLabel(node: GraphNode): string {
+ *  prefix, the name, and the ⋯ a cut-short ring appends. */
+function relationLabel(node: GraphNode): string {
 	const marker = node.hasChildren ? (node.expanded ? '− ' : '+ ') : '';
-	const name = `${node.container ? `${node.container}·` : ''}${node.name}`.replace(/"/g, "'");
-	return `${marker}${name}${node.truncated ? ' ⋯' : ''}`;
-}
-
-/** The flowchart `flowchart TD` source over the visible (expanded) shapes: nodes in
- *  `N0…` order, every edge from the referencing side to the referenced (refsTo's
- *  children point up, the other directions point down), the ×N a count past one carries,
- *  use arrows dashed, and the link styles + the root's class riding the theme palette
- *  (mermaid reads its style values literally — a `var(--…)` fails the render — so the
- *  colours cross as the literals, picked by the theme kind like mermaidConfig's own). */
-export function relationMermaid(nodes: GraphNode[], edges: GraphEdge[], rootKey: string): string {
-	const index = new Map(nodes.map((node, at) => [node.key, at]));
-	const dark = document.documentElement.classList.contains('vscode-dark');
-	const tone = dark ? { call: '#4fc1ff', use: '#9da5b4', member: '#89d185' } : { call: '#006abc', use: '#5a5a5a', member: '#2da44e' };
-	const lines: string[] = ['flowchart TD'];
-	for (const node of nodes) lines.push(`  N${index.get(node.key)}["${relationLabel(node)}"]`);
-	const styled: string[] = [];
-	for (const edge of edges) {
-		const from = index.get(edge.from);
-		const to = index.get(edge.to);
-		if (from === undefined || to === undefined) continue;
-		const arrow = edge.kind === 'use' ? '-.->' : '-->';
-		lines.push(`  N${from} ${arrow}${edge.count > 1 ? `|"×${edge.count}"|` : ''} N${to}`);
-		const at = lines.length - 2 - nodes.length; // the edge's own linkStyle index
-		styled.push(`${at} stroke:${tone[edge.kind as 'call' | 'use' | 'member'] ?? tone.use}`);
-	}
-	for (const style of styled) lines.push(`  linkStyle ${style}`);
-	lines.push(
-		`  classDef rgRoot ${dark ? 'fill:#2c3544,stroke:#6dd4e9,color:#e8edf5' : 'fill:#f7f7f7,stroke:#334155,color:#171717'},stroke-width:1.5px`,
-		`  class N${index.get(rootKey) ?? 0} rgRoot`
-	);
-	return lines.join('\n');
+	return `${marker}${node.container ? `${node.container}·` : ''}${node.name}${node.truncated ? ' ⋯' : ''}`;
 }
 
 /** The declaration card's cargo: the definition's opening lines and where they sit. */
@@ -165,15 +148,15 @@ const DECL_MAX_LINES = 6;
 const DECL_MAX_CHARS = 400;
 
 export class RelationGraphView {
-	/** The canvas: the mermaid drawing host (module 17's DiagramView — its zoombar,
-	 *  pan/zoom, fit and keyboard ride along). */
+	/** The canvas: the G6 container (the engine's own viewport — wheel zoom, drag pan,
+	 *  Fit and its scrollbars live inside it). */
 	readonly element: HTMLElement;
 
 	/** The direction buttons, the pin and the Fit — the Symbol Window's section head hosts
 	 *  them beside its own label, so the graph costs one row of the sidebar. */
 	readonly controls: HTMLElement;
 
-	/** A definition click (one click on a card) — the line arrives 1-based. */
+	/** A definition jump — the line arrives 1-based. */
 	onOpen?: (path: string, line: number) => void;
 
 	/** The pin's toggle — the host re-feeds the cursor's symbol when the pin lifts. */
@@ -184,16 +167,9 @@ export class RelationGraphView {
 	 *  Unwired, the path passes through as-is. */
 	resolvePath?: (path: string) => string;
 
-	private diagram: DiagramView | null = null;
+	private readonly stage: HTMLElement;
 
-	/** The drawing host's lazy construction — the module 17 chunk (mermaid itself loads
-	 *  inside it) only pays when a graph first draws. */
-	private diagramReady: Promise<DiagramView> | null = null;
-
-	/** Set by the dispose: a first draw still in flight must not mount into a dead view. */
-	private disposed = false;
-
-	/** The resting/loading/failed note, floating over the drawing host. */
+	/** The resting/loading/failed note, floating over the engine's canvas. */
 	private readonly hint: HTMLElement;
 
 	private root: RelationRoot | null = null;
@@ -222,6 +198,12 @@ export class RelationGraphView {
 
 	private pinned = false;
 
+	/** The stable slots: placed cards never move — an expansion only appends slots. */
+	private readonly positions = new Map<string, LayoutPoint>();
+
+	/** The next free slot's x per depth — the layout's allocation frontier. */
+	private readonly depthCursor = new Map<number, number>();
+
 	private readonly dirTo: HTMLButtonElement;
 
 	private readonly dirFrom: HTMLButtonElement;
@@ -230,32 +212,26 @@ export class RelationGraphView {
 
 	private readonly pinButton: HTMLButtonElement;
 
-	/* ---------- The declaration card ---------- */
+	private disposed = false;
 
-	private readonly declCache = new Map<string, Promise<DeclFragment | null>>();
+	/** The engine instance and its lazy construction — the G6 chunk loads on the first
+	 *  drawing, and every draw that lost a supersede race stays unpainted (each engine
+	 *  data operation repaints incrementally; a stale one would fight the newer state). */
+	private graph: import('@antv/g6').Graph | null = null;
 
-	private declTimer: number | null = null;
+	private graphReady: Promise<import('@antv/g6').Graph> | null = null;
 
-	/** A drillable card's deferred drill in flight — the double click cancels it. */
-	private clickTimer: number | null = null;
+	/** The engine draw in flight — the initial fit waits for it. */
+	private drawn: Promise<void> = Promise.resolve();
 
-	private declCard: HTMLElement | null = null;
-
-	private readonly onDocMouseDown = (event: MouseEvent): void => {
-		if (this.declCard && !this.declCard.contains(event.target as Node)) this.hideDecl();
-	};
-
-	private readonly onDocKeyDown = (event: KeyboardEvent): void => {
-		if (event.key === 'Escape' && this.declCard) this.hideDecl();
-	};
-
-	/** The card the pointer rests on — the hover's deferred subject, dropped by the
-	 *  next mouseover or a mouseout that leaves the host. */
-	private declTarget: { node: GraphNode; generation: number; x: number; y: number } | null = null;
+	/** The labels painted on the engine's current cards — the update pass only rewrites
+	 *  the ones whose ring state moved (+ / − / ⋯). */
+	private readonly paintedLabels = new Map<string, string>();
 
 	constructor() {
+		this.stage = el('div', 'rg-stage');
 		this.hint = el('div', 'rg-hint rg-hint-overlay');
-		this.element = el('div', 'rg-root', [this.hint]);
+		this.element = el('div', 'rg-root', [this.stage, this.hint]);
 
 		this.dirTo = el('button', 'rg-dir');
 		this.dirTo.addEventListener('click', () => this.setDirection('refsTo'));
@@ -276,84 +252,6 @@ export class RelationGraphView {
 		this.render();
 	}
 
-	/** The drawing host, built on the first render that has something to draw: the
-	 *  dynamic import keeps the Symbol Window's first paint off module 17's chunk (and
-	 *  the static one off the seam graph — the analysis page already imports this module
-	 *  through its facade, and a static edge back would close a cycle). */
-	private ensureDiagram(): Promise<DiagramView> {
-		this.diagramReady ??= (async () => {
-			const { DiagramView } = await import('../analysis');
-			if (this.disposed) throw new Error('the relation graph was disposed');
-			const diagram = new DiagramView({
-				// Source Insight's relation-window vocabulary: a card whose label carries the
-				// +/− (the ring's expander) drills on one click — the deferred drill, so a
-				// double click's first press never expands before the jump; a card without
-				// a ring has nothing to drill and its click opens the definition at once.
-				// An edge click (its id carries the L_ prefix) and the background answer
-				// nothing.
-				onSelect: (id) => {
-					if (id === null || id.startsWith('L_')) return;
-					const node = this.nodes.get(id);
-					if (!node) return;
-					if (!node.hasChildren) {
-						this.onOpen?.(node.path, node.line + 1);
-						return;
-					}
-					if (this.clickTimer !== null) clearTimeout(this.clickTimer);
-					this.clickTimer = window.setTimeout(() => {
-						this.clickTimer = null;
-						void this.toggleExpand(id);
-					}, CLICK_DRILL_DELAY);
-				},
-				// The double click jumps to the definition — SI's own jump — cancelling a
-				// drill the first press had scheduled.
-				onOpenNode: (key) => {
-					this.cancelClickDrill();
-					const node = this.nodes.get(key);
-					if (node) this.onOpen?.(node.path, node.line + 1);
-				},
-				// The right-click menu: the ring's drill, the re-root, the definition.
-				onNodeContext: (x, y, key) => {
-					const node = this.nodes.get(key);
-					if (!node) return;
-					const entries: MenuEntry[] = [];
-					if (node.hasChildren) {
-						entries.push({
-							label: node.expanded ? t('relations.collapse') : t('relations.expand'),
-							run: () => void this.toggleExpand(key)
-						});
-					}
-					entries.push(
-						{ label: t('relations.reRoot'), run: () => this.setRoot({ kind: node.kind, name: node.name, path: node.path, line: node.line }) },
-						{ label: t('relations.openDef'), run: () => this.onOpen?.(node.path, node.line + 1) }
-					);
-					showContextMenu(x, y, entries);
-				},
-				onEdgeContext: () => undefined
-			});
-			// The host's own tooltip names the module page's hint — the graph speaks for itself.
-			diagram.host.title = '';
-			diagram.host.setAttribute('aria-label', t('symbols.graph.title'));
-			// The hover's declaration card: one delegated pair over the drawing host —
-			// mermaid rebuilds its SVG under us, the markers always resolve.
-			diagram.host.addEventListener('mouseover', (event) => {
-				const target = event.target instanceof Element ? event.target.closest('[data-path]') : null;
-				const key = target?.getAttribute('data-path');
-				const node = key ? this.nodes.get(key) : null;
-				if (!node) return;
-				this.scheduleDecl(node, event.clientX, event.clientY);
-			});
-			diagram.host.addEventListener('mouseout', (event) => {
-				const target = event.target instanceof Element ? event.target.closest('[data-path]') : null;
-				if (target) this.cancelDecl();
-			});
-			this.diagram = diagram;
-			this.element.insertBefore(diagram.host, this.hint);
-			return diagram;
-		})();
-		return this.diagramReady;
-	}
-
 	/** The host's dispose: the document-level dismissers must not outlive the view. */
 	dispose(): void {
 		this.disposed = true;
@@ -361,14 +259,8 @@ export class RelationGraphView {
 		this.cancelClickDrill();
 		document.removeEventListener('mousedown', this.onDocMouseDown);
 		document.removeEventListener('keydown', this.onDocKeyDown);
-		this.diagram?.destroy();
-	}
-
-	private cancelClickDrill(): void {
-		if (this.clickTimer !== null) {
-			clearTimeout(this.clickTimer);
-			this.clickTimer = null;
-		}
+		this.graph?.destroy();
+		this.graph = null;
 	}
 
 	/** Root the graph on an explicit symbol and pin it — the hover card's jump: the
@@ -403,9 +295,13 @@ export class RelationGraphView {
 		const generation = ++this.generation;
 		const root = this.root;
 		this.hideDecl();
+		this.cancelClickDrill();
 		this.nodes.clear();
+		this.positions.clear();
+		this.depthCursor.clear();
 		this.crossEdges.length = 0;
 		this.crossSeen.clear();
+		this.paintedLabels.clear();
 		this.rootFailed = false;
 		this.rootLoading = root !== null;
 		this.paintControls();
@@ -416,6 +312,7 @@ export class RelationGraphView {
 			);
 			this.nodes.set(node.key, node);
 			this.rootKey = node.key;
+			this.place(node, 0);
 		}
 		this.render();
 		if (!root) return;
@@ -430,6 +327,7 @@ export class RelationGraphView {
 					node.expanded = true;
 					node.loaded = true;
 					this.absorbRing(node, answer?.nodes ?? []);
+					this.revealChildren(node);
 				}
 			}
 		} catch {
@@ -491,24 +389,56 @@ export class RelationGraphView {
 		this.pinButton.classList.toggle('active', this.pinned);
 	}
 
+	/* ---------- The stable tree layout ---------- */
+
+	/** Give a card its permanent slot: the next free x at its depth — or, when the band
+	 *  below its parent is still free, right under the parent (the ring grows where the
+	 *  eye already is). Placed cards never move again. */
+	private place(node: GraphNode, depth: number): void {
+		const parent = node.parentKey !== null ? this.positions.get(node.parentKey) : undefined;
+		const x = node.parentKey === null ? 0 : Math.max(this.depthCursor.get(depth) ?? 0, parent?.x ?? 0);
+		this.positions.set(node.key, { x, y: depth * LEVEL_H });
+		this.depthCursor.set(depth, x + NODE_W + GAP_X);
+	}
+
+	/** The visible walk: the root, then every expanded card's children in turn — a
+	 *  collapsed card's descendants stay in the map but leave the drawing. */
+	private visibleNodes(): GraphNode[] {
+		const list: GraphNode[] = [];
+		const collect = (key: string): void => {
+			const node = this.nodes.get(key);
+			if (!node) return;
+			list.push(node);
+			if (node.expanded) for (const child of node.children) collect(child);
+		};
+		collect(this.rootKey);
+		return list;
+	}
+
 	/* ---------- Expansion ---------- */
 
 	private async toggleExpand(key: string): Promise<void> {
 		const node = this.nodes.get(key);
 		if (!node || node.loading) return;
 		if (node.expanded) {
+			// The collapse removes the card's whole visible subtree — slots and cards —
+			// and nothing else moves.
+			for (const descendant of this.visibleSubtree(key)) {
+				if (descendant !== node) this.positions.delete(descendant.key);
+			}
 			node.expanded = false;
 			this.render();
 			return;
 		}
 		node.expanded = true;
 		if (node.loaded) {
+			this.revealChildren(node);
 			this.render();
 			return;
 		}
 		if (this.depthOf(key) >= MAX_DEPTH) {
 			// At the cap the marker stays and the ⋯ answers — the rings exist, the graph
-			// just stops drawing them (re-rooting on the node goes deeper instead).
+			// just stops drawing them (re-rooting on the card goes deeper instead).
 			node.loaded = true;
 			node.truncated = true;
 			node.expanded = false;
@@ -530,10 +460,34 @@ export class RelationGraphView {
 			node.loaded = true;
 			node.truncated = false;
 		}
+		this.revealChildren(node);
 		this.render();
 	}
 
-	/** The node's depth over the tree's parent chain. */
+	/** The re-expansion of a cached ring: its cards re-enter at fresh slots (their old
+	 *  ones may have been taken), still without moving anything already placed. */
+	private revealChildren(node: GraphNode): void {
+		const depth = this.depthOf(node.key) + 1;
+		for (const key of node.children) {
+			const child = this.nodes.get(key);
+			if (child && !this.positions.has(key)) this.place(child, depth);
+		}
+	}
+
+	/** A card's visible subtree: itself plus every drawn descendant. */
+	private visibleSubtree(key: string): GraphNode[] {
+		const list: GraphNode[] = [];
+		const collect = (at: string): void => {
+			const node = this.nodes.get(at);
+			if (!node) return;
+			list.push(node);
+			if (node.expanded) for (const child of node.children) collect(child);
+		};
+		collect(key);
+		return list;
+	}
+
+	/** The card's depth over the tree's parent chain. */
 	private depthOf(key: string): number {
 		let depth = 0;
 		let at = this.nodes.get(key);
@@ -544,82 +498,7 @@ export class RelationGraphView {
 		return depth;
 	}
 
-	/* ---------- Rendering ---------- */
-
-	/** Rebuild the flowchart over the current nodes: ELK lays the whole source again —
-	 *  the auto-arrange by construction. The hint floats over the empty states. */
-	private render(): void {
-		this.hint.textContent = '';
-		this.hint.hidden = true;
-		if (!this.root) {
-			this.hint.appendChild(el('span', undefined, [this.rootNote ?? t('symbols.graph.hint')]));
-			this.hint.hidden = false;
-			this.draw(null);
-			return;
-		}
-		if (this.rootLoading) {
-			this.hint.append(icon('sync', 'codicon-modifier-spin'), el('span', undefined, [t('relations.loading')]));
-			this.hint.hidden = false;
-			this.draw(null);
-			return;
-		}
-		if (this.rootFailed) {
-			this.hint.appendChild(el('span', undefined, [t('relations.failed')]));
-			this.hint.hidden = false;
-			this.draw(null);
-			return;
-		}
-		this.draw(this.buildPayload());
-	}
-
-	/** The flowchart payload over the visible (expanded) shapes — the walk from the root
-	 *  through expanded children only, so a collapsed subtree's cards leave the drawing
-	 *  with it. The drawn order is the walk's: the root first, then every ring in turn —
-	 *  mermaid's N-ids and the payload's paths line up by construction. */
-	private buildPayload(): ModuleDiagram {
-		const list: GraphNode[] = [];
-		const collect = (key: string): void => {
-			const node = this.nodes.get(key);
-			if (!node) return;
-			list.push(node);
-			if (node.expanded) for (const child of node.children) collect(child);
-		};
-		collect(this.rootKey);
-		const edges = this.visibleEdgeList();
-		const index = new Map(list.map((node, at) => [node.key, at]));
-		return {
-			nodes: list.map((node) => ({ path: node.key, label: relationLabel(node), module: null, tone: 0, callsIn: 0, callsOut: 0 })),
-			edges: edges
-				.filter((edge) => index.has(edge.from) && index.has(edge.to))
-				.map((edge) => ({ id: `L_N${index.get(edge.from)}_N${index.get(edge.to)}`, from: edge.from, to: edge.to, calls: edge.count, dashed: edge.kind === 'use' })),
-			droppedFiles: 0,
-			droppedEdges: 0,
-			mermaid: relationMermaid(list, edges, this.rootKey)
-		};
-	}
-
-	/** Hand the payload to the drawing host — building it first when this is the first
-	 *  draw (the dynamic import above); a state that landed while the host built draws
-	 *  what stands, not what asked, and a superseded draw never paints (every setDiagram
-	 *  clears the tree before its async render — a stale one would flash it empty). A
-	 *  build that loses a dispose race stays silent — the dead view keeps nothing to
-	 *  draw into. */
-	private drawSeq = 0;
-
-	private draw(payload: ModuleDiagram | null): void {
-		const seq = ++this.drawSeq;
-		if (this.diagram) {
-			this.diagram.setDiagram(payload);
-			return;
-		}
-		void this.ensureDiagram()
-			.then((diagram) => {
-				if (this.disposed || seq !== this.drawSeq) return;
-				const settled = !this.root || this.rootLoading || this.rootFailed ? null : this.buildPayload();
-				diagram.setDiagram(settled);
-			})
-			.catch(() => undefined);
-	}
+	/* ---------- Rendering (the engine's incremental data operations) ---------- */
 
 	private visibleEdgeList(): GraphEdge[] {
 		const edges: GraphEdge[] = [];
@@ -638,38 +517,319 @@ export class RelationGraphView {
 		return edges;
 	}
 
-	/* ---------- The view over the drawing ---------- */
-
-	/** Fit the whole drawing into the viewport — the Fit button's answer and a new root's
-	 *  opening frame. */
-	fit(): void {
-		this.diagram?.fit(true);
+	/** Repaint the drawing through the engine's data operations: the target card/edge
+	 *  lists diff against what the engine holds, so an expansion only **adds** its ring's
+	 *  cards and a collapse only **removes** its subtree — every other card keeps its
+	 *  slot and the camera stays (the stable tree). The empty states (hint branches)
+	 *  clear the engine outright. */
+	private render(): void {
+		this.hint.textContent = '';
+		this.hint.hidden = true;
+		if (!this.root) {
+			this.hint.appendChild(el('span', undefined, [this.rootNote ?? t('symbols.graph.hint')]));
+			this.hint.hidden = false;
+			this.clearEngine();
+			return;
+		}
+		if (this.rootLoading) {
+			this.hint.append(icon('sync', 'codicon-modifier-spin'), el('span', undefined, [t('relations.loading')]));
+			this.hint.hidden = false;
+			this.clearEngine();
+			return;
+		}
+		if (this.rootFailed) {
+			this.hint.appendChild(el('span', undefined, [t('relations.failed')]));
+			this.hint.hidden = false;
+			this.clearEngine();
+			return;
+		}
+		this.draw(this.buildScene());
 	}
 
-	/** The page re-gained a real viewport (the section re-showed, the sash moved): frame
-	 *  the drawing unless the user had zoomed or panned by hand. */
+	private buildScene(): { nodes: { id: string; label: string; x: number; y: number; root: boolean }[]; edges: { id: string; from: string; to: string; kind: string; count: number }[] } {
+		const visible = this.visibleNodes();
+		return {
+			nodes: visible.map((node) => {
+				const point = this.positions.get(node.key)!;
+				return { id: node.key, label: relationLabel(node), x: point.x + NODE_W / 2, y: point.y + NODE_H / 2, root: node.parentKey === null };
+			}),
+			edges: this.visibleEdgeList().map((edge) => ({ id: `${edge.from}\u0000${edge.to}`, from: edge.from, to: edge.to, kind: edge.kind, count: edge.count }))
+		};
+	}
+
+	private clearEngine(): void {
+		this.paintedLabels.clear();
+		if (!this.graph) return;
+		this.graph.removeNodeData(this.graph.getNodeData().map((node) => String(node.id)));
+		this.graph.removeEdgeData(this.graph.getEdgeData().map((edge) => String(edge.id)));
+	}
+
+	/** Hand the scene to the engine — building it first when this is the first draw (the
+	 *  dynamic import); a state that landed while the engine built draws what stands, not
+	 *  what asked. A draw that loses a supersede race or the dispose stays unpainted. */
+	private drawSeq = 0;
+
+	private draw(scene: { nodes: { id: string; label: string; x: number; y: number; root: boolean }[]; edges: { id: string; from: string; to: string; kind: string; count: number }[] }): void {
+		const seq = ++this.drawSeq;
+		if (this.graph) {
+			this.applyScene(scene);
+			return;
+		}
+		void this.ensureGraph()
+			.then((graph) => {
+				if (this.disposed || seq !== this.drawSeq) return;
+				const settled = !this.root || this.rootLoading || this.rootFailed ? null : this.buildScene();
+				if (settled) this.applyScene(settled);
+			})
+			.catch(() => undefined);
+	}
+
+	private async ensureGraph(): Promise<import('@antv/g6').Graph> {
+		this.graphReady ??= (async () => {
+			const { Graph } = await import('@antv/g6');
+			if (this.disposed) throw new Error('the relation graph was disposed');
+			const palette = themePalette();
+			const graph = new Graph({
+				container: this.stage,
+				animation: false,
+				data: { nodes: [], edges: [] },
+				// The viewport affordances are the engine's own: wheel zoom, drag pan.
+				behaviors: ['zoom-canvas', 'drag-canvas'],
+				node: {
+					type: 'rect',
+					style: {
+						size: [NODE_W, NODE_H],
+						radius: 6,
+						fill: palette.card,
+						stroke: palette.cardStroke,
+						lineWidth: 1,
+						labelPlacement: 'center',
+						labelFontSize: 11,
+						labelFontFamily: uiFontFamily(),
+						labelFill: palette.text,
+						cursor: 'pointer'
+					}
+				},
+				edge: {
+					type: 'line',
+					style: {
+						stroke: palette.edge,
+						lineWidth: 1.5,
+						endArrow: true,
+						endArrowSize: 8,
+						labelFontSize: 10,
+						labelFontFamily: uiFontFamily(),
+						labelFill: palette.text,
+						labelBackground: true,
+						labelBackgroundFill: palette.card,
+						labelBackgroundRadius: 3,
+						labelPadding: [1, 3]
+					}
+				}
+			});
+			// The pointer's vocabulary (the state machine below owns the meanings).
+			graph.on('node:click', (event: unknown) => this.onCardClick(this.cardKey(event)));
+			graph.on('node:dblclick', (event: unknown) => {
+				this.cancelClickDrill();
+				const node = this.nodes.get(this.cardKey(event));
+				if (node) this.onOpen?.(node.path, node.line + 1);
+			});
+			graph.on('node:contextmenu', (event: unknown) => {
+				const client = (event as { client?: { x: number; y: number }; originalEvent?: MouseEvent }).client ??
+					{ x: (event as { originalEvent?: MouseEvent }).originalEvent?.clientX ?? 0, y: (event as { originalEvent?: MouseEvent }).originalEvent?.clientY ?? 0 };
+				(event as { originalEvent?: MouseEvent }).originalEvent?.preventDefault();
+				this.showCardMenu(client.x, client.y, this.cardKey(event));
+			});
+			graph.on('node:pointerenter', (event: unknown) => {
+				const node = this.nodes.get(this.cardKey(event));
+				if (!node) return;
+				const client = (event as { client?: { x: number; y: number } }).client ?? { x: 0, y: 0 };
+				this.scheduleDecl(node, client.x, client.y);
+			});
+			graph.on('node:pointerleave', () => {
+				if (this.declTimer !== null) {
+					clearTimeout(this.declTimer);
+					this.declTimer = null;
+				}
+			});
+			this.graph = graph;
+			await graph.render();
+			return graph;
+		})();
+		return this.graphReady;
+	}
+
+	/** The clicked card's key off an engine event: the event's target is the card's data
+	 *  (or its id, by engine version) — both carry the key. */
+	private cardKey(event: unknown): string {
+		const target = (event as { target?: unknown }).target;
+		if (typeof target === 'string') return target;
+		return (target as { id?: string })?.id ?? '';
+	}
+
+	/** The scene's diff onto the engine: new cards add, gone cards remove, a card whose
+	 *  ring state moved (+ / − / ⋯) rewrites its label — and nothing else is touched, so
+	 *  the camera and the kept cards stand exactly where they were. */
+	private applyScene(scene: { nodes: { id: string; label: string; x: number; y: number; root: boolean }[]; edges: { id: string; from: string; to: string; kind: string; count: number }[] }): void {
+		const graph = this.graph;
+		if (!graph) return;
+		const palette = themePalette();
+		const kept = new Set(scene.nodes.map((node) => node.id));
+		const goneNodes = graph.getNodeData().map((node) => String(node.id)).filter((id) => !kept.has(id));
+		if (goneNodes.length > 0) graph.removeNodeData(goneNodes);
+		const fresh = scene.nodes.filter((node) => !graph.getNodeData().some((data) => String(data.id) === node.id));
+		if (fresh.length > 0) {
+			graph.addNodeData(
+				fresh.map((node) => ({
+					id: node.id,
+					style: {
+						x: node.x,
+						y: node.y,
+						labelText: node.label,
+						stroke: node.root ? palette.rootStroke : palette.cardStroke,
+						lineWidth: node.root ? 1.5 : 1,
+						fill: node.root ? palette.rootCard : palette.card,
+						labelFill: node.root ? palette.rootText : palette.text,
+						labelFontWeight: node.root ? 600 : 400
+					}
+				}))
+			);
+		}
+		// The kept cards' labels move only when their ring state moved (+ / − / ⋯).
+		for (const node of scene.nodes) {
+			if (this.paintedLabels.get(node.id) !== node.label) {
+				graph.updateNodeData([{ id: node.id, style: { labelText: node.label } }]);
+				this.paintedLabels.set(node.id, node.label);
+			}
+		}
+		const keptEdges = new Set(scene.edges.map((edge) => edge.id));
+		const goneEdges = graph.getEdgeData().map((edge) => String(edge.id)).filter((id) => !keptEdges.has(id));
+		if (goneEdges.length > 0) graph.removeEdgeData(goneEdges);
+		const presentEdges = new Set(graph.getEdgeData().map((edge) => String(edge.id)));
+		const freshEdges = scene.edges.filter((edge) => !presentEdges.has(edge.id));
+		if (freshEdges.length > 0) {
+			graph.addEdgeData(
+				freshEdges.map((edge) => ({
+					id: edge.id,
+					source: edge.from,
+					target: edge.to,
+					style: {
+						stroke: palette[edge.kind as 'call' | 'use' | 'member'] ?? palette.edge,
+					lineDash: edge.kind === 'use' ? [4, 3] : undefined,
+					lineWidth: edge.count > 1 ? 2.5 : 1.5,
+					labelText: edge.count > 1 ? `×${edge.count}` : ''
+				}
+			}))
+		);
+		// The data operations only update the records — draw paints the diff onto the
+		// canvas (a blank canvas otherwise).
+		this.drawn = graph.draw();
+	}
+	}
+
+	/* ---------- The view ---------- */
+
+	/** Fit the whole drawing into the viewport — a new root's opening frame and the Fit
+	 *  button's answer (the engine's own fit, padding kept). */
+	fit(): void {
+		// The initial fit lands after the first draw paints (a fitView against an undrawn
+		// engine would frame nothing).
+		void this.drawn.then(() => this.graph?.fitView({ when: 'always' }));
+	}
+
+	/** The page re-gained a real viewport (the section re-showed, the sash moved): keep
+	 *  the camera unless the drawing no longer fits it — a zoom-to-fit when it outgrew,
+	 *  a re-centre when it slid off. */
 	frame(): void {
-		this.diagram?.onShown();
+		const graph = this.graph;
+		if (!graph) return;
+		const [width, height] = graph.getSize();
+		if (width === 0 || height === 0) return;
+		const topLeft = graph.getCanvasByClient([0, 0]);
+		const bottomRight = graph.getCanvasByClient([width, height]);
+		const spanW = bottomRight[0] - topLeft[0];
+		const spanH = bottomRight[1] - topLeft[1];
+		const minX = Math.min(...[...this.positions.values()].map((p) => p.x));
+		const maxX = Math.max(...[...this.positions.values()].map((p) => p.x + NODE_W));
+		const minY = Math.min(...[...this.positions.values()].map((p) => p.y));
+		const maxY = Math.max(...[...this.positions.values()].map((p) => p.y + NODE_H));
+		const fullyVisible = minX >= topLeft[0] && minY >= topLeft[1] && maxX <= bottomRight[0] && maxY <= bottomRight[1];
+		if (fullyVisible) return;
+		if (maxX - minX <= spanW && maxY - minY <= spanH) {
+			// It fits the viewport's span: bring its centre into view.
+			void graph.translateTo([(minX + maxX) / 2, (minY + maxY) / 2]);
+		} else {
+			void graph.fitView({ when: "always" });
+		}
+	}
+
+	private cancelClickDrill(): void {
+		if (this.clickTimer !== null) {
+			clearTimeout(this.clickTimer);
+			this.clickTimer = null;
+		}
+	}
+
+	private clickTimer: number | null = null;
+
+	/* ---------- The card handlers (Source Insight's vocabulary) ---------- */
+
+	private onCardClick(key: string): void {
+		const node = this.nodes.get(key);
+		if (!node) return;
+		// A card with a ring drills on one click (the deferred drill, so a double click's
+		// first press never expands); a card without a ring has nothing to drill and
+		// opens at once.
+		if (!node.hasChildren) {
+			this.onOpen?.(node.path, node.line + 1);
+			return;
+		}
+		if (this.clickTimer !== null) clearTimeout(this.clickTimer);
+		this.clickTimer = window.setTimeout(() => {
+			this.clickTimer = null;
+			void this.toggleExpand(key);
+		}, CLICK_DRILL_DELAY);
+	}
+
+	private showCardMenu(x: number, y: number, key: string): void {
+		const node = this.nodes.get(key);
+		if (!node) return;
+		const entries: MenuEntry[] = [];
+		if (node.hasChildren) {
+			entries.push({
+				label: node.expanded ? t('relations.collapse') : t('relations.expand'),
+				run: () => void this.toggleExpand(key)
+			});
+		}
+		entries.push(
+			{ label: t('relations.reRoot'), run: () => this.setRoot({ kind: node.kind, name: node.name, path: node.path, line: node.line }) },
+			{ label: t('relations.openDef'), run: () => this.onOpen?.(node.path, node.line + 1) }
+		);
+		showContextMenu(x, y, entries);
 	}
 
 	/* ---------- The declaration card ---------- */
 
+	private readonly onDocMouseDown = (event: MouseEvent): void => {
+		if (this.declCard && !this.declCard.contains(event.target as Node)) this.hideDecl();
+	};
+
+	private readonly onDocKeyDown = (event: KeyboardEvent): void => {
+		if (event.key === 'Escape' && this.declCard) this.hideDecl();
+	};
+
+	private declTimer: number | null = null;
+
+	private readonly declCache = new Map<string, Promise<DeclFragment | null>>();
+
+	private declCard: HTMLElement | null = null;
+
 	private scheduleDecl(node: GraphNode, x: number, y: number): void {
 		if (this.declTimer !== null) clearTimeout(this.declTimer);
-		this.declTarget = { node, generation: this.generation, x, y };
 		this.declTimer = window.setTimeout(() => {
 			this.declTimer = null;
-			const target = this.declTarget;
-			if (target) void this.showDecl(target.node, target.generation, target.x, target.y);
+			void this.showDecl(node, this.generation, x, y);
 		}, DECL_DELAY);
-	}
-
-	private cancelDecl(): void {
-		if (this.declTimer !== null) {
-			clearTimeout(this.declTimer);
-			this.declTimer = null;
-		}
-		this.declTarget = null;
 	}
 
 	/** Fetch (or reuse) the declaration fragment of one symbol: the index's definitions for
@@ -731,9 +891,42 @@ export class RelationGraphView {
 	}
 
 	private hideDecl(): void {
-		this.cancelDecl();
+		if (this.declTimer !== null) {
+			clearTimeout(this.declTimer);
+			this.declTimer = null;
+		}
 		this.declCard?.remove();
 		this.declCard = null;
+	}
+}
+
+/** The canvas palette: the engine's canvas cannot read CSS variables, so the colours
+ *  cross as literals picked by the workbench theme's kind. */
+function themePalette(): {
+	card: string;
+	cardStroke: string;
+	rootCard: string;
+	rootStroke: string;
+	rootText: string;
+	text: string;
+	edge: string;
+	call: string;
+	use: string;
+	member: string;
+} {
+	const dark = document.documentElement.classList.contains('vscode-dark');
+	return dark
+		? { card: '#2c3544', cardStroke: '#454f5e', rootCard: '#2c3544', rootStroke: '#6dd4e9', rootText: '#e8edf5', text: '#e8edf5', edge: '#9da5b4', call: '#4fc1ff', use: '#9da5b4', member: '#89d185' }
+		: { card: '#f7f7f7', cardStroke: '#c8c8c8', rootCard: '#f7f7f7', rootStroke: '#006abc', rootText: '#171717', text: '#171717', edge: '#5a5a5a', call: '#006abc', use: '#5a5a5a', member: '#2da44e' };
+}
+
+/** The workbench's UI font, resolved once — the canvas text needs the literal family. */
+function uiFontFamily(): string {
+	try {
+		const family = getComputedStyle(document.body).fontFamily;
+		return family || 'sans-serif';
+	} catch {
+		return 'sans-serif';
 	}
 }
 
