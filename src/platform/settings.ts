@@ -73,6 +73,10 @@ export interface AppSettings {
 	tabSize: number;
 	/** `editor.wordWrap`: break long lines at the viewport edge. */
 	wordWrap: boolean;
+	/** Whether the pointer resting on a symbol raises the quick-info card (module 6's
+	 * hover — macro definition text, a struct or function body, otherwise the
+	 * declaration). `editor.toggleSymbolHover` flips it. */
+	symbolHover: boolean;
 	/** `editor.snippetSuggestions`: offer snippets in the completion list. */
 	snippetSuggestions: boolean;
 	/** Offer workspace paths in the completion list when a fragment looks like one. */
@@ -138,7 +142,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	theme: 'dark-modern', locale: 'en', showOutline: false, autoSave: 'off', autoSaveDelay: 1000,
 	minimap: true, stickyScroll: false, bracketColors: true,
 	mouseWheelScrollSensitivity: 1, fastScrollSensitivity: 4,
-	fontSize: 14, tabSize: 4, wordWrap: false, snippetSuggestions: true, pathCompletion: true,
+	fontSize: 14, tabSize: 4, wordWrap: false, snippetSuggestions: true, pathCompletion: true, symbolHover: true,
 	// dmp/mdmp joined the default 2026-11-18 (the owner's direction: dmp格式默认使用ggs
 	// 打开) — the Memory Dump Viewer's formats, which usually have no other handler; an
 	// install that predates this keeps its stored list and picks them up through the
@@ -299,6 +303,7 @@ export const SETTING_DEFS: SettingDef[] = [
 	{ key: 'fontSize', category: 'editor', kind: 'enum', options: [12, 13, 14, 16, 18, 20, 24].map((size) => ({ value: String(size), label: `${size} px` })) },
 	{ key: 'tabSize', category: 'editor', kind: 'enum', options: [2, 4, 8].map((size) => ({ value: String(size), label: String(size) })) },
 	{ key: 'wordWrap', category: 'editor', kind: 'boolean' },
+	{ key: 'symbolHover', category: 'editor', kind: 'boolean' },
 	{ key: 'showOutline', category: 'editor', kind: 'boolean' },
 	{ key: 'minimap', category: 'editor', kind: 'boolean' },
 	{ key: 'stickyScroll', category: 'editor', kind: 'boolean' },

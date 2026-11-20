@@ -7,6 +7,7 @@ import type { Workbench } from './workbench';
 import { commands } from '../platform/commands';
 import { t } from '../platform/i18n';
 import { hook } from '../platform/hooks';
+import { settings } from '../platform/settings';
 import * as state from '../platform/state';
 import { basename, type MenuEntry } from '../platform/ui/index';
 
@@ -46,7 +47,7 @@ export const menusMethods: ThisType<Workbench> = {
 			{ label: t('menu.analysis'), submenu: [
 				item('analysis.showModules'), item('analysis.showMetrics'), item('analysis.showDeadCode'), item('analysis.showSecurity'), item('analysis.showImports'), item('analysis.showMcp')
 			] },
-			'separator', item('editor.toggleWordWrap'), 'separator', item('markdown.showPreview'), item('markdown.showPreviewToSide'), item('git.openFileHistory'), item('git.toggleBlame'), 'separator',
+			'separator', item('editor.toggleWordWrap'), commands.menuItem('editor.toggleSymbolHover', { checked: settings.symbolHover }), 'separator', item('markdown.showPreview'), item('markdown.showPreviewToSide'), item('git.openFileHistory'), item('git.toggleBlame'), 'separator',
 				// The phone shell's CSS keeps one editor group on screen — the split/move
 				// layout commands are noise there (they stay on the desktop and tablet).
 				...(hook('navigation').phoneShell() ? [] : [{ label: 'Editor Layout', submenu: [

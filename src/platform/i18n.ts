@@ -164,6 +164,7 @@ const zhCnText: Record<string, string> = {
 	'Toggle Bookmark': '切换书签',
 	'List Bookmarks': '列出书签',
 	'Toggle Word Wrap': '切换自动换行',
+	'Toggle Symbol Hover': '切换符号悬停',
 	'Toggle Line Comment': '切换行注释',
 	'Toggle Block Comment': '切换块注释',
 	'Install Extension from VSIX...': '从 VSIX 安装扩展...',

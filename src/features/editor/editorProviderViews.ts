@@ -15,6 +15,7 @@
 import { hoverTooltip, ViewPlugin, EditorView, keymap, type TooltipView } from '@codemirror/view';
 import { Facet, type Extension } from '@codemirror/state';
 import { t } from '../../platform/i18n';
+import { settings } from '../../platform/settings';
 import { joinPath, relativeTo } from '../../platform/ui/index';
 import type { WsSymbol } from '../../platform/ipc/search';
 import { symbolRefStats, symbolRelationChildren, type ScopeDefinition } from '../../platform/ipc/symbols';
@@ -590,6 +591,12 @@ export function wordRangeAt(view: EditorView, pos: number): { from: number; to: 
 	return view.state.wordAt(pos);
 }
 
+/** How long the pointer must rest on a word before the quick-info card shows: a full
+ *  second, so a mouse passing over code never flashes a card on the way (2026-11-20,
+ *  the owner's direction: 鼠标放上去1s后才显示宏 结构体等，不要立马显示). The extension
+ *  providers' hover beside this one keeps its own shorter delay. */
+const SYMBOL_HOVER_SHOW_MS = 1000;
+
 /** The workbench's own hover (CLion's quick info, over the symbol index): a hovered
  *  `#define` lists every indexed definition's directive text, a hovered function /
  *  struct / enum / class shows its whole definition body, and any other indexed symbol
@@ -607,6 +614,11 @@ export function symbolHoverExtension(source: MacroHoverSource): Extension[] {
 		: undefined;
 	return [
 		hoverTooltip(async (view, pos) => {
+			// The Symbol Hover switch (Settings → Editor, the `editor.toggleSymbolHover`
+			// command beside Toggle Word Wrap): read per hover, so a flip reaches every
+			// open editor at once — no remount, and the extension providers' hover beside
+			// this one keeps answering on its own.
+			if (!settings.symbolHover) return null;
 			const range = wordRangeAt(view, pos);
 			if (!range) return null;
 			const name = view.state.sliceDoc(range.from, range.to);
@@ -639,7 +651,7 @@ export function symbolHoverExtension(source: MacroHoverSource): Extension[] {
 				end: range.to,
 				create: (): TooltipView => ({ dom: quickInfoDom(info, { open }) })
 			};
-		}, { hoverTime: 350 }),
+		}, { hoverTime: SYMBOL_HOVER_SHOW_MS }),
 		hoverKeepAliveExtension()
 	];
 }
