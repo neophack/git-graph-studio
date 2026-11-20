@@ -33,6 +33,27 @@ fn resolve_root(roots: &WorkspaceRoots, repo: Option<String>) -> Result<String, 
         .ok_or_else(|| "No folder is open".to_owned())
 }
 
+/// The store speaks repo-relative forward-slash paths; the editor and other callers may
+/// hand absolute ones. A path sitting under `root` crosses relativized — the prefix
+/// compares case-insensitively when the root is a Windows-style path (backslashes or a
+/// drive letter, where case carries no meaning) — and anything else passes through
+/// unchanged, so a multi-root outside path still binary-searches honestly.
+fn store_relative(root: &str, path: &str) -> String {
+    let forward = path.replace('\\', "/");
+    let prefix = format!("{}/", root.replace('\\', "/").trim_end_matches('/'));
+    let windowsish = root.contains('\\') || root.contains(':');
+    let under = if windowsish {
+        forward.len() > prefix.len() && forward[..prefix.len()].eq_ignore_ascii_case(&prefix)
+    } else {
+        forward.starts_with(&prefix)
+    };
+    if under {
+        forward[prefix.len()..].to_owned()
+    } else {
+        forward
+    }
+}
+
 /// Make the root's symbol index resident — resumed or built now when it is not — off the
 /// async runtime (a first build of a large tree takes a while). Every symbol query runs
 /// it first; `workspace_symbols` / `find_references` (cmd_search) and the metrics report
@@ -212,6 +233,9 @@ pub async fn symbol_file_outline(
         Ok(root) => root,
         Err(_) => return Ok(None),
     };
+    // The editor hands absolute paths; the store's binary search wants the repo-relative
+    // form it filed the file under.
+    let path = store_relative(&root, &path);
     ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
     let symbols = symbol_index
         .file_symbols(&root, &path)
@@ -255,6 +279,9 @@ pub async fn symbol_relation_children(
     repo: Option<String>,
 ) -> Result<RelationAnswerDto, String> {
     let root = resolve_root(roots.inner(), repo)?;
+    // The store's file identity is the repo-relative form; an absolute root crosses
+    // relativized (the same rule `symbol_file_outline` runs).
+    let path = store_relative(&root, &path);
     ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
     let direction = RelationDirection::parse(&direction)?;
     // A root without a resident index answers the empty ring; the relation query itself
@@ -439,6 +466,19 @@ fn scope_locals(text: &str, ext: &str, line: usize) -> Vec<ScopeDefinition> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The store-relative conversion: an absolute editor path under the root relativizes
+    /// (either separator, Windows case folded), a path outside it passes through, and a
+    /// repo-relative path survives untouched.
+    #[test]
+    fn store_relative_relativizes_under_the_root_and_passes_the_rest() {
+        assert_eq!(store_relative("C:\\repo", "C:\\repo\\src\\main.c"), "src/main.c");
+        assert_eq!(store_relative("c:/repo", "C:/REPO/src/main.c"), "src/main.c");
+        assert_eq!(store_relative("/repo", "/repo/src/main.c"), "src/main.c");
+        assert_eq!(store_relative("C:\\repo", "D:\\elsewhere\\main.c"), "D:/elsewhere/main.c");
+        assert_eq!(store_relative("/repo", "/repository/main.c"), "/repository/main.c");
+        assert_eq!(store_relative("/repo", "src/main.c"), "src/main.c");
+    }
 
     /// The outline's imports carry their first line: each name lands on the line the
     /// source spells it on — an include on line 0 included — and source order holds.
