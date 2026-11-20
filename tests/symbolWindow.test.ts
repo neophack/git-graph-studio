@@ -532,4 +532,28 @@ describe('the workbench wiring', () => {
 			// The booted shell has no text editor active: the hook answers null.
 			expect(workbench.symbolWindow.provideText!()).toBeNull();
 		});
+
+		it('wires the jumps: an open joins the root, an absolute path passes through', async () => {
+			expect(typeof workbench.symbolWindow.onOpen).toBe('function');
+			const opens: { path: string; line?: number }[] = [];
+			const editors = workbench.editors as unknown as { openFile: (path: string, options?: { line?: number }) => Promise<unknown> };
+			const original = editors.openFile;
+			editors.openFile = async (path, options) => {
+				opens.push({ path, line: options?.line });
+			};
+			try {
+				// The graph's cards speak the index's repo-relative path — the join lands.
+				workbench.symbolWindow.onOpen!('src/a.c', 4);
+				await flush(2);
+				// The outline's rows speak the editor's absolute path — it passes through.
+				workbench.symbolWindow.onOpen!(FILE, 7);
+				await flush(2);
+			} finally {
+				editors.openFile = original;
+			}
+			expect(opens).toEqual([
+				{ path: 'C:\\repo\\src\\a.c', line: 4 },
+				{ path: FILE, line: 7 }
+			]);
+		});
 	});

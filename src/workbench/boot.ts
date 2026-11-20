@@ -608,6 +608,13 @@ export const bootMethods: ThisType<Workbench> = {
 			/^([a-zA-Z]:[\\/]|\\|\/)/.test(path) || !this.repoPath ? path : joinRepo(this.repoPath, path);
 		this.panel.definition.resolvePath = resolveSymbolPath;
 		this.panel.references.resolvePath = resolveSymbolPath;
+		// The Symbol Window's jumps: an outline row, an import, a current-function local,
+		// and the relation graph's card click open the target at the 1-based line. The
+		// outline's rows speak the editor's absolute path, the graph's cards the index's
+		// repo-relative one — an open joins the root, an absolute path passes through.
+		this.symbolWindow.onOpen = (path, line) => {
+			void this.editors.openFile(resolveSymbolPath(path), { line });
+		};
 		// The hover card's relations click: the card's symbol — the index's own
 		// { kind, name, path, line } vocabulary — becomes the Symbol Window's relation
 		// graph's pinned root, and the sidebar shows it.
