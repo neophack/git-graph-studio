@@ -9,7 +9,7 @@ import { applyTheme, updateSetting } from '../src/platform/settings';
 import { ContextView } from '../src/features/search';
 import { EditorGroup } from '../src/features/editor';
 import { StatusBar } from '../src/workbench/statusbar';
-import { buildTree, subtreeCounts, SymbolDatabaseView } from '../src/features/search';
+import { buildTree, buildCategories, subtreeCounts, SymbolDatabaseView } from '../src/features/search';
 import { fileSymbolItems, workspaceSymbolItems } from '../src/workbench';
 import { backend } from './tauriMock';
 import { click, flush, key, texts } from './helpers';
@@ -227,6 +227,20 @@ describe('the Symbol Database page', () => {
 		expect(counts).toEqual({ files: 3, symbols: 4 });
 	});
 
+	it('folds the outline into alphabetical kind categories, each kind name-alphabetical', () => {
+		const categories = buildCategories(outline);
+		expect(categories.map((category) => [category.kind, category.label, category.symbols.length])).toEqual([
+			['function', 'Function', 3],
+			['struct', 'Struct', 1]
+		]);
+		// A kind gathers its symbols across every file, name-alphabetical.
+		expect(categories[0]!.symbols.map((entry) => [entry.symbol.name, entry.file.path])).toEqual([
+			['beta', 'src/deep/b.rs'],
+			['gamma', 'src/a.rs'],
+			['main', 'top.rs']
+		]);
+	});
+
 	it('renders folders, files and symbols, collapses, filters and opens', async () => {
 		backend.on('symbol_tree', () => outline);
 		const host = document.createElement('div');
@@ -284,6 +298,90 @@ describe('the Symbol Database page', () => {
 		filter.dispatchEvent(new Event('input', { bubbles: true }));
 		expect(host.querySelectorAll('.sd-row')).toHaveLength(9);
 		expect(host.querySelector<HTMLElement>('.sd-row[data-key="src/a.rs:9"]')).toBe(gammaRow);
+	});
+
+	it('switches to the category view: kinds grouped with counts, collapsible, opening unchanged', async () => {
+		backend.on('symbol_tree', () => outline);
+		const host = document.createElement('div');
+		document.body.appendChild(host);
+		const opened: { path: string; line: number }[] = [];
+		const view = new SymbolDatabaseView(host);
+		view.onOpen = (path, line) => opened.push({ path, line });
+		await view.load();
+
+		// The header switch: two segments, Folders selected by default.
+		const buttons = Array.from(host.querySelectorAll<HTMLButtonElement>('.sd-mode-btn'));
+		expect(buttons.map((button) => button.textContent)).toEqual(['Folders', 'Categories']);
+		expect(buttons[0]!.classList.contains('active')).toBe(true);
+		expect(buttons[1]!.classList.contains('active')).toBe(false);
+		expect(texts('.sd-row .label', host)).toEqual(['src', 'deep', 'b.rs', 'beta', 'a.rs', 'Alpha', 'gamma', 'top.rs', 'main']);
+
+		click(buttons[1]!);
+		expect(buttons[1]!.classList.contains('active')).toBe(true);
+		// Groups sort by kind; every group starts open with its symbols name-alphabetical.
+		expect(texts('.sd-row .label', host)).toEqual(['Function', 'beta', 'gamma', 'main', 'Struct', 'Alpha']);
+		// The group counter reads the kind's whole symbol total.
+		expect(texts('.sd-row.container .description', host)).toEqual(['3 symbols', '1 symbols']);
+		// Symbol rows keep the folders tree's tail: the 1-based line and the refs.
+		expect(texts('.sd-row .tail', host)).toContain('4 · 2 refs');
+
+		// A symbol click opens its declaration through the same onOpen semantics.
+		const rowAt = (key: string) => Array.from(host.querySelectorAll<HTMLElement>('.sd-row')).find((row) => row.dataset['key'] === key)!;
+		click(rowAt('kind:function:src/a.rs:9'));
+		expect(opened).toEqual([{ path: 'src/a.rs', line: 10 }]);
+
+		// A group row collapses its kind (and brings it back).
+		click(rowAt('kind:function'));
+		expect(texts('.sd-row .label', host)).toEqual(['Function', 'Struct', 'Alpha']);
+		click(rowAt('kind:function'));
+		expect(texts('.sd-row .label', host)).toEqual(['Function', 'beta', 'gamma', 'main', 'Struct', 'Alpha']);
+	});
+
+	it('filters the category view: a symbol name narrows the group, a category name shows the whole kind', async () => {
+		backend.on('symbol_tree', () => outline);
+		const host = document.createElement('div');
+		document.body.appendChild(host);
+		const view = new SymbolDatabaseView(host);
+		await view.load();
+		click(host.querySelectorAll<HTMLButtonElement>('.sd-mode-btn')[1]!);
+		const filter = host.querySelector<HTMLInputElement>('.sd-filter')!;
+
+		// A symbol-name filter keeps only the matching symbol; its group stays with the
+		// counter narrowed to what is listed, and the empty group disappears.
+		filter.value = 'GAM';
+		filter.dispatchEvent(new Event('input', { bubbles: true }));
+		expect(texts('.sd-row .label', host)).toEqual(['Function', 'gamma']);
+		expect(texts('.sd-row.container .description', host)).toEqual(['1 symbols']);
+
+		// A category-name filter lists that whole category, counter back at its total.
+		filter.value = 'FUNC';
+		filter.dispatchEvent(new Event('input', { bubbles: true }));
+		expect(texts('.sd-row .label', host)).toEqual(['Function', 'beta', 'gamma', 'main']);
+		expect(texts('.sd-row.container .description', host)).toEqual(['3 symbols']);
+
+		// Clearing the filter restores every group and symbol.
+		filter.value = '';
+		filter.dispatchEvent(new Event('input', { bubbles: true }));
+		expect(host.querySelectorAll('.sd-row')).toHaveLength(6);
+		expect(texts('.sd-row .label', host)).toEqual(['Function', 'beta', 'gamma', 'main', 'Struct', 'Alpha']);
+	});
+
+	it('switches back to folders reshaping the cached outline without asking the backend again', async () => {
+		backend.on('symbol_tree', () => outline);
+		const host = document.createElement('div');
+		document.body.appendChild(host);
+		const view = new SymbolDatabaseView(host);
+		await view.load();
+		expect(backend.callsTo('symbol_tree')).toHaveLength(1);
+
+		const [folders, categories] = Array.from(host.querySelectorAll<HTMLButtonElement>('.sd-mode-btn'));
+		click(categories!);
+		expect(texts('.sd-row .label', host)).toEqual(['Function', 'beta', 'gamma', 'main', 'Struct', 'Alpha']);
+		click(folders!);
+		// The folders tree is back, exactly as it first rendered.
+		expect(texts('.sd-row .label', host)).toEqual(['src', 'deep', 'b.rs', 'beta', 'a.rs', 'Alpha', 'gamma', 'top.rs', 'main']);
+		// Neither hop re-fetched the outline: the cached data reshaped in place.
+		expect(backend.callsTo('symbol_tree')).toHaveLength(1);
 	});
 
 	it('rebuilds through the command and reloads', async () => {

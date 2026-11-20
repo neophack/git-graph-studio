@@ -1520,5 +1520,8 @@ export const en = {
 	'relations.contains': 'Contains',
 	'relations.containsEmpty': 'No members are declared inside {0}.',
 	'relations.edgeCount': '{0} reference sites',
+	'symbols.window.locals': 'Current function',
+	'symbols.page.byFolder': 'Folders',
+	'symbols.page.byCategory': 'Categories',
 	'relations.declAt': '{0} in {1} at line {2}',
 };

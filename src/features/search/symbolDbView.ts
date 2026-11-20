@@ -6,9 +6,11 @@
 import { Channel } from '../../platform/ipc/core';
 import { symbolTree, symbolsRebuild } from '../../platform/ipc/symbols';
 
-import { t } from '../../platform/i18n';
+import { onLocaleChange, t } from '../../platform/i18n';
 import { KIND_ICONS } from './contextView';
 import { actionButton, el, icon } from '../../platform/ui/index';
+
+import './symbolDb.css';
 
 
 import type { TreeFile, TreeSymbol } from '../../platform/ipc/symbols';
@@ -70,10 +72,51 @@ export function subtreeCounts(folders: FolderNode[], files: TreeFile[]): { files
 	return { files: fileCount, symbols };
 }
 
+/** One category of the Categories mode: every symbol of one kind across the whole index. */
+export interface CategoryNode {
+	/** The kind exactly as the index spells it ('function', 'struct', …). */
+	kind: string;
+	/** The row label: the kind with its first letter capitalised. */
+	label: string;
+	/** The category's symbols, name-alphabetical, each with its declaring file. */
+	symbols: { file: TreeFile; symbol: TreeSymbol }[];
+}
+
+/** Fold the file list into kind categories — kinds alphabetical, each kind's symbols
+ *  name-alphabetical. Pure, so the tests shape it without a backend. */
+export function buildCategories(files: TreeFile[]): CategoryNode[] {
+	const byKind = new Map<string, { file: TreeFile; symbol: TreeSymbol }[]>();
+	for (const file of files) {
+		for (const symbol of file.symbols) {
+			const bucket = byKind.get(symbol.kind);
+			if (bucket) bucket.push({ file, symbol });
+			else byKind.set(symbol.kind, [{ file, symbol }]);
+		}
+	}
+	const categories = Array.from(byKind.entries(), ([kind, symbols]) => ({
+		kind,
+		label: kind.charAt(0).toUpperCase() + kind.slice(1),
+		symbols
+	}));
+	categories.sort((a, b) => a.kind.localeCompare(b.kind));
+	for (const category of categories) {
+		category.symbols.sort(
+			(a, b) => a.symbol.name.localeCompare(b.symbol.name) || a.file.path.localeCompare(b.file.path) || a.symbol.line - b.symbol.line
+		);
+	}
+	return categories;
+}
+
+/** The row keys of Categories mode, prefixed so they can never collide with the folders
+ *  tree's path-and-line keys (nor with each other across kinds). */
+const categoryKey = (kind: string): string => `kind:${kind}`;
+const categorySymbolKey = (kind: string, path: string, line: number): string => `${categoryKey(kind)}:${path}:${line}`;
+
 /** One visible row's identity and content — what the render's reconciliation compares
  *  before keeping an existing row's DOM (element, listeners included) instead of rebuilding. */
 interface RowSpec {
-	/** The folder path, file path, or `file:line` of a symbol — unique per visible row. */
+	/** The folder path, file path, or `file:line` of a symbol (a `kind:`-prefixed key in
+	 *  Categories mode) — unique per visible row. */
 	key: string;
 	container: boolean;
 	glyph: string;
@@ -89,9 +132,15 @@ export class SymbolDatabaseView {
 	private readonly list: HTMLElement;
 	private files: TreeFile[] = [];
 	private loading = true;
-	/** Collapsed node keys (the folder or file path); a filter overrides the collapsing. */
+	/** Collapsed node keys (the folder or file path, or a Categories-mode `kind:` key); a
+	 *  filter overrides the collapsing. */
 	private collapsed = new Set<string>();
 	private filter = '';
+	/** What the body renders: the folders tree (the default) or the kind categories. */
+	private mode: 'folders' | 'categories' = 'folders';
+	/** The kind categories of the cached outline — rebuilt only when `load` lands new
+	 *  data, never on a mode switch. */
+	private categories: CategoryNode[] = [];
 
 	onOpen: ((path: string, line: number) => void) | null = null;
 
@@ -107,10 +156,21 @@ export class SymbolDatabaseView {
 			this.filter = this.filterInput.value.trim().toLowerCase();
 			this.render();
 		});
+		this.modeFolders = el('button', 'sd-mode-btn active');
+		this.modeFolders.type = 'button';
+		this.modeFolders.textContent = t('symbols.page.byFolder');
+		this.modeFolders.setAttribute('aria-pressed', 'true');
+		this.modeFolders.addEventListener('click', () => this.setMode('folders'));
+		this.modeCategories = el('button', 'sd-mode-btn');
+		this.modeCategories.type = 'button';
+		this.modeCategories.textContent = t('symbols.page.byCategory');
+		this.modeCategories.setAttribute('aria-pressed', 'false');
+		this.modeCategories.addEventListener('click', () => this.setMode('categories'));
 		header.append(
 			icon('symbol-structure'),
 			this.title,
 			this.filterInput,
+			el('div', 'sd-mode', [this.modeFolders, this.modeCategories]),
 			el('div', 'actions', [
 				actionButton('collapse-all', t('symbols.page.collapseAll'), () => this.setCollapsed(true)),
 				actionButton('expand-all', t('symbols.page.expandAll'), () => this.setCollapsed(false)),
@@ -121,11 +181,19 @@ export class SymbolDatabaseView {
 		this.list.setAttribute('role', 'tree');
 		this.list.setAttribute('aria-label', t('symbols.page.title'));
 		container.append(header, this.list);
+		// The switch's labels are built once, so a display-language switch relabels them in
+		// place (the view has no other rebuild path).
+		onLocaleChange(() => {
+			this.modeFolders.textContent = t('symbols.page.byFolder');
+			this.modeCategories.textContent = t('symbols.page.byCategory');
+		});
 		this.render();
 	}
 
 	private readonly title: HTMLElement;
 	private readonly filterInput: HTMLInputElement;
+	private readonly modeFolders: HTMLButtonElement;
+	private readonly modeCategories: HTMLButtonElement;
 
 	/** Fetch the index outline and render it (the tab's open, or a rebuild's refresh). */
 	async load(): Promise<void> {
@@ -136,6 +204,7 @@ export class SymbolDatabaseView {
 		} catch {
 			this.files = [];
 		}
+		this.categories = buildCategories(this.files);
 		this.loading = false;
 		this.render();
 	}
@@ -153,15 +222,24 @@ export class SymbolDatabaseView {
 
 	private setCollapsed(collapsed: boolean): void {
 		this.collapsed.clear();
-		if (!collapsed) return;
-		const walk = (folders: FolderNode[]): void => {
-			for (const folder of folders) {
-				this.collapsed.add(folder.path);
-				walk(folder.folders);
-			}
-		};
-		walk(buildTree(this.files).folders);
-		for (const file of this.files) this.collapsed.add(file.path);
+		if (!collapsed) {
+			// Categories mode folds its open groups away, so they must be re-collected;
+			// the folders tree renders every row either way.
+			if (this.mode === 'categories') this.render();
+			return;
+		}
+		if (this.mode === 'categories') {
+			for (const category of this.categories) this.collapsed.add(categoryKey(category.kind));
+		} else {
+			const walk = (folders: FolderNode[]): void => {
+				for (const folder of folders) {
+					this.collapsed.add(folder.path);
+					walk(folder.folders);
+				}
+			};
+			walk(buildTree(this.files).folders);
+			for (const file of this.files) this.collapsed.add(file.path);
+		}
 		this.render();
 	}
 
@@ -186,9 +264,65 @@ export class SymbolDatabaseView {
 			return;
 		}
 		const rows: { spec: RowSpec; depth: number }[] = [];
-		const root = buildTree(this.files);
-		this.collectRows(root.folders, root.files, 0, rows);
+		if (this.mode === 'categories') this.collectCategoryRows(rows);
+		else {
+			const root = buildTree(this.files);
+			this.collectRows(root.folders, root.files, 0, rows);
+		}
 		this.reconcile(rows);
+	}
+
+	/** Switch the body between the folders tree and the kind categories. The outline is
+	 *  already cached — the backend is never asked again. */
+	private setMode(mode: 'folders' | 'categories'): void {
+		if (this.mode === mode) return;
+		this.mode = mode;
+		this.modeFolders.classList.toggle('active', mode === 'folders');
+		this.modeFolders.setAttribute('aria-pressed', String(mode === 'folders'));
+		this.modeCategories.classList.toggle('active', mode === 'categories');
+		this.modeCategories.setAttribute('aria-pressed', String(mode === 'categories'));
+		this.render();
+	}
+
+	/** The visible rows in Categories mode: one collapsible group per kind (alphabetical,
+	 *  the counter reading what is listed beneath it), each followed by its symbols. A
+	 *  filter keeps a group on screen while its category name matches — the whole category
+	 *  shows then — or while one of its symbol names matches, those symbols alone showing. */
+	private collectCategoryRows(out: { spec: RowSpec; depth: number }[]): void {
+		for (const category of this.categories) {
+			const labelMatch =
+				this.filter !== '' && (category.label.toLowerCase().includes(this.filter) || category.kind.toLowerCase().includes(this.filter));
+			const shown = labelMatch ? category.symbols : category.symbols.filter((entry) => this.matches(entry.symbol));
+			if (this.filter !== '' && shown.length === 0) continue;
+			const key = categoryKey(category.kind);
+			out.push({
+				depth: 0,
+				spec: {
+					key,
+					container: true,
+					glyph: KIND_ICONS[category.kind] ?? 'symbol-variable',
+					label: category.label,
+					description: `${shown.length} ${t('symbols.page.symbols')}`,
+					tail: null,
+					onOpen: null
+				}
+			});
+			if (!this.isOpen(key)) continue;
+			for (const { file, symbol } of shown) {
+				out.push({
+					depth: 1,
+					spec: {
+						key: categorySymbolKey(category.kind, file.path, symbol.line),
+						container: false,
+						glyph: KIND_ICONS[symbol.kind] ?? 'symbol-variable',
+						label: symbol.name,
+						description: file.path,
+						tail: `${symbol.line + 1} · ${symbol.refs} ${t('symbols.page.refs')}`,
+						onOpen: () => this.onOpen?.(file.path, symbol.line + 1)
+					}
+				});
+			}
+		}
 	}
 
 	/** The visible rows in tree order: folders first (each followed by its subtree), then

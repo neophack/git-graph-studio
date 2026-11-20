@@ -39,3 +39,8 @@
 .sw-row .sw-line { margin-left: auto; color: var(--vscode-descriptionForeground); font-size: 11px; }
 .sw-row:hover .sw-name { color: var(--vscode-textLink-foreground); }
 .sw-row.current { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+/* The current function's section: a static label head (not a toggle) over rows indented
+   like the import rows; the outline rows' container indentation rides inline padding. */
+.sw-locals-head { cursor: default; }
+.sw-locals-head:hover { background: transparent; }
+.sw-locals .sw-row { padding-left: 30px; }

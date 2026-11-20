@@ -5,7 +5,7 @@ import type { Workbench } from './workbench';
 import { listen } from '../platform/ipc/core';
 import { appNewInstance, bootContext, type BootContext, openDevtools, windowCloseAck } from '../platform/ipc/app';
 import { backupList, backupRead, type BackupEntry, type WatcherReport } from '../platform/ipc/fs';
-import { type SymbolIndexStatus } from '../platform/ipc/symbols';
+import { symbolLookup, type SymbolIndexStatus } from '../platform/ipc/symbols';
 import { type RemoteHostStatus, remoteHostHideMain, remoteHostStatus } from '../platform/ipc/remote';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -297,6 +297,45 @@ export const bootMethods: ThisType<Workbench> = {
 			}
 		});
 		registerZhCnText({ 'Rename Symbol': '重命名符号' });
+		register({
+			id: 'symbols.switchDeclDef',
+			title: 'Switch Between Declaration and Definition',
+			category: 'Go',
+			keybinding: 'Ctrl+F12',
+			enabled: () => this.editors.activeView !== null,
+			run: () => {
+				const view = editorView();
+				if (!view) return;
+				const position = view.state.selection.main.head;
+				const line = view.state.doc.lineAt(position);
+				const found = view.state.wordAt(Math.min(Math.max(line.from, position), line.to));
+				if (!found) return;
+				const name = view.state.sliceDoc(found.from, found.to);
+				const active = this.editors.activeGroup.activeEditor;
+				const current = active && active.input.kind === 'file' ? active.input.path ?? '' : '';
+				if (!name || !current || !this.repoPath) return;
+				void (async () => {
+					let defs: { path: string; line: number }[];
+					try {
+						defs = (await symbolLookup(name)) ?? [];
+					} catch {
+						return;
+					}
+					// A definition in another file outranks the cursor's own file — the same-stem
+					// pair first (a.c beside a.h, app.ts beside app.d.ts), then any other file —
+					// so a body lands on its prototype and a prototype lands on its body.
+					const toAbs = (path: string) => (/^([a-zA-Z]:[\\/]|\\|\/)/.test(path) ? path : joinRepo(this.repoPath!, path));
+					const key = (path: string) => toAbs(path).replaceAll('\\', '/').toLowerCase();
+					const here = key(current);
+					const stem = (path: string) => path.replace(/\.[^.]+$/, '');
+					const others = defs.filter((def) => key(def.path) !== here);
+					const target = others.find((def) => stem(key(def.path)) === stem(here)) ?? others[0];
+					if (!target) return;
+					void this.editors.openFile(toAbs(target.path), { line: target.line + 1 });
+				})();
+			}
+		});
+		registerZhCnText({ 'Switch Between Declaration and Definition': '声明与定义互切' });
 		register({ id: 'editor.callTree', title: 'Show Call Tree', category: 'Go', enabled: () => this.editors.activeView !== null, run: () => void this.editors.openCallTreeAtCursor() });
 		register({ id: 'editor.formatDocument', title: 'Format Document', category: 'Editor', keybinding: 'Ctrl+Shift+I', enabled: () => this.editors.activeView !== null, run: () => void this.formatActiveDocument() });
 		register({ id: 'editor.toggleBookmark', title: 'Toggle Bookmark', category: 'Edit', keybinding: 'Ctrl+Alt+B', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.toggleBookmark() });
@@ -494,6 +533,9 @@ export const bootMethods: ThisType<Workbench> = {
 			if (editor?.kind === 'file' && editor.path) this.extensionHost.noteLanguageOpened(editor.path);
 			this.extensionHost.noteActiveEditor(editor);
 		};
+		// The Symbol Window's "current function" locals read the active text editor's live
+		// buffer through this hook — null whenever the cursor is not in a text editor.
+		this.symbolWindow.provideText = () => { const editor = this.editors.activeGroup.activeEditor; return editor && editor.input.kind === 'file' && editor.view ? editor.view.state.doc.toString() : null; };
 		this.editors.onNavigationChange = () => this.titleBar.setNavigation(this.editors.canGoBack(), this.editors.canGoForward());
 		// The session snapshot (tabs, active tab, expanded folders) follows every change, coalesced.
 		// The session snapshot follows every change, coalesced — and so does every extension's

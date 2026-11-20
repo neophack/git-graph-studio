@@ -340,7 +340,8 @@ fails to answer, loads the pre-lowered entries the TS scan runs over.
 
 Workspace-wide search & replace with streaming results, and symbol
 navigation (Go-to-Definition, Find References, Call Tree, Quick Open's `@` / `#` symbol
-modes, the Context Window, the Symbol Window sidebar page, the Relation panel page)
+modes, the Context Window, the Symbol Window sidebar page, the Relation panel page, the
+declaration ↔ definition switch)
 over the persistent workspace symbol index: interned names,
 per-file fingerprints and per-name occurrence lists under `~/.ggs/index/`, updated
 file-by-file by the watcher. **Nothing is indexed on open** (2026-10-22, the owner's
@@ -352,7 +353,9 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   results' focus and the per-row replace styles), `src/features/search/callTree.ts`, `src/features/search/contextView.ts` (the Context
   Window panel page - the definition of the symbol under the cursor),
   `src/features/search/symbolDbView.ts` (the Symbol Database page - the index as a collapsible
-  folder / file / symbol tree with reference counts, filter and rebuild),
+  folder / file / symbol tree with reference counts, filter and rebuild, with a
+  Folders/Categories toggle over the same cached data — the category arm groups by kind
+  with counts and the filter works across both arms; 2026-11-20),
   `src/features/search/symbolWindowView.ts` + `symbolWindow.css` (the Symbol Window sidebar
   page — the classic outline pane: the active file's imports and its index outline
   as icon rows with the container prefix, click jumping through `onOpen`, the filter box,
@@ -360,7 +363,11 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   a same-file cursor move only swaps the highlight class, never re-queries, and a highlight
   CHANGE scrolls the row into view (hidden page never scrolls); the include rows jump to
   their own line since 2026-11-20, the line riding `symbol_file_outline`'s
-  `FileOutlineImport`; reload rides the showView hook, the active-tab change and the
+  `FileOutlineImport`; member rows indent one level per container chain (a nested class's
+  members read two deep); the Current-function section lists the covering symbol's
+  parameters and locals from `symbol_locals` over the host-provided live buffer
+  (`provideText`, wired beside the setFile feed), refetched only when the covering
+  symbol's identity changes; reload rides the showView hook, the active-tab change and the
   scheduled refresh; `workbench.showSymbolWindow`, Alt+L),
   `src/features/search/relationsView.ts` + `relations.css` (the Relation panel page —
   the expandable reference tree over `symbol_relation_children`: the cursor
@@ -441,7 +448,9 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   `symbol_scope_lookup` parses the caller's live buffer per call (no folder, no disk read)
   and answers the scope-local definitions covering a use site, innermost first; the hover,
   Go-to-Definition and Peek ask it before the global lookup, so a local resolves inside its
-  scope and a same-named global is never served there (a v3 symbols.bin is rebuilt). A
+  scope and a same-named global is never served there (a v3 symbols.bin is rebuilt); the
+  sibling `symbol_locals` answers every covering local of the line — the Symbol Window's
+  Current-function section rides it (2026-11-20). A
   parameter whose enclosing-function walk finds no function sits in a TYPE position — a
   prototype's, a function-pointer typedef's, a callback parameter's inner list (the C/C++
   param scope climbs the declarator chains: `c_family_param_scope`) — and owns nothing at

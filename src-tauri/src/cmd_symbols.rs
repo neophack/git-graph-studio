@@ -363,6 +363,40 @@ pub async fn symbol_scope_lookup(
         .collect()
 }
 
+/// The cap a locals answer cuts at — a pathological giant function must not flood the
+/// page with thousands of rows.
+const SYMBOL_LOCALS_CAP: usize = 200;
+
+/// Every scope-local definition covering `line` of `text` — all parameters and locals
+/// of every function-like scope whose range holds the line, declaration order first.
+/// The same stateless parse `symbol_scope_lookup` rides (that one answers the
+/// definitions of one name; this answers the whole scope), so an unsaved edit answers
+/// as written: no folder, no index, no disk read.
+#[tauri::command]
+pub async fn symbol_locals(text: String, ext: String, line: usize) -> Vec<ScopeDefinition> {
+    scope_locals(&text, &ext, line)
+}
+
+fn scope_locals(text: &str, ext: &str, line: usize) -> Vec<ScopeDefinition> {
+    let mut locals: Vec<ScopeDefinition> = ggs_index::symbols::parse::parse_file(text, ext)
+        .locals
+        .into_iter()
+        .filter(|s| s.scope.is_some_and(|(from, to)| from <= line && line <= to))
+        .map(|s| ScopeDefinition {
+            kind: s.kind.to_owned(),
+            name: s.name,
+            line: s.line,
+            column: s.column,
+            scope_end: s.scope.map(|(_, to)| to).unwrap_or(s.end_line),
+        })
+        .collect();
+    // Declaration order, line then column; the cap cuts after the sort, so a giant
+    // function answers its earliest declarations rather than an arbitrary subset.
+    locals.sort_by(|a, b| a.line.cmp(&b.line).then_with(|| a.column.cmp(&b.column)));
+    locals.truncate(SYMBOL_LOCALS_CAP);
+    locals
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +426,77 @@ mod tests {
         assert_eq!(import_line("int a;\n", "nowhere.h"), 0);
         assert_eq!(import_line("import x from './x';\n", "./x"), 0);
         assert_eq!(import_line("#pragma once\n#include \"a.h\"\n", "a.h"), 1);
+    }
+
+    /// `symbol_locals`: a C function's two parameters and two locals all answer in
+    /// declaration order, each reaching the function's end.
+    #[test]
+    fn locals_answer_a_c_function_whole_and_in_declaration_order() {
+        let text = "int total(int a, int b) {\n    int sum = a + b;\n    int twice = sum * 2;\n    return twice;\n}\n";
+        let rows = scope_locals(text, "c", 2);
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.kind.as_str(), r.name.as_str(), r.line, r.column))
+                .collect::<Vec<_>>(),
+            vec![
+                ("parameter", "a", 0, 14),
+                ("parameter", "b", 0, 21),
+                ("variable", "sum", 1, 8),
+                ("variable", "twice", 2, 8)
+            ]
+        );
+        assert!(
+            rows.iter().all(|r| r.scope_end == 4),
+            "{rows:?} — every local reaches the function's end"
+        );
+    }
+
+    /// A line inside a nested scope answers the inner names beside the outer function's
+    /// — scope coverage decides, declaration order holds across the scopes, and the ts
+    /// arrow function rides the same parse path as C.
+    #[test]
+    fn locals_answer_every_scope_covering_a_nested_line() {
+        let text = "function outer(a) {\n  const base = a * 2;\n  const inner = (b: number) => {\n    const scaled = b + base;\n    return scaled;\n  };\n  return inner;\n}\n";
+        let rows = scope_locals(text, "ts", 3);
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        for want in ["a", "base", "b", "scaled"] {
+            assert!(names.contains(&want), "{names:?}");
+        }
+        let lines: Vec<usize> = rows.iter().map(|r| r.line).collect();
+        let mut sorted = lines.clone();
+        sorted.sort_unstable();
+        assert_eq!(lines, sorted, "{rows:?} — declaration order");
+        // The inner scope's reach ends inside the outer function's.
+        let scaled = rows.iter().find(|r| r.name == "scaled").unwrap();
+        assert!(scaled.scope_end < 7, "{rows:?}");
+    }
+
+    /// A use site between the functions sits outside every local's scope: the empty
+    /// answer is real, and the reach includes the function's own last row.
+    #[test]
+    fn locals_answer_empty_outside_every_scope() {
+        let text = "int total(int a, int b) { return a + b; }\nint use = total(1, 2);\nvoid step(void) {\n    int local = 0;\n}\n";
+        assert!(scope_locals(text, "c", 1).is_empty());
+        let rows = scope_locals(text, "c", 4);
+        assert_eq!(
+            rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            vec!["local"],
+            "the brace row is step's last row — its scope still answers"
+        );
+    }
+
+    /// A pathological giant function is cut at the cap after the sort, so the earliest
+    /// declarations survive.
+    #[test]
+    fn locals_cut_at_the_cap_after_the_sort() {
+        let mut text = String::from("void big(void) {\n");
+        for i in 0..250 {
+            text.push_str(&format!("    int v{i} = {i};\n"));
+        }
+        text.push_str("}\n");
+        let rows = scope_locals(&text, "c", 1);
+        assert_eq!(rows.len(), 200);
+        assert_eq!(rows.first().unwrap().name, "v0");
+        assert_eq!(rows.last().unwrap().name, "v199");
     }
 }

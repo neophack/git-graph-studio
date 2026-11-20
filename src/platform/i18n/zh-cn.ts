@@ -1506,5 +1506,8 @@ export const zhCn: typeof en = {
 	'relations.contains': '包含',
 	'relations.containsEmpty': '没有声明在 {0} 内部的成员。',
 	'relations.edgeCount': '{0} 处引用',
+	'symbols.window.locals': '当前函数',
+	'symbols.page.byFolder': '文件夹',
+	'symbols.page.byCategory': '类别',
 	'relations.declAt': '{0} in {1} 第 {2} 行',
 };

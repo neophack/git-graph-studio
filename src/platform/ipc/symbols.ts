@@ -60,6 +60,12 @@ export interface ScopeDefinition {
 export const symbolScopeLookup = (name: string, line: number, text: string, ext: string) =>
 	invoke<ScopeDefinition[]>('symbol_scope_lookup', { name, line, text, ext });
 
+/** Every scope-local definition covering `line` of `text` — all parameters and locals of
+ *  the enclosing function, declaration order first. The parse runs over the passed text
+ *  (the editor's live buffer) with the passed extension: no folder, no index, no disk read. */
+export const symbolLocals = (text: string, ext: string, line: number) =>
+	invoke<ScopeDefinition[]>('symbol_locals', { text, ext, line });
+
 export const symbolTree = () => invoke<TreeFile[] | null>('symbol_tree');
 export const symbolReferences = (name: string) => invoke<SymbolRefFile[]>('symbol_references', { name });
 export const symbolsRebuild = (onEvent: Channel<SymbolIndexEvent>) => invoke<SymbolIndexStatus | null>('symbols_rebuild', { onEvent });

@@ -1,7 +1,9 @@
 // The Symbol Window sidebar page (module 5): the active file's includes/imports and its
 // indexed outline, the click-through jump at the 1-based line, the cursor-following
 // highlight with its one-query-per-file rule, the filter, the hidden page's deferred
-// load — and the workbench wiring (the palette command, the activity bar entry, the
+// load — the current function's locals section (asked once per covering symbol's
+// identity over the host's live buffer), the container chain's indentation — and the
+// workbench wiring (the palette command, the activity bar entry, the text hook, the
 // zh-cn title pairs).
 
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -272,6 +274,163 @@ describe('the hidden page defers its load', () => {
 	});
 });
 
+describe('the current function locals', () => {
+	const LOCALS = [
+		{ kind: 'parameter', name: 'cfg', line: 3, column: 11, scopeEnd: 6 },
+		{ kind: 'variable', name: 'tmp', line: 5, column: 2, scopeEnd: 6 }
+	];
+	const SOURCE = 'int load(Config *cfg) {\n\tint tmp = 0;\n\treturn tmp;\n}';
+
+	it('renders the covering function\'s locals and jumps at the 1-based lines', async () => {
+		backend.on('symbol_file_outline', () => OUTLINE);
+		backend.on('symbol_locals', () => LOCALS);
+		const { host, view } = mountView();
+		view.provideText = () => SOURCE;
+		view.setFile(FILE);
+		await flush(4);
+		// No cursor yet: nothing covers it, nothing asks.
+		expect(backend.callsTo('symbol_locals')).toHaveLength(0);
+
+		view.setFile(FILE, 4);
+		await flush(4);
+		// The ask carried the live buffer, the file's extension and the 0-based cursor line.
+		expect(backend.callsTo('symbol_locals')).toEqual([{ text: SOURCE, ext: 'c', line: 4 }]);
+		expect(texts('.sw-locals .sw-section-label', host)).toEqual(['Current function']);
+		expect(texts('.sw-locals .sw-name', host)).toEqual(['cfg', 'tmp']);
+		// The row line column is 1-based.
+		expect(texts('.sw-locals .sw-line', host)).toEqual(['4', '6']);
+		const opened: { path: string; line: number }[] = [];
+		view.onOpen = (path, line) => opened.push({ path, line });
+		click(host.querySelectorAll<HTMLElement>('.sw-locals .sw-row')[1]!);
+		expect(opened).toEqual([{ path: FILE, line: 6 }]);
+	});
+
+	it('never re-asks while the cursor roams inside the same function', async () => {
+		backend.on('symbol_file_outline', () => OUTLINE);
+		backend.on('symbol_locals', () => LOCALS);
+		const { host, view } = mountView();
+		view.provideText = () => SOURCE;
+		view.setFile(FILE, 4);
+		await flush(4);
+		expect(backend.callsTo('symbol_locals')).toHaveLength(1);
+		view.setFile(FILE, 5);
+		view.setFile(FILE, 6);
+		await flush(4);
+		expect(backend.callsTo('symbol_locals')).toHaveLength(1, 'the covering symbol\'s identity did not change');
+		expect(texts('.sw-locals .sw-name', host)).toEqual(['cfg', 'tmp'], 'the section survived the roaming');
+	});
+
+	it('hides the section once the cursor leaves every symbol', async () => {
+		backend.on('symbol_file_outline', () => OUTLINE);
+		backend.on('symbol_locals', () => LOCALS);
+		const { host, view } = mountView();
+		view.provideText = () => SOURCE;
+		view.setFile(FILE, 4);
+		await flush(4);
+		expect(host.querySelector('.sw-locals')).not.toBeNull();
+		view.setFile(FILE, 100);
+		await flush(2);
+		expect(host.querySelector('.sw-locals')).toBeNull();
+		expect(backend.callsTo('symbol_locals')).toHaveLength(1, 'nothing covers the cursor, nothing asks');
+	});
+
+	it('hides the section when the host cannot supply text', async () => {
+		backend.on('symbol_file_outline', () => OUTLINE);
+		const { host, view } = mountView();
+		view.provideText = () => null;
+		view.setFile(FILE, 4);
+		await flush(4);
+		expect(host.querySelector('.sw-locals')).toBeNull();
+		expect(backend.callsTo('symbol_locals')).toHaveLength(0, 'no text, no ask');
+	});
+
+	it('hides the section without a provider at all', async () => {
+		backend.on('symbol_file_outline', () => OUTLINE);
+		const { host, view } = mountView();
+		view.setFile(FILE, 4);
+		await flush(4);
+		expect(host.querySelector('.sw-locals')).toBeNull();
+		expect(backend.callsTo('symbol_locals')).toHaveLength(0);
+	});
+
+	it('hides the section silently when the parse fails', async () => {
+		backend.on('symbol_file_outline', () => OUTLINE);
+		backend.on('symbol_locals', () => {
+			throw new Error('no parser');
+		});
+		const { host, view } = mountView();
+		view.provideText = () => SOURCE;
+		view.setFile(FILE, 4);
+		await flush(4);
+		expect(host.querySelector('.sw-locals')).toBeNull();
+		// Roaming inside the same function does not retry the failed ask.
+		view.setFile(FILE, 5);
+		await flush(4);
+		expect(backend.callsTo('symbol_locals')).toHaveLength(1);
+	});
+
+	it('clears the section on an outline refresh and on a file switch', async () => {
+		backend.on('symbol_file_outline', () => OUTLINE);
+		backend.on('symbol_locals', () => LOCALS);
+		const { host, view } = mountView();
+		view.provideText = () => SOURCE;
+		view.setFile(FILE, 4);
+		await flush(4);
+		expect(host.querySelector('.sw-locals')).not.toBeNull();
+		expect(backend.callsTo('symbol_locals')).toHaveLength(1);
+
+		// The reload drops the section; the covering symbol is still load, so exactly one
+		// re-ask repopulates it.
+		view.refresh();
+		await flush(4);
+		expect(backend.callsTo('symbol_locals')).toHaveLength(2);
+		expect(host.querySelector('.sw-locals')).not.toBeNull();
+
+		// A file switch drops the section at once, before the new outline answers.
+		view.setFile('C:\\repo\\src\\other.c');
+		expect(host.querySelector('.sw-locals')).toBeNull();
+	});
+});
+
+describe('container indentation', () => {
+	const NESTED = {
+		symbols: [
+			{ kind: 'class', name: 'Widget', container: null, line: 0, endLine: 90 },
+			{ kind: 'method', name: 'paint', container: 'Widget', line: 2, endLine: 8 },
+			{ kind: 'class', name: 'Inner', container: 'Widget', line: 10, endLine: 40 },
+			{ kind: 'method', name: 'tick', container: 'Inner', line: 12, endLine: 16 },
+			{ kind: 'method', name: 'free', container: 'Ghost', line: 20, endLine: 24 },
+			{ kind: 'function', name: 'level0', container: null, line: 30, endLine: 80 },
+			{ kind: 'function', name: 'level1', container: 'level0', line: 32, endLine: 70 },
+			{ kind: 'function', name: 'level2', container: 'level1', line: 34, endLine: 60 },
+			{ kind: 'function', name: 'level3', container: 'level2', line: 36, endLine: 50 },
+			{ kind: 'function', name: 'level4', container: 'level3', line: 38, endLine: 48 }
+		],
+		imports: []
+	};
+
+	/** The row's depth read back off its inline padding (the 8px base plus 14px a level;
+	 *  a top-level row carries no inline padding at all). */
+	function depthOf(host: HTMLElement, name: string): number {
+		const pad = rowOf(host, name)!.style.paddingLeft;
+		return pad === '' ? 0 : Math.round((Number.parseFloat(pad) - 8) / 14);
+	}
+
+	it('indents members by their container chain, caps at three, tops unlisted containers', async () => {
+		backend.on('symbol_file_outline', () => NESTED);
+		const { host, view } = mountView();
+		view.setFile(FILE);
+		await flush(4);
+		expect(depthOf(host, 'Widget')).toBe(0);
+		expect(depthOf(host, 'paint')).toBe(1, 'Widget·paint sits one level under Widget');
+		expect(depthOf(host, 'Inner')).toBe(1, 'the nested class sits at its container\'s member depth');
+		expect(depthOf(host, 'tick')).toBe(2, 'Inner·tick names Inner, already listed at depth 1');
+		expect(depthOf(host, 'free')).toBe(0, 'a container never listed above is the top level');
+		expect(depthOf(host, 'level3')).toBe(3);
+		expect(depthOf(host, 'level4')).toBe(3, 'the depth stops at three');
+	});
+});
+
 describe('the empty and failed states', () => {
 	it('rests empty without an active editor', () => {
 		const { host } = mountView();
@@ -351,20 +510,26 @@ describe('the workbench wiring', () => {
 		updateSetting('locale', 'en');
 	});
 
-	it('feeds the view from the editor group: the shown page loads, a hidden one defers, no editor clears it', async () => {
-		// The booted page is hidden (the boot's view is the Explorer): an active editor's
-		// payload marks it dirty and asks for nothing yet.
-		workbench.symbolWindow.setFile(FILE, 4);
-		await flush(4);
-		expect(backend.callsTo('symbol_file_outline')).toHaveLength(0);
-		// showView('symbolWindow') reveals the page and its refresh hook pulls.
-		workbench.showView('symbolWindow');
-		await flush(4);
-		expect(backend.callsTo('symbol_file_outline')).toHaveLength(1);
-		expect(backend.callsTo('symbol_file_outline')[0]!['path']).toBe(FILE);
-		expect(workbench.views.symbolWindow.querySelector('.sw-row')!.dataset['path']).toBe(FILE);
-		// No active editor clears the page.
-		workbench.symbolWindow.setFile(null);
-		expect(workbench.views.symbolWindow.querySelector('.sw-empty')!.textContent).toContain('Open a file');
+		it('feeds the view from the editor group: the shown page loads, a hidden one defers, no editor clears it', async () => {
+			// The booted page is hidden (the boot's view is the Explorer): an active editor's
+			// payload marks it dirty and asks for nothing yet.
+			workbench.symbolWindow.setFile(FILE, 4);
+			await flush(4);
+			expect(backend.callsTo('symbol_file_outline')).toHaveLength(0);
+			// showView('symbolWindow') reveals the page and its refresh hook pulls.
+			workbench.showView('symbolWindow');
+			await flush(4);
+			expect(backend.callsTo('symbol_file_outline')).toHaveLength(1);
+			expect(backend.callsTo('symbol_file_outline')[0]!['path']).toBe(FILE);
+			expect(workbench.views.symbolWindow.querySelector('.sw-row')!.dataset['path']).toBe(FILE);
+			// No active editor clears the page.
+			workbench.symbolWindow.setFile(null);
+			expect(workbench.views.symbolWindow.querySelector('.sw-empty')!.textContent).toContain('Open a file');
+		});
+
+		it('wires provideText to the active editor\'s live buffer', async () => {
+			expect(typeof workbench.symbolWindow.provideText).toBe('function');
+			// The booted shell has no text editor active: the hook answers null.
+			expect(workbench.symbolWindow.provideText!()).toBeNull();
+		});
 	});
-});

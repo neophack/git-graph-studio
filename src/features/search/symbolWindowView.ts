@@ -1,17 +1,20 @@
 // The Symbol Window sidebar page (module 5) — an outline window over the
-// active editor's file: its includes/imports and the persistent index's per-file outline
-// as one flat list. The workbench feeds it the active editor's path and cursor line
-// (editorProviderViews' symbols, 0-based); a row click jumps to the declaration, and the
-// row whose [line, endLine] span holds the cursor carries the highlight. The outline is
-// one query per file change — the cursor only repaints a class.
+// active editor's file: its includes/imports, the "current function" locals section, and
+// the persistent index's per-file outline as one flat list. The workbench feeds it the
+// active editor's path and cursor line (editorProviderViews' symbols, 0-based); a row
+// click jumps to the declaration, and the row whose [line, endLine] span holds the
+// cursor carries the highlight. The outline is one query per file change — the cursor
+// only repaints a class. The locals ride the same discipline one level down: the
+// enclosing symbol's identity (name + line) is the query key, and only its change asks
+// the backend to parse the live buffer the host hands over through `provideText`.
 
-import { symbolFileOutline } from '../../platform/ipc/symbols';
+import { symbolFileOutline, symbolLocals } from '../../platform/ipc/symbols';
 
 import { t } from '../../platform/i18n';
 import { KIND_ICONS } from './contextView';
 import { el, icon } from '../../platform/ui/index';
 
-import type { FileOutlineImport, FileOutlineSymbol } from '../../platform/ipc/symbols';
+import type { FileOutlineImport, FileOutlineSymbol, ScopeDefinition } from '../../platform/ipc/symbols';
 
 import './symbolWindow.css';
 
@@ -19,6 +22,25 @@ import './symbolWindow.css';
 function baseName(path: string): string {
 	const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
 	return cut === -1 ? path : path.slice(cut + 1);
+}
+
+/** The path's extension the scope parser reads by — the last dot segment (the
+ *  convention every `symbol_*` scope caller uses). */
+function extOf(path: string): string {
+	return path.split('.').pop() ?? '';
+}
+
+/** The covering symbol's identity: name plus declaration line. */
+function sameIdentity(a: FileOutlineSymbol | null, b: FileOutlineSymbol | null): boolean {
+	return a === b || (a !== null && b !== null && a.name === b.name && a.line === b.line);
+}
+
+/** One listed row's container-chain depth: one past the most recent earlier listed row
+ *  carrying the container's name; no container, or a container never listed above, is
+ *  the top level. Three levels is the deepest the indentation goes. */
+function containerDepth(symbol: FileOutlineSymbol, depths: Map<string, number>): number {
+	if (symbol.container === null) return 0;
+	return Math.min((depths.get(symbol.container) ?? -1) + 1, 3);
 }
 
 export class SymbolWindowView {
@@ -67,6 +89,25 @@ export class SymbolWindowView {
 
 	private renderedSymbols: FileOutlineSymbol[] = [];
 
+	/** The live buffer the locals parse reads — the host (boot) hands over the active
+	 *  text editor's document; null whenever the cursor is not in a text editor. */
+	provideText?: () => string | null;
+
+	/** The current function's locals as `symbol_locals` answered, null while the section
+	 *  is hidden — no covering symbol, no text to parse, the request still in flight,
+	 *  failed, or superseded. */
+	private locals: ScopeDefinition[] | null = null;
+
+	/** The covering symbol the locals belong to, and whether the field reflects the
+	 *  current outline + cursor at all (false after every outline reload, forcing one
+	 *  re-evaluation). The identity — name plus line — is the locals' query key. */
+	private localsOwner: FileOutlineSymbol | null = null;
+
+	private localsOwnerKnown = false;
+
+	/** Invalidates an older locals answer against a newer ask or outline reload. */
+	private localsGen = 0;
+
 	onOpen?: (path: string, line: number) => void;
 
 	constructor(private readonly container: HTMLElement) {
@@ -101,6 +142,7 @@ export class SymbolWindowView {
 			this.failed = false;
 			this.symbols = [];
 			this.imports = [];
+			this.resetLocals();
 			this.render();
 			return;
 		}
@@ -117,6 +159,7 @@ export class SymbolWindowView {
 		this.dirty = !this.visible();
 		this.symbols = [];
 		this.imports = [];
+		this.resetLocals();
 		this.render();
 		if (!this.dirty) void this.load();
 	}
@@ -145,6 +188,9 @@ export class SymbolWindowView {
 	private async load(): Promise<void> {
 		const path = this.targetPath;
 		if (path === null) return;
+		// The outline is being re-read: the locals section drops (an edit may have moved
+		// the enclosing function), and the highlight below re-derives the owner once.
+		this.resetLocals();
 		const generation = ++this.generation;
 		this.loadingPath = path;
 		this.failed = false;
@@ -179,6 +225,8 @@ export class SymbolWindowView {
 			return;
 		}
 		if (this.imports.length > 0) this.body.appendChild(this.importsSection());
+		const locals = this.localsSection();
+		if (locals !== null) this.body.appendChild(locals);
 		if (this.loadedPath === null && !this.failed) return; // a load still owed (hidden page) — the list stays empty
 		if (this.symbols.length === 0) {
 			// No outline the index serves: null, failed, or a file it holds nothing for.
@@ -186,9 +234,14 @@ export class SymbolWindowView {
 			return;
 		}
 		const query = this.filterText;
+		// The indentation walks the listed rows: a row whose container names an earlier
+		// listed row sits one level under that row's depth (capped at three).
+		const depths = new Map<string, number>();
 		for (const symbol of this.symbols) {
 			if (query !== '' && !symbol.name.toLowerCase().includes(query)) continue;
-			this.body.appendChild(this.symbolRow(symbol));
+			const depth = containerDepth(symbol, depths);
+			depths.set(symbol.name, depth);
+			this.body.appendChild(this.symbolRow(symbol, depth));
 		}
 		this.updateHighlight();
 	}
@@ -219,7 +272,27 @@ export class SymbolWindowView {
 		return section;
 	}
 
-	private symbolRow(symbol: FileOutlineSymbol): HTMLElement {
+	/** The "current function" section: the enclosing symbol's parameters and locals,
+	 *  shown between the imports and the outline rows. Hidden whenever there is nothing
+	 *  served for the cursor's position — no covering symbol, no text, no answer. */
+	private localsSection(): HTMLElement | null {
+		const path = this.targetPath;
+		if (this.locals === null || path === null) return null;
+		const section = el('div', 'sw-locals');
+		section.appendChild(el('div', 'sw-section sw-locals-head', [el('span', 'sw-section-label', [t('symbols.window.locals')])]));
+		for (const def of this.locals) {
+			const row = el('div', 'sw-row sw-local-row', [
+				icon(KIND_ICONS[def.kind] ?? 'symbol-variable'),
+				el('span', 'sw-name', [def.name]),
+				el('span', 'sw-line', [String(def.line + 1)])
+			]);
+			row.addEventListener('click', () => this.onOpen?.(path, def.line + 1));
+			section.appendChild(row);
+		}
+		return section;
+	}
+
+	private symbolRow(symbol: FileOutlineSymbol, depth: number): HTMLElement {
 		const path = this.targetPath!;
 		const row = el('div', 'sw-row');
 		row.dataset['path'] = path;
@@ -228,6 +301,8 @@ export class SymbolWindowView {
 		if (symbol.container) row.appendChild(el('span', 'sw-container', [`${symbol.container}·`]));
 		row.appendChild(el('span', 'sw-name', [symbol.name]));
 		row.appendChild(el('span', 'sw-line', [String(symbol.line + 1)]));
+		// The container chain's depth as padding — the row structure stays untouched.
+		if (depth > 0) row.style.paddingLeft = `${8 + depth * 14}px`;
 		row.addEventListener('click', () => this.onOpen?.(path, symbol.line + 1));
 		this.renderedRows.push(row);
 		this.renderedSymbols.push(symbol);
@@ -238,7 +313,9 @@ export class SymbolWindowView {
 	 *  `current` class — exactly one row, and only a change to which row that is
 	 *  touches the DOM. A change also keeps the row on screen (the cursor follow:
 	 *  the current function stays visible as the caret roams) — never on every
-	 *  keystroke, which would jitter, and never on a hidden page, which has no layout. */
+	 *  keystroke, which would jitter, and never on a hidden page, which has no layout.
+	 *  The same pass re-derives the locals' owner over the whole outline (the filter
+	 *  hides rows, never the cursor's own function); only an identity change asks. */
 	private updateHighlight(): void {
 		let next: HTMLElement | null = null;
 		let start = -1;
@@ -251,10 +328,76 @@ export class SymbolWindowView {
 				next = this.renderedRows[index] ?? null;
 			}
 		}
-		if (next === this.currentRow) return;
-		this.currentRow?.classList.remove('current');
-		next?.classList.add('current');
-		this.currentRow = next;
-		if (next !== null && this.visible()) next.scrollIntoView({ block: 'nearest' });
+		if (next !== this.currentRow) {
+			this.currentRow?.classList.remove('current');
+			next?.classList.add('current');
+			this.currentRow = next;
+			if (next !== null && this.visible()) next.scrollIntoView({ block: 'nearest' });
+		}
+		this.noteCurrentSymbol(this.coveringSymbol());
+	}
+
+	/** The innermost outline symbol covering the cursor — the locals' owner, over the
+	 *  full outline (not the filtered rows), null when no span holds the cursor. */
+	private coveringSymbol(): FileOutlineSymbol | null {
+		let best: FileOutlineSymbol | null = null;
+		let start = -1;
+		for (const symbol of this.symbols) {
+			if (this.cursorLine < symbol.line || this.cursorLine > symbol.endLine) continue;
+			if (symbol.line >= start) {
+				start = symbol.line;
+				best = symbol;
+			}
+		}
+		return best;
+	}
+
+	/** The covering symbol moved: remember it and refresh the locals — once per identity
+	 *  change, never per keystroke. Runs after the highlight swap so a synchronous
+	 *  hide-render below always lands on the settled DOM. */
+	private noteCurrentSymbol(symbol: FileOutlineSymbol | null): void {
+		if (this.localsOwnerKnown && sameIdentity(this.localsOwner, symbol)) return;
+		this.localsOwner = symbol;
+		this.localsOwnerKnown = true;
+		void this.fetchLocals();
+	}
+
+	/** Ask for the owner's locals. The host's text decides everything: no callback, a
+	 *  null answer, or no covering symbol keeps the section hidden; a failure hides it
+	 *  silently (the owner stays remembered, so roaming inside the function never
+	 *  retries); a superseded answer is dropped by its generation. */
+	private async fetchLocals(): Promise<void> {
+		const symbol = this.localsOwner;
+		const path = this.targetPath;
+		const provide = this.provideText;
+		const generation = ++this.localsGen;
+		const had = this.locals !== null;
+		this.locals = null;
+		if (symbol === null || path === null || provide === undefined) {
+			if (had) this.render();
+			return;
+		}
+		const text = provide();
+		if (text === null) {
+			if (had) this.render();
+			return;
+		}
+		try {
+			const defs = await symbolLocals(text, extOf(path), this.cursorLine);
+			if (generation !== this.localsGen) return;
+			this.locals = defs ?? [];
+		} catch {
+			return; // the parse failed — the section stays hidden
+		}
+		this.render();
+	}
+
+	/** Drop the locals and forget their owner: every outline reload (and every file
+	 *  switch) starts the section over, and the in-flight answers die with the bump. */
+	private resetLocals(): void {
+		this.localsOwner = null;
+		this.localsOwnerKnown = false;
+		this.locals = null;
+		this.localsGen++;
 	}
 }

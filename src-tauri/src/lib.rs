@@ -792,6 +792,7 @@ mod desktop {
                 cmd_symbols::symbols_rebuild,
                 cmd_symbols::symbol_lookup,
                 cmd_symbols::symbol_scope_lookup,
+                cmd_symbols::symbol_locals,
                 cmd_symbols::symbol_references,
                 cmd_symbols::symbol_tree,
                 cmd_symbols::symbol_file_outline,
