@@ -1539,7 +1539,7 @@ export const en = {
 	'relations.contains': 'Contains',
 	'symbols.window.locals': 'Current function',
 	'symbols.graph.title': 'Relations',
-	'symbols.graph.hint': 'Rest the cursor inside a function to see its relations here.',
+	'symbols.graph.hint': 'Rest the cursor inside a function to see its relations here. Click a card with + or − to drill its ring; double-click opens the definition.',
 	'symbols.graph.fit': 'Fit the graph',
 	'symbols.graph.cut': 'More relations — cut short.',
 	'symbols.page.byFolder': 'Folders',

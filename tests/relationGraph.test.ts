@@ -264,7 +264,7 @@ describe('drilling rings', () => {
 	});
 });
 
-describe('the direction and the re-root', () => {
+describe("the pointer (Source Insight's vocabulary)", () => {
 	it('the direction switch re-asks a different graph', async () => {
 		const view = mountView();
 		view.setRoot({ ...ROOT });
@@ -282,31 +282,49 @@ describe('the direction and the re-root', () => {
 		view.dispose();
 	});
 
-	it('a double click re-roots the graph on that symbol', async () => {
+	it("a drillable card's click drills its ring", async () => {
 		const view = mountView();
 		view.setRoot({ ...ROOT });
 		await untilDrawn(view.element, 4);
-		nodeEl(view.element, 'beta').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
-		await untilDrawn(view.element, 1);
-		const last = backend.callsTo('symbol_relation_children').at(-1)!;
-		expect(last['name']).toBe('beta');
-		expect(last['path']).toBe('src/b.c');
-		expect(last['line']).toBe(2);
-		// The scripted engine answers beta's own ring empty — the markerless root card.
-		expect(source()).toContain('N0["beta"]');
-		expect(source()).toContain('class N0 rgRoot');
+		const asked = backend.callsTo('symbol_relation_children').length;
+		// gamma carries the + — the click is the expander (deferred past a double click's
+		// first press); its ring re-names beta, so the cross edge draws and no card grows.
+		click(nodeEl(view.element, 'gamma'));
+		await until(() => backend.callsTo('symbol_relation_children').length === asked + 1);
+		await flush();
+		await untilDrawn(view.element, 4);
+		expect(edgeLines()).toHaveLength(4);
 		view.dispose();
 	});
 
-	it('one click opens the definition', async () => {
+	it("a leaf card's click opens the definition", async () => {
 		const view = mountView();
 		const opens: string[] = [];
 		view.onOpen = (path, line) => opens.push(`${path}:${line}`);
 		view.setRoot({ ...ROOT });
 		await untilDrawn(view.element, 4);
+		// beta carries no ring — its click has nothing to drill and opens at once.
 		click(nodeEl(view.element, 'beta'));
 		await flush();
 		expect(opens).toEqual(['src/b.c:3']);
+		view.dispose();
+	});
+
+	it('the double click opens the definition, and never expands on its way', async () => {
+		const view = mountView();
+		const opens: string[] = [];
+		view.onOpen = (path, line) => opens.push(`${path}:${line}`);
+		view.setRoot({ ...ROOT });
+		await untilDrawn(view.element, 4);
+		const asked = backend.callsTo('symbol_relation_children').length;
+		// The first press schedules gamma's drill; the double click cancels it and jumps.
+		click(nodeEl(view.element, 'gamma'));
+		nodeEl(view.element, 'gamma').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+		await flush();
+		expect(opens).toEqual(['src/c.c:2']);
+		expect(backend.callsTo('symbol_relation_children').length).toBe(asked);
+		await new Promise((resolve) => setTimeout(resolve, 300)); // past the deferred drill's window
+		expect(backend.callsTo('symbol_relation_children').length).toBe(asked);
 		view.dispose();
 	});
 });

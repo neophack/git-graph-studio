@@ -1524,7 +1524,7 @@ export const zhCn: typeof en = {
 	'relations.contains': '包含',
 	'symbols.window.locals': '当前函数',
 	'symbols.graph.title': '关系',
-	'symbols.graph.hint': '把光标放在函数内，这里会显示它的关系图。',
+	'symbols.graph.hint': '把光标放在函数内，这里会显示它的关系图。单击带 +/− 的卡片展开或折叠它的关系环；双击打开定义。',
 	'symbols.graph.fit': '适应窗口',
 	'symbols.graph.cut': '还有更多关系，已截断。',
 	'symbols.page.byFolder': '文件夹',

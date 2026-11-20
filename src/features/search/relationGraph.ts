@@ -3,12 +3,15 @@
 // (`moduleDiagram.ts`'s DiagramView — the same mermaid + ELK renderer, the same
 // gitdiagram-class viewer: pan, zoom, fit, keyboard, pinch). Every expansion rebuilds the
 // flowchart source, so ELK re-lays the whole graph — the auto-arrange by construction, no
-// overlaps ever. The pointer's vocabulary: one click opens the definition, a double click
-// re-roots the graph on that symbol, a right-click menu drills (expand/collapse the ring),
-// re-roots or opens, and resting floats the declaration card. The direction buttons swap
-// refs to / refs from / contains; a node whose ring the index promises carries the +/−
-// marker in its label (and ⋯ when the ring came back cut short), and an aggregating edge
-// carries its ×N in the label. mermaid loads lazily, shared with module 17's chunk.
+// overlaps ever. The pointer's vocabulary is Source Insight's relation window's: one
+// click on a card whose label carries the +/− drills its ring (the deferred drill, so a
+// double click's first press never expands), one click on a card without a ring — and
+// the double click on any card — opens the definition, a right-click menu drills
+// (expand/collapse), re-roots or opens, and resting floats the declaration card. The
+// direction buttons swap refs to / refs from / contains; a node whose ring the index
+// promises carries the +/− marker in its label (and ⋯ when the ring came back cut
+// short), and an aggregating edge carries its ×N in the label. mermaid loads lazily,
+// shared with module 17's chunk.
 
 import type { ModuleDiagram } from '../../platform/ipc/analysis';
 import { readFile } from '../../platform/ipc/fs';
@@ -41,6 +44,11 @@ const MAX_DEPTH = 3;
 
 /** The pointer's rest before the declaration card floats in — the panel tree's timing. */
 const DECL_DELAY = 300;
+
+/** A drillable card's click waits this long before it drills, so the double click's
+ *  first press never expands the ring on its way to the jump (SI's expander reads
+ *  instantly; here the whole card is the expander, and the delay is the merge's cost). */
+const CLICK_DRILL_DELAY = 220;
 
 /** One graph node: a symbol's card and its ring's bookkeeping. The drawn structure is a
  *  strict tree — a ring answer naming a symbol already drawn adds a cross edge instead of
@@ -228,6 +236,9 @@ export class RelationGraphView {
 
 	private declTimer: number | null = null;
 
+	/** A drillable card's deferred drill in flight — the double click cancels it. */
+	private clickTimer: number | null = null;
+
 	private declCard: HTMLElement | null = null;
 
 	private readonly onDocMouseDown = (event: MouseEvent): void => {
@@ -274,17 +285,32 @@ export class RelationGraphView {
 			const { DiagramView } = await import('../analysis');
 			if (this.disposed) throw new Error('the relation graph was disposed');
 			const diagram = new DiagramView({
-				// One click opens the definition; an edge click (its id carries the L_ prefix)
-				// and the background answer nothing.
+				// Source Insight's relation-window vocabulary: a card whose label carries the
+				// +/− (the ring's expander) drills on one click — the deferred drill, so a
+				// double click's first press never expands before the jump; a card without
+				// a ring has nothing to drill and its click opens the definition at once.
+				// An edge click (its id carries the L_ prefix) and the background answer
+				// nothing.
 				onSelect: (id) => {
 					if (id === null || id.startsWith('L_')) return;
 					const node = this.nodes.get(id);
-					if (node) this.onOpen?.(node.path, node.line + 1);
+					if (!node) return;
+					if (!node.hasChildren) {
+						this.onOpen?.(node.path, node.line + 1);
+						return;
+					}
+					if (this.clickTimer !== null) clearTimeout(this.clickTimer);
+					this.clickTimer = window.setTimeout(() => {
+						this.clickTimer = null;
+						void this.toggleExpand(id);
+					}, CLICK_DRILL_DELAY);
 				},
-				// The double click re-roots the graph on that symbol.
+				// The double click jumps to the definition — SI's own jump — cancelling a
+				// drill the first press had scheduled.
 				onOpenNode: (key) => {
+					this.cancelClickDrill();
 					const node = this.nodes.get(key);
-					if (node) this.setRoot({ kind: node.kind, name: node.name, path: node.path, line: node.line });
+					if (node) this.onOpen?.(node.path, node.line + 1);
 				},
 				// The right-click menu: the ring's drill, the re-root, the definition.
 				onNodeContext: (x, y, key) => {
@@ -332,9 +358,17 @@ export class RelationGraphView {
 	dispose(): void {
 		this.disposed = true;
 		this.hideDecl();
+		this.cancelClickDrill();
 		document.removeEventListener('mousedown', this.onDocMouseDown);
 		document.removeEventListener('keydown', this.onDocKeyDown);
 		this.diagram?.destroy();
+	}
+
+	private cancelClickDrill(): void {
+		if (this.clickTimer !== null) {
+			clearTimeout(this.clickTimer);
+			this.clickTimer = null;
+		}
 	}
 
 	/** Root the graph on an explicit symbol and pin it — the hover card's jump: the

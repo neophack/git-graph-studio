@@ -1778,8 +1778,9 @@
 				note.textContent = 'RELATION-GRAPH FIXTURE (?relgraph=1) — verify by eye: the outline on top roots the graph below on the ' +
 					'covering function (alpha opens); the cursor buttons re-root it (hook answers an empty ring, nowhere shows the hint); ' +
 					'the drawing is mermaid (module 17\u2019s DiagramView), so a drill re-lays the whole graph by ELK; drag the background to pan, ' +
-					'wheel to zoom, click a card to jump (logged right), double-click to re-root, right-click a card for the drill menu ' +
-					'(gamma\u2019s ring carries the \u00d72 label); the pin freezes the root; the sash resizes the halves; ' +
+					'wheel to zoom; the interaction is Source Insight\u2019s relation window\u2019s — click a card with + or \u2212 to drill its ring ' +
+					'(gamma\u2019s edge carries the \u00d72 label), a card without a ring and the double click open the definition (logged right), ' +
+					'right-click a card for the drill / re-root / open menu; the pin freezes the root; the sash resizes the halves; ' +
 					'the section head (Relations) collapses the graph.';
 				const stage = document.createElement('div');
 				stage.style.cssText = 'position:fixed;inset:0;z-index:9000;display:flex;flex-direction:column;background:var(--vscode-editor-background,#1e1e1e);';
@@ -1822,10 +1823,10 @@
 					hook: { kind: 'function', name: 'hook', path: 'alpha.c', line: 19, endLine: 21 }
 				};
 				const REFS = {
-					alpha: [{ path: 'alpha.c', matches: [{ line: 3, column: 5 }] }],
+					alpha: [{ path: 'alpha.c', matches: [{ line: 4, column: 5 }] }],
 					beta: [
-						{ path: 'alpha.c', matches: [{ line: 8, column: 14 }, { line: 13, column: 15 }] },
-						{ path: 'beta.c', matches: [{ line: 1, column: 4 }, { line: 5, column: 9 }] }
+						{ path: 'alpha.c', matches: [{ line: 9, column: 14 }, { line: 14, column: 15 }] },
+						{ path: 'beta.c', matches: [{ line: 2, column: 4 }, { line: 6, column: 9 }] }
 					]
 				};
 				const OUTLINE = {

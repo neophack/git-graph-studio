@@ -387,8 +387,12 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   points down, the kinds ride `linkStyle` palette literals — a `var(--…)` fails the
   render), the aggregating edge's ×N in its label; every drill rebuilds the source, so
   ELK re-lays the whole graph — the auto-arrange by construction; the pointer's
-  vocabulary: one click opens the definition, a double click re-roots, the right-click
-  menu drills (expand/collapse), re-roots or opens, resting floats the declaration card
+  vocabulary is Source Insight's relation window's (2026-11-20, the owner's direction:
+  relation的交互和source insight不一致): one click on a card whose label carries the
+  +/− drills its ring — deferred 220 ms, so a double click's first press never expands
+  on its way to the jump — one click on a ringless card, and the double click on any
+  card, open the definition; the right-click menu drills (expand/collapse), re-roots or
+  opens; resting floats the declaration card
   (its file read resolving through `resolvePath`, the host-joined absolute spelling); a
   symbol already drawn gains the cross edge instead of a second card (kept while both
   ends stand drawn), a ring naming only drawn symbols leaves the node a leaf, and the
