@@ -12,14 +12,14 @@
 
 ## 0. The goal in one sentence
 
-**GGS is a single desktop binary under 10 MB that does everything VS Code does, opens and searches 100,000-file projects instantly like Source Insight, compares and merges like Beyond Compare, feels as polished as Xcode, and installs git-graph-rs and other VSIX extensions.**
+**GGS is a single desktop binary under 10 MB that does everything VS Code does, opens and searches 100,000-file projects instantly like the classic symbol IDEs, compares and merges like Beyond Compare, feels as polished as Xcode, and installs git-graph-rs and other VSIX extensions.**
 
 Each of the five benchmarks contributes one thing, and each has a measurable acceptance line (section 4):
 
 | Benchmark | What we take | What we leave |
 |---|---|---|
 | VS Code | The workbench model (activity bar / side bar / editor groups / panel / status bar / command palette), keybindings, the settings system, the extension contract | Electron, the Node extension host, debugger / remote development / notebooks |
-| Source Insight | The project-wide symbol database, references / call trees / relation window, startup and open speed on huge projects, the context window | Its UI style and proprietary parser scripts |
+| Classic symbol IDEs | The project-wide symbol database, references / call trees / relation window, startup and open speed on huge projects, the context window | Its UI style and proprietary parser scripts |
 | Beyond Compare | Folder compare and sync, three-way merge, comparison rules (ignore whitespace / case / regex), hex / image compare, sessions | FTP / cloud remote sessions |
 | Xcode | Restrained visual hierarchy, motion and feedback, native window feel, keyboard-first, empty-state design | Interface Builder, Instruments |
 | Size | One exe, no runtime dependency (system WebView2 on Windows), installer ≤ 8 MB | — |
@@ -107,7 +107,7 @@ The RustDesk source (rustdesk/rustdesk@851d2df, a shallow clone studied outside 
 
 **2026-09-16, symbol database + Xcode polish round (M4 storage/queries/UI 🟡, M7 7.2-7.8 🟡)** (478 vitest, 182 backend tests, clippy clean):
 
-**The persistent symbol index (M4)**: `symbols/store.rs` + `cmd_symbols.rs` — the compact binary per root under `~/.ggs/index/<hash>/symbols.bin` (interned names, per-file mtime+size fingerprints, per-name occurrence lists marking which files contain the word, and an explicit "trusted" bit: names first seen by an incremental update fall back to a full reference scan until the next full build). A folder open resumes the saved index and repairs it against the disk in the background; watcher batches update single files (`apply_changes`), and a generation counter cancels like the text search's. Four commands (`symbols_status`, `symbols_rebuild` with a streaming channel, `symbol_lookup`, `symbol_references`); the old `workspace_symbols` / `find_references` serve from the index when it has landed and keep the in-memory path as the fallback. Frontend: Go-to-Definition asks `symbol_lookup` first (one hit jumps, several offer VS Code's definition list), Find References scans the occurrence-narrowed file set, Quick Open grows the `@` (file outline) and `#` (workspace symbols) modes, the status bar follows `studio://symbol-index` ("Indexing symbols n/m", click to rebuild), and Source Insight's **Context Window** is the panel's third tab — the definition of the symbol under the cursor after a 150 ms dwell, pinnable, click-to-open. Still open in M4: the tree-sitter parser layer (the outline scan remains the extractor — §3's pure-Rust rule defers it), `symbol_fuzzy`, the Peek popup (F12 list today), the Search-view grouping of references, the Relation Window, semantic colouring, and the exclusion-rules setting.
+**The persistent symbol index (M4)**: `symbols/store.rs` + `cmd_symbols.rs` — the compact binary per root under `~/.ggs/index/<hash>/symbols.bin` (interned names, per-file mtime+size fingerprints, per-name occurrence lists marking which files contain the word, and an explicit "trusted" bit: names first seen by an incremental update fall back to a full reference scan until the next full build). A folder open resumes the saved index and repairs it against the disk in the background; watcher batches update single files (`apply_changes`), and a generation counter cancels like the text search's. Four commands (`symbols_status`, `symbols_rebuild` with a streaming channel, `symbol_lookup`, `symbol_references`); the old `workspace_symbols` / `find_references` serve from the index when it has landed and keep the in-memory path as the fallback. Frontend: Go-to-Definition asks `symbol_lookup` first (one hit jumps, several offer VS Code's definition list), Find References scans the occurrence-narrowed file set, Quick Open grows the `@` (file outline) and `#` (workspace symbols) modes, the status bar follows `studio://symbol-index` ("Indexing symbols n/m", click to rebuild), and the **Context Window** is the panel's third tab — the definition of the symbol under the cursor after a 150 ms dwell, pinnable, click-to-open. Still open in M4: the tree-sitter parser layer (the outline scan remains the extractor — §3's pure-Rust rule defers it), `symbol_fuzzy`, the Peek popup (F12 list today), the Search-view grouping of references, the Relation Window, semantic colouring, and the exclusion-rules setting.
 
 **Xcode-level polish (M7)**: the motion tokens (`--motion-fast/normal`, the easings, `prefers-reduced-motion` collapsing every transition) and the density setting (Compact / Comfortable — the row / tab / status / activity / panel-tab heights travel as CSS variables); the theme picker grows **Auto (System)** with a live `prefers-color-scheme` follow; delayed hover tooltips (activity bar, status items), the saved-tab flash, the busy cursor during a rebuild, F6 cycling focus through activity bar → side bar → editor → panel, and the tablists label their selected tab (`aria-selected`). A build-script fix came out of the round: the Windows test exes now carry the Common-Controls v6 side-by-side dependency as an external manifest (the lib test exe died at load with STATUS_ENTRYPOINT_NOT_FOUND without it).
 
@@ -271,7 +271,7 @@ Release numbers on 20,000 files (Windows, NVMe): walk 30 ms, raw read 938 ms, se
 | Zen mode / full screen / layout presets | None | All | M7 |
 | Debugger / tasks / remote / notebooks | None | **Explicitly out of scope** (tasks are replaced by "run in terminal") | — |
 
-### 2.2 Source Insight (large projects, speed, symbols)
+### 2.2 Classic symbol IDEs (large projects, speed, symbols)
 
 | Capability | Today | Gap | Milestone |
 |---|---|---|---|
@@ -410,7 +410,7 @@ Goal: exe 23 MB → ≤ 10 MB, installer 28 MB → ≤ 8 MB, no feature loss.
 
 ### M2 — Startup and large-project performance (2 weeks)
 
-Goal: Source Insight-class "huge project opens instantly".
+Goal: IDE-class "huge project opens instantly".
 
 | # | Task | Touches | Acceptance |
 |---|---|---|---|
@@ -454,7 +454,7 @@ Goal: the daily editing workflow no longer needs a trip back to VS Code.
 | 3.14 | Git completion: hunk-level stage / unstage / discard (diff gutter buttons, backend builds a patch for `git apply --cached`), worktree and submodule views, cherry-pick / revert palette entries, an interactive rebase editor (draggable todo list via `GIT_SEQUENCE_EDITOR`) | — |
 | 3.15 | Explorer completion: drag to move / copy, multi-select, cut / copy / paste, `.gitignore` dimming, Open Editors group, collapse all | — |
 
-### M4 — Source Insight: symbol database and code navigation (4 weeks)
+### M4 — the symbol database and code navigation (4 weeks)
 
 Goal: semantic navigation for eight languages — C / C++ / Rust / TS / JS / Python / Go / Java.
 
@@ -466,7 +466,7 @@ Goal: semantic navigation for eight languages — C / C++ / Rust / TS / JS / Pyt
 | 4.4 🟡 | Go to Definition uses the index (regex fallback kept for languages without a grammar); Peek list on multiple definitions; `Alt+F12` Peek Definition (popup reusing the fast viewer's fragment rendering) | `editor.ts` | —. The exact-name lookup jumps / offers the list; the `Alt+F12` popup itself is still open |
 | 4.5 🟡 | Find References (`Shift+F12`): results reuse the Search view's tree, grouped as definition / write / read / call, scope-weighted (same file > same directory > others); `Ctrl+Shift+F12` reference Peek | `searchView.ts` | —. The scan is occurrence-narrowed by the index; the Search-view tree and grouping are still open |
 | 4.6 | Call hierarchy view: a "Call Hierarchy" side bar, lazily expanded nodes, callers / callees toggle, double-click to jump, cycle detection; export as text | new `callHierarchy.ts` | 5 levels deep ≤ 300 ms |
-| 4.7 ✅ | Context window (Source Insight's Context Window): a "Context" panel tab showing the definition of the symbol under the cursor after a 150 ms hover (pinnable, navigable) | `panel.ts`, new `contextView.ts` | Never steals focus, never jitters |
+| 4.7 ✅ | Context window (the definition under the cursor): a "Context" panel tab showing the definition of the symbol under the cursor after a 150 ms hover (pinnable, navigable) | `panel.ts`, new `contextView.ts` | Never steals focus, never jitters |
 | 4.8 | Relation window: the selected symbol's five relation groups (definition / references / calls / callers / members) as a tree | new `relationView.ts` | — |
 | 4.9 ✅ | Quick Open modes: `@` symbols in file, `#` workspace symbols, `:` line; `Ctrl+Shift+O`, `Ctrl+T` | `quickOpen.ts` | — |
 | 4.10 | Semantic colouring overlay: token classes from the index (function / type / variable / macro / parameter) layered over lezer / syntect highlighting, switchable; Outline and breadcrumbs read the index | `cmTheme.ts`, `fastView.ts` | Visually matches VS Code semantic tokens |

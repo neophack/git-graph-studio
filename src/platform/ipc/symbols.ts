@@ -141,7 +141,7 @@ export interface RelationAnswer {
  *  `contains`: the members and nested types declared inside the subject. */
 export type RelationDirection = 'refsTo' | 'refsFrom' | 'contains';
 
-/** The children of one relation node — the next ring of the relation
+/** The children of one relation node — the next ring of the box-and-arrow relation
  *  graph, computed over the persistent index. The subject is a definition: the symbol under
  *  the cursor with the location the context-symbol resolution reported for it. */
 export const symbolRelationChildren = (name: string, path: string, line: number, direction: RelationDirection) =>

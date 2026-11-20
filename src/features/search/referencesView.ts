@@ -3,7 +3,7 @@
 // answered not raw but specially processed before it shows — the click opens a folded
 // context slice: the innermost enclosing definition's declaration line, a window of lines
 // around the site, and the body's middle folded into `… N lines …` rows that click open
-// (capped), the way the classic symbol IDEs keeps a reference's context structural instead of a
+// (capped), the way the classic lookup page keeps a reference's context structural instead of a
 // wall of code. The workbench feeds it with the same gate and debounce discipline the
 // definition page keeps (the panel up, this page active, the pin off); the highlighted
 // site line — or the row's double click — jumps into the editor.

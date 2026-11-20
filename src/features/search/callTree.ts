@@ -1,4 +1,4 @@
-// The Call Tree: Source Insight's caller / callee navigation over the workspace symbol index.
+// The Call Tree: caller / callee navigation over the workspace symbol index.
 // There is no parser here - a function's body is the lines between its declaration and the
 // next symbol's, and a call is a reference to a known function name inside another function's
 // body. That heuristic covers the direct-call reading the tree is for; the definitions come

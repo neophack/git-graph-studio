@@ -142,7 +142,7 @@ export class OutputView {
 export class Panel {
 	readonly terminal: TerminalView;
 	readonly output: OutputView;
-	/** Source Insight's Context Window (M4 4.7): the symbol-under-the-cursor's definition. */
+	/** The Context Window (M4 4.7): the symbol-under-the-cursor's definition. */
 	readonly context: ContextView;
 	/** The Definition page (module 5): the clicked symbol's definition content —
 	 *  a function through its body, a macro through its continuations. */
