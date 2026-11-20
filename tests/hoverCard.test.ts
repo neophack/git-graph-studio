@@ -133,7 +133,7 @@ describe('hoverCard — the reference footer', () => {
 		expect(dom.querySelector('.ggs-symbol-hover-refs')!.textContent).toBe('Referenced in 3 file(s)');
 		const relations = dom.querySelector('button.ggs-symbol-hover-relations');
 		expect(relations).not.toBeNull();
-		expect(relations!.textContent).toBe('Open the relations window');
+		expect(relations!.textContent).toBe('Show the relation graph');
 		relations!.click();
 		// The opener receives the first candidate.
 		expect(got).toEqual({ kind: 'function', name: 'add', path: 'src/main.c', line: 1 });

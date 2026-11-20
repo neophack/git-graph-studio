@@ -1514,200 +1514,6 @@
 			}
 		</script>
 		<script type="module">
-			// The relations mode (?relations=1): the Relations panel (module 5) mounted over a
-			// scripted four-file C fixture, for the checks jsdom cannot express — a real hover
-			// card, a real pin, a human eye on the badge and the truncated line. The fixture
-			// makes alpha the hub: beta and gamma and delta call it, alpha calls beta and hook,
-			// and ONE alpha( call sits inside a COMMENT in beta.c — the comment mask must keep
-			// it out of every ring and every count, so a leak betrays itself as a x2 badge on
-			// beta. The root buttons swap the subject without touching an editor; every jump
-			// the view asks for logs below the buttons, since no editor backs the stage.
-			if (new URLSearchParams(location.search).has('relations')) {
-				// A clean boot per distinct query string, the scroll mode's rule.
-				if (sessionStorage.getItem('relations-clean') !== location.search) {
-					sessionStorage.setItem('relations-clean', location.search);
-					localStorage.clear();
-					location.reload();
-				}
-				const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-				const waitFor = async (ready, ms = 15000) => {
-					const end = Date.now() + ms;
-					while (Date.now() < end) {
-						if (ready()) return true;
-						await sleep(100);
-					}
-					return ready();
-				};
-
-				/* ---------- the fixture: four C files, the comments below name their 0-based lines ---------- */
-
-				const FILES = {
-					'alpha.c': [
-						'/* The relations fixture: alpha is the hub (line 0). */',
-						'#include "alpha.h"',
-						'',
-						'void alpha(int n) {',
-						'    beta(n);',
-						'    hook(n);',
-						'}',
-						'',
-						'void hook(int n) {',
-						'    (void)n;',
-						'}'
-					].join('\n'),
-					'alpha.h': [
-						'/* alpha.h — the include alpha.c names; its line is a jump target. */',
-						'void alpha(int n);',
-						'void hook(int n);'
-					].join('\n'),
-					// beta.c: the real call site is line 2; the commented call at line 3 is the
-					// mask's fixture — a leak would aggregate beta's edge into x2 at the same line.
-					'beta.c': [
-						'/* beta calls alpha once; one more alpha( call hides in a comment below. */',
-						'void beta(int n) {',
-						'    alpha(n);',
-						'    /* alpha(n + 1); — the comment mask must keep this out of every ring. */',
-						'}'
-					].join('\n'),
-					// gamma.c: two alpha sites (lines 2 and 3) aggregate into one x2 edge.
-					'gamma.c': [
-						'/* gamma calls alpha from two sites and beta once — the x2 badge\'s fixture. */',
-						'void gamma(int n) {',
-						'    if (n > 0) { alpha(n); }',
-						'    alpha(n - 1);',
-						'    beta(n);',
-						'}'
-					].join('\n'),
-					// delta.c: the third referrer, and the ring gamma's drill-down lands in.
-					'delta.c': [
-						'/* delta: the third referrer, and the ring gamma drills into. */',
-						'void delta(int n) {',
-						'    alpha(n);',
-						'    gamma(n);',
-						'}'
-					].join('\n')
-				};
-				const DEFS = {
-					alpha: { kind: 'function', name: 'alpha', path: 'alpha.c', line: 3, endLine: 6 },
-					beta: { kind: 'function', name: 'beta', path: 'beta.c', line: 1, endLine: 4 },
-					gamma: { kind: 'function', name: 'gamma', path: 'gamma.c', line: 1, endLine: 5 },
-					delta: { kind: 'function', name: 'delta', path: 'delta.c', line: 1, endLine: 4 },
-					hook: { kind: 'function', name: 'hook', path: 'alpha.c', line: 8, endLine: 10 }
-				};
-				/** One ring entry: the referenced symbol at its definition, carried with the
-				 *  reference site that produced the edge (all lines 0-based, the wire's own
-				 *  vocabulary). `count` past 1 is the xN badge; `drills` is the optimistic +. */
-				const node = (name, edgePath, edgeLine, count, drills) => ({
-					kind: 'function', name, container: null,
-					path: DEFS[name].path, line: DEFS[name].line,
-					edgePath, edgeLine, edgeKind: 'call', edgeCount: count, hasChildren: drills === true
-				});
-				const answer = (nodes, truncated) => ({ nodes, truncated: truncated === true });
-
-				/* ---------- the scripted commands, over whatever backend the page runs ---------- */
-
-				const relationHandlers = {
-					symbol_relation_children: ({ name, direction }) => {
-						if (direction === 'refsTo') {
-							// The hub ring: beta and gamma and delta, cut short — the faint
-							// truncated line must close it. gamma's two sites make the x2 badge.
-							if (name === 'alpha') {
-								return answer([
-									node('beta', 'beta.c', 2, 1, false),
-									node('gamma', 'gamma.c', 2, 2, true),
-									node('delta', 'delta.c', 2, 1, false)
-								], true);
-							}
-							// The drills: gamma's + lands on delta, beta's + on gamma; delta's own
-							// ring answers empty (the "nothing references" note).
-							if (name === 'gamma') return answer([node('delta', 'delta.c', 3, 1, false)]);
-							if (name === 'beta') return answer([node('gamma', 'gamma.c', 4, 1, false)]);
-							return answer([]);
-						}
-						// refsFrom: what the subject's body calls. beta calls alpha ONCE — the
-						// commented alpha( at beta.c line 3 must not lift the count to 2.
-						if (name === 'alpha') return answer([node('beta', 'alpha.c', 4, 1, true), node('hook', 'alpha.c', 5, 1, false)]);
-						if (name === 'beta') return answer([node('alpha', 'beta.c', 2, 1, false)]);
-						if (name === 'gamma') return answer([node('alpha', 'gamma.c', 2, 2, false), node('beta', 'gamma.c', 4, 1, false)]);
-						if (name === 'delta') return answer([node('alpha', 'delta.c', 2, 1, false), node('gamma', 'delta.c', 3, 1, false)]);
-						return answer([]);
-					},
-					// The declaration card's data: the fixture definitions, then the file's own
-					// lines. Unknown names answer empty rather than falling through — no stray
-					// unhandled-invoke warnings from the workbench's own probes.
-					symbol_lookup: ({ name }) => (DEFS[String(name || '')] ? [DEFS[String(name || '')]] : []),
-					// The card reads the definition's file; fixture files answer here, everything
-					// else (the editor's own file.c and friends) falls through to the base mock.
-					read_file: ({ path }) => {
-						const base = String(path || '').split(/[\\/]/).pop();
-						if (!FILES[base]) return undefined;
-						return { contents: FILES[base], binary: false, size: FILES[base].length };
-					}
-				};
-				const baseInvoke = window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
-				window.__TAURI_INTERNALS__.invoke = (command, args) => {
-					const handler = Object.prototype.hasOwnProperty.call(relationHandlers, command) ? relationHandlers[command] : null;
-					if (!handler) return baseInvoke(command, args);
-					const answered = handler(args || {});
-					return answered === undefined ? baseInvoke(command, args) : Promise.resolve(answered);
-				};
-
-				/* ---------- the stage: explanation, root buttons, jump log, the view ---------- */
-
-				await waitFor(() => document.querySelectorAll('#statusbar .status-item').length > 0, 30000);
-				const { RelationsView } = await import('/src/features/search/relationsView.ts');
-				const view = new RelationsView();
-				view.element.hidden = false; // the constructor parks a panel page hidden; the stage shows it
-				view.element.style.flex = '1';
-				view.element.style.minHeight = '0';
-
-				const opens = [];
-				const openLog = document.createElement('span');
-				openLog.style.cssText = 'margin-left:auto;color:#8ec07c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-				view.onOpen = (path, line) => {
-					opens.push(path + ':' + line);
-					openLog.textContent = 'jumps: ' + opens.length + ' — last: ' + path + ':' + line + ' (1-based)';
-					console.log('[relations] open ' + path + ':' + line);
-				};
-
-				const button = (label, title) => {
-					const b = document.createElement('button');
-					b.textContent = label;
-					b.title = title;
-					b.style.cssText = 'font:11px monospace;padding:2px 10px;cursor:pointer;background:#333;color:#ddd;border:1px solid #555;border-radius:3px;';
-					return b;
-				};
-				const roots = document.createElement('span');
-				roots.style.cssText = 'display:flex;gap:4px;align-items:center;';
-				roots.appendChild(document.createTextNode('root:'));
-				for (const name of Object.keys(DEFS)) {
-					const def = DEFS[name];
-					const b = button(name, def.path + ':' + (def.line + 1));
-					b.addEventListener('click', () => view.setRoot({ ...def }));
-					roots.appendChild(b);
-				}
-				roots.appendChild(view.actions);
-				roots.appendChild(openLog);
-
-				const note = document.createElement('div');
-				note.style.cssText = 'padding:4px 10px;color:#aaa;border-bottom:1px solid #444;line-height:1.5;';
-				note.textContent = 'RELATIONS FIXTURE (?relations=1) — verify by eye: the root ring (alpha) ends with the faint truncated line; ' +
-					'gamma\'s edge carries the \u00d72 badge (two call sites at gamma.c:3 and :4) and its + drills to delta; ' +
-					'beta\'s edge stays \u00d71 although a commented alpha( call sits at beta.c:4 (1-based) — a comment-mask leak would show \u00d72 there; ' +
-					'the direction buttons flip refs to / refs from; resting on a row floats the declaration card (alpha.c lines, 300 ms pause); ' +
-					'every click logs its 1-based jump on the right.';
-
-				const stage = document.createElement('div');
-				stage.id = 'relations-stage';
-				stage.style.cssText = 'position:fixed;left:0;right:0;bottom:0;height:46vh;z-index:9000;display:flex;flex-direction:column;' +
-					'background:var(--vscode-editor-background,#1e1e1e);color:var(--vscode-foreground,#ccc);border-top:2px solid #007acc;';
-				stage.append(note, roots, view.element);
-				document.body.appendChild(stage);
-				// The hub as the opening subject — the page answers settled, ready to poke.
-				view.setRoot({ ...DEFS.alpha });
-			}
-		</script>
-		<script type="module">
 			// The rename mode (?rename=1): the rename dialog (module 5) over a scripted two-file
 			// C fixture whose preview answer is DERIVED from the sources — a word-boundary scan
 			// with comment spans masked — so the comment trap verifies by eye: beta.c carries a
@@ -1845,6 +1651,234 @@
 						console.log('[rename] open ' + path + ':' + line);
 					}
 				});
+			}
+		</script>
+		<script type="module">
+			// The relation-graph mode (?relgraph=1): the Symbol Window (module 5) mounted whole
+			// — outline on top, the relation graph under its sash — over the same scripted C
+			// fixture the relations mode drives. The cursor buttons move the caret between
+			// alpha, hook, and nowhere, so the graph re-roots by eye; the checks jsdom cannot
+			// express live here: dragging a box (its edges follow), background pan, the
+			// wheel's zoom about the cursor, the lazy + rings, the double-click re-root, the
+			// hover declaration card, and the ×2 badge on gamma's edge.
+			if (new URLSearchParams(location.search).has('relgraph')) {
+				if (sessionStorage.getItem('relgraph-clean') !== location.search) {
+					sessionStorage.setItem('relgraph-clean', location.search);
+					localStorage.clear();
+					location.reload();
+				}
+				const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+				const waitFor = async (ready, ms = 15000) => {
+					const end = Date.now() + ms;
+					while (Date.now() < end) {
+						if (ready()) return true;
+						await sleep(100);
+					}
+					return ready();
+				};
+
+				/* ---------- the fixture: alpha.c with its outline; the scripted rings ---------- */
+
+				const FILE = 'C:\\fixture\\alpha.c';
+				const REPO = 'C:\\fixture';
+				const OUTLINE = {
+					symbols: [
+						{ kind: 'function', name: 'alpha', container: null, line: 3, endLine: 6 },
+						{ kind: 'function', name: 'hook', container: null, line: 8, endLine: 10 }
+					],
+					imports: [{ name: 'alpha.h', line: 1 }]
+				};
+				const DEFS = {
+					alpha: { kind: 'function', name: 'alpha', path: 'alpha.c', line: 3, endLine: 6 },
+					beta: { kind: 'function', name: 'beta', path: 'beta.c', line: 1, endLine: 4 },
+					gamma: { kind: 'function', name: 'gamma', path: 'gamma.c', line: 1, endLine: 5 },
+					delta: { kind: 'function', name: 'delta', path: 'delta.c', line: 1, endLine: 4 },
+					hook: { kind: 'function', name: 'hook', path: 'alpha.c', line: 8, endLine: 10 }
+				};
+				const ALPHA_LINES = [
+					'/* The relation-graph fixture: alpha is the hub (line 0). */',
+					'#include "alpha.h"',
+					'',
+					'void alpha(int n) {',
+					'    beta(n);',
+					'    hook(n);',
+					'}',
+					'',
+					'void hook(int n) {',
+					'    (void)n;',
+					'}'
+				].join('\n');
+				const node = (name, edgePath, edgeLine, count, drills) => ({
+					kind: 'function', name, container: null,
+					path: DEFS[name].path, line: DEFS[name].line,
+					edgePath, edgeLine, edgeKind: 'call', edgeCount: count, hasChildren: drills === true
+				});
+				const answer = (nodes, truncated) => ({ nodes, truncated: truncated === true });
+				const handlers = {
+					symbol_file_outline: ({ path }) => (String(path).endsWith('alpha.c') ? OUTLINE : { symbols: [], imports: [] }),
+					symbol_relation_children: ({ name, direction }) => {
+						if (direction === 'refsTo') {
+							if (name === 'alpha') return answer([node('beta', 'beta.c', 2, 1, false), node('gamma', 'gamma.c', 2, 2, true), node('delta', 'delta.c', 2, 1, false)], true);
+							if (name === 'gamma') return answer([node('delta', 'delta.c', 3, 1, false)]);
+							return answer([]);
+						}
+						if (name === 'alpha') return answer([node('beta', 'alpha.c', 4, 1, true), node('hook', 'alpha.c', 5, 1, false)]);
+						return answer([]);
+					},
+					symbol_lookup: ({ name }) => (DEFS[String(name || '')] ? [DEFS[String(name || '')]] : []),
+					read_file: ({ path }) => {
+						const base = String(path || '').split(/[\\/]/).pop();
+						return base === 'alpha.c' ? { contents: ALPHA_LINES, binary: false, size: ALPHA_LINES.length } : undefined;
+					}
+				};
+				const baseInvoke = window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
+				window.__TAURI_INTERNALS__.invoke = (command, args) => {
+					const handler = Object.prototype.hasOwnProperty.call(handlers, command) ? handlers[command] : null;
+					if (!handler) return baseInvoke(command, args);
+					const answered = handler(args || {});
+					return answered === undefined ? baseInvoke(command, args) : Promise.resolve(answered);
+				};
+
+				/* ---------- the stage: cursor buttons, jump log, the whole window ---------- */
+
+				await waitFor(() => document.querySelectorAll('#statusbar .status-item').length > 0, 30000);
+				const { SymbolWindowView } = await import('/src/features/search/symbolWindowView.ts');
+				// The view fills the container handed to it — the stage's remaining height.
+				const host = document.createElement('div');
+				host.style.cssText = 'flex:1;min-height:0;';
+				const view = new SymbolWindowView(host);
+				view.provideRepo = () => REPO;
+				const opens = [];
+				const openLog = document.createElement('span');
+				openLog.style.cssText = 'margin-left:auto;color:#8ec07c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+				view.onOpen = (path, line) => {
+					opens.push(path + ':' + line);
+					openLog.textContent = 'jumps: ' + opens.length + ' — last: ' + path + ':' + line + ' (1-based)';
+					console.log('[relgraph] open ' + path + ':' + line);
+				};
+				const button = (label, title) => {
+					const b = document.createElement('button');
+					b.textContent = label;
+					b.title = title;
+					b.style.cssText = 'font:11px monospace;padding:2px 10px;cursor:pointer;background:#333;color:#ddd;border:1px solid #555;border-radius:3px;';
+					return b;
+				};
+				const cursors = document.createElement('span');
+				cursors.style.cssText = 'display:flex;gap:4px;align-items:center;';
+				cursors.appendChild(document.createTextNode('cursor:'));
+				for (const [label, line] of [['in alpha (line 5)', 4], ['in hook (line 10)', 9], ['nowhere (line 2)', 1]]) {
+					const b = button(label, 'setFile ' + FILE + ', cursor line ' + (line + 1) + ' 1-based');
+					b.addEventListener('click', () => view.setFile(FILE, line));
+					cursors.appendChild(b);
+				}
+				cursors.appendChild(openLog);
+				const note = document.createElement('div');
+				note.style.cssText = 'padding:4px 10px;color:#aaa;border-bottom:1px solid #444;line-height:1.5;';
+				note.textContent = 'RELATION-GRAPH FIXTURE (?relgraph=1) — verify by eye: the outline on top roots the graph below on the ' +
+					'covering function (alpha opens); the cursor buttons re-root it (hook answers an empty ring, nowhere shows the hint); ' +
+					'drag a box (its edges follow), drag the background to pan, wheel to zoom about the cursor, click a box to jump (logged right), ' +
+					'double-click to re-root, gamma\u2019s + drills and its edge carries the \u00d72 badge; the pin freezes the root; the sash resizes the halves; ' +
+					'the section head (Relations) collapses the graph.';
+				const stage = document.createElement('div');
+				stage.style.cssText = 'position:fixed;inset:0;z-index:9000;display:flex;flex-direction:column;background:var(--vscode-editor-background,#1e1e1e);';
+				stage.append(note, cursors, host);
+				document.body.appendChild(stage);
+				view.setFile(FILE, 4);
+			}
+		</script>
+		<script type="module">
+			// The references mode (?references=1): the References panel page (module 5) mounted
+			// standalone over a scripted two-file fixture — the checks jsdom cannot express
+			// live here: a site row's click unfolding the folded context (the enclosing
+			// function's head, the body's middle folded into `… N lines …` rows that click
+			// open, the site line highlighted), the second group opening on its header's
+			// click, the def marker beside the definition row, and the highlighted site
+			// line's jump (logged right).
+			if (new URLSearchParams(location.search).has('references')) {
+				if (sessionStorage.getItem('references-clean') !== location.search) {
+					sessionStorage.setItem('references-clean', location.search);
+					localStorage.clear();
+					location.reload();
+				}
+				const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+				const waitFor = async (ready, ms = 15000) => {
+					const end = Date.now() + ms;
+					while (Date.now() < end) {
+						if (ready()) return true;
+						await sleep(100);
+					}
+					return ready();
+				};
+
+				/* ---------- the fixture: alpha.c (a wide function holding two sites), beta.c ---------- */
+
+				const alphaLines = ['/* The references fixture: alpha is the hub (line 0). */', '#include "alpha.h"', '', 'void alpha(int n) {', '    int pad_0 = 0;', '    int pad_1 = 1;', '    int pad_2 = 2;', '    int pad_3 = 3;', '    int mid = beta(n);', '    int pad_4 = 4;', '    int pad_5 = 5;', '    int pad_6 = 6;', '    int pad_7 = 7;', '    int tail = beta(n + 1);', '    int pad_8 = 8;', '    int pad_9 = 9;', '    return mid + tail;', '}', '', 'void hook(int n) {', '    (void)n;', '}'].join('\n');
+				const betaLines = ['/* beta.c */', 'int beta(int n) {', '    return n * 2;', '}', '', 'int use = beta(3);'].join('\n');
+				const DEFS = {
+					alpha: { kind: 'function', name: 'alpha', path: 'alpha.c', line: 3, endLine: 16 },
+					beta: { kind: 'function', name: 'beta', path: 'beta.c', line: 1, endLine: 3 },
+					hook: { kind: 'function', name: 'hook', path: 'alpha.c', line: 19, endLine: 21 }
+				};
+				const REFS = {
+					alpha: [{ path: 'alpha.c', matches: [{ line: 3, column: 5 }] }],
+					beta: [
+						{ path: 'alpha.c', matches: [{ line: 8, column: 14 }, { line: 13, column: 15 }] },
+						{ path: 'beta.c', matches: [{ line: 1, column: 4 }, { line: 5, column: 9 }] }
+					]
+				};
+				const OUTLINE = {
+					symbols: [
+						{ kind: 'function', name: 'alpha', container: null, line: 3, endLine: 16 },
+						{ kind: 'function', name: 'hook', container: null, line: 19, endLine: 21 }
+					],
+					imports: [{ name: 'alpha.h', line: 1 }]
+				};
+				const handlers = {
+					symbol_references: ({ name }) => REFS[String(name || '')] ?? [],
+					symbol_lookup: ({ name }) => (DEFS[String(name || '')] ? [DEFS[String(name || '')]] : []),
+					symbol_file_outline: () => OUTLINE,
+					read_file: ({ path }) => {
+						const base = String(path || '').split(/[\\/]/).pop();
+						if (base === 'alpha.c') return { contents: alphaLines, binary: false, size: alphaLines.length };
+						if (base === 'beta.c') return { contents: betaLines, binary: false, size: betaLines.length };
+						return undefined;
+					}
+				};
+				const baseInvoke = window.__TAURI_INTERNALS__.invoke.bind(window.__TAURI_INTERNALS__);
+				window.__TAURI_INTERNALS__.invoke = (command, args) => {
+					const handler = Object.prototype.hasOwnProperty.call(handlers, command) ? handlers[command] : null;
+					if (!handler) return baseInvoke(command, args);
+					const answered = handler(args || {});
+					return answered === undefined ? baseInvoke(command, args) : Promise.resolve(answered);
+				};
+
+				/* ---------- the stage ---------- */
+
+				await waitFor(() => document.querySelectorAll('#statusbar .status-item').length > 0, 30000);
+				const { ReferencesView } = await import('/src/features/search/referencesView.ts');
+				const host = document.createElement('div');
+				host.style.cssText = 'flex:1;min-height:0;display:flex;';
+				const view = new ReferencesView();
+				host.appendChild(view.element);
+				const opens = [];
+				const openLog = document.createElement('span');
+				openLog.style.cssText = 'margin-left:auto;color:#8ec07c;white-space:nowrap;';
+				view.onOpen = (path, line) => {
+					opens.push(path + ':' + line);
+					openLog.textContent = 'jumps: ' + opens.length + ' — last: ' + path + ':' + line + ' (1-based)';
+					console.log('[references] open ' + path + ':' + line);
+				};
+				const note = document.createElement('div');
+				note.style.cssText = 'padding:4px 10px;color:#aaa;border-bottom:1px solid #444;line-height:1.5;';
+				note.textContent = 'REFERENCES FIXTURE (?references=1) — verify by eye: alpha.c opens first (the def row carries the marker); ' +
+					'click site line 9 — the context keeps alpha\u2019s head, folds the pad lines into `… N lines …` rows around the window, and the highlighted ' +
+					'site line jumps on click (logged right); a fold row opens in place; site line 14 shows the tail fold; clicking the beta.c header opens ' +
+					'the second group; the pin freezes the page.';
+				const stage = document.createElement('div');
+				stage.style.cssText = 'position:fixed;inset:0;z-index:9000;display:flex;flex-direction:column;background:var(--vscode-editor-background,#1e1e1e);';
+				stage.append(note, openLog, host);
+				document.body.appendChild(stage);
+				view.setSubject({ kind: 'function', name: 'beta', path: 'beta.c', line: 1 });
 			}
 		</script>
 		<script type="module">

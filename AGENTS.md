@@ -368,24 +368,56 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   parameters and locals from `symbol_locals` over the host-provided live buffer
   (`provideText`, wired beside the setFile feed), refetched only when the covering
   symbol's identity changes; reload rides the showView hook, the active-tab change and the
-  scheduled refresh; `workbench.showSymbolWindow`, Alt+L),
-  `src/features/search/relationsView.ts` + `relations.css` (the Relation panel page —
-  the expandable reference tree over `symbol_relation_children`: the cursor
-  symbol as the root chip (click = the definition), the refsTo / refsFrom / contains
-  direction toggle (contains = the members declared inside the subject, member rows
-  reading as definitions),
-  every node row a `+` expander that lazily fetches its ring (cached per node, the
-  best-effort `hasChildren` misfire answered by a remembered empty ring, 8 rings deep),
-  the edge part and a row double-click jumping to the reference site through `onOpen`,
-  pin stopping the cursor follow; a ring's `truncated` answer renders a cut-short note,
-  `edgeCount > 1` renders a ×N badge (2026-11-20, per-counterpart edge aggregation), and
-  hovering a node floats the declaration card — `symbolLookup` + `readFile` sliced to the
-  definition's first lines, cached per `name|path`; the pick button opens the quick input
-  over `workspaceSymbols`, rooting the tree on any symbol without moving the cursor;
-  `followRelationSymbol` mirrors `followContextSymbol`'s
-  gate/debounce/generation beside it in workbench.ts; `workbench.showRelations`;
-  the dev harness's `?relations=1` surface scripts the whole tree — mask escape hatch,
-  counts, truncation, the tooltip — for eyeballing),
+  scheduled refresh; `workbench.showSymbolWindow`, Alt+L;
+  since 2026-11-20 the lower half — under a draggable sash, collapsible from its own head —
+  is the relation graph (`relationGraph.ts`), rooted on the covering symbol over the
+  host-provided repo (`provideRepo`, the editor's absolute path relativized before it
+  reaches the index), re-rooted on every covering-symbol identity change unless pinned or
+  collapsed; the hover card's relations jump rides `openGraphRoot`, which pins the graph
+  on the hovered symbol and opens the section; 2026-11-20),
+  `src/features/search/relationGraph.ts` + `relationGraph.css` (the relation graph — the
+  Symbol Window's box-and-arrow lower half over the `symbol_relation_children` engine:
+  the root ring drawn as an interactive box-and-arrow
+  canvas, svg edges whose arrowheads land on the referenced side (refsTo's children point
+  up, the other directions point down), call solid blue / use dashed / member green, the
+  aggregating edge carrying its ×N in stroke width and title; the layout a tidy top-down
+  tree recomputed over the visible shapes (leaves in slots, parents centred, a per-depth
+  sweep pushing overlaps right — `computeLayout`, pure and exported), a dragged box's
+  offset surviving every re-layout; the pointer works the canvas — box drag moves a box,
+  background drag pans, the wheel zooms about the cursor, one click opens the definition,
+  a drag kills its own click, a double click re-roots, resting floats the declaration card;
+  a symbol already drawn gains the cross edge instead of a second box, a ring cut short
+  (or a node at the 3-depth cap) renders the faint cut note under its box, and only a new
+  root or the Fit button refits; `pinRoot` seeds an explicit pinned root;
+  the dev harness's `?relgraph=1` surface scripts the Symbol Window whole — outline, sash,
+  graph, and the cursor buttons that re-root it — for eyeballing; 2026-11-20),
+  `src/features/search/definitionView.ts` + `definition.css` (the Definition panel page —
+  2026-11-20, it replaces the relation tree the panel used to host: the clicked symbol's
+  definition content, drawn from the index — the workbench resolves the cursor word
+  (`followDefinitionSymbol` / `resolveDefinitionSymbol`, the same gate/debounce/generation
+  discipline the context window keeps: the panel up, this page active, the pin off) and
+  hands the row over; the body slices the declaration through the index's `endLine`, a
+  macro whose end the index never recorded extends over its `\` continuations, the 400-line
+  / 20 000-char cap ends with the faint cut note, and the header's location button jumps
+  at the 1-based line through `onOpenDefinition`; pin freezes the content;
+  `workbench.showDefinition`),
+  `src/features/search/referencesView.ts` + `references.css` (the References panel page —
+  2026-11-20, Source-Insight-style Lookup References over the index's occurrence list
+  (`symbol_references`) with the definitions' markers (`symbol_lookup`): the clicked
+  symbol's every whole-word site grouped by file with per-group counts (two hits on one
+  line are one site), a file group opening on its header's click over a cached
+  `read_file` + `symbol_file_outline` pair, and — the special processing the raw list
+  never shows — a site's click answering a folded context slice (`foldedContext`, pure
+  and exported): the innermost enclosing definition's declaration line, a window of lines
+  around the site (the site row highlighted, its click jumping 1-based through `onOpen`,
+  the row's double click jumping directly), and the body's middle folded into
+  `… N lines …` rows that click open in place (200-line cap, the remainder its own fold
+  row); with nothing enclosing, a raw ±4 window; a definition site is its own head with
+  the whole body folded behind it; the same cursor-follow gate the definition page keeps
+  (the panel up, this page active, the pin off) resolves the subject — one
+  `resolveDefinitionSymbol` feeding whichever of the two pages is active; the 100-file /
+  500-site caps answer cut notes; `workbench.showReferences`; the dev harness's
+  `?references=1` surface scripts a two-file fixture for eyeballing; 2026-11-20),
   `src/features/search/renameView.ts` + `rename.css` (the rename dialog over
   `symbol_rename_preview` / `symbol_rename_apply` — `symbols.rename` opens it with the
   cursor word: the preview groups every site by file (`rename.locations` headlines,
@@ -404,7 +436,7 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   literal byte spans of one text plus its line-start table, the scanner discipline:
   loop-based, escape-aware, unclosed literals degrade to end-of-text; every relation scan
   filters its hits through it so a name inside a comment or a string is never a reference),
-  `symbols::relations` (the Relation window's query engine,
+  `symbols::relations` (the relation graph's query engine,
   2026-11-19: `relation_children` over one root — refsTo attributes every occurrence of
   the name to its innermost enclosing def via the store's per-file [line, end_line] spans
   (the declaration line's own hit and unattributed hits skip, a hit inside the root's body
@@ -474,7 +506,7 @@ colouring, sticky scroll, minimap, bookmarks, markdown preview.
   `src/features/editor/docFind.ts` (the whole-file find/replace bar the windowed editor and the Fast Viewer
   serve, over `viewer_find` / `viewer_replace`), `src/features/editor/diffViewer.ts` (the diff editor's
   accessible viewer — VS Code's F7 surface: every change as one overlay row with a +/− preview,
-  walked by F7/Shift+F7/arrows, Enter jumping to the change, Escape closing), `src/features/editor/editorProviderViews.ts` (the extension providers' hover/definition bridge beside the workbench's own quick-info hover — a hovered `#define` shows every indexed definition's directive text with the doc comment above it, the slice validated against the live file: the entry's line re-aligns onto the directive the file has now and cuts at the directive's own last `\`-continuation, so a stale index entry shows the macro and its comment, never the declaration below it (2026-11-18, the owner's report: 看宏我就只要宏和对应注释，不要看到结构体，不要错位), a hovered function / struct / enum / class shows its whole definition body through the index's end line (the pane scrolls, so length is no cap), a hovered variable its declaration line, and any entry its doc comment above; the entries rank by what the hover site is — the definition covering the hovered line, the hovered file's own, and the kind the site's text asks for (`hoverKindHint`: `total(` the function, `struct S` that struct, a value position the variable — so a hovered variable leads over a same-named function; 2026-11-17, the owner's reports), each location a click that opens the definition, and macros answer first; and since 2026-11-18 the scope answer leads the whole ranking — a hovered name declared inside the enclosing function of the use site is that parameter or local (`scopeQuickInfoFor`, the declaration line sliced from the live buffer: no disk read, no index), and a same-named global never appears beside it; the hover is sticky — the tooltips keep their hovered word's range and a capture-phase keep-alive guard swallows the pointer's travel toward the tooltip so it can be reached, scrolled and clicked without dismissing; and since 2026-11-20 the card is its own rendering half (`src/features/editor/hoverCard.ts`, the data assembly stays here) that shows each entry's kind, a leading type's members (the contains ring over the store's `members_of`), the files referencing the name (`symbol_ref_stats`) beside a jump that roots the relations window through the `hoverRelations` opener, and a +N count of the definitions past the render cap), `src/features/editor/editorExtras.ts`, `src/features/editor/diffView.ts` (the text diff
+  walked by F7/Shift+F7/arrows, Enter jumping to the change, Escape closing), `src/features/editor/editorProviderViews.ts` (the extension providers' hover/definition bridge beside the workbench's own quick-info hover — a hovered `#define` shows every indexed definition's directive text with the doc comment above it, the slice validated against the live file: the entry's line re-aligns onto the directive the file has now and cuts at the directive's own last `\`-continuation, so a stale index entry shows the macro and its comment, never the declaration below it (2026-11-18, the owner's report: 看宏我就只要宏和对应注释，不要看到结构体，不要错位), a hovered function / struct / enum / class shows its whole definition body through the index's end line (the pane scrolls, so length is no cap), a hovered variable its declaration line, and any entry its doc comment above; the entries rank by what the hover site is — the definition covering the hovered line, the hovered file's own, and the kind the site's text asks for (`hoverKindHint`: `total(` the function, `struct S` that struct, a value position the variable — so a hovered variable leads over a same-named function; 2026-11-17, the owner's reports), each location a click that opens the definition, and macros answer first; and since 2026-11-18 the scope answer leads the whole ranking — a hovered name declared inside the enclosing function of the use site is that parameter or local (`scopeQuickInfoFor`, the declaration line sliced from the live buffer: no disk read, no index), and a same-named global never appears beside it; the hover is sticky — the tooltips keep their hovered word's range and a capture-phase keep-alive guard swallows the pointer's travel toward the tooltip so it can be reached, scrolled and clicked without dismissing; and since 2026-11-20 the card is its own rendering half (`src/features/editor/hoverCard.ts`, the data assembly stays here) that shows each entry's kind, a leading type's members (the contains ring over the store's `members_of`), the files referencing the name (`symbol_ref_stats`) beside a jump that roots the relations window through the `hoverRelations` opener, and a +N count of the definitions past the render cap; and since 2026-11-20 the whole hover answers only under the **Symbol Hover switch** — Settings → Editor's `symbolHover` row and the View menu's `editor.toggleSymbolHover` beside Toggle Word Wrap (the menu entry carries the checked state) — read at hover time, so a flip reaches every already-open editor without a remount, and the extension providers' own hover beside it keeps answering on its own), `src/features/editor/editorExtras.ts`, `src/features/editor/diffView.ts` (the text diff
   view: the backend's git-computed hunks — `scm_diff`'s gix answer — painted as line
   decorations over the split panes or the unified editor, with the hunk's paired lines
   carrying the backend's character-level spans as inline `cm-diff-char-*` marks —

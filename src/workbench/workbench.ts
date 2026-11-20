@@ -732,15 +732,15 @@ export class Workbench {
 
 	contextTimer: number | null = null;
 
-	/** The Relations page's follow: the same debounce/generation discipline the Context
-	 *  Window keeps, over its own root (never the context view's). */
-	relationTimer: number | null = null;
+	/** The Definition page's follow: the same debounce/generation discipline the Context
+	 *  Window keeps, over its own subject (never the context view's). */
+	definitionTimer: number | null = null;
 
 	readonly onThemeChangedBound = () => this.extensionHost.noteThemeChanged();
 
 	contextGeneration = 0;
 
-	relationGeneration = 0;
+	definitionGeneration = 0;
 
 	followContextSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): void {
 		// The view only follows while it is the one being looked at (or pinned to a symbol);
@@ -800,49 +800,59 @@ export class Workbench {
 
 	}
 
-	followRelationSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): void {
-		// The Relations page follows the cursor only while the panel is up, it is the page
-		// being looked at and its root is not pinned - never a background query per keystroke.
-		if (!this.panel.isVisible() || this.panel.activeView() !== 'relations' || this.panel.relations.isPinned()) return;
-		if (this.relationTimer !== null) window.clearTimeout(this.relationTimer);
-		const generation = ++this.relationGeneration;
-		this.relationTimer = window.setTimeout(() => {
-			this.relationTimer = null;
-			if (generation !== this.relationGeneration) return;
-			void this.resolveRelationSymbol(editor);
+	followDefinitionSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): void {
+		// The Definition and References pages follow the cursor only while the panel is up,
+		// the page being looked at is one of them and its content is not pinned - never a
+		// background query per keystroke.
+		if (!this.panel.isVisible()) return;
+		const page = this.panel.activeView();
+		if (page !== 'definition' && page !== 'references') return;
+		if (page === 'definition' ? this.panel.definition.isPinned() : this.panel.references.isPinned()) return;
+		if (this.definitionTimer !== null) window.clearTimeout(this.definitionTimer);
+		const generation = ++this.definitionGeneration;
+		this.definitionTimer = window.setTimeout(() => {
+			this.definitionTimer = null;
+			if (generation !== this.definitionGeneration) return;
+			void this.resolveDefinitionSymbol(editor);
 		}, 150);
 	}
 
-	async resolveRelationSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): Promise<void> {
+	async resolveDefinitionSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): Promise<void> {
 		const view = this.editors.activeView;
+		const page = this.panel.activeView();
+		const clears = (): void => {
+			if (page === 'references') this.panel.references.setSubject(null);
+			else this.panel.definition.setDefinition(null);
+		};
 		if (!editor || editor.kind !== 'file' || !view || !this.repoPath) {
-			this.panel.relations.setRoot(null);
+			clears();
 			return;
 		}
 		const line = view.state.doc.line(Math.min(Math.max(1, editor.line), view.state.doc.lines));
 		const at = Math.min(Math.max(line.from, line.from + editor.column - 1), line.to);
 		const word = view.state.wordAt(at);
 		if (!word) {
-			this.panel.relations.setRoot(null);
+			clears();
 			return;
 		}
 		const name = view.state.sliceDoc(word.from, word.to);
-		let defs: { kind: string; name: string; path: string; line: number }[] = [];
+		let defs: { kind: string; name: string; path: string; line: number; endLine?: number }[] = [];
 		try {
 			defs = (await symbolLookup(name)) ?? [];
 		} catch {
 			defs = [];
 		}
 		if (defs.length === 0) {
-			this.panel.relations.setRoot(null);
+			clears();
 			return;
 		}
 		// A same-file definition outranks the first hit; the index speaks repo-relative
-		// paths and the relation backend expects them, so the definition crosses as
-		// reported (the view's open callback joins the root, not here).
+		// paths and the definition backend expects them, so the row crosses as reported
+		// (the view's open callback joins the root, not here).
 		const wanted = editor.path ? editor.path.replaceAll('\\', '/').toLowerCase() : '';
 		const def = defs.find((candidate) => joinRepo(this.repoPath!, candidate.path).replaceAll('\\', '/').toLowerCase() === wanted) ?? defs[0]!;
-		this.panel.relations.setRoot({ kind: def.kind, name: def.name, path: def.path, line: def.line });
+		if (page === 'references') this.panel.references.setSubject({ kind: def.kind, name: def.name, path: def.path, line: def.line });
+		else this.panel.definition.setDefinition({ kind: def.kind, name: def.name, path: def.path, line: def.line, endLine: def.endLine });
 	}
 
 	/** F6 (M7 7.4): cycle the keyboard through the workbench's parts - activity bar, side

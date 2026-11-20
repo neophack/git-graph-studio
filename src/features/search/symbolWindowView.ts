@@ -7,12 +7,17 @@
 // only repaints a class. The locals ride the same discipline one level down: the
 // enclosing symbol's identity (name + line) is the query key, and only its change asks
 // the backend to parse the live buffer the host hands over through `provideText`.
+// Below the outline, split by a draggable sash, sits the relation graph: the covering
+// symbol's ring drawn as an interactive box-and-arrow canvas over `relationGraph.ts` —
+// re-rooted on every covering-symbol identity change unless pinned, the same discipline
+// the locals run on.
 
 import { symbolFileOutline, symbolLocals } from '../../platform/ipc/symbols';
 
 import { t } from '../../platform/i18n';
 import { KIND_ICONS } from './contextView';
-import { el, icon } from '../../platform/ui/index';
+import { RelationGraphView } from './relationGraph';
+import { el, icon, relativeTo } from '../../platform/ui/index';
 
 import type { FileOutlineImport, FileOutlineSymbol, ScopeDefinition } from '../../platform/ipc/symbols';
 
@@ -93,6 +98,11 @@ export class SymbolWindowView {
 	 *  text editor's document; null whenever the cursor is not in a text editor. */
 	provideText?: () => string | null;
 
+	/** The workspace root the repo-relative paths speak — the host (boot) hands over the
+	 *  open repo, so the graph's root reaches the index in its own vocabulary. Null keeps
+	 *  the editor's path as-is (the graph then answers the empty ring, not a crash). */
+	provideRepo?: () => string | null;
+
 	/** The current function's locals as `symbol_locals` answered, null while the section
 	 *  is hidden — no covering symbol, no text to parse, the request still in flight,
 	 *  failed, or superseded. */
@@ -108,6 +118,21 @@ export class SymbolWindowView {
 	/** Invalidates an older locals answer against a newer ask or outline reload. */
 	private localsGen = 0;
 
+	/** The lower half's graph over the covering symbol, its section shell, and the sash
+	 *  between the outline and it. */
+	private readonly graph: RelationGraphView;
+
+	private readonly graphSection: HTMLElement;
+
+	private readonly graphHead: HTMLElement;
+
+	private readonly sash: HTMLElement;
+
+	private graphCollapsed = false;
+
+	/** The drag the sash is running — its window listeners end it. */
+	private sashDrag: { startY: number; baseHeight: number; viewHeight: number } | null = null;
+
 	onOpen?: (path: string, line: number) => void;
 
 	constructor(private readonly container: HTMLElement) {
@@ -121,10 +146,110 @@ export class SymbolWindowView {
 			this.filterText = this.filterInput.value.trim().toLowerCase();
 			this.render();
 		});
-		const header = el('div', 'sw-header', [icon('symbol-structure'), this.title, this.filterInput]);
+		const header = el('div', 'sw-header', [icon('symbol-class'), this.title, this.filterInput]);
 		this.body = el('div', 'sw-list');
-		container.append(header, this.body);
+		this.graph = new RelationGraphView();
+		this.graph.onOpen = (path, line) => this.onOpen?.(path, line);
+		this.graph.onPinChange = (pinned) => {
+			if (!pinned) this.feedGraph();
+		};
+		this.graphSection = el('div', 'sw-graph');
+		// The head keeps its own classes — `.sw-section` stays the outline's collapsible
+		// sections' vocabulary, which the tests and the collapse reads ride on.
+		this.graphHead = el('div', 'sw-graph-head');
+		this.graphHead.setAttribute('role', 'button');
+		// The head's click is the section's collapse; the graph's own controls riding in it
+		// must keep their clicks for themselves.
+		this.graph.controls.addEventListener('click', (event) => event.stopPropagation());
+		this.paintGraphHead();
+		this.graphHead.addEventListener('click', () => this.toggleGraph());
+		this.sash = el('div', 'sw-sash');
+		this.sash.setAttribute('role', 'separator');
+		this.sash.addEventListener('pointerdown', (event) => this.beginSashDrag(event));
+		this.graphSection.append(this.graphHead, this.graph.element);
+		container.append(header, this.body, this.sash, this.graphSection);
 		this.render();
+	}
+
+	/** The section head's twistie and label — one paint per collapse toggle. */
+	private paintGraphHead(): void {
+		this.graphHead.textContent = '';
+		this.graphHead.append(
+			el('span', 'twistie', [icon(this.graphCollapsed ? 'chevron-right' : 'chevron-down')]),
+			el('span', 'sw-graph-label', [t('symbols.graph.title')]),
+			this.graph.controls
+		);
+	}
+
+	private toggleGraph(): void {
+		this.graphCollapsed = !this.graphCollapsed;
+		this.graphSection.classList.toggle('collapsed', this.graphCollapsed);
+		this.paintGraphHead();
+		if (!this.graphCollapsed) {
+			this.feedGraph();
+			// A re-shown section has a real viewport again — frame what stands.
+			window.requestAnimationFrame(() => this.graph.fit());
+		}
+	}
+
+	/** The sash: a vertical drag between the outline and the graph moves the split, as a
+	 *  percentage of the view's height clamped so neither half collapses. */
+	private beginSashDrag(event: PointerEvent): void {
+		if (event.button !== 0 || this.graphCollapsed) return;
+		const viewRect = this.container.getBoundingClientRect();
+		if (viewRect.height === 0) return;
+		event.preventDefault();
+		this.sashDrag = { startY: event.clientY, baseHeight: this.graphSection.getBoundingClientRect().height, viewHeight: viewRect.height };
+		const move = (e: PointerEvent): void => {
+			const drag = this.sashDrag;
+			if (!drag) return;
+			const height = drag.baseHeight + (drag.startY - e.clientY);
+			const clamped = Math.min(Math.max(height, drag.viewHeight * 0.15), drag.viewHeight * 0.8);
+			this.graphSection.style.height = `${(clamped / drag.viewHeight) * 100}%`;
+		};
+		const up = (): void => {
+			this.sashDrag = null;
+			window.removeEventListener('pointermove', move);
+			window.removeEventListener('pointerup', up);
+		};
+		window.addEventListener('pointermove', move);
+		window.addEventListener('pointerup', up);
+	}
+
+	/** The covering symbol moved: remember it and refresh the locals — once per identity
+	 *  change, never per keystroke. Runs after the highlight swap so a synchronous
+	 *  hide-render below always lands on the settled DOM. The graph rides the same
+	 *  identity discipline: only an identity change re-roots it (and a collapsed section
+	 *  is asked nothing — its re-show feeds it). */
+	private noteCurrentSymbol(symbol: FileOutlineSymbol | null): void {
+		if (this.localsOwnerKnown && sameIdentity(this.localsOwner, symbol)) return;
+		this.localsOwner = symbol;
+		this.localsOwnerKnown = true;
+		void this.fetchLocals();
+		this.feedGraph();
+	}
+
+	/** The hover card's jump: root the graph on the hovered symbol, pinned so the
+	 *  cursor-follow never clobbers it, and make sure the section stands open. The
+	 *  caller shows the view. */
+	openGraphRoot(sym: { kind: string; name: string; path: string; line: number }): void {
+		if (this.graphCollapsed) this.toggleGraph();
+		this.graph.pinRoot(sym);
+	}
+
+	/** Root the graph on the covering symbol: the index speaks repo-relative paths, so the
+	 *  editor's absolute path crosses through the host's root first. A pin freezes the
+	 *  graph; no covering symbol (or no root to relativize against) empties it. */
+	private feedGraph(): void {
+		if (this.graph.isPinned() || this.graphCollapsed) return;
+		const symbol = this.localsOwner;
+		const path = this.targetPath;
+		if (!symbol || !path) {
+			this.graph.setRoot(null);
+			return;
+		}
+		const repo = this.provideRepo?.() ?? null;
+		this.graph.setRoot({ kind: symbol.kind, name: symbol.name, path: repo ? relativeTo(repo, path) : path, line: symbol.line });
 	}
 
 	/** The active editor moved: remember the file, load it when the sidebar shows this
@@ -143,6 +268,7 @@ export class SymbolWindowView {
 			this.symbols = [];
 			this.imports = [];
 			this.resetLocals();
+			this.feedGraph();
 			this.render();
 			return;
 		}
@@ -350,16 +476,6 @@ export class SymbolWindowView {
 			}
 		}
 		return best;
-	}
-
-	/** The covering symbol moved: remember it and refresh the locals — once per identity
-	 *  change, never per keystroke. Runs after the highlight swap so a synchronous
-	 *  hide-render below always lands on the settled DOM. */
-	private noteCurrentSymbol(symbol: FileOutlineSymbol | null): void {
-		if (this.localsOwnerKnown && sameIdentity(this.localsOwner, symbol)) return;
-		this.localsOwner = symbol;
-		this.localsOwnerKnown = true;
-		void this.fetchLocals();
 	}
 
 	/** Ask for the owner's locals. The host's text decides everything: no callback, a

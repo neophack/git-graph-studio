@@ -51,14 +51,23 @@ names), Find References narrowed to the files that contain the word, Quick Open'
 that shows the definition of the symbol under the cursor. Two classic windows
 complete the set: a **Symbol Window** sidebar page (the active file's imports and its
 outline as icon rows — click jumps, the cursor's enclosing symbol stays highlighted, and
-the enclosing function's parameters and locals ride along as a Current-function section)
+the enclosing function's parameters and locals ride along as a Current-function section;
+below a draggable sash, the same page draws the **Relation Graph**: the covering function's
+relations as an interactive box-and-arrow canvas — box drag, background pan, wheel zoom
+about the cursor, one click into the definition, double-click
+re-roots on that symbol, `+` drills the next ring, and the direction buttons swap who
+references whom)
 and
-a **Relation** panel page (the symbol under the cursor as the root of an expandable
-reference tree: who references it, what it references, and — for a type — what it
-declares, every node a `+` away from its own ring, jumping to any reference site;
-reference counts badge each edge, a cut-short note reports truncation, hovering a node
-floats its declaration, a picker roots the tree on any symbol, and all scans skip
-comments and strings). Renaming rides the same index: a preview lists every definition
+a **Definition** panel page (click a symbol and the panel shows its definition content: a
+function or method through its body's end line, a macro through its directive and every
+continuation, a struct or enum through its whole body — the index sizes the slice, a cap
+cuts the rare giant with a note, and the header's location jumps to the definition; the
+pin freezes the content against the cursor's roam), and a **References** panel page
+(Source-Insight-style Lookup References: every whole-word site of the clicked symbol
+grouped by file with counts, and a site's click answering a specially processed context —
+the enclosing definition's declaration line, the lines around the site highlighted, the
+function body's middle folded into `… N lines …` rows that click open — the highlighted
+site line jumps into the editor; the pin freezes the list). Renaming rides the same index: a preview lists every definition
 and reference site grouped by file, conflicts refuse all-or-nothing, and the apply
 rewrites files in place with word-boundary precision — encoding, line endings and BOM
 preserved, every rewritten file re-verified with the original restored on any doubt
@@ -67,7 +76,10 @@ a category view (symbols by kind with counts), and a command switches a symbol b
 its declaration and its definition. Hovering any symbol answers quick documentation in
 place: macro directives with their comments, whole function and type bodies, the
 enclosing function's locals first, a type's members listed under the hover, and the
-reference footprint with a jump into the relations window. The declarations are extracted by
+reference footprint with a jump into the Symbol Window's relation graph. The whole
+hover answers only while the Symbol Hover switch is on — Settings → Editor's Symbol
+Hover row, or the View menu's Toggle Symbol Hover — and a flip reaches every open
+editor at once. The declarations are extracted by
 a tree-sitter parser layer (one grammar per language, each behind a Cargo feature), so every
 symbol carries its column, range, enclosing type and complexity.
 

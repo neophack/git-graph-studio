@@ -54,7 +54,7 @@ export const layoutMethods: ThisType<Workbench> = {
 		add('search', icon('search'), 'Search (Ctrl+Shift+F)', () => this.toggleView('search'));
 		add('scm', icon('source-control'), 'Source Control (Ctrl+Shift+G)', () => this.toggleView('scm'));
 		add('analysis', icon('graph'), 'Analysis (Ctrl+Shift+A)', () => this.toggleView('analysis'));
-		add('symbolWindow', icon('symbol-structure'), 'Symbols (Alt+L)', () => this.toggleView('symbolWindow'));
+		add('symbolWindow', icon('symbol-class'), 'Symbols (Alt+L)', () => this.toggleView('symbolWindow'));
 		add('extensions', icon('extensions'), 'Extensions (Ctrl+Shift+X)', () => this.toggleView('extensions'));
 		this.activitySpacer = el('div', 'activity-spacer');
 		this.activityBar.appendChild(this.activitySpacer);

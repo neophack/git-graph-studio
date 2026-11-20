@@ -1667,7 +1667,7 @@ export const openMethods: ThisType<EditorGroup> = {
 			input: { kind: 'symboldb', id },
 			id,
 			label: 'Symbol Database',
-			iconClass: 'symbol-structure',
+			iconClass: 'symbol-class',
 			pane: el('div', 'editor-pane'),
 			dirty: false
 		};

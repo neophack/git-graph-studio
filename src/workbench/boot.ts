@@ -149,6 +149,7 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'editor.toggleLineComment', title: 'Toggle Line Comment', category: 'Edit', keybinding: 'Ctrl+/', enabled: hasCommentSurface, run: () => this.editors.runEditorCommand('toggleLineComment') });
 		register({ id: 'editor.toggleBlockComment', title: 'Toggle Block Comment', category: 'Edit', keybinding: 'Shift+Alt+A', enabled: hasCommentSurface, run: () => this.editors.runEditorCommand('toggleBlockComment') });
 		register({ id: 'editor.toggleWordWrap', title: 'Toggle Word Wrap', category: 'View', keybinding: 'Alt+Z', run: () => updateSetting('wordWrap', !settings.wordWrap) });
+		register({ id: 'editor.toggleSymbolHover', title: 'Toggle Symbol Hover', category: 'View', run: () => updateSetting('symbolHover', !settings.symbolHover) });
 		register({ id: 'editor.selectAll', title: 'Select All', category: 'Selection', keybinding: 'Ctrl+A', enabled: hasEditor, run: () => this.editors.runEditorCommand('selectAll') });
 		// VS Code's line-editing family: join, sort, the case transforms, trim. None carries
 		// a free VS Code-matching single key here (Ctrl+J toggles the panel; VS Code's own
@@ -356,10 +357,11 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'view.zenMode', title: 'Toggle Zen Mode', category: 'View', keybinding: 'Ctrl+K Z', run: () => this.toggleZenMode() });
 		register({ id: 'workbench.showOutput', title: 'Output', category: 'View', run: () => this.panel.show('output') });
 		register({ id: 'workbench.showContext', title: 'Context', category: 'View', run: () => this.panel.show('context') });
-		register({ id: 'workbench.showRelations', title: 'Relations', category: 'View', run: () => this.panel.show('relations') });
+		register({ id: 'workbench.showDefinition', title: 'Definition', category: 'View', run: () => this.panel.show('definition') });
+		register({ id: 'workbench.showReferences', title: 'References', category: 'View', run: () => this.panel.show('references') });
 		// The panel page's zh-cn twin (the localization sweep reads the command title
 		// through trText, as it does every registry title).
-		registerZhCnText({ 'Relations': '关系' });
+		registerZhCnText({ 'Definition': '定义', 'References': '引用' });
 		register({ id: 'workbench.showSymbolDatabase', title: 'Symbol Database', category: 'View', enabled: hasRepo, run: () => void this.editors.openSymbolDatabase() });
 		register({ id: 'workbench.focusNextPart', title: 'Focus Next Part', category: 'View', keybinding: 'F6', run: () => this.focusNextPart() });
 		register({ id: 'terminal.toggle', title: 'Toggle Terminal', category: 'Terminal', keybinding: 'Ctrl+`', run: () => this.panel.toggle('terminal') });
@@ -514,8 +516,8 @@ export const bootMethods: ThisType<Workbench> = {
 			this.statusBar.setEditor(editor);
 			this.followContextSymbol(editor);
 			// The Relations page follows the same payload; its own gate (the page being the
-			// active one, the root not pinned) lives inside followRelationSymbol.
-			this.followRelationSymbol(editor);
+			// active one, the content not pinned) lives inside followDefinitionSymbol.
+			this.followDefinitionSymbol(editor);
 			// The Symbol Window follows the active editor's file and cursor line (0-based,
 			// the same payload the context window follows); no editor clears it.
 			if (editor?.kind === 'file' && editor.path) this.symbolWindow.setFile(editor.path, editor.line);
@@ -535,8 +537,11 @@ export const bootMethods: ThisType<Workbench> = {
 			this.extensionHost.noteActiveEditor(editor);
 		};
 		// The Symbol Window's "current function" locals read the active text editor's live
-		// buffer through this hook — null whenever the cursor is not in a text editor.
+		// buffer through this hook — null whenever the cursor is not in a text editor. The
+		// relation graph under the outline relativizes the editor's path through the open
+		// repo, so its root reaches the index in the repo-relative vocabulary it speaks.
 		this.symbolWindow.provideText = () => { const editor = this.editors.activeGroup.activeEditor; return editor && editor.input.kind === 'file' && editor.view ? editor.view.state.doc.toString() : null; };
+		this.symbolWindow.provideRepo = () => this.repoPath;
 		this.editors.onNavigationChange = () => this.titleBar.setNavigation(this.editors.canGoBack(), this.editors.canGoForward());
 		// The session snapshot (tabs, active tab, expanded folders) follows every change, coalesced.
 		// The session snapshot follows every change, coalesced — and so does every extension's
@@ -584,29 +589,38 @@ export const bootMethods: ThisType<Workbench> = {
 		this.panel.context.onOpenDefinition = (definition) => {
 			void this.editors.openFile(definition.path, { line: definition.line + 1 });
 		};
-		// The Relations window's jumps: a definition (the root chip, a row's name) or a
-		// reference site (a row's edge, the row's double click) opens at the 1-based line;
-		// the index speaks repo-relative paths, so an open joins the workspace root.
-		this.panel.relations.onOpen = (path, line) => {
+		// The Definition page's jump: the header's location button opens the definition at
+		// the 1-based line; the index speaks repo-relative paths, so an open joins the
+		// workspace root.
+		this.panel.definition.onOpenDefinition = (path, line) => {
 			void this.editors.openFile(/^([a-zA-Z]:[\\/]|\\|\/)/.test(path) || !this.repoPath ? path : joinRepo(this.repoPath, path), { line });
 		};
-		// The hover card's "open the relations window" click: the card's cursor symbol —
-		// the index's own { kind, name, path, line } vocabulary — becomes the Relations
-		// page's root.
+		// The References page's jump: a highlighted site line — or the row's double click —
+		// opens the site at the 1-based line; the index speaks repo-relative paths, so an
+		// open joins the workspace root.
+		this.panel.references.onOpen = (path, line) => {
+			void this.editors.openFile(/^([a-zA-Z]:[\\/]|\\|\/)/.test(path) || !this.repoPath ? path : joinRepo(this.repoPath, path), { line });
+		};
+		// The hover card's relations click: the card's symbol — the index's own
+		// { kind, name, path, line } vocabulary — becomes the Symbol Window's relation
+		// graph's pinned root, and the sidebar shows it.
 		setHoverRelationsOpener((sym) => {
-			this.panel.show('relations');
-			this.panel.relations.setRoot(sym);
+			this.showView('symbolWindow');
+			this.symbolWindow.openGraphRoot(sym);
 		});
 		// The page's own activation re-resolves the cursor symbol right away (the debounced
 		// follow only rides editor changes): the live selection is the payload.
-		this.panel.relations.onNeedRoot = () => {
+		this.panel.definition.onNeedRoot = () => {
 			const view = this.editors.activeView;
 			const input = this.editors.activeInput;
 			if (input?.kind !== 'file' || !view) return;
 			const position = view.state.selection.main.head;
 			const line = view.state.doc.lineAt(position);
-			this.followRelationSymbol({ kind: 'file', path: input.path, line: line.number, column: position - line.from + 1 });
+			this.followDefinitionSymbol({ kind: 'file', path: input.path, line: line.number, column: position - line.from + 1 });
 		};
+		// The References page's activation re-resolves the cursor symbol through the same
+		// live-selection payload the definition page hands over.
+		this.panel.references.onNeedRoot = this.panel.definition.onNeedRoot;
 
 		document.addEventListener('keydown', this.onKeyDownBound);
 		// External changes arrive from the backend's file watcher; the focus refresh stays as

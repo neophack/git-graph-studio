@@ -1,0 +1,65 @@
+/* The References panel page's own affordances — the header row, the file groups, the site
+   rows with their painted occurrences, and the folded context slice with its fold rows.
+   The shared row vocabulary lives in the workbench shell's stylesheet. */
+
+.refs-panel { display: flex; flex-direction: column; min-height: 0; }
+.refs-body { flex: 1; min-height: 0; overflow: auto; padding: 4px 10px 8px; }
+.refs-hint { color: var(--vscode-descriptionForeground); padding: 8px 0; display: flex; align-items: center; gap: 6px; }
+.refs-title { display: flex; align-items: center; gap: 8px; padding: 2px 0 6px; white-space: nowrap; }
+.refs-title > .codicon { font-size: 14px; }
+.refs-name { font-weight: 600; color: var(--vscode-sideBar-foreground); }
+.refs-kind { color: var(--vscode-descriptionForeground); font-size: 11px; }
+.refs-summary { margin-left: auto; color: var(--vscode-descriptionForeground); font-size: 11px; flex: none; }
+.refs-cut { padding: 4px 0 0; color: var(--vscode-descriptionForeground); font-size: 11px; }
+
+.refs-file {
+	display: flex; align-items: center; gap: 6px; padding: 3px 2px; cursor: pointer; border-radius: 3px;
+	white-space: nowrap; color: var(--vscode-sideBar-foreground);
+}
+.refs-file:hover { background: var(--vscode-list-hoverBackground); }
+.refs-file:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+.refs-file > .twistie { font-size: 12px; flex: none; color: var(--vscode-descriptionForeground); }
+.refs-file-name { font-weight: 600; font-size: 12px; }
+.refs-file-path { color: var(--vscode-descriptionForeground); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+.refs-file-count {
+	margin-left: auto; flex: none; color: var(--vscode-descriptionForeground); font-size: 11px;
+	background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
+	border-radius: 8px; padding: 0 6px; line-height: 16px;
+}
+
+.refs-site {
+	display: flex; align-items: center; gap: 6px; padding: 1px 2px 1px 16px; cursor: pointer; border-radius: 3px;
+	font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.5;
+	white-space: nowrap;
+}
+.refs-site:hover { background: var(--vscode-list-hoverBackground); }
+.refs-def { font-size: 14px; flex: none; color: var(--vscode-symbolIcon-functionForeground, var(--vscode-descriptionForeground)); }
+.refs-def-space { width: 14px; flex: none; }
+.refs-site-num {
+	flex: none; min-width: 30px; text-align: right; color: var(--vscode-descriptionForeground);
+	font-size: 11px; user-select: none;
+}
+.refs-site-text { overflow: hidden; text-overflow: ellipsis; }
+.refs-hit {
+	background: none; color: inherit; font-weight: 700;
+	text-decoration: underline; text-decoration-color: var(--vscode-editorOverviewRuler-findMatchForeground, currentColor);
+}
+.refs-site:hover .refs-hit { background: var(--vscode-editor-findMatchHighlightBackground); }
+
+.refs-ctx {
+	margin: 2px 0 4px 16px; padding: 3px 0; border-left: 2px solid var(--vscode-panel-border, var(--vscode-descriptionForeground));
+	font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.5;
+	white-space: pre; overflow-x: auto;
+}
+.ref-ctx-line { color: var(--vscode-descriptionForeground); padding: 0 6px; }
+.ref-ctx-site {
+	color: var(--vscode-sideBar-foreground); background: var(--vscode-editor-findMatchHighlightBackground);
+	cursor: pointer;
+}
+.ref-ctx-site:hover { outline: 1px solid var(--vscode-focusBorder); }
+.ref-ctx-site .refs-hit { text-decoration: underline; text-decoration-style: dotted; }
+.ref-ctx-fold {
+	color: var(--vscode-descriptionForeground); padding: 0 6px; cursor: pointer; font-style: italic; user-select: none;
+}
+.ref-ctx-fold:hover { color: var(--vscode-textLink-foreground); }
+.ref-ctx-fold:focus-visible { outline: 1px solid var(--vscode-focusBorder); }

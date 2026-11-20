@@ -167,7 +167,7 @@ export class SymbolDatabaseView {
 		this.modeCategories.setAttribute('aria-pressed', 'false');
 		this.modeCategories.addEventListener('click', () => this.setMode('categories'));
 		header.append(
-			icon('symbol-structure'),
+			icon('symbol-class'),
 			this.title,
 			this.filterInput,
 			el('div', 'sd-mode', [this.modeFolders, this.modeCategories]),

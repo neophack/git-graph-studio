@@ -24,11 +24,11 @@ export const KIND_ICONS: Record<string, string> = {
 	function: 'symbol-method',
 	method: 'symbol-method',
 	class: 'symbol-class',
-	struct: 'symbol-struct',
+	struct: 'symbol-structure',
 	interface: 'symbol-interface',
 	enum: 'symbol-enum',
 	module: 'symbol-module',
-	type: 'symbol-type-parameter'
+	type: 'symbol-parameter'
 };
 
 export class ContextView {

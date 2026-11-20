@@ -1,0 +1,20 @@
+/* The Definition panel page's own affordances — the header row, the body's code pane, and
+   the resting hints. The shared row vocabulary lives in the workbench shell's stylesheet. */
+
+.def-panel { display: flex; flex-direction: column; min-height: 0; }
+.def-body { flex: 1; min-height: 0; overflow: auto; padding: 4px 10px 8px; }
+.def-hint { color: var(--vscode-descriptionForeground); padding: 8px 0; display: flex; align-items: center; gap: 6px; }
+.def-title { display: flex; align-items: center; gap: 8px; padding: 2px 0 6px; white-space: nowrap; }
+.def-title > .codicon { font-size: 14px; }
+.def-name { font-weight: 600; color: var(--vscode-sideBar-foreground); }
+.def-kind { color: var(--vscode-descriptionForeground); font-size: 11px; }
+.def-location {
+	margin-left: auto; background: none; border: none; padding: 0 2px; border-radius: 3px;
+	color: var(--vscode-descriptionForeground); font-size: 11px; flex: none;
+}
+.def-location:hover { color: var(--vscode-textLink-foreground); background: var(--vscode-toolbar-hoverBackground); }
+.def-code {
+	margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.5;
+	white-space: pre; overflow-x: auto;
+}
+.def-cut { padding: 4px 0 0; color: var(--vscode-descriptionForeground); font-size: 11px; }
