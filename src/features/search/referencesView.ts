@@ -363,7 +363,7 @@ export class ReferencesView {
 			const defs = this.defLines.get(file.path);
 			for (const match of matches) {
 				if (!this.openGroups.has(file.path)) return;
-				group.appendChild(this.buildSite(file, match, lines, defs?.get(match.line)));
+				group.appendChild(this.buildSite(file, match, lines, defs?.get(match.line - 1)));
 			}
 			// An expanded site of a re-rendered group repaints its folded context from the cache.
 			for (const match of matches) {
@@ -383,12 +383,15 @@ export class ReferencesView {
 		} else {
 			row.appendChild(el('span', 'refs-def-space'));
 		}
-		row.appendChild(el('span', 'refs-site-num', [String(match.line + 1)]));
-		const text = (lines[match.line] ?? '').trimEnd().slice(0, TEXT_MAX);
+		// The index speaks 1-based lines; the file's lines array and the outline spans are
+		// 0-based — the site row shows the line as the backend named it.
+		const at = match.line - 1;
+		row.appendChild(el('span', 'refs-site-num', [String(match.line)]));
+		const text = (lines[at] ?? '').trimEnd().slice(0, TEXT_MAX);
 		row.appendChild(this.paintLineText(text, this.subject?.name ?? ''));
 		row.title = t('references.siteTitle');
 		row.addEventListener('click', () => void this.toggleSite(row, file, match.line));
-		row.addEventListener('dblclick', () => this.onOpen?.(file.path, match.line + 1));
+		row.addEventListener('dblclick', () => this.onOpen?.(file.path, match.line));
 		return row;
 	}
 
@@ -423,7 +426,8 @@ export class ReferencesView {
 	}
 
 	/** Build and mount one site's folded context after its row: the pure slice over the
-	 *  file's cached lines and outline, the fold rows wired to open in place. */
+	 *  file's cached lines and outline, the fold rows wired to open in place. `line` is the
+	 *  index's 1-based site line. */
 	private async expandSite(host: HTMLElement, file: SymbolRefFile, line: number, scroll: boolean): Promise<void> {
 		const key = siteKey(file.path, line);
 		const data = await this.loadFile(file.path);
@@ -435,7 +439,7 @@ export class ReferencesView {
 		ctx.dataset['for'] = key;
 		const lines = data?.lines ?? [];
 		const spans = data?.spans ?? [];
-		for (const entry of foldedContext(lines, spans, line)) {
+		for (const entry of foldedContext(lines, spans, line - 1)) {
 			if (entry.kind === 'fold') {
 				ctx.appendChild(this.buildFold(entry.from ?? 0, entry.to ?? 0, lines));
 			} else {
@@ -444,7 +448,7 @@ export class ReferencesView {
 				if (entry.kind === 'site') {
 					lineElt.classList.add('ref-ctx-site');
 					lineElt.title = t('references.openTitle');
-					lineElt.addEventListener('click', () => this.onOpen?.(file.path, line + 1));
+					lineElt.addEventListener('click', () => this.onOpen?.(file.path, line));
 				}
 				ctx.appendChild(lineElt);
 			}

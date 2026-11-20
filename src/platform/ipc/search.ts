@@ -51,7 +51,8 @@ export interface WsSymbol {
 	container?: string | null;
 }
 
-/** One file of `find_references`: the lines the name occurs on. */
+/** One file of `find_references`: the lines the name occurs on, 1-based (`line` counts
+ *  source lines from one, `column` the hit's 1-based character column). */
 export interface RefFile {
 	path: string;
 	matches: { line: number; column: number; length: number; text: string }[];

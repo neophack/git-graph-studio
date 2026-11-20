@@ -399,9 +399,25 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   ends stand drawn), a ring naming only drawn symbols leaves the node a leaf, and the
   3-depth cap answers the ⋯ instead of a request; `pinRoot` seeds an explicit pinned
   root; the engine’s own viewport owns the wheel zoom and the drag pan, and Fit frames
-  the whole drawing; the dev harness’s `?relgraph=1` surface scripts the Symbol Window
-  whole — outline, sash, graph, and the cursor buttons that re-root it — for eyeballing;
-  2026-11-20),
+  the whole drawing;
+  2026-11-20, the relation TYPE is Source Insight's own (the si-lite reconstruction the
+  reference; the owner's direction: the references and relations must match Source
+  Insight's usage experience):
+  the section head's picker lists the thirteen view names the relation window offers —
+  Calls, Callers, Calls and Callers, Referenced by Functions/Files/Modules, Contains,
+  Container, Base/Derived Classes, Member Types/Classes, Types Used (SI_KINDS, the
+  active one checked) — and every ring drills by the graph's own type, the combined
+  view's branches reading the node's edge coordinates for its side (a callee's edge
+  site sits in the root's own file → Calls; anywhere else → Callers); the arrows point
+  the kind's own way (the referencing side at the referenced — refsTo's family,
+  Container, Derived Classes; the subject at what it names — refsFrom's family,
+  Contains, Base Classes; the `base` edge its own colour), the depth guard is SI's own
+  — five levels of cards, the fifth a leaf carrying the ⋯ — the per-ring cap the
+  backend's 64, and an empty root ring answers the kind's own verdict ("No callers.",
+  "No contents.", … — EMPTY_VERDICTS, the wording the relation window itself prints);
+  the dev harness's `?relgraph=1` surface scripts the Symbol Window
+  whole — outline, sash, graph, the type picker and the cursor buttons that re-root it
+  — for eyeballing; 2026-11-20),
   `src/features/search/definitionView.ts` + `definition.css` (the Definition panel page —
   2026-11-20, it replaces the relation tree the panel used to host: the clicked symbol's
   definition content, drawn from the index — the workbench resolves the cursor word
@@ -447,8 +463,17 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   text search), `replace`, `compare` (the folder comparison), `hexdiff` (the byte
   comparison), `symbols::parse` (the tree-sitter parser layer, plan M4.1: one embedded
   `.scm` query per language over defs, call sites and imports, each grammar behind a
-  `grammar-*` Cargo feature, the outline scan as the fallback), `symbols::store` (the
-  compact on-disk store), `symbols::index` (the per-root databases, the build / resume /
+  `grammar-*` Cargo feature, the outline scan as the fallback; 2026-11-20, a class-like
+  declaration carries its base types' simple names (`ParsedSymbol::bases`, the
+  `extends`/`implements`/`: public Base`/superclass/supertrait clause walked two levels,
+  the qualified or templated spelling reduced to its last segment — the Base/Derived
+  Classes rings' data; and the container walk stopped matching a class-like declaration's
+  own node — a self-container made every C++/Java/C#/TS class its own member and blinded
+  the nested-class chains the contains rings walk)), `symbols::store` (the
+  compact on-disk store; format v7, 2026-11-20: the per-file base table — one record per
+  deriving declaration, the base names interned beside the others — and the container fix
+  both rebuild a version-6 file; `bases_of`/`derived_of` answer the inheritance rings off
+  the table, never the texts), `symbols::index` (the per-root databases, the build / resume /
   rebuild, the reference scan), `symbols::mask` (the code mask — the comment/string/char-
   literal byte spans of one text plus its line-start table, the scanner discipline:
   loop-based, escape-aware, unclosed literals degrade to end-of-text; every relation scan
@@ -467,7 +492,26 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   budget both set `truncated`; the third direction `contains` answers the root's members
   over the store's `members_of` (container-intern scan, member edges carrying the
   member's own declaration, `hasChildren` peeking whether the member is itself a
-  container — nested types drill)),
+  container — nested types drill);
+  2026-11-20, the type set speaks Source Insight's own relation window (the si-lite
+  reconstruction the reference; the owner's direction: the references and relations must
+  match Source Insight's usage experience): `RelationKind` answers thirteen kinds — the three original
+  directions plus `calls`/`callers` (the same scans through the call edges only, the
+  peeks asking the same filtered question so a ring marker never promises an empty
+  drill), `callsAndCallers` (the caller ring first, the callee ring merged in, a mutual
+  counterpart keeping one node whose count is the pair's total — a caller's edge site
+  lives in its own file and a callee's in the subject's, the coordinates the frontend
+  reads to pick the branch's drill kind), `referencedByFunctions` (refsTo under SI's
+  name), `referencedByFiles`/`referencedByModules` (the attributed sites keyed by their
+  file — one node per file, count the kept sites, the earliest line, files answering
+  leaves), `container` (the enclosing type one ring up, the membership edge at the
+  subject's declaration, the chain walked upward one drill at a time),
+  `memberTypes`/`memberClasses` (the members filtered by kind, the store-side filter
+  keeping the truncation honest), `typesUsed` (the type-category targets only) and
+  `baseClasses`/`derivedClasses` (the parser's base table walked both ways, the edges at
+  the derivations' own lines); parse() accepts SI's own view names in every spelling
+  (camelCase, lower case without spaces, the `callees` alias); the per-ring node cap is
+  SI's 64),
   `symbols::rename` (the rename engine, 2026-11-20: the plan unions the old name's
   declarations with its masked reference sites and the conflicts refuse all-or-nothing —
   the new name already declared, the same name, not found, over the site cap — while the

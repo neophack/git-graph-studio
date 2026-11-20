@@ -39,9 +39,10 @@ use crate::symbols::store::{FileOutlineRow, SymbolStore};
 use crate::symbols::WorkspaceSymbol;
 
 /// The children one direction returns at most: the window expands ring by ring, and a
-/// hub name's caller list is read, not painted as a graph. Tripping it marks the answer
-/// truncated — the ring had more to show.
-const MAX_NODES: usize = 500;
+/// hub name's caller list is read, not painted as a graph. Source Insight's relation
+/// window caps every node's children at 64 and answers the overflow's own verdict; the
+/// same ceiling here marks the answer truncated — the ring had more to show.
+const MAX_NODES: usize = 64;
 /// One relation call's wall-clock budget, a time-slice discipline: a
 /// pathological workspace stops the expansion mid-scan (`truncated`) instead of holding
 /// the store's lock past the user's patience.
@@ -110,22 +111,118 @@ impl Budget {
 }
 
 /// `refsTo`: who references the subject. `refsFrom`: what the subject references.
-/// `contains`: the members declared inside the subject.
+/// `contains`: the members declared inside the subject. The rest speak Source Insight's
+/// relation window's own type set (2026-11-20, the owner's direction: the relation and
+/// references experience aligned with Source Insight, the si-lite reconstruction the
+/// reference): Calls (the call edges out), Callers (the call edges in), Calls and
+/// Callers (both, caller branches first), Referenced by Functions (== refsTo), Referenced
+/// by Files / Modules (the references keyed by their file — files are leaves), Container
+/// (the enclosing type, the chain walked upward one ring per drill), Member Types /
+/// Member Classes (the members by kind), Types Used (the type-category declarations the
+/// body references), Base Classes / Derived Classes (the inheritance the parser
+/// captures).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RelationDirection {
+pub enum RelationKind {
     RefsTo,
     RefsFrom,
     Contains,
+    Calls,
+    Callers,
+    CallsAndCallers,
+    RefByFiles,
+    RefByModules,
+    Container,
+    MemberTypes,
+    MemberClasses,
+    TypesUsed,
+    BaseClasses,
+    DerivedClasses,
 }
 
-impl RelationDirection {
-    /// The wire spelling the frontend sends; anything else is an error, not a default.
-    pub fn parse(value: &str) -> Result<RelationDirection, String> {
-        match value {
-            "refsTo" => Ok(RelationDirection::RefsTo),
-            "refsFrom" => Ok(RelationDirection::RefsFrom),
-            "contains" => Ok(RelationDirection::Contains),
+impl RelationKind {
+    /// The wire spelling the frontend sends. Source Insight's own view names answer in
+    /// every spelling they are written in — camelCase, lower case without spaces, the
+    /// `callees` legacy alias — anything else is an error, not a default.
+    pub fn parse(value: &str) -> Result<RelationKind, String> {
+        let name: String = value.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase();
+        match name.as_str() {
+            "refsto" | "referencedbyfunctions" => Ok(RelationKind::RefsTo),
+            "refsfrom" => Ok(RelationKind::RefsFrom),
+            "contains" => Ok(RelationKind::Contains),
+            "calls" | "callees" => Ok(RelationKind::Calls),
+            "callers" => Ok(RelationKind::Callers),
+            "callsandcallers" | "callersandcalls" => Ok(RelationKind::CallsAndCallers),
+            "referencedbyfiles" => Ok(RelationKind::RefByFiles),
+            "referencedbymodules" => Ok(RelationKind::RefByModules),
+            "container" => Ok(RelationKind::Container),
+            "membertypes" => Ok(RelationKind::MemberTypes),
+            "memberclasses" => Ok(RelationKind::MemberClasses),
+            "typesused" => Ok(RelationKind::TypesUsed),
+            "baseclasses" => Ok(RelationKind::BaseClasses),
+            "derivedclasses" => Ok(RelationKind::DerivedClasses),
             other => Err(format!("unknown relation direction: {other}")),
+        }
+    }
+}
+
+/// The reference edges a ring keeps: every site (the refsTo/refsFrom vocabulary), or one
+/// of Source Insight's filtered views — the call edges only, or the edges landing on
+/// type-category declarations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EdgeFilter {
+    All,
+    CallsOnly,
+    TypesOnly,
+}
+
+impl EdgeFilter {
+    /// Whether a node of this kind and edge kind survives the filter.
+    fn keeps(&self, kind: &str, edge_kind: &str) -> bool {
+        match self {
+            EdgeFilter::All => true,
+            EdgeFilter::CallsOnly => edge_kind == "call",
+            EdgeFilter::TypesOnly => is_typeish(kind),
+        }
+    }
+}
+
+/// The declaration kinds that count as types — Source Insight's `refs_is_typeish`
+/// vocabulary over the index's own kind names: the types a `Types Used` ring keeps and
+/// the `Member Types` filter's members.
+const TYPEISH: &[&str] = &["class", "struct", "interface", "enum", "type", "module"];
+
+/// The class-kind members only — `Member Classes`' filter.
+const CLASSISH: &[&str] = &["class"];
+
+fn is_typeish(kind: &str) -> bool {
+    TYPEISH.contains(&kind)
+}
+
+/// One ring's shape beyond its subject: how many nodes it keeps (the 64-children cap),
+/// whether its nodes' ring markers are peeked (a peek inside a peek would chase the
+/// whole ring depth-first), and which edges it keeps (the Calls / Types Used views).
+#[derive(Clone, Copy, Debug)]
+struct RingOpts {
+    limit: usize,
+    with_flags: bool,
+    filter: EdgeFilter,
+}
+
+impl RingOpts {
+    fn new(limit: usize, with_flags: bool, filter: EdgeFilter) -> RingOpts {
+        RingOpts {
+            limit,
+            with_flags,
+            filter,
+        }
+    }
+
+    /// The peeks-off twin a peek itself runs with.
+    fn bare(&self) -> RingOpts {
+        RingOpts {
+            limit: 1,
+            with_flags: false,
+            filter: self.filter,
         }
     }
 }
@@ -166,19 +263,20 @@ fn sym_def(symbol: &WorkspaceSymbol) -> DefRow {
 
 /// The children of one subject definition, the next ring of the relation graph, under
 /// the default time budget. The subject is `(name, path, line)` — the symbol under the
-/// cursor with the location the context-symbol resolution reported. `refsTo` needs only
-/// the name (its edges are found by scanning the name everywhere and attributing each
-/// hit, so the subject itself is never resolved); `refsFrom` resolves the subject's body
-/// extent from all three.
+/// cursor with the location the context-symbol resolution reported. Every name-scanned
+/// kind (the refsTo family) needs only the name — the edges are found by scanning the
+/// name everywhere and attributing each hit, so the subject itself is never resolved;
+/// every body-walking kind (the refsFrom family) and every resolution-backed kind
+/// (Container, Base/Derived) resolve the subject's definition from all three.
 pub fn relation_children(
     root: &str,
     store: &SymbolStore,
     name: &str,
     path: &str,
     line: usize,
-    direction: RelationDirection,
+    kind: RelationKind,
 ) -> Result<RelationAnswer, String> {
-    relation_children_budgeted(root, store, name, path, line, direction, RELATION_BUDGET_MS)
+    relation_children_budgeted(root, store, name, path, line, kind, RELATION_BUDGET_MS)
 }
 
 /// The same query under an explicit budget in milliseconds — the tests' dial; 0 means
@@ -189,15 +287,38 @@ pub fn relation_children_budgeted(
     name: &str,
     path: &str,
     line: usize,
-    direction: RelationDirection,
+    kind: RelationKind,
     budget_ms: u64,
 ) -> Result<RelationAnswer, String> {
     let budget = Budget::after(budget_ms);
-    match direction {
-        RelationDirection::RefsTo => refs_to(root, store, name, MAX_NODES, true, &budget),
-        RelationDirection::RefsFrom => refs_from(store, name, path, line, MAX_NODES, true, &budget),
+    match kind {
+        RelationKind::RefsTo => refs_to(root, store, name, RingOpts::new(MAX_NODES, true, EdgeFilter::All), &budget),
+        RelationKind::RefsFrom => refs_from(store, name, path, line, RingOpts::new(MAX_NODES, true, EdgeFilter::All), &budget),
         // A pure store query: no file read, no wall-clock budget to respect.
-        RelationDirection::Contains => contains_members(store, name, MAX_NODES, true),
+        RelationKind::Contains => contains_members(store, name, MAX_NODES, true, MemberFilter::All),
+        // Source Insight's Calls / Callers: the same scans through the call edges only —
+        // the peeks ask the same filtered question, so a node's ring marker never promises
+        // a drill the kind answers empty.
+        RelationKind::Calls => refs_from(store, name, path, line, RingOpts::new(MAX_NODES, true, EdgeFilter::CallsOnly), &budget),
+        RelationKind::Callers => refs_to(root, store, name, RingOpts::new(MAX_NODES, true, EdgeFilter::CallsOnly), &budget),
+        // The combined view: the caller ring first, the callee ring merged in — a
+        // counterpart met on both sides keeps one node whose count is the pair's total.
+        // Caller branches drill as Callers, callee branches as Calls (the node's edge
+        // coordinates tell the frontend which side it stands on: a caller's edge lives in
+        // its own file, a callee's in the subject's).
+        RelationKind::CallsAndCallers => calls_and_callers(root, store, name, path, line, &budget),
+        // Source Insight's referenced-by-files/modules: the same attributed sites keyed
+        // by their file; the files are leaves.
+        RelationKind::RefByFiles | RelationKind::RefByModules => {
+            refs_by_files(root, store, name, MAX_NODES, &budget)
+        }
+        // The enclosing type, one ring per drill — the walk upward.
+        RelationKind::Container => container_chain(store, name, path, line),
+        RelationKind::MemberTypes => contains_members(store, name, MAX_NODES, true, MemberFilter::Types),
+        RelationKind::MemberClasses => contains_members(store, name, MAX_NODES, true, MemberFilter::Classes),
+        RelationKind::TypesUsed => refs_from(store, name, path, line, RingOpts::new(MAX_NODES, true, EdgeFilter::TypesOnly), &budget),
+        RelationKind::BaseClasses => base_classes(store, name, path, line, MAX_NODES, &budget),
+        RelationKind::DerivedClasses => derived_classes(store, name, path, line, MAX_NODES, &budget),
     }
 }
 
@@ -216,10 +337,14 @@ fn refs_to(
     root: &str,
     store: &SymbolStore,
     name: &str,
-    limit: usize,
-    with_flags: bool,
+    opts: RingOpts,
     budget: &Budget,
 ) -> Result<RelationAnswer, String> {
+    let RingOpts {
+        limit,
+        with_flags,
+        filter,
+    } = opts;
     let narrow = store.files_containing(name);
     let (files, _) = scan_references_bounded(root, name, narrow, SCAN_KEEP, "")?;
     let mut nodes: Vec<RelationNode> = Vec::new();
@@ -256,6 +381,16 @@ fn refs_to(
             {
                 continue;
             }
+            let edge_kind = if is_call_site(&hit.text, hit.column, hit.length) {
+                "call"
+            } else {
+                "use"
+            };
+            // A filtered ring (Calls) skips the sites it does not keep before they count
+            // — the pair's total is the kept sites' count, never the scan's.
+            if !filter.keeps(def.kind, edge_kind) {
+                continue;
+            }
             let key = (def.name.clone(), def.kind.to_owned(), def.line);
             if let Some(&at) = index_of.get(&key) {
                 // The pair's later sites only thicken the edge they already made.
@@ -272,16 +407,13 @@ fn refs_to(
                 line: def.line,
                 edge_path: file.path.clone(),
                 edge_line: site,
-                edge_kind: if is_call_site(&hit.text, hit.column, hit.length) {
-                    "call"
-                } else {
-                    "use"
-                }
-                .to_owned(),
+                edge_kind: edge_kind.to_owned(),
                 edge_count: 1,
                 // The peek turns its own flags off: a flag computed inside a peek would
-                // chase the whole ring depth-first, one scan per level.
-                has_children: with_flags && has_refs_to_children(root, store, &def.name, budget),
+                // chase the whole ring depth-first, one scan per level. The filtered
+                // rings' peeks ask the same filtered question.
+                has_children: with_flags
+                    && has_refs_to_children(root, store, &def.name, opts.bare(), budget),
             });
             if nodes.len() >= limit {
                 truncated = true;
@@ -317,11 +449,17 @@ fn file_mask<'a>(
 /// the real answer. A hotter name — a word spread over dozens of files almost certainly
 /// has users — and a list the store does not trust (whose truth would cost a full-tree
 /// scan) answer optimistically.
-fn has_refs_to_children(root: &str, store: &SymbolStore, name: &str, budget: &Budget) -> bool {
+fn has_refs_to_children(
+    root: &str,
+    store: &SymbolStore,
+    name: &str,
+    peek: RingOpts,
+    budget: &Budget,
+) -> bool {
     match store.files_containing(name) {
         None => true,
         Some(files) if files.len() > PEEK_FILE_CAP => true,
-        Some(_) => refs_to(root, store, name, 1, false, budget)
+        Some(_) => refs_to(root, store, name, peek, budget)
             .is_ok_and(|answer| !answer.nodes.is_empty()),
     }
 }
@@ -362,10 +500,14 @@ fn refs_from(
     name: &str,
     path: &str,
     line: usize,
-    limit: usize,
-    with_flags: bool,
+    opts: RingOpts,
     budget: &Budget,
 ) -> Result<RelationAnswer, String> {
+    let RingOpts {
+        limit,
+        with_flags,
+        filter,
+    } = opts;
     let Some(subject) = resolve_def(store, name, path, line) else {
         return Ok(RelationAnswer {
             nodes: Vec::new(),
@@ -439,6 +581,16 @@ fn refs_from(
             else {
                 continue;
             };
+            let edge_kind = if line_text[end..].trim_start().starts_with('(') {
+                "call"
+            } else {
+                "use"
+            };
+            // A filtered ring (Calls, Types Used) drops the target before it counts —
+            // the ring is the kept edges', never the scan's.
+            if !filter.keeps(&target.kind, edge_kind) {
+                continue;
+            }
             node_of.insert(word, nodes.len());
             nodes.push(RelationNode {
                 kind: target.kind.clone(),
@@ -448,14 +600,10 @@ fn refs_from(
                 line: target.line,
                 edge_path: subject.path.clone(),
                 edge_line: line_no,
-                edge_kind: if line_text[end..].trim_start().starts_with('(') {
-                    "call"
-                } else {
-                    "use"
-                }
-                .to_owned(),
+                edge_kind: edge_kind.to_owned(),
                 edge_count: 1,
-                has_children: with_flags && has_refs_from_children(store, &target, budget),
+                has_children: with_flags
+                    && has_refs_from_children(store, &target, opts.bare(), budget),
             });
             if nodes.len() >= limit {
                 truncated = true;
@@ -472,43 +620,61 @@ fn refs_from(
 
 /// Whether expanding a node as refsFrom yields children — **precise**: the peek re-runs
 /// the direction with limit 1 and its flags off, which reads just the node's own file
-/// (the bounded read) and stops at the first unmasked edge.
-fn has_refs_from_children(store: &SymbolStore, target: &DefRow, budget: &Budget) -> bool {
-    refs_from(
-        store,
-        &target.name,
-        &target.path,
-        target.line,
-        1,
-        false,
-        budget,
-    )
-    .is_ok_and(|answer| !answer.nodes.is_empty())
+/// (the bounded read) and stops at the first edge the ring's filter keeps.
+fn has_refs_from_children(
+    store: &SymbolStore,
+    target: &DefRow,
+    peek: RingOpts,
+    budget: &Budget,
+) -> bool {
+    refs_from(store, &target.name, &target.path, target.line, peek, budget)
+        .is_ok_and(|answer| !answer.nodes.is_empty())
 }
 
 /* ---------- contains ---------- */
+
+/// The member rings' kind filters: every member (`contains`), the type-category members
+/// (`Member Types`), the class-kind members (`Member Classes`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemberFilter {
+    All,
+    Types,
+    Classes,
+}
+
+impl MemberFilter {
+    /// The kind slice the store filters members by; `None` keeps every member.
+    fn kinds(self) -> Option<&'static [&'static str]> {
+        match self {
+            MemberFilter::All => None,
+            MemberFilter::Types => Some(TYPEISH),
+            MemberFilter::Classes => Some(CLASSISH),
+        }
+    }
+}
 
 /// The subject's members: every declaration whose container is the subject's name, one
 /// store query (`members_of` — the container is an interned name, so the filter runs
 /// inside the store and only the hits leave it), path-then-line sorted, the node cap the
 /// ceiling — one member past it marks the ring truncated, never silently shortened. The
 /// edge is the member's own declaration (`edge_kind: "member"`, one site per member), and
-/// `has_children` peeks whether the member's name is itself a container — the nested-type
-/// fold-out the window drills into next (`container_names_among`, one scan for the whole
-/// ring). A root nothing declares members of — a plain function, an unknown name —
-/// answers the empty ring.
+/// `has_children` peeks whether the member's name is itself a container **of members the
+/// ring's own filter keeps** — the nested-type fold-out the window drills into next (one
+/// scan for the whole ring). A root nothing declares members of — a plain function, an
+/// unknown name — answers the empty ring.
 fn contains_members(
     store: &SymbolStore,
     name: &str,
     limit: usize,
     with_flags: bool,
+    filter: MemberFilter,
 ) -> Result<RelationAnswer, String> {
-    let mut rows = store.members_of(name, limit.saturating_add(1));
+    let mut rows = store.members_of(name, limit.saturating_add(1), filter.kinds());
     let truncated = rows.len() > limit;
     rows.truncate(limit);
     let drillable = if with_flags && !rows.is_empty() {
         let names: Vec<&str> = rows.iter().map(|(_, row)| row.name.as_str()).collect();
-        store.container_names_among(&names)
+        store.container_names_among(&names, filter.kinds())
     } else {
         HashSet::new()
     };
@@ -525,6 +691,299 @@ fn contains_members(
             line: row.line,
             name: row.name,
             path,
+        })
+        .collect();
+    Ok(RelationAnswer { nodes, truncated })
+}
+
+/* ---------- Calls and Callers ---------- */
+
+/// The combined view: the caller ring first, the callee ring merged in — a counterpart
+/// met on both sides keeps one node whose count is the pair's total sites (Source
+/// Insight's CallsAndCalls counter) and whose edge stays the caller side's. Every node's
+/// ring marker asks its own side's question — callers for the caller nodes (whose edge
+/// site lives in their own file), calls for the callee nodes — so a drill never promises
+/// a ring the branch answers empty.
+fn calls_and_callers(
+    root: &str,
+    store: &SymbolStore,
+    name: &str,
+    path: &str,
+    line: usize,
+    budget: &Budget,
+) -> Result<RelationAnswer, String> {
+    let bare = RingOpts::new(MAX_NODES, false, EdgeFilter::All);
+    let callers = refs_to(root, store, name, bare, budget)?;
+    let callees = refs_from(store, name, path, line, bare, budget)?;
+    let mut truncated = callers.truncated || callees.truncated;
+    let root_path = path;
+    let mut nodes = callers.nodes;
+    let mut index_of: HashMap<(String, String, usize), usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(at, node)| ((node.name.clone(), node.path.clone(), node.line), at))
+        .collect();
+    for callee in callees.nodes {
+        let key = (callee.name.clone(), callee.path.clone(), callee.line);
+        if let Some(&at) = index_of.get(&key) {
+            // The caller side's coordinates stay — the branch drills as Callers — and
+            // the count is the pair's total sites (Source Insight's CallsAndCalls).
+            nodes[at].edge_count += callee.edge_count;
+            continue;
+        }
+        index_of.insert(key, nodes.len());
+        nodes.push(callee);
+    }
+    for node in &mut nodes {
+        // The caller side's edge site is the node's own file; the callee side's is the
+        // subject's. The branch's drill kind follows the side, and so does the peek.
+        let caller_side = node.edge_path != root_path;
+        node.has_children = if caller_side {
+            has_refs_to_children(root, store, &node.name, RingOpts::new(1, false, EdgeFilter::All), budget)
+        } else {
+            let target = DefRow {
+                kind: node.kind.clone(),
+                name: node.name.clone(),
+                container: node.container.clone(),
+                path: node.path.clone(),
+                line: node.line,
+                end_line: node.line,
+            };
+            has_refs_from_children(store, &target, RingOpts::new(1, false, EdgeFilter::All), budget)
+        };
+    }
+    if !truncated && (nodes.len() >= MAX_NODES) {
+        truncated = true;
+    }
+    nodes.sort_by_key(|node| node.edge_line);
+    Ok(RelationAnswer { nodes, truncated })
+}
+
+/* ---------- Referenced by Files / Modules ---------- */
+
+/// The attributed reference sites keyed by their file — Source Insight's Referenced by
+/// Files / Modules view (`refs_refby_mods` in the reference reconstruction): one node per
+/// file, count the file's kept sites, line the earliest. The same attribution discipline
+/// `refs_to` keeps (the declaration lines, the comment/string mask, the intervals), and
+/// the files are leaves: `has_children` is false down the ring.
+fn refs_by_files(
+    root: &str,
+    store: &SymbolStore,
+    name: &str,
+    limit: usize,
+    budget: &Budget,
+) -> Result<RelationAnswer, String> {
+    let narrow = store.files_containing(name);
+    let (files, _) = scan_references_bounded(root, name, narrow, SCAN_KEEP, "")?;
+    let mut nodes: Vec<RelationNode> = Vec::new();
+    let mut index_of: HashMap<String, usize> = HashMap::new();
+    let mut masks: HashMap<String, Option<CodeMask>> = HashMap::new();
+    let mut truncated = false;
+    let mut files_seen = 0usize;
+    let mut hits_seen = 0usize;
+    'files: for file in files {
+        files_seen += 1;
+        if files_seen % BUDGET_FILES_PER_CHECK == 1 && budget.expired() {
+            truncated = true;
+            break;
+        }
+        let Some(defs) = store.file_symbols(&file.path) else {
+            continue;
+        };
+        for hit in &file.matches {
+            hits_seen += 1;
+            if hits_seen.is_multiple_of(BUDGET_HITS_PER_CHECK) && budget.expired() {
+                truncated = true;
+                break 'files;
+            }
+            let site = hit.line.saturating_sub(1);
+            let Some(def) = owning_def(&defs, site) else {
+                continue;
+            };
+            if site == def.line {
+                continue;
+            }
+            if file_mask(root, &mut masks, &file.path)
+                .is_some_and(|mask| mask.is_masked(site, hit.column - 1))
+            {
+                continue;
+            }
+            if let Some(&at) = index_of.get(&file.path) {
+                nodes[at].edge_count += 1;
+                nodes[at].edge_line = nodes[at].edge_line.min(site);
+                nodes[at].line = nodes[at].line.min(site);
+                continue;
+            }
+            index_of.insert(file.path.clone(), nodes.len());
+            nodes.push(RelationNode {
+                kind: "file".to_owned(),
+                name: file.path.rsplit(['/', '\\']).next().unwrap_or(&file.path).to_owned(),
+                container: None,
+                path: file.path.clone(),
+                line: site,
+                edge_path: file.path.clone(),
+                edge_line: site,
+                edge_kind: "use".to_owned(),
+                edge_count: 1,
+                has_children: false,
+            });
+            if nodes.len() >= limit {
+                truncated = true;
+                break 'files;
+            }
+        }
+    }
+    nodes.sort_by_key(|node| node.edge_line);
+    Ok(RelationAnswer { nodes, truncated })
+}
+
+/* ---------- Container ---------- */
+
+/// The subject's enclosing type — Source Insight's Container view, walked one ring per
+/// drill: the ring names the container, the next drill on that node names its own. The
+/// edge is the membership fact itself (the subject's declaration line); the ring marker
+/// answers whether the container has a container of its own.
+fn container_chain(
+    store: &SymbolStore,
+    name: &str,
+    path: &str,
+    line: usize,
+) -> Result<RelationAnswer, String> {
+    let Some(subject) = resolve_def(store, name, path, line) else {
+        return Ok(RelationAnswer {
+            nodes: Vec::new(),
+            truncated: false,
+        });
+    };
+    let Some(container) = subject.container else {
+        return Ok(RelationAnswer {
+            nodes: Vec::new(),
+            truncated: false,
+        });
+    };
+    // The container's own definition: its file's outline first (the same file usually),
+    // then the best global declaration.
+    let container_def = store
+        .file_symbols(&subject.path)
+        .unwrap_or_default()
+        .iter()
+        .find(|row| row.name == container)
+        .map(|row| row_def(&subject.path, row))
+        .or_else(|| pick_def(&store.lookup(&container)).map(sym_def));
+    let Some(def) = container_def else {
+        return Ok(RelationAnswer {
+            nodes: Vec::new(),
+            truncated: false,
+        });
+    };
+    Ok(RelationAnswer {
+        nodes: vec![RelationNode {
+            kind: def.kind.clone(),
+            name: def.name.clone(),
+            container: def.container.clone(),
+            path: def.path.clone(),
+            line: def.line,
+            edge_path: subject.path.clone(),
+            edge_line: subject.line,
+            edge_kind: "member".to_owned(),
+            edge_count: 1,
+            has_children: def.container.is_some(),
+        }],
+        truncated: false,
+    })
+}
+
+/* ---------- Base Classes / Derived Classes ---------- */
+
+/// The base types the subject derives from — Source Insight's Base Classes view: one node
+/// per base in source order, the edge at the derivation's own line (the declaration line
+/// the `extends`/`: public Base` clause sits on), and the ring marker peeking whether the
+/// base derives from anything itself — the chain drills upward the same way.
+fn base_classes(
+    store: &SymbolStore,
+    name: &str,
+    path: &str,
+    line: usize,
+    limit: usize,
+    budget: &Budget,
+) -> Result<RelationAnswer, String> {
+    let subject = resolve_def(store, name, path, line);
+    let bases = store.bases_of(name);
+    let mut truncated = bases.len() > limit;
+    let nodes: Vec<RelationNode> = bases
+        .iter()
+        .take(limit)
+        .filter_map(|base| {
+            // The base's definition: the subject's own file first, then the best global.
+            let def = store
+                .file_symbols(path)
+                .unwrap_or_default()
+                .iter()
+                .find(|row| row.name == *base)
+                .map(|row| row_def(path, row))
+                .or_else(|| pick_def(&store.lookup(base)).map(sym_def))
+                .or_else(|| {
+                    // A base nothing declares still rings: the name is the node, its own
+                    // declaration line unknown.
+                    Some(DefRow {
+                        kind: "type".to_owned(),
+                        name: base.clone(),
+                        container: None,
+                        path: String::new(),
+                        line: 0,
+                        end_line: 0,
+                    })
+                })?;
+            Some(RelationNode {
+                has_children: !budget.expired() && !store.bases_of(base).is_empty(),
+                kind: def.kind.clone(),
+                name: def.name.clone(),
+                container: def.container.clone(),
+                path: def.path.clone(),
+                line: def.line,
+                edge_path: subject.as_ref().map_or(path, |s| s.path.as_str()).to_owned(),
+                edge_line: subject.as_ref().map_or(line, |s| s.line),
+                edge_kind: "base".to_owned(),
+                edge_count: 1,
+            })
+        })
+        .collect();
+    if !truncated && nodes.len() >= limit && bases.len() > nodes.len() {
+        truncated = true;
+    }
+    Ok(RelationAnswer { nodes, truncated })
+}
+
+/// The declarations that derive from the subject — Source Insight's Derived Classes view:
+/// the store's base table scanned the other way, one node per derived declaration with
+/// its own declaration line for the edge, and the ring marker peeking its own bases.
+fn derived_classes(
+    store: &SymbolStore,
+    name: &str,
+    path: &str,
+    line: usize,
+    limit: usize,
+    _budget: &Budget,
+) -> Result<RelationAnswer, String> {
+    // The reverse scan walks the store's base table and never needs the subject's own
+    // resolution — the coordinates ride along unused, the shared signature's shape.
+    let _ = (path, line);
+    let rows = store.derived_of(name, limit.saturating_add(1));
+    let truncated = rows.len() > limit;
+    let nodes: Vec<RelationNode> = rows
+        .into_iter()
+        .take(limit)
+        .map(|(child_path, row)| RelationNode {
+            has_children: !store.bases_of(&row.name).is_empty(),
+            kind: row.kind.to_owned(),
+            name: row.name.clone(),
+            container: row.container.clone(),
+            path: child_path.clone(),
+            line: row.line,
+            edge_path: child_path,
+            edge_line: row.line,
+            edge_kind: "base".to_owned(),
+            edge_count: 1,
         })
         .collect();
     Ok(RelationAnswer { nodes, truncated })
@@ -908,9 +1367,9 @@ mod tests {
         name: &str,
         path: &str,
         line: usize,
-        direction: RelationDirection,
+        kind: RelationKind,
     ) -> Vec<RelationNode> {
-        answer(store, root, name, path, line, direction).nodes
+        answer(store, root, name, path, line, kind).nodes
     }
 
     fn answer(
@@ -919,9 +1378,9 @@ mod tests {
         name: &str,
         path: &str,
         line: usize,
-        direction: RelationDirection,
+        kind: RelationKind,
     ) -> RelationAnswer {
-        relation_children(root, store, name, path, line, direction).unwrap()
+        relation_children(root, store, name, path, line, kind).unwrap()
     }
 
     /// Cross-file refsTo: b.c's beta and gamma call alpha, the header's prototype line
@@ -951,7 +1410,7 @@ mod tests {
             "alpha",
             "src/a.c",
             1,
-            RelationDirection::RefsTo,
+            RelationKind::RefsTo,
         );
         // The util.h prototype sits outside every def interval (skipped unattributed);
         // alpha's own declaration line (a.c line 1) and wrap's two same-line calls
@@ -996,7 +1455,7 @@ mod tests {
             "loop",
             "rec.c",
             0,
-            RelationDirection::RefsTo,
+            RelationKind::RefsTo,
         );
         assert_eq!(nodes.len(), 1);
         assert_eq!(
@@ -1026,7 +1485,7 @@ mod tests {
             "beta",
             "use.c",
             5,
-            RelationDirection::RefsFrom,
+            RelationKind::RefsFrom,
         );
         assert_eq!(
             nodes.len(),
@@ -1077,7 +1536,7 @@ mod tests {
             "beta",
             "src/lib.c",
             4,
-            RelationDirection::RefsFrom,
+            RelationKind::RefsFrom,
         );
         assert_eq!(nodes.len(), 1);
         assert_eq!(
@@ -1096,7 +1555,7 @@ mod tests {
             "beta",
             "src/lib.c",
             999,
-            RelationDirection::RefsFrom,
+            RelationKind::RefsFrom,
         );
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].edge_path, "src/lib.c");
@@ -1108,7 +1567,7 @@ mod tests {
             "alpha",
             "src/other.c",
             42,
-            RelationDirection::RefsFrom,
+            RelationKind::RefsFrom,
         );
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].name, "beta");
@@ -1121,28 +1580,63 @@ mod tests {
             "nosuch",
             "src/other.c",
             0,
-            RelationDirection::RefsFrom,
+            RelationKind::RefsFrom,
         );
         assert!(nodes.is_empty());
     }
 
-    /// The direction parses only the wire spellings; anything else is an error.
+    /// The kind parses the wire spellings and Source Insight's own view names in every
+    /// spelling they are written in; anything else is an error.
     #[test]
     fn direction_parses_the_wire_spelling_only() {
+        assert_eq!(RelationKind::parse("refsTo"), Ok(RelationKind::RefsTo));
+        assert_eq!(RelationKind::parse("refsFrom"), Ok(RelationKind::RefsFrom));
+        assert_eq!(RelationKind::parse("contains"), Ok(RelationKind::Contains));
+        // Source Insight's view names: camelCase, lower case without spaces, and the
+        // `callees` legacy alias of the Calls view.
         assert_eq!(
-            RelationDirection::parse("refsTo"),
-            Ok(RelationDirection::RefsTo)
+            RelationKind::parse("referencedByFunctions"),
+            Ok(RelationKind::RefsTo)
         );
         assert_eq!(
-            RelationDirection::parse("refsFrom"),
-            Ok(RelationDirection::RefsFrom)
+            RelationKind::parse("referencedbyfiles"),
+            Ok(RelationKind::RefByFiles)
         );
         assert_eq!(
-            RelationDirection::parse("contains"),
-            Ok(RelationDirection::Contains)
+            RelationKind::parse("referencedbymodules"),
+            Ok(RelationKind::RefByModules)
         );
-        assert!(RelationDirection::parse("sideways").is_err());
-        assert!(RelationDirection::parse("").is_err());
+        assert_eq!(RelationKind::parse("calls"), Ok(RelationKind::Calls));
+        assert_eq!(RelationKind::parse("callees"), Ok(RelationKind::Calls));
+        assert_eq!(RelationKind::parse("callers"), Ok(RelationKind::Callers));
+        assert_eq!(
+            RelationKind::parse("CallsAndCallers"),
+            Ok(RelationKind::CallsAndCallers)
+        );
+        assert_eq!(
+            RelationKind::parse("callsandcallers"),
+            Ok(RelationKind::CallsAndCallers)
+        );
+        assert_eq!(RelationKind::parse("container"), Ok(RelationKind::Container));
+        assert_eq!(
+            RelationKind::parse("memberTypes"),
+            Ok(RelationKind::MemberTypes)
+        );
+        assert_eq!(
+            RelationKind::parse("memberclasses"),
+            Ok(RelationKind::MemberClasses)
+        );
+        assert_eq!(RelationKind::parse("typesUsed"), Ok(RelationKind::TypesUsed));
+        assert_eq!(
+            RelationKind::parse("BaseClasses"),
+            Ok(RelationKind::BaseClasses)
+        );
+        assert_eq!(
+            RelationKind::parse("derivedclasses"),
+            Ok(RelationKind::DerivedClasses)
+        );
+        assert!(RelationKind::parse("sideways").is_err());
+        assert!(RelationKind::parse("").is_err());
     }
 
     /// The contains ring: a receiver type's methods across files, path-then-line sorted,
@@ -1162,7 +1656,7 @@ mod tests {
             "Widget",
             "a.go",
             2,
-            RelationDirection::Contains,
+            RelationKind::Contains,
         );
         assert_eq!(nodes.len(), 2);
         assert_eq!(
@@ -1216,7 +1710,7 @@ mod tests {
             "Port",
             "a.go",
             5,
-            RelationDirection::Contains,
+            RelationKind::Contains,
         );
         assert_eq!(nodes.len(), 2);
         assert_eq!(
@@ -1241,7 +1735,7 @@ mod tests {
             "Massive",
             "big.go",
             2,
-            RelationDirection::Contains,
+            RelationKind::Contains,
         );
         assert_eq!(ans.nodes.len(), MAX_NODES);
         assert!(ans.truncated);
@@ -1261,7 +1755,7 @@ mod tests {
             "Run",
             "a.go",
             3,
-            RelationDirection::Contains,
+            RelationKind::Contains,
         );
         assert!(nodes.is_empty());
         let nodes = children(
@@ -1270,7 +1764,7 @@ mod tests {
             "nowhere",
             "a.go",
             0,
-            RelationDirection::Contains,
+            RelationKind::Contains,
         );
         assert!(nodes.is_empty());
     }
@@ -1291,7 +1785,7 @@ mod tests {
             "hub",
             "big.c",
             0,
-            RelationDirection::RefsTo,
+            RelationKind::RefsTo,
         );
         assert_eq!(nodes.len(), MAX_NODES);
         assert_eq!(nodes[0].name, "caller000");
@@ -1325,7 +1819,7 @@ mod tests {
             "alpha",
             "src/a.c",
             0,
-            RelationDirection::RefsTo,
+            RelationKind::RefsTo,
         );
         assert_eq!(nodes.len(), 1, "only delta's real call survives");
         assert_eq!(
@@ -1351,7 +1845,7 @@ mod tests {
             "alpha",
             "src/a.c",
             0,
-            RelationDirection::RefsTo,
+            RelationKind::RefsTo,
         );
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].name, "gamma");
@@ -1371,7 +1865,7 @@ mod tests {
             "alpha",
             "call.c",
             0,
-            RelationDirection::RefsTo,
+            RelationKind::RefsTo,
         );
         assert_eq!(nodes.len(), 1);
         assert_eq!(
@@ -1398,7 +1892,7 @@ mod tests {
             "beta",
             "use.c",
             4,
-            RelationDirection::RefsFrom,
+            RelationKind::RefsFrom,
         );
         assert_eq!(nodes.len(), 1, "the commented mention is not a second edge");
         assert_eq!(
@@ -1427,7 +1921,7 @@ mod tests {
             "hub",
             "big.c",
             0,
-            RelationDirection::RefsTo,
+            RelationKind::RefsTo,
             0,
         )
         .unwrap();
@@ -1449,9 +1943,283 @@ mod tests {
             "hub",
             "big.c",
             0,
-            RelationDirection::RefsTo,
+            RelationKind::RefsTo,
         );
         assert_eq!(ans.nodes.len(), MAX_NODES);
         assert!(ans.truncated);
+    }
+
+    /// Source Insight's Calls view: the body's call edges only — a macro reference and a
+    /// local never answer; the `callees` spelling rides parse() into the same view.
+    #[test]
+    fn calls_keeps_only_the_call_edges() {
+        let (_dir, store) = seeded(&[(
+            "use.c",
+            "#define MAGIC_NUM 7\nint alpha(int x)\n{\n    return x;\n}\nint beta(int y)\n{\n    int t = alpha(y) + MAGIC_NUM;\n    return t + alpha(t);\n}\n",
+        )]);
+        let calls = children(&store, store.root(), "beta", "use.c", 6, RelationKind::Calls);
+        assert_eq!(
+            calls.len(),
+            1,
+            "the macro reference is a use, the local resolves to nothing: {calls:?}"
+        );
+        assert_eq!(
+            (calls[0].name.as_str(), calls[0].edge_kind.as_str()),
+            ("alpha", "call")
+        );
+    }
+
+    /// Source Insight's Callers view: refsTo through the call edges only — a use-site
+    /// reference never poses as a caller.
+    #[test]
+    fn callers_keeps_only_the_call_edges() {
+        let (_dir, store) = seeded(&[(
+            "src/a.c",
+            "int alpha(int x)\n{\n    return x;\n}\nint calls_it(int y)\n{\n    return alpha(y);\n}\nint names_it(void)\n{\n    typedef int Fn;\n    return 0;\n}\n",
+        )]);
+        let callers = children(
+            &store,
+            store.root(),
+            "alpha",
+            "src/a.c",
+            0,
+            RelationKind::Callers,
+        );
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0].name, "calls_it");
+    }
+
+    /// Calls and Callers: the caller ring first, the callee ring merged in, a mutual
+    /// counterpart keeping one node whose count is the pair's total sites; each node's
+    /// edge coordinates name its side (a caller's edge site lives in its own file, a
+    /// callee's in the subject's) so the branch drills by its own kind.
+    #[test]
+    fn calls_and_callers_merges_both_sides_callers_first() {
+        let (_dir, store) = seeded(&[
+            ("src/lib.c", "int alpha(int x)\n{\n    return beta(x) + 1;\n}\n"),
+            ("src/beta.c", "int beta(int y)\n{\n    return alpha(y) + 1;\n}\n"),
+            ("src/other.c", "int gamma(int n)\n{\n    return alpha(n) - 1;\n}\n"),
+        ]);
+        let root = store.root().to_owned();
+        let nodes = children(
+            &store,
+            &root,
+            "alpha",
+            "src/lib.c",
+            0,
+            RelationKind::CallsAndCallers,
+        );
+        // alpha's callers: beta (the mutual pair) and gamma; alpha's callees: beta. The
+        // merged ring keeps one node per counterpart — beta's count is the pair's total —
+        // and the caller side's coordinates stay, so the frontend's branch reads beta as
+        // a caller. Equal earliest sites run in file order (beta.c before other.c).
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].name, "beta");
+        assert_eq!(nodes[0].edge_count, 2);
+        assert_eq!(nodes[0].edge_path, "src/beta.c");
+        assert!(nodes[0].has_children);
+        assert_eq!(nodes[1].name, "gamma");
+        assert_eq!(nodes[1].edge_path, "src/other.c");
+        assert!(!nodes[1].has_children, "nobody calls gamma");
+    }
+
+    /// Referenced by Files / Modules: one node per file, the count the file's kept sites,
+    /// the earliest line kept, and the files answering leaves.
+    #[test]
+    fn referenced_by_files_keys_the_ring_by_file() {
+        let (_dir, store) = seeded(&[
+            (
+                "src/a.c",
+                "int alpha(int x)\n{\n    return x;\n}\nint wrap(int y)\n{\n    return alpha(y) + alpha(y);\n}\n",
+            ),
+            ("src/b.c", "int beta(int n)\n{\n    return alpha(n) * 2;\n}\n"),
+        ]);
+        let nodes = children(
+            &store,
+            store.root(),
+            "alpha",
+            "src/a.c",
+            0,
+            RelationKind::RefByFiles,
+        );
+        assert_eq!(nodes.len(), 2);
+        assert!(
+            nodes.iter().all(|node| node.kind == "file" && !node.has_children),
+            "{nodes:?}"
+        );
+        let a = nodes.iter().find(|node| node.path == "src/a.c").unwrap();
+        let b = nodes.iter().find(|node| node.path == "src/b.c").unwrap();
+        assert_eq!((a.edge_count, a.edge_line), (2, 6));
+        assert_eq!((b.edge_count, b.edge_line), (1, 2));
+        // SI's own view name spells the same ring.
+        let modules = children(
+            &store,
+            store.root(),
+            "alpha",
+            "src/a.c",
+            0,
+            RelationKind::parse("referencedbymodules").unwrap(),
+        );
+        assert_eq!(modules.len(), 2);
+    }
+
+    /// Container: the enclosing type one ring up, the membership edge at the subject's
+    /// declaration, and the marker answering whether the container has a container of
+    /// its own — the chain drills upward one ring at a time.
+    #[test]
+    fn container_names_the_enclosing_type() {
+        let (_dir, store) = seeded(&[(
+            "src/gui.cpp",
+            "class Shell\n{\npublic:\n    void draw();\n};\nvoid Shell::draw()\n{\n}\n",
+        )]);
+        // The indexed definition of draw is the out-of-line one (line 5) — the class's
+        // prototype is not a captured def; the subject resolves there.
+        let nodes = children(
+            &store,
+            store.root(),
+            "draw",
+            "src/gui.cpp",
+            5,
+            RelationKind::Container,
+        );
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(
+            (
+                nodes[0].name.as_str(),
+                nodes[0].kind.as_str(),
+                nodes[0].path.as_str()
+            ),
+            ("Shell", "class", "src/gui.cpp")
+        );
+        assert_eq!(
+            (nodes[0].edge_path.as_str(), nodes[0].edge_line),
+            ("src/gui.cpp", 5)
+        );
+        assert!(!nodes[0].has_children, "Shell has no container of its own");
+    }
+
+    /// Member Types / Member Classes: the members filtered by kind — the type-category
+    /// members and the class-kind members — with the marker peeking same-kind members
+    /// only, so a drill never promises a ring the filter answers empty.
+    #[test]
+    fn member_rings_filter_by_kind() {
+        let (_dir, store) = seeded(&[(
+            "src/box.cpp",
+            "class Outer\n{\npublic:\n    class Inner\n    {\n    public:\n        class Deepest\n        {\n        };\n    };\n    struct Record\n    {\n    };\n    enum Mode\n    {\n    };\n    void Method()\n    {\n    }\n};\n",
+        )]);
+        let all = children(
+            &store,
+            store.root(),
+            "Outer",
+            "src/box.cpp",
+            0,
+            RelationKind::Contains,
+        );
+        assert_eq!(all.len(), 4, "Inner, Record, Mode, Method: {all:?}");
+        let types = children(
+            &store,
+            store.root(),
+            "Outer",
+            "src/box.cpp",
+            0,
+            RelationKind::MemberTypes,
+        );
+        assert_eq!(types.len(), 3, "Inner, Record, Mode: {types:?}");
+        let classes = children(
+            &store,
+            store.root(),
+            "Outer",
+            "src/box.cpp",
+            0,
+            RelationKind::MemberClasses,
+        );
+        assert_eq!(classes.len(), 1, "Inner only: {classes:?}");
+        let inner = types.iter().find(|node| node.name == "Inner").unwrap();
+        assert!(inner.has_children, "Inner holds one class member");
+        let record = types.iter().find(|node| node.name == "Record").unwrap();
+        assert!(!record.has_children, "Record holds no type members");
+    }
+
+    /// Base Classes / Derived Classes: the parser's base table walked both ways — the
+    /// chain's edges at the derivations' own lines, and the markers peeking one level
+    /// up, so the chain drills the way Source Insight's tree does.
+    #[test]
+    fn base_and_derived_classes_walk_the_inheritance() {
+        let (_dir, store) = seeded(&[(
+            "src/shape.cpp",
+            "class Base\n{\n};\nclass Mid : public Base\n{\n};\nclass Leaf : public Mid\n{\n};\n",
+        )]);
+        let bases = children(
+            &store,
+            store.root(),
+            "Leaf",
+            "src/shape.cpp",
+            6,
+            RelationKind::BaseClasses,
+        );
+        assert_eq!(bases.len(), 1);
+        assert_eq!(
+            (
+                bases[0].name.as_str(),
+                bases[0].kind.as_str(),
+                bases[0].edge_kind.as_str()
+            ),
+            ("Mid", "class", "base")
+        );
+        assert_eq!(
+            (bases[0].edge_path.as_str(), bases[0].edge_line),
+            ("src/shape.cpp", 6)
+        );
+        assert!(bases[0].has_children, "Mid derives from Base — the chain drills");
+        let derived = children(
+            &store,
+            store.root(),
+            "Base",
+            "src/shape.cpp",
+            0,
+            RelationKind::DerivedClasses,
+        );
+        assert_eq!(derived.len(), 1);
+        assert_eq!(derived[0].name, "Mid");
+        assert_eq!(derived[0].edge_path, "src/shape.cpp");
+        // A leaf nothing derives answers the empty ring.
+        let none = children(
+            &store,
+            store.root(),
+            "Leaf",
+            "src/shape.cpp",
+            6,
+            RelationKind::DerivedClasses,
+        );
+        assert_eq!(none.len(), 0);
+    }
+
+    /// Referenced by Functions is refsTo under SI's own name — the same ring, the same
+    /// answer, one query.
+    #[test]
+    fn referenced_by_functions_is_refs_to() {
+        let (_dir, store) = seeded(&[(
+            "src/a.c",
+            "int alpha(int x)\n{\n    return x;\n}\nint wrap(int y)\n{\n    return alpha(y);\n}\n",
+        )]);
+        let by_functions = answer(
+            &store,
+            store.root(),
+            "alpha",
+            "src/a.c",
+            0,
+            RelationKind::parse("referencedByFunctions").unwrap(),
+        );
+        let refs_to = answer(
+            &store,
+            store.root(),
+            "alpha",
+            "src/a.c",
+            0,
+            RelationKind::RefsTo,
+        );
+        assert_eq!(by_functions, refs_to);
+        assert_eq!(by_functions.nodes.len(), 1);
+        assert_eq!(by_functions.nodes[0].name, "wrap");
     }
 }

@@ -42,9 +42,11 @@ const OUTLINE = [
 	{ kind: 'function', name: 'helper', container: null, line: 5, endLine: 18 }
 ];
 const DEFS = [{ kind: 'function', name: 'total', path: 'src/math.c', line: 0, endLine: 4 }];
+// The reference matches speak the backend's 1-based lines (the outline and the defs are
+// 0-based): the def site of line 0 arrives as line 1, and so on.
 const REFS = [
-	{ path: 'src/other.c', matches: [{ line: 1, column: 10 }] },
-	{ path: 'src/math.c', matches: [{ line: 0, column: 4 }, { line: 2, column: 13 }, { line: 11, column: 16 }] }
+	{ path: 'src/other.c', matches: [{ line: 2, column: 10 }] },
+	{ path: 'src/math.c', matches: [{ line: 1, column: 4 }, { line: 3, column: 13 }, { line: 12, column: 16 }] }
 ];
 
 function mountView(): ReferencesView {
@@ -206,7 +208,7 @@ describe('rendering the references', () => {
 	});
 
 	it('past the file cap the cut note answers', async () => {
-		const many = Array.from({ length: 120 }, (_, at) => ({ path: `src/f${String(at).padStart(3, '0')}.c`, matches: [{ line: 0, column: 0 }] }));
+		const many = Array.from({ length: 120 }, (_, at) => ({ path: `src/f${String(at).padStart(3, '0')}.c`, matches: [{ line: 1, column: 0 }] }));
 		backend.on('symbol_references', () => many);
 		const view = mountView();
 		view.setSubject({ kind: 'function', name: 'total', path: 'src/math.c', line: 0 });

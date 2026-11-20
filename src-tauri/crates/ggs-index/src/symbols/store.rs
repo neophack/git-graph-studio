@@ -59,7 +59,14 @@ const MAGIC: &[u8; 6] = b"GGSIDX";
 /// Format 5 (2026-11-19): parameters without an enclosing function — a prototype's, a
 /// function-pointer typedef's — own nothing and are no longer indexed at all; a
 /// version-4 file holds them stored under the KINDS fallback kind and is rebuilt.
-const VERSION: u8 = 5;
+/// Format 6 (2026-11-20): a class-like declaration carries its base types' names (the
+/// relation window's Base/Derived Classes rings) as a per-file side table; a version-5
+/// file has no such table and is rebuilt.
+/// Format 7 (2026-11-20, the same day): the container walk stopped matching a class-like
+/// declaration's own node — a self-container made every C++/Java/C#/TS class its own
+/// member and blinded the nested-class chains; a version-6 file carries those rows and
+/// is rebuilt.
+const VERSION: u8 = 7;
 /// The interned-name id a symbol without a container carries.
 const NO_CONTAINER: u32 = u32::MAX;
 /// Full builds report progress every this many files; also the cancellation checkpoint.
@@ -76,6 +83,19 @@ struct StoredSymbol {
     end_line: u32,
 }
 
+/// One declaration's base types, as interned name ids. The symbol field indexes the
+/// file's own `symbols`; the table carries only the declarations that derive from
+/// something, so a workspace without inheritance pays one empty vector per file.
+#[derive(Clone, Debug, PartialEq)]
+struct StoredBases {
+    symbol: u32,
+    bases: Vec<u32>,
+}
+
+/// One file's build scan: its path, the words it contains, its stored symbols and its
+/// base records — phase 3's per-file output before it lands in the entry.
+type Scanned = (String, Vec<u32>, Vec<StoredSymbol>, Vec<StoredBases>);
+
 /// One indexed file: its fingerprint and what it declares. `words` is the transpose of the
 /// occurrence lists — the names this file contains — kept so an update can subtract the
 /// file's contributions before rescanning it.
@@ -85,6 +105,7 @@ struct FileEntry {
     size: u64,
     symbols: Vec<StoredSymbol>,
     words: Vec<u32>,
+    bases: Vec<StoredBases>,
 }
 
 /// A file's extraction, before the names are interned.
@@ -103,6 +124,7 @@ struct Extracted {
     line: u32,
     column: u32,
     end_line: u32,
+    bases: Vec<String>,
 }
 
 pub struct SymbolStore {
@@ -283,7 +305,16 @@ impl SymbolStore {
     /// direction. The container is an interned name, so one binary search finds its id and
     /// one scan copies only the hits, path-then-line sorted (the store's own order), at
     /// most `limit`.
-    pub fn members_of(&self, container: &str, limit: usize) -> Vec<(String, FileOutlineRow)> {
+    /// The declarations whose container is `container`, path-then-line order, at most
+    /// `limit` — `kinds` narrows them to the given kinds (`Some` is the Member
+    /// Types/Classes rings' filter; `None` keeps every member). The container is an
+    /// interned name, so the filter runs inside the store and only the hits leave it.
+    pub fn members_of(
+        &self,
+        container: &str,
+        limit: usize,
+        kinds: Option<&[&str]>,
+    ) -> Vec<(String, FileOutlineRow)> {
         let mut hits: Vec<(String, FileOutlineRow)> = Vec::new();
         if limit == 0 {
             return hits;
@@ -296,6 +327,110 @@ impl SymbolStore {
                 if symbol.container_id != id as u32 {
                     continue;
                 }
+                let kind = kind_name(symbol.kind);
+                if kinds.is_some_and(|kinds| !kinds.contains(&kind)) {
+                    continue;
+                }
+                hits.push((
+                    file.path.clone(),
+                    FileOutlineRow {
+                        kind,
+                        name: self.names[symbol.name_id as usize].clone(),
+                        container: (symbol.container_id != NO_CONTAINER)
+                            .then(|| self.names[symbol.container_id as usize].clone()),
+                        line: symbol.line as usize,
+                        end_line: symbol.end_line as usize,
+                        refs: self
+                            .refs
+                            .get(symbol.name_id as usize)
+                            .and_then(|files| files.as_ref())
+                            .map_or(0, |files| files.len()),
+                    },
+                ));
+                if hits.len() >= limit {
+                    return hits;
+                }
+            }
+        }
+        hits
+    }
+
+    /// Which of `names` are themselves containers **of members the `kinds` filter keeps**
+    /// — the contains rings' `has_children` peek: one scan answers the whole ring instead
+    /// of one members query per member.
+    pub fn container_names_among(
+        &self,
+        names: &[&str],
+        kinds: Option<&[&str]>,
+    ) -> HashSet<String> {
+        let wanted: HashSet<&str> = names.iter().copied().collect();
+        let mut found = HashSet::new();
+        if wanted.is_empty() {
+            return found;
+        }
+        for file in &self.files {
+            for symbol in &file.symbols {
+                if symbol.container_id == NO_CONTAINER {
+                    continue;
+                }
+                if kinds.is_some_and(|kinds| !kinds.contains(&kind_name(symbol.kind))) {
+                    continue;
+                }
+                let name = &self.names[symbol.container_id as usize];
+                if wanted.contains(name.as_str()) {
+                    found.insert(name.clone());
+                }
+            }
+        }
+        found
+    }
+
+    /// The base types the name's class-like declarations carry, source order, deduplicated
+    /// across every declaration of the name — the relation window's Base Classes ring. A
+    /// name nothing derives (or nothing declares) answers empty.
+    pub fn bases_of(&self, name: &str) -> Vec<String> {
+        let Ok(id) = self.names.binary_search_by(|n| n.as_str().cmp(name)) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        for file in &self.files {
+            for record in &file.bases {
+                let Some(symbol) = file.symbols.get(record.symbol as usize) else {
+                    continue;
+                };
+                if symbol.name_id != id as u32 {
+                    continue;
+                }
+                for &base in &record.bases {
+                    let name = &self.names[base as usize];
+                    if !out.contains(name) {
+                        out.push(name.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The declarations that name `base` among their bases, path-then-line order, at most
+    /// `limit` — the relation window's Derived Classes ring (the scan walks the same side
+    /// table `bases_of` reads, never the texts).
+    pub fn derived_of(&self, base: &str, limit: usize) -> Vec<(String, FileOutlineRow)> {
+        let mut hits: Vec<(String, FileOutlineRow)> = Vec::new();
+        if limit == 0 {
+            return hits;
+        }
+        let Ok(id) = self.names.binary_search_by(|n| n.as_str().cmp(base)) else {
+            return hits;
+        };
+        for file in &self.files {
+            for record in &file.bases {
+                if !record.bases.contains(&(id as u32)) {
+                    continue;
+                }
+                let Some(symbol) = file.symbols.get(record.symbol as usize) else {
+                    continue;
+                };
                 hits.push((
                     file.path.clone(),
                     FileOutlineRow {
@@ -318,28 +453,6 @@ impl SymbolStore {
             }
         }
         hits
-    }
-
-    /// Which of `names` are themselves containers — the `contains` ring's `has_children`
-    /// peek: one scan answers the whole ring instead of one members query per member.
-    pub fn container_names_among(&self, names: &[&str]) -> HashSet<String> {
-        let wanted: HashSet<&str> = names.iter().copied().collect();
-        let mut found = HashSet::new();
-        if wanted.is_empty() {
-            return found;
-        }
-        for file in &self.files {
-            for symbol in &file.symbols {
-                if symbol.container_id == NO_CONTAINER {
-                    continue;
-                }
-                let name = &self.names[symbol.container_id as usize];
-                if wanted.contains(name.as_str()) {
-                    found.insert(name.clone());
-                }
-            }
-        }
-        found
     }
 
     /// The files whose text contains `name` as a word, or `None` when the occurrence list is
@@ -486,6 +599,9 @@ impl SymbolStore {
                 if let Some(container) = &symbol.container {
                     interned.entry(container.clone()).or_insert_with(|| 0);
                 }
+                for base in &symbol.bases {
+                    interned.entry(base.clone()).or_insert_with(|| 0);
+                }
             }
         }
         let names: Vec<String> = interned.keys().cloned().collect();
@@ -499,13 +615,12 @@ impl SymbolStore {
 
         // Phase 3: occurrences. Every file is scanned once for the declared words it
         // contains; the per-file results transpose into the per-name lists below.
-        let mut scanned: Vec<(String, Vec<u32>, Vec<StoredSymbol>)> =
-            Vec::with_capacity(extracted.len());
+        let mut scanned: Vec<Scanned> = Vec::with_capacity(extracted.len());
         for batch in extracted.chunks(BUILD_BATCH) {
             if cancelled() {
                 return None;
             }
-            let mut part: Vec<(String, Vec<u32>, Vec<StoredSymbol>)> = batch
+            let mut part: Vec<Scanned> = batch
                 .par_iter()
                 .map(|file| {
                     let words = match fs::read_to_string(Path::new(root).join(&file.path)) {
@@ -528,7 +643,21 @@ impl SymbolStore {
                             end_line: symbol.end_line,
                         })
                         .collect();
-                    (file.path.clone(), words, symbols)
+                    let bases = file
+                        .symbols
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, symbol)| !symbol.bases.is_empty())
+                        .map(|(at, symbol)| StoredBases {
+                            symbol: at as u32,
+                            bases: symbol
+                                .bases
+                                .iter()
+                                .map(|base| lookup[base.as_str()])
+                                .collect(),
+                        })
+                        .collect();
+                    (file.path.clone(), words, symbols, bases)
                 })
                 .collect();
             scanned.append(&mut part);
@@ -538,7 +667,7 @@ impl SymbolStore {
             root: root.to_owned(),
             files: scanned
                 .iter()
-                .map(|(path, _, _)| path.clone())
+                .map(|(path, _, _, _)| path.clone())
                 .zip(extracted.iter().map(|f| (f.mtime_ms, f.size)))
                 .map(|(path, (mtime_ms, size))| FileEntry {
                     path,
@@ -546,6 +675,7 @@ impl SymbolStore {
                     size,
                     symbols: Vec::new(),
                     words: Vec::new(),
+                    bases: Vec::new(),
                 })
                 .collect(),
             names,
@@ -553,9 +683,10 @@ impl SymbolStore {
         };
         // The walk is sorted and phase 1 sorted again; the zip above keeps that order.
         debug_assert!(store.files.windows(2).all(|w| w[0].path < w[1].path));
-        for (i, (_, words, symbols)) in scanned.into_iter().enumerate() {
+        for (i, (_, words, symbols, bases)) in scanned.into_iter().enumerate() {
             store.files[i].words = words;
             store.files[i].symbols = symbols;
+            store.files[i].bases = bases;
         }
         store.rebuild_refs();
         Some(store)
@@ -702,7 +833,10 @@ impl SymbolStore {
         let mut fresh: BTreeSet<String> = BTreeSet::new();
         for file in &upserts {
             for symbol in &file.symbols {
-                for name in std::iter::once(&symbol.name).chain(symbol.container.iter()) {
+                for name in std::iter::once(&symbol.name)
+                    .chain(symbol.container.iter())
+                    .chain(symbol.bases.iter())
+                {
                     if self
                         .names
                         .binary_search_by(|n| n.as_str().cmp(name.as_str()))
@@ -746,12 +880,27 @@ impl SymbolStore {
                     end_line: symbol.end_line,
                 })
                 .collect();
+            let bases = file
+                .symbols
+                .iter()
+                .enumerate()
+                .filter(|(_, symbol)| !symbol.bases.is_empty())
+                .map(|(at, symbol)| StoredBases {
+                    symbol: at as u32,
+                    bases: symbol
+                        .bases
+                        .iter()
+                        .map(|base| lookup[base.as_str()])
+                        .collect(),
+                })
+                .collect();
             let entry = FileEntry {
                 path: file.path,
                 mtime_ms: file.mtime_ms,
                 size: file.size,
                 symbols,
                 words: words.clone(),
+                bases,
             };
             // The entry's pre-renumber id is final here — renumber_after_edits remaps it.
             let entry_id = self.files.len() as u32;
@@ -789,6 +938,11 @@ impl SymbolStore {
                 symbol.name_id = new_ids[symbol.name_id as usize];
                 if symbol.container_id != NO_CONTAINER {
                     symbol.container_id = new_ids[symbol.container_id as usize];
+                }
+            }
+            for record in &mut file.bases {
+                for base in &mut record.bases {
+                    *base = new_ids[*base as usize];
                 }
             }
             for word in &mut file.words {
@@ -878,6 +1032,14 @@ impl SymbolStore {
                 out.extend_from_slice(&symbol.column.to_le_bytes());
                 out.extend_from_slice(&symbol.end_line.to_le_bytes());
             }
+            push_u32(&mut out, file.bases.len() as u32);
+            for record in &file.bases {
+                out.extend_from_slice(&record.symbol.to_le_bytes());
+                push_u32(&mut out, record.bases.len() as u32);
+                for &base in &record.bases {
+                    out.extend_from_slice(&base.to_le_bytes());
+                }
+            }
         }
         for refs in &self.refs {
             match refs {
@@ -939,12 +1101,31 @@ impl SymbolStore {
                     end_line,
                 });
             }
+            let mut bases = Vec::new();
+            let base_records = take_u32(&bytes, &mut at)? as usize;
+            for _ in 0..base_records {
+                let symbol = take_u32(&bytes, &mut at)?;
+                let count = take_u32(&bytes, &mut at)? as usize;
+                let mut ids = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let base = take_u32(&bytes, &mut at)?;
+                    if base as usize >= names.len() {
+                        return None;
+                    }
+                    ids.push(base);
+                }
+                if symbol as usize >= symbols {
+                    return None;
+                }
+                bases.push(StoredBases { symbol, bases: ids });
+            }
             files.push(FileEntry {
                 path,
                 mtime_ms,
                 size,
                 symbols: parsed,
                 words: Vec::new(),
+                bases,
             });
         }
         let mut refs = Vec::with_capacity(name_count);
@@ -993,6 +1174,7 @@ impl FileEntry {
             size: 0,
             symbols: Vec::new(),
             words: Vec::new(),
+            bases: Vec::new(),
         }
     }
 }
@@ -1015,6 +1197,7 @@ fn extract_file(root: &str, relative: &str) -> Option<Extraction> {
             line: s.line as u32,
             column: s.column as u32,
             end_line: s.end_line as u32,
+            bases: s.bases,
         })
         .collect();
     Some(Extraction {
@@ -1158,6 +1341,49 @@ mod tests {
         }
         let root = dir.path().display().to_string();
         assert!(SymbolStore::build(&root, 4, &|_, _| {}, &|| true).is_none());
+    }
+
+    /// The base table: a C++ inheritance chain's bases land in the store, survive the
+    /// save/load round trip intact, and answer the two rings' queries — the Base Classes
+    /// side by name, the Derived Classes side by the reverse scan.
+    #[test]
+    fn bases_round_trip_and_answer_both_rings() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/shape.cpp", "class Base {};
+class Mid : public Base {};
+class Leaf : public Mid, Extra {};
+");
+        let root = dir.path().display().to_string();
+        let home = tempfile::tempdir().unwrap();
+
+        let store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        assert_eq!(store.bases_of("Leaf"), vec!["Mid", "Extra"]);
+        assert_eq!(store.bases_of("Mid"), vec!["Base"]);
+        assert!(store.bases_of("Base").is_empty());
+        let derived = store.derived_of("Base", 10);
+        assert_eq!(derived.len(), 1);
+        assert_eq!((derived[0].0.as_str(), derived[0].1.name.as_str()), ("src/shape.cpp", "Mid"));
+
+        store.save(home.path()).unwrap();
+        let loaded = SymbolStore::load(&root, home.path()).expect("the saved index loads back");
+        assert_eq!(loaded.bases_of("Leaf"), vec!["Mid", "Extra"]);
+        assert_eq!(loaded.bases_of("Mid"), vec!["Base"]);
+        let names = |rows: Vec<(String, FileOutlineRow)>| -> Vec<(String, String)> {
+            rows.into_iter()
+                .map(|(path, row)| (path, row.name))
+                .collect()
+        };
+        assert_eq!(
+            names(loaded.derived_of("Base", 10)),
+            names(store.derived_of("Base", 10))
+        );
+
+        // A version-5 file has no base table — a clean rebuild, never a partial answer.
+        let index_file = SymbolStore::index_dir(&root, home.path()).join("symbols.bin");
+        let mut bytes = fs::read(&index_file).unwrap();
+        bytes[6] = 5; // the version byte, past the magic
+        fs::write(&index_file, &bytes).unwrap();
+        assert!(SymbolStore::load(&root, home.path()).is_none());
     }
 
     #[test]

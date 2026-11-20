@@ -11,15 +11,21 @@
 // click's first press never expands), a card without a ring — and the double click on
 // any card — opens the definition, a right-click menu drills, re-roots or opens, and
 // resting floats the declaration card. The engine's own viewport handles the wheel
-// zoom, the drag pan and Fit (`fitView`). The direction buttons swap refs to / refs
-// from / contains; an aggregating edge carries its ×N in its label; a ring cut short
-// (or a card at the 3-depth cap) carries the ⋯. G6 loads lazily on the first drawing
-// (a chunk the sidebar's first paint never pays for).
+// zoom, the drag pan and Fit (`fitView`). The relation TYPE is Source Insight's own
+// (2026-11-20, the owner's direction: 引用和关系要做到和 source insight 99% 一致的使用体验,
+// the si-lite reconstruction the reference): the picker lists the thirteen view names
+// the relation window offers — Calls, Callers, Calls and Callers, Referenced by
+// Functions/Files/Modules, Contains, Container, Base/Derived Classes, Member
+// Types/Classes, Types Used — every ring drills by its own kind, the combined view's
+// caller branches drilling as Callers and its callee branches as Calls (the node's edge
+// coordinates name its side), the depth guard is SI's own — five levels of cards, the
+// fifth a leaf — a ring cut short at the 64-children cap carries the ⋯, and an empty
+// root ring answers the verdict SI's window prints ("no callers", "no contents", …).
 
 import { readFile } from '../../platform/ipc/fs';
-import { symbolLookup, symbolRelationChildren, type RelationDirection, type RelationNode } from '../../platform/ipc/symbols';
+import { symbolLookup, symbolRelationChildren, type RelationKind, type RelationNode } from '../../platform/ipc/symbols';
 
-import { t, tf } from '../../platform/i18n';
+import { t, tf, type LocaleKey } from '../../platform/i18n';
 import { el, escapeHtml, icon, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 
 import './relationGraph.css';
@@ -47,9 +53,49 @@ const LEVEL_H = 76;
 const GAP_X = 18;
 
 
-/** How deep the graph may drill before a card's ring answers the cap instead — the
- *  runaway guard for a hot name whose rings never end (the panel tree's is 8). */
-const MAX_DEPTH = 3;
+/** How deep the graph may drill before a card's ring answers the cap instead — Source
+ *  Insight's own guard: nodes are shown before the guard and the guard blocks
+ *  expansion, so five levels of cards stand and the fifth is a leaf (the reference
+ *  reconstruction's depth > 3). */
+const MAX_DEPTH = 4;
+
+/** Source Insight's relation window's own type set, in its own order — the picker's
+ *  entries and the wire spellings the backend accepts in every spelling. */
+const SI_KINDS: { kind: RelationKind; label: LocaleKey }[] = [
+	{ kind: 'calls', label: 'relations.kind.calls' },
+	{ kind: 'callers', label: 'relations.kind.callers' },
+	{ kind: 'callsAndCallers', label: 'relations.kind.callsAndCallers' },
+	{ kind: 'referencedByFunctions', label: 'relations.kind.referencedByFunctions' },
+	{ kind: 'referencedByFiles', label: 'relations.kind.referencedByFiles' },
+	{ kind: 'referencedByModules', label: 'relations.kind.referencedByModules' },
+	{ kind: 'contains', label: 'relations.kind.contains' },
+	{ kind: 'container', label: 'relations.kind.container' },
+	{ kind: 'baseClasses', label: 'relations.kind.baseClasses' },
+	{ kind: 'derivedClasses', label: 'relations.kind.derivedClasses' },
+	{ kind: 'memberTypes', label: 'relations.kind.memberTypes' },
+	{ kind: 'memberClasses', label: 'relations.kind.memberClasses' },
+	{ kind: 'typesUsed', label: 'relations.kind.typesUsed' }
+];
+
+/** The empty-ring verdict each kind answers with — the wording the relation window
+ *  itself prints (si-lite's expansion verdicts). */
+const EMPTY_VERDICTS: Partial<Record<RelationKind, LocaleKey>> = {
+	calls: 'relations.empty.calls',
+	callers: 'relations.empty.callers',
+	callsAndCallers: 'relations.empty.callsAndCallers',
+	referencedByFunctions: 'relations.empty.refsTo',
+	referencedByFiles: 'relations.empty.files',
+	referencedByModules: 'relations.empty.modules',
+	contains: 'relations.empty.contains',
+	container: 'relations.empty.container',
+	baseClasses: 'relations.empty.baseClasses',
+	derivedClasses: 'relations.empty.derivedClasses',
+	memberTypes: 'relations.empty.memberTypes',
+	memberClasses: 'relations.empty.memberClasses',
+	typesUsed: 'relations.empty.typesUsed',
+	refsTo: 'relations.empty.refsTo',
+	refsFrom: 'relations.empty.refsFrom'
+};
 
 /** The pointer's rest before the declaration card floats in — the panel tree's timing. */
 const DECL_DELAY = 300;
@@ -75,7 +121,10 @@ interface GraphNode {
 	/** The fetched ring, in answer order — drawn only while `expanded`. */
 	children: string[];
 	/** The edge that produced this node: its site and how many sites it aggregates — the
-	 *  arrow's kind and the ×N label (the root carries the neutral defaults). */
+	 *  arrow's kind and the ×N label (the root carries the neutral defaults). The site's
+	 *  file also names the node's side in the combined view: a caller's edge lives in its
+	 *  own file, a callee's in the subject's. */
+	edgePath: string;
 	edgeKind: string;
 	edgeCount: number;
 	hasChildren: boolean;
@@ -118,6 +167,7 @@ function fromRelation(node: RelationNode, parentKey: string | null): GraphNode {
 		line: node.line,
 		parentKey,
 		children: [],
+		edgePath: node.edgePath,
 		edgeKind: node.edgeKind,
 		edgeCount: node.edgeCount,
 		hasChildren: node.hasChildren,
@@ -152,8 +202,8 @@ export class RelationGraphView {
 	 *  Fit and its scrollbars live inside it). */
 	readonly element: HTMLElement;
 
-	/** The direction buttons, the pin and the Fit — the Symbol Window's section head hosts
-	 *  them beside its own label, so the graph costs one row of the sidebar. */
+	/** The relation-type picker, the pin and the Fit — the Symbol Window's section head
+	 *  hosts them beside its own label, so the graph costs one row of the sidebar. */
 	readonly controls: HTMLElement;
 
 	/** A definition jump — the line arrives 1-based. */
@@ -174,7 +224,10 @@ export class RelationGraphView {
 
 	private root: RelationRoot | null = null;
 
-	private direction: RelationDirection = 'refsTo';
+	private kind: RelationKind = 'refsTo';
+
+	/** The root ring came back empty — the kind's own verdict shows beside the root. */
+	private emptyVerdict = false;
 
 	private readonly nodes = new Map<string, GraphNode>();
 
@@ -202,13 +255,8 @@ export class RelationGraphView {
 	private readonly positions = new Map<string, LayoutPoint>();
 
 	/** The next free slot's x per depth — the layout's allocation frontier. */
-	private readonly depthCursor = new Map<number, number>();
 
-	private readonly dirTo: HTMLButtonElement;
-
-	private readonly dirFrom: HTMLButtonElement;
-
-	private readonly dirContains: HTMLButtonElement;
+	private readonly kindButton: HTMLButtonElement;
 
 	private readonly pinButton: HTMLButtonElement;
 
@@ -233,18 +281,14 @@ export class RelationGraphView {
 		this.hint = el('div', 'rg-hint rg-hint-overlay');
 		this.element = el('div', 'rg-root', [this.stage, this.hint]);
 
-		this.dirTo = el('button', 'rg-dir');
-		this.dirTo.addEventListener('click', () => this.setDirection('refsTo'));
-		this.dirFrom = el('button', 'rg-dir');
-		this.dirFrom.addEventListener('click', () => this.setDirection('refsFrom'));
-		this.dirContains = el('button', 'rg-dir');
-		this.dirContains.addEventListener('click', () => this.setDirection('contains'));
+		this.kindButton = el('button', 'rg-dir rg-kind');
+		this.kindButton.addEventListener('click', (event) => this.showKindPicker(event));
 		const fit = el('button', 'rg-dir', [icon('screen-full')]);
 		fit.title = t('symbols.graph.fit');
 		fit.addEventListener('click', () => this.fit());
 		this.pinButton = el('button', 'rg-dir');
 		this.pinButton.addEventListener('click', () => this.togglePin());
-		this.controls = el('div', 'rg-controls', [this.dirTo, this.dirFrom, this.dirContains, this.pinButton, fit]);
+		this.controls = el('div', 'rg-controls', [this.kindButton, this.pinButton, fit]);
 		this.paintControls();
 
 		document.addEventListener('mousedown', this.onDocMouseDown);
@@ -274,7 +318,7 @@ export class RelationGraphView {
 	/* ---------- Root and direction ---------- */
 
 	/** Swap the root (or clear it, `note` explaining why) and refetch its ring; the
-	 *  direction survives, every expansion below the root does not. */
+	 *  relation type survives, every expansion below the root does not. */
 	setRoot(root: RelationRoot | null, note?: string): void {
 		const same =
 			this.root !== null && root !== null && this.root.name === root.name && this.root.path === root.path && this.root.line === root.line;
@@ -284,11 +328,57 @@ export class RelationGraphView {
 		void this.loadRoot();
 	}
 
-	/** Flip the graph's direction and refetch: the other direction is a different graph. */
-	private setDirection(direction: RelationDirection): void {
-		if (this.direction === direction) return;
-		this.direction = direction;
+	/** Swap the relation type and refetch: the other type is a different graph. */
+	private setKind(kind: RelationKind): void {
+		if (this.kind === kind) return;
+		this.kind = kind;
 		void this.loadRoot();
+	}
+
+	/** The picker: Source Insight's own thirteen view names, the active one checked. */
+	private showKindPicker(event: MouseEvent): void {
+		const entries: MenuEntry[] = SI_KINDS.map((entry) => ({
+			label: t(entry.label),
+			checked: this.kind === entry.kind,
+			run: () => this.setKind(entry.kind)
+		}));
+		showContextMenu(event.clientX, event.clientY, entries);
+	}
+
+	/** The ring's drill kind: every ring drills by the graph's own type, except the
+	 *  combined view's branches — a caller keeps drilling as Callers (its edge site
+	 *  lives outside the root's file) and a callee as Calls (the root's body names it). */
+	private ringKind(node: GraphNode): RelationKind {
+		if (this.kind !== 'callsAndCallers') return this.kind;
+		return this.callsSide(node) ? 'calls' : 'callers';
+	}
+
+	/** The combined view's side of one node: a callee's edge site sits in the root's own
+	 *  file (the body that names it); a caller's anywhere else. */
+	private callsSide(node: GraphNode): boolean {
+		return node.edgePath === (this.root?.path ?? '');
+	}
+
+	/** Whether this kind's arrow runs from the child to its parent (the referencing side
+	 *  points at the referenced — refsTo's family, Container's chain upward, the derived
+	 *  classes' `derives from`) or from the parent down (the body's references, the
+	 *  contains rings, the base classes' `extends`). The combined view's branches read
+	 *  the node's own side. */
+	private pointsUp(node: GraphNode): boolean {
+		switch (this.kind) {
+			case 'refsTo':
+			case 'referencedByFunctions':
+			case 'referencedByFiles':
+			case 'referencedByModules':
+			case 'callers':
+			case 'container':
+			case 'derivedClasses':
+				return true;
+			case 'callsAndCallers':
+				return !this.callsSide(node);
+			default:
+				return false;
+		}
 	}
 
 	private async loadRoot(): Promise<void> {
@@ -298,11 +388,11 @@ export class RelationGraphView {
 		this.cancelClickDrill();
 		this.nodes.clear();
 		this.positions.clear();
-		this.depthCursor.clear();
 		this.crossEdges.length = 0;
 		this.crossSeen.clear();
 		this.paintedLabels.clear();
 		this.rootFailed = false;
+		this.emptyVerdict = false;
 		this.rootLoading = root !== null;
 		this.paintControls();
 		if (root) {
@@ -317,12 +407,15 @@ export class RelationGraphView {
 		this.render();
 		if (!root) return;
 		try {
-			const answer = await symbolRelationChildren(root.name, root.path, root.line, this.direction);
+			const answer = await symbolRelationChildren(root.name, root.path, root.line, this.kind);
 			if (generation !== this.generation) return;
 			const node = this.nodes.get(this.rootKey);
 			if (node) {
 				node.hasChildren = (answer?.nodes.length ?? 0) > 0;
 				node.truncated = answer?.truncated === true;
+				// An empty ring answers the kind's own verdict — the relation window's
+				// "no callers", "no contents", … beside the root card.
+				this.emptyVerdict = !node.hasChildren;
 				if (node.hasChildren) {
 					node.expanded = true;
 					node.loaded = true;
@@ -340,14 +433,16 @@ export class RelationGraphView {
 	}
 
 	/** Absorb one ring answer into the graph: new symbols become the node's children, a
-	 *  symbol already drawn becomes a cross edge (the arrow without the second card). */
+	 *  symbol already drawn becomes a cross edge (the arrow without the second card,
+	 *  pointing the kind's own way). */
 	private absorbRing(node: GraphNode, ring: RelationNode[]): void {
 		node.children = [];
 		for (const entry of ring) {
 			const key = nodeKey(entry.name, entry.path, entry.line);
 			if (this.nodes.has(key)) {
-				const from = this.direction === 'refsTo' ? key : node.key;
-				const to = this.direction === 'refsTo' ? node.key : key;
+				const up = this.kind === 'callsAndCallers' ? entry.edgePath !== (this.root?.path ?? '') : this.pointsUp(node);
+				const from = up ? key : node.key;
+				const to = up ? node.key : key;
 				const seen = `${from}\u0000${to}`;
 				if (!this.crossSeen.has(seen)) {
 					this.crossSeen.add(seen);
@@ -373,15 +468,11 @@ export class RelationGraphView {
 	}
 
 	private paintControls(): void {
-		this.dirTo.textContent = t('relations.refsTo');
-		this.dirTo.classList.toggle('active', this.direction === 'refsTo');
-		this.dirTo.setAttribute('aria-pressed', this.direction === 'refsTo' ? 'true' : 'false');
-		this.dirFrom.textContent = t('relations.refsFrom');
-		this.dirFrom.classList.toggle('active', this.direction === 'refsFrom');
-		this.dirFrom.setAttribute('aria-pressed', this.direction === 'refsFrom' ? 'true' : 'false');
-		this.dirContains.textContent = t('relations.contains');
-		this.dirContains.classList.toggle('active', this.direction === 'contains');
-		this.dirContains.setAttribute('aria-pressed', this.direction === 'contains' ? 'true' : 'false');
+		const current = SI_KINDS.find((entry) => entry.kind === this.kind) ?? SI_KINDS[0];
+		this.kindButton.textContent = '';
+		this.kindButton.append(el('span', 'rg-kind-label', [t(current.label)]), icon('chevron-down'));
+		this.kindButton.title = t('relations.kind.pick');
+		this.kindButton.setAttribute('aria-label', this.kindButton.title);
 		this.pinButton.title = this.pinned ? t('relations.unpin') : t('relations.pin');
 		this.pinButton.setAttribute('aria-label', this.pinButton.title);
 		this.pinButton.textContent = '';
@@ -391,16 +482,33 @@ export class RelationGraphView {
 
 	/* ---------- The stable tree layout ---------- */
 
-	/** Give a card its permanent slot: the next free x at its depth — or, when the band
-	 *  below its parent is still free, right under the parent (the ring grows where the
-	 *  eye already is). Placed cards never move again. */
+	/** Give a card its permanent slot: directly below its parent when that band is
+	 *  free, otherwise shifted past the cards already occupying the depth — placed
+	 *  cards never move, and a collapse/expand cycle re-places a ring at its same
+	 *  slots (nothing wanders across cycles — the owner's direction: 点加号和减号
+	 *  不要重新缩放界面). */
 	private place(node: GraphNode, depth: number): void {
 		const parent = node.parentKey !== null ? this.positions.get(node.parentKey) : undefined;
-		const x = node.parentKey === null ? 0 : Math.max(this.depthCursor.get(depth) ?? 0, parent?.x ?? 0);
-		this.positions.set(node.key, { x, y: depth * LEVEL_H });
-		this.depthCursor.set(depth, x + NODE_W + GAP_X);
+		if (node.parentKey === null || !parent) {
+			this.positions.set(node.key, { x: 0, y: 0 });
+			return;
+		}
+		const rowY = depth * LEVEL_H;
+		const row = [...this.positions.entries()].filter(([, point]) => Math.abs(point.y - rowY) < 1);
+		let x = parent.x;
+		let blocked = true;
+		while (blocked) {
+			blocked = false;
+			for (const [, point] of row) {
+				if (x < point.x + NODE_W + GAP_X && point.x < x + NODE_W + GAP_X) {
+					x = point.x + NODE_W + GAP_X;
+					blocked = true;
+					break;
+				}
+			}
+		}
+		this.positions.set(node.key, { x, y: rowY });
 	}
-
 	/** The visible walk: the root, then every expanded card's children in turn — a
 	 *  collapsed card's descendants stay in the map but leave the drawing. */
 	private visibleNodes(): GraphNode[] {
@@ -448,7 +556,7 @@ export class RelationGraphView {
 		node.loading = true;
 		const generation = this.generation;
 		try {
-			const answer = await symbolRelationChildren(node.name, node.path, node.line, this.direction);
+			const answer = await symbolRelationChildren(node.name, node.path, node.line, this.ringKind(node));
 			node.loading = false;
 			if (generation !== this.generation) return;
 			node.loaded = true;
@@ -507,9 +615,12 @@ export class RelationGraphView {
 			for (const key of node.children) {
 				const child = this.nodes.get(key);
 				if (!child) continue;
-				// refsTo's children point up at their parent; the other directions point down.
-				const from = this.direction === 'refsTo' ? key : node.key;
-				const to = this.direction === 'refsTo' ? node.key : key;
+				// The kind's own arrow direction: the referencing side points at the
+				// referenced (refsTo's family, Container, Derived Classes) or the subject
+				// points at what it names (refsFrom's family, Contains, Base Classes).
+				const up = this.pointsUp(child);
+				const from = up ? key : node.key;
+				const to = up ? node.key : key;
 				edges.push({ from, to, kind: child.edgeKind, count: child.edgeCount });
 			}
 		}
@@ -542,6 +653,12 @@ export class RelationGraphView {
 			this.hint.hidden = false;
 			this.clearEngine();
 			return;
+		}
+		if (this.emptyVerdict) {
+			// The root stands alone; the verdict is the kind's own — the wording the
+			// relation window itself answers with.
+			this.hint.appendChild(el('span', undefined, [t(EMPTY_VERDICTS[this.kind] ?? 'relations.empty.refsFrom')]));
+			this.hint.hidden = false;
 		}
 		this.draw(this.buildScene());
 	}
@@ -714,11 +831,11 @@ export class RelationGraphView {
 					source: edge.from,
 					target: edge.to,
 					style: {
-						stroke: palette[edge.kind as 'call' | 'use' | 'member'] ?? palette.edge,
-					lineDash: edge.kind === 'use' ? [4, 3] : undefined,
-					lineWidth: edge.count > 1 ? 2.5 : 1.5,
-					labelText: edge.count > 1 ? `×${edge.count}` : ''
-				}
+						stroke: palette[edge.kind as 'call' | 'use' | 'member' | 'base'] ?? palette.edge,
+						lineDash: edge.kind === 'use' ? [4, 3] : undefined,
+						lineWidth: edge.count > 1 ? 2.5 : 1.5,
+						labelText: edge.count > 1 ? `×${edge.count}` : ''
+					}
 			}))
 		);
 		// The data operations only update the records — draw paints the diff onto the
@@ -913,11 +1030,12 @@ function themePalette(): {
 	call: string;
 	use: string;
 	member: string;
+	base: string;
 } {
 	const dark = document.documentElement.classList.contains('vscode-dark');
 	return dark
-		? { card: '#2c3544', cardStroke: '#454f5e', rootCard: '#2c3544', rootStroke: '#6dd4e9', rootText: '#e8edf5', text: '#e8edf5', edge: '#9da5b4', call: '#4fc1ff', use: '#9da5b4', member: '#89d185' }
-		: { card: '#f7f7f7', cardStroke: '#c8c8c8', rootCard: '#f7f7f7', rootStroke: '#006abc', rootText: '#171717', text: '#171717', edge: '#5a5a5a', call: '#006abc', use: '#5a5a5a', member: '#2da44e' };
+		? { card: '#2c3544', cardStroke: '#454f5e', rootCard: '#2c3544', rootStroke: '#6dd4e9', rootText: '#e8edf5', text: '#e8edf5', edge: '#9da5b4', call: '#4fc1ff', use: '#9da5b4', member: '#89d185', base: '#c98ee9' }
+		: { card: '#f7f7f7', cardStroke: '#c8c8c8', rootCard: '#f7f7f7', rootStroke: '#006abc', rootText: '#171717', text: '#171717', edge: '#5a5a5a', call: '#006abc', use: '#5a5a5a', member: '#2da44e', base: '#8250df' };
 }
 
 /** The workbench's UI font, resolved once — the canvas text needs the literal family. */

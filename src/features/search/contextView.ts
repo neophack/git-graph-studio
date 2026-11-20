@@ -25,6 +25,7 @@ export const KIND_ICONS: Record<string, string> = {
 	method: 'symbol-method',
 	class: 'symbol-class',
 	struct: 'symbol-structure',
+	file: 'file-code',
 	interface: 'symbol-interface',
 	enum: 'symbol-enum',
 	module: 'symbol-module',

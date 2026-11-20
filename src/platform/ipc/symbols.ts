@@ -20,7 +20,9 @@ export interface TreeFile {
 	symbols: TreeSymbol[];
 }
 
-/** `symbol_references`: the occurrence list the index keeps, narrowed to per-file lines. */
+/** `symbol_references`: the occurrence list the index keeps, narrowed to per-file lines.
+ *  `line` is 1-based (the scan counts source lines from one); `column` is the 1-based
+ *  character column of the hit. */
 export interface SymbolRefFile {
 	path: string;
 	matches: { line: number; column: number }[];
@@ -137,15 +139,40 @@ export interface RelationAnswer {
 	truncated: boolean;
 }
 
-/** `refsTo`: the symbols that reference the subject. `refsFrom`: the symbols the subject references.
- *  `contains`: the members and nested types declared inside the subject. */
+/** The relation kinds the window drills — Source Insight's own relation-type set
+ *  (2026-11-20): the three original directions plus Calls/Callers (the call edges only),
+ *  their combined view, the referenced-by files/modules keys, the upward Container walk,
+ *  the member rings by kind, the body's type references, and the inheritance chains the
+ *  parser captures. `refsTo` doubles as `Referenced by Functions` — every edge's site is
+ *  attributed to the enclosing definition already. */
+export type RelationKind =
+	| 'refsTo'
+	| 'refsFrom'
+	| 'contains'
+	| 'calls'
+	| 'callers'
+	| 'callsAndCallers'
+	| 'referencedByFunctions'
+	| 'referencedByFiles'
+	| 'referencedByModules'
+	| 'container'
+	| 'memberTypes'
+	| 'memberClasses'
+	| 'typesUsed'
+	| 'baseClasses'
+	| 'derivedClasses';
+
+/** The original direction spellings, kept for the callers that speak them. */
 export type RelationDirection = 'refsTo' | 'refsFrom' | 'contains';
 
 /** The children of one relation node — the next ring of the box-and-arrow relation
  *  graph, computed over the persistent index. The subject is a definition: the symbol under
- *  the cursor with the location the context-symbol resolution reported for it. */
-export const symbolRelationChildren = (name: string, path: string, line: number, direction: RelationDirection) =>
-	invoke<RelationAnswer>('symbol_relation_children', { name, path, line, direction });
+ *  the cursor with the location the context-symbol resolution reported for it. The kind
+ *  accepts Source Insight's own view-name spellings too (`calls`, `callers`,
+ *  `callsandcallers`, `referencedbyfiles`, … — the backend lower-cases and de-spaces
+ *  before it matches). */
+export const symbolRelationChildren = (name: string, path: string, line: number, kind: RelationKind) =>
+	invoke<RelationAnswer>('symbol_relation_children', { name, path, line, direction: kind });
 
 /** One site a rename plans to rewrite: the identifier occurrence at a 0-based line and
  *  character column, rewritten word-boundary exact. */

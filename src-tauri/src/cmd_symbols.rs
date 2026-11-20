@@ -21,7 +21,7 @@ use ggs_index::symbols::index::{
     references_for, tree_from, IndexStatus, SymbolIndex, SymbolIndexEvent, TreeFile,
 };
 use ggs_index::symbols::relations::{
-    relation_children, RelationAnswer, RelationDirection, RelationNode,
+    relation_children, RelationAnswer, RelationKind, RelationNode,
 };
 use ggs_index::symbols::rename::{rename_apply, rename_plan, RenameOutcome, RenamePlan};
 use ggs_index::symbols::WorkspaceSymbol;
@@ -283,12 +283,12 @@ pub async fn symbol_relation_children(
     // relativized (the same rule `symbol_file_outline` runs).
     let path = store_relative(&root, &path);
     ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
-    let direction = RelationDirection::parse(&direction)?;
+    let kind = RelationKind::parse(&direction)?;
     // A root without a resident index answers the empty ring; the relation query itself
     // ran inside the store's short lock and its result alone leaves it.
     let answer = symbol_index
         .with_store(&root, |store| {
-            relation_children(&root, store, &name, &path, line, direction)
+            relation_children(&root, store, &name, &path, line, kind)
         })
         .unwrap_or_else(|| {
             Ok(RelationAnswer {

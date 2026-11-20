@@ -18,6 +18,10 @@
 	background: var(--vscode-toolbar-hoverBackground);
 }
 .rg-dir > .codicon { font-size: 14px; }
+/* The relation-type picker: the current kind's name, then the chevron. */
+.rg-kind { gap: 3px; padding-right: 5px; }
+.rg-kind .rg-kind-label { font-weight: 500; }
+.rg-kind > .codicon { font-size: 12px; }
 
 .rg-hint { color: var(--vscode-descriptionForeground); padding: 10px 12px; font-size: 12px; display: flex; align-items: center; gap: 6px; }
 .rg-hint-overlay {

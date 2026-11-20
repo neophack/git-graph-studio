@@ -48,6 +48,10 @@ pub struct ParsedSymbol {
     /// resolved per file against its scope (2026-11-18, the owner's direction: a hovered
     /// local shows its own scope's definition, never a same-named global).
     pub scope: Option<(usize, usize)>,
+    /// The base types a class-like declaration derives from, its `extends`/`implements`
+    /// clause's simple names in source order — the relation window's Base/Derived Classes
+    /// rings. Empty for everything that derives from nothing.
+    pub bases: Vec<String>,
 }
 
 /// One call expression: the callee's spelling and, when the grammar names an object, the
@@ -574,6 +578,7 @@ fn outline_fallback(text: &str, ext: &str) -> Vec<ParsedSymbol> {
             nesting: 0,
             signature: String::new(),
             scope: None,
+            bases: Vec::new(),
         })
         .collect()
 }
@@ -708,6 +713,7 @@ fn symbol_of(
         nesting,
         signature,
         scope,
+        bases: base_names(lang, decl, text),
     }
 }
 
@@ -824,13 +830,16 @@ fn shadowed_by_function(lang: Lang, capture_kind: &str, node: tree_sitter::Node)
 }
 
 /// Walk up from a declaration to the type that contains it. A Go method's container is its
-/// own receiver, so the declaration node itself is checked before walking.
+/// own receiver, so the declaration node itself is checked before walking; the type
+/// declarations are reached only from ABOVE — a class capture's own node must never count
+/// as its container (a self-container made every C++/Java/C#/TS class its own member and
+/// blinded the nested-class chains the contains rings walk, found 2026-11-20).
 fn container_of(lang: Lang, decl: Option<tree_sitter::Node>, text: &str) -> Option<String> {
     let mut node = decl?;
     let mut started = false;
     loop {
         let container = match (lang, node.kind()) {
-            (Lang::Rust, "impl_item") => node
+            (Lang::Rust, "impl_item") if started => node
                 .child_by_field_name("type")
                 .map(|t| text[t.byte_range()].to_owned())
                 .map(|t| t.rsplit("::").next().unwrap_or(&t).to_owned()),
@@ -850,7 +859,7 @@ fn container_of(lang: Lang, decl: Option<tree_sitter::Node>, text: &str) -> Opti
             | (Lang::CSharp, "class_declaration")
             | (Lang::CSharp, "struct_declaration")
             | (Lang::CSharp, "interface_declaration")
-            | (Lang::CSharp, "record_declaration") => node
+            | (Lang::CSharp, "record_declaration") if started => node
                 .child_by_field_name("name")
                 .map(|n| text[n.byte_range()].to_owned()),
             (Lang::Go, "method_declaration") if !started => node
@@ -865,6 +874,82 @@ fn container_of(lang: Lang, decl: Option<tree_sitter::Node>, text: &str) -> Opti
         started = true;
         node = node.parent()?;
     }
+}
+
+/// The base types a class-like declaration derives from: its base clause's simple names
+/// (`extends`/`implements`, the C++ `: public Base`, Python's superclass list, a Rust
+/// trait's bounds), source order, deduplicated. The clause's wrapper kinds per language
+/// are walked two levels deep — a clause holds the access keywords and, per base, a
+/// qualified or templated spelling whose last segment is the simple name the index's
+/// name-based lookup resolves. Everything that derives from nothing answers empty.
+fn base_names(lang: Lang, decl: Option<tree_sitter::Node>, text: &str) -> Vec<String> {
+    fn spelling(node: tree_sitter::Node, text: &str) -> Option<String> {
+        // The simple name: cut template/argument lists, split the qualified spelling on
+        // its separators, keep the identifier characters of the last segment.
+        let raw = &text[node.byte_range()];
+        let head = raw.split(['<', '(']).next().unwrap_or(raw);
+        let last = head.rsplit([':', '.']).find(|part| !part.is_empty())?;
+        let clean: String = last.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect();
+        if clean.is_empty() { None } else { Some(clean) }
+    }
+    fn is_type_node(kind: &str) -> bool {
+        matches!(
+            kind,
+            "type_identifier"
+                | "identifier"
+                | "attribute"
+                | "member_expression"
+                | "qualified_identifier"
+                | "scoped_type_identifier"
+                | "namespace_identifier"
+                | "generic_type"
+                | "template_type"
+        )
+    }
+    fn collect(node: tree_sitter::Node, depth: u8, text: &str, out: &mut Vec<String>) {
+        // The access keywords of a C++ clause and the punctuation carry no base.
+        if node.kind() == "access_specifier" {
+            return;
+        }
+        if is_type_node(node.kind()) {
+            if let Some(name) = spelling(node, text) {
+                if !out.contains(&name) {
+                    out.push(name);
+                }
+            }
+            return;
+        }
+        if depth == 0 {
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            collect(child, depth - 1, text, out);
+        }
+    }
+    let Some(decl) = decl else {
+        return Vec::new();
+    };
+    let clauses: &[&str] = match lang {
+        Lang::Cpp => &["base_class_clause"],
+        Lang::Java => &["superclass", "super_interfaces", "extends_interfaces"],
+        Lang::CSharp => &["base_list"],
+        Lang::Python => &["argument_list"],
+        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => &["class_heritage"],
+        Lang::Rust => &["trait_bounds"],
+        Lang::Go | Lang::C => &[],
+    };
+    if clauses.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut cursor = decl.walk();
+    for child in decl.children(&mut cursor) {
+        if clauses.contains(&child.kind()) {
+            collect(child, 3, text, &mut out);
+        }
+    }
+    out
 }
 
 fn exported_of(lang: Lang, decl: Option<tree_sitter::Node>, name: &str, text: &str) -> bool {
@@ -1375,6 +1460,61 @@ macro_rules! sq { ($e:expr) => { $e * $e } }
             .any(|c| c.name == "other" && c.receiver.is_none()));
         assert_eq!(file.imports, vec!["./mod"]);
     }
+
+    #[test]
+    fn class_declarations_carry_their_base_types() {
+        // C++'s `: public Base` clause — the access keyword dropped, a qualified
+        // template base reduced to its simple name, source order kept.
+        let cpp = "class Base {};
+class Derived : public Base {};
+class Wide : protected ns::Templated<int>, Other {};
+";
+        let file = parse_file(cpp, "cpp");
+        let find = |name: &str| file.symbols.iter().find(|s| s.name == name).unwrap();
+        assert_eq!(find("Derived").bases, vec!["Base"]);
+        assert_eq!(find("Wide").bases, vec!["Templated", "Other"]);
+        assert!(find("Base").bases.is_empty());
+        // Java's extends + implements.
+        let java = "class Animal {}
+class Dog extends Animal implements Pet {}
+interface Pet {}
+";
+        let file = parse_file(java, "java");
+        let dog = file.symbols.iter().find(|s| s.name == "Dog").unwrap();
+        assert_eq!(dog.bases, vec!["Animal", "Pet"]);
+        // Python's superclass list.
+        let py = "class Base:
+    pass
+class Child(Base):
+    pass
+";
+        let file = parse_file(py, "py");
+        let child = file.symbols.iter().find(|s| s.name == "Child").unwrap();
+        assert_eq!(child.bases, vec!["Base"]);
+        // TypeScript's extends clause.
+        let ts = "class Base {}
+class Child extends Base {}
+";
+        let file = parse_file(ts, "ts");
+        let child = file.symbols.iter().find(|s| s.name == "Child").unwrap();
+        assert_eq!(child.bases, vec!["Base"]);
+        // C#'s base list.
+        let cs = "class Base {}
+class Child : Base {}
+";
+        let file = parse_file(cs, "cs");
+        let child = file.symbols.iter().find(|s| s.name == "Child").unwrap();
+        assert_eq!(child.bases, vec!["Base"]);
+        // A Rust trait's supertrait bounds.
+        let rs = "trait Marker {}
+trait Stream: Marker {
+    fn read(&mut self);
+}
+";
+        let file = parse_file(rs, "rs");
+        let stream = file.symbols.iter().find(|s| s.name == "Stream").unwrap();
+        assert_eq!(stream.bases, vec!["Marker"]);
+     }
 
     #[test]
     fn tsx_parses_with_the_tsx_grammar_and_finds_components() {
