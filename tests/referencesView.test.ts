@@ -215,6 +215,24 @@ describe('rendering the references', () => {
 		expect(view.element.querySelector('.refs-cut')?.textContent).toContain('More files');
 		view.element.remove();
 	});
+
+	it("a file's read resolves through the host's absolute spelling", async () => {
+		const view = mountView();
+		const reads: string[] = [];
+		backend.on('read_file', ({ path }) => {
+			reads.push(String(path));
+			if (String(path) === 'C:\\repo\\src\\math.c') return { contents: FILE_BODY, binary: false, size: FILE_BODY.length };
+			if (String(path) === 'C:\\repo\\src\\other.c') return { contents: OTHER_BODY, binary: false, size: OTHER_BODY.length };
+			return undefined;
+		});
+		view.resolvePath = (path) => `C:\\repo\\${path.replaceAll('/', '\\')}`;
+		view.setSubject({ kind: 'function', name: 'total', path: 'src/math.c', line: 0 });
+		await flush();
+		// The repo-relative index paths crossed joined; the open group's sites carry text.
+		expect(reads).toContain('C:\\repo\\src\\math.c');
+		expect(texts('.refs-site-text', view.element)[0]).toContain('int total(int a, int b)');
+		view.element.remove();
+	});
 });
 
 /* ---------- The workbench wiring ---------- */

@@ -150,6 +150,15 @@ export class SymbolWindowView {
 		this.body = el('div', 'sw-list');
 		this.graph = new RelationGraphView();
 		this.graph.onOpen = (path, line) => this.onOpen?.(path, line);
+		// The declaration card's file read: the index speaks repo-relative paths and the
+		// backend's read_file needs the absolute spelling, so the graph resolves through
+		// the host's root (an absolute path passes through).
+		this.graph.resolvePath = (path) => {
+			const repo = this.provideRepo?.() ?? null;
+			if (repo === null || /^([a-zA-Z]:[\\/]|\\|\/)/.test(path)) return path;
+			const separator = repo.includes('\\') ? '\\' : '/';
+			return repo.replace(/[\\/]+$/, '') + separator + path.replaceAll('/', separator);
+		};
 		this.graph.onPinChange = (pinned) => {
 			if (!pinned) this.feedGraph();
 		};
@@ -211,6 +220,9 @@ export class SymbolWindowView {
 			this.sashDrag = null;
 			window.removeEventListener('pointermove', move);
 			window.removeEventListener('pointerup', up);
+			// The split moved: the graph re-frames over its new viewport (only when the
+			// bounds no longer fit — the user's pan and zoom stay otherwise).
+			if (!this.graphCollapsed) window.requestAnimationFrame(() => this.graph.frame());
 		};
 		window.addEventListener('pointermove', move);
 		window.addEventListener('pointerup', up);
@@ -291,13 +303,16 @@ export class SymbolWindowView {
 	}
 
 	/** Re-pull the followed file's outline: a save or an external write may have moved it.
-	 *  A hidden view records the debt; the showView hook re-asks with the view displayed. */
+	 *  A hidden view records the debt; the showView hook re-asks with the view displayed.
+	 *  The shown page's graph re-frames too — a feed that landed while the page was hidden
+	 *  never saw a viewport, so its fit bailed and the graph would sit unframed. */
 	refresh(): void {
 		if (this.targetPath === null) return;
 		if (!this.visible() || this.loadingPath !== null) {
 			this.dirty = true;
 			return;
 		}
+		if (!this.graphCollapsed) window.requestAnimationFrame(() => this.graph.frame());
 		void this.load();
 	}
 

@@ -1654,13 +1654,14 @@
 			}
 		</script>
 		<script type="module">
-			// The relation-graph mode (?relgraph=1): the Symbol Window (module 5) mounted whole
-			// — outline on top, the relation graph under its sash — over the same scripted C
-			// fixture the relations mode drives. The cursor buttons move the caret between
-			// alpha, hook, and nowhere, so the graph re-roots by eye; the checks jsdom cannot
-			// express live here: dragging a box (its edges follow), background pan, the
-			// wheel's zoom about the cursor, the lazy + rings, the double-click re-root, the
-			// hover declaration card, and the ×2 badge on gamma's edge.
+				// The relation-graph mode (?relgraph=1): the Symbol Window (module 5) mounted whole
+				// — outline on top, the relation graph under its sash — over the same scripted C
+				// fixture the relations mode drives. The cursor buttons move the caret between
+				// alpha, hook, and nowhere, so the graph re-roots by eye; the checks jsdom cannot
+				// express live here: the mermaid drawing's ELK auto-layout on a drill (the whole
+				// source re-lays), the pan/zoom/pinch viewer module 17's DiagramView brings,
+				// the right-click drill menu, the double-click re-root, the hover declaration
+				// card, and the ×2 label on gamma's edge.
 			if (new URLSearchParams(location.search).has('relgraph')) {
 				if (sessionStorage.getItem('relgraph-clean') !== location.search) {
 					sessionStorage.setItem('relgraph-clean', location.search);
@@ -1776,8 +1777,9 @@
 				note.style.cssText = 'padding:4px 10px;color:#aaa;border-bottom:1px solid #444;line-height:1.5;';
 				note.textContent = 'RELATION-GRAPH FIXTURE (?relgraph=1) — verify by eye: the outline on top roots the graph below on the ' +
 					'covering function (alpha opens); the cursor buttons re-root it (hook answers an empty ring, nowhere shows the hint); ' +
-					'drag a box (its edges follow), drag the background to pan, wheel to zoom about the cursor, click a box to jump (logged right), ' +
-					'double-click to re-root, gamma\u2019s + drills and its edge carries the \u00d72 badge; the pin freezes the root; the sash resizes the halves; ' +
+					'the drawing is mermaid (module 17\u2019s DiagramView), so a drill re-lays the whole graph by ELK; drag the background to pan, ' +
+					'wheel to zoom, click a card to jump (logged right), double-click to re-root, right-click a card for the drill menu ' +
+					'(gamma\u2019s ring carries the \u00d72 label); the pin freezes the root; the sash resizes the halves; ' +
 					'the section head (Relations) collapses the graph.';
 				const stage = document.createElement('div');
 				stage.style.cssText = 'position:fixed;inset:0;z-index:9000;display:flex;flex-direction:column;background:var(--vscode-editor-background,#1e1e1e);';

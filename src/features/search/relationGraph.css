@@ -1,8 +1,11 @@
-/* The Relation Graph's own affordances — the box-and-arrow canvas, its pan/zoom viewport,
-   and the declaration card. The box geometry copies relationGraph.ts's NODE_W/NODE_H; the
-   colours ride the charts palette every theme defines. */
+/* The Relation Graph's own affordances — the controls riding the section head, the
+   resting/loading/failed hint floating over module 17's drawing host, and the
+   declaration card. The drawing itself (`.an-diagram`, its zoombar and the mermaid
+   SVG) is styled by the workbench shell — the same classes the Code Analysis page
+   mounts. */
 
 .rg-root { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.rg-root > .an-diagram { flex: 1; min-height: 0; }
 .rg-controls { display: inline-flex; gap: 2px; align-items: center; }
 .rg-dir {
 	background: none; border: 1px solid transparent; padding: 1px 7px; border-radius: 3px;
@@ -17,49 +20,12 @@
 }
 .rg-dir > .codicon { font-size: 14px; }
 
-.rg-view { position: relative; flex: 1; min-height: 0; overflow: hidden; touch-action: none; }
-.rg-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
-.rg-edges { position: absolute; overflow: visible; pointer-events: none; }
-.rg-edge { fill: none; stroke-width: 1.5px; }
-.rg-edge.rg-call { stroke: var(--vscode-charts-blue); }
-.rg-edge.rg-use { stroke: var(--vscode-charts-lines); stroke-dasharray: 4 3; }
-.rg-edge.rg-member { stroke: var(--vscode-charts-green); }
-.rg-edge[data-count] { stroke-width: 2.5px; }
-.rg-arrow-call { fill: var(--vscode-charts-blue); }
-.rg-arrow-use { fill: var(--vscode-charts-lines); }
-.rg-arrow-member { fill: var(--vscode-charts-green); }
-
-.rg-node {
-	position: absolute; display: flex; align-items: center; gap: 4px; width: 148px; height: 24px;
-	padding: 0 4px; box-sizing: border-box; border: 1px solid var(--vscode-panel-border);
-	border-radius: 4px; background: var(--vscode-sideBar-background, var(--vscode-editor-background));
-	color: var(--vscode-sideBar-foreground); font-size: 11px; cursor: grab; user-select: none;
-	white-space: nowrap;
-}
-.rg-node:active { cursor: grabbing; }
-.rg-node:hover { border-color: var(--vscode-focusBorder); }
-.rg-node > .codicon { flex: none; font-size: 13px; }
-.rg-node.rg-root-node {
-	border-color: var(--vscode-focusBorder);
-	background: var(--vscode-list-activeSelectionBackground);
-	color: var(--vscode-list-activeSelectionForeground);
-	font-weight: 600;
-}
-.rg-badge {
-	flex: none; width: 14px; height: 16px; display: inline-flex; align-items: center; justify-content: center;
-	background: none; border: none; padding: 0; color: var(--vscode-descriptionForeground);
-	font-size: 13px; line-height: 1; cursor: pointer;
-}
-.rg-badge:hover { color: var(--vscode-sideBar-foreground); }
-.rg-badge.rg-leaf { cursor: default; }
-.rg-badge.loading { font-size: 11px; }
-.rg-container { color: var(--vscode-descriptionForeground); font-size: 10px; }
-.rg-label { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.rg-cut {
-	position: absolute; max-width: 148px; padding: 0 2px; color: var(--vscode-descriptionForeground);
-	font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
-}
 .rg-hint { color: var(--vscode-descriptionForeground); padding: 10px 12px; font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.rg-hint-overlay {
+	position: absolute; inset: 0; z-index: 2; align-items: flex-start;
+	background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+	pointer-events: none;
+}
 
 /* The hover's declaration card: the definition's opening lines over its caption, floating
    over everything — the Relations panel's card, in the graph's own classes. */

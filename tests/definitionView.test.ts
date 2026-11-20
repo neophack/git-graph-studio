@@ -98,6 +98,22 @@ describe('rendering the definition', () => {
 		expect(view.element.querySelector('.def-hint')?.textContent).toContain('Click a symbol');
 		view.element.remove();
 	});
+
+	it("the body's read resolves through the host's absolute spelling", async () => {
+		const view = mountView();
+		const reads: string[] = [];
+		backend.on('read_file', ({ path }) => {
+			reads.push(String(path));
+			return String(path) === 'C:\\repo\\src\\math.c' ? { contents: FILE_BODY, binary: false, size: FILE_BODY.length } : undefined;
+		});
+		view.resolvePath = (path) => `C:\\repo\\${path.replaceAll('/', '\\')}`;
+		view.setDefinition({ kind: 'function', name: 'total', path: 'src/math.c', line: 0, endLine: 4 });
+		await flush();
+		// The repo-relative index path crossed joined; the body rendered from the answer.
+		expect(reads).toEqual(['C:\\repo\\src\\math.c']);
+		expect(view.element.querySelector('.def-code')?.textContent).toContain('int total(int a, int b)');
+		view.element.remove();
+	});
 });
 
 /* ---------- The workbench wiring ---------- */
@@ -158,6 +174,13 @@ describe('the workbench wiring', () => {
 		// No active editor view: the resolver clears the page without an ask.
 		await workbench.resolveDefinitionSymbol({ kind: 'file', path: 'C:\\repo\\src\\main.c', line: 3, column: 5 });
 		expect(asked).toHaveLength(0);
+		workbench.dispose();
+	});
+
+	it('the panel pages read through the joined root, an absolute path passing through', () => {
+		expect(workbench.panel.definition.resolvePath?.('src/a.c')).toBe('C:\\repo\\src\\a.c');
+		expect(workbench.panel.references.resolvePath?.('src/a.c')).toBe('C:\\repo\\src\\a.c');
+		expect(workbench.panel.definition.resolvePath?.('D:\\elsewhere\\a.c')).toBe('D:\\elsewhere\\a.c');
 		workbench.dispose();
 	});
 });

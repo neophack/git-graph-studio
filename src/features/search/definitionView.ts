@@ -49,6 +49,11 @@ export class DefinitionView {
 	/** The panel page's shown() asks the workbench to re-resolve the cursor symbol. */
 	onNeedRoot?: () => void;
 
+	/** The index's repo-relative paths against the workspace: the hook the host wires so
+	 *  the body's read opens the absolute spelling the backend's read_file needs. Unwired,
+	 *  the path passes through as-is. */
+	resolvePath?: (path: string) => string;
+
 	private readonly body: HTMLElement;
 	private readonly pinButton: HTMLButtonElement;
 
@@ -110,7 +115,7 @@ export class DefinitionView {
 		this.render();
 		if (!subject) return;
 		try {
-			const file = await readFile(subject.path);
+			const file = await readFile(this.resolvePath?.(subject.path) ?? subject.path);
 			// A newer setDefinition owns the page now; this answer paints nothing.
 			if (generation !== this.generation) return;
 			const contents = file?.contents;

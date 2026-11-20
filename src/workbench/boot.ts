@@ -601,6 +601,13 @@ export const bootMethods: ThisType<Workbench> = {
 		this.panel.references.onOpen = (path, line) => {
 			void this.editors.openFile(/^([a-zA-Z]:[\\/]|\\|\/)/.test(path) || !this.repoPath ? path : joinRepo(this.repoPath, path), { line });
 		};
+		// Both pages' file reads: the index speaks repo-relative paths and the backend's
+		// read_file needs the absolute spelling, so the views resolve through the open
+		// root (an absolute path passes through).
+		const resolveSymbolPath = (path: string): string =>
+			/^([a-zA-Z]:[\\/]|\\|\/)/.test(path) || !this.repoPath ? path : joinRepo(this.repoPath, path);
+		this.panel.definition.resolvePath = resolveSymbolPath;
+		this.panel.references.resolvePath = resolveSymbolPath;
 		// The hover card's relations click: the card's symbol — the index's own
 		// { kind, name, path, line } vocabulary — becomes the Symbol Window's relation
 		// graph's pinned root, and the sidebar shows it.

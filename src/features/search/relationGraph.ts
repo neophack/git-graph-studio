@@ -1,25 +1,28 @@
 // The Relation Graph (module 5) — the Symbol Window's lower half: the symbol under the
-// cursor as an interactive box-and-arrow graph over the same `symbol_relation_children`
-// engine the Relations panel's tree drives. Every ring the
-// tree can drill the graph draws: nodes are the symbols, edges the reference sites with
-// their arrowheads pointing at the referenced side (the ×N badge and the call/use/member
-// kinds ride along), the direction buttons swap refs to / refs from / contains, and a node
-// whose ring the index promises grows the same lazy + the tree rows carry. The pointer
-// works the canvas: dragging a box moves it (its edges follow), dragging the background
-// pans, the wheel zooms about the cursor, one click opens the definition, a double click
-// re-roots the graph on that symbol, and resting floats the declaration card the panel
-// floats. The layout is a tidy top-down tree recomputed over the visible (expanded)
-// shapes; a dragged box's offset survives every re-layout, so an expansion never throws
-// the arrangement away, and only a new root or the Fit button recenters.
+// cursor's ring as a mermaid flowchart, drawn on the Code Analysis module's own drawing
+// (`moduleDiagram.ts`'s DiagramView — the same mermaid + ELK renderer, the same
+// gitdiagram-class viewer: pan, zoom, fit, keyboard, pinch). Every expansion rebuilds the
+// flowchart source, so ELK re-lays the whole graph — the auto-arrange by construction, no
+// overlaps ever. The pointer's vocabulary: one click opens the definition, a double click
+// re-roots the graph on that symbol, a right-click menu drills (expand/collapse the ring),
+// re-roots or opens, and resting floats the declaration card. The direction buttons swap
+// refs to / refs from / contains; a node whose ring the index promises carries the +/−
+// marker in its label (and ⋯ when the ring came back cut short), and an aggregating edge
+// carries its ×N in the label. mermaid loads lazily, shared with module 17's chunk.
 
+import type { ModuleDiagram } from '../../platform/ipc/analysis';
 import { readFile } from '../../platform/ipc/fs';
 import { symbolLookup, symbolRelationChildren, type RelationDirection, type RelationNode } from '../../platform/ipc/symbols';
 
 import { t, tf } from '../../platform/i18n';
-import { KIND_ICONS } from './contextView';
-import { el, escapeHtml, icon } from '../../platform/ui/index';
+import { el, escapeHtml, icon, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 
 import './relationGraph.css';
+
+/** The drawing host's own type — the value itself crosses through the first draw's
+ *  dynamic import (module 17's chunk; a static edge back to the analysis facade would
+ *  close an import cycle the analysis page's own search import opens). */
+type DiagramView = import('../analysis').DiagramView;
 
 /** What the workbench resolved the symbol under the cursor to (0-based line) — the
  *  graph's root vocabulary, shared with every seeder of it. */
@@ -32,39 +35,16 @@ export interface RelationRoot {
 	line: number;
 }
 
-/** The box's fixed geometry — the layout's slots, the edges' anchors and the svg's bounds
- *  are all counted in these, and `.rg-node`'s own width/height copy them. */
-const NODE_W = 148;
-const NODE_H = 24;
-
-/** One depth level's vertical span. */
-const LEVEL_H = 62;
-
-/** The horizontal gap between neighbouring leaf slots. */
-const GAP_X = 14;
-
-/** The world's empty border: the svg's bounds and the Fit's math both carry it. */
-const PAD = 28;
-
-/** The pointer's travel before a press becomes a drag — and its click dies. */
-const DRAG_T = 4;
-
-/** The zoom clamp, about the cursor. */
-const SCALE_MIN = 0.3;
-const SCALE_MAX = 2.5;
-const ZOOM_STEP = 1.15;
-
-/** How deep the graph may drill before a node's + answers the cap instead — the runaway
- *  guard for a hot name whose rings never end (the panel tree's is 8; the canvas fills
- *  faster than a list). */
+/** How deep the graph may drill before a node's ring answers the cap instead — the
+ *  runaway guard for a hot name whose rings never end (the panel tree's is 8). */
 const MAX_DEPTH = 3;
 
 /** The pointer's rest before the declaration card floats in — the panel tree's timing. */
 const DECL_DELAY = 300;
 
-/** One graph node: a symbol box and its ring's bookkeeping. The visible structure is a
+/** One graph node: a symbol's card and its ring's bookkeeping. The drawn structure is a
  *  strict tree — a ring answer naming a symbol already drawn adds a cross edge instead of
- *  a second box, so the layout recursion never meets a cycle. */
+ *  a second card, so the source's node/edge lists never meet a cycle. */
 interface GraphNode {
 	key: string;
 	kind: string;
@@ -77,19 +57,15 @@ interface GraphNode {
 	/** The fetched ring, in answer order — drawn only while `expanded`. */
 	children: string[];
 	/** The edge that produced this node: its site and how many sites it aggregates — the
-	 *  arrow's kind and the ×N badge (the root carries the neutral defaults). */
+	 *  arrow's kind and the ×N label (the root carries the neutral defaults). */
 	edgeKind: string;
 	edgeCount: number;
 	hasChildren: boolean;
 	expanded: boolean;
 	loaded: boolean;
 	loading: boolean;
-	/** The node's own ring came back cut short — the faint note under the box keeps saying so. */
+	/** The node's own ring came back cut short — the label's ⋯ keeps saying so. */
 	truncated: boolean;
-	/** The user's drag offset in world coordinates, kept across every re-layout. */
-	dx: number;
-	dy: number;
-	elt: HTMLElement | null;
 }
 
 /** One drawn arrow: `from` references (or contains) `to`, the head lands on `to`. */
@@ -100,20 +76,6 @@ interface GraphEdge {
 	kind: string;
 	/** How many reference sites this edge aggregates — 1 for a single site. */
 	count: number;
-}
-
-/** A settled layout position in world coordinates — the box's top-left corner. */
-interface LayoutPoint {
-	x: number;
-	y: number;
-}
-
-/** The graph's world bounds, the svg's viewBox and the Fit's input. */
-interface Bounds {
-	minX: number;
-	minY: number;
-	width: number;
-	height: number;
 }
 
 /** The identity key: two same-named definitions are different nodes. */
@@ -137,72 +99,49 @@ function fromRelation(node: RelationNode, parentKey: string | null): GraphNode {
 		expanded: false,
 		loaded: false,
 		loading: false,
-		truncated: false,
-		dx: 0,
-		dy: 0,
-		elt: null
+		truncated: false
 	};
 }
 
-/** The visible (expanded) tree's tidy top-down layout: leaves take sequential slots,
- *  parents centre over their children's span, and a final per-depth sweep pushes any
- *  overlap right (a wide child subtree can shove its parent's centre into the neighbour's
- *  — the edges follow, nothing else moves). Strictly over the expanded shapes: a collapsed
- *  node occupies its own slot and its subtree none. */
-export function computeLayout(nodes: Map<string, GraphNode>, rootKey: string): Map<string, LayoutPoint> {
-	const positions = new Map<string, LayoutPoint>();
-	let cursor = 0;
-	const place = (key: string, depth: number): { min: number; max: number } => {
-		const node = nodes.get(key);
-		if (!node) return { min: cursor, max: cursor };
-		const kids = node.expanded ? node.children : [];
-		if (kids.length === 0) {
-			const x = cursor;
-			cursor += NODE_W + GAP_X;
-			positions.set(key, { x, y: depth * LEVEL_H });
-			return { min: x, max: x };
-		}
-		let min = Infinity;
-		let max = -Infinity;
-		for (const kid of kids) {
-			const span = place(kid, depth + 1);
-			min = Math.min(min, span.min);
-			max = Math.max(max, span.max);
-		}
-		const x = (min + max) / 2;
-		positions.set(key, { x, y: depth * LEVEL_H });
-		return { min: Math.min(min, x), max: Math.max(max, x) };
-	};
-	place(rootKey, 0);
-	// Pre-order DFS meets every depth left-to-right, so one "last right edge per depth"
-	// table is the whole sweep.
-	const lastRight = new Map<number, number>();
-	const fix = (key: string, depth: number): void => {
-		const point = positions.get(key);
-		if (!point) return;
-		const prev = lastRight.get(depth) ?? -Infinity;
-		if (point.x < prev) point.x = prev;
-		lastRight.set(depth, point.x + NODE_W + GAP_X);
-		const node = nodes.get(key);
-		if (node?.expanded) for (const kid of node.children) fix(kid, depth + 1);
-	};
-	fix(rootKey, 0);
-	return positions;
+/* ---------- The mermaid source (pure, for the tests) ---------- */
+
+/** One card's label: the drill marker the ring's state carries (+ / −), the container
+ *  prefix, the name, and the ⋯ a cut-short ring appends. Quotes become apostrophes —
+ *  mermaid's `["…"]` strings have no escape for them. */
+export function relationLabel(node: GraphNode): string {
+	const marker = node.hasChildren ? (node.expanded ? '− ' : '+ ') : '';
+	const name = `${node.container ? `${node.container}·` : ''}${node.name}`.replace(/"/g, "'");
+	return `${marker}${name}${node.truncated ? ' ⋯' : ''}`;
 }
 
-function boundsOf(positions: Map<string, LayoutPoint>): Bounds {
-	let minX = Infinity;
-	let minY = Infinity;
-	let maxX = -Infinity;
-	let maxY = -Infinity;
-	for (const point of positions.values()) {
-		minX = Math.min(minX, point.x);
-		minY = Math.min(minY, point.y);
-		maxX = Math.max(maxX, point.x + NODE_W);
-		maxY = Math.max(maxY, point.y + NODE_H);
+/** The flowchart `flowchart TD` source over the visible (expanded) shapes: nodes in
+ *  `N0…` order, every edge from the referencing side to the referenced (refsTo's
+ *  children point up, the other directions point down), the ×N a count past one carries,
+ *  use arrows dashed, and the link styles + the root's class riding the theme palette
+ *  (mermaid reads its style values literally — a `var(--…)` fails the render — so the
+ *  colours cross as the literals, picked by the theme kind like mermaidConfig's own). */
+export function relationMermaid(nodes: GraphNode[], edges: GraphEdge[], rootKey: string): string {
+	const index = new Map(nodes.map((node, at) => [node.key, at]));
+	const dark = document.documentElement.classList.contains('vscode-dark');
+	const tone = dark ? { call: '#4fc1ff', use: '#9da5b4', member: '#89d185' } : { call: '#006abc', use: '#5a5a5a', member: '#2da44e' };
+	const lines: string[] = ['flowchart TD'];
+	for (const node of nodes) lines.push(`  N${index.get(node.key)}["${relationLabel(node)}"]`);
+	const styled: string[] = [];
+	for (const edge of edges) {
+		const from = index.get(edge.from);
+		const to = index.get(edge.to);
+		if (from === undefined || to === undefined) continue;
+		const arrow = edge.kind === 'use' ? '-.->' : '-->';
+		lines.push(`  N${from} ${arrow}${edge.count > 1 ? `|"×${edge.count}"|` : ''} N${to}`);
+		const at = lines.length - 2 - nodes.length; // the edge's own linkStyle index
+		styled.push(`${at} stroke:${tone[edge.kind as 'call' | 'use' | 'member'] ?? tone.use}`);
 	}
-	if (!Number.isFinite(minX)) return { minX: 0, minY: 0, width: 0, height: 0 };
-	return { minX: minX - PAD, minY: minY - PAD, width: maxX - minX + PAD * 2, height: maxY - minY + PAD * 2 };
+	for (const style of styled) lines.push(`  linkStyle ${style}`);
+	lines.push(
+		`  classDef rgRoot ${dark ? 'fill:#2c3544,stroke:#6dd4e9,color:#e8edf5' : 'fill:#f7f7f7,stroke:#334155,color:#171717'},stroke-width:1.5px`,
+		`  class N${index.get(rootKey) ?? 0} rgRoot`
+	);
+	return lines.join('\n');
 }
 
 /** The declaration card's cargo: the definition's opening lines and where they sit. */
@@ -218,18 +157,36 @@ const DECL_MAX_LINES = 6;
 const DECL_MAX_CHARS = 400;
 
 export class RelationGraphView {
-	/** The canvas: the pan/zoom viewport holding the edge svg and the node boxes. */
+	/** The canvas: the mermaid drawing host (module 17's DiagramView — its zoombar,
+	 *  pan/zoom, fit and keyboard ride along). */
 	readonly element: HTMLElement;
 
 	/** The direction buttons, the pin and the Fit — the Symbol Window's section head hosts
 	 *  them beside its own label, so the graph costs one row of the sidebar. */
 	readonly controls: HTMLElement;
 
-	/** A definition click (one click on a box) — the line arrives 1-based. */
+	/** A definition click (one click on a card) — the line arrives 1-based. */
 	onOpen?: (path: string, line: number) => void;
 
 	/** The pin's toggle — the host re-feeds the cursor's symbol when the pin lifts. */
 	onPinChange?: (pinned: boolean) => void;
+
+	/** The index's repo-relative paths against the workspace: the hook the host wires so
+	 *  the declaration card's file read opens the absolute spelling the backend needs.
+	 *  Unwired, the path passes through as-is. */
+	resolvePath?: (path: string) => string;
+
+	private diagram: DiagramView | null = null;
+
+	/** The drawing host's lazy construction — the module 17 chunk (mermaid itself loads
+	 *  inside it) only pays when a graph first draws. */
+	private diagramReady: Promise<DiagramView> | null = null;
+
+	/** Set by the dispose: a first draw still in flight must not mount into a dead view. */
+	private disposed = false;
+
+	/** The resting/loading/failed note, floating over the drawing host. */
+	private readonly hint: HTMLElement;
 
 	private root: RelationRoot | null = null;
 
@@ -239,7 +196,7 @@ export class RelationGraphView {
 
 	private rootKey = '';
 
-	/** Rings that named an already-drawn symbol: the arrow without the second box. */
+	/** Rings that named an already-drawn symbol: the arrow without the second card. */
 	private readonly crossEdges: GraphEdge[] = [];
 
 	private readonly crossSeen = new Set<string>();
@@ -257,24 +214,6 @@ export class RelationGraphView {
 
 	private pinned = false;
 
-	/** The settled layout (before the drag offsets), the world bounds, and the view. */
-	private positions = new Map<string, LayoutPoint>();
-
-	private bounds: Bounds = { minX: 0, minY: 0, width: 0, height: 0 };
-
-	private scale = 1;
-
-	private panX = 0;
-
-	private panY = 0;
-
-	/** The viewport element (the canvas) — drag/pan/wheel land here. */
-	private readonly viewport: HTMLElement;
-
-	private readonly world: HTMLElement;
-
-	private readonly svg: SVGSVGElement;
-
 	private readonly dirTo: HTMLButtonElement;
 
 	private readonly dirFrom: HTMLButtonElement;
@@ -282,17 +221,6 @@ export class RelationGraphView {
 	private readonly dirContains: HTMLButtonElement;
 
 	private readonly pinButton: HTMLButtonElement;
-
-	/* ---------- The drag/pan bookkeeping ---------- */
-
-	/** The box drag in flight — its window listeners end it; `moved` kills the click. */
-	private drag: { node: GraphNode; startX: number; startY: number; baseDx: number; baseDy: number; moved: boolean } | null = null;
-
-	/** The background pan in flight. */
-	private panning: { startX: number; startY: number; baseX: number; baseY: number } | null = null;
-
-	/** Set when a pointer settled as a drag — the click that follows pointerup must die. */
-	private clickSuppressed = false;
 
 	/* ---------- The declaration card ---------- */
 
@@ -310,15 +238,13 @@ export class RelationGraphView {
 		if (event.key === 'Escape' && this.declCard) this.hideDecl();
 	};
 
+	/** The card the pointer rests on — the hover's deferred subject, dropped by the
+	 *  next mouseover or a mouseout that leaves the host. */
+	private declTarget: { node: GraphNode; generation: number; x: number; y: number } | null = null;
+
 	constructor() {
-		this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-		this.svg.classList.add('rg-edges');
-		this.world = el('div', 'rg-world');
-		this.world.appendChild(this.svg);
-		this.viewport = el('div', 'rg-view', [this.world]);
-		this.element = el('div', 'rg-root', [this.viewport]);
-		this.viewport.addEventListener('wheel', (event) => this.onWheel(event), { passive: false });
-		this.viewport.addEventListener('pointerdown', (event) => this.onViewportPointerDown(event));
+		this.hint = el('div', 'rg-hint rg-hint-overlay');
+		this.element = el('div', 'rg-root', [this.hint]);
 
 		this.dirTo = el('button', 'rg-dir');
 		this.dirTo.addEventListener('click', () => this.setDirection('refsTo'));
@@ -339,12 +265,76 @@ export class RelationGraphView {
 		this.render();
 	}
 
+	/** The drawing host, built on the first render that has something to draw: the
+	 *  dynamic import keeps the Symbol Window's first paint off module 17's chunk (and
+	 *  the static one off the seam graph — the analysis page already imports this module
+	 *  through its facade, and a static edge back would close a cycle). */
+	private ensureDiagram(): Promise<DiagramView> {
+		this.diagramReady ??= (async () => {
+			const { DiagramView } = await import('../analysis');
+			if (this.disposed) throw new Error('the relation graph was disposed');
+			const diagram = new DiagramView({
+				// One click opens the definition; an edge click (its id carries the L_ prefix)
+				// and the background answer nothing.
+				onSelect: (id) => {
+					if (id === null || id.startsWith('L_')) return;
+					const node = this.nodes.get(id);
+					if (node) this.onOpen?.(node.path, node.line + 1);
+				},
+				// The double click re-roots the graph on that symbol.
+				onOpenNode: (key) => {
+					const node = this.nodes.get(key);
+					if (node) this.setRoot({ kind: node.kind, name: node.name, path: node.path, line: node.line });
+				},
+				// The right-click menu: the ring's drill, the re-root, the definition.
+				onNodeContext: (x, y, key) => {
+					const node = this.nodes.get(key);
+					if (!node) return;
+					const entries: MenuEntry[] = [];
+					if (node.hasChildren) {
+						entries.push({
+							label: node.expanded ? t('relations.collapse') : t('relations.expand'),
+							run: () => void this.toggleExpand(key)
+						});
+					}
+					entries.push(
+						{ label: t('relations.reRoot'), run: () => this.setRoot({ kind: node.kind, name: node.name, path: node.path, line: node.line }) },
+						{ label: t('relations.openDef'), run: () => this.onOpen?.(node.path, node.line + 1) }
+					);
+					showContextMenu(x, y, entries);
+				},
+				onEdgeContext: () => undefined
+			});
+			// The host's own tooltip names the module page's hint — the graph speaks for itself.
+			diagram.host.title = '';
+			diagram.host.setAttribute('aria-label', t('symbols.graph.title'));
+			// The hover's declaration card: one delegated pair over the drawing host —
+			// mermaid rebuilds its SVG under us, the markers always resolve.
+			diagram.host.addEventListener('mouseover', (event) => {
+				const target = event.target instanceof Element ? event.target.closest('[data-path]') : null;
+				const key = target?.getAttribute('data-path');
+				const node = key ? this.nodes.get(key) : null;
+				if (!node) return;
+				this.scheduleDecl(node, event.clientX, event.clientY);
+			});
+			diagram.host.addEventListener('mouseout', (event) => {
+				const target = event.target instanceof Element ? event.target.closest('[data-path]') : null;
+				if (target) this.cancelDecl();
+			});
+			this.diagram = diagram;
+			this.element.insertBefore(diagram.host, this.hint);
+			return diagram;
+		})();
+		return this.diagramReady;
+	}
+
 	/** The host's dispose: the document-level dismissers must not outlive the view. */
 	dispose(): void {
+		this.disposed = true;
 		this.hideDecl();
-		this.endPointer();
 		document.removeEventListener('mousedown', this.onDocMouseDown);
 		document.removeEventListener('keydown', this.onDocKeyDown);
+		this.diagram?.destroy();
 	}
 
 	/** Root the graph on an explicit symbol and pin it — the hover card's jump: the
@@ -358,7 +348,7 @@ export class RelationGraphView {
 	/* ---------- Root and direction ---------- */
 
 	/** Swap the root (or clear it, `note` explaining why) and refetch its ring; the
-	 *  direction survives, every expansion and drag offset below the root does not. */
+	 *  direction survives, every expansion below the root does not. */
 	setRoot(root: RelationRoot | null, note?: string): void {
 		const same =
 			this.root !== null && root !== null && this.root.name === root.name && this.root.path === root.path && this.root.line === root.line;
@@ -418,7 +408,7 @@ export class RelationGraphView {
 	}
 
 	/** Absorb one ring answer into the graph: new symbols become the node's children, a
-	 *  symbol already drawn becomes a cross edge (the arrow without the second box). */
+	 *  symbol already drawn becomes a cross edge (the arrow without the second card). */
 	private absorbRing(node: GraphNode, ring: RelationNode[]): void {
 		node.children = [];
 		for (const entry of ring) {
@@ -483,8 +473,8 @@ export class RelationGraphView {
 			return;
 		}
 		if (this.depthOf(key) >= MAX_DEPTH) {
-			// At the cap the + stays and the faint cut note answers — the rings exist, the
-			// canvas just stops drawing them (re-rooting on the node goes deeper instead).
+			// At the cap the marker stays and the ⋯ answers — the rings exist, the graph
+			// just stops drawing them (re-rooting on the node goes deeper instead).
 			node.loaded = true;
 			node.truncated = true;
 			node.expanded = false;
@@ -492,7 +482,6 @@ export class RelationGraphView {
 			return;
 		}
 		node.loading = true;
-		this.paintNode(node);
 		const generation = this.generation;
 		try {
 			const answer = await symbolRelationChildren(node.name, node.path, node.line, this.direction);
@@ -523,45 +512,79 @@ export class RelationGraphView {
 
 	/* ---------- Rendering ---------- */
 
+	/** Rebuild the flowchart over the current nodes: ELK lays the whole source again —
+	 *  the auto-arrange by construction. The hint floats over the empty states. */
 	private render(): void {
-		this.world.textContent = '';
-		this.world.appendChild(this.svg);
+		this.hint.textContent = '';
+		this.hint.hidden = true;
 		if (!this.root) {
-			this.svg.setAttribute('width', '0');
-			this.svg.setAttribute('height', '0');
-			this.world.appendChild(el('div', 'rg-hint', [this.rootNote ?? t('symbols.graph.hint')]));
+			this.hint.appendChild(el('span', undefined, [this.rootNote ?? t('symbols.graph.hint')]));
+			this.hint.hidden = false;
+			this.draw(null);
 			return;
 		}
 		if (this.rootLoading) {
-			this.world.appendChild(el('div', 'rg-hint', [icon('sync', 'codicon-modifier-spin'), t('relations.loading')]));
+			this.hint.append(icon('sync', 'codicon-modifier-spin'), el('span', undefined, [t('relations.loading')]));
+			this.hint.hidden = false;
+			this.draw(null);
 			return;
 		}
 		if (this.rootFailed) {
-			this.world.appendChild(el('div', 'rg-hint', [t('relations.failed')]));
+			this.hint.appendChild(el('span', undefined, [t('relations.failed')]));
+			this.hint.hidden = false;
+			this.draw(null);
 			return;
 		}
-		this.positions = computeLayout(this.nodes, this.rootKey);
-		this.bounds = boundsOf(this.positions);
-		this.svg.setAttribute('width', String(this.bounds.width));
-		this.svg.setAttribute('height', String(this.bounds.height));
-		this.svg.setAttribute('viewBox', `${this.bounds.minX} ${this.bounds.minY} ${this.bounds.width} ${this.bounds.height}`);
-		this.svg.style.left = `${this.bounds.minX}px`;
-		this.svg.style.top = `${this.bounds.minY}px`;
-		this.paintEdges();
-		for (const node of this.nodes.values()) this.world.appendChild(this.buildNode(node));
-		this.paintPositions();
-		this.applyTransform();
+		this.draw(this.buildPayload());
 	}
 
-	/** The light repaint a drag asks for: every box and edge moves, nothing rebuilds. */
-	private paintPositions(): void {
-		for (const node of this.nodes.values()) {
-			const point = this.positions.get(node.key);
-			if (!point || !node.elt) continue;
-			node.elt.style.left = `${point.x + node.dx - this.bounds.minX}px`;
-			node.elt.style.top = `${point.y + node.dy - this.bounds.minY}px`;
+	/** The flowchart payload over the visible (expanded) shapes — the walk from the root
+	 *  through expanded children only, so a collapsed subtree's cards leave the drawing
+	 *  with it. The drawn order is the walk's: the root first, then every ring in turn —
+	 *  mermaid's N-ids and the payload's paths line up by construction. */
+	private buildPayload(): ModuleDiagram {
+		const list: GraphNode[] = [];
+		const collect = (key: string): void => {
+			const node = this.nodes.get(key);
+			if (!node) return;
+			list.push(node);
+			if (node.expanded) for (const child of node.children) collect(child);
+		};
+		collect(this.rootKey);
+		const edges = this.visibleEdgeList();
+		const index = new Map(list.map((node, at) => [node.key, at]));
+		return {
+			nodes: list.map((node) => ({ path: node.key, label: relationLabel(node), module: null, tone: 0, callsIn: 0, callsOut: 0 })),
+			edges: edges
+				.filter((edge) => index.has(edge.from) && index.has(edge.to))
+				.map((edge) => ({ id: `L_N${index.get(edge.from)}_N${index.get(edge.to)}`, from: edge.from, to: edge.to, calls: edge.count, dashed: edge.kind === 'use' })),
+			droppedFiles: 0,
+			droppedEdges: 0,
+			mermaid: relationMermaid(list, edges, this.rootKey)
+		};
+	}
+
+	/** Hand the payload to the drawing host — building it first when this is the first
+	 *  draw (the dynamic import above); a state that landed while the host built draws
+	 *  what stands, not what asked, and a superseded draw never paints (every setDiagram
+	 *  clears the tree before its async render — a stale one would flash it empty). A
+	 *  build that loses a dispose race stays silent — the dead view keeps nothing to
+	 *  draw into. */
+	private drawSeq = 0;
+
+	private draw(payload: ModuleDiagram | null): void {
+		const seq = ++this.drawSeq;
+		if (this.diagram) {
+			this.diagram.setDiagram(payload);
+			return;
 		}
-		this.paintEdges();
+		void this.ensureDiagram()
+			.then((diagram) => {
+				if (this.disposed || seq !== this.drawSeq) return;
+				const settled = !this.root || this.rootLoading || this.rootFailed ? null : this.buildPayload();
+				diagram.setDiagram(settled);
+			})
+			.catch(() => undefined);
 	}
 
 	private visibleEdgeList(): GraphEdge[] {
@@ -581,233 +604,46 @@ export class RelationGraphView {
 		return edges;
 	}
 
-	private paintEdges(): void {
-		this.svg.textContent = '';
-		if (this.positions.size === 0) return;
-		const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-		for (const kind of ['call', 'use', 'member'] as const) {
-			const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
-			marker.setAttribute('id', `rg-arrow-${kind}`);
-			marker.setAttribute('viewBox', '0 0 10 10');
-			marker.setAttribute('refX', '9');
-			marker.setAttribute('refY', '5');
-			marker.setAttribute('markerWidth', '7');
-			marker.setAttribute('markerHeight', '7');
-			marker.setAttribute('markerUnits', 'userSpaceOnUse');
-			marker.setAttribute('orient', 'auto-start-reverse');
-			const head = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-			head.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
-			head.setAttribute('class', `rg-arrow rg-arrow-${kind}`);
-			marker.appendChild(head);
-			defs.appendChild(marker);
-		}
-		this.svg.appendChild(defs);
-		for (const edge of this.visibleEdgeList()) {
-			const from = this.nodeAnchor(edge.from, true);
-			const to = this.nodeAnchor(edge.to, false);
-			if (!from || !to) continue;
-			// The straight hop between the facing sides: the head lands on the referenced box.
-			const downward = to.y > from.y;
-			const x1 = from.x + NODE_W / 2;
-			const y1 = downward ? from.y + NODE_H : from.y;
-			const x2 = to.x + NODE_W / 2;
-			const y2 = downward ? to.y : to.y + NODE_H;
-			const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-			path.setAttribute('d', `M ${x1} ${y1} L ${x2} ${y2}`);
-			path.setAttribute('class', `rg-edge rg-${edge.kind === 'member' ? 'member' : edge.kind === 'call' ? 'call' : 'use'}`);
-			if (edge.kind !== 'member' && edge.count > 1) path.setAttribute('data-count', String(edge.count));
-			path.setAttribute('marker-end', `url(#rg-arrow-${edge.kind === 'member' ? 'member' : edge.kind === 'call' ? 'call' : 'use'})`);
-			const label = edge.count > 1 ? `×${edge.count}` : '';
-			if (label) {
-				path.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'title')).textContent = label;
-			}
-			this.svg.appendChild(path);
-		}
-	}
+	/* ---------- The view over the drawing ---------- */
 
-	/** A node's anchor side: `bottom` true hands the bottom-centre, false the top-centre —
-	 *  in world coordinates, the drag offset included. */
-	private nodeAnchor(key: string, bottom: boolean): { x: number; y: number } | null {
-		const node = this.nodes.get(key);
-		const point = this.positions.get(key);
-		if (!node || !point) return null;
-		const x = point.x + node.dx;
-		const y = point.y + node.dy;
-		return { x, y: bottom ? y + NODE_H : y };
-	}
-
-	private buildNode(node: GraphNode): HTMLElement {
-		const badge = node.hasChildren ? el('button', 'rg-badge') : el('span', 'rg-badge rg-leaf');
-		if (node.hasChildren) badge.addEventListener('click', (event) => {
-			event.stopPropagation();
-			void this.toggleExpand(node.key);
-		});
-		const box = el('div', node.parentKey === null ? 'rg-node rg-root-node' : 'rg-node', [
-			badge,
-			icon(KIND_ICONS[node.kind] ?? 'symbol-variable'),
-			node.container ? el('span', 'rg-container', [`${node.container}·`]) : null,
-			el('span', 'rg-label', [node.name])
-		]);
-		box.style.left = '0px';
-		box.style.top = '0px';
-		box.dataset['key'] = node.key;
-		box.title = `${node.path}:${node.line + 1}`;
-		box.addEventListener('click', () => {
-			if (this.clickSuppressed) {
-				this.clickSuppressed = false;
-				return;
-			}
-			this.onOpen?.(node.path, node.line + 1);
-		});
-		box.addEventListener('dblclick', (event) => {
-			event.stopPropagation();
-			this.setRoot({ kind: node.kind, name: node.name, path: node.path, line: node.line });
-		});
-		box.addEventListener('pointerdown', (event) => this.beginNodeDrag(event, node));
-		this.wireDeclHover(box, node);
-		node.elt = box;
-		this.paintNode(node);
-		if (node.truncated) {
-			const cut = el('div', 'rg-cut', [t('symbols.graph.cut')]);
-			const point = this.positions.get(node.key);
-			if (point) {
-				cut.style.left = `${point.x + node.dx - this.bounds.minX}px`;
-				cut.style.top = `${point.y + node.dy + NODE_H + 2 - this.bounds.minY}px`;
-			}
-			this.world.appendChild(cut);
-		}
-		return box;
-	}
-
-	private paintNode(node: GraphNode): void {
-		if (!node.elt) return;
-		const badge = node.elt.querySelector<HTMLButtonElement>('.rg-badge');
-		if (!badge || badge.classList.contains('rg-leaf')) return;
-		badge.classList.toggle('loading', node.loading);
-		badge.textContent = '';
-		if (node.loading) badge.appendChild(icon('sync', 'codicon-modifier-spin'));
-		else badge.textContent = node.expanded ? '−' : '+';
-	}
-
-	/* ---------- Pan, zoom, drag ---------- */
-
-	private applyTransform(): void {
-		this.world.style.transform = `translate(${this.panX}px, ${this.panY}px) scale(${this.scale})`;
-	}
-
-	/** Fit the world's bounds into the viewport, centred — a new root's opening frame,
-	 *  the Fit button's answer, and the host's re-frame when the section re-shows. A
-	 *  viewport with no layout yet (a hidden page) keeps the identity transform. */
+	/** Fit the whole drawing into the viewport — the Fit button's answer and a new root's
+	 *  opening frame. */
 	fit(): void {
-		const width = this.viewport.clientWidth;
-		const height = this.viewport.clientHeight;
-		if (width === 0 || height === 0 || this.bounds.width === 0) return;
-		const scale = Math.min(Math.min(width / this.bounds.width, height / this.bounds.height), 1);
-		this.scale = Math.max(scale, SCALE_MIN);
-		this.panX = (width - this.bounds.width * this.scale) / 2;
-		this.panY = (height - this.bounds.height * this.scale) / 2;
-		this.applyTransform();
+		this.diagram?.fit(true);
 	}
 
-	private onWheel(event: WheelEvent): void {
-		event.preventDefault();
-		this.zoomAt(event.clientX, event.clientY, event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP);
-	}
-
-	private zoomAt(clientX: number, clientY: number, factor: number): void {
-		const rect = this.viewport.getBoundingClientRect();
-		const px = clientX - rect.left;
-		const py = clientY - rect.top;
-		const next = Math.min(SCALE_MAX, Math.max(SCALE_MIN, this.scale * factor));
-		if (next === this.scale) return;
-		// The world point under the cursor stays under it: pan' = p − (p − pan)·s′/s.
-		this.panX = px - ((px - this.panX) * next) / this.scale;
-		this.panY = py - ((py - this.panY) * next) / this.scale;
-		this.scale = next;
-		this.applyTransform();
-	}
-
-	private onViewportPointerDown(event: PointerEvent): void {
-		if (event.button !== 0) return;
-		if ((event.target as HTMLElement | null)?.closest('.rg-node')) return;
-		this.hideDecl();
-		this.endPointer();
-		this.panning = { startX: event.clientX, startY: event.clientY, baseX: this.panX, baseY: this.panY };
-		const move = (e: PointerEvent): void => {
-			if (!this.panning) return;
-			this.panX = this.panning.baseX + (e.clientX - this.panning.startX);
-			this.panY = this.panning.baseY + (e.clientY - this.panning.startY);
-			this.applyTransform();
-		};
-		const up = (): void => {
-			this.panning = null;
-			window.removeEventListener('pointermove', move);
-			window.removeEventListener('pointerup', up);
-		};
-		window.addEventListener('pointermove', move);
-		window.addEventListener('pointerup', up);
-	}
-
-	private beginNodeDrag(event: PointerEvent, node: GraphNode): void {
-		if (event.button !== 0) return;
-		event.stopPropagation();
-		this.hideDecl();
-		this.clickSuppressed = false;
-		this.endPointer();
-		this.drag = { node, startX: event.clientX, startY: event.clientY, baseDx: node.dx, baseDy: node.dy, moved: false };
-		const move = (e: PointerEvent): void => {
-			const drag = this.drag;
-			if (!drag) return;
-			const dx = e.clientX - drag.startX;
-			const dy = e.clientY - drag.startY;
-			if (!drag.moved && Math.hypot(dx, dy) < DRAG_T) return;
-			drag.moved = true;
-			drag.node.dx = drag.baseDx + dx / this.scale;
-			drag.node.dy = drag.baseDy + dy / this.scale;
-			this.paintPositions();
-		};
-		const up = (): void => {
-			if (this.drag?.moved) this.clickSuppressed = true;
-			this.drag = null;
-			window.removeEventListener('pointermove', move);
-			window.removeEventListener('pointerup', up);
-		};
-		window.addEventListener('pointermove', move);
-		window.addEventListener('pointerup', up);
-	}
-
-	/** Retire any pointer's window listeners (a drag or a pan whose up never came — the
-	 *  view's dispose path included). */
-	private endPointer(): void {
-		this.drag = null;
-		this.panning = null;
+	/** The page re-gained a real viewport (the section re-showed, the sash moved): frame
+	 *  the drawing unless the user had zoomed or panned by hand. */
+	frame(): void {
+		this.diagram?.onShown();
 	}
 
 	/* ---------- The declaration card ---------- */
 
-	private wireDeclHover(surface: HTMLElement, node: GraphNode): void {
-		surface.addEventListener('mouseenter', (event) => {
-			const generation = this.generation;
-			if (this.declTimer !== null) clearTimeout(this.declTimer);
-			this.declTimer = window.setTimeout(() => {
-				this.declTimer = null;
-				void this.showDecl(node, generation, event.clientX, event.clientY);
-			}, DECL_DELAY);
-		});
-		surface.addEventListener('mouseleave', (event) => {
-			if (this.declTimer !== null) {
-				clearTimeout(this.declTimer);
-				this.declTimer = null;
-			}
-			if (this.declCard && event.relatedTarget instanceof Node && this.declCard.contains(event.relatedTarget)) return;
-			this.hideDecl();
-		});
+	private scheduleDecl(node: GraphNode, x: number, y: number): void {
+		if (this.declTimer !== null) clearTimeout(this.declTimer);
+		this.declTarget = { node, generation: this.generation, x, y };
+		this.declTimer = window.setTimeout(() => {
+			this.declTimer = null;
+			const target = this.declTarget;
+			if (target) void this.showDecl(target.node, target.generation, target.x, target.y);
+		}, DECL_DELAY);
+	}
+
+	private cancelDecl(): void {
+		if (this.declTimer !== null) {
+			clearTimeout(this.declTimer);
+			this.declTimer = null;
+		}
+		this.declTarget = null;
 	}
 
 	/** Fetch (or reuse) the declaration fragment of one symbol: the index's definitions for
 	 *  the name pick the node's own file first, then one with a body, then the first; the
-	 *  file's lines from the declaration on fill the fragment, capped. A fetch that finds
-	 *  nothing answers null and is not kept. */
+	 *  file's lines from the declaration on fill the fragment, capped. The read opens the
+	 *  path through the host's `resolvePath` (the backend's read_file wants absolute
+	 *  paths, the index speaks repo-relative ones). A fetch that finds nothing answers
+	 *  null and is not kept. */
 	private declFragment(name: string, path: string): Promise<DeclFragment | null> {
 		const key = `${name}|${path}`;
 		const cached = this.declCache.get(key);
@@ -817,7 +653,7 @@ export class RelationGraphView {
 				const defs = (await symbolLookup(name)) ?? [];
 				const def = defs.find((d) => d.path === path) ?? defs.find((d) => (d.endLine ?? d.line) > d.line) ?? defs[0];
 				if (!def) return null;
-				const file = await readFile(def.path);
+				const file = await readFile(this.resolvePath?.(def.path) ?? def.path);
 				const contents = file?.contents;
 				if (contents == null) return null;
 				const lines = contents.split('\n');
@@ -861,10 +697,7 @@ export class RelationGraphView {
 	}
 
 	private hideDecl(): void {
-		if (this.declTimer !== null) {
-			clearTimeout(this.declTimer);
-			this.declTimer = null;
-		}
+		this.cancelDecl();
 		this.declCard?.remove();
 		this.declCard = null;
 	}

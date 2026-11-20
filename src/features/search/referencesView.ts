@@ -129,6 +129,11 @@ export class ReferencesView {
 	/** The panel page's shown() asks the workbench to re-resolve the cursor symbol. */
 	onNeedRoot?: () => void;
 
+	/** The index's repo-relative paths against the workspace: the hook the host wires so
+	 *  a file's read and outline open the absolute spelling the backend needs. Unwired,
+	 *  the path passes through as-is. */
+	resolvePath?: (path: string) => string;
+
 	private readonly body: HTMLElement;
 	private readonly pinButton: HTMLButtonElement;
 
@@ -246,7 +251,8 @@ export class ReferencesView {
 		if (cached) return cached;
 		const fetch = (async (): Promise<FileData | null> => {
 			try {
-				const [file, outline] = await Promise.all([readFile(path), symbolFileOutline(path)]);
+				const absolute = this.resolvePath?.(path) ?? path;
+				const [file, outline] = await Promise.all([readFile(absolute), symbolFileOutline(absolute)]);
 				if (file?.contents == null) return null;
 				return {
 					lines: file.contents.split('\n'),

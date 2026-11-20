@@ -376,21 +376,26 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   collapsed; the hover card's relations jump rides `openGraphRoot`, which pins the graph
   on the hovered symbol and opens the section; 2026-11-20),
   `src/features/search/relationGraph.ts` + `relationGraph.css` (the relation graph — the
-  Symbol Window's box-and-arrow lower half over the `symbol_relation_children` engine:
-  the root ring drawn as an interactive box-and-arrow
-  canvas, svg edges whose arrowheads land on the referenced side (refsTo's children point
-  up, the other directions point down), call solid blue / use dashed / member green, the
-  aggregating edge carrying its ×N in stroke width and title; the layout a tidy top-down
-  tree recomputed over the visible shapes (leaves in slots, parents centred, a per-depth
-  sweep pushing overlaps right — `computeLayout`, pure and exported), a dragged box's
-  offset surviving every re-layout; the pointer works the canvas — box drag moves a box,
-  background drag pans, the wheel zooms about the cursor, one click opens the definition,
-  a drag kills its own click, a double click re-roots, resting floats the declaration card;
-  a symbol already drawn gains the cross edge instead of a second box, a ring cut short
-  (or a node at the 3-depth cap) renders the faint cut note under its box, and only a new
-  root or the Fit button refits; `pinRoot` seeds an explicit pinned root;
-  the dev harness's `?relgraph=1` surface scripts the Symbol Window whole — outline, sash,
-  graph, and the cursor buttons that re-root it — for eyeballing; 2026-11-20),
+  Symbol Window's lower half, drawn on the Code Analysis module's own mermaid drawing
+  (`../analysis`'s DiagramView — the same mermaid + ELK renderer and the same
+  gitdiagram-class viewer: pan, zoom, fit, keyboard, pinch, zoom bar; the chunk loads
+  through the first draw's dynamic import, so the sidebar's first paint never pays for
+  mermaid, and the static edge stays off the seam graph the analysis page's own search
+  import opens): the ring as a `flowchart TD` source — rounded cards whose labels carry
+  the drill marker (+/−) and the ⋯ a cut-short ring appends, curved edges whose heads
+  land on the referenced card (refsTo's children point down into the root, contains
+  points down, the kinds ride `linkStyle` palette literals — a `var(--…)` fails the
+  render), the aggregating edge's ×N in its label; every drill rebuilds the source, so
+  ELK re-lays the whole graph — the auto-arrange by construction; the pointer's
+  vocabulary: one click opens the definition, a double click re-roots, the right-click
+  menu drills (expand/collapse), re-roots or opens, resting floats the declaration card
+  (its file read resolving through `resolvePath`, the host-joined absolute spelling); a
+  symbol already drawn gains the cross edge instead of a second card (kept while both
+  ends stand drawn), a ring naming only drawn symbols leaves the node a leaf, and the
+  3-depth cap answers the ⋯ instead of a request; `pinRoot` seeds an explicit pinned
+  root; the dev harness's `?relgraph=1` surface scripts the Symbol Window whole —
+  outline, sash, graph, and the cursor buttons that re-root it — for eyeballing;
+  2026-11-20),
   `src/features/search/definitionView.ts` + `definition.css` (the Definition panel page —
   2026-11-20, it replaces the relation tree the panel used to host: the clicked symbol's
   definition content, drawn from the index — the workbench resolves the cursor word
@@ -399,14 +404,20 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   hands the row over; the body slices the declaration through the index's `endLine`, a
   macro whose end the index never recorded extends over its `\` continuations, the 400-line
   / 20 000-char cap ends with the faint cut note, and the header's location button jumps
-  at the 1-based line through `onOpenDefinition`; pin freezes the content;
+  at the 1-based line through `onOpenDefinition`; the body's read resolves through
+  `resolvePath` (the index speaks repo-relative paths, the backend's `read_file` needs
+  the absolute spelling — the same hook the references page and the graph's declaration
+  card carry; 2026-11-20, the missing hook left the page answering 符号索引没有响应 on
+  every read); pin freezes the content;
   `workbench.showDefinition`),
   `src/features/search/referencesView.ts` + `references.css` (the References panel page —
   2026-11-20, Source-Insight-style Lookup References over the index's occurrence list
   (`symbol_references`) with the definitions' markers (`symbol_lookup`): the clicked
   symbol's every whole-word site grouped by file with per-group counts (two hits on one
   line are one site), a file group opening on its header's click over a cached
-  `read_file` + `symbol_file_outline` pair, and — the special processing the raw list
+  `read_file` + `symbol_file_outline` pair (both resolving through the same `resolvePath`
+  absolute-join hook — without it every site row painted its number over an empty line;
+  2026-11-20), and — the special processing the raw list
   never shows — a site's click answering a folded context slice (`foldedContext`, pure
   and exported): the innermost enclosing definition's declaration line, a window of lines
   around the site (the site row highlighted, its click jumping 1-based through `onOpen`,
