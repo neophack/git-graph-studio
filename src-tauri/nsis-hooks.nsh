@@ -14,7 +14,33 @@
 ; leaves) — never by rewriting a multi-entry PATH through NSIS string space.
 
 ; WordReplace comes from WordFunc.nsh, included by Tauri's installer.nsi
-; before this file.
+; before this file. The hook macros are included BEFORE Tauri's own defines
+; ("a hook can only use what is already defined"), so the process names below
+; are hardcoded — keep them in step with `mainBinaryName` in tauri.conf.json
+; and prepare.mjs's staged sidecars (ggs-node, ggs-bash on Windows,
+; ggs-config).
+
+!macro NSIS_HOOK_PREINSTALL
+  ; The install directory carries four executables (ggs, ggs-node, ggs-bash,
+  ; ggs-config) and every one of them is a file this installer overwrites.
+  ; Tauri's own running-app check names only the main binary, so a lingering
+  ; sidecar locks its file and the copy fails with "Error opening file for
+  ; writing" (2026-11-21, ggs-node.exe: the extension backends this instance
+  ; spawned outliving it — the app-update's exit races their stop, and a
+  ; crashed window leaves them orphaned; a GGS Bash terminal locks
+  ; ggs-bash.exe the same way). End this user's copies before the copies run.
+  ; The ~/.ggs/shell/bash.exe copy is a different image name and is never
+  ; touched; no /T beside the two /FI filters — that pair hangs taskkill
+  ; forever when nothing matches (2026-10-12).
+  ReadEnvStr $R7 USERNAME
+  nsExec::Exec /TIMEOUT=5000 'taskkill /F /FI "IMAGENAME eq ggs-node.exe" /FI "USERNAME eq $R7"'
+  Pop $R6
+  nsExec::Exec /TIMEOUT=5000 'taskkill /F /FI "IMAGENAME eq ggs-bash.exe" /FI "USERNAME eq $R7"'
+  Pop $R6
+  nsExec::Exec /TIMEOUT=5000 'taskkill /F /FI "IMAGENAME eq ggs-config.exe" /FI "USERNAME eq $R7"'
+  Pop $R6
+  Sleep 500
+!macroend
 
 !macro NSIS_HOOK_POSTINSTALL
   ; PATH is deliberately untouched here — see the module comment. The app's
@@ -23,6 +49,18 @@
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
+  ; The same lingering sidecars that block the installer's copies block the
+  ; uninstaller's deletions — NSIS Delete fails silently on a locked file and
+  ; leaves it behind. End this user's copies first (the same kills the
+  ; PREINSTALL hook runs; see its comment for why they exist).
+  ReadEnvStr $R7 USERNAME
+  nsExec::Exec /TIMEOUT=5000 'taskkill /F /FI "IMAGENAME eq ggs-node.exe" /FI "USERNAME eq $R7"'
+  Pop $R6
+  nsExec::Exec /TIMEOUT=5000 'taskkill /F /FI "IMAGENAME eq ggs-bash.exe" /FI "USERNAME eq $R7"'
+  Pop $R6
+  nsExec::Exec /TIMEOUT=5000 'taskkill /F /FI "IMAGENAME eq ggs-config.exe" /FI "USERNAME eq $R7"'
+  Pop $R6
+  Sleep 500
   ; The File Associations service (cmd_assoc) writes per-user ProgIds and the
   ; RegisteredApplications entry under HKCU; the installer never owns them, so the
   ; uninstaller removes them here - a leftover would leave "Git Graph Studio" in
