@@ -1492,7 +1492,8 @@ export const zhCn: typeof en = {
 	'references.sitesCut': '此文件还有更多引用 — 已截断。',
 	'references.fold': '… {0} 行 …',
 	'references.defTitle': '定义',
-	'references.siteTitle': '点击展开折叠的上下文；双击跳转',
+	'references.siteTitle': '点击跳转到此引用',
+	'references.contextTitle': '折叠上下文 — 点击展开或收起',
 	'references.openTitle': '跳转到此引用',
 	// 关系图的类型选择器——Source Insight 关系窗口自己的关系类型集（2026-11-20）。
 	'relations.kind.pick': '关系图绘制的关系类型',

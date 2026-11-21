@@ -1507,7 +1507,8 @@ export const en = {
 	'references.sitesCut': 'More sites in this file — cut short.',
 	'references.fold': '… {0} line(s) …',
 	'references.defTitle': 'Definition',
-	'references.siteTitle': 'Click for the folded context; double-click to jump',
+	'references.siteTitle': 'Click to jump to this reference',
+	'references.contextTitle': 'The folded context — click to expand or collapse',
 	'references.openTitle': 'Jump to this site',
 	// The relation graph's type picker — Source Insight's own relation-type set (the
 	// names its relation window offers, 2026-11-20).

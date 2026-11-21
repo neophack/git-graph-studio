@@ -108,12 +108,15 @@ struct FileEntry {
     bases: Vec<StoredBases>,
 }
 
-/// A file's extraction, before the names are interned.
+/// A file's extraction, before the names are interned. `words` is the file's unique
+/// identifier words, walked off the same read the symbols came from — an update never
+/// re-reads the file for its occurrence list.
 struct Extraction {
     path: String,
     mtime_ms: u64,
     size: u64,
     symbols: Vec<Extracted>,
+    words: Vec<String>,
 }
 
 /// One declaration as extracted, names still owned by the file.
@@ -860,10 +863,13 @@ impl SymbolStore {
             .collect();
         lookup.shrink_to_fit();
         for file in upserts {
-            let words = match fs::read_to_string(Path::new(&self.root).join(&file.path)) {
-                Ok(text) => words_in(&text, &|word| lookup.get(word).copied()),
-                Err(_) => Vec::new(),
-            };
+            // The words rode the extraction (one read in extract_file covered both the
+            // parse and this list); an unknown word — never a declared name — drops.
+            let words = file
+                .words
+                .iter()
+                .filter_map(|word| lookup.get(word.as_str()).copied())
+                .collect::<Vec<u32>>();
             let symbols = file
                 .symbols
                 .iter()
@@ -1200,12 +1206,42 @@ fn extract_file(root: &str, relative: &str) -> Option<Extraction> {
             bases: s.bases,
         })
         .collect();
+    let words = unique_words(&text);
     Some(Extraction {
         path: relative.to_owned(),
         mtime_ms: stat.mtime_ms,
         size: stat.size,
         symbols,
+        words,
     })
+}
+
+/// The file's unique identifier words, deduplicated — the raw material the interned
+/// occurrence list maps from.
+fn unique_words(text: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut words = Vec::new();
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut start = None;
+    for (at, c) in text.char_indices() {
+        if is_word(c) {
+            if start.is_none() {
+                start = Some(at);
+            }
+        } else if let Some(from) = start.take() {
+            let word = &text[from..at];
+            if seen.insert(word) {
+                words.push(word.to_owned());
+            }
+        }
+    }
+    if let Some(from) = start {
+        let word = &text[from..];
+        if seen.insert(word) {
+            words.push(word.to_owned());
+        }
+    }
+    words
 }
 
 /// Which of the interned names occur as words in `text`, as a sorted, deduplicated id list.

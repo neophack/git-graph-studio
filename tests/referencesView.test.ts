@@ -136,12 +136,18 @@ describe('rendering the references', () => {
 		view.element.remove();
 	});
 
-	it('clicking a site opens the folded context; the fold rows open in place', async () => {
+	it('clicking a site jumps at once; its arrow opens the folded context, the fold rows open in place', async () => {
 		const view = mountView();
 		view.setSubject({ kind: 'function', name: 'total', path: 'src/math.c', line: 0 });
 		await flush();
 		const rows = view.element.querySelectorAll('.refs-site');
-		click(rows[2]!); // the deep site inside helper
+		// The row itself is the jump — one click, Source Insight's search-results read.
+		const jumpOpens: string[] = [];
+		view.onOpen = (path, line) => jumpOpens.push(`${path}:${line}`);
+		click(rows[2]!);
+		expect(jumpOpens).toEqual(['src/math.c:12']);
+		// The arrow folds the context open.
+		click(rows[2]!.querySelector('.refs-ctx-toggle')!);
 		await flush();
 		const ctx = view.element.querySelector('.refs-ctx');
 		expect(ctx).toBeTruthy();
@@ -160,15 +166,15 @@ describe('rendering the references', () => {
 		view.element.remove();
 	});
 
-	it('clicking the site row again collapses the context', async () => {
+	it('clicking the arrow again collapses the context; the row click never re-folds', async () => {
 		const view = mountView();
 		view.setSubject({ kind: 'function', name: 'total', path: 'src/math.c', line: 0 });
 		await flush();
 		const row = view.element.querySelectorAll('.refs-site')[1]!;
-		click(row);
+		click(row.querySelector('.refs-ctx-toggle')!);
 		await flush();
 		expect(view.element.querySelector('.refs-ctx')).toBeTruthy();
-		click(row);
+		click(row.querySelector('.refs-ctx-toggle')!);
 		expect(view.element.querySelector('.refs-ctx')).toBeNull();
 		view.element.remove();
 	});
@@ -177,10 +183,21 @@ describe('rendering the references', () => {
 		const view = mountView();
 		view.setSubject({ kind: 'function', name: 'total', path: 'src/math.c', line: 0 });
 		await flush();
-		click(view.element.querySelectorAll('.refs-site')[2]!);
+		click(view.element.querySelectorAll('.refs-site')[2]!.querySelector('.refs-ctx-toggle')!);
 		await flush();
 		// other.c's group opens with its own read; here math.c's outline names every site.
 		expect(view.element.querySelectorAll('.refs-ctx')).toHaveLength(1);
+		view.element.remove();
+	});
+
+	it('the site rows carry the code colors, the name riding the emphasis', async () => {
+		const view = mountView();
+		view.setSubject({ kind: 'function', name: 'total', path: 'src/math.c', line: 0 });
+		await flush();
+		const row = view.element.querySelectorAll('.refs-site')[0]!;
+		// A keyword and the searched name, colored by the shared tokenizer.
+		expect(row.querySelector('.hl-keyword')).toBeTruthy();
+		expect(row.querySelector('.hl-emphasis')?.textContent).toBe('total');
 		view.element.remove();
 	});
 

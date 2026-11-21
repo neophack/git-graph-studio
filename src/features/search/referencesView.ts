@@ -13,6 +13,7 @@ import { symbolFileOutline, symbolLookup, symbolReferences, type SymbolRefFile }
 
 import { t, tf } from '../../platform/i18n';
 import { KIND_ICONS } from './contextView';
+import { highlightLine, extOf } from '../../platform/highlight';
 import { actionButton, el, icon } from '../../platform/ui/index';
 
 import './references.css';
@@ -112,11 +113,6 @@ export function foldedContext(lines: string[], spans: RefSpan[], siteLine: numbe
 function baseName(path: string): string {
 	const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
 	return cut === -1 ? path : path.slice(cut + 1);
-}
-
-/** The whole-word matcher that paints every occurrence of the name in a line. */
-function wordPattern(name: string): RegExp {
-	return new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
 }
 
 export class ReferencesView {
@@ -351,8 +347,8 @@ export class ReferencesView {
 		return group;
 	}
 
-	/** The group's site rows: the def marker, the 1-based line number, and the line's text
-	 *  with every whole-word occurrence of the name painted. */
+	/** The group's site rows: the def marker, the context arrow, the 1-based line number,
+	 *  and the line's code colored. */
 	private paintGroup(group: HTMLElement, file: SymbolRefFile, matches: SymbolRefFile['matches']): void {
 		const pending = el('div', 'refs-hint', [icon('sync', 'codicon-modifier-spin')]);
 		group.appendChild(pending);
@@ -367,7 +363,11 @@ export class ReferencesView {
 			}
 			// An expanded site of a re-rendered group repaints its folded context from the cache.
 			for (const match of matches) {
-				if (this.openSites.has(siteKey(file.path, match.line))) void this.expandSite(group, file, match.line, false);
+				if (this.openSites.has(siteKey(file.path, match.line))) {
+					const key = siteKey(file.path, match.line);
+					group.querySelector(`.refs-site[data-key="${cssEscape(key)}"] .refs-ctx-toggle`)?.classList.add('open');
+					void this.expandSite(group, file, match.line, false);
+				}
 			}
 		});
 	}
@@ -376,6 +376,7 @@ export class ReferencesView {
 		const key = siteKey(file.path, match.line);
 		const row = el('div', 'refs-site');
 		row.dataset['key'] = key;
+		row.tabIndex = 0;
 		if (defKind) {
 			const marker = icon(KIND_ICONS[defKind] ?? 'symbol-variable', 'refs-def');
 			marker.title = t('references.defTitle');
@@ -383,45 +384,58 @@ export class ReferencesView {
 		} else {
 			row.appendChild(el('span', 'refs-def-space'));
 		}
+		// The context's toggle is its own affordance — the row itself is the jump (Source
+		// Insight's search results: one click navigates), the arrow folds and unfolds.
+		const context = el('span', 'refs-ctx-toggle', [icon('chevron-right', 'twistie')]);
+		context.title = t('references.contextTitle');
+		context.addEventListener('click', (event) => {
+			event.stopPropagation();
+			void this.toggleSite(row, file, match.line, context);
+		});
+		row.appendChild(context);
 		// The index speaks 1-based lines; the file's lines array and the outline spans are
 		// 0-based — the site row shows the line as the backend named it.
 		const at = match.line - 1;
 		row.appendChild(el('span', 'refs-site-num', [String(match.line)]));
-		const text = (lines[at] ?? '').trimEnd().slice(0, TEXT_MAX);
-		row.appendChild(this.paintLineText(text, this.subject?.name ?? ''));
+		row.appendChild(this.paintLineText((lines[at] ?? '').trimEnd(), extOf(file.path)));
 		row.title = t('references.siteTitle');
-		row.addEventListener('click', () => void this.toggleSite(row, file, match.line));
-		row.addEventListener('dblclick', () => this.onOpen?.(file.path, match.line));
+		row.addEventListener('click', () => this.onOpen?.(file.path, match.line));
+		row.addEventListener('keydown', (event) => {
+			if (event.key === 'Enter') {
+				event.preventDefault();
+				this.onOpen?.(file.path, match.line);
+			} else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+				event.preventDefault();
+				const rows = this.body.querySelectorAll<HTMLElement>('.refs-site');
+				const at = Array.from(rows).indexOf(row) + (event.key === 'ArrowDown' ? 1 : -1);
+				rows[at]?.focus();
+			}
+		});
 		return row;
 	}
 
-	/** One line's text with every whole-word occurrence of the name wrapped. */
-	private paintLineText(text: string, name: string): HTMLElement {
+	/** One line's code, colored — the shared tokenizer's runs, the searched name riding
+	 *  the emphasis class over its word tokens. */
+	private paintLineText(text: string, ext: string, cap = TEXT_MAX): HTMLElement {
 		const span = el('span', 'refs-site-text');
-		if (name) {
-			let at = 0;
-			for (const hit of text.matchAll(wordPattern(name))) {
-				const start = hit.index ?? 0;
-				if (start > at) span.appendChild(document.createTextNode(text.slice(at, start)));
-				span.appendChild(el('mark', 'refs-hit', [text.slice(start, start + hit[0].length)]));
-				at = start + hit[0].length;
-			}
-			if (at < text.length) span.appendChild(document.createTextNode(text.slice(at)));
-		} else {
-			span.textContent = text;
+		const shown = text.slice(0, cap);
+		for (const segment of highlightLine(shown, ext, this.subject?.name)) {
+			span.appendChild(segment.cls ? el('span', segment.cls, [segment.text]) : document.createTextNode(segment.text));
 		}
+		if (text.length > cap) span.appendChild(document.createTextNode('…'));
 		return span;
 	}
 
-	/** Open or close one site's folded context; `paint` false repaints an already-open
-	 *  slice (a group's re-render) instead of toggling. */
-	private async toggleSite(row: HTMLElement, file: SymbolRefFile, line: number): Promise<void> {
+	/** Open or close one site's folded context; the row's chevron flips with it. */
+	private async toggleSite(row: HTMLElement, file: SymbolRefFile, line: number, toggle?: HTMLElement): Promise<void> {
 		const key = siteKey(file.path, line);
 		if (!this.openSites.delete(key)) {
 			this.openSites.add(key);
+			toggle?.classList.add('open');
 			await this.expandSite(row.parentElement ?? row, file, line, true);
 			return;
 		}
+		toggle?.classList.remove('open');
 		row.parentElement?.querySelector(`.refs-ctx[data-for="${cssEscape(key)}"]`)?.remove();
 	}
 
@@ -441,10 +455,10 @@ export class ReferencesView {
 		const spans = data?.spans ?? [];
 		for (const entry of foldedContext(lines, spans, line - 1)) {
 			if (entry.kind === 'fold') {
-				ctx.appendChild(this.buildFold(entry.from ?? 0, entry.to ?? 0, lines));
+				ctx.appendChild(this.buildFold(entry.from ?? 0, entry.to ?? 0, lines, extOf(file.path)));
 			} else {
 				const at = entry.line ?? 0;
-				const lineElt = this.buildContextLine(lines[at] ?? '', this.subject?.name ?? '');
+				const lineElt = this.buildContextLine(lines[at] ?? '', extOf(file.path));
 				if (entry.kind === 'site') {
 					lineElt.classList.add('ref-ctx-site');
 					lineElt.title = t('references.openTitle');
@@ -459,15 +473,15 @@ export class ReferencesView {
 
 	/** A fold row: `… N lines …` — the click replaces it with the folded lines, capped,
 	 *  the remainder staying a fold row of its own. */
-	private buildFold(from: number, to: number, lines: string[]): HTMLElement {
+	private buildFold(from: number, to: number, lines: string[], ext: string): HTMLElement {
 		const fold = el('div', 'ref-ctx-fold', [tf('references.fold', to - from + 1)]);
 		fold.setAttribute('role', 'button');
 		fold.tabIndex = 0;
 		const open = (): void => {
 			const end = Math.min(to, from + FOLD_MAX - 1);
 			const frag = document.createDocumentFragment();
-			for (let at = from; at <= end; at++) frag.appendChild(this.buildContextLine(lines[at] ?? '', this.subject?.name ?? ''));
-			if (end < to) frag.appendChild(this.buildFold(end + 1, to, lines));
+			for (let at = from; at <= end; at++) frag.appendChild(this.buildContextLine(lines[at] ?? '', ext));
+			if (end < to) frag.appendChild(this.buildFold(end + 1, to, lines, ext));
 			fold.replaceWith(frag);
 		};
 		fold.addEventListener('click', open);
@@ -480,9 +494,9 @@ export class ReferencesView {
 		return fold;
 	}
 
-	/** One context code line, painted with the same occurrence highlights the rows carry. */
-	private buildContextLine(text: string, name: string): HTMLElement {
-		return el('div', 'ref-ctx-line', [this.paintLineText(text.trimEnd().slice(0, TEXT_MAX), name)]);
+	/** One context code line, colored like the site rows. */
+	private buildContextLine(text: string, ext: string): HTMLElement {
+		return el('div', 'ref-ctx-line', [this.paintLineText(text.trimEnd(), ext)]);
 	}
 }
 

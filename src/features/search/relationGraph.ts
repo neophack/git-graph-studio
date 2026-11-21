@@ -6,11 +6,13 @@
 // `removeNodeData`s them — every other card keeps its exact slot and the camera never
 // moves (点击加号减号要添加减少节点，不要重新刷图). The layout is Source Insight's
 // relation window's stable tree: slots grow rightward/downward from the root and a
-// placed card never relocates. The cards speak the SI vocabulary: a card whose label
-// carries the +/− — the ring's expander — drills on one click (deferred, so a double
-// click's first press never expands), a card without a ring — and the double click on
-// any card — opens the definition, a right-click menu drills, re-roots or opens, and
-// resting floats the declaration card. The engine's own viewport handles the wheel
+// placed card never relocates. The cards speak the SI vocabulary (2026-11-20, the
+// owner's direction: the panels' operation logic aligned with Source Insight): a card's
+// one click opens its definition — the relation window's own click — and the ring's
+// +/− expander is its own small node beside the card, the tree's box, whose click alone
+// drills and collapses (instantly — no deferred merge); a right-click menu drills,
+// re-roots or opens, and resting floats the declaration card, its code colored. The
+// engine's own viewport handles the wheel
 // zoom, the drag pan and Fit (`fitView`). The relation TYPE is Source Insight's own
 // (2026-11-20, the owner's direction: 引用和关系要做到和 source insight 99% 一致的使用体验,
 // the si-lite reconstruction the reference): the picker lists the thirteen view names
@@ -26,7 +28,8 @@ import { readFile } from '../../platform/ipc/fs';
 import { symbolLookup, symbolRelationChildren, type RelationKind, type RelationNode } from '../../platform/ipc/symbols';
 
 import { t, tf, type LocaleKey } from '../../platform/i18n';
-import { el, escapeHtml, icon, showContextMenu, type MenuEntry } from '../../platform/ui/index';
+import { extOf, highlightLine } from '../../platform/highlight';
+import { el, icon, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 
 import './relationGraph.css';
 
@@ -100,10 +103,11 @@ const EMPTY_VERDICTS: Partial<Record<RelationKind, LocaleKey>> = {
 /** The pointer's rest before the declaration card floats in — the panel tree's timing. */
 const DECL_DELAY = 300;
 
-/** A drillable card's click waits this long before it drills, so the double click's
- *  first press never expands the ring on its way to the jump (SI's expander reads
- *  instantly; here the whole card is the expander, and the delay is the merge's cost). */
-const CLICK_DRILL_DELAY = 220;
+/** The ring's expander: a small circle node at the card's right edge, the tree row's
+ *  +/− box — its click alone drills and collapses, the card's own click being the
+ *  definition jump. The id suffix marks one in the engine's node list. */
+const EXPANDER_SUFFIX = '\u0000+';
+const EXPANDER_SIZE = 14;
 
 /** One graph node: a symbol card and its ring's bookkeeping. The drawn structure is a
  *  strict tree — a ring answer naming a symbol already drawn adds a cross edge instead of
@@ -181,8 +185,23 @@ function fromRelation(node: RelationNode, parentKey: string | null): GraphNode {
 /** One card's label: the drill marker the ring's state carries (+ / −), the container
  *  prefix, the name, and the ⋯ a cut-short ring appends. */
 function relationLabel(node: GraphNode): string {
-	const marker = node.hasChildren ? (node.expanded ? '− ' : '+ ') : '';
-	return `${marker}${node.container ? `${node.container}·` : ''}${node.name}${node.truncated ? ' ⋯' : ''}`;
+	return `${node.container ? `${node.container}·` : ''}${node.name}${node.truncated ? ' ⋯' : ''}`;
+}
+
+/** The ring expander's own label — the tree box's +/− (or ⋯ at the depth cap). */
+function expanderLabel(node: GraphNode): string {
+	return node.truncated && !node.expanded ? '⋯' : node.expanded ? '−' : '+';
+}
+
+/** The expander node's id for one card. */
+function expanderKey(cardKey: string): string {
+	return `${cardKey}${EXPANDER_SUFFIX}`;
+}
+
+/** One drawn scene: the cards and their ring expanders, and the arrows between them. */
+interface Scene {
+	nodes: { id: string; label: string; x: number; y: number; root: boolean; expander: boolean }[];
+	edges: { id: string; from: string; to: string; kind: string; count: number }[];
 }
 
 /** The declaration card's cargo: the definition's opening lines and where they sit. */
@@ -300,7 +319,6 @@ export class RelationGraphView {
 	dispose(): void {
 		this.disposed = true;
 		this.hideDecl();
-		this.cancelClickDrill();
 		document.removeEventListener('mousedown', this.onDocMouseDown);
 		document.removeEventListener('keydown', this.onDocKeyDown);
 		this.graph?.destroy();
@@ -385,7 +403,6 @@ export class RelationGraphView {
 		const generation = ++this.generation;
 		const root = this.root;
 		this.hideDecl();
-		this.cancelClickDrill();
 		this.nodes.clear();
 		this.positions.clear();
 		this.crossEdges.length = 0;
@@ -663,13 +680,28 @@ export class RelationGraphView {
 		this.draw(this.buildScene());
 	}
 
-	private buildScene(): { nodes: { id: string; label: string; x: number; y: number; root: boolean }[]; edges: { id: string; from: string; to: string; kind: string; count: number }[] } {
+	private buildScene(): Scene {
 		const visible = this.visibleNodes();
+		const nodes = visible.map((node) => {
+			const point = this.positions.get(node.key)!;
+			return { id: node.key, label: relationLabel(node), x: point.x + NODE_W / 2, y: point.y + NODE_H / 2, root: node.parentKey === null, expander: false };
+		});
+		// Every drillable card's box sits at its right edge — the tree row's +/−, the
+		// only hit that drills (the card's own click is the definition jump).
+		for (const node of visible) {
+			if (!node.hasChildren) continue;
+			const point = this.positions.get(node.key)!;
+			nodes.push({
+				id: expanderKey(node.key),
+				label: expanderLabel(node),
+				x: point.x + NODE_W + EXPANDER_SIZE / 2 + 4,
+				y: point.y + NODE_H / 2,
+				root: false,
+				expander: true
+			});
+		}
 		return {
-			nodes: visible.map((node) => {
-				const point = this.positions.get(node.key)!;
-				return { id: node.key, label: relationLabel(node), x: point.x + NODE_W / 2, y: point.y + NODE_H / 2, root: node.parentKey === null };
-			}),
+			nodes,
 			edges: this.visibleEdgeList().map((edge) => ({ id: `${edge.from}\u0000${edge.to}`, from: edge.from, to: edge.to, kind: edge.kind, count: edge.count }))
 		};
 	}
@@ -686,7 +718,7 @@ export class RelationGraphView {
 	 *  what asked. A draw that loses a supersede race or the dispose stays unpainted. */
 	private drawSeq = 0;
 
-	private draw(scene: { nodes: { id: string; label: string; x: number; y: number; root: boolean }[]; edges: { id: string; from: string; to: string; kind: string; count: number }[] }): void {
+	private draw(scene: Scene): void {
 		const seq = ++this.drawSeq;
 		if (this.graph) {
 			this.applyScene(scene);
@@ -747,18 +779,25 @@ export class RelationGraphView {
 			// The pointer's vocabulary (the state machine below owns the meanings).
 			graph.on('node:click', (event: unknown) => this.onCardClick(this.cardKey(event)));
 			graph.on('node:dblclick', (event: unknown) => {
-				this.cancelClickDrill();
-				const node = this.nodes.get(this.cardKey(event));
-				if (node) this.onOpen?.(node.path, node.line + 1);
+				// The card's double click is the same jump; an expander click never jumps.
+				const key = this.cardKey(event);
+				if (!key.endsWith(EXPANDER_SUFFIX)) {
+					const node = this.nodes.get(this.cardKey(event));
+					if (node) this.onOpen?.(node.path, node.line + 1);
+				}
 			});
 			graph.on('node:contextmenu', (event: unknown) => {
+				const key = this.cardKey(event);
+				if (key.endsWith(EXPANDER_SUFFIX)) return;
 				const client = (event as { client?: { x: number; y: number }; originalEvent?: MouseEvent }).client ??
 					{ x: (event as { originalEvent?: MouseEvent }).originalEvent?.clientX ?? 0, y: (event as { originalEvent?: MouseEvent }).originalEvent?.clientY ?? 0 };
 				(event as { originalEvent?: MouseEvent }).originalEvent?.preventDefault();
-				this.showCardMenu(client.x, client.y, this.cardKey(event));
+				this.showCardMenu(client.x, client.y, key);
 			});
 			graph.on('node:pointerenter', (event: unknown) => {
-				const node = this.nodes.get(this.cardKey(event));
+				const key = this.cardKey(event);
+				if (key.endsWith(EXPANDER_SUFFIX)) return;
+				const node = this.nodes.get(key);
 				if (!node) return;
 				const client = (event as { client?: { x: number; y: number } }).client ?? { x: 0, y: 0 };
 				this.scheduleDecl(node, client.x, client.y);
@@ -786,8 +825,9 @@ export class RelationGraphView {
 
 	/** The scene's diff onto the engine: new cards add, gone cards remove, a card whose
 	 *  ring state moved (+ / − / ⋯) rewrites its label — and nothing else is touched, so
-	 *  the camera and the kept cards stand exactly where they were. */
-	private applyScene(scene: { nodes: { id: string; label: string; x: number; y: number; root: boolean }[]; edges: { id: string; from: string; to: string; kind: string; count: number }[] }): void {
+	 *  the camera and the kept cards stand exactly where they were. The ring expanders
+	 *  ride the same diff — small circles carrying the tree box's own glyph. */
+	private applyScene(scene: Scene): void {
 		const graph = this.graph;
 		if (!graph) return;
 		const palette = themePalette();
@@ -797,19 +837,40 @@ export class RelationGraphView {
 		const fresh = scene.nodes.filter((node) => !graph.getNodeData().some((data) => String(data.id) === node.id));
 		if (fresh.length > 0) {
 			graph.addNodeData(
-				fresh.map((node) => ({
-					id: node.id,
-					style: {
-						x: node.x,
-						y: node.y,
-						labelText: node.label,
-						stroke: node.root ? palette.rootStroke : palette.cardStroke,
-						lineWidth: node.root ? 1.5 : 1,
-						fill: node.root ? palette.rootCard : palette.card,
-						labelFill: node.root ? palette.rootText : palette.text,
-						labelFontWeight: node.root ? 600 : 400
-					}
-				}))
+				fresh.map((node) =>
+					node.expander
+						? {
+								id: node.id,
+								type: 'circle',
+								style: {
+									x: node.x,
+									y: node.y,
+									size: EXPANDER_SIZE,
+									labelText: node.label,
+									fill: palette.card,
+									stroke: palette.cardStroke,
+									lineWidth: 1,
+									labelPlacement: 'right',
+									labelFontSize: 13,
+									labelFontFamily: uiFontFamily(),
+									labelFill: palette.text,
+									cursor: 'pointer'
+								}
+							}
+						: {
+								id: node.id,
+								style: {
+									x: node.x,
+									y: node.y,
+									labelText: node.label,
+									stroke: node.root ? palette.rootStroke : palette.cardStroke,
+									lineWidth: node.root ? 1.5 : 1,
+									fill: node.root ? palette.rootCard : palette.card,
+									labelFill: node.root ? palette.rootText : palette.text,
+									labelFontWeight: node.root ? 600 : 400
+								}
+							}
+					)
 			);
 		}
 		// The kept cards' labels move only when their ring state moved (+ / − / ⋯).
@@ -880,32 +941,18 @@ export class RelationGraphView {
 		}
 	}
 
-	private cancelClickDrill(): void {
-		if (this.clickTimer !== null) {
-			clearTimeout(this.clickTimer);
-			this.clickTimer = null;
-		}
-	}
-
-	private clickTimer: number | null = null;
-
 	/* ---------- The card handlers (Source Insight's vocabulary) ---------- */
 
 	private onCardClick(key: string): void {
-		const node = this.nodes.get(key);
-		if (!node) return;
-		// A card with a ring drills on one click (the deferred drill, so a double click's
-		// first press never expands); a card without a ring has nothing to drill and
-		// opens at once.
-		if (!node.hasChildren) {
-			this.onOpen?.(node.path, node.line + 1);
+		// The ring expander is the tree row's box: its click alone drills and collapses —
+		// instantly, the way the relation window's own expander reads.
+		if (key.endsWith(EXPANDER_SUFFIX)) {
+			void this.toggleExpand(key.slice(0, -EXPANDER_SUFFIX.length));
 			return;
 		}
-		if (this.clickTimer !== null) clearTimeout(this.clickTimer);
-		this.clickTimer = window.setTimeout(() => {
-			this.clickTimer = null;
-			void this.toggleExpand(key);
-		}, CLICK_DRILL_DELAY);
+		// The card's one click is the definition jump — the relation window's own click.
+		const node = this.nodes.get(key);
+		if (node) this.onOpen?.(node.path, node.line + 1);
 	}
 
 	private showCardMenu(x: number, y: number, key: string): void {
@@ -989,8 +1036,17 @@ export class RelationGraphView {
 		if (!fragment || generation !== this.generation) return;
 		this.hideDecl();
 		const card = el('div', 'rg-decl');
+		// The declaration's own colors: the shared tokenizer's runs, one row per line —
+		// the hover reads like the editor's code, not like plain text.
 		const code = el('pre', 'rg-decl-code');
-		code.innerHTML = escapeHtml(fragment.text);
+		const ext = extOf(fragment.path);
+		for (const line of fragment.text.split('\n')) {
+			const row = el('div', 'rg-decl-line');
+			for (const segment of highlightLine(line, ext)) {
+				row.appendChild(segment.cls ? el('span', segment.cls, [segment.text]) : document.createTextNode(segment.text));
+			}
+			code.appendChild(row);
+		}
 		card.append(
 			code,
 			el('div', 'rg-decl-meta', [tf('relations.declAt', fragment.kind, baseName(fragment.path), fragment.line + 1)])

@@ -59,17 +59,28 @@ function engine(): Graph {
 	return instance;
 }
 
+/** The expander dots carry the suffix-marked ids; the cards are the symbol records. */
+const EXPANDER_SUFFIX = '\u0000+';
+
+function cards(): { id: string; style?: Record<string, unknown> }[] {
+	return engine().getNodeData().filter((node) => !String(node.id).endsWith(EXPANDER_SUFFIX));
+}
+
+function expanders(): { id: string; style?: Record<string, unknown> }[] {
+	return engine().getNodeData().filter((node) => String(node.id).endsWith(EXPANDER_SUFFIX));
+}
+
 /** The card record for one symbol, told apart by the label the engine holds. */
 function cardOf(name: string): { id: string; style?: Record<string, unknown> } {
-	const card = engine().getNodeData().find((card) => String(card.style?.['labelText'] ?? '').includes(name));
+	const card = cards().find((card) => String(card.style?.['labelText'] ?? '').includes(name));
 	if (!card) throw new Error(`no rendered card names ${name}`);
 	return card;
 }
 
 async function untilCards(count: number): Promise<void> {
 	await vi.waitFor(() => {
-		if (engine().getNodeData().length !== count)
-			throw new Error(`the drawing does not hold ${count} cards yet: ${JSON.stringify(engine().getNodeData().map((card) => card.style?.['labelText']))}`);
+		if (cards().length !== count)
+			throw new Error(`the drawing does not hold ${count} cards yet: ${JSON.stringify(cards().map((card) => card.style?.['labelText']))}`);
 	}, { timeout: 3000 });
 }
 
@@ -99,10 +110,12 @@ describe('drawing the ring', () => {
 		view.setRoot({ ...ROOT });
 		await untilCards(4);
 		// The fixture's ring came back cut short — the ⋯ rides the root's label, and the
-		// drillable card carries the + while the leaves stand bare.
-		expect(String(cardOf('alpha').style?.['labelText'])).toBe('− alpha ⋯');
-		expect(String(cardOf('gamma').style?.['labelText'])).toBe('+ gamma');
+		// drillable cards carry their expander boxes with the +/− glyph while the leaves
+		// stand bare.
+		expect(String(cardOf('alpha').style?.['labelText'])).toBe('alpha ⋯');
+		expect(String(cardOf('gamma').style?.['labelText'])).toBe('gamma');
 		expect(String(cardOf('beta').style?.['labelText'])).toBe('beta');
+		expect(expanders().map((box) => String(box.style?.['labelText']))).toEqual(['−', '+']);
 		// The arrows: three tree edges (dashed for the use) plus the ×N on gamma's edge.
 		expect(edgePairs()).toHaveLength(3);
 		expect(engine().getEdgeData().some((edge) => edge.style?.['labelText'] === '×2')).toBe(true);
@@ -181,7 +194,7 @@ describe('drilling rings', () => {
 		await untilCards(4);
 		await drill('gamma', 'Expand this ring');
 		await untilCards(4);
-		expect(engine().getNodeData()).toHaveLength(4); // no second beta
+		expect(cards()).toHaveLength(4); // no second beta
 		expect(edgePairs()).toHaveLength(4); // the cross edge joined
 		view.dispose();
 	});
@@ -356,49 +369,53 @@ describe("the pointer (Source Insight's vocabulary)", () => {
 		view.dispose();
 	});
 
-	it("a drillable card's click drills its ring", async () => {
+	it("a drillable card's expander box drills its ring, and never jumps", async () => {
+		// gamma's ring names a new symbol and the already-drawn beta — a child plus the
+		// cross edge — so the box keeps its drill after the ring lands.
+		backend.on('symbol_relation_children', ({ name }) => {
+			if (name === 'alpha') return answer(RING, true);
+			if (name === 'gamma') {
+				return answer([
+					...GAMMA_RING,
+					{ kind: 'function', name: 'epsilon', container: null, path: 'src/e.c', line: 0, edgePath: 'src/c.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, hasChildren: false }
+				]);
+			}
+			return answer([]);
+		});
 		const view = mountView();
+		const opens: string[] = [];
+		view.onOpen = (path, line) => opens.push(`${path}:${line}`);
 		view.setRoot({ ...ROOT });
 		await untilCards(4);
 		const asked = backend.callsTo('symbol_relation_children').length;
-		// gamma carries the + — the click is the expander (deferred past a double click's
-		// first press); its ring re-names beta, so the cross edge draws and no card grows.
-		engine().emit('node:click', { target: { id: cardOf('gamma').id } });
+		// gamma's box carries the + — its click alone drills, and it never jumps.
+		engine().emit('node:click', { target: { id: `${cardOf('gamma').id}${EXPANDER_SUFFIX}` } });
 		await until(() => backend.callsTo('symbol_relation_children').length === asked + 1);
-		await flush();
-		await untilCards(4);
-		expect(edgePairs()).toHaveLength(4);
+		await untilCards(5);
+		expect(edgePairs()).toHaveLength(5);
+		expect(opens).toEqual([]);
+		// The box flipped to −; the second click collapses (the cached ring, no re-ask).
+		const box = engine().getNodeData().find((node) => String(node.id) === `${cardOf('gamma').id}${EXPANDER_SUFFIX}`)!;
+		expect(String(box.style?.['labelText'])).toBe('−');
+		const after = backend.callsTo('symbol_relation_children').length;
+		engine().emit('node:click', { target: { id: `${cardOf('gamma').id}${EXPANDER_SUFFIX}` } });
+		await untilCards(4); // epsilon's card left, beta stayed the cross edge
+		expect(backend.callsTo('symbol_relation_children').length).toBe(after);
+		expect(opens).toEqual([]);
 		view.dispose();
 	});
 
-	it("a leaf card's click opens the definition", async () => {
-		const view = mountView();
-		const opens: string[] = [];
-		view.onOpen = (path, line) => opens.push(`${path}:${line}`);
-		view.setRoot({ ...ROOT });
-		await untilCards(4);
-		// beta carries no ring — its click has nothing to drill and opens at once.
-		engine().emit('node:click', { target: { id: cardOf('beta').id } });
-		await flush();
-		expect(opens).toEqual(['src/b.c:3']);
-		view.dispose();
-	});
-
-	it('the double click opens the definition, and never expands on its way', async () => {
+	it("a card's click opens the definition — the relation window's own click", async () => {
 		const view = mountView();
 		const opens: string[] = [];
 		view.onOpen = (path, line) => opens.push(`${path}:${line}`);
 		view.setRoot({ ...ROOT });
 		await untilCards(4);
 		const asked = backend.callsTo('symbol_relation_children').length;
-		// The first press schedules gamma's drill; the double click cancels it and jumps.
-		const gammaId = cardOf('gamma').id;
-		engine().emit('node:click', { target: { id: gammaId } });
-		engine().emit('node:dblclick', { target: { id: gammaId } });
+		// The drillable card itself jumps on the plain click — the box owns the drilling.
+		engine().emit('node:click', { target: { id: cardOf('gamma').id } });
 		await flush();
 		expect(opens).toEqual(['src/c.c:2']);
-		expect(backend.callsTo('symbol_relation_children').length).toBe(asked);
-		await new Promise((resolve) => setTimeout(resolve, 300)); // past the deferred drill's window
 		expect(backend.callsTo('symbol_relation_children').length).toBe(asked);
 		view.dispose();
 	});

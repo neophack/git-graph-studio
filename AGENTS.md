@@ -175,7 +175,9 @@ guarantees the window is never a blank dark rectangle.
   the backend's registration; the shared result shapes — StatusMap, FileContents,
   WsSymbol, ExtInfo, CanLogStats... — live there once), `src/platform/fileIcons.ts` / `src/platform/extAssets.ts` (the file-icon mapping and
   extension-asset data URLs every view decorates with), `src/platform/lazy.ts` (async-chunk
-  loaders), `src/platform/coalesce.ts` (single-flight coalescing for refresh-shaped work —
+  loaders), `src/platform/highlight.ts` + `highlight.css` (the panels' shared line
+  highlighter — the references rows and the relation declaration card color their code
+  through its tokenizer, the searched name riding the emphasis class), `src/platform/coalesce.ts` (single-flight coalescing for refresh-shaped work —
   the SCM and Explorer refreshes: one run in flight, one queued), `src/platform/windowDrag.ts`
   (the native window move's gate: a title-bar mousedown plus each `tauri://move` mark the
   drag, a 250 ms quiet decay ends it, and the workbench's scheduled refreshes defer for as
@@ -377,22 +379,25 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   on the hovered symbol and opens the section; 2026-11-20),
   `src/features/search/relationGraph.ts` + `relationGraph.css` (the relation graph — the
   Symbol Window's lower half, drawn on **@antv/G6** (AntV's graph engine — an established
-  drawing library, per the owner's direction: 不要自己写，要使用库，比如Drawnix; loaded
+  drawing library, per the owner's direction: use a drawing library, not a hand-rolled
+  canvas; loaded
   lazily on the first drawing, a chunk the sidebar's first paint never pays for). The
   layout is Source Insight's relation window's stable tree: slots grow rightward/downward
   from the root, a placed card never relocates, and the engine is driven **incrementally**
   — a ring's expansion addNodeData's its cards below the expanded one and a collapse
   removeNodeData’s them, every other card keeping its exact slot and the camera never
-  moving (点击加号减号要添加减少节点，不要重新刷图; the mermaid round’s whole-graph ELK
+  moving (the owner's direction: a click adds or removes nodes, it never re-lays the
+  graph; the mermaid round’s whole-graph ELK
   re-layout was exactly the repaint being rejected, and the module-analysis drawing
   library itself carries no vanilla mount — Plait renders through React/Angular
-  carriers). The cards speak the SI vocabulary (2026-11-20, the owner’s direction:
-  relation的交互和source insight不一致): one click on a card whose label carries the
-  +/− drills its ring — deferred 220 ms, so a double click’s first press never expands
-  on its way to the jump — one click on a ringless card, and the double click on any
-  card, open the definition; the right-click menu drills (expand/collapse), re-roots or
-  opens; resting floats the declaration card (its file read resolving through
-  `resolvePath`, the host-joined absolute spelling). Cards carry the ⋯ a cut-short ring
+  carriers). The cards speak the SI vocabulary (2026-11-20, the owner's direction: the panels'
+  operation logic aligned with Source Insight): one click on a card opens its definition —
+  the relation window's own click — and the ring's +/− expander is its own small circle
+  node beside the card (the tree row's box), whose click alone drills and collapses,
+  instantly — the deferred whole-card merge is gone; the right-click menu drills
+  (expand/collapse), re-roots or opens; resting floats the declaration card (its file
+  read resolving through `resolvePath`, the host-joined absolute spelling), its lines
+  colored by the shared tokenizer. Cards carry the ⋯ a cut-short ring
   appends, the root the accent, and an aggregating edge its ×N label (call solid blue,
   use dashed, member green — palette literals, the canvas cannot read CSS variables); a
   symbol already drawn gains the cross edge instead of a second card (kept while both
@@ -439,14 +444,18 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   line are one site), a file group opening on its header's click over a cached
   `read_file` + `symbol_file_outline` pair (both resolving through the same `resolvePath`
   absolute-join hook — without it every site row painted its number over an empty line;
-  2026-11-20), and — the special processing the raw list
-  never shows — a site's click answering a folded context slice (`foldedContext`, pure
-  and exported): the innermost enclosing definition's declaration line, a window of lines
-  around the site (the site row highlighted, its click jumping 1-based through `onOpen`,
-  the row's double click jumping directly), and the body's middle folded into
+  2026-11-20; the rows carry the shared tokenizer's colors, the searched name its own
+  class), and — the special processing the raw list
+  never shows — the folded context slice (`foldedContext`, pure
+  and exported) behind each site's own arrow: the innermost enclosing definition's
+  declaration line, a window of lines
+  around the site (the site row highlighted, its click jumping 1-based through `onOpen`),
+  and the body's middle folded into
   `… N lines …` rows that click open in place (200-line cap, the remainder its own fold
   row); with nothing enclosing, a raw ±4 window; a definition site is its own head with
-  the whole body folded behind it; the same cursor-follow gate the definition page keeps
+  the whole body folded behind it; a site row's one click is the jump — Source Insight's
+  search-results read — the arrow alone folds (the arrow keys walk the rows, Enter
+  jumps); the same cursor-follow gate the definition page keeps
   (the panel up, this page active, the pin off) resolves the subject — one
   `resolveDefinitionSymbol` feeding whichever of the two pages is active; the 100-file /
   500-site caps answer cut notes; `workbench.showReferences`; the dev harness's

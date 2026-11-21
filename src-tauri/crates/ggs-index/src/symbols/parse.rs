@@ -676,7 +676,12 @@ fn symbol_of(
         .and_then(|d| d.child_by_field_name("parameters"))
         .map(|p| p.named_child_count())
         .unwrap_or(0);
-    let (complexity, nesting) = scope
+    // The complexity walk is the parse's most expensive per-declaration work — it reads
+    // the whole body. Only a callable's body carries decisions; a variable, type or enum
+    // answers the default without the walk (the index build parses every file, so the
+    // skip is the build's own speed win).
+    let complexity_scope = scope.filter(|_| matches!(kind, "function" | "method" | "macro"));
+    let (complexity, nesting) = complexity_scope
         .map(|d| complexity_of(lang, d, text))
         .unwrap_or((1, 0));
     let signature = scope

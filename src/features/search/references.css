@@ -33,18 +33,25 @@
 	white-space: nowrap;
 }
 .refs-site:hover { background: var(--vscode-list-hoverBackground); }
+.refs-site:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 .refs-def { font-size: 14px; flex: none; color: var(--vscode-symbolIcon-functionForeground, var(--vscode-descriptionForeground)); }
 .refs-def-space { width: 14px; flex: none; }
+/* The folded context's arrow — the row itself is the jump (Source Insight's search
+   results); this affordance alone folds and unfolds. */
+.refs-ctx-toggle {
+	flex: none; display: inline-flex; align-items: center; cursor: pointer;
+	color: var(--vscode-descriptionForeground); border-radius: 3px;
+}
+.refs-ctx-toggle:hover { color: var(--vscode-sideBar-foreground); }
+.refs-ctx-toggle > .twistie {
+	font-size: 12px; transition: transform 0.1s ease; transform: rotate(0deg);
+}
+.refs-ctx-toggle.open > .twistie { transform: rotate(90deg); }
 .refs-site-num {
 	flex: none; min-width: 30px; text-align: right; color: var(--vscode-descriptionForeground);
 	font-size: 11px; user-select: none;
 }
 .refs-site-text { overflow: hidden; text-overflow: ellipsis; }
-.refs-hit {
-	background: none; color: inherit; font-weight: 700;
-	text-decoration: underline; text-decoration-color: var(--vscode-editorOverviewRuler-findMatchForeground, currentColor);
-}
-.refs-site:hover .refs-hit { background: var(--vscode-editor-findMatchHighlightBackground); }
 
 .refs-ctx {
 	margin: 2px 0 4px 16px; padding: 3px 0; border-left: 2px solid var(--vscode-panel-border, var(--vscode-descriptionForeground));
@@ -57,7 +64,6 @@
 	cursor: pointer;
 }
 .ref-ctx-site:hover { outline: 1px solid var(--vscode-focusBorder); }
-.ref-ctx-site .refs-hit { text-decoration: underline; text-decoration-style: dotted; }
 .ref-ctx-fold {
 	color: var(--vscode-descriptionForeground); padding: 0 6px; cursor: pointer; font-style: italic; user-select: none;
 }

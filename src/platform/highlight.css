@@ -1,0 +1,21 @@
+/* The panels' shared code-token palette (highlight.ts's classes) — the references page's
+   rows and the relation graph's declaration card color through it. VS Code's webview CSS
+   variables carry no syntax-token colors, so the palette is literal: the light+ pairs
+   first, the dark+ overrides under the theme class the workbench puts on the root. */
+
+.hl-comment { color: #008000; font-style: italic; }
+.hl-string { color: #a31515; }
+.hl-number { color: #098658; }
+.hl-keyword { color: #0000ff; }
+.hl-type { color: #267f99; }
+.hl-emphasis {
+	color: var(--vscode-editor-background, #1e1e1e);
+	background: var(--vscode-editor-selectionBackground, #add6ff);
+	border-radius: 2px;
+}
+
+.vscode-dark .hl-comment, .vscode-high-contrast .hl-comment { color: #6a9955; }
+.vscode-dark .hl-string, .vscode-high-contrast .hl-string { color: #ce9178; }
+.vscode-dark .hl-number, .vscode-high-contrast .hl-number { color: #b5cea8; }
+.vscode-dark .hl-keyword, .vscode-high-contrast .hl-keyword { color: #569cd6; }
+.vscode-dark .hl-type, .vscode-high-contrast .hl-type { color: #4ec9b0; }

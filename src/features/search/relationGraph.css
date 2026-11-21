@@ -43,4 +43,6 @@
 	margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.5;
 	white-space: pre; overflow-x: auto; max-width: 100%;
 }
+.rg-decl-line { white-space: pre; }
+
 .rg-decl-meta { margin-top: 4px; color: var(--vscode-descriptionForeground); font-size: 11px; white-space: nowrap; }
