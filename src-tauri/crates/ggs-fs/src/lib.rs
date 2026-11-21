@@ -37,8 +37,10 @@ pub struct DirEntryInfo {
     pub children: Option<u32>,
 }
 
-/// The names VS Code's default `files.exclude` hides from the Explorer.
-const EXCLUDED: &[&str] = &[".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db"];
+/// The names VS Code's default `files.exclude` hides from the Explorer. `.ggs` joins them:
+/// the app's own per-project analysis database (the symbol store) — generated data the
+/// program may delete at any time, hidden beside the code like `.git` is.
+const EXCLUDED: &[&str] = &[".git", ".ggs", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db"];
 
 pub fn read_dir_sorted(path: &str) -> Result<Vec<DirEntryInfo>, String> {
     let mut dirs = Vec::new();
@@ -703,9 +705,12 @@ pub fn zip_trees<W: std::io::Write + std::io::Seek>(
 }
 
 /// The folders VS Code's search excludes by default when walking for Quick Open. Pruned even
-/// when no `.gitignore` names them, so a checkout without one still opens instantly.
+/// when no `.gitignore` names them, so a checkout without one still opens instantly. `.ggs`
+/// is the app's own per-project analysis database (the symbol store) — generated data the
+/// program may delete at any time, never a search result or an index input.
 const SKIPPED_DIRS: &[&str] = &[
     ".git",
+    ".ggs",
     "node_modules",
     "target",
     "out",

@@ -108,7 +108,7 @@ The principles below are the plan's §3, condensed. They apply to every change.
    `dev/dev-harness.html` scenario for behaviour jsdom cannot express.
 6. **Sizes are measured, not gated.** Artefact sizes and probe timings are recorded to
    `target/studio/metrics.json`. The size budgets and their CI gate were removed on
-   2026-09-15 at the owner's request ("不要限制大小了"); backend performance budgets remain
+   2026-09-15 at the owner's request ("stop gating sizes"); backend performance budgets remain
    enforced by `src-tauri/tests/it/perf.rs`.
 7. **The engine is consumed through exactly two seams**, both build-enforced — see
    [Invariants](#invariants).
@@ -316,7 +316,7 @@ no-clobber copy — not a transfer) stay.
   carries a live status cell, and a refused install is recorded, so `fs_watcher_status` and
   the `studio://watcher-status` pushes can show the status bar's dot where the automatic
   refreshes do not exist or have stopped; and since 2026-11-18 the install self-heals
-  (2026-11-18, the owner's report: 自动刷新过一段时间就变灰了 — the install is fire-once,
+  (2026-11-18, the owner's report: auto-refresh turns gray after a while — the install is fire-once,
   so the hiccup that lost it — a first-paint invoke swallowed on a busy page, a drain
   racing a folder switch — left the dot gray for the rest of the session): the status
   query re-arms an open root whose report says starting while nothing is pending in
@@ -349,10 +349,24 @@ navigation (Go-to-Definition, Find References, Call Tree, Quick Open's `@` / `#`
 modes, the Context Window, the Symbol Window sidebar page, the Relation panel page, the
 declaration ↔ definition switch)
 over the persistent workspace symbol index: interned names,
-per-file fingerprints and per-name occurrence lists under `~/.ggs/index/`, updated
+per-file fingerprints and per-name occurrence lists in the analyzed folder's own hidden
+analysis database (2026-11-21, the owner's direction: add a hidden code-analysis folder
+inside the project — the program may delete it, it never enters the git index, and the same
+files regenerate — the classic symbol IDEs' project-local database): `symbols.bin` (the native store) plus `si.db` / `si.tix` (the reference
+implementation's six-table database — dnMod/dnSir/call-edges/dnSyl/dnTdr/dnSirCode —
+byte-format identical to `si4-rea`'s si-lite `db_save`/`tix_save`, which its tooling loads
+back) under `<root>/.ggs/analysis/<hash>/`, hidden in Explorer (the `.git` attribute
+treatment), excluded from the git index through `.git/info/exclude` (ascend to the
+repository, worktree `commondir` honoured) and from every walk (`SKIPPED_DIRS`) and the
+Explorer tree (`EXCLUDED`); a read-only folder falls back to `~/.ggs/index/<hash>/`, whose
+older copies still resume. The Rebuild command is the delete-and-regenerate surface: it
+wipes the store first, and the fresh build writes the same bytes whole. Reference-table
+collection rides the full build (parse call sites + mask-filtered positioned hits);
+incremental watcher updates keep the saved `si.db` standing until the next full build.
 file-by-file by the watcher. **Nothing is indexed on open** (2026-10-22, the owner's
-direction: 打开大的项目会导致内存占用极高，我不要打开时候就分析项目，而是使用某个分析功能就开始分析，
-分析完后要释放内存): the first symbol query resumes (or builds) the index, and it leaves
+direction: opening a big project drives memory use extremely high — do not analyze the
+project on open; start analyzing only when a feature needs it, and release the memory once
+done): the first symbol query resumes (or builds) the index, and it leaves
 memory once idle — module 17's Code Analysis index follows the same lifetime.
 
 - Frontend: `src/features/search/searchView.ts`, `src/features/search/searchView.css` (the
@@ -413,8 +427,9 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   variables); a symbol already drawn gains the cross edge instead of a second card (kept
   while both ends stand drawn), a ring naming only drawn symbols leaves the node a leaf,
   and the 3-depth cap answers the ⋯ instead of a request; `pinRoot` seeds an explicit
-  pinned root; the board's viewport is its own — wheel pans, ctrl/cmd+wheel zooms at the
-  cursor, a background drag pans, and Fit frames the whole drawing;
+  pinned root; the board's viewport is its own — the wheel zooms at the cursor (2026-11-21,
+  the owner's direction: the wheel zooms in and out, it must not scroll the drawing up and
+  down), a background drag pans, and Fit frames the whole drawing;
   2026-11-20, the relation TYPE is the classic window's own (the the reference reconstruction reconstruction the
   reference; the owner's direction: the references and relations must match Source
   Insight's usage experience):
@@ -444,7 +459,7 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   at the 1-based line through `onOpenDefinition`; the body's read resolves through
   `resolvePath` (the index speaks repo-relative paths, the backend's `read_file` needs
   the absolute spelling — the same hook the references page and the graph's declaration
-  card carry; 2026-11-20, the missing hook left the page answering 符号索引没有响应 on
+  card carry; 2026-11-20, the missing hook left the page answering "the symbol index is not responding" on
   every read); the body's code is colored through the shared tokenizer — each line one
   colored span and the newline as text, the pane's text content staying the code verbatim
   (2026-11-21, the owner's direction: the definition code must be colored too); pin
@@ -495,8 +510,19 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   compact on-disk store; format v7, 2026-11-20: the per-file base table — one record per
   deriving declaration, the base names interned beside the others — and the container fix
   both rebuild a version-6 file; `bases_of`/`derived_of` answer the inheritance rings off
-  the table, never the texts), `symbols::index` (the per-root databases, the build / resume /
-  rebuild, the reference scan), `symbols::mask` (the code mask — the comment/string/char-
+  the table, never the texts; since 2026-11-21 the store lives in the analyzed folder's
+  hidden `.ggs/analysis/<hash>/` — hidden attribute, `.git/info/exclude` line, home
+  fallback for a read-only folder, the Rebuild command wiping it before the clean
+  regenerate), `symbols::sidb` (the reference analysis database, 2026-11-21: the six
+  tables — modules, symbols, call edges, syllable fragments, type definitions, code
+  positions — serialized byte-for-byte in `si4-rea`'s si-lite `db_save`/`tix_save` shape
+  (`si.db` + `si.tix` beside the store; the reference tooling loads ggs's files back and
+  its own re-saved tix is byte-identical); collected on a full build from the parse's
+  call sites and the mask-filtered positioned hits, the assembly mirroring si-lite's
+  `db_add_symbol`/`db_add_edge`/`db_add_code_rec_enc` semantics — first-declaration-wins
+  names, exact-pair edge dedup, member access and self-references never recorded),
+  `symbols::index` (the per-root databases, the build / resume /
+  rebuild, the reference scan; `wipe_disk` is the delete-and-regenerate surface), `symbols::mask` (the code mask — the comment/string/char-
   literal byte spans of one text plus its line-start table, the scanner discipline:
   loop-based, escape-aware, unclosed literals degrade to end-of-text; every relation scan
   filters its hits through it so a name inside a comment or a string is never a reference),
@@ -557,7 +583,8 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   `matching`, `occurrence_counts`) and copy out only their hits — Go-to-Definition used to
   materialize the whole index per lookup. Every walk reuses the Quick Open walk so the
   exclusion policy is one list. And the index is the GLOBAL catalogue only (2026-11-18,
-  the owner's direction: 函数传参的变量要能识别，局部变量只显示局部范围的定义):
+  the owner's direction: variables passed as function arguments must be recognized, and a
+local variable only resolves inside its local scope):
   the parser layer extracts every function's parameters and local variables with their
   enclosing function's line range (`ParsedFile::locals`), and they ride the index never —
   `symbol_scope_lookup` parses the caller's live buffer per call (no folder, no disk read)
@@ -589,7 +616,9 @@ colouring, sticky scroll, minimap, bookmarks, markdown preview.
   `src/features/editor/docFind.ts` (the whole-file find/replace bar the windowed editor and the Fast Viewer
   serve, over `viewer_find` / `viewer_replace`), `src/features/editor/diffViewer.ts` (the diff editor's
   accessible viewer — VS Code's F7 surface: every change as one overlay row with a +/− preview,
-  walked by F7/Shift+F7/arrows, Enter jumping to the change, Escape closing), `src/features/editor/editorProviderViews.ts` (the extension providers' hover/definition bridge beside the workbench's own quick-info hover — a hovered `#define` shows every indexed definition's directive text with the doc comment above it, the slice validated against the live file: the entry's line re-aligns onto the directive the file has now and cuts at the directive's own last `\`-continuation, so a stale index entry shows the macro and its comment, never the declaration below it (2026-11-18, the owner's report: 看宏我就只要宏和对应注释，不要看到结构体，不要错位), a hovered function / struct / enum / class shows its whole definition body through the index's end line (the pane scrolls, so length is no cap), a hovered variable its declaration line, and any entry its doc comment above; the entries rank by what the hover site is — the definition covering the hovered line, the hovered file's own, and the kind the site's text asks for (`hoverKindHint`: `total(` the function, `struct S` that struct, a value position the variable — so a hovered variable leads over a same-named function; 2026-11-17, the owner's reports), each location a click that opens the definition, and macros answer first; and since 2026-11-18 the scope answer leads the whole ranking — a hovered name declared inside the enclosing function of the use site is that parameter or local (`scopeQuickInfoFor`, the declaration line sliced from the live buffer: no disk read, no index), and a same-named global never appears beside it; the hover is sticky — the tooltips keep their hovered word's range and a capture-phase keep-alive guard swallows the pointer's travel toward the tooltip so it can be reached, scrolled and clicked without dismissing; and since 2026-11-20 the card is its own rendering half (`src/features/editor/hoverCard.ts`, the data assembly stays here) that shows each entry's kind, a leading type's members (the contains ring over the store's `members_of`), the files referencing the name (`symbol_ref_stats`) beside a jump that roots the relations window through the `hoverRelations` opener, and a +N count of the definitions past the render cap; and since 2026-11-20 the whole hover answers only under the **Symbol Hover switch** — Settings → Editor's `symbolHover` row and the View menu's `editor.toggleSymbolHover` beside Toggle Word Wrap (the menu entry carries the checked state) — read at hover time, so a flip reaches every already-open editor without a remount, and the extension providers' own hover beside it keeps answering on its own; and since 2026-11-21 the card itself carries the switch too (the owner's direction: 在弹出的上面要增加开关 — the head's 关闭悬停 button, on every hover card, flips the setting off and closes the standing tooltip at once)), `src/features/editor/editorExtras.ts`, `src/features/editor/diffView.ts` (the text diff
+  walked by F7/Shift+F7/arrows, Enter jumping to the change, Escape closing), `src/features/editor/editorProviderViews.ts` (the extension providers' hover/definition bridge beside the workbench's own quick-info hover — a hovered `#define` shows every indexed definition's directive text with the doc comment above it, the slice validated against the live file: the entry's line re-aligns onto the directive the file has now and cuts at the directive's own last `\`-continuation, so a stale index entry shows the macro and its comment, never the declaration below it (2026-11-18, the owner's report: for a macro I only want the macro and its comment — not
+the struct below it, and nothing misaligned), a hovered function / struct / enum / class shows its whole definition body through the index's end line (the pane scrolls, so length is no cap), a hovered variable its declaration line, and any entry its doc comment above; the entries rank by what the hover site is — the definition covering the hovered line, the hovered file's own, and the kind the site's text asks for (`hoverKindHint`: `total(` the function, `struct S` that struct, a value position the variable — so a hovered variable leads over a same-named function; 2026-11-17, the owner's reports), each location a click that opens the definition, and macros answer first; and since 2026-11-18 the scope answer leads the whole ranking — a hovered name declared inside the enclosing function of the use site is that parameter or local (`scopeQuickInfoFor`, the declaration line sliced from the live buffer: no disk read, no index), and a same-named global never appears beside it; the hover is sticky — the tooltips keep their hovered word's range and a capture-phase keep-alive guard swallows the pointer's travel toward the tooltip so it can be reached, scrolled and clicked without dismissing; and since 2026-11-20 the card is its own rendering half (`src/features/editor/hoverCard.ts`, the data assembly stays here) that shows each entry's kind, a leading type's members (the contains ring over the store's `members_of`), the files referencing the name (`symbol_ref_stats`) beside a jump that roots the relations window through the `hoverRelations` opener, and a +N count of the definitions past the render cap; and since 2026-11-20 the whole hover answers only under the **Symbol Hover switch** — Settings → Editor's `symbolHover` row and the View menu's `editor.toggleSymbolHover` beside Toggle Word Wrap (the menu entry carries the checked state) — read at hover time, so a flip reaches every already-open editor without a remount, and the extension providers' own hover beside it keeps answering on its own; and since 2026-11-21 the card itself carries the switch too (the owner's direction: put the switch on the popup itself — the head's turn-off-hover
+button, on every hover card, flips the setting off and closes the standing tooltip at once)), `src/features/editor/editorExtras.ts`, `src/features/editor/diffView.ts` (the text diff
   view: the backend's git-computed hunks — `scm_diff`'s gix answer — painted as line
   decorations over the split panes or the unified editor, with the hunk's paired lines
   carrying the backend's character-level spans as inline `cm-diff-char-*` marks —
@@ -614,10 +643,11 @@ colouring, sticky scroll, minimap, bookmarks, markdown preview.
 
 A million-line file opens as fast as its bytes can be read; a multi-gigabyte binary is
 paged, never loaded whole; an image opens in a professional viewer driven equally by the
-mouse, the keyboard and the fingers (2026-10-18, the owner's direction: 图像查看要支持手机
-触摸操作，要重写 pc 端和手机端，要更好用，更专业，功能更全，手机端支持手势操作图像);
-a video/audio file opens in the media viewer (2026-11-14, the owner's direction: 增加视频
-音频信息显示功能，可以使用播放器打开视频和音频) — the webview's own decoder plays it, the
+mouse, the keyboard and the fingers (2026-10-18, the owner's direction: the image viewer must support phone
+touch operation — rewrite the PC and phone sides; better to use, more professional, more
+complete; the phone side drives the image with gestures);
+a video/audio file opens in the media viewer (2026-11-14, the owner's direction: show video/audio information, and open video and audio
+in a player) — the webview's own decoder plays it, the
 backend's header parsers answer the container facts, and a codec the webview build cannot
 decode hands off to the system player.
 
@@ -716,7 +746,7 @@ commit-msg hook, `refs/for/` push).
   every extension backend's PATH, so the Git Graph view's own `findGit` (standard roots,
   then PATH) finds the same git the app runs and its write operations work; and 2026-11-03,
   the Windows error-206 recovery — a spawn failing with ERROR_FILENAME_EXCED_RANGE
-  ("文件名或扩展名太长", a CreateProcess length limit: the command line, the inherited
+  ("the filename or extension is too long", a CreateProcess length limit: the command line, the inherited
   environment block, or a working-directory path past MAX_PATH — never a missing git)
   retries as `git -C <repo>` from the repository's root, then with the accumulated `PATH`
   slimmed to git's own directory and the system roots, then with a curated minimal
@@ -986,7 +1016,7 @@ model provider — the official Claude service or any Anthropic-compatible endpo
 (DeepSeek, Zhipu GLM, Moonshot Kimi, a custom gateway). The store lives at
 `~/.ggs/ai-providers.json` — never Claude's own `~/.claude`: `cmd_providers.rs` seals
 every API key with AES-256-GCM under a master key derived from the machine's identity
-(2026-11-16, the owner's direction: 加密要跟机器绑定 — Windows' MachineGuid, Linux'
+(2026-11-16, the owner's direction: the encryption must be bound to the machine — Windows' MachineGuid, Linux'
 machine-id, macOS' platform UUID, hashed with a domain separator; no key material is
 stored anywhere, and `ai-providers.json` copied to another PC does not decrypt —
 `keys/ai-providers.key` carried along included, that earlier version's random file key
@@ -1065,7 +1095,7 @@ an empty value reads as unset everywhere downstream; the rollout does not decide
 and a change restarts through `providers_shell_refresh`,
 the provider switch's own path. The whole env set rides the backend's own process
 only — and since 2026-11-16 (the owner's direction: once the user has set the key it
-must not be readable, 防盗刷 protection) the key does not ride it at all: the endpoint
+must not be readable, anti-abuse protection) the key does not ride it at all: the endpoint
 URL becomes the loopback relay's (`compat::managed_base_url` — a route keyed per
 upstream+credential+fold that strips the placeholder `x-api-key` / `authorization`
 headers the engine sends and injects the real pair upstream-side) and the pair becomes
@@ -1270,7 +1300,7 @@ page shows the integration's state (`claude_mcp_status`).
   which strict gateways and the Qwen chat templates behind NewAPI reject with
   `System message must be at the beginning`; since 2026-11-16 the relay is also the
   credential seam — the owner's direction: once the user has set the key it must not
-  be readable, 防盗刷 protection): every third-party profile's `ANTHROPIC_BASE_URL`
+  be readable, anti-abuse protection): every third-party profile's `ANTHROPIC_BASE_URL`
   points at the loopback relay from `backend_env_for` crate-side — one listener per
   process, an unguessable route token per upstream+credential+fold — that folds the
   system entries into the adjacent user turn as `<system-reminder>` blocks (per the
@@ -1450,7 +1480,8 @@ page shows the integration's state (`claude_mcp_status`).
   remote workbench shows as a live copy, module 19's webview streams: before, a webview
   followed whichever frontend last resolved or messaged it, and the other side's Claude
   chat froze) — except the per-frontend webviews (2026-10-18, the owner's direction:
-  远程和 PC 尺寸不一样，git graph 一个 remote 是手机端页面一个是 pc 端页面，不需要同步滚动条 —
+  the remote and the PC are different sizes — the git graph can be a phone page on the
+  remote and a PC page on the desktop, no scrollbar sync needed —
   plan §22.9): extensions the curated set `per_frontend_webviews` names (Git Graph alone
   today; the ids live in Rust, cross to `src/` only as `ExtInfo.perFrontendWebviews`)
   get their own page in EVERY frontend, and the backend's webview traffic
@@ -1552,7 +1583,8 @@ CANoe's Statistics window and graphics window in one view: `.blf` / `.asc` trace
 the backend, rendered asynchronously — per-channel counts, bus load, per-identifier cycle
 times, frame-loss blame, raw frame browsing and SVG charts. Both pages carry a two-row
 compact toolbar at every width — the command row over the filter row, never a third
-(2026-10-19, the owner's direction: 顶部不超过两行按钮，排布紧凑，适配不同屏幕尺寸): wide the
+(2026-10-19, the owner's direction: at most two rows of buttons on top, laid out compactly,
+adapting to different screen sizes): wide the
 desktop dashboard and its sashes with every action visible, under 600 CSS
 px of the view's own width the narrow form — the toolbar's two rows at phone heights, flat
 inset cards, two-line rows, the charts at the compact viewBox, a coarse pointer's taller rows,
@@ -1849,7 +1881,7 @@ Everything that turns the source tree into installers: asset assembly into
   (`Git Graph Studio_0.1.11_x64_en-US.msi`), and no artifact path, checksum filter or
   measurement names the MSI anymore. The macOS build carries the
   DMG safety net `scripts/recover-dmg.mjs`: tauri's bundle_dmg.sh loses the occasional
-  Finder/Spotlight detach race (`资源忙`/EBUSY on the scratch volume, exit 16, the
+  Finder/Spotlight detach race (`Resource busy`/EBUSY on the scratch volume, exit 16, the
   `error running bundle_dmg.sh` failure) and leaks the mounted scratch — `--clean-only`
   (before every macOS build) detaches stale scratch volumes and sweeps leaked `rw.*` images,
   and the recover form (when `tauri build` failed) re-runs the same script with tauri's own
@@ -2003,8 +2035,8 @@ test-macos pass `-- --skip ggs_bash`).
   external, no MINGW/MSYS component anywhere): the curated applet list wins over
   `PATH` (a script's `find` is never Windows' `find.exe`) — and whatever the list
   and the `PATH` both lack still answers from the local Git Bash's own
-  `usr/bin` when one is installed (2026-10-13, the owner's direction "支持所有
-  git bash 命令": `stat`, `file`, `chmod`'s GNU cousins… — `exec.rs`'s
+  `usr/bin` when one is installed (2026-10-13, the owner's direction "support all
+  git bash commands": `stat`, `file`, `chmod`'s GNU cousins… — `exec.rs`'s
   `git_usr_bin_from`, found through a PATH `git.exe` walking up or the standard
   install roots; `which` reports those hits as `/usr/bin/<name>`, and the
   Tab-completion's command list reads the same directory) — `ls(-t/-r/-l/-C/-a/
@@ -2031,8 +2063,8 @@ test-macos pass `-- --skip ggs_bash`).
   `next`/`exit`, `-F`/`-v`; no user functions, no `getline`/`system`); the archives are
   pure Rust (`compress.rs`: a real DEFLATE inflater, fixed and dynamic Huffman, plus a
   stored-block gzip writer; `archive.rs`: USTAR tar read/write and zip extraction)
-- **The 2026-10-14 parity batch** (the owner's direction: "ggs bash 相对 git bash
-  缺失很多命令" — the curated list still left a Git Bash install carrying far more
+- **The 2026-10-14 parity batch** (the owner's direction: "ggs bash is missing many commands
+  compared to git bash" — the curated list still left a Git Bash install carrying far more
   than the sidecar answered, and the usr/bin fallback only helps machines that
   already have Git Bash, which a clean one does not). Two halves landed:
   - *The OS-facing half finally compiled* — `sysinfo.rs` (written 2026-10-13)
@@ -2193,8 +2225,8 @@ explicit `?mirror=1`. A session NEVER opens folders, files or new windows (K4):
 `settings_write` and the OS-integration commands (R0 — a session's settings stay on its
 device, never written to the PC's file), the window switcher lost its "new window" row,
 and the daemon's `GET /api/browse` endpoint is deleted. **The picker page keeps its typed
-folder-path row** (2026-10-16, the owner's direction: 网页上"此 PC 上的窗口"上面输入文件夹路径打开
-ggs 的要保留): the row above the window list sends `SPAWN` — the one remote spawn door, the
+folder-path row** (2026-10-16, the owner's direction: keep the folder-path row above "windows on this PC"
+that opens ggs): the row above the window list sends `SPAWN` — the one remote spawn door, the
 `folderInput` setting hiding it when off; the remote WORKBENCH still never
 spawns and the recent list's tap spawns only from the picker. The remote's folder restore rides `boot_context`'s new `roots` /
 `workspaceFile` answer instead of an `open_folder` invoke. The frame codec falls back to
@@ -2238,8 +2270,8 @@ is gone the same day** (§11's deletion list): `mirror/phoneShell.ts`, `hostStub
 phone-sized branch — the PC window keeps its desktop shell at every size (`fitFor` floors
 every viewer at the desktop minimum, the Rust fit no longer clears the window's
 `set_min_size`), and a phone always runs its own workbench rather than being mirrored.
-**The desktop window's device mode** (2026-11-03, the owner's direction: 桌面版也要支持设
-置切换手机平板模式，可以给小屏 windows 游戏机使用): the Device Mode setting
+**The desktop window's device mode** (2026-11-03, the owner's direction: the desktop build must also support switching
+phone/tablet modes — for small-screen Windows game consoles): the Device Mode setting
 (`workbench.deviceMode`: `auto` the default / `phone` / `tablet`, Settings → Appearance)
 wears the five layouts INSIDE the desktop window — `src/remote/deviceShell.ts`, wired from
 `main.ts` (the composition root the import rules let name remote/): `primeDeviceShell()`
@@ -2270,8 +2302,8 @@ shells' Files destination is the MT-manager flat list — `src/remote/app/files/
 (`filesPage.ts` mounts it INTO the explorer's sidebar view: on a page-stack shell the tree
 hides and the page shows, the wide forms keep the classic tree; the git letters ride the
 SCM view's `onStatus` chained in, the opens go through the same `workbench.openFile`; the
-toolbar's leading chip is the BRANCH switch (2026-10-16, the owner's direction: 手机端文件
-管理页面没有切换分支的按钮) — the current branch off `scm.onHead`, one tap from the shared
+toolbar's leading chip is the BRANCH switch (2026-10-16, the owner's direction: the phone file-management page has no branch-switch
+button) — the current branch off `scm.onHead`, one tap from the shared
 branch sheet below),
 `pathBar.ts` (the root chip and one chip per level, horizontally scrolled to the end, a
 chip long-pressed copies its path, the trailing ▸ lists the sibling folders), `fileList.ts`
@@ -2303,7 +2335,8 @@ click that ends a drag is swallowed), wired in `scm/rowActions.ts` behind the
 Unstage, the merge group Mark Resolved, each the same handler the hover buttons and the
 context menu run (a discard keeps its own confirm); the two-line row layout and the
 commit box's sticky ride CSS keyed on the same marker. **The phone's own Source Control
-page** (2026-10-16, the owner's direction: 手机端源代码管理界面不适合触控，要重新设计 —
+page** (2026-10-16, the owner's direction: the phone source-control page is not touch-friendly —
+redesign it —
 `src/remote/app/scm/scmPage.ts`, mounted INTO the SCM sidebar view exactly the way the
 files page mounts into the explorer's): on a page-stack shell the classic 22 px view
 hides and a touch page shows — the branch row (tap: the shared branch sheet, ahead /
@@ -2394,9 +2427,10 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   header hygiene. Declared honestly (plan §23.7): **the Hub is a full-trust component**
   — e2e.rs is designed but unwired, so everything through a Hub is visible to it.
 
-- **The joint login** (2026-10-16, the owner's direction: 登录页要由服务端和插件联合验证密码、
-  页面由服务端提供，防止别人转发色情反动的网页内容；局域网还是要输密码；服务端转发后只要
-  一次密码 — plan §20.14): through a Hub, the login page and the password check are the
+- **The joint login** (2026-10-16, the owner's direction: the login page must verify the password jointly by the
+server and the plugin, the page served by the server so forwarded pornographic or subversive
+web content is impossible; the LAN still asks for the password; after the server forwards,
+one password only — plan §20.14): through a Hub, the login page and the password check are the
   SERVER's own before anything is proxied — a relay can no longer be turned into a content
   host by whoever holds the link's uuid. The daemon pushes its Argon2id verifier
   (`T_CREDENTIAL` 0x8C: hash, credential epoch, display language) right after `T_READY`
@@ -2442,7 +2476,7 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   headers before its tree is packed — the instance sends an empty first `FileReply`
   up front, so the browser's download bar appears at once however long the build takes
   (the daemon's 30 s first-chunk wait once failed every big folder, and the browser's
-  retry against the spent one-time URL answered 404 — Chrome's "未发现文件"); a build
+  retry against the spent one-time URL answered 404 — Chrome's "no file found"); a build
   that dies after the headers sends a mid-stream error chunk, which the daemon turns into
   an aborted body so a truncated archive never lands as a complete file. The recently
   opened folders (`extensions-src/ggs-remote/daemon/src/recent.rs`, 2026-10-12): every
@@ -2498,8 +2532,8 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   else a link serves (navigations 302 to the login page, the WS upgrade is refused, the
   rest 401), and a verifier-less tunnel fails closed (coming-online, then the
   update-needed page — never the proxy). The silence gate (2026-10-12, the owner's direction:
-  "如果不是 /u/uuid 访问，不要返回任何东西，就像没开这个端口一样" +
-  "判别不是 uuid 也要返回端口关闭，链接对才返回内容" — only a well-formed link is ever
+  "if the request is not a /u/uuid visit, return nothing, as if the port were closed" +
+  "a non-uuid visit must answer port-closed; only a correct link returns content" — only a well-formed link is ever
   answered, everything else is the shape of an unopened port): `gate.rs` wraps the router
   in a tower service whose `Silent` error makes hyper close the connection without one
   byte of HTTP — the public surface is exactly `/u/<uuid>/…` for a uuid segment that
@@ -2608,7 +2642,8 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   the legacy recorder: streaming chat 11×, virtualized scroll 12.7×, JS animation 28.8×,
   combined 19.6× — each scenario ends with the copy's DOM equal to the PC's.
   **The workbench link's traffic accounting and wire economy** (2026-11-18, the owner's
-  direction: 增加一个前端和rust后端通信流量统计在远程页面上显示,并优化流量到最省流量 —
+  direction: add a frontend-to-Rust-backend traffic statistic shown on the remote page, and
+optimize the traffic toward the minimum —
   plan §10.5 landed): the Transport keeps the session's wire ledger (`src/remote/traffic.ts`
   — totals, per-frame-type bytes both directions, the compression's plain-vs-wire pair,
   and per-subject buckets where the frame names its subject: `invoke <cmd>` pairs each
@@ -2641,8 +2676,8 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   `tests/remote.test.ts` pins the accounting, the compression, the merge and the slim
   envelope; the daemon's `conn.rs` tests pin raw compression with and without the
   client's cap.
-  **The relay-restart subscription resync** (2026-11-18, the owner's report: 网页的页面和
-  桌面应用的操作不同步，导致打开文件又消失了): the relay's per-session state — every
+  **The relay-restart subscription resync** (2026-11-18, the owner's report: the web page and the
+  desktop app's state drift apart, so an opened file disappears again): the relay's per-session state — every
   event subscription a browser page established with LISTEN frames — lives only in the
   relay webview, while the browser's socket and the stateless invoke path survive a relay
   restart, so a restarted relay left the page looking healthy while it received no events
@@ -2688,8 +2723,8 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   taps and keys into it; `webviewFrames.ts` is the lookup the desktop's extension host
   registers (and the resolve of a view nobody showed yet) — so a question asked on
   either side streams on both. **The copy IS the chat UI** (2026-10-16, the owner's
-  fifth-round direction, superseding the S2 session bridge of the same day: 远程 claude
-  不要单独自己写界面，使用 claude 原始界面 — the hand-written native composer, cards
+  fifth-round direction, superseding the S2 session bridge of the same day: the remote Claude
+  must not hand-write its own UI — use Claude's original UI — the hand-written native composer, cards
   and `chat/chatAck/chatState` bridge are withdrawn, whole): the remote types and clicks
   Claude's own composer and cards straight in the copy, every keystroke and tap replaying
   into the PC's page the way any copy input does, and the recorder has no skipped subtree —
@@ -2715,8 +2750,9 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   `closeTab` message turns a copy's close on a phone into the PC panel's close (which
   reaches the extension, the backend's dispose mirror then clearing every remaining
   copy) — before, a closed copy left the PC's page open (the owner's report, same day).
-  **Per-frontend webview instances** (2026-10-18, the owner's direction: 远程和 pc 上
-  尺寸不一样，git graph 可以一个 remote 是手机端页面一个是 pc 端页面，不需要同步滚动条 —
+  **Per-frontend webview instances** (2026-10-18, the owner's direction: the remote and the PC are
+  different sizes — the git graph can be a phone page on the remote and a PC page on the
+  desktop, no scrollbar sync needed —
   plan §22.9): the extensions the backend's curated set names (Git Graph alone; the ids
   live in Rust `ext_routing::per_frontend_webviews`, crossing to `src/` only as
   `ExtInfo.perFrontendWebviews`) get their OWN page in every frontend instead of a copy —
@@ -2760,7 +2796,7 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   hides NO LONGER cross (2026-10-16, S1/G8: each frontend's layout is its own — K7's
   "only what opened" leaves the side bar out); `open`/`openTab` gained an `inactive` flag
   for the catch-up's background opens. **The phone's page is never dragged by a remote
-  act** (2026-10-16, the owner's direction: 文件页面会被其他页面顶到最前): the navigation
+  act** (2026-10-16, the owner's direction: the files page gets pushed to the front by other pages): the navigation
   policy (`platform/hooks.ts` `NavigationPolicy`) gained `holdPage` — while a hold is
   live, `revealEditorPage` is a no-op (the editor tab still opens; the page showing keeps
   its place), `nav.ts`'s `holdPhonePage` the remote implementation and the desktop default
@@ -2782,7 +2818,7 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   background, its own cross back as `inactive` opens, nothing ever closes, unsaved
   buffers survive) and takes the answerer's active tab — the PC reopening follows the
   remote's state. The catch-up's fresh-connect race is closed (2026-10-16, the owner's
-  "远程编辑器没有同步打开 PC 的打开页面"): a remote that just connected holds an EMPTY
+  the remote editor does not sync-open the pages the PC has open"): a remote that just connected holds an EMPTY
   roster — the PC's heartbeat has not arrived and the connect's WINDOWS word landed before
   the table existed — so its start's own catch-up skipped ("no other active frontend")
   and nothing ever retried; now the WINDOWS external words are REMEMBERED
@@ -2864,15 +2900,16 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   installs and starts it (`install --ggs-exe`), sets the access password through the
   loopback admin API (the value on a stdin pipe, never an argv a process listing could
   show; the prompt does not echo), sets the LAN listener's fixed port and protocol
-  (2026-10-23, the owner's direction: 局域网模式要支持自定义端口 / ggs config 可以设置固定端口 /
-  可以设置使用 http 还是 https — one `admin/config` patch, then a wait for the rebind
+  (2026-10-23, the owner's direction: LAN mode must support a custom port / `ggs config` can
+  pin a fixed port / can choose http or https — one `admin/config` patch, then a wait for the rebind
   that reports a port another program holds), optionally connects
   a relay (`hub/connect`), and prints the links (`print-link`; flags `--password` /
   `--port` / `--scheme` / `--bind` / `--server` / `--join-key` answer the prompts
   non-interactively, an empty answer keeping the current value, `--server ""` skipping
   the relay without asking; `--bind` never asks — an absent flag keeps the address, so a
   watchdog re-running the command never hangs on a new question). 2026-10-24, the
-  owner's direction (安装后就运行 remote,不需要启动一次界面 / 开机自启 / 直接 http 可以绑定
+  owner's direction (run the remote right after install, no UI launch needed / start at boot /
+  plain http may bind
   0.0.0.0): the `ggs config` spelling first runs the bundled-extension install the GUI
   boot pass performs, headless (`cmd_ext::install_missing_bundled_headless` — no
   AppHandle, the store `~/.ggs/extensions`, the bundled roots resolved beside the
@@ -2912,7 +2949,7 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   its lifetime (`window.rs`'s `remote_sessions_awake`, macOS, release too): a permanently
   hidden WKWebView gets its DOM timers throttled to ~1 s and a fully hidden instance is
   App Nap's favourite target — either one alone turns the remote's terminal and mirror
-  streams into second-long lurches (2026-10-16, "macOS 的 remote 很卡"; the main window
+  streams into second-long lurches (2026-10-16, "the macOS remote is very laggy"; the main window
   carries the same switch in tauri.conf.json since the §22 mirror). Terminal output also
   batches before its broadcast emit (`pty.rs`'s coalescer, 8 ms / 32 KiB): on macOS every
   emit evaluates JavaScript in every webview on the main thread, and a per-read emit let
@@ -2928,12 +2965,12 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   each extension's page, five at most, with the open-editors and pending-changes badges;
   a second tap reselects a list page to its top, and EVERY tap of the Editor opens the
   open editors list — §6.2's phone tab strip, the chooser between the pages the PC and
-  this device have open (2026-10-16, the owner's "点击编辑没有弹出选择哪个页面的选项":
+  this device have open (2026-10-16, the owner's "clicking edit never offers the choice of which page":
   the first tap used to only show the page; with nothing open the page's empty state
   answers instead of an empty chooser; the rail `navRail.ts` answers the same way — the
   portrait tablet has no app bar, its Editor item is the only switcher), and the rail
   carries the portrait tablet's page actions too (2026-10-18, the owner's direction:
-  平板模式相对手机模式有些页面有内容缺失 — the phone app bar's trailing cluster had no
+  tablet mode was missing content some pages show in phone mode — the phone app bar's trailing cluster had no
   entry on the app-bar-less form): the ⋯ pinned in the rail's foot above the ‹ opens the
   current page's own sheet — the editor's actions, the git commands, the terminal's
   new/kill, the files ＋ sheet — and hides on the pages whose app bar carries none
@@ -2963,7 +3000,8 @@ terminal the phone opens reaches the PC's open terminal page over the same mirro
   keyboard (`data-keyboard`) and the body follows the visual viewport, so the bars step
   aside or lift with the content. A horizontal drag over the page column pages the bottom
   navigation's ring (`swipeNav.ts`, wired in `shell.ts`, 2026-10-18 — the owner's
-  direction: 手机远程时浏览器手势会导致页面退出, 左滑右滑改为切换底部按钮): leftward to the
+  direction: on a phone remote, browser gestures exit the page — left/right swipes now switch
+the bottom buttons): leftward to the
   next destination, rightward to the previous, rubber-banded at the ends; the page follows
   the finger (translate + edge glow) and the commit is a two-phase slide — the page out in
   the swipe direction, the destination in from the other side, reduced motion collapsing
@@ -3180,8 +3218,8 @@ memory regions for embedded files by magic signature while the list browses.
   in-memory read of the dump — every validator slice reads the buffer, memchr drives every
   magic and trailer pass — with VA attribution and module containment per hit. The
   validator set is fitted byte-for-byte against the reference carver's extraction of a
-  real 332 MB SumatraPDF minidump (2026-11-15, the owner's direction: 只提取
-  这些文件, ggs 也要做到一致 — 905 entries at identical offsets and sizes, the cross-carver
+  real 332 MB SumatraPDF minidump (2026-11-15, the owner's direction: extract only
+  these files, and ggs must behave the same — 905 entries at identical offsets and sizes, the cross-carver
   diff riding `real_dump --entries`): PNG ends at the CRC-stamped IEND with no minimum
   size, JPEG walks the APP0-led marker chain to the SOS, cursors and icons carve per
   directory entry (a 32bpp BITMAPINFOHEADER bitmap whose XOR + AND planes add up to the

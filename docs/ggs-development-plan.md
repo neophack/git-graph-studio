@@ -109,6 +109,23 @@ The RustDesk source (rustdesk/rustdesk@851d2df, a shallow clone studied outside 
 
 **The persistent symbol index (M4)**: `symbols/store.rs` + `cmd_symbols.rs` — the compact binary per root under `~/.ggs/index/<hash>/symbols.bin` (interned names, per-file mtime+size fingerprints, per-name occurrence lists marking which files contain the word, and an explicit "trusted" bit: names first seen by an incremental update fall back to a full reference scan until the next full build). A folder open resumes the saved index and repairs it against the disk in the background; watcher batches update single files (`apply_changes`), and a generation counter cancels like the text search's. Four commands (`symbols_status`, `symbols_rebuild` with a streaming channel, `symbol_lookup`, `symbol_references`); the old `workspace_symbols` / `find_references` serve from the index when it has landed and keep the in-memory path as the fallback. Frontend: Go-to-Definition asks `symbol_lookup` first (one hit jumps, several offer VS Code's definition list), Find References scans the occurrence-narrowed file set, Quick Open grows the `@` (file outline) and `#` (workspace symbols) modes, the status bar follows `studio://symbol-index` ("Indexing symbols n/m", click to rebuild), and the **Context Window** is the panel's third tab — the definition of the symbol under the cursor after a 150 ms dwell, pinnable, click-to-open. Still open in M4: the tree-sitter parser layer (the outline scan remains the extractor — §3's pure-Rust rule defers it), `symbol_fuzzy`, the Peek popup (F12 list today), the Search-view grouping of references, the Relation Window, semantic colouring, and the exclusion-rules setting.
 
+2026-11-21: the owner's direction (add a hidden code-analysis folder inside the project — the
+program may delete it, it never enters the git index, and the same files regenerate; consult the
+si4-rea code and generate exactly the same files) moves the store into the analyzed
+folder itself: `symbols.bin` now lives under the hidden `<root>/.ggs/analysis/<hash>/` —
+hidden in Explorer (the `.git` attribute treatment), excluded from the git index through
+`.git/info/exclude` (ascending to the repository; a worktree pointer's `commondir`
+honoured), pruned from every walk and the Explorer tree, and falling back to
+`~/.ggs/index/<hash>/` when the folder refuses writes (the older copies still resume).
+Beside it stand `si.db` + `si.tix` — the reference analysis database from the owner's
+`si4-rea` reconstruction (si-lite's six tables: modules, symbols, call edges, syllable
+fragments, type definitions, code positions), serialized byte-for-byte in si-lite's
+`db_save`/`tix_save` shape so the reference tooling loads ggs's database back; the tables
+are collected on a full build (parse call sites plus mask-filtered positioned hits) and
+regenerate deterministically. The Rebuild command wipes the store first — delete and
+regenerate is its surface. The `.siproj`/`.siwork` project-management files are
+explicitly out of scope.
+
 **Xcode-level polish (M7)**: the motion tokens (`--motion-fast/normal`, the easings, `prefers-reduced-motion` collapsing every transition) and the density setting (Compact / Comfortable — the row / tab / status / activity / panel-tab heights travel as CSS variables); the theme picker grows **Auto (System)** with a live `prefers-color-scheme` follow; delayed hover tooltips (activity bar, status items), the saved-tab flash, the busy cursor during a rebuild, F6 cycling focus through activity bar → side bar → editor → panel, and the tablists label their selected tab (`aria-selected`). A build-script fix came out of the round: the Windows test exes now carry the Common-Controls v6 side-by-side dependency as an external manifest (the lib test exe died at load with STATUS_ENTRYPOINT_NOT_FOUND without it).
 
 **2026-09-14, full-UI sweep round** (294 vitest):

@@ -1,9 +1,11 @@
 //! The workspace symbol index (plan M4): the shape of a symbol, the persistent per-root
 //! databases behind Go-to-Definition / Find References / the Symbol Database page, and the
 //! extraction layer. `parse` is the tree-sitter parser (plan M4.1, one `.scm` query per
-//! language behind a `grammar-*` feature); `store` is the compact on-disk store under
-//! `~/.ggs/index/`; `cache` is the in-memory whole-workspace rebuild the window before an
-//! index lands is served from; `index` owns the per-root databases and the reference scan.
+//! language behind a `grammar-*` feature); `store` is the compact on-disk store in the
+//! analyzed folder's hidden `.ggs/analysis/` database; `sidb` is the reference analysis
+//! database (`si4-rea`'s si-lite format) written beside it; `cache` is the in-memory
+//! whole-workspace rebuild the window before an index lands is served from; `index` owns
+//! the per-root databases and the reference scan.
 
 use serde::Serialize;
 
@@ -13,6 +15,7 @@ pub mod mask;
 pub mod parse;
 pub mod relations;
 pub mod rename;
+pub mod sidb;
 pub mod store;
 
 /// One declaration in the workspace index: what Go-to-Definition, Find References, Quick

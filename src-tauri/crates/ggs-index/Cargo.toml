@@ -68,3 +68,8 @@ tree-sitter-c-sharp = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+
+# The project analysis folder's hidden attribute (store.rs's mark_hidden) — the `.git`
+# treatment on Windows; the other platforms hide the dot name by convention alone.
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

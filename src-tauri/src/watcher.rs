@@ -58,7 +58,11 @@ pub struct FsChange {
 
 /// Folders whose churn is noise to every consumer (the Explorer never shows them, the index
 /// skips them): a build writing into `target/` must not refresh the SCM view a hundred times.
-const NOISE_DIRS: &[&str] = &["node_modules", "target", ".svn", ".hg"];
+/// `.ggs` carries the analysis database, and it lives INSIDE the watched tree — its own
+/// writes reporting as changes would feed the watch that made them (`apply_changes` saves on
+/// every batch, every save is a new batch, forever), which the symbol window showed as its
+/// content flickering without end (2026-11-21).
+const NOISE_DIRS: &[&str] = &["node_modules", "target", ".svn", ".hg", ".ggs"];
 
 /// Fold one raw event path into the batch being built. Pure, so the classification is unit
 /// tested without a watcher: paths outside the root are dropped, `.git/` sets a flag (its
@@ -453,6 +457,32 @@ mod tests {
         // A working file beside it is still listed.
         fold_path(&mut change, root, &under(root, "sub/fixture-sub/src/a.rs"));
         assert_eq!(change.paths, ["sub/fixture-sub/src/a.rs"]);
+    }
+
+    /// The analysis database's own writes are never a change: the `.ggs` folder lives inside
+    /// the watched tree, and every `apply_changes` save writes into it — a batch reporting
+    /// those writes would trigger the next save, the refresh loop the symbol window's
+    /// flicker rode (2026-11-21). A source file beside the folder still reports.
+    #[test]
+    fn the_analysis_folders_own_writes_are_never_a_change() {
+        let root = &std::env::temp_dir().join("repo");
+        let mut quiet = FsChange::default();
+        for noise in [
+            ".ggs/analysis/9f2c/symbols.bin",
+            ".ggs/analysis/9f2c/si.db",
+            ".ggs/analysis/9f2c/si.tix",
+            ".ggs/analysis/9f2c/symbols.bin.new",
+        ] {
+            fold_path(&mut quiet, root, &under(root, noise));
+        }
+        assert!(quiet.paths.is_empty(), "{:?}", quiet.paths);
+        assert!(!quiet.git_changed);
+        assert!(!quiet.git_index_changed);
+        assert!(!quiet.truncated);
+
+        let mut change = FsChange::default();
+        fold_path(&mut change, root, &under(root, "src/a.rs"));
+        assert_eq!(change.paths, ["src/a.rs"]);
     }
 
     #[test]

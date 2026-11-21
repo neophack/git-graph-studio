@@ -1,5 +1,10 @@
 //! The symbol store: the workspace's declarations and their occurrences in one compact,
-//! little-endian binary per root (`~/.ggs/index/<hash>/symbols.bin`). Design:
+//! little-endian binary per root, living in the analyzed folder's own hidden analysis
+//! database (`.ggs/analysis/<hash>/symbols.bin` — 2026-11-21, the owner's direction: the
+//! classic IDEs' project-local database, a hidden folder the program may delete at any
+//! time and never enters the git index; the next query regenerates the same files; a
+//! read-only folder falls back to `~/.ggs/index/<hash>/`, the pre-2026-11-21 home whose
+//! older copies still resume). Design:
 //!
 //! - **Names are interned.** Every declared name appears once; files reference it by id.
 //! - **Files carry fingerprints** (mtime + size), so an incremental update re-extracts only
@@ -19,6 +24,7 @@ use std::time::UNIX_EPOCH;
 use rayon::prelude::*;
 
 use crate::scan::is_symbol_source;
+use crate::symbols::sidb;
 use crate::symbols::WorkspaceSymbol;
 use ggs_fs::walk_files;
 
@@ -67,6 +73,109 @@ const MAGIC: &[u8; 6] = b"GGSIDX";
 /// member and blinded the nested-class chains; a version-6 file carries those rows and
 /// is rebuilt.
 const VERSION: u8 = 7;
+
+/// The hidden per-project analysis folder (2026-11-21, the owner's direction: 在项目中增加
+/// 一个代码分析的隐藏文件夹，程序可以删除这个，不加入 git 索引，可以生成一样的文件): the
+/// store lives beside the code it describes, like the classic IDEs' project databases.
+/// Deleting it loses nothing — the next query regenerates the same bytes — and the walk's
+/// `SKIPPED_DIRS` keeps search and re-index out of it.
+pub const PROJECT_ANALYSIS_DIR: &str = ".ggs";
+
+/// The per-root directory name under the analysis folder: the root path's SHA-1 prefix,
+/// the same hash on every machine, so two app instances over one folder meet on one store.
+fn store_hash(root: &str) -> String {
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(root.as_bytes());
+    let hash = hex::encode(hasher.finalize());
+    hash[..16].to_owned()
+}
+
+/// The analysis folder hides itself the way `.git` does — git marks its own folder hidden
+/// on Windows, and a bare dot name alone still shows in Explorer there.
+#[cfg(windows)]
+fn mark_hidden(dir: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        windows_sys::Win32::Storage::FileSystem::SetFileAttributesW(
+            wide.as_ptr(),
+            windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn mark_hidden(_dir: &Path) {}
+
+/// Keep the analysis folder out of the git index without touching the project's own
+/// `.gitignore`: the repo-local `.git/info/exclude` (never committed) gains the line the
+/// moment the folder is created. The repository may be above the analyzed folder (an
+/// opened subdirectory of a checkout), so the search ascends the way git itself resolves
+/// a repository. A linked worktree's `.git` is a pointer file whose `commondir` names
+/// the shared git directory the exclude actually lives in.
+fn ensure_git_ignored(root: &Path) {
+    let mut dir = Some(root.to_path_buf());
+    let dot_git = loop {
+        let Some(current) = dir else { return };
+        let candidate = current.join(".git");
+        if candidate.exists() {
+            break candidate;
+        }
+        dir = current.parent().map(Path::to_path_buf);
+    };
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else if dot_git.is_file() {
+        let pointer = match fs::read_to_string(&dot_git) {
+            Ok(text) => text,
+            Err(_) => return,
+        };
+        let Some(rest) = pointer.trim().strip_prefix("gitdir:") else {
+            return;
+        };
+        let target = PathBuf::from(rest.trim());
+        // A relative `gitdir:` resolves against the folder holding the pointer file.
+        let base = dot_git.parent().unwrap_or(root).to_path_buf();
+        let target = if target.is_absolute() {
+            target
+        } else {
+            base.join(target)
+        };
+        // The worktree git dir carries a `commondir` file (`../..`) pointing at the
+        // shared git directory; `info/exclude` lives there, not per worktree.
+        match fs::read_to_string(target.join("commondir")) {
+            Ok(rel) => {
+                let rel = rel.trim();
+                if Path::new(rel).is_absolute() {
+                    PathBuf::from(rel)
+                } else {
+                    target.join(rel)
+                }
+            }
+            Err(_) => target,
+        }
+    } else {
+        return;
+    };
+    let info = git_dir.join("info");
+    if fs::create_dir_all(&info).is_err() {
+        return;
+    }
+    let exclude = info.join("exclude");
+    let line = format!("{}/", PROJECT_ANALYSIS_DIR);
+    let existing = fs::read_to_string(&exclude).unwrap_or_default();
+    if existing.lines().any(|l| l.trim() == line) {
+        return;
+    }
+    let mut body = existing;
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(&line);
+    body.push('\n');
+    let _ = fs::write(&exclude, body);
+}
 /// The interned-name id a symbol without a container carries.
 const NO_CONTAINER: u32 = u32::MAX;
 /// Full builds report progress every this many files; also the cancellation checkpoint.
@@ -94,7 +203,13 @@ struct StoredBases {
 
 /// One file's build scan: its path, the words it contains, its stored symbols and its
 /// base records — phase 3's per-file output before it lands in the entry.
-type Scanned = (String, Vec<u32>, Vec<StoredSymbol>, Vec<StoredBases>);
+type Scanned = (
+    String,
+    Vec<u32>,
+    Vec<StoredSymbol>,
+    Vec<StoredBases>,
+    Vec<(u32, u32)>,
+);
 
 /// One indexed file: its fingerprint and what it declares. `words` is the transpose of the
 /// occurrence lists — the names this file contains — kept so an update can subtract the
@@ -117,6 +232,9 @@ struct Extraction {
     size: u64,
     symbols: Vec<Extracted>,
     words: Vec<String>,
+    /// The parse's call sites — the callee's name and its 0-based line — the reference
+    /// database's call edges read from.
+    calls: Vec<(String, u32)>,
 }
 
 /// One declaration as extracted, names still owned by the file.
@@ -139,6 +257,11 @@ pub struct SymbolStore {
     /// Per name: the ids of the files containing the word, or `None` when the list is not
     /// trusted to be complete (the name first appeared in an incremental update).
     refs: Vec<Option<Vec<u32>>>,
+    /// The reference analysis database's tables (si4-rea's si-lite format), collected on
+    /// a full build and persisted beside the store as `si.db` + `si.tix`. `None` after a
+    /// disk resume — the saved `si.db` stays standing untouched until the next full
+    /// build (the Rebuild command's delete-and-regenerate) rewrites it whole.
+    si: Option<sidb::SiTables>,
 }
 
 pub struct BuildStats {
@@ -193,6 +316,7 @@ impl SymbolStore {
             files: Vec::new(),
             names: Vec::new(),
             refs: Vec::new(),
+            si: None,
         }
     }
 
@@ -626,9 +750,13 @@ impl SymbolStore {
             let mut part: Vec<Scanned> = batch
                 .par_iter()
                 .map(|file| {
-                    let words = match fs::read_to_string(Path::new(root).join(&file.path)) {
-                        Ok(text) => words_in(&text, &|word| lookup.get(word).copied()),
-                        Err(_) => Vec::new(),
+                    let (words, hits) = match fs::read_to_string(Path::new(root).join(&file.path))
+                    {
+                        Ok(text) => (
+                            words_in(&text, &|word| lookup.get(word).copied()),
+                            positioned_hits(&text, &|word| lookup.get(word).copied()),
+                        ),
+                        Err(_) => (Vec::new(), Vec::new()),
                     };
                     let symbols = file
                         .symbols
@@ -660,7 +788,7 @@ impl SymbolStore {
                                 .collect(),
                         })
                         .collect();
-                    (file.path.clone(), words, symbols, bases)
+                    (file.path.clone(), words, symbols, bases, hits)
                 })
                 .collect();
             scanned.append(&mut part);
@@ -670,7 +798,7 @@ impl SymbolStore {
             root: root.to_owned(),
             files: scanned
                 .iter()
-                .map(|(path, _, _, _)| path.clone())
+                .map(|(path, _, _, _, _)| path.clone())
                 .zip(extracted.iter().map(|f| (f.mtime_ms, f.size)))
                 .map(|(path, (mtime_ms, size))| FileEntry {
                     path,
@@ -683,15 +811,27 @@ impl SymbolStore {
                 .collect(),
             names,
             refs: Vec::new(),
+            si: None,
         };
         // The walk is sorted and phase 1 sorted again; the zip above keeps that order.
         debug_assert!(store.files.windows(2).all(|w| w[0].path < w[1].path));
-        for (i, (_, words, symbols, bases)) in scanned.into_iter().enumerate() {
-            store.files[i].words = words;
-            store.files[i].symbols = symbols;
-            store.files[i].bases = bases;
+        for (i, (_, words, symbols, bases, _)) in scanned.iter().enumerate() {
+            store.files[i].words = words.clone();
+            store.files[i].symbols = symbols.clone();
+            store.files[i].bases = bases.clone();
         }
         store.rebuild_refs();
+        // The reference database's tables, from the parse's calls and the masked
+        // positioned hits — collected only here, on a full build.
+        let calls_per_file: Vec<Vec<(String, u32)>> = extracted
+            .iter()
+            .map(|file| file.calls.clone())
+            .collect();
+        let hits_per_file: Vec<Vec<(u32, u32)>> = scanned
+            .into_iter()
+            .map(|(_, _, _, _, hits)| hits)
+            .collect();
+        store.si = Some(build_si_tables(&store, &calls_per_file, &hits_per_file));
         Some(store)
     }
 
@@ -700,8 +840,10 @@ impl SymbolStore {
     /// Apply watcher changes (repo-relative paths): gone files are dropped, changed files
     /// re-extracted (a matching fingerprint skips the work), new files added. Names first
     /// seen here stay untrusted; every trusted name's occurrence list stays complete because
-    /// each touched file's contributions are subtracted and rescanned.
-    pub fn apply_changes(&mut self, paths: &[String]) {
+    /// each touched file's contributions are subtracted and rescanned. Answers whether the
+    /// store changed at all — a batch naming nothing the store holds must not pay a save
+    /// (the write is bytes on disk and a watcher event, never free).
+    pub fn apply_changes(&mut self, paths: &[String]) -> bool {
         let wanted: HashSet<&str> = paths
             .iter()
             .map(String::as_str)
@@ -715,6 +857,7 @@ impl SymbolStore {
         let SymbolStore { files, refs, .. } = self;
         let mut keep: Vec<bool> = Vec::with_capacity(files.len());
         let mut to_extract: HashSet<String> = HashSet::new();
+        let mut changed = false;
         for file in files.iter() {
             let touched = wanted.contains(file.path.as_str());
             let stat = stat_of(&Path::new(&root).join(&file.path));
@@ -726,6 +869,7 @@ impl SymbolStore {
                 keep.push(true);
                 continue;
             }
+            changed = true;
             Self::subtract_contributions(refs, files, file);
             if stat.is_some() {
                 to_extract.insert(file.path.clone());
@@ -765,8 +909,12 @@ impl SymbolStore {
             .filter_map(|path| extract_file(&root, path))
             .collect();
         upserts.sort_by(|a, b| a.path.cmp(&b.path));
+        if !upserts.is_empty() {
+            changed = true;
+        }
         self.upsert(upserts);
         self.renumber_after_edits();
+        changed
     }
 
     /// Remove `file`'s occurrence contributions from the name lists. An associated function
@@ -1001,13 +1149,48 @@ impl SymbolStore {
 
     /* ---------- Persistence ---------- */
 
-    /// Where this root's index lives under the GGS home (`~/.ggs/index/<hash>/`).
+    /// Where this root's index lives: inside the analyzed folder itself — the hidden
+    /// `.ggs/analysis/<hash>/` database (2026-11-21, the owner's direction) — when the
+    /// folder accepts the write, the GGS home (`~/.ggs/index/<hash>/`, the layout before
+    /// that date) otherwise. Preparing the project folder marks it hidden (the `.git`
+    /// treatment) and gains it a `.git/info/exclude` line, so `git status` never lists it.
     pub fn index_dir(root: &str, home: &Path) -> PathBuf {
-        use sha1::{Digest, Sha1};
-        let mut hasher = Sha1::new();
-        hasher.update(root.as_bytes());
-        let hash = hex::encode(hasher.finalize());
-        home.join("index").join(&hash[..16])
+        Self::prepared_store_dir(root).unwrap_or_else(|| home.join("index").join(store_hash(root)))
+    }
+
+    /// The store's project-local directory `<root>/.ggs/analysis/<hash>/`, created —
+    /// `None` when the folder refuses the write (a read-only share, or `root` is not a
+    /// directory at all).
+    fn prepared_store_dir(root: &str) -> Option<PathBuf> {
+        let analysis = Path::new(root).join(PROJECT_ANALYSIS_DIR);
+        let dir = analysis.join("analysis").join(store_hash(root));
+        fs::create_dir_all(&dir).ok()?;
+        mark_hidden(&analysis);
+        ensure_git_ignored(Path::new(root));
+        Some(dir)
+    }
+
+    /// Every place the root's store may sit, project-local first: the load reads the
+    /// first copy present — the project folder, else the GGS home copy an older build
+    /// saved (the next save migrates it into the project). The rebuild's wipe removes
+    /// every entry.
+    fn store_dirs(root: &str, home: &Path) -> [PathBuf; 2] {
+        [
+            Path::new(root)
+                .join(PROJECT_ANALYSIS_DIR)
+                .join("analysis")
+                .join(store_hash(root)),
+            home.join("index").join(store_hash(root)),
+        ]
+    }
+
+    /// Delete the root's saved store from every location it may live in — the rebuild's
+    /// clean start. Nothing user-authored ever lives in the analysis folder, so a wipe
+    /// never loses work; the next build regenerates the files whole.
+    pub fn remove_store_dirs(root: &str, home: &Path) {
+        for dir in Self::store_dirs(root, home) {
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 
     /// Persist the root's index. Two app instances can have the same root open (the app is
@@ -1059,13 +1242,23 @@ impl SymbolStore {
                 }
             }
         }
-        ggs_base::fsx::atomic_write(&dir.join("symbols.bin"), &out)
+        ggs_base::fsx::atomic_write(&dir.join("symbols.bin"), &out)?;
+        // The reference database rides beside the store in the same folder: a full build
+        // collected its tables, so the delete-and-regenerate promise covers them too.
+        // No tables (a resumed store) leaves the saved files standing untouched.
+        if let Some(si) = &self.si {
+            ggs_base::fsx::atomic_write(&dir.join(sidb::DB_FILE), &sidb::write_db(si))?;
+            ggs_base::fsx::atomic_write(&dir.join(sidb::TIX_FILE), &sidb::write_tix(si))?;
+        }
+        Ok(())
     }
 
     /// Read the root's index back. `None` for anything absent or not exactly this format's
     /// shape — a corrupt file means "rebuild", never an error to surface.
     pub fn load(root: &str, home: &Path) -> Option<SymbolStore> {
-        let bytes = fs::read(Self::index_dir(root, home).join("symbols.bin")).ok()?;
+        let bytes = Self::store_dirs(root, home)
+            .iter()
+            .find_map(|dir| fs::read(dir.join("symbols.bin")).ok())?;
         let mut at = 0usize;
         take(&bytes, &mut at, MAGIC.len())?
             .iter()
@@ -1152,12 +1345,15 @@ impl SymbolStore {
         if at != bytes.len() {
             return None;
         }
-        // The words transpose comes back from the occurrence lists.
+        // The words transpose comes back from the occurrence lists. The reference
+        // tables stay `None` — the saved `si.db` on disk keeps standing until the next
+        // full build rewrites it whole.
         let mut store = SymbolStore {
             root,
             files,
             names,
             refs,
+            si: None,
         };
         for (name, files_with) in store.refs.iter().enumerate() {
             for &file in files_with.as_deref().unwrap_or(&[]) {
@@ -1194,7 +1390,9 @@ fn extract_file(root: &str, relative: &str) -> Option<Extraction> {
     let stat = stat_of(&path)?;
     let text = fs::read_to_string(&path).ok()?;
     let ext = relative.rsplit_once('.')?.1;
-    let symbols = crate::symbols::parse::parse_symbols(&text, ext)
+    let parsed = crate::symbols::parse::parse_file(&text, ext);
+    let symbols = parsed
+        .symbols
         .into_iter()
         .map(|s| Extracted {
             kind: kind_id(s.kind),
@@ -1206,6 +1404,11 @@ fn extract_file(root: &str, relative: &str) -> Option<Extraction> {
             bases: s.bases,
         })
         .collect();
+    let calls = parsed
+        .calls
+        .into_iter()
+        .map(|call| (call.name, call.line as u32))
+        .collect();
     let words = unique_words(&text);
     Some(Extraction {
         path: relative.to_owned(),
@@ -1213,6 +1416,7 @@ fn extract_file(root: &str, relative: &str) -> Option<Extraction> {
         size: stat.size,
         symbols,
         words,
+        calls,
     })
 }
 
@@ -1246,6 +1450,264 @@ fn unique_words(text: &str) -> Vec<String> {
 
 /// Which of the interned names occur as words in `text`, as a sorted, deduplicated id list.
 /// The scan is a plain character walk — no allocation per word, only per hit.
+/// The positioned, code-only word hits one file carries: `(name id, 0-based line)`, every
+/// whole word whose name the index knows, hits inside comments and strings filtered out
+/// by the mask. The reference database's reference rows read from this — the store's own
+/// occurrence lists stay the unfiltered unique words `words_in` gathers.
+fn positioned_hits(text: &str, id_of: &impl Fn(&str) -> Option<u32>) -> Vec<(u32, u32)> {
+    let code_mask = crate::symbols::mask::mask(text);
+    let mut hits: Vec<(u32, u32)> = Vec::new();
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut start: Option<usize> = None;
+    // The line bookkeeping as it stood when the word started — a flush that happens on
+    // the newline closing the word's line must still read the word's own line.
+    let mut word_line = 0usize;
+    let mut word_line_start = 0usize;
+    // The character before the word, ignoring whitespace — a `.` or `>` marks member
+    // access (`self.x`, `ptr->x`), which the reference engine never records as a plain
+    // reference.
+    let mut last_significant: Option<char> = None;
+    let mut line = 0usize;
+    let mut line_start_byte = 0usize;
+    for (at, c) in text.char_indices() {
+        if is_word(c) {
+            if start.is_none() {
+                start = Some(at);
+                word_line = line;
+                word_line_start = line_start_byte;
+            }
+        } else {
+            if let Some(from) = start.take() {
+                push_positioned_hit(
+                    &mut hits,
+                    text,
+                    &code_mask,
+                    id_of,
+                    from,
+                    at,
+                    word_line,
+                    word_line_start,
+                    last_significant,
+                );
+            }
+            if c == '\n' {
+                line += 1;
+                line_start_byte = at + 1;
+            }
+            if !c.is_whitespace() {
+                last_significant = Some(c);
+            }
+        }
+    }
+    if let Some(from) = start {
+        push_positioned_hit(
+            &mut hits,
+            text,
+            &code_mask,
+            id_of,
+            from,
+            text.len(),
+            line,
+            line_start_byte,
+            last_significant,
+        );
+    }
+    hits
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_positioned_hit(
+    hits: &mut Vec<(u32, u32)>,
+    text: &str,
+    code_mask: &crate::symbols::mask::CodeMask,
+    id_of: &impl Fn(&str) -> Option<u32>,
+    from: usize,
+    to: usize,
+    line: usize,
+    line_start_byte: usize,
+    last_significant: Option<char>,
+) {
+    let word = &text[from..to];
+    let Some(id) = id_of(word) else {
+        return;
+    };
+    if matches!(last_significant, Some('.') | Some('>')) {
+        return;
+    }
+    let col = text[line_start_byte..from].chars().count();
+    if code_mask.is_masked(line, col) {
+        return;
+    }
+    hits.push((id, line as u32));
+}
+
+/// The innermost declaration covering `line` (0-based) — the latest-starting span wins,
+/// the same innermost rule the relation scans attribute references by.
+fn enclosing_symbol(symbols: &[StoredSymbol], line: u32) -> Option<&StoredSymbol> {
+    symbols
+        .iter()
+        .filter(|symbol| symbol.line <= line && line <= symbol.end_line)
+        .max_by_key(|symbol| symbol.line)
+}
+
+/// The reference database's SymType for one of the store's kinds.
+fn si_type_of(kind: u8) -> i32 {
+    match kind_name(kind) {
+        "function" => sidb::SYM_FUNCTION,
+        "method" => sidb::SYM_PROTOTYPE,
+        "class" => sidb::SYM_CLASS,
+        "struct" => sidb::SYM_STRUCT,
+        "interface" => sidb::SYM_INTERFACE,
+        "enum" => sidb::SYM_ENUM,
+        "module" => sidb::SYM_NAMESPACE,
+        "type" => sidb::SYM_TYPEDEF,
+        "macro" => sidb::SYM_MACRO,
+        "variable" => sidb::SYM_VARIABLE,
+        _ => sidb::SYM_UNKNOWN,
+    }
+}
+
+/// The kinds the reference database's type-definition table records — its `db_add_tdr`
+/// covers class / struct / union / enum / typedef / interface / namespace declarations.
+fn is_si_tdr_kind(kind: u8) -> bool {
+    matches!(
+        kind_name(kind),
+        "class" | "struct" | "interface" | "enum" | "module" | "type"
+    )
+}
+
+/// Assemble the reference database's six tables from a fully built store plus the
+/// per-file call sites and positioned hits. Mirrors si-lite's parse flow: symbols
+/// deduplicate by name (first declaration wins, and only a new symbol bumps its
+/// module's count); every declaration row lands in the code table with `enc = -1`;
+/// a call whose both ends resolve records the (caller, callee) edge — deduplicated on
+/// the exact pair, first line wins — plus its code row; a plain code-positioned
+/// identifier records its code row alone; member access and self-references never
+/// record. The tables are deterministic, so a rebuild regenerates the same bytes.
+fn build_si_tables(
+    store: &SymbolStore,
+    calls_per_file: &[Vec<(String, u32)>],
+    hits_per_file: &[Vec<(u32, u32)>],
+) -> sidb::SiTables {
+    let mut tables = sidb::SiTables {
+        mods: store
+            .files
+            .iter()
+            .map(|file| sidb::SiModule {
+                name: file.path.clone(),
+                sym_count: 0,
+            })
+            .collect(),
+        ..sidb::SiTables::default()
+    };
+    let mut si_id_of: HashMap<&str, i32> = HashMap::new();
+    let mut tdr_of: HashSet<&str> = HashSet::new();
+    let mut syl_seen: HashSet<(i32, Vec<u8>)> = HashSet::new();
+    let mut edge_seen: HashSet<(i32, i32)> = HashSet::new();
+
+    // Pass 1 — declarations: symbols, type-def records, syllables, definition code rows.
+    for (module, file) in store.files.iter().enumerate() {
+        for symbol in &file.symbols {
+            let name = store.names[symbol.name_id as usize].as_str();
+            let line = symbol.line as i32 + 1;
+            let id = match si_id_of.get(name) {
+                Some(&id) => id,
+                None => {
+                    let id = tables.syms.len() as i32;
+                    tables.syms.push(sidb::SiSymbol {
+                        id,
+                        name: name.to_owned(),
+                        type_: si_type_of(symbol.kind),
+                        module: module as i32,
+                        line,
+                    });
+                    tables.mods[module].sym_count += 1;
+                    si_id_of.insert(name, id);
+                    for frag in sidb::split_syllables(name) {
+                        if syl_seen.insert((id, frag.clone())) {
+                            tables.syls.push(sidb::SiSyl { frag, sym: id });
+                        }
+                    }
+                    id
+                }
+            };
+            tables.code.push(sidb::SiCode {
+                sym: id,
+                module: module as i32,
+                line,
+                is_def: 1,
+                enc: -1,
+            });
+            if is_si_tdr_kind(symbol.kind) && tdr_of.insert(name) {
+                tables.tdrs.push(sidb::SiTdr {
+                    name: name.to_owned(),
+                    type_: si_type_of(symbol.kind),
+                    module: module as i32,
+                    line,
+                });
+            }
+        }
+    }
+
+    // Pass 2 — references: the parse's call sites (grammar-clean) and the masked
+    // positioned words, both attributed to their innermost enclosing declaration.
+    let id_of_name = |name: &str| si_id_of.get(name).copied();
+    for (module, file) in store.files.iter().enumerate() {
+        let record = |tables: &mut sidb::SiTables,
+                      subject: &str,
+                      line: u32,
+                      want_edge: bool,
+                      edge_seen: &mut HashSet<(i32, i32)>| {
+            let Some(enclosing) = enclosing_symbol(&file.symbols, line) else {
+                return;
+            };
+            let enc_name = store.names[enclosing.name_id as usize].as_str();
+            let (Some(subject_id), Some(enc_id)) = (id_of_name(subject), id_of_name(enc_name))
+            else {
+                return;
+            };
+            if subject_id == enc_id {
+                return;
+            }
+            if want_edge && edge_seen.insert((enc_id, subject_id)) {
+                tables.edges.push(sidb::SiEdge {
+                    caller: enc_id,
+                    callee: subject_id,
+                    line: line as i32 + 1,
+                });
+            }
+            tables.code.push(sidb::SiCode {
+                sym: subject_id,
+                module: module as i32,
+                line: line as i32 + 1,
+                is_def: 0,
+                enc: enc_id,
+            });
+        };
+        for (name, line) in calls_per_file
+            .get(module)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            record(&mut tables, name, *line, true, &mut edge_seen);
+        }
+        for (name_id, line) in hits_per_file
+            .get(module)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            record(
+                &mut tables,
+                store.names[*name_id as usize].as_str(),
+                *line,
+                false,
+                &mut edge_seen,
+            );
+        }
+    }
+    tables
+}
+
 fn words_in(text: &str, id_of: &impl Fn(&str) -> Option<u32>) -> Vec<u32> {
     let mut hits: Vec<u32> = Vec::new();
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
@@ -1625,5 +2087,163 @@ class Leaf : public Mid, Extra {};
         assert_eq!(rows[1].container.as_deref(), Some("Thing"));
         assert_eq!(rows[1].refs, 1, "beta occurs only where it is declared");
         assert!(store.file_symbols("missing.rs").is_none());
+    }
+
+    /* ---------- the project analysis folder (2026-11-21) ---------- */
+
+    #[test]
+    fn the_store_lives_in_the_projects_hidden_analysis_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.c", "void draw(void) {}\n");
+        let root = dir.path().display().to_string();
+        let home = tempfile::tempdir().unwrap();
+
+        let store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        store.save(home.path()).unwrap();
+
+        // The store landed inside the analyzed folder, under the hidden `.ggs`.
+        let local = dir
+            .path()
+            .join(PROJECT_ANALYSIS_DIR)
+            .join("analysis")
+            .join(store_hash(&root));
+        assert!(local.join("symbols.bin").exists());
+        assert!(
+            !home
+                .path()
+                .join("index")
+                .join(store_hash(&root))
+                .join("symbols.bin")
+                .exists()
+        );
+        // A load reads the project copy back.
+        assert!(SymbolStore::load(&root, home.path()).is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_analysis_folder_hides_itself_in_explorer() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.c", "void f(void) {}\n");
+        let root = dir.path().display().to_string();
+        let home = tempfile::tempdir().unwrap();
+
+        let store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        store.save(home.path()).unwrap();
+        let analysis = dir.path().join(PROJECT_ANALYSIS_DIR);
+        let meta = fs::metadata(&analysis).unwrap();
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        assert_ne!(
+            meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN,
+            0,
+            "the analysis folder carries the hidden attribute, the .git treatment"
+        );
+    }
+
+    #[test]
+    fn the_analysis_folder_leaves_the_git_index_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.c", "void f(void) {}\n");
+        // A repository: the exclude gains the analysis folder the moment it is created.
+        fs::create_dir_all(dir.path().join(".git").join("info")).unwrap();
+        let root = dir.path().display().to_string();
+        let home = tempfile::tempdir().unwrap();
+
+        let store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        store.save(home.path()).unwrap();
+        let exclude = fs::read_to_string(dir.path().join(".git/info/exclude")).unwrap();
+        assert!(
+            exclude.lines().any(|l| l.trim() == ".ggs/"),
+            "the exclude names the analysis folder: {exclude:?}"
+        );
+        // Idempotent: a second save does not grow the line.
+        store.save(home.path()).unwrap();
+        let exclude = fs::read_to_string(dir.path().join(".git/info/exclude")).unwrap();
+        assert_eq!(exclude.lines().filter(|l| l.trim() == ".ggs/").count(), 1);
+    }
+
+    #[test]
+    fn a_worktree_pointer_excludes_through_the_shared_git_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.c", "void f(void) {}\n");
+        // The linked worktree's `.git` is a pointer file; the shared git dir it names
+        // (via `commondir`) is where `info/exclude` lives.
+        let shared = tempfile::tempdir().unwrap();
+        fs::create_dir_all(shared.path().join("worktrees").join("wt1")).unwrap();
+        fs::write(dir.path().join(".git"), format!("gitdir: {}", shared.path().join("worktrees/wt1").display())).unwrap();
+        fs::write(shared.path().join("worktrees/wt1/commondir"), "../..").unwrap();
+        let root = dir.path().display().to_string();
+        let home = tempfile::tempdir().unwrap();
+
+        let store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        store.save(home.path()).unwrap();
+        let exclude = fs::read_to_string(shared.path().join("info/exclude")).unwrap();
+        assert!(exclude.lines().any(|l| l.trim() == ".ggs/"));
+    }
+
+    #[test]
+    fn a_refusing_root_falls_back_to_the_home() {
+        let dir = tempfile::tempdir().unwrap();
+        // The root is a FILE — no `.ggs` folder can ever be created under it.
+        let blocker = dir.path().join("notafolder");
+        fs::write(&blocker, "x").unwrap();
+        let root = blocker.display().to_string();
+        let home = tempfile::tempdir().unwrap();
+
+        let store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        store.save(home.path()).unwrap();
+        assert!(
+            home.path().join("index").join(store_hash(&root)).join("symbols.bin").exists(),
+            "an unwritable project keeps its store in the GGS home"
+        );
+    }
+
+    #[test]
+    fn a_full_build_writes_the_reference_database_and_a_wipe_regenerates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "src/shape.cpp",
+            "struct Shape { int area; };\nvoid draw(Shape s) { use(s.area); }\nvoid render(void) { draw(*(Shape*)0); }\n",
+        );
+        let root = dir.path().display().to_string();
+        let home = tempfile::tempdir().unwrap();
+
+        let store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        store.save(home.path()).unwrap();
+        let dir_path = dir.path().join(PROJECT_ANALYSIS_DIR).join("analysis").join(store_hash(&root));
+        let db = dir_path.join(sidb::DB_FILE);
+        let tix = dir_path.join(sidb::TIX_FILE);
+        let db_bytes = fs::read(&db).expect("the reference database rides beside the store");
+        let tix_bytes = fs::read(&tix).expect("the syllable index rides beside the store");
+        assert_eq!(&db_bytes[0..4], &sidb::DB_MAGIC.to_le_bytes());
+        assert_eq!(&tix_bytes[0..4], b"TIX1");
+
+        // The delete-and-regenerate surface: wipe, then a fresh build writes the same
+        // bytes whole.
+        SymbolStore::remove_store_dirs(&root, home.path());
+        assert!(SymbolStore::load(&root, home.path()).is_none());
+        assert!(!db.exists());
+        let rebuilt = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        rebuilt.save(home.path()).unwrap();
+        assert_eq!(fs::read(&db).unwrap(), db_bytes, "the same analysis regenerates the same file");
+
+        // The database's tables speak the parsed truth: one module, the declarations,
+        // the call edge render -> draw, and the syllable fragments.
+        let tables = store.si.as_ref().unwrap();
+        assert_eq!(tables.mods.len(), 1);
+        assert_eq!(tables.mods[0].name, "src/shape.cpp");
+        let names: Vec<&str> = tables.syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"draw") && names.contains(&"render") && names.contains(&"Shape"));
+        assert!(tables.syls.iter().any(|s| s.frag == b"draw"));
+        let edges: Vec<(i32, i32)> = tables.edges.iter().map(|e| (e.caller, e.callee)).collect();
+        assert_eq!(edges.len(), 1, "the call inside render is the one edge: {edges:?}");
+        // `use(s.area)` — a member access after '.', never a reference row.
+        let plain: Vec<_> = tables.code.iter().filter(|c| c.is_def == 0).collect();
+        assert!(
+            plain.iter().all(|c| tables.syms[c.sym as usize].name != "area"),
+            "member access records no reference: {plain:?}"
+        );
     }
 }

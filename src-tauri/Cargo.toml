@@ -109,6 +109,10 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",
 ] }
+# The project analysis folder's hidden attribute (ggs-index's mark_hidden, store.rs): the
+# `.git` treatment — git marks its own folder hidden on Windows, the analysis folder does
+# the same. The version is one wry already builds.
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSMenu", "NSMenuItem"] }

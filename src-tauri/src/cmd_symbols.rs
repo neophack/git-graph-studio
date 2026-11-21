@@ -95,6 +95,9 @@ pub async fn symbols_rebuild(
     tauri::async_runtime::spawn_blocking(move || {
         let mut channel = crate::events::ChannelSink(on_event);
         let channel: Option<&mut dyn BatchSink<SymbolIndexEvent>> = Some(&mut channel);
+        // A rebuild is the delete-and-regenerate surface: the analysis folder's store
+        // goes away first, and the fresh build writes the same files whole.
+        index.wipe_disk(&root);
         index.build_blocking(None, &root, channel)
     })
     .await

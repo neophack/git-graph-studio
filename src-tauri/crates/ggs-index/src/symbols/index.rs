@@ -179,6 +179,14 @@ impl SymbolIndex {
         drop(dropped);
     }
 
+    /// Delete the root's saved store from the analysis folder (and the GGS home a copy
+    /// may still sit in) — the rebuild's delete-and-regenerate surface: nothing
+    /// user-authored ever lives there, and the next build writes the same files whole.
+    /// A store already resident stays serving until the fresh one lands.
+    pub fn wipe_disk(&self, root: &str) {
+        SymbolStore::remove_store_dirs(root, &self.home);
+    }
+
     /// Make the root's index resident: resume (or build) it now when it is not — what
     /// every symbol query runs first. Concurrent callers wait for the one build in
     /// flight; a cancelled build (a folder switch) answers an error.
@@ -493,7 +501,8 @@ impl SymbolIndex {
         Ok(self.status(root))
     }
 
-    /// Apply a watcher batch to the root's index on a background thread and persist it.
+    /// Apply a watcher batch to the root's index on a background thread, persisting only
+    /// when the batch actually moved the store.
     pub fn apply_changes(
         self: &Arc<Self>,
         sink: Option<Arc<dyn EventSink>>,
@@ -508,8 +517,13 @@ impl SymbolIndex {
             };
             {
                 let mut store = store.lock().unwrap();
-                store.apply_changes(&paths);
-                let _ = store.save(&index.home);
+                // A batch naming nothing the store holds (a non-source write, another app's
+                // churn) ends here: saving unchanged bytes would only put new watcher events
+                // on the tree the watch reports, so the store's own persistence never feeds
+                // the watch.
+                if store.apply_changes(&paths) {
+                    let _ = store.save(&index.home);
+                }
             }
             if let Some(sink) = sink.as_deref() {
                 if let Ok(payload) = serde_json::to_value(index.status(&root)) {
@@ -750,6 +764,41 @@ mod tests {
         let all: usize = files.iter().map(|f| f.matches.len()).sum();
         assert_eq!(all, 401);
         assert!(files.windows(2).all(|pair| pair[0].path <= pair[1].path));
+    }
+
+    /// A batch naming nothing the store holds must not rewrite the store: the save's bytes
+    /// land inside the watched tree, and a write the watch reports as a change is exactly
+    /// the loop that made the symbol window flicker without end (2026-11-21). A real edit
+    /// still persists.
+    #[test]
+    fn a_no_op_batch_never_rewrites_the_store() {
+        let (root_dir, home, index, root) = seeded_index();
+        let store_path = SymbolStore::index_dir(&root, home.path()).join("symbols.bin");
+        let before = std::fs::metadata(&store_path).unwrap();
+
+        index.apply_changes(None, &root, vec!["notes.txt".to_owned()]);
+        // The apply runs on a background thread; give it its moment before reading.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let after = std::fs::metadata(&store_path).unwrap();
+        assert_eq!(
+            (after.modified().unwrap(), after.len()),
+            (before.modified().unwrap(), before.len()),
+            "a no-op batch left symbols.bin untouched"
+        );
+
+        // The positive control: a real edit reaches the store on disk.
+        std::fs::write(root_dir.path().join("a.rs"), "fn alpha() { beta(); gamma(); }\n").unwrap();
+        index.apply_changes(None, &root, vec!["a.rs".to_owned()]);
+        let mut landed = false;
+        for _ in 0..100 {
+            let written = std::fs::metadata(&store_path).unwrap();
+            if written.modified().unwrap() != before.modified().unwrap() {
+                landed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(landed, "a real edit re-persisted the store");
     }
 
     #[test]

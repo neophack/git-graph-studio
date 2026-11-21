@@ -15,8 +15,9 @@
 // window's own click — and the ring's +/− expander is its own small circle at the branch
 // point, whose click alone drills and collapses (instantly — no deferred merge); a
 // right-click menu drills, re-roots or opens, and resting floats the declaration card,
-// its code colored. The board's viewport is its own: wheel pans, ctrl/cmd+wheel zooms at
-// the cursor, a background drag pans, and Fit frames the whole drawing. The relation TYPE
+// its code colored. The board's viewport is its own: the wheel zooms at the cursor (2026-11-21,
+// the owner's direction: the wheel zooms in and out, it must not scroll the drawing up and
+// down), a background drag pans, and Fit frames the whole drawing. The relation TYPE
 // is the classic window's own (2026-11-20): the picker lists the thirteen view names —
 // Calls, Callers, Calls and Callers, Referenced by Functions/Files/Modules, Contains,
 // Container, Base/Derived Classes, Member Types/Classes, Types Used — every ring drills
@@ -223,8 +224,8 @@ const DECL_MAX_LINES = 6;
 const DECL_MAX_CHARS = 400;
 
 export class RelationGraphView {
-	/** The board: the SVG viewport (wheel pan, ctrl/cmd+wheel zoom, background drag pan —
-	 *  the drawing's own affordances, no engine behind them). */
+	/** The board: the SVG viewport (wheel zoom at the cursor, background drag pan — the
+	 *  drawing's own affordances, no engine behind them). */
 	readonly element: HTMLElement;
 
 	/** The relation-type picker, the pin and the Fit — the Symbol Window's section head
@@ -1148,21 +1149,20 @@ export class RelationGraphView {
 
 	private readonly onWheel = (event: WheelEvent): void => {
 		event.preventDefault();
-		if (event.ctrlKey || event.metaKey) {
-			const rect = this.board.getBoundingClientRect();
-			const px = event.clientX - rect.left;
-			const py = event.clientY - rect.top;
-			const factor = Math.exp(-event.deltaY * 0.002);
-			const next = Math.max(0.15, Math.min(3, this.camScale * factor));
-			this.camX = px - ((px - this.camX) / this.camScale) * next;
-			this.camY = py - ((py - this.camY) / this.camScale) * next;
-			this.camScale = next;
-			this.applyCamera();
-		} else {
-			this.camX -= event.deltaX;
-			this.camY -= event.deltaY;
-			this.applyCamera();
-		}
+		// The wheel zooms at the cursor (2026-11-21, the owner's direction: the wheel
+		// zooms in and out — the plain wheel used to pan, which read as the page scrolling
+		// up and down): the cursor's point holds still in the viewport while the scale
+		// multiplies around it, every wheel gesture riding the same path — pinch gestures
+		// and ctrl/cmd wheels included. Panning is the background drag's own.
+		const rect = this.board.getBoundingClientRect();
+		const px = event.clientX - rect.left;
+		const py = event.clientY - rect.top;
+		const factor = Math.exp(-event.deltaY * 0.002);
+		const next = Math.max(0.15, Math.min(3, this.camScale * factor));
+		this.camX = px - ((px - this.camX) / this.camScale) * next;
+		this.camY = py - ((py - this.camY) / this.camScale) * next;
+		this.camScale = next;
+		this.applyCamera();
 	};
 
 	private panFrom: { x: number; y: number; camX: number; camY: number } | null = null;
