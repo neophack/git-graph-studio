@@ -39,7 +39,7 @@ use crate::symbols::store::{FileOutlineRow, SymbolStore};
 use crate::symbols::WorkspaceSymbol;
 
 /// The children one direction returns at most: the window expands ring by ring, and a
-/// hub name's caller list is read, not painted as a graph. Source Insight's relation
+/// hub name's caller list is read, not painted as a graph. the classic window's relation
 /// window caps every node's children at 64 and answers the overflow's own verdict; the
 /// same ceiling here marks the answer truncated — the ring had more to show.
 const MAX_NODES: usize = 64;
@@ -111,9 +111,9 @@ impl Budget {
 }
 
 /// `refsTo`: who references the subject. `refsFrom`: what the subject references.
-/// `contains`: the members declared inside the subject. The rest speak Source Insight's
+/// `contains`: the members declared inside the subject. The rest speak the classic window's
 /// relation window's own type set (2026-11-20, the owner's direction: the relation and
-/// references experience aligned with Source Insight, the si-lite reconstruction the
+/// references experience aligned with the classic symbol IDEs, the the reference reconstruction reconstruction the
 /// reference): Calls (the call edges out), Callers (the call edges in), Calls and
 /// Callers (both, caller branches first), Referenced by Functions (== refsTo), Referenced
 /// by Files / Modules (the references keyed by their file — files are leaves), Container
@@ -140,7 +140,7 @@ pub enum RelationKind {
 }
 
 impl RelationKind {
-    /// The wire spelling the frontend sends. Source Insight's own view names answer in
+    /// The wire spelling the frontend sends. the classic window's own view names answer in
     /// every spelling they are written in — camelCase, lower case without spaces, the
     /// `callees` legacy alias — anything else is an error, not a default.
     pub fn parse(value: &str) -> Result<RelationKind, String> {
@@ -166,7 +166,7 @@ impl RelationKind {
 }
 
 /// The reference edges a ring keeps: every site (the refsTo/refsFrom vocabulary), or one
-/// of Source Insight's filtered views — the call edges only, or the edges landing on
+/// of the classic window's filtered views — the call edges only, or the edges landing on
 /// type-category declarations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EdgeFilter {
@@ -186,7 +186,7 @@ impl EdgeFilter {
     }
 }
 
-/// The declaration kinds that count as types — Source Insight's `refs_is_typeish`
+/// The declaration kinds that count as types — the classic window's `refs_is_typeish`
 /// vocabulary over the index's own kind names: the types a `Types Used` ring keeps and
 /// the `Member Types` filter's members.
 const TYPEISH: &[&str] = &["class", "struct", "interface", "enum", "type", "module"];
@@ -296,7 +296,7 @@ pub fn relation_children_budgeted(
         RelationKind::RefsFrom => refs_from(store, name, path, line, RingOpts::new(MAX_NODES, true, EdgeFilter::All), &budget),
         // A pure store query: no file read, no wall-clock budget to respect.
         RelationKind::Contains => contains_members(store, name, MAX_NODES, true, MemberFilter::All),
-        // Source Insight's Calls / Callers: the same scans through the call edges only —
+        // The classic Calls / Callers: the same scans through the call edges only —
         // the peeks ask the same filtered question, so a node's ring marker never promises
         // a drill the kind answers empty.
         RelationKind::Calls => refs_from(store, name, path, line, RingOpts::new(MAX_NODES, true, EdgeFilter::CallsOnly), &budget),
@@ -307,7 +307,7 @@ pub fn relation_children_budgeted(
         // coordinates tell the frontend which side it stands on: a caller's edge lives in
         // its own file, a callee's in the subject's).
         RelationKind::CallsAndCallers => calls_and_callers(root, store, name, path, line, &budget),
-        // Source Insight's referenced-by-files/modules: the same attributed sites keyed
+        // the classic referenced-by-files/modules: the same attributed sites keyed
         // by their file; the files are leaves.
         RelationKind::RefByFiles | RelationKind::RefByModules => {
             refs_by_files(root, store, name, MAX_NODES, &budget)
@@ -727,7 +727,7 @@ fn calls_and_callers(
         let key = (callee.name.clone(), callee.path.clone(), callee.line);
         if let Some(&at) = index_of.get(&key) {
             // The caller side's coordinates stay — the branch drills as Callers — and
-            // the count is the pair's total sites (Source Insight's CallsAndCalls).
+            // the count is the pair's total sites (the classic window's CallsAndCalls).
             nodes[at].edge_count += callee.edge_count;
             continue;
         }
@@ -761,7 +761,7 @@ fn calls_and_callers(
 
 /* ---------- Referenced by Files / Modules ---------- */
 
-/// The attributed reference sites keyed by their file — Source Insight's Referenced by
+/// The attributed reference sites keyed by their file — the classic Referenced by
 /// Files / Modules view (`refs_refby_mods` in the reference reconstruction): one node per
 /// file, count the file's kept sites, line the earliest. The same attribution discipline
 /// `refs_to` keeps (the declaration lines, the comment/string mask, the intervals), and
@@ -839,7 +839,7 @@ fn refs_by_files(
 
 /* ---------- Container ---------- */
 
-/// The subject's enclosing type — Source Insight's Container view, walked one ring per
+/// The subject's enclosing type — the classic Container view, walked one ring per
 /// drill: the ring names the container, the next drill on that node names its own. The
 /// edge is the membership fact itself (the subject's declaration line); the ring marker
 /// answers whether the container has a container of its own.
@@ -895,7 +895,7 @@ fn container_chain(
 
 /* ---------- Base Classes / Derived Classes ---------- */
 
-/// The base types the subject derives from — Source Insight's Base Classes view: one node
+/// The base types the subject derives from — the classic Base Classes view: one node
 /// per base in source order, the edge at the derivation's own line (the declaration line
 /// the `extends`/`: public Base` clause sits on), and the ring marker peeking whether the
 /// base derives from anything itself — the chain drills upward the same way.
@@ -954,7 +954,7 @@ fn base_classes(
     Ok(RelationAnswer { nodes, truncated })
 }
 
-/// The declarations that derive from the subject — Source Insight's Derived Classes view:
+/// The declarations that derive from the subject — the classic Derived Classes view:
 /// the store's base table scanned the other way, one node per derived declaration with
 /// its own declaration line for the edge, and the ring marker peeking its own bases.
 fn derived_classes(
@@ -1585,14 +1585,14 @@ mod tests {
         assert!(nodes.is_empty());
     }
 
-    /// The kind parses the wire spellings and Source Insight's own view names in every
+    /// The kind parses the wire spellings and the classic window's own view names in every
     /// spelling they are written in; anything else is an error.
     #[test]
     fn direction_parses_the_wire_spelling_only() {
         assert_eq!(RelationKind::parse("refsTo"), Ok(RelationKind::RefsTo));
         assert_eq!(RelationKind::parse("refsFrom"), Ok(RelationKind::RefsFrom));
         assert_eq!(RelationKind::parse("contains"), Ok(RelationKind::Contains));
-        // Source Insight's view names: camelCase, lower case without spaces, and the
+        // The classic window's view names: camelCase, lower case without spaces, and the
         // `callees` legacy alias of the Calls view.
         assert_eq!(
             RelationKind::parse("referencedByFunctions"),
@@ -1949,7 +1949,7 @@ mod tests {
         assert!(ans.truncated);
     }
 
-    /// Source Insight's Calls view: the body's call edges only — a macro reference and a
+    /// The classic Calls view: the body's call edges only — a macro reference and a
     /// local never answer; the `callees` spelling rides parse() into the same view.
     #[test]
     fn calls_keeps_only_the_call_edges() {
@@ -1969,7 +1969,7 @@ mod tests {
         );
     }
 
-    /// Source Insight's Callers view: refsTo through the call edges only — a use-site
+    /// The classic Callers view: refsTo through the call edges only — a use-site
     /// reference never poses as a caller.
     #[test]
     fn callers_keeps_only_the_call_edges() {
@@ -2051,7 +2051,7 @@ mod tests {
         let b = nodes.iter().find(|node| node.path == "src/b.c").unwrap();
         assert_eq!((a.edge_count, a.edge_line), (2, 6));
         assert_eq!((b.edge_count, b.edge_line), (1, 2));
-        // SI's own view name spells the same ring.
+        // The classic window's own view name spells the same ring.
         let modules = children(
             &store,
             store.root(),
@@ -2142,7 +2142,7 @@ mod tests {
 
     /// Base Classes / Derived Classes: the parser's base table walked both ways — the
     /// chain's edges at the derivations' own lines, and the markers peeking one level
-    /// up, so the chain drills the way Source Insight's tree does.
+    /// up, so the chain drills the way the classic tree does.
     #[test]
     fn base_and_derived_classes_walk_the_inheritance() {
         let (_dir, store) = seeded(&[(
@@ -2194,7 +2194,7 @@ mod tests {
         assert_eq!(none.len(), 0);
     }
 
-    /// Referenced by Functions is refsTo under SI's own name — the same ring, the same
+    /// Referenced by Functions is refsTo under the classic window's own name — the same ring, the same
     /// answer, one query.
     #[test]
     fn referenced_by_functions_is_refs_to() {

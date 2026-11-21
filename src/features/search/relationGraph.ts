@@ -4,25 +4,25 @@
 // direction: 不要自己写，要使用库，比如Drawnix). The engine is driven incrementally:
 // a ring's expansion `addNodeData`s its cards below the expanded one and a collapse
 // `removeNodeData`s them — every other card keeps its exact slot and the camera never
-// moves (点击加号减号要添加减少节点，不要重新刷图). The layout is Source Insight's
+// moves (点击加号减号要添加减少节点，不要重新刷图). The layout is the classic window's
 // relation window's stable tree: slots grow rightward/downward from the root and a
-// placed card never relocates. The cards speak the SI vocabulary (2026-11-20, the
-// owner's direction: the panels' operation logic aligned with Source Insight): a card's
+// placed card never relocates. The cards speak the classic vocabulary (2026-11-20, the
+// owner's direction: the panels' operation logic aligned with the classic symbol IDEs): a card's
 // one click opens its definition — the relation window's own click — and the ring's
 // +/− expander is its own small node beside the card, the tree's box, whose click alone
 // drills and collapses (instantly — no deferred merge); a right-click menu drills,
 // re-roots or opens, and resting floats the declaration card, its code colored. The
 // engine's own viewport handles the wheel
-// zoom, the drag pan and Fit (`fitView`). The relation TYPE is Source Insight's own
-// (2026-11-20, the owner's direction: 引用和关系要做到和 source insight 99% 一致的使用体验,
-// the si-lite reconstruction the reference): the picker lists the thirteen view names
+// zoom, the drag pan and Fit (`fitView`). The relation TYPE is the classic window's own
+// (2026-11-20, the owner's direction: the references and relations must match the
+// classic symbol IDEs' usage experience): the picker lists the thirteen view names
 // the relation window offers — Calls, Callers, Calls and Callers, Referenced by
 // Functions/Files/Modules, Contains, Container, Base/Derived Classes, Member
 // Types/Classes, Types Used — every ring drills by its own kind, the combined view's
 // caller branches drilling as Callers and its callee branches as Calls (the node's edge
-// coordinates name its side), the depth guard is SI's own — five levels of cards, the
+// coordinates name its side), the depth guard is the classic window's own — five levels of cards, the
 // fifth a leaf — a ring cut short at the 64-children cap carries the ⋯, and an empty
-// root ring answers the verdict SI's window prints ("no callers", "no contents", …).
+// root ring answers the verdict the classic window prints ("no callers", "no contents", …).
 
 import { readFile } from '../../platform/ipc/fs';
 import { symbolLookup, symbolRelationChildren, type RelationKind, type RelationNode } from '../../platform/ipc/symbols';
@@ -62,9 +62,9 @@ const GAP_X = 18;
  *  reconstruction's depth > 3). */
 const MAX_DEPTH = 4;
 
-/** Source Insight's relation window's own type set, in its own order — the picker's
+/** the classic relation window's own type set, in its own order — the picker's
  *  entries and the wire spellings the backend accepts in every spelling. */
-const SI_KINDS: { kind: RelationKind; label: LocaleKey }[] = [
+const PICKER_KINDS: { kind: RelationKind; label: LocaleKey }[] = [
 	{ kind: 'calls', label: 'relations.kind.calls' },
 	{ kind: 'callers', label: 'relations.kind.callers' },
 	{ kind: 'callsAndCallers', label: 'relations.kind.callsAndCallers' },
@@ -81,7 +81,7 @@ const SI_KINDS: { kind: RelationKind; label: LocaleKey }[] = [
 ];
 
 /** The empty-ring verdict each kind answers with — the wording the relation window
- *  itself prints (si-lite's expansion verdicts). */
+ *  itself prints (the reference reconstruction's expansion verdicts). */
 const EMPTY_VERDICTS: Partial<Record<RelationKind, LocaleKey>> = {
 	calls: 'relations.empty.calls',
 	callers: 'relations.empty.callers',
@@ -353,9 +353,9 @@ export class RelationGraphView {
 		void this.loadRoot();
 	}
 
-	/** The picker: Source Insight's own thirteen view names, the active one checked. */
+	/** The picker: the classic window's own thirteen view names, the active one checked. */
 	private showKindPicker(event: MouseEvent): void {
-		const entries: MenuEntry[] = SI_KINDS.map((entry) => ({
+		const entries: MenuEntry[] = PICKER_KINDS.map((entry) => ({
 			label: t(entry.label),
 			checked: this.kind === entry.kind,
 			run: () => this.setKind(entry.kind)
@@ -485,7 +485,7 @@ export class RelationGraphView {
 	}
 
 	private paintControls(): void {
-		const current = SI_KINDS.find((entry) => entry.kind === this.kind) ?? SI_KINDS[0];
+		const current = PICKER_KINDS.find((entry) => entry.kind === this.kind) ?? PICKER_KINDS[0];
 		this.kindButton.textContent = '';
 		this.kindButton.append(el('span', 'rg-kind-label', [t(current.label)]), icon('chevron-down'));
 		this.kindButton.title = t('relations.kind.pick');
@@ -941,7 +941,7 @@ export class RelationGraphView {
 		}
 	}
 
-	/* ---------- The card handlers (Source Insight's vocabulary) ---------- */
+	/* ---------- The card handlers (the classic window's vocabulary) ---------- */
 
 	private onCardClick(key: string): void {
 		// The ring expander is the tree row's box: its click alone drills and collapses —

@@ -214,7 +214,7 @@ export class ReferencesView {
 			this.files = (refs ?? [])
 				.map((file) => {
 					// Two hits on one line are one site — the folded context and the jump speak
-					// lines, as Source Insight's "%s line %d" unit does.
+					// lines, as the classic window's "%s line %d" unit does.
 					const seen = new Set<number>();
 					const matches = [...file.matches]
 						.sort((a, b) => a.line - b.line || a.column - b.column)

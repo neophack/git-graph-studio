@@ -1495,7 +1495,7 @@ export const zhCn: typeof en = {
 	'references.siteTitle': '点击跳转到此引用',
 	'references.contextTitle': '折叠上下文 — 点击展开或收起',
 	'references.openTitle': '跳转到此引用',
-	// 关系图的类型选择器——Source Insight 关系窗口自己的关系类型集（2026-11-20）。
+	// 关系图的类型选择器——经典符号 IDE 关系窗口自己的关系类型集（2026-11-20）。
 	'relations.kind.pick': '关系图绘制的关系类型',
 	'relations.kind.calls': '调用',
 	'relations.kind.callers': '被调用',

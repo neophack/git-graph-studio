@@ -36,7 +36,7 @@
 .refs-site:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 .refs-def { font-size: 14px; flex: none; color: var(--vscode-symbolIcon-functionForeground, var(--vscode-descriptionForeground)); }
 .refs-def-space { width: 14px; flex: none; }
-/* The folded context's arrow — the row itself is the jump (Source Insight's search
+/* The folded context's arrow — the row itself is the jump (the classic search
    results); this affordance alone folds and unfolds. */
 .refs-ctx-toggle {
 	flex: none; display: inline-flex; align-items: center; cursor: pointer;

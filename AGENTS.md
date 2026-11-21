@@ -382,7 +382,7 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   drawing library, per the owner's direction: use a drawing library, not a hand-rolled
   canvas; loaded
   lazily on the first drawing, a chunk the sidebar's first paint never pays for). The
-  layout is Source Insight's relation window's stable tree: slots grow rightward/downward
+  layout is the classic relation window's stable tree: slots grow rightward/downward
   from the root, a placed card never relocates, and the engine is driven **incrementally**
   — a ring's expansion addNodeData's its cards below the expanded one and a collapse
   removeNodeData’s them, every other card keeping its exact slot and the camera never
@@ -390,8 +390,8 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   graph; the mermaid round’s whole-graph ELK
   re-layout was exactly the repaint being rejected, and the module-analysis drawing
   library itself carries no vanilla mount — Plait renders through React/Angular
-  carriers). The cards speak the SI vocabulary (2026-11-20, the owner's direction: the panels'
-  operation logic aligned with Source Insight): one click on a card opens its definition —
+  carriers). The cards speak the classic vocabulary (2026-11-20, the owner's direction: the panels'
+  operation logic aligned with the classic symbol IDEs): one click on a card opens its definition —
   the relation window's own click — and the ring's +/− expander is its own small circle
   node beside the card (the tree row's box), whose click alone drills and collapses,
   instantly — the deferred whole-card merge is gone; the right-click menu drills
@@ -405,7 +405,7 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   3-depth cap answers the ⋯ instead of a request; `pinRoot` seeds an explicit pinned
   root; the engine’s own viewport owns the wheel zoom and the drag pan, and Fit frames
   the whole drawing;
-  2026-11-20, the relation TYPE is Source Insight's own (the si-lite reconstruction the
+  2026-11-20, the relation TYPE is the classic window's own (the the reference reconstruction reconstruction the
   reference; the owner's direction: the references and relations must match Source
   Insight's usage experience):
   the section head's picker lists the thirteen view names the relation window offers —
@@ -416,7 +416,7 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   site sits in the root's own file → Calls; anywhere else → Callers); the arrows point
   the kind's own way (the referencing side at the referenced — refsTo's family,
   Container, Derived Classes; the subject at what it names — refsFrom's family,
-  Contains, Base Classes; the `base` edge its own colour), the depth guard is SI's own
+  Contains, Base Classes; the `base` edge its own colour), the depth guard is the classic window's own
   — five levels of cards, the fifth a leaf carrying the ⋯ — the per-ring cap the
   backend's 64, and an empty root ring answers the kind's own verdict ("No callers.",
   "No contents.", … — EMPTY_VERDICTS, the wording the relation window itself prints);
@@ -453,7 +453,7 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   and the body's middle folded into
   `… N lines …` rows that click open in place (200-line cap, the remainder its own fold
   row); with nothing enclosing, a raw ±4 window; a definition site is its own head with
-  the whole body folded behind it; a site row's one click is the jump — Source Insight's
+  the whole body folded behind it; a site row's one click is the jump — the classic window's
   search-results read — the arrow alone folds (the arrow keys walk the rows, Enter
   jumps); the same cursor-follow gate the definition page keeps
   (the panel up, this page active, the pin off) resolves the subject — one
@@ -502,15 +502,15 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   over the store's `members_of` (container-intern scan, member edges carrying the
   member's own declaration, `hasChildren` peeking whether the member is itself a
   container — nested types drill);
-  2026-11-20, the type set speaks Source Insight's own relation window (the si-lite
+  2026-11-20, the type set speaks the classic window's own relation window (the the reference reconstruction
   reconstruction the reference; the owner's direction: the references and relations must
-  match Source Insight's usage experience): `RelationKind` answers thirteen kinds — the three original
+  match the classic symbol IDEs' usage experience): `RelationKind` answers thirteen kinds — the three original
   directions plus `calls`/`callers` (the same scans through the call edges only, the
   peeks asking the same filtered question so a ring marker never promises an empty
   drill), `callsAndCallers` (the caller ring first, the callee ring merged in, a mutual
   counterpart keeping one node whose count is the pair's total — a caller's edge site
   lives in its own file and a callee's in the subject's, the coordinates the frontend
-  reads to pick the branch's drill kind), `referencedByFunctions` (refsTo under SI's
+  reads to pick the branch's drill kind), `referencedByFunctions` (refsTo under the classic window's
   name), `referencedByFiles`/`referencedByModules` (the attributed sites keyed by their
   file — one node per file, count the kept sites, the earliest line, files answering
   leaves), `container` (the enclosing type one ring up, the membership edge at the
@@ -518,9 +518,9 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   `memberTypes`/`memberClasses` (the members filtered by kind, the store-side filter
   keeping the truncation honest), `typesUsed` (the type-category targets only) and
   `baseClasses`/`derivedClasses` (the parser's base table walked both ways, the edges at
-  the derivations' own lines); parse() accepts SI's own view names in every spelling
+  the derivations' own lines); parse() accepts the classic window's own view names in every spelling
   (camelCase, lower case without spaces, the `callees` alias); the per-ring node cap is
-  SI's 64),
+  the classic window's 64),
   `symbols::rename` (the rename engine, 2026-11-20: the plan unions the old name's
   declarations with its masked reference sites and the conflicts refuse all-or-nothing —
   the new name already declared, the same name, not found, over the site cap — while the

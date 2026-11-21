@@ -4,7 +4,7 @@
 // the +/− drill markers, the root's accent, the dashed use arrows), the lazy rings behind
 // the right-click menu (cached, depth-capped), the three-way direction switch, the cross
 // edge a repeated symbol draws, the stable tree (an expansion adds cards without moving
-// any placed one — the owner's ask), the pointer's vocabulary in Source Insight's terms
+// any placed one — the owner's ask), the pointer's vocabulary in the classic window's terms
 // (one click on a ringed card drills, a card without a ring opens, the double click opens
 // and never expands on its way), the declaration card reading through the joined path —
 // and the Symbol Window feeding the graph from the covering symbol over the repo-relative
@@ -240,7 +240,7 @@ describe('drilling rings', () => {
 
 	it('the depth cap answers with the ⋯ marker instead of a request', async () => {
 		// A ring chain naming the next symbol each time: alpha → child-of-alpha → … — the
-		// root's ring opens itself, so the chain starts one level down. SI's guard shows
+		// root's ring opens itself, so the chain starts one level down. the classic guard shows
 		// five levels of cards (depths 0..4); a card at depth 4 is the leaf.
 		backend.on('symbol_relation_children', ({ name, direction }) => {
 			if (direction !== 'refsTo') return answer([]);
@@ -290,13 +290,13 @@ describe('drilling rings', () => {
 	});
 });
 
-describe("the pointer (Source Insight's vocabulary)", () => {
+describe("the pointer (the classic window's vocabulary)", () => {
 	it('the type picker lists the thirteen view names and swaps the kind', async () => {
 		const view = mountView();
 		view.setRoot({ ...ROOT });
 		await untilCards(4);
 		// The picker is the head's first button; its click opens the thirteen entries,
-		// Source Insight's own set in its own order, the active one checked.
+		// The classic window's own set in its own order, the active one checked.
 		click(view.controls.children[0] as HTMLElement);
 		await flush();
 		expect(menuLabels()).toEqual([

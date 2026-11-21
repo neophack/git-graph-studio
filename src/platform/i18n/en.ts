@@ -1510,7 +1510,7 @@ export const en = {
 	'references.siteTitle': 'Click to jump to this reference',
 	'references.contextTitle': 'The folded context — click to expand or collapse',
 	'references.openTitle': 'Jump to this site',
-	// The relation graph's type picker — Source Insight's own relation-type set (the
+	// The relation graph's type picker — the classic window's own relation-type set (the
 	// names its relation window offers, 2026-11-20).
 	'relations.kind.pick': 'The relation type the graph draws',
 	'relations.kind.calls': 'Calls',

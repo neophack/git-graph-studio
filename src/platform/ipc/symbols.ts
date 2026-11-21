@@ -139,7 +139,7 @@ export interface RelationAnswer {
 	truncated: boolean;
 }
 
-/** The relation kinds the window drills — Source Insight's own relation-type set
+/** The relation kinds the window drills — the classic window's own relation-type set
  *  (2026-11-20): the three original directions plus Calls/Callers (the call edges only),
  *  their combined view, the referenced-by files/modules keys, the upward Container walk,
  *  the member rings by kind, the body's type references, and the inheritance chains the
@@ -168,7 +168,7 @@ export type RelationDirection = 'refsTo' | 'refsFrom' | 'contains';
 /** The children of one relation node — the next ring of the box-and-arrow relation
  *  graph, computed over the persistent index. The subject is a definition: the symbol under
  *  the cursor with the location the context-symbol resolution reported for it. The kind
- *  accepts Source Insight's own view-name spellings too (`calls`, `callers`,
+ *  accepts the classic window's own view-name spellings too (`calls`, `callers`,
  *  `callsandcallers`, `referencedbyfiles`, … — the backend lower-cases and de-spaces
  *  before it matches). */
 export const symbolRelationChildren = (name: string, path: string, line: number, kind: RelationKind) =>

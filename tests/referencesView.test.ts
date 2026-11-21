@@ -141,7 +141,7 @@ describe('rendering the references', () => {
 		view.setSubject({ kind: 'function', name: 'total', path: 'src/math.c', line: 0 });
 		await flush();
 		const rows = view.element.querySelectorAll('.refs-site');
-		// The row itself is the jump — one click, Source Insight's search-results read.
+		// The row itself is the jump — one click, the classic search-results read.
 		const jumpOpens: string[] = [];
 		view.onOpen = (path, line) => jumpOpens.push(`${path}:${line}`);
 		click(rows[2]!);
