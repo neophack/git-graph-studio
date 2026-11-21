@@ -354,6 +354,8 @@ export const zhCn: typeof en = {
 	'symbols.page.expandAll': '全部展开',
 	'symbols.page.empty': '此文件夹的符号索引为空。',
 	'symbols.hover.definitions': '个定义',
+	'symbols.hover.disable': '关闭悬停',
+	'symbols.hover.disableTip': '关闭符号悬停：设置 → 编辑器 → 符号悬停可重新打开。',
 	'symbols.hover.openDefinition': '打开定义',
 	'symbols.context.empty': '将光标放在符号上，即可在此查看它的定义。',
 	'symbols.context.ambiguous': '个符号同名——请在编辑器中选择其一。',

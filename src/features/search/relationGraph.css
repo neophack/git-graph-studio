@@ -1,10 +1,10 @@
 /* The Relation Graph's own affordances — the controls riding the section head, the
-   resting hints, and the declaration card. The drawing itself is the @antv/G6 engine's
-   canvas (relationGraph.ts builds it into .rg-stage); the canvas palette lives in
-   relationGraph.ts's themePalette, since the canvas cannot read CSS variables. */
+   resting hints, and the declaration card. The drawing itself is the view's own SVG
+   board (relationGraph.ts builds it into .rg-stage); the SVG palette lives in
+   relationGraph.ts's themePalette, since the SVG reads attributes, not CSS variables. */
 
 .rg-root { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.rg-stage { position: relative; flex: 1; min-height: 0; }
+.rg-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; }
 .rg-controls { display: inline-flex; gap: 2px; align-items: center; }
 .rg-dir {
 	background: none; border: 1px solid transparent; padding: 1px 7px; border-radius: 3px;
@@ -29,6 +29,29 @@
 	background: var(--vscode-sideBar-background, var(--vscode-editor-background));
 	pointer-events: none;
 }
+
+/* The board: the bare surface pans (drag or wheel); ctrl/cmd+wheel zooms. */
+.rg-board { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; outline: none; }
+.rg-board.rg-panning { cursor: grabbing; }
+.rg-edge { pointer-events: none; }
+.rg-edge text { pointer-events: none; }
+
+.rg-card { cursor: pointer; }
+.rg-card rect { transition: filter 0.12s ease; }
+.rg-card:hover rect { filter: brightness(1.14); }
+.rg-card.rg-root rect { filter: none; }
+.rg-card.rg-root:hover rect { filter: brightness(1.08); }
+
+.rg-expander { cursor: pointer; }
+.rg-expander circle { transition: stroke 0.12s ease; }
+.rg-expander:hover circle { stroke: var(--vscode-focusBorder, #0078d4); }
+
+/* A first appearance: the card fades in where the layout put it — the transform rides
+   the attribute (the geometry), so only the opacity animates. */
+@keyframes rg-enter {
+	from { opacity: 0; }
+}
+.rg-enter { animation: rg-enter 0.22s ease-out; }
 
 /* The hover's declaration card: the definition's opening lines over its caption, floating
    over everything — the Relations panel's card, in the graph's own classes. */

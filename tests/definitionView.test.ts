@@ -40,17 +40,31 @@ beforeEach(() => {
 	backend.on('read_file', ({ path }) => (path === 'src/math.c' ? { contents: FILE_BODY, binary: false, size: FILE_BODY.length } : undefined));
 });
 
-describe('rendering the definition', () => {
-	it('shows the body through the end line, with the header naming kind and location', async () => {
-		const view = mountView();
-		view.setDefinition({ kind: 'function', name: 'total', path: 'src/math.c', line: 0, endLine: 4 });
-		await flush();
-		expect(texts('.def-name', view.element)).toEqual(['total']);
-		expect(view.element.querySelector('.def-kind')?.textContent).toBe('function');
-		expect(view.element.querySelector('.def-location')?.textContent).toBe('math.c:1');
-		expect(view.element.querySelector('.def-code')?.textContent).toBe('int total(int a, int b)\n{\n    int sum = a + b;\n    return sum;\n}');
-		view.element.remove();
-	});
+	describe('rendering the definition', () => {
+		it('shows the body through the end line, with the header naming kind and location', async () => {
+			const view = mountView();
+			view.setDefinition({ kind: 'function', name: 'total', path: 'src/math.c', line: 0, endLine: 4 });
+			await flush();
+			expect(texts('.def-name', view.element)).toEqual(['total']);
+			expect(view.element.querySelector('.def-kind')?.textContent).toBe('function');
+			expect(view.element.querySelector('.def-location')?.textContent).toBe('math.c:1');
+			expect(view.element.querySelector('.def-code')?.textContent).toBe('int total(int a, int b)\n{\n    int sum = a + b;\n    return sum;\n}');
+			view.element.remove();
+		});
+
+		it("the body's code is colored — the tokenizer's runs over the lines", async () => {
+			const view = mountView();
+			view.setDefinition({ kind: 'function', name: 'total', path: 'src/math.c', line: 0, endLine: 4 });
+			await flush();
+			const code = view.element.querySelector('.def-code')!;
+			// The keywords (`int`, `return`) ride their own class, the line spans carry the
+			// rows, and the pane's text content stays the code verbatim.
+			const keywords = [...code.querySelectorAll('.hl-keyword')].map((span) => span.textContent);
+			expect(keywords).toContain('int');
+			expect(keywords).toContain('return');
+			expect(code.querySelectorAll('.def-line').length).toBe(5);
+			view.element.remove();
+		});
 
 	it('a macro without an indexed end extends over its backslash continuations', async () => {
 		const macro = [

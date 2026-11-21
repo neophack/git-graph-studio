@@ -897,6 +897,11 @@ body.resizing iframe { pointer-events: none; }
    links are. */
 .ggs-symbol-hover { max-width: 640px; font-family: var(--vscode-font-family); font-size: 12px; }
 .ggs-symbol-hover-head { display: flex; align-items: center; gap: 6px; padding: 2px 0 5px; font-weight: 600; }
+/* The head's off switch sits at its far end: a muted link-styled button that turns the
+   whole feature off (the Symbol Hover setting) and closes this tooltip at once. */
+.ggs-symbol-hover-head-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ggs-symbol-hover-off { flex: none; margin-left: auto; padding: 0; border: none; background: none; color: var(--vscode-descriptionForeground); font-family: var(--vscode-font-family); font-size: 11px; font-weight: 400; cursor: pointer; }
+button.ggs-symbol-hover-off:hover { color: var(--vscode-textLink-activeForeground); text-decoration: underline; }
 .ggs-symbol-hover-code, .ggs-symbol-hover-comment { margin: 3px 0; padding: 4px 8px; background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.1)); border-radius: 3px; font-family: var(--vscode-editor-font-family, monospace); font-size: var(--vscode-editor-font-size, 12px); white-space: pre; overflow-x: auto; max-width: 100%; }
 /* A definition body shows whole whatever its length — the pane scrolls over the cap. */
 .ggs-symbol-hover-code.ggs-symbol-hover-body { max-height: 340px; overflow-y: auto; }

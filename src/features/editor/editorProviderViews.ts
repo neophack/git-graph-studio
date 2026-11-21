@@ -325,7 +325,8 @@ export function macroHoverDom(name: string, entries: MacroHoverEntry[], open?: (
 	dom.className = 'ggs-symbol-hover';
 	const head = document.createElement('div');
 	head.className = 'ggs-symbol-hover-head';
-	head.textContent = entries.length > 1 ? `${name} — ${entries.length} ${t('symbols.hover.definitions')}` : name;
+	head.appendChild(hoverHeadLabel(name, entries.length));
+	head.appendChild(disableHoverDom());
 	dom.appendChild(head);
 	for (const entry of entries) {
 		if (entry.comment) {
@@ -358,7 +359,7 @@ export function macroHoverDom(name: string, entries: MacroHoverEntry[], open?: (
 
 // The card's types and rendering live in ./hoverCard (the data assembly here, the
 // rendering there); the names re-export for the existing importers.
-import { quickInfoDom, type SymbolQuickInfo, type SymbolQuickInfoEntry } from './hoverCard';
+import { quickInfoDom, hoverHeadLabel, disableHoverDom, type SymbolQuickInfo, type SymbolQuickInfoEntry } from './hoverCard';
 export { quickInfoDom, type HoverCardActions, type HoverMember, type SymbolQuickInfo, type SymbolQuickInfoEntry } from './hoverCard';
 
 /** The kinds whose members the hover previews: the relation ring's `contains` answer of

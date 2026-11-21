@@ -478,19 +478,30 @@ export class SymbolWindowView {
 		this.noteCurrentSymbol(this.coveringSymbol());
 	}
 
-	/** The innermost outline symbol covering the cursor — the locals' owner, over the
-	 *  full outline (not the filtered rows), null when no span holds the cursor. */
+	/** The symbol the cursor's line belongs to — the locals' owner and the relation
+	 *  graph's root, over the full outline (not the filtered rows). A span reaching past
+	 *  its own first line is an enclosing scope (the function whose body holds the
+	 *  cursor), and the innermost of those wins: a one-line entry declaring a name on
+	 *  the very line sits inside that scope, and its own bare ring is never the root.
+	 *  Only when nothing encloses the line does the line's own entry answer. */
 	private coveringSymbol(): FileOutlineSymbol | null {
-		let best: FileOutlineSymbol | null = null;
-		let start = -1;
+		let enclosing: FileOutlineSymbol | null = null;
+		let enclosingStart = -1;
+		let onLine: FileOutlineSymbol | null = null;
+		let onLineStart = -1;
 		for (const symbol of this.symbols) {
 			if (this.cursorLine < symbol.line || this.cursorLine > symbol.endLine) continue;
-			if (symbol.line >= start) {
-				start = symbol.line;
-				best = symbol;
+			if (symbol.endLine > symbol.line) {
+				if (symbol.line >= enclosingStart) {
+					enclosingStart = symbol.line;
+					enclosing = symbol;
+				}
+			} else if (symbol.line >= onLineStart) {
+				onLineStart = symbol.line;
+				onLine = symbol;
 			}
 		}
-		return best;
+		return enclosing ?? onLine;
 	}
 
 	/** Ask for the owner's locals. The host's text decides everything: no callback, a

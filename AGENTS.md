@@ -176,8 +176,12 @@ guarantees the window is never a blank dark rectangle.
   WsSymbol, ExtInfo, CanLogStats... — live there once), `src/platform/fileIcons.ts` / `src/platform/extAssets.ts` (the file-icon mapping and
   extension-asset data URLs every view decorates with), `src/platform/lazy.ts` (async-chunk
   loaders), `src/platform/highlight.ts` + `highlight.css` (the panels' shared line
-  highlighter — the references rows and the relation declaration card color their code
-  through its tokenizer, the searched name riding the emphasis class), `src/platform/coalesce.ts` (single-flight coalescing for refresh-shaped work —
+  highlighter — the references rows, the relation declaration card, the Definition page's
+  body and the Context Window's code color their lines through its tokenizer, the
+  searched name riding the emphasis class; 2026-11-21, the owner's direction: the
+  definition code must be colored too — the definition page and the context window
+  joined, each line one colored span and the newline as text, so the pane's text content
+  stays the code verbatim), `src/platform/coalesce.ts` (single-flight coalescing for refresh-shaped work —
   the SCM and Explorer refreshes: one run in flight, one queued), `src/platform/windowDrag.ts`
   (the native window move's gate: a title-bar mousedown plus each `tauri://move` mark the
   drag, a 250 ms quiet decay ends it, and the workbench's scheduled refreshes defer for as
@@ -378,33 +382,39 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   collapsed; the hover card's relations jump rides `openGraphRoot`, which pins the graph
   on the hovered symbol and opens the section; 2026-11-20),
   `src/features/search/relationGraph.ts` + `relationGraph.css` (the relation graph — the
-  Symbol Window's lower half, drawn on **@antv/G6** (AntV's graph engine — an established
-  drawing library, per the owner's direction: use a drawing library, not a hand-rolled
-  canvas; loaded
-  lazily on the first drawing, a chunk the sidebar's first paint never pays for). The
-  layout is the classic relation window's stable tree: slots grow rightward/downward
-  from the root, a placed card never relocates, and the engine is driven **incrementally**
-  — a ring's expansion addNodeData's its cards below the expanded one and a collapse
-  removeNodeData’s them, every other card keeping its exact slot and the camera never
-  moving (the owner's direction: a click adds or removes nodes, it never re-lays the
-  graph; the mermaid round’s whole-graph ELK
-  re-layout was exactly the repaint being rejected, and the module-analysis drawing
-  library itself carries no vanilla mount — Plait renders through React/Angular
-  carriers). The cards speak the classic vocabulary (2026-11-20, the owner's direction: the panels'
+  Symbol Window's lower half, drawn on the view's **own SVG board** in the worktile/plait
+  mind-map manner (2026-11-21, the owner's direction: drop @antv/g6 and rewrite the
+  drawing after worktile/plait's code — Plait itself mounts through React/Angular
+  carriers, so the board takes its *ideas*: the logic layout stacking each branch's boxes
+  and centering a parent on its children, the bezier branch links — a straight lead out
+  of the parent card, then a cubic whose controls sit a third and a half of the
+  neighbouring gaps' sum into the run — and the circle expander at the branch point; no
+  engine, no canvas library, one `<svg>` with a world group). The layout is a **mind map,
+  re-planned on every draw** over the visible tree, TOP-DOWN (2026-11-21, the owner's
+  direction: the relation graph runs top to bottom) — the root's card at the top, every
+  depth its own row, the children of one card packing side by side by their subtree
+  widths, a card centered between its outermost children, the links dropping from the
+  card's bottom face to the child's top face — and the cards **glide** to their new spots
+  when a ring's expansion or collapse re-plans the drawing (2026-11-21, the owner's
+  direction: mind-map curve links, and the nodes move by themselves; it replaces the
+  stable-slot tree, whose fixed slots crossed and overlapped), a short rAF tween moving
+  each displaced card while the links redraw from the moving ends every frame
+  (`whenSettled` resolves once any glide has landed). The cards speak the classic
+  vocabulary (2026-11-20, the owner's direction: the panels'
   operation logic aligned with the classic symbol IDEs): one click on a card opens its definition —
   the relation window's own click — and the ring's +/− expander is its own small circle
-  node beside the card (the tree row's box), whose click alone drills and collapses,
+  at the branch point (the tree row's box), whose click alone drills and collapses,
   instantly — the deferred whole-card merge is gone; the right-click menu drills
   (expand/collapse), re-roots or opens; resting floats the declaration card (its file
   read resolving through `resolvePath`, the host-joined absolute spelling), its lines
-  colored by the shared tokenizer. Cards carry the ⋯ a cut-short ring
+  colored by the shared tokenizer. Cards size to their labels, carry the ⋯ a cut-short ring
   appends, the root the accent, and an aggregating edge its ×N label (call solid blue,
-  use dashed, member green — palette literals, the canvas cannot read CSS variables); a
-  symbol already drawn gains the cross edge instead of a second card (kept while both
-  ends stand drawn), a ring naming only drawn symbols leaves the node a leaf, and the
-  3-depth cap answers the ⋯ instead of a request; `pinRoot` seeds an explicit pinned
-  root; the engine’s own viewport owns the wheel zoom and the drag pan, and Fit frames
-  the whole drawing;
+  use dashed, member green — palette literals, the SVG reads attributes, not CSS
+  variables); a symbol already drawn gains the cross edge instead of a second card (kept
+  while both ends stand drawn), a ring naming only drawn symbols leaves the node a leaf,
+  and the 3-depth cap answers the ⋯ instead of a request; `pinRoot` seeds an explicit
+  pinned root; the board's viewport is its own — wheel pans, ctrl/cmd+wheel zooms at the
+  cursor, a background drag pans, and Fit frames the whole drawing;
   2026-11-20, the relation TYPE is the classic window's own (the the reference reconstruction reconstruction the
   reference; the owner's direction: the references and relations must match Source
   Insight's usage experience):
@@ -435,7 +445,10 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   `resolvePath` (the index speaks repo-relative paths, the backend's `read_file` needs
   the absolute spelling — the same hook the references page and the graph's declaration
   card carry; 2026-11-20, the missing hook left the page answering 符号索引没有响应 on
-  every read); pin freezes the content;
+  every read); the body's code is colored through the shared tokenizer — each line one
+  colored span and the newline as text, the pane's text content staying the code verbatim
+  (2026-11-21, the owner's direction: the definition code must be colored too); pin
+  freezes the content;
   `workbench.showDefinition`),
   `src/features/search/referencesView.ts` + `references.css` (the References panel page —
   2026-11-20, Source-Insight-style Lookup References over the index's occurrence list
@@ -576,7 +589,7 @@ colouring, sticky scroll, minimap, bookmarks, markdown preview.
   `src/features/editor/docFind.ts` (the whole-file find/replace bar the windowed editor and the Fast Viewer
   serve, over `viewer_find` / `viewer_replace`), `src/features/editor/diffViewer.ts` (the diff editor's
   accessible viewer — VS Code's F7 surface: every change as one overlay row with a +/− preview,
-  walked by F7/Shift+F7/arrows, Enter jumping to the change, Escape closing), `src/features/editor/editorProviderViews.ts` (the extension providers' hover/definition bridge beside the workbench's own quick-info hover — a hovered `#define` shows every indexed definition's directive text with the doc comment above it, the slice validated against the live file: the entry's line re-aligns onto the directive the file has now and cuts at the directive's own last `\`-continuation, so a stale index entry shows the macro and its comment, never the declaration below it (2026-11-18, the owner's report: 看宏我就只要宏和对应注释，不要看到结构体，不要错位), a hovered function / struct / enum / class shows its whole definition body through the index's end line (the pane scrolls, so length is no cap), a hovered variable its declaration line, and any entry its doc comment above; the entries rank by what the hover site is — the definition covering the hovered line, the hovered file's own, and the kind the site's text asks for (`hoverKindHint`: `total(` the function, `struct S` that struct, a value position the variable — so a hovered variable leads over a same-named function; 2026-11-17, the owner's reports), each location a click that opens the definition, and macros answer first; and since 2026-11-18 the scope answer leads the whole ranking — a hovered name declared inside the enclosing function of the use site is that parameter or local (`scopeQuickInfoFor`, the declaration line sliced from the live buffer: no disk read, no index), and a same-named global never appears beside it; the hover is sticky — the tooltips keep their hovered word's range and a capture-phase keep-alive guard swallows the pointer's travel toward the tooltip so it can be reached, scrolled and clicked without dismissing; and since 2026-11-20 the card is its own rendering half (`src/features/editor/hoverCard.ts`, the data assembly stays here) that shows each entry's kind, a leading type's members (the contains ring over the store's `members_of`), the files referencing the name (`symbol_ref_stats`) beside a jump that roots the relations window through the `hoverRelations` opener, and a +N count of the definitions past the render cap; and since 2026-11-20 the whole hover answers only under the **Symbol Hover switch** — Settings → Editor's `symbolHover` row and the View menu's `editor.toggleSymbolHover` beside Toggle Word Wrap (the menu entry carries the checked state) — read at hover time, so a flip reaches every already-open editor without a remount, and the extension providers' own hover beside it keeps answering on its own), `src/features/editor/editorExtras.ts`, `src/features/editor/diffView.ts` (the text diff
+  walked by F7/Shift+F7/arrows, Enter jumping to the change, Escape closing), `src/features/editor/editorProviderViews.ts` (the extension providers' hover/definition bridge beside the workbench's own quick-info hover — a hovered `#define` shows every indexed definition's directive text with the doc comment above it, the slice validated against the live file: the entry's line re-aligns onto the directive the file has now and cuts at the directive's own last `\`-continuation, so a stale index entry shows the macro and its comment, never the declaration below it (2026-11-18, the owner's report: 看宏我就只要宏和对应注释，不要看到结构体，不要错位), a hovered function / struct / enum / class shows its whole definition body through the index's end line (the pane scrolls, so length is no cap), a hovered variable its declaration line, and any entry its doc comment above; the entries rank by what the hover site is — the definition covering the hovered line, the hovered file's own, and the kind the site's text asks for (`hoverKindHint`: `total(` the function, `struct S` that struct, a value position the variable — so a hovered variable leads over a same-named function; 2026-11-17, the owner's reports), each location a click that opens the definition, and macros answer first; and since 2026-11-18 the scope answer leads the whole ranking — a hovered name declared inside the enclosing function of the use site is that parameter or local (`scopeQuickInfoFor`, the declaration line sliced from the live buffer: no disk read, no index), and a same-named global never appears beside it; the hover is sticky — the tooltips keep their hovered word's range and a capture-phase keep-alive guard swallows the pointer's travel toward the tooltip so it can be reached, scrolled and clicked without dismissing; and since 2026-11-20 the card is its own rendering half (`src/features/editor/hoverCard.ts`, the data assembly stays here) that shows each entry's kind, a leading type's members (the contains ring over the store's `members_of`), the files referencing the name (`symbol_ref_stats`) beside a jump that roots the relations window through the `hoverRelations` opener, and a +N count of the definitions past the render cap; and since 2026-11-20 the whole hover answers only under the **Symbol Hover switch** — Settings → Editor's `symbolHover` row and the View menu's `editor.toggleSymbolHover` beside Toggle Word Wrap (the menu entry carries the checked state) — read at hover time, so a flip reaches every already-open editor without a remount, and the extension providers' own hover beside it keeps answering on its own; and since 2026-11-21 the card itself carries the switch too (the owner's direction: 在弹出的上面要增加开关 — the head's 关闭悬停 button, on every hover card, flips the setting off and closes the standing tooltip at once)), `src/features/editor/editorExtras.ts`, `src/features/editor/diffView.ts` (the text diff
   view: the backend's git-computed hunks — `scm_diff`'s gix answer — painted as line
   decorations over the split panes or the unified editor, with the hunk's paired lines
   carrying the backend's character-level spans as inline `cm-diff-char-*` marks —
@@ -906,7 +919,12 @@ by the status bar), webview panels (`window.createWebviewPanel` — a sandboxed 
 in an editor tab, with `acquireVsCodeApi()` composed in, `asWebviewUri` mapping onto
 `ggs://`; the composed boot also shields `history.replaceState`/`pushState` URL rewrites —
 an `about:srcdoc` document admits no history-entry URLs, and claude-code's `?session=` sync
-threw SecurityError inside its message pump, which then skipped the message — 2026-10-15),
+threw SecurityError inside its message pump, which then skipped the message — 2026-10-15;
+and re-dispatches host→page messages with `origin: window.origin` — claude-code 2.1.330's
+client drops every host message whose origin is not the page's own (its `uUn` gate), and a
+bare synthetic MessageEvent's `""` killed them all (2026-11-21, the dead chat panel); the
+stamped value is `window.origin`, never `location.origin` — an about:srcdoc URL's own
+origin is `"null"` while the document inherits the workbench's),
 persisted `globalState`/`workspaceState` mementos, and `env.clipboard`; VS Code's
 own built-in commands (`vscode.diff` / `vscode.open` over a registered text-document content
 provider's scheme — the host asks the registering frame for the text and opens the diff

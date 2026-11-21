@@ -1658,10 +1658,11 @@
 				// — outline on top, the relation graph under its sash — over the same scripted C
 				// fixture the relations mode drives. The cursor buttons move the caret between
 				// alpha, hook, and nowhere, so the graph re-roots by eye; the checks jsdom cannot
-				// express live here: the mermaid drawing's ELK auto-layout on a drill (the whole
-				// source re-lays), the pan/zoom/pinch viewer module 17's DiagramView brings,
-				// the right-click drill menu, the double-click re-root, the hover declaration
-				// card, and the ×2 label on gamma's edge.
+				// express live here: the SVG board's re-plan on a drill — the grown branch pushing
+				// its siblings down while the cards glide to their new spots and the bezier links
+				// follow — the pan/zoom viewport (wheel pans, ctrl/cmd+wheel zooms, a background
+				// drag pans), the right-click drill menu, the double-click open, the hover
+				// declaration card, and the ×2 label on gamma's edge.
 			if (new URLSearchParams(location.search).has('relgraph')) {
 				if (sessionStorage.getItem('relgraph-clean') !== location.search) {
 					sessionStorage.setItem('relgraph-clean', location.search);
@@ -1696,6 +1697,8 @@
 					beta: { kind: 'function', name: 'beta', path: 'beta.c', line: 1, endLine: 4 },
 					gamma: { kind: 'function', name: 'gamma', path: 'gamma.c', line: 1, endLine: 5 },
 					delta: { kind: 'function', name: 'delta', path: 'delta.c', line: 1, endLine: 4 },
+					epsilon: { kind: 'function', name: 'epsilon', path: 'epsilon.c', line: 1, endLine: 3 },
+					zeta: { kind: 'function', name: 'zeta', path: 'zeta.c', line: 1, endLine: 3 },
 					hook: { kind: 'function', name: 'hook', path: 'alpha.c', line: 8, endLine: 10 },
 					Shape: { kind: 'struct', name: 'Shape', path: 'alpha.c', line: 12, endLine: 13 },
 					Circle: { kind: 'struct', name: 'Circle', path: 'alpha.c', line: 14, endLine: 15 }
@@ -1727,7 +1730,7 @@
 					symbol_relation_children: ({ name, direction }) => {
 						const refsTo = () => {
 							if (name === 'alpha') return answer([node('beta', 'beta.c', 2, 1, false), node('gamma', 'gamma.c', 2, 2, true), node('delta', 'delta.c', 2, 1, false)], true);
-							if (name === 'gamma') return answer([node('delta', 'delta.c', 3, 1, false)]);
+							if (name === 'gamma') return answer([node('delta', 'delta.c', 3, 1, false), node('epsilon', 'gamma.c', 3, 1, false), node('zeta', 'gamma.c', 4, 1, false)]);
 							return answer([]);
 						};
 						const refsFrom = () => {
@@ -1830,10 +1833,14 @@
 					'inheritance kinds); the type picker beside the section head swaps the relation type — the classic symbol IDEs\'s own thirteen ' +
 					'(Calls, Callers, Calls and Callers, Referenced by Functions/Files/Modules, Contains, Container, Base/Derived ' +
 					'Classes, Member Types/Classes, Types Used — an empty root ring answers the verdict); ' +
-					'the drawing is @antv/G6 — a drill addNodeData/removeNodeData adds or removes its cards and nothing else moves (the stable ' +
-					'tree); drag the background to pan, wheel to zoom, Fit to frame; the interaction follows the classic relation window — one ' +
-					'click on a card opens its definition (logged right), the small +/− box beside a drillable card alone drills and ' +
-					'collapses its ring (gamma edge carries the ×2 label), right-click a card for the drill / re-root / open menu; the pin ' +
+					'the drawing is the view\'s own SVG board in the Plait mind-map manner, TOP-DOWN — every draw re-plans the tree ' +
+					'(mind-map bezier links dropping from a card\'s bottom face to the child\'s top face, branch expanders beneath the ' +
+					'cards, cards sized to their labels) and the cards GLIDE to their new spots, so drilling ' +
+					'gamma grows its branch and beta/delta slide right to clear it (the ×2 label rides gamma\'s edge; the delta→gamma ' +
+					'cross edge joins when a ring names a drawn symbol); wheel pans, ctrl/cmd+wheel zooms at the cursor, drag the ' +
+					'bare board to pan, Fit to frame; the interaction follows the classic relation window — one ' +
+					'click on a card opens its definition (logged right), the small +/− circle beside a drillable card alone drills and ' +
+					'collapses its ring, right-click a card for the drill / re-root / open menu; the pin ' +
 					'freezes the root; ' +
 					'the sash resizes the halves; the section head (Relations) collapses the graph.';
 				const stage = document.createElement('div');

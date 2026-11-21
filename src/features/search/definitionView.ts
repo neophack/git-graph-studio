@@ -10,8 +10,9 @@
 import { readFile } from '../../platform/ipc/fs';
 
 import { t } from '../../platform/i18n';
+import { highlightLine, extOf } from '../../platform/highlight';
 import { KIND_ICONS } from './contextView';
-import { actionButton, el, escapeHtml, icon } from '../../platform/ui/index';
+import { actionButton, el, icon } from '../../platform/ui/index';
 
 import './definition.css';
 
@@ -190,8 +191,21 @@ export class DefinitionView {
 			this.body.appendChild(el('div', 'def-hint', [t('relations.failed')]));
 			return;
 		}
+		// The body's own colors: the shared tokenizer's runs, one colored span per line
+		// with the newline as text — the definition reads like the editor's code, and the
+		// pane's text content stays the code verbatim (the owner's direction: 定义的代码
+		// 也要着色).
 		const code = el('pre', 'def-code');
-		code.innerHTML = escapeHtml(this.bodyText);
+		const ext = extOf(this.subject.path);
+		const lines = this.bodyText.split('\n');
+		lines.forEach((line, index) => {
+			const row = el('span', 'def-line');
+			for (const segment of highlightLine(line, ext)) {
+				row.appendChild(segment.cls ? el('span', segment.cls, [segment.text]) : document.createTextNode(segment.text));
+			}
+			code.appendChild(row);
+			if (index < lines.length - 1) code.appendChild(document.createTextNode('\n'));
+		});
 		this.body.appendChild(code);
 		if (this.bodyCapped) this.body.appendChild(el('div', 'def-cut', [t('definition.cut')]));
 	}

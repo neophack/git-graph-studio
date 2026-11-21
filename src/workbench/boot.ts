@@ -518,9 +518,10 @@ export const bootMethods: ThisType<Workbench> = {
 			// The Relations page follows the same payload; its own gate (the page being the
 			// active one, the content not pinned) lives inside followDefinitionSymbol.
 			this.followDefinitionSymbol(editor);
-			// The Symbol Window follows the active editor's file and cursor line (0-based,
-			// the same payload the context window follows); no editor clears it.
-			if (editor?.kind === 'file' && editor.path) this.symbolWindow.setFile(editor.path, editor.line);
+			// The Symbol Window follows the active editor's file and cursor line; no editor
+			// clears it. The payload's line is the status bar's Ln (1-based — the base the
+			// context window's `doc.line` reads), and the view's contract is 0-based.
+			if (editor?.kind === 'file' && editor.path) this.symbolWindow.setFile(editor.path, editor.line - 1);
 			else this.symbolWindow.setFile(null);
 			if (editor?.kind === 'file' && editor.path) {
 				// explorer.autoReveal: the active file reveals in the tree when the Explorer is

@@ -354,6 +354,8 @@ export const en = {
 	'symbols.page.expandAll': 'Expand All',
 	'symbols.page.empty': 'The symbol index is empty for this folder.',
 	'symbols.hover.definitions': 'definitions',
+	'symbols.hover.disable': 'Disable hover',
+	'symbols.hover.disableTip': 'Turn the symbol hover off — Settings → Editor → Symbol Hover turns it back on.',
 	'symbols.hover.openDefinition': 'Open definition',
 	'symbols.context.empty': 'Place the cursor on a symbol to see its definition here.',
 	'symbols.context.ambiguous': 'symbols share this name - pick one in the editor.',

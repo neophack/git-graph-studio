@@ -1,14 +1,16 @@
-// The Relation Graph (module 5): the Symbol Window's lower half, drawn on the @antv/G6
-// engine (stubbed here the same way module 17's mermaid is stubbed in its own suite) —
-// the ring rendered as cards and arrows whose records the assertions read (the ×N label,
-// the +/− drill markers, the root's accent, the dashed use arrows), the lazy rings behind
-// the right-click menu (cached, depth-capped), the three-way direction switch, the cross
-// edge a repeated symbol draws, the stable tree (an expansion adds cards without moving
-// any placed one — the owner's ask), the pointer's vocabulary in the classic window's terms
-// (one click on a ringed card drills, a card without a ring opens, the double click opens
-// and never expands on its way), the declaration card reading through the joined path —
-// and the Symbol Window feeding the graph from the covering symbol over the repo-relative
-// path, with the pin freeze and the collapsed section's gate.
+// The Relation Graph (module 5): the Symbol Window's lower half, drawn on the view's own
+// SVG board in the worktile/plait mind-map manner — the ring rendered as cards whose
+// groups, links and branch expanders the assertions read (the ×N label, the +/− drill
+// markers, the root's accent, the dashed use arrows, the bezier `C` in every link's
+// path), the layout re-planned on every draw (children stacked without overlap, a parent
+// centered on its outermost children, a branch's expansion gliding the siblings aside —
+// the owner's ask: 思维导图曲线连线 + 自动移动节点), the lazy rings behind the right-click
+// menu (cached, depth-capped), the three-way direction switch, the cross edge a repeated
+// symbol draws, the pointer's vocabulary in the classic window's terms (one click on a
+// ringed card drills, a card without a ring opens, the double click opens and never
+// expands on its way), the declaration card reading through the joined path — and the
+// Symbol Window feeding the graph from the covering symbol over the repo-relative path,
+// with the pin freeze and the collapsed section's gate.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -17,10 +19,6 @@ import { updateSetting } from '../src/platform/settings';
 import { backend } from './tauriMock';
 import { click, flush, menuLabels, menuItem, until } from './helpers';
 import type { RelationAnswer, RelationNode } from '../src/platform/ipc/symbols';
-
-vi.mock('@antv/g6', () => import('./g6Stub'));
-// eslint-disable-next-line import/order
-import { Graph, reset as resetG6 } from './g6Stub';
 
 const ROOT = { kind: 'function', name: 'alpha', path: 'src/a.c', line: 0 };
 
@@ -36,7 +34,7 @@ const GAMMA_RING: RelationNode[] = [
 
 const answer = (nodes: RelationNode[], truncated = false): RelationAnswer => ({ nodes, truncated });
 
-/** The graph's scripted engine: alpha's ring (cut short), gamma's ring re-naming beta —
+/** The graph's scripted backend: alpha's ring (cut short), gamma's ring re-naming beta —
  *  the cross edge's fixture; everything else answers empty. */
 function scriptEngine(): void {
 	backend.on('symbol_relation_children', ({ name, direction }) => {
@@ -46,52 +44,66 @@ function scriptEngine(): void {
 	});
 }
 
-function mountView(): RelationGraphView {
-	const view = new RelationGraphView();
-	document.body.appendChild(view.element);
+/** The views mounted so far — the helpers read the last one, the test's own. */
+const mounted: RelationGraphView[] = [];
+
+/** The board the current test is driving. */
+function live(): RelationGraphView {
+	const view = mounted.at(-1);
+	if (!view) throw new Error('no relation graph is mounted');
 	return view;
 }
 
-/** The engine the view built for the current root. */
-function engine(): Graph {
-	const instance = Graph.instances.at(-1);
-	if (!instance) throw new Error('the engine has not been built yet');
-	return instance;
+function mountView(): RelationGraphView {
+	const view = new RelationGraphView();
+	document.body.appendChild(view.element);
+	mounted.push(view);
+	return view;
 }
 
-/** The expander dots carry the suffix-marked ids; the cards are the symbol records. */
-const EXPANDER_SUFFIX = '\u0000+';
-
-function cards(): { id: string; style?: Record<string, unknown> }[] {
-	return engine().getNodeData().filter((node) => !String(node.id).endsWith(EXPANDER_SUFFIX));
+/** The card group of one symbol, told apart by the label the board holds. */
+function cards(): SVGGElement[] {
+	return [...live().element.querySelectorAll<SVGGElement>('.rg-card')];
 }
 
-function expanders(): { id: string; style?: Record<string, unknown> }[] {
-	return engine().getNodeData().filter((node) => String(node.id).endsWith(EXPANDER_SUFFIX));
-}
-
-/** The card record for one symbol, told apart by the label the engine holds. */
-function cardOf(name: string): { id: string; style?: Record<string, unknown> } {
-	const card = cards().find((card) => String(card.style?.['labelText'] ?? '').includes(name));
+function cardOf(name: string): SVGGElement {
+	const card = cards().find((card) => card.textContent?.includes(name));
 	if (!card) throw new Error(`no rendered card names ${name}`);
 	return card;
+}
+
+function expanders(): SVGGElement[] {
+	return [...live().element.querySelectorAll<SVGGElement>('.rg-expander')];
+}
+
+function expanderOf(name: string): SVGGElement {
+	const box = expanders().find((box) => box.dataset.for === cardOf(name).dataset.id);
+	if (!box) throw new Error(`no branch expander under ${name}`);
+	return box;
+}
+
+/** The arrows in the board, as `from → to` pairs (the groups carry the keys). */
+function edgePairs(): string[] {
+	return [...live().element.querySelectorAll<SVGGElement>('.rg-edge')].map((g) => `${g.dataset.from} → ${g.dataset.to}`);
+}
+
+/** A card's world spot off its transform — the layout's own output. */
+function spot(g: SVGGElement): { x: number; y: number } {
+	const match = /translate\((-?[\d.]+) (-?[\d.]+)\)/.exec(g.getAttribute('transform') ?? '');
+	if (!match) throw new Error(`no spot on ${g.getAttribute('transform')}`);
+	return { x: Number(match[1]), y: Number(match[2]) };
 }
 
 async function untilCards(count: number): Promise<void> {
 	await vi.waitFor(() => {
 		if (cards().length !== count)
-			throw new Error(`the drawing does not hold ${count} cards yet: ${JSON.stringify(cards().map((card) => card.style?.['labelText']))}`);
+			throw new Error(`the board does not hold ${count} cards yet: ${JSON.stringify(cards().map((card) => card.textContent))}`);
 	}, { timeout: 3000 });
-}
-
-/** The arrows in the engine, as `from → to` pairs. */
-function edgePairs(): string[] {
-	return engine().getEdgeData().map((edge) => `${edge.source} → ${edge.target}`);
 }
 
 async function drill(name: string, label: string): Promise<void> {
 	const card = cardOf(name);
-	engine().emit('node:contextmenu', { target: { id: card.id }, client: { x: 10, y: 10 }, originalEvent: new MouseEvent('contextmenu') });
+	card.dispatchEvent(new MouseEvent('contextmenu', { clientX: 10, clientY: 10, bubbles: true }));
 	const item = menuItem(label);
 	if (!item) throw new Error(`no ${label} menu entry`);
 	click(item);
@@ -99,7 +111,6 @@ async function drill(name: string, label: string): Promise<void> {
 
 beforeEach(() => {
 	backend.reset();
-	resetG6();
 	updateSetting('locale', 'en');
 	scriptEngine();
 });
@@ -109,19 +120,26 @@ describe('drawing the ring', () => {
 		const view = mountView();
 		view.setRoot({ ...ROOT });
 		await untilCards(4);
+		await view.whenSettled();
 		// The fixture's ring came back cut short — the ⋯ rides the root's label, and the
-		// drillable cards carry their expander boxes with the +/− glyph while the leaves
+		// drillable cards carry their branch expanders with the +/− glyph while the leaves
 		// stand bare.
-		expect(String(cardOf('alpha').style?.['labelText'])).toBe('alpha ⋯');
-		expect(String(cardOf('gamma').style?.['labelText'])).toBe('gamma');
-		expect(String(cardOf('beta').style?.['labelText'])).toBe('beta');
-		expect(expanders().map((box) => String(box.style?.['labelText']))).toEqual(['−', '+']);
-		// The arrows: three tree edges (dashed for the use) plus the ×N on gamma's edge.
+		expect(cardOf('alpha').querySelector('text')?.textContent).toBe('alpha ⋯');
+		expect(cardOf('gamma').querySelector('text')?.textContent).toBe('gamma');
+		expect(cardOf('beta').querySelector('text')?.textContent).toBe('beta');
+		// The branch expanders: the root's flipped to − (its ring drew), gamma's stands +.
+		expect(expanders()).toHaveLength(2);
+		expect(expanderOf('alpha').querySelector('text')?.textContent).toBe('−');
+		expect(expanderOf('gamma').querySelector('text')?.textContent).toBe('+');
+		// The links: three tree edges (dashed for the use) plus the ×N on gamma's edge,
+		// every one of them a bezier — the mind-map curve, not a straight line.
 		expect(edgePairs()).toHaveLength(3);
-		expect(engine().getEdgeData().some((edge) => edge.style?.['labelText'] === '×2')).toBe(true);
-		expect(engine().getEdgeData().some((edge) => Array.isArray(edge.style?.['lineDash']))).toBe(true);
-		// The root carries the accent.
-		expect(cardOf('alpha').style?.['lineWidth']).toBe(1.5);
+		const curves = [...view.element.querySelectorAll<SVGPathElement>('.rg-edge path')].map((path) => path.getAttribute('d') ?? '');
+		expect(curves.every((d) => d.includes('C'))).toBe(true);
+		expect([...view.element.querySelectorAll<SVGTextElement>('.rg-edge text')].some((text) => text.textContent === '×2')).toBe(true);
+		expect([...view.element.querySelectorAll<SVGPathElement>('.rg-edge path')].some((path) => path.getAttribute('stroke-dasharray'))).toBe(true);
+		// The root carries the accent stroke.
+		expect(cardOf('alpha').querySelector('rect')?.getAttribute('stroke-width')).toBe('1.5');
 		view.dispose();
 	});
 
@@ -146,10 +164,145 @@ describe('drawing the ring', () => {
 		view.resolvePath = (path) => `C:\\repo\\${path.replaceAll('/', '\\')}`;
 		view.setRoot({ ...ROOT });
 		await untilCards(4);
-		engine().emit('node:pointerenter', { target: { id: cardOf('beta').id }, client: { x: 10, y: 10 } });
+		cardOf('beta').dispatchEvent(new MouseEvent('pointerenter', { clientX: 10, clientY: 10, bubbles: true }));
 		await until(() => document.querySelector('.rg-decl') !== null);
 		expect(reads).toContain('C:\\repo\\src\\b.c');
 		expect(document.querySelector('.rg-decl')?.textContent).toContain('int beta(void)');
+		view.dispose();
+	});
+});
+
+describe('the mind layout (draw, glide, no overlap)', () => {
+	it('the layout stacks children without overlap and centers the parent on them', async () => {
+		const view = mountView();
+		view.setRoot({ ...ROOT });
+		await untilCards(4);
+		await view.whenSettled();
+		// Every card owns a rectangle no other card crosses — the tidy tree's promise.
+		const boxes = cards().map((card) => {
+			const at = spot(card);
+			return { x: at.x, y: at.y, w: Number(card.querySelector('rect')!.getAttribute('width')), h: 28 };
+		});
+		for (let i = 0; i < boxes.length; i++) {
+			for (let j = i + 1; j < boxes.length; j++) {
+				const apart =
+					boxes[i]!.x + boxes[i]!.w <= boxes[j]!.x || boxes[j]!.x + boxes[j]!.w <= boxes[i]!.x || boxes[i]!.y + boxes[i]!.h <= boxes[j]!.y || boxes[j]!.y + boxes[j]!.h <= boxes[i]!.y;
+				expect(apart, `cards ${i} and ${j} overlap`).toBe(true);
+			}
+		}
+		// alpha centers between its outermost children (beta first, Config last) — now on
+		// the X axis, the tree growing downward.
+		const alpha = spot(cardOf('alpha')).x + Number(cardOf('alpha').querySelector('rect')!.getAttribute('width')) / 2;
+		const beta = spot(cardOf('beta')).x + Number(cardOf('beta').querySelector('rect')!.getAttribute('width')) / 2;
+		const config = spot(cardOf('Config')).x + Number(cardOf('Config').querySelector('rect')!.getAttribute('width')) / 2;
+		expect(Math.abs(alpha - (beta + config) / 2)).toBeLessThan(0.5);
+		// The tree grows downward: gamma one row below alpha.
+		expect(spot(cardOf('gamma')).y).toBeGreaterThan(spot(cardOf('alpha')).y);
+		view.dispose();
+	});
+
+	it("an expansion glides the siblings aside, and a collapse removes only the subtree", async () => {
+		// gamma's ring names the already-drawn beta (the cross edge) and two fresh
+		// symbols — a two-leaf branch whose growth the drawing must clear room for.
+		backend.on('symbol_relation_children', ({ name }) => {
+			if (name === 'alpha') return answer(RING, true);
+			if (name === 'gamma') {
+				return answer([
+					...GAMMA_RING,
+					{ kind: 'function', name: 'epsilon', container: null, path: 'src/e.c', line: 0, edgePath: 'src/c.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, hasChildren: false },
+					{ kind: 'function', name: 'zeta', container: null, path: 'src/z.c', line: 0, edgePath: 'src/c.c', edgeLine: 5, edgeKind: 'call', edgeCount: 1, hasChildren: false }
+				]);
+			}
+			return answer([]);
+		});
+		const view = mountView();
+		view.setRoot({ ...ROOT });
+		await untilCards(4);
+		await view.whenSettled();
+		const configBefore = spot(cardOf('Config'));
+		// Expand gamma: epsilon's and zeta's cards join BELOW gamma, and the tree
+		// re-arranges itself into the tidy mind map — Config slides right to clear the
+		// grown branch, alpha re-centers on its children (the auto-arrangement), no
+		// card overlaps any other.
+		await drill('gamma', 'Expand this ring');
+		await untilCards(6);
+		await view.whenSettled();
+		const configAfter = spot(cardOf('Config'));
+		expect(configAfter.x).toBeGreaterThan(configBefore.x);
+		expect(spot(cardOf('epsilon')).y).toBeGreaterThan(spot(cardOf('gamma')).y);
+		const boxes = cards().map((card) => {
+			const at = spot(card);
+			return { x: at.x, y: at.y, w: Number(card.querySelector('rect')!.getAttribute('width')), h: 28 };
+		});
+		for (let i = 0; i < boxes.length; i++) {
+			for (let j = i + 1; j < boxes.length; j++) {
+				const apart =
+					boxes[i]!.x + boxes[i]!.w <= boxes[j]!.x || boxes[j]!.x + boxes[j]!.w <= boxes[i]!.x || boxes[i]!.y + boxes[i]!.h <= boxes[j]!.y || boxes[j]!.y + boxes[j]!.h <= boxes[i]!.y;
+				expect(apart, `cards ${i} and ${j} overlap`).toBe(true);
+			}
+		}
+		// alpha still centers on its outermost children after the re-plan (the X axis —
+		// the rows grow downward).
+		const alphaCx = spot(cardOf('alpha')).x + Number(cardOf('alpha').querySelector('rect')!.getAttribute('width')) / 2;
+		const betaCx = spot(cardOf('beta')).x + Number(cardOf('beta').querySelector('rect')!.getAttribute('width')) / 2;
+		const configCx = spot(cardOf('Config')).x + Number(cardOf('Config').querySelector('rect')!.getAttribute('width')) / 2;
+		expect(Math.abs(alphaCx - (betaCx + configCx) / 2)).toBeLessThan(0.5);
+		const asked = backend.callsTo('symbol_relation_children').length;
+		// Collapse and re-expand: the cached ring answers without a second ask. The cross
+		// edge stays — its two ends are both still drawn.
+		await drill('gamma', 'Collapse this ring');
+		await untilCards(4);
+		await view.whenSettled();
+		// The subtree's links left; the cross edge stays — both its ends are still drawn.
+		expect(edgePairs()).toHaveLength(4);
+		await drill('gamma', 'Expand this ring');
+		await untilCards(6);
+		await view.whenSettled();
+		expect(backend.callsTo('symbol_relation_children').length).toBe(asked);
+		expect(edgePairs()).toHaveLength(6);
+		// The re-plan is deterministic: the same visible tree lands on the same spots.
+		expect(spot(cardOf('Config'))).toEqual(configAfter);
+		// The collapse put the drawing back where the expansion found it.
+		await drill('gamma', 'Collapse this ring');
+		await untilCards(4);
+		await view.whenSettled();
+		expect(spot(cardOf('Config'))).toEqual(configBefore);
+		view.dispose();
+	});
+
+	it('the re-plan re-anchors the links on the moved cards', async () => {
+		// gamma's ring grows the branch by two leaves — the growth Config must slide for.
+		backend.on('symbol_relation_children', ({ name }) => {
+			if (name === 'alpha') return answer(RING, true);
+			if (name === 'gamma') {
+				return answer([
+					...GAMMA_RING,
+					{ kind: 'function', name: 'epsilon', container: null, path: 'src/e.c', line: 0, edgePath: 'src/c.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, hasChildren: false },
+					{ kind: 'function', name: 'zeta', container: null, path: 'src/z.c', line: 0, edgePath: 'src/c.c', edgeLine: 5, edgeKind: 'call', edgeCount: 1, hasChildren: false }
+				]);
+			}
+			return answer([]);
+		});
+		const view = mountView();
+		view.setRoot({ ...ROOT });
+		await untilCards(4);
+		await view.whenSettled();
+		const configBefore = spot(cardOf('Config'));
+		const configId = cardOf('Config').dataset.id!;
+		// Config's own link runs FROM Config (the referencing side points at alpha).
+		const linkOfConfig = [...view.element.querySelectorAll<SVGGElement>('.rg-edge')].find((g) => g.dataset.from === configId)!;
+		const dBefore = linkOfConfig.querySelector('path')!.getAttribute('d')!;
+		await drill('gamma', 'Expand this ring');
+		await untilCards(6);
+		await view.whenSettled();
+		const at = spot(cardOf('Config'));
+		expect(at.x).toBeGreaterThan(configBefore.x);
+		// Landed: the link now leads out of Config's TOP face (alpha sits on the row
+		// above) at its new column, a bezier the whole way.
+		const dAfter = linkOfConfig.querySelector('path')!.getAttribute('d')!;
+		expect(dAfter).not.toBe(dBefore);
+		expect(dAfter).toContain(`M ${at.x + Number(cardOf('Config').querySelector('rect')!.getAttribute('width')) / 2} ${at.y}`);
+		expect(dAfter).toContain('C');
 		view.dispose();
 	});
 });
@@ -177,14 +330,6 @@ describe('drilling rings', () => {
 		const after = backend.callsTo('symbol_relation_children').length;
 		expect(after).toBe(asked + 1);
 		expect(edgePairs()).toHaveLength(5);
-		// Collapse and re-expand: the cached ring answers without a second ask. The cross
-		// edge stays — its two ends are both still drawn.
-		await drill('gamma', 'Collapse this ring');
-		await untilCards(4);
-		expect(edgePairs()).toHaveLength(4);
-		await drill('gamma', 'Expand this ring');
-		await untilCards(5);
-		expect(backend.callsTo('symbol_relation_children').length).toBe(after);
 		view.dispose();
 	});
 
@@ -199,15 +344,18 @@ describe('drilling rings', () => {
 		view.dispose();
 	});
 
-	it('an expansion never moves a placed card, and a collapse removes only the subtree', async () => {
-		// gamma's ring names a new symbol and the already-drawn beta — a child plus the
-		// cross edge — so the drill has a real card to add and later to remove.
+	it('a fold hides a whole subtree’s arrows, not just its cards', async () => {
+		// gamma's ring: the drawn beta (the cross edge) plus two fresh children. Expanding
+		// gamma leaves it `expanded` in the cache — so when the ROOT then folds, gamma is
+		// hidden while still expanded, and neither its tree arrows nor the cross edge may
+		// linger over the emptied board (the residual-line report).
 		backend.on('symbol_relation_children', ({ name }) => {
 			if (name === 'alpha') return answer(RING, true);
 			if (name === 'gamma') {
 				return answer([
 					...GAMMA_RING,
-					{ kind: 'function', name: 'epsilon', container: null, path: 'src/e.c', line: 0, edgePath: 'src/c.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, hasChildren: false }
+					{ kind: 'function', name: 'epsilon', container: null, path: 'src/e.c', line: 0, edgePath: 'src/c.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, hasChildren: false },
+					{ kind: 'function', name: 'zeta', container: null, path: 'src/z.c', line: 0, edgePath: 'src/c.c', edgeLine: 5, edgeKind: 'call', edgeCount: 1, hasChildren: false }
 				]);
 			}
 			return answer([]);
@@ -215,26 +363,13 @@ describe('drilling rings', () => {
 		const view = mountView();
 		view.setRoot({ ...ROOT });
 		await untilCards(4);
-		// Expand gamma: epsilon's card joins and NOTHING else changes slots.
 		await drill('gamma', 'Expand this ring');
-		await untilCards(5);
-		const before = Object.fromEntries(engine().getNodeData().filter((card) => !String(card.id).startsWith('epsilon')).map((card) => [card.id, { x: card.style?.['x'], y: card.style?.['y'] }]));
-		await drill('gamma', 'Collapse this ring');
-		await untilCards(4);
-		const after = Object.fromEntries(engine().getNodeData().map((card) => [card.id, { x: card.style?.['x'], y: card.style?.['y'] }]));
-		expect(after).toEqual(before); // the collapse only removed epsilon; every kept card keeps its exact slot
-		// Re-expanding re-places the ring at its SAME slots — nothing wanders across
-		// collapse/expand cycles (the stable tree).
-		await drill('gamma', 'Expand this ring');
-		await untilCards(5);
-		const epsilon = engine().getNodeData().find((card) => String(card.id).startsWith('epsilon'))!;
-		const epsilonSlot = { x: epsilon.style?.['x'], y: epsilon.style?.['y'] };
-		await drill('gamma', 'Collapse this ring');
-		await untilCards(4);
-		await drill('gamma', 'Expand this ring');
-		await untilCards(5);
-		const epsilonAgain = engine().getNodeData().find((card) => String(card.id).startsWith('epsilon'))!;
-		expect({ x: epsilonAgain.style?.['x'], y: epsilonAgain.style?.['y'] }).toEqual(epsilonSlot);
+		await untilCards(6);
+		expect(edgePairs()).toHaveLength(6); // 3 tree + 2 under gamma + the cross edge
+		await drill('alpha', 'Collapse this ring');
+		await untilCards(1);
+		await view.whenSettled();
+		expect(edgePairs()).toHaveLength(0); // no stray curve over the empty board
 		view.dispose();
 	});
 
@@ -266,7 +401,7 @@ describe('drilling rings', () => {
 		await drill(at, 'Expand this ring');
 		await flush();
 		expect(backend.callsTo('symbol_relation_children').length).toBe(asked);
-		expect(String(cardOf(at).style?.['labelText'])).toContain('⋯');
+		expect(cardOf(at).querySelector('text')?.textContent).toContain('⋯');
 		view.dispose();
 	});
 
@@ -276,11 +411,11 @@ describe('drilling rings', () => {
 		view.onOpen = (path, line) => opens.push(`${path}:${line}`);
 		view.setRoot({ ...ROOT });
 		await untilCards(4);
-		const betaId = cardOf('beta').id;
-		engine().emit('node:contextmenu', { target: { id: betaId }, client: { x: 10, y: 10 }, originalEvent: new MouseEvent('contextmenu') });
+		const betaId = cardOf('beta').dataset.id!;
+		cardOf('beta').dispatchEvent(new MouseEvent('contextmenu', { clientX: 10, clientY: 10, bubbles: true }));
 		click(menuItem('Open the definition')!);
 		expect(opens).toEqual(['src/b.c:3']);
-		engine().emit('node:contextmenu', { target: { id: betaId }, client: { x: 10, y: 10 }, originalEvent: new MouseEvent('contextmenu') });
+		cardOf('beta').dispatchEvent(new MouseEvent('contextmenu', { clientX: 10, clientY: 10, bubbles: true }));
 		click(menuItem('Re-root the graph here')!);
 		await untilCards(1);
 		const last = backend.callsTo('symbol_relation_children').at(-1)!;
@@ -369,7 +504,7 @@ describe("the pointer (the classic window's vocabulary)", () => {
 		view.dispose();
 	});
 
-	it("a drillable card's expander box drills its ring, and never jumps", async () => {
+	it("a branch expander drills its ring, and never jumps", async () => {
 		// gamma's ring names a new symbol and the already-drawn beta — a child plus the
 		// cross edge — so the box keeps its drill after the ring lands.
 		backend.on('symbol_relation_children', ({ name }) => {
@@ -387,18 +522,24 @@ describe("the pointer (the classic window's vocabulary)", () => {
 		view.onOpen = (path, line) => opens.push(`${path}:${line}`);
 		view.setRoot({ ...ROOT });
 		await untilCards(4);
+		// The press on the circle must not start a board pan: the pointerdown a real
+		// click delivers targets the circle's own glyph, and a pan start here would
+		// capture the pointer to the board — the click then composes on the board and
+		// the circle never sees it (the dead +/− the owner reported).
+		const board = view.element.querySelector('svg')!;
+		expanderOf('gamma').dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+		expect(board.classList.contains('rg-panning')).toBe(false);
 		const asked = backend.callsTo('symbol_relation_children').length;
 		// gamma's box carries the + — its click alone drills, and it never jumps.
-		engine().emit('node:click', { target: { id: `${cardOf('gamma').id}${EXPANDER_SUFFIX}` } });
+		expanderOf('gamma').dispatchEvent(new MouseEvent('click', { bubbles: true }));
 		await until(() => backend.callsTo('symbol_relation_children').length === asked + 1);
 		await untilCards(5);
 		expect(edgePairs()).toHaveLength(5);
 		expect(opens).toEqual([]);
 		// The box flipped to −; the second click collapses (the cached ring, no re-ask).
-		const box = engine().getNodeData().find((node) => String(node.id) === `${cardOf('gamma').id}${EXPANDER_SUFFIX}`)!;
-		expect(String(box.style?.['labelText'])).toBe('−');
+		expect(expanderOf('gamma').querySelector('text')?.textContent).toBe('−');
 		const after = backend.callsTo('symbol_relation_children').length;
-		engine().emit('node:click', { target: { id: `${cardOf('gamma').id}${EXPANDER_SUFFIX}` } });
+		expanderOf('gamma').dispatchEvent(new MouseEvent('click', { bubbles: true }));
 		await untilCards(4); // epsilon's card left, beta stayed the cross edge
 		expect(backend.callsTo('symbol_relation_children').length).toBe(after);
 		expect(opens).toEqual([]);
@@ -413,7 +554,7 @@ describe("the pointer (the classic window's vocabulary)", () => {
 		await untilCards(4);
 		const asked = backend.callsTo('symbol_relation_children').length;
 		// The drillable card itself jumps on the plain click — the box owns the drilling.
-		engine().emit('node:click', { target: { id: cardOf('gamma').id } });
+		cardOf('gamma').dispatchEvent(new MouseEvent('click', { bubbles: true }));
 		await flush();
 		expect(opens).toEqual(['src/c.c:2']);
 		expect(backend.callsTo('symbol_relation_children').length).toBe(asked);
@@ -434,7 +575,7 @@ const OUTLINE = {
 	imports: [] as { name: string; line: number }[]
 };
 
-/** The window's engine: the outline answers, the graph's asks record; the locals never
+/** The window's backend: the outline answers, the graph's asks record; the locals never
  *  ride (no provideText), so the covering symbol alone decides the graph's root. */
 function scriptWindow(): void {
 	backend.on('symbol_file_outline', () => OUTLINE);

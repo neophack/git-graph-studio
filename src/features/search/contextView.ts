@@ -4,7 +4,8 @@
 // a pin that stops the auto-following, and opens the definition in the editor on click.
 
 import { t } from '../../platform/i18n';
-import { actionButton, el, escapeHtml, icon } from '../../platform/ui/index';
+import { highlightLine, extOf } from '../../platform/highlight';
+import { actionButton, el, icon } from '../../platform/ui/index';
 
 /** What the workbench resolved the symbol under the cursor to. */
 export interface ContextDefinition {
@@ -93,8 +94,20 @@ export class ContextView {
 		location.title = t('symbols.context.open');
 		location.addEventListener('click', () => this.onOpenDefinition?.(definition));
 		header.appendChild(location);
+		// The definition's own colors: the shared tokenizer's runs, one colored span per
+		// line with the newline as text — the context reads like the editor's code, and
+		// the pane's text content stays the code verbatim.
 		const code = el('pre', 'context-code');
-		code.innerHTML = definition.fragment.split('\n').map(escapeHtml).join('\n');
+		const ext = extOf(definition.path);
+		const lines = definition.fragment.split('\n');
+		lines.forEach((line, index) => {
+			const row = el('span', 'context-line');
+			for (const segment of highlightLine(line, ext)) {
+				row.appendChild(segment.cls ? el('span', segment.cls, [segment.text]) : document.createTextNode(segment.text));
+			}
+			code.appendChild(row);
+			if (index < lines.length - 1) code.appendChild(document.createTextNode('\n'));
+		});
 		this.body.append(header, code);
 	}
 

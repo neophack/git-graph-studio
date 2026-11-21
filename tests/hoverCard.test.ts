@@ -4,6 +4,7 @@
 // the definitions-overflow line, and the plain comment/body/location fields. No backend:
 // the data assembly lives in editorProviderViews and degrades to absent fields here.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { EditorView, activateHover, hasHoverTooltips, hoverTooltip } from '@codemirror/view';
 import {
 	quickInfoDom,
 	type HoverCardActions,
@@ -12,6 +13,7 @@ import {
 	type SymbolQuickInfoEntry
 } from '../src/features/editor/hoverCard';
 import { setHoverRelationsOpener } from '../src/features/editor/hoverRelations';
+import { settings, updateSetting } from '../src/platform/settings';
 
 beforeEach(() => {
 	document.body.innerHTML = '';
@@ -21,6 +23,7 @@ afterEach(() => {
 	// The opener is module state — a test that registered one must not leak it into the
 	// later static-footer cases.
 	setHoverRelationsOpener(null);
+	updateSetting('symbolHover', true);
 });
 
 /** A full entry from a few fields: the optional ones default to the degraded shapes. */
@@ -180,13 +183,46 @@ describe('hoverCard — the definitions overflow line', () => {
 	});
 });
 
+describe('hoverCard — the off switch in the head', () => {
+	it('sits in the head, its click turns the setting off and closes the standing tooltip', () => {
+		const host = document.createElement('div');
+		document.body.appendChild(host);
+		const view = new EditorView({
+			doc: 'hello world',
+			extensions: [
+				hoverTooltip((_v, pos) => ({
+					pos: 0,
+					end: 5,
+					create: () => ({ dom: quickInfoDom(info({ entries: [FUNCTION_ENTRY] })) })
+				}))
+			],
+			parent: host
+		});
+		activateHover(view, 0, 1);
+		expect(hasHoverTooltips(view.state)).toBe(true);
+
+		const off = view.dom.querySelector('button.ggs-symbol-hover-off')!;
+		expect(off.textContent).toBe('Disable hover');
+		off.click();
+		// The whole feature is off — the next hover over any word answers nothing — and
+		// the card the click landed on is gone at once.
+		expect(settings.symbolHover).toBe(false);
+		expect(hasHoverTooltips(view.state)).toBe(false);
+
+		// Back on, the same hover answers again.
+		updateSetting('symbolHover', true);
+		activateHover(view, 0, 1);
+		expect(hasHoverTooltips(view.state)).toBe(true);
+	});
+});
+
 describe('hoverCard — the plain fields keep rendering', () => {
 	it('shows the head, the comment, the body whole and the clickable location', () => {
 		const opened: string[] = [];
 		const dom = quickInfoDom(info({ name: 'add', entries: [FUNCTION_ENTRY] }), {
 			open: (path) => opened.push(path)
 		});
-		expect(dom.querySelector('.ggs-symbol-hover-head')!.textContent).toBe('add');
+		expect(dom.querySelector('.ggs-symbol-hover-head-name')!.textContent).toBe('add');
 		expect(dom.querySelector('.ggs-symbol-hover-comment')!.textContent).toBe('/** Adds its arguments. */');
 		expect(dom.querySelector('.ggs-symbol-hover-body')!.textContent).toBe('int add(int a, int b)\n{\n\treturn a + b;\n}');
 		expect(dom.querySelectorAll('.ggs-symbol-hover-code')).toHaveLength(1, 'the signature rides inside the body, not beside it');

@@ -70,7 +70,13 @@ function webviewBoot(nonce: string | null, fileRoot: string): string {
 	window.addEventListener('message', function (event) {
 		var data = event.data;
 		if (!data || data.__ggsWebviewHost !== true) return;
-		if (data.type === 'message') window.dispatchEvent(new MessageEvent('message', { data: data.message }));
+		// The re-dispatch carries the page's own origin: a synthetic MessageEvent's origin
+		// is "" otherwise, and claude-code 2.1.330's client (uUn) drops every host message
+		// whose origin is not the page's own — the chat's replies, the sessions list's
+		// answers, all of it. The value must be window.origin (the document origin this
+		// srcdoc page inherits from the workbench, what the client's gate compares
+		// against), never location.origin — that is "null" for an about:srcdoc URL.
+		if (data.type === 'message') window.dispatchEvent(new MessageEvent('message', { data: data.message, origin: String(window.origin) }));
 		if (data.type === 'theme') {
 			// VS Code defines the --vscode-* variables (and the kind class) in every webview
 			// document itself; the host pushes its theme here for the same effect. The

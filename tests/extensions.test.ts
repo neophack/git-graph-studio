@@ -1101,6 +1101,54 @@ describe('the extension host UI surfaces (status bar, output, webview tabs)', ()
 		}
 	});
 
+	it('the composed boot re-dispatches host messages with the page\'s own origin', async () => {
+		// claude-code 2.1.330's client drops every from-extension message whose
+		// `event.origin` is not the page's own (the uUn guard beside its message
+		// listener). The boot's re-dispatch used to construct a bare MessageEvent,
+		// whose origin is "" — every answer died there, and the sessions list sat
+		// on "Loading sessions…" forever (the chat panel stranded the same way).
+		const { host } = hostWithFrame();
+		await host['serve']('webview.create', [1, 'chat.view', 'Claude Code'], 'acme.demo', {} as never);
+		await host['serve']('webview.setHtml', [1, '<html><head></head><body>hi</body></html>'], 'acme.demo', {} as never);
+		const pane = document.body.appendChild(document.createElement('div'));
+		const dispose = host.mountWebview('acme.demo', 1, pane);
+		const srcdoc = pane.querySelector('iframe')!.getAttribute('srcdoc')!;
+		const boot = (srcdoc.match(/<script[^>]*>[\s\S]*?<\/script>/g) ?? [])
+			.find((script) => script.includes('acquireVsCodeApi'))
+			?.replace(/^<script[^>]*>/, '')
+			.replace(/<\/script>$/, '');
+		expect(boot).toBeTruthy();
+		// The property the boot stamps matters: window.origin is the document origin a
+		// srcdoc page inherits from the workbench (what the client's gate compares
+		// against); location.origin is "null" for an about:srcdoc URL and would still be
+		// refused. jsdom's plain document has both equal, so pin the source itself.
+		expect(boot).toContain('window.origin');
+		expect(boot).not.toContain('location.origin');
+		new Function(boot!)();
+		try {
+			const message = { type: 'from-extension', message: { requestId: 'r1', response: {} } };
+			const seen: MessageEvent[] = [];
+			const probe = (event: MessageEvent) => {
+				// The boot's own listener re-dispatches synchronously inside this
+				// dispatch, so the probe sees the wrapper and the inner message.
+				if (event.data === message) seen.push(event);
+			};
+			window.addEventListener('message', probe);
+			window.dispatchEvent(new MessageEvent('message', {
+				data: { __ggsWebviewHost: true, type: 'message', message }
+			}));
+			window.removeEventListener('message', probe);
+			expect(seen).toHaveLength(1);
+			expect(seen[0].data).toBe(message);
+			// An ""-origin re-dispatch is exactly what the client refuses — the origin
+			// must read as the page's own, the value a real parent postMessage carries
+			// into a srcdoc document.
+			expect(seen[0].origin).toBe(window.origin);
+		} finally {
+			dispose();
+		}
+	});
+
 	it('webview.create resolves the create\'s ViewColumn into the tab open\'s placement and focus', async () => {
 		const { host } = hostWithFrame();
 		const opened: [number, string, string, unknown, boolean | undefined][] = [];

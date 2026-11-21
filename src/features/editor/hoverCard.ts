@@ -4,7 +4,9 @@
 // reference-count footer — split from the data assembly in editorProviderViews, so the
 // card and the data can move separately. The optional fields (members, totals, reference
 // counts) are answered by the data half when it can and degrade to absent here.
+import { EditorView, closeHoverTooltips } from '@codemirror/view';
 import { t, tf } from '../../platform/i18n';
+import { updateSetting } from '../../platform/settings';
 import { el, icon } from '../../platform/ui/index';
 import { hoverRelationsOpener } from './hoverRelations';
 
@@ -76,6 +78,29 @@ function kindLabel(kind: string): string {
 	return kind ? kind.charAt(0).toUpperCase() + kind.slice(1) : '';
 }
 
+/** The card's head label — the name (and the definition count when several), kept in its
+ *  own span so the head's other content (the disable switch) never rides its text. */
+export function hoverHeadLabel(name: string, entries: number): HTMLElement {
+	return el('span', 'ggs-symbol-hover-head-name', [entries > 1 ? `${name} — ${entries} ${t('symbols.hover.definitions')}` : name]);
+}
+
+/** The card's own off switch (2026-11-21, the owner's direction: the popup itself must
+ *  carry a way to close the feature): clicking turns the `symbolHover` setting off —
+ *  the hover reads it per hover, so the next rest on a symbol answers nothing, and the
+ *  Settings dialog or the View menu's Toggle Symbol Hover turns it back on — then
+ *  closes this tooltip at once through CodeMirror's own close effect. */
+export function disableHoverDom(): HTMLElement {
+	const off = el('button', 'ggs-symbol-hover-off', [t('symbols.hover.disable')]);
+	off.title = t('symbols.hover.disableTip');
+	off.addEventListener('click', () => {
+		updateSetting('symbolHover', false);
+		const editor = off.closest<HTMLElement>('.cm-editor');
+		const view = editor ? EditorView.findFromDOM(editor) : null;
+		if (view) view.dispatch({ effects: closeHoverTooltips });
+	});
+	return off;
+}
+
 /** A type entry's members block: the section header, then one row per member — its kind's
  *  icon, its name and its 1-based line at the row's far end. The rows jump to the member's
  *  declaration when `open` is wired (the same open the location rows ride); without it
@@ -110,7 +135,8 @@ export function quickInfoDom(info: SymbolQuickInfo, actions?: HoverCardActions):
 	dom.className = 'ggs-symbol-hover ggs-quick-info';
 	const head = document.createElement('div');
 	head.className = 'ggs-symbol-hover-head';
-	head.textContent = info.entries.length > 1 ? `${info.name} — ${info.entries.length} ${t('symbols.hover.definitions')}` : info.name;
+	head.appendChild(hoverHeadLabel(info.name, info.entries.length));
+	head.appendChild(disableHoverDom());
 	dom.appendChild(head);
 	for (const entry of info.entries) {
 		const entryDom = document.createElement('div');

@@ -19,7 +19,6 @@
 		"test:e2e-remote": "playwright test -c playwright.remote.config.ts"
 	},
 	"dependencies": {
-		"@antv/g6": "^5.1.1",
 		"@codemirror/autocomplete": "^6.20.3",
 		"@codemirror/commands": "^6.11.0",
 		"@codemirror/language": "^6.12.4",

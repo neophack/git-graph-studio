@@ -392,6 +392,60 @@ describe('the current function locals', () => {
 	});
 });
 
+describe('the relation graph root', () => {
+	// The outline can carry a one-line entry declaring a name ON the cursor's own line
+	// (a bare variable's row) while an enclosing function's span also holds the cursor.
+	// The function is the root the relation window means — its ring is the meaningful
+	// one; the variable sits inside it.
+	it('roots the graph on the enclosing function, not on a same-line one-liner', async () => {
+		backend.on('symbol_file_outline', () => ({
+			symbols: [
+				{ kind: 'function', name: 'load', container: null, line: 3, endLine: 6 },
+				{ kind: 'variable', name: 'slot', container: null, line: 4, endLine: 4 }
+			],
+			imports: []
+		}));
+		backend.on('symbol_relation_children', ({ name }) => ({ nodes: [], truncated: false }));
+		const { host, view } = mountView();
+		view.setFile(FILE, 4);
+		await flush(4);
+		const asked = backend.callsTo('symbol_relation_children').map((call) => call['name']);
+		expect(asked).toEqual(['load'], 'the enclosing function roots the graph');
+		// The outline highlight keeps the VS Code rule — the innermost row, here the
+		// one-liner's own row.
+		expect(rowOf(host, 'slot').classList.contains('current')).toBe(true);
+	});
+
+	it('a one-liner is the root when nothing encloses the cursor', async () => {
+		backend.on('symbol_file_outline', () => ({
+			symbols: [{ kind: 'variable', name: 'slot', container: null, line: 4, endLine: 4 }],
+			imports: []
+		}));
+		backend.on('symbol_relation_children', ({ name }) => ({ nodes: [], truncated: false }));
+		const { view } = mountView();
+		view.setFile(FILE, 4);
+		await flush(4);
+		const asked = backend.callsTo('symbol_relation_children').map((call) => call['name']);
+		expect(asked).toEqual(['slot']);
+	});
+
+	it('the graph root follows the covering symbol identity, once per change', async () => {
+		backend.on('symbol_file_outline', () => OUTLINE);
+		backend.on('symbol_relation_children', ({ name }) => ({ nodes: [], truncated: false }));
+		const { view } = mountView();
+		view.setFile(FILE, 4);
+		await flush(4);
+		expect(backend.callsTo('symbol_relation_children').map((call) => call['name'])).toEqual(['load']);
+		// Roaming inside the same function asks nothing; the next function asks once.
+		view.setFile(FILE, 5);
+		await flush(2);
+		expect(backend.callsTo('symbol_relation_children')).toHaveLength(1);
+		view.setFile(FILE, 13);
+		await flush(2);
+		expect(backend.callsTo('symbol_relation_children').map((call) => call['name'])).toEqual(['load', 'main']);
+	});
+});
+
 describe('container indentation', () => {
 	const NESTED = {
 		symbols: [
@@ -531,6 +585,23 @@ describe('the workbench wiring', () => {
 			expect(typeof workbench.symbolWindow.provideText).toBe('function');
 			// The booted shell has no text editor active: the hook answers null.
 			expect(workbench.symbolWindow.provideText!()).toBeNull();
+		});
+
+		it('hands the view the editor\'s cursor line as 0-based (the payload\'s Ln is 1-based)', async () => {
+			const received: { path: string | null; line?: number }[] = [];
+			const view = workbench.symbolWindow as unknown as { setFile: (path: string | null, line?: number) => void };
+			const original = view.setFile;
+			view.setFile = (path, line) => received.push({ path, line });
+			const editors = workbench.editors as unknown as { onActiveChange: ((editor: unknown) => void) | null };
+			try {
+				// The editor group's payload carries the status bar's Ln (1-based, the
+				// context window's `doc.line` base); the view's contract is 0-based.
+				editors.onActiveChange?.({ kind: 'file', path: FILE, line: 7, column: 1 });
+				await flush(2);
+			} finally {
+				view.setFile = original;
+			}
+			expect(received[received.length - 1]).toEqual({ path: FILE, line: 6 });
 		});
 
 		it('wires the jumps: an open joins the root, an absolute path passes through', async () => {

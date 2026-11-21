@@ -512,7 +512,7 @@ describe('the macro hover', () => {
 		expect(await macroHoverFor(macros, noWord, 12)).toBeNull();
 
 		const dom = macroHoverDom('MAX_LEN', (await macroHoverFor(macros, view, 12))!);
-		expect(dom.querySelector('.ggs-symbol-hover-head')!.textContent).toBe('MAX_LEN');
+		expect(dom.querySelector('.ggs-symbol-hover-head-name')!.textContent).toBe('MAX_LEN');
 		expect(dom.querySelector('.ggs-symbol-hover-loc')!.textContent).toBe('inc/conf.h:3');
 		expect(dom.querySelector('.ggs-symbol-hover-code')!.textContent).toBe('#define MAX_LEN 256');
 
@@ -520,7 +520,7 @@ describe('the macro hover', () => {
 			{ path: 'inc/conf.h', line: 2, text: '#define MAX_LEN 256', comment: '' },
 			{ path: 'src/other.h', line: 0, text: '', comment: '' }
 		]);
-		expect(several.querySelector('.ggs-symbol-hover-head')!.textContent).toContain('2');
+		expect(several.querySelector('.ggs-symbol-hover-head-name')!.textContent).toContain('2');
 		expect(several.querySelectorAll('.ggs-symbol-hover-loc')).toHaveLength(2);
 		expect(several.querySelectorAll('.ggs-symbol-hover-code')).toHaveLength(1, 'an unread file shows its location only');
 	});
@@ -814,7 +814,7 @@ describe('the quick-info hover (any indexed symbol)', () => {
 		const opened: string[] = [];
 		const dom = quickInfoDom(info!, { open: (path, line) => opened.push(`${path}@${line}`) });
 		expect(dom.classList.contains('ggs-quick-info')).toBe(true);
-		expect(dom.querySelector('.ggs-symbol-hover-head')!.textContent).toBe('add');
+		expect(dom.querySelector('.ggs-symbol-hover-head-name')!.textContent).toBe('add');
 		expect(dom.querySelector('.ggs-symbol-hover-comment')!.textContent).toBe('/** Adds its arguments. */');
 		expect(dom.querySelector('.ggs-symbol-hover-code')!.textContent).toBe('int add(int a, int b)');
 		click(dom.querySelector('button.ggs-symbol-hover-loc'));
