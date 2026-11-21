@@ -521,6 +521,15 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   call sites and the mask-filtered positioned hits, the assembly mirroring si-lite's
   `db_add_symbol`/`db_add_edge`/`db_add_code_rec_enc` semantics — first-declaration-wins
   names, exact-pair edge dedup, member access and self-references never recorded),
+  `symbols::sipb` + `symbols::sipb_sig` (the Source Insight 4 project-volume emitters,
+  2026-11-21: the ten `.siproj` / `.sip_*` containers of the classic IDE's own database —
+  the 0x200 base-block header, `0xFFFFFFFD`-marked fixed slots, the 180-byte symbol
+  records, the 2024-byte djb2-bloom signature records — written from the `si4-rea`
+  reverse-engineering specs in `sip-vol\SPEC-*.md`; `sipb` carries the container layer and
+  the structured record constructors, `sipb_sig` the xr/xf/xc signature hashes (djb2
+  5381×33 / ×63, %7993, verified 478/478 records against the reference volumes); the
+  round-trip tests read the reference snapshot through `GGS_SIP_SNAP_DIR` and skip when it
+  is absent — research parity work, nothing in the app reads it yet),
   `symbols::index` (the per-root databases, the build / resume /
   rebuild, the reference scan; `wipe_disk` is the delete-and-regenerate surface), `symbols::mask` (the code mask — the comment/string/char-
   literal byte spans of one text plus its line-start table, the scanner discipline:

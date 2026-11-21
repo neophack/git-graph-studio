@@ -3,7 +3,11 @@
 //! extraction layer. `parse` is the tree-sitter parser (plan M4.1, one `.scm` query per
 //! language behind a `grammar-*` feature); `store` is the compact on-disk store in the
 //! analyzed folder's hidden `.ggs/analysis/` database; `sidb` is the reference analysis
-//! database (`si4-rea`'s si-lite format) written beside it; `cache` is the in-memory
+//! database (`si4-rea`'s si-lite format) written beside it; `sipb` is SI4's own project
+//! volume format (`si4-rea`'s sip-vol container, a different format from `sidb`'s six
+//! tables) byte-exact; `sipb_sig` generates the signature volumes' payload bytes (the
+//! hash bloom behind `sipb`'s undecoded `signature` field, verified against the
+//! snapshot); `cache` is the in-memory
 //! whole-workspace rebuild the window before an index lands is served from; `index` owns
 //! the per-root databases and the reference scan.
 
@@ -16,6 +20,8 @@ pub mod parse;
 pub mod relations;
 pub mod rename;
 pub mod sidb;
+pub mod sipb;
+pub mod sipb_sig;
 pub mod store;
 
 /// One declaration in the workspace index: what Go-to-Definition, Find References, Quick
