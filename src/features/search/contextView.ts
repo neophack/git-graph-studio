@@ -2,8 +2,8 @@
 // symbol under the cursor, pinned over the bottom panel. The workbench feeds it from the
 // editor's cursor changes (debounced there); this view only renders what it is handed, keeps
 // a pin that stops the auto-following, and opens the definition in the editor on click.
-// The window is a live view too (2026-11-23, the si4-rea reconstruction's
-// SPEC-ui-references-definition §2): the fed fragment paints first, then the whole
+// The window is a live view too (2026-11-23, the owner's direction: the windows read
+// as one coherent set): the fed fragment paints first, then the whole
 // declaring file replaces it — scrolled to the declaration, the symbol's own span marked
 // as the selection, files past the 1 MiB+1 ceiling keeping the fragment — and the body's
 // one click relocates the window onto the clicked word's own definition, chain browsing.

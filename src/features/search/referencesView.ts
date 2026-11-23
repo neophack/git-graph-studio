@@ -7,8 +7,8 @@
 // workbench feeds it with the same gate and debounce discipline the definition page
 // keeps (the panel up, this page active, the pin off); the highlighted site line — or
 // the row's double click — jumps into the editor.
-// The search-results options land too (2026-11-23, the si4-rea reconstruction's
-// SPEC-ui-references-definition §1.2/§1.5): each site row carries the four display
+// The search-results options land too (2026-11-23, the owner's direction: the windows
+// read as one coherent set): each site row carries the four display
 // switches — the container function or class's name, the file name, the line number, the
 // line text — and repeated lookups follow the output policy, appending to, replacing, or
 // asking about the old results, the page accumulating the lookups as sections.

@@ -11,8 +11,8 @@
 // symbol's ring drawn as an interactive box-and-arrow canvas over `relationGraph.ts` —
 // re-rooted on every covering-symbol identity change unless pinned, the same discipline
 // the locals run on.
-// The outline folds too (2026-11-23, the si4-rea reconstruction's
-// SPEC-ui-references-definition §6.3): a container row carries its own +/- twistie whose
+// The outline folds too (2026-11-23, the owner's direction: the windows read as one
+// coherent set): a container row carries its own +/- twistie whose
 // click folds and opens its members in place, Expand All / Collapse All / Expand Special
 // are the tree commands (the special one asking its number of levels), and the sort
 // speaks three states — By Line (the tree, the only state that folds), By Name and By

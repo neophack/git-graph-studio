@@ -352,9 +352,9 @@ over the persistent workspace symbol index: interned names,
 per-file fingerprints and per-name occurrence lists in the analyzed folder's own hidden
 analysis database (2026-11-21, the owner's direction: add a hidden code-analysis folder
 inside the project — the program may delete it, it never enters the git index, and the same
-files regenerate — the project-local symbol database beside the code it describes): `symbols.bin` (the native store) plus `si.db` / `si.tix` (the reference
-implementation's six-table database — dnMod/dnSir/call-edges/dnSyl/dnTdr/dnSirCode —
-byte-format identical to `si4-rea`'s si-lite `db_save`/`tix_save`, which its tooling loads
+files regenerate — the project-local symbol database beside the code it describes): `symbols.bin` (the native store) plus `ggs.db` / `ggs.tix` (the six-table
+analysis database — modules, symbols, call edges, syllable fragments, type definitions,
+code positions — in a fixed flat-file layout external tooling that understands it loads
 back) under `<root>/.ggs/analysis/<hash>/`, hidden in Explorer (the `.git` attribute
 treatment), excluded from the git index through `.git/info/exclude` (ascend to the
 repository, worktree `commondir` honoured) and from every walk (`SKIPPED_DIRS`) and the
@@ -362,7 +362,7 @@ Explorer tree (`EXCLUDED`); a read-only folder falls back to `~/.ggs/index/<hash
 older copies still resume. The Rebuild command is the delete-and-regenerate surface: it
 wipes the store first, and the fresh build writes the same bytes whole. Reference-table
 collection rides the full build (parse call sites + mask-filtered positioned hits);
-incremental watcher updates keep the saved `si.db` standing until the next full build.
+incremental watcher updates keep the saved `ggs.db` standing until the next full build.
 file-by-file by the watcher. **Nothing is indexed on open** (2026-10-22, the owner's
 direction: opening a big project drives memory use extremely high — do not analyze the
 project on open; start analyzing only when a feature needs it, and release the memory once
@@ -399,8 +399,7 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   reaches the index), re-rooted on every covering-symbol identity change unless pinned or
   collapsed; the hover card's relations jump rides `openGraphRoot`, which pins the graph
   on the hovered symbol and opens the section; 2026-11-23, the outline is a collapsible
-  tree (the si4-rea reconstruction's
-  SPEC-ui-references-definition §6.3, the owner's direction: the windows must read as one
+  tree (the owner's direction: the windows must read as one
   coherent set): the container rows carry their own +/− twisties folding their
   members in place (`outlineRows`, pure and exported — structural depth kept, the filter
   keeping a row when it or any descendant matches), Expand All / Collapse All /
@@ -413,8 +412,7 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   `src/features/search/relationGraph.ts` + `relationGraph.css` (the relation graph — the
   Symbol Window's lower half, drawn on the view's **own SVG board** reading as the reference
   relation window (2026-11-23, the owner's direction: calls carry their line numbers on
-  the graph — the drawing discipline rides the si4-rea reconstruction's SPEC-ui-relation
-  §1.2/§2/§2.9): the cards joined by **orthogonal trunk links** in the connection red —
+  the graph): the cards joined by **orthogonal trunk links** in the connection red —
   out of the parent card's facing face, to the mid-band bus every sibling edge shares,
   into each child's facing face, the V-shaped arrowhead landing on the referenced side
   (the kind's own direction); a **multi-site edge carries its numbered rows** ("1. line
@@ -476,7 +474,7 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   the dev harness's `?relgraph=1` surface scripts the Symbol Window
   whole — outline, sash, graph, the type picker and the cursor buttons that re-root it
   — for eyeballing; 2026-11-23, the window speaks the relation
-  view set and commands (the si4-rea reconstruction's SPEC-ui-relation §7, the owner's
+  view set and commands (the owner's
   direction: the windows must read as one coherent set): the three views — the
   Outline multi-column list (the name with its Calls/Callers suffix, the reference count,
   the file, the 1-based line, under the relation type's own header; a row's click shows
@@ -509,8 +507,7 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   every read); the body's code is colored through the shared tokenizer — each line one
   colored span and the newline as text, the pane's text content staying the code verbatim
   (2026-11-21, the owner's direction: the definition code must be colored too); 2026-11-23,
-  the page is a live view (the si4-rea reconstruction's
-  SPEC-ui-references-definition §2, the owner's direction: the windows must read as one
+  the page is a live view (the owner's direction: the windows must read as one
   coherent set): the whole declaring file stands as the view — scrolled to the
   declaration, the symbol's own span marked as the selection — not a slice, a file past
   the 1 MiB+1 ceiling refusing with the same "ShowCode: file too big" note; and
@@ -542,8 +539,8 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   (the panel up, this page active, the pin off) resolves the subject — one
   `resolveDefinitionSymbol` feeding whichever of the two pages is active; the 100-file /
   500-site caps answer cut notes; 2026-11-23, the page carries the Search
-  Results' own options (the si4-rea reconstruction's SPEC-ui-references-definition
-  §1.2/§1.5, the owner's direction: the windows must read as one coherent set) —
+  Results' own options (the owner's direction: the windows must read as one coherent
+  set) —
   the four display switches on the head's gear
   (`ResultsOptions`, persisted: the container function or class's name joined as
   `Class:Function:` ahead of the site row through `containerPrefix`, the file name, the
@@ -578,21 +575,25 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   the table, never the texts; since 2026-11-21 the store lives in the analyzed folder's
   hidden `.ggs/analysis/<hash>/` — hidden attribute, `.git/info/exclude` line, home
   fallback for a read-only folder, the Rebuild command wiping it before the clean
-  regenerate), `symbols::anadb` (the reference analysis database, 2026-11-21: the six
+  regenerate), `symbols::anadb` (the analysis database, 2026-11-21: the six
   tables — modules, symbols, call edges, syllable fragments, type definitions, code
-  positions — serialized byte-for-byte in `si4-rea`'s si-lite `db_save`/`tix_save` shape
-  (`si.db` + `si.tix` beside the store; the reference tooling loads ggs's files back and
-  its own re-saved tix is byte-identical); collected on a full build from the parse's
-  call sites and the mask-filtered positioned hits, the assembly mirroring si-lite's
-  `db_add_symbol`/`db_add_edge`/`db_add_code_rec_enc` semantics — first-declaration-wins
+  positions — serialized in the fixed flat-file layout
+  (`ggs.db` + `ggs.tix` beside the store; external tooling that understands the layout
+  loads ggs's files back); collected on a full build from the parse's
+  call sites and the mask-filtered positioned hits — first-declaration-wins
   names, exact-pair edge dedup, member access and self-references never recorded),
-  `symbols::projvol` + `symbols::projvol_sig` (the project-volume emitters,
-  2026-11-21: the ten `.siproj` / `.sip_*` containers of the reference database —
+  `symbols::projvol` + `symbols::projvol_sig` + `symbols::projvol_indexgen` +
+  `symbols::symgen` (the project-volume emitters,
+  2026-11-21: the reference layout's fixed-record containers under `.ggs_*` names —
   the 0x200 base-block header, `0xFFFFFFFD`-marked fixed slots, the 180-byte symbol
-  records, the 2024-byte djb2-bloom signature records — written from the `si4-rea`
-  reverse-engineering specs in `sip-vol\SPEC-*.md`; `projvol` carries the container layer and
+  records, the 2024-byte djb2-bloom signature records, the paged 16-byte name indexes
+  and their page directories; the reference project's own file-table container is read
+  side only, never emitted, and nothing this code writes carries any other name;
+  `projvol` carries the container layer and
   the structured record constructors, `projvol_sig` the xr/xf/xc signature hashes (djb2
-  5381×33 / ×63, %7993, verified 478/478 records against the reference volumes); the
+  5381×33 / ×63, %7993, verified 478/478 records against the reference volumes),
+  `projvol_indexgen` the name indexes and their page directories, `symgen` the symbol
+  skeletons discovered from source text; the
   round-trip tests read the reference snapshot through `GGS_REF_SNAP_DIR` and skip when it
   is absent — research parity work, nothing in the app reads it yet),
   `symbols::index` (the per-root databases, the build / resume /

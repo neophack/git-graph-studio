@@ -1,20 +1,19 @@
-//! The `.sip_xab` / `.sip_xsb` index-volume generator, plus the `.sip_xad` / `.sip_xsd`
-//! page directories they imply — `si4-rea`'s Wave3 generation model
-//! (`sip-vol/MODEL-xab-generation.md`) ported from the Python prototype
-//! (`xab-gen-work/gen_xab_xsb.py`; record-set agreement 99.64% xab / 95.89% xsb, key
-//! agreement 99.64% / 99.91% against the reference snapshot).
+//! The `.ggs_xab` / `.ggs_xsb` index-volume generator, plus the `.ggs_xad` / `.ggs_xsd`
+//! page directories they imply — the generation model ported from the verified Python
+//! prototype (record-set agreement 99.64% xab / 95.89% xsb, key agreement 99.64% /
+//! 99.91% against the reference snapshot).
 //!
 //! The model, condensed. There is **no bucket hash**: both volumes are key-ordered
 //! paged sequential files (B-tree leaf-page shape) sorted by the byte-wise `c | 0x20`
 //! fold. A page is a 256-record slice of the sorted record stream (16 B per record,
 //! 4096 B per page); filling a page splits it; a deletion decrements the page's count
 //! without clearing bytes, so live snapshots carry stale garbage past `count` and a
-//! run of all-zero slots to the page's end. The directory (`MODEL` §5) carries one
-//! 40 B entry per page whose `+0x14` field is the page's *valid record count* (the
-//! "bucket" reading of Wave1 is dead — `MODEL` §0's IDA proof), the anchor record is
-//! the page's first 16 bytes and the file offset is the page's own.
+//! run of all-zero slots to the page's end. The directory carries one 40 B entry per
+//! page whose `+0x14` field is the page's *valid record count* (the "bucket" reading
+//! is dead — a direct read off the reference binary), the anchor record is the page's
+//! first 16 bytes and the file offset is the page's own.
 //!
-//! Record sets, per symbol slot of a [`SymSlot`] table (`MODEL` §1):
+//! Record sets, per symbol slot of a [`SymSlot`] table:
 //!
 //! - **xsb** — exactly one record per symbol. The key token is chosen by the arm
 //!   table of [`xsb_key_token`] (shadow/baseref rows their own name, Python module
@@ -29,22 +28,22 @@
 //!   `flag31 = len(word) <= 4`; a member (scope >= 0, kind outside {21, 22, 23, 42})
 //!   appends one raw-name record `size = 2` after the word records.
 //!
-//! The key bytes ride the **dirty buffer** (`MODEL` §1.3): one shared 4-byte buffer
-//! per volume, `min(len, 4)` bytes copied in, an explicit NUL at `[len]` when the
-//! token is shorter than 4, everything beyond left as the previous write's tail. The
-//! buffer resets at each file batch (the prototype's approximation of the reference parse
-//! batches; `MODEL` §9.1 lists the residual).
+//! The key bytes ride the **dirty buffer**: one shared 4-byte buffer per volume,
+//! `min(len, 4)` bytes copied in, an explicit NUL at `[len]` when the token is
+//! shorter than 4, everything beyond left as the previous write's tail. The buffer
+//! resets at each file batch (the prototype's approximation of the reference parse
+//! batches; the residuals are listed with the exception tables).
 //!
-//! Clean-rebuild stream order (`MODEL` §3): xab by (folded token, folded own name,
-//! slot, word index, raw record last), xsb by (folded key token, slot). The snapshot's
-//! actual order interleaves per-file insertion batches on top of this — history, not
-//! derivable from the sym table (57.2% / 89.0% of key groups reproduce; `MODEL` §3).
+//! Clean-rebuild stream order: xab by (folded token, folded own name, slot, word
+//! index, raw record last), xsb by (folded key token, slot). The snapshot's actual
+//! order interleaves per-file insertion batches on top of this — history, not
+//! derivable from the sym table (57.2% / 89.0% of key groups reproduce).
 //!
 //! The residuals the rules cannot reach ride the two exception tables below
-//! (`MODEL` §6/§7: dirty-buffer batch-boundary state, stack-pointer fragments, the
-//! degraded whole-file parse of a few Python/test/tool trees, the `dspm` flag
-//! relicts of mat.cpp's re-parse era) — all of them the snapshot's incremental history,
-//! values read off the reference snapshot. They apply only under
+//! (dirty-buffer batch-boundary state, stack-pointer fragments, the degraded
+//! whole-file parse of a few Python/test/tool trees, the `dspm` flag relicts of
+//! mat.cpp's re-parse era) — all of them the snapshot's incremental history, values
+//! read off the reference snapshot. They apply only under
 //! [`IndexGenOptions::reference_history`]; a clean rebuild of other data ignores them.
 
 use std::collections::HashMap;
@@ -55,15 +54,15 @@ use super::projvol::{
 };
 
 /// The kind of a shadow row (a typedef's alternate identity): no xab records at all,
-/// xsb keyed by the own name (`MODEL` §1.1/§1.2).
+/// xsb keyed by the own name.
 pub const SHADOW_KIND: u16 = 22;
 /// The kind of a base-class reference row: no xab records, xsb keyed by the own name.
 pub const BASEREF_KIND: u16 = 23;
-/// The synthetic member kinds without a raw-name xab record (`MODEL` §1.1: 21 stub,
+/// The synthetic member kinds without a raw-name xab record (21 stub,
 /// 22 shadow, 23 baseref, 42).
 const NO_RAW_KINDS: [u16; 4] = [21, 22, 23, 42];
 /// The scope-chain top kinds whose members key xsb by the owning file's basename
-/// (`MODEL` §1.2: 21 class-implementation stub, 11 method, 36 property).
+/// (21 class-implementation stub, 11 method, 36 property).
 const FILE_KEY_CHAIN_KINDS: [u16; 3] = [21, 11, 36];
 /// The kind of a C++ class; a *named* one (not the `{anon` spelling) keys its members
 /// by the file basename too.
@@ -73,32 +72,31 @@ const ANON_TAG_PREFIX: &[u8] = b"{anon}";
 /// The Python module-anchor kind.
 const PY_MODULE_KIND: u16 = 29;
 /// The sym `flags` bit that switches the xsb key to its lowercase variant
-/// (`MODEL` §1.2: typedef-group enum constants, shadows, anon tags).
+/// (typedef-group enum constants, shadows, anon tags).
 pub const FLAGS_FOLD_KEY: u16 = 0x100;
 
-/// The xab word record's size base and step: kept token #i carries `4 + 8*i`
-/// (`MODEL` §1.1).
+/// The xab word record's size base and step: kept token #i carries `4 + 8*i`.
 const WORD_SIZE_BASE: u32 = 4;
 const WORD_SIZE_STEP: u32 = 8;
-/// The raw-name record's size (`MODEL` §1.1).
+/// The raw-name record's size.
 const RAW_NAME_SIZE: u32 = 2;
 /// The raw-name record's word index for the sort key (it sorts last for its key).
 const RAW_NAME_WI: u16 = 99;
-/// The clean-rebuild VM arena's linear base (`MODEL` §5: generated volumes allocate
+/// The clean-rebuild VM arena's linear base (generated volumes allocate
 /// linearly from `0x5410000`; the snapshot's segment bases and relocations are
 /// allocator history).
 pub const VM_BASE_DEFAULT: u32 = 0x0541_0000;
 
 /* =====================================================================
  * Exception tables — snapshot incremental history, not rules. Every entry's
- * value was read off the reference snapshot (`si4-rea`'s sip-vol/snap);
+ * value was read off the reference snapshot;
  * each documents the update state the snapshot carries that a clean
- * rebuild cannot derive (MODEL-xab-generation §6/§7/§9). Applied only
+ * rebuild cannot derive. Applied only
  * under `IndexGenOptions::reference_history`.
  * ===================================================================== */
 
 /// xab records whose 4-byte key is a dirty-buffer batch-boundary state the
-/// prototype's per-file zeroing cannot reproduce (`MODEL` §9.1: 47 residual tails).
+/// prototype's per-file zeroing cannot reproduce (47 residual tails).
 /// Keyed `(slot, size, flag)` — unique over the generated stream — to the key bytes
 /// the snapshot carries; the override replaces the emitted key only and leaves the
 /// buffer chain untouched.
@@ -155,9 +153,9 @@ const XAB_KEY_EXCEPTIONS: &[(u16, u32, bool, [u8; 4])] = &[
 /// xsb rows the rules cannot reach, keyed by slot (one xsb record per slot, so the
 /// key is unambiguous). Each entry carries the full vocabulary the snapshot's row
 /// holds — key bytes, `size` and the `flag31` bit — replacing the generated row's.
-/// Three classes (`MODEL` §6, xsb act-only 176):
+/// Three classes (xsb act-only 176):
 ///
-/// - 4 stack/heap-pointer fragments (`A\0\xd1\x08` shape — `MODEL` §9.2: the dirty
+/// - 4 stack/heap-pointer fragments (`A\0\xd1\x08` shape — the dirty
 ///   buffer's pre-batch content is unrecoverable from the data);
 /// - 24 degraded whole-file parse rows (the ImgTo3D.py / test / tool trees keyed by
 ///   their path's first segment with the degraded `size = 1` parse-state marker);
@@ -346,8 +344,8 @@ const XSB_ROW_EXCEPTIONS: &[(u16, [u8; 4], u32, bool)] = &[
  * Options and the generated bundle
  * ===================================================================== */
 
-/// The generator's knobs. The defaults produce the clean-rebuild conventions
-/// (`MODEL` §5): a zeroed timestamp pair and the linear VM arena; the reference
+/// The generator's knobs. The defaults produce the clean-rebuild conventions:
+/// a zeroed timestamp pair and the linear VM arena; the reference
 /// snapshot's clock reads and segment bases are allocation state, passed in when a
 /// byte-level reproduction is wanted.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -385,24 +383,24 @@ impl Default for IndexGenOptions {
 /// zero slots included) and the two page directories ([`XdirVolume::emit`] bytes).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IndexVolumes {
-    /// The word-prefix index volume (`.sip_xab`).
+    /// The word-prefix index volume (`.ggs_xab`).
     pub xab: Vec<u8>,
-    /// The name index volume (`.sip_xsb`).
+    /// The name index volume (`.ggs_xsb`).
     pub xsb: Vec<u8>,
-    /// The xab's page directory (`.sip_xad`).
+    /// The xab's page directory (`.ggs_xad`).
     pub xad: Vec<u8>,
-    /// The xsb's page directory (`.sip_xsd`).
+    /// The xsb's page directory (`.ggs_xsd`).
     pub xsd: Vec<u8>,
 }
 
 /* =====================================================================
  * Lexical helpers — the fold, the lowercase variant, the camel splitter
- * and the dirty buffer (MODEL §1.3 / §2)
+ * and the dirty buffer
  * ===================================================================== */
 
-/// The sort/compare fold: every byte OR `0x20` (`MODEL` §0 — '_' 0x5F folds to 0x7F
+/// The sort/compare fold: every byte OR `0x20` ('_' 0x5F folds to 0x7F
 /// past the letters, '@' 0x40 folds to 0x60 between ':' and 'a'; the same fold the
-/// djb2 hash family at `sub_4493C0` uses).
+/// djb2 hash family uses).
 pub fn fold(bytes: &[u8]) -> Vec<u8> {
     bytes.iter().map(|&b| b | 0x20).collect()
 }
@@ -415,7 +413,7 @@ pub fn tolower_bytes(bytes: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-/// The shared 4-byte key buffer (`MODEL` §1.3): `min(len, 4)` bytes in, an explicit
+/// The shared 4-byte key buffer (the dirty buffer): `min(len, 4)` bytes in, an explicit
 /// NUL at `[len]` when the token is shorter than 4, the rest left as the previous
 /// write's tail. One instance per volume; reset at each file batch.
 #[derive(Clone, Debug)]
@@ -440,13 +438,13 @@ impl DirtyBuf {
     }
 }
 
-/// The camel splitter (`MODEL` §2, `xab-gen-work/model_xab.py: si_split`): separators
+/// The camel splitter: separators
 /// break; digit-led parts vanish entirely (no record, no word index); an upper run
 /// followed by a lower run backs one character off the caps run (HTTPServer → HTTP +
 /// Server) and trailing digits attach to the word (BMI270, C2, AW9523); a lower run
 /// takes its trailing digits (fft2r → fft2); parts under two characters drop. ASCII
 /// names only — the name byte is ASCII throughout the format.
-pub fn si_split(name: &[u8]) -> Vec<Vec<u8>> {
+pub fn camel_split(name: &[u8]) -> Vec<Vec<u8>> {
     let mut parts: Vec<Vec<u8>> = Vec::new();
     let n = name.len();
     let mut i = 0;
@@ -521,7 +519,7 @@ pub fn si_split(name: &[u8]) -> Vec<Vec<u8>> {
 }
 
 /* =====================================================================
- * Scope chains and the xsb key-token arm table (MODEL §1.2)
+ * Scope chains and the xsb key-token arm table
  * ===================================================================== */
 
 /// The symbol's same-table scope chain, innermost first (`+124` links; cycle-guarded).
@@ -555,7 +553,7 @@ fn path_segment(path: &[u8], last: bool) -> &[u8] {
     }
 }
 
-/// The `.py` suffix test (case-insensitive, `MODEL` §1.2's module-anchor arm).
+/// The `.py` suffix test (case-insensitive, the module-anchor arm).
 fn ends_with_py(path: &[u8]) -> bool {
     path.len() >= 3
         && path[path.len() - 3..]
@@ -564,13 +562,13 @@ fn ends_with_py(path: &[u8]) -> bool {
             .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
-/// The xsb key token for one symbol slot — the arm table of `MODEL` §1.2, in the
+/// The xsb key token for one symbol slot — the arm table, in the
 /// table's own precedence order: shadow/baseref rows their own name; a Python module
 /// anchor the owning path's first segment; a member whose scope-chain top is a stub
 /// chain (kinds 21/11/36) or a *named* C++ class the owning file's basename (with
 /// extension); any other member the outermost scope ancestor's name; a top-level
 /// symbol its own name. Rows with `flags & 0x100` return the lowercase variant.
-/// `files` is the `.siproj` path table indexed by the record's `file_id`.
+/// `files` is the reference project's path list indexed by the record's `file_id`.
 pub fn xsb_key_token(sym: &[SymSlot], slot: usize, files: &[&[u8]]) -> Vec<u8> {
     let s = &sym[slot];
     let name = &s.name;
@@ -601,11 +599,11 @@ pub fn xsb_key_token(sym: &[SymSlot], slot: usize, files: &[&[u8]]) -> Vec<u8> {
 }
 
 /* =====================================================================
- * Stream generation and the clean-rebuild order (MODEL §1 / §3)
+ * Stream generation and the clean-rebuild order
  * ===================================================================== */
 
 /// The xab stream's sort key: folded token, folded own name, slot, word index, raw
-/// record last (`MODEL` §3).
+/// record last.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct XabSortKey {
     tok: Vec<u8>,
@@ -615,7 +613,7 @@ struct XabSortKey {
     wi: u16,
 }
 
-/// The xsb stream's sort key: folded key token, slot (`MODEL` §3).
+/// The xsb stream's sort key: folded key token, slot.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct XsbSortKey {
     token: Vec<u8>,
@@ -688,9 +686,9 @@ pub fn gen_index_streams(
         let chain = scope_chain(sym, slot);
         let mut tokens: Vec<Vec<u8>> = Vec::new();
         for ancestor in chain.iter().rev() {
-            tokens.extend(si_split(&sym[*ancestor].name));
+            tokens.extend(camel_split(&sym[*ancestor].name));
         }
-        tokens.extend(si_split(&s.name));
+        tokens.extend(camel_split(&s.name));
         let kept: Vec<&Vec<u8>> = tokens.iter().filter(|t| t.len() >= 2).collect();
         let fname = fold(&s.name);
         for (i, token) in kept.iter().enumerate() {
@@ -749,7 +747,7 @@ pub fn gen_index_streams(
 }
 
 /* =====================================================================
- * Page and directory assembly (MODEL §4 / §5)
+ * Page and directory assembly
  * ===================================================================== */
 
 /// The page count of a record stream.
@@ -758,7 +756,7 @@ fn page_count(records: usize) -> usize {
 }
 
 /// Emits the whole index volume: 256-record pages, every page zero-filled past the
-/// stream's tail slice (`MODEL` §4's empty-slot model — clean rebuilds carry no
+/// stream's tail slice (the empty-slot model — clean rebuilds carry no
 /// stale bytes).
 pub fn build_index_volume(stream: &[IndexRecord]) -> Vec<u8> {
     let mut out = vec![0u8; page_count(stream.len()) * INDEX_PAGE_SIZE];
@@ -771,8 +769,8 @@ pub fn build_index_volume(stream: &[IndexRecord]) -> Vec<u8> {
 
 /// Assembles the page directory of a record stream: one entry per page whose anchor
 /// is the page's first record, whose count field is the page's valid-record count
-/// (the `+0x14` semantics, `MODEL` §0) and whose file offset is the page's own; the
-/// VM addresses run linearly from the options' base (`MODEL` §5's clean-rebuild
+/// (the `+0x14` semantics) and whose file offset is the page's own; the
+/// VM addresses run linearly from the options' base (the clean-rebuild
 /// convention — the snapshot's segments and relocations are allocator history).
 pub fn build_index_directory(stream: &[IndexRecord], options: &IndexGenOptions) -> XdirVolume {
     let pages = page_count(stream.len());
@@ -806,7 +804,7 @@ pub fn build_index_directory(stream: &[IndexRecord], options: &IndexGenOptions) 
     }
 }
 
-/// The full generation entry point: a sym record table plus its `.siproj` path table
+/// The full generation entry point: a sym record table plus its file-table path list
 /// (indexed by `file_id`) produce the four index files. The defaults are the
 /// clean-rebuild conventions; pass [`IndexGenOptions::reference_history`] to apply
 /// the reference snapshot's exception tables.
@@ -837,7 +835,7 @@ pub fn from_sym_records(sym: &[SymSlot], files: &[&[u8]]) -> IndexVolumes {
 mod tests {
     use super::*;
     use crate::symbols::projvol::{
-        parse_index_volume, parse_siproj_volume, parse_sym_volume, XDIR_PAGES_CAPACITY,
+        parse_index_volume, parse_file_table_volume, parse_sym_volume, XDIR_PAGES_CAPACITY,
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -845,10 +843,7 @@ mod tests {
     /* ---------- the reference snapshot (the projvol.rs conventions) ---------- */
 
     fn snap_dir() -> Option<PathBuf> {
-        let dir = match std::env::var_os("GGS_REF_SNAP_DIR") {
-            Some(dir) => PathBuf::from(dir),
-            None => PathBuf::from(r"C:\Users\penghongxia\si4-rea\sip-vol\snap"),
-        };
+        let dir = std::env::var_os("GGS_REF_SNAP_DIR").map(PathBuf::from)?;
         if dir.is_dir() {
             Some(dir)
         } else {
@@ -858,8 +853,8 @@ mod tests {
 
     fn skip_note() {
         eprintln!(
-            "skip: the si4-rea reference snapshot is not present \
-             (set GGS_REF_SNAP_DIR to its sip-vol/snap directory)"
+            "skip: the reference snapshot is not present \
+             (set GGS_REF_SNAP_DIR to the snapshot directory)"
         );
     }
 
@@ -871,9 +866,9 @@ mod tests {
     fn snap_inputs() -> Option<(Vec<SymSlot>, Vec<Vec<u8>>)> {
         let sym = parse_sym_volume(&snap_volume("Untitled Project2.sip_sym")?).expect("sym parses")
             .records;
-        let siproj =
-            parse_siproj_volume(&snap_volume("Untitled Project2.siproj")?).expect("siproj parses");
-        let files = siproj
+        let table =
+            parse_file_table_volume(&snap_volume("Untitled Project2.siproj")?).expect("file table parses");
+        let files = table
             .records
             .iter()
             .map(|r| r.path.clone())
@@ -887,7 +882,7 @@ mod tests {
 
     /// The snapshot volume's live records through its own directory: the `count`
     /// records of every page are the valid ones, any nonzero record past `count` is
-    /// stale garbage (`MODEL` §4).
+    /// stale garbage.
     fn snap_active(volume: &[u8], dir: &[u8]) -> (Vec<IndexRecord>, Vec<IndexRecord>) {
         let parsed = XdirVolume::parse(dir).expect("directory parses");
         let records = parse_index_volume(volume).expect("index volume parses");
@@ -941,10 +936,10 @@ mod tests {
     /* ---------- the lexical layer ---------- */
 
     #[test]
-    fn si_split_follows_the_model_examples() {
-        // MODEL-xab-generation §2's fitted examples.
+    fn camel_split_follows_the_model_examples() {
+        // The fitted examples.
         let split = |s: &[u8]| -> Vec<String> {
-            si_split(s)
+            camel_split(s)
                 .into_iter()
                 .map(|p| String::from_utf8(p).unwrap())
                 .collect()
@@ -958,12 +953,12 @@ mod tests {
         assert!(split(b"3D").is_empty()); // digit-led part dropped
         assert!(split(b"A").is_empty()); // single character dropped
         assert_eq!(split(b"ImgTo3D_matrix"), ["Img", "To3", "matrix"]);
-        assert_eq!(split(b"si_split_x"), ["si", "split"]); // separators break
+        assert_eq!(split(b"camel_split_x"), ["camel", "split"]); // separators break
     }
 
     #[test]
     fn the_dirty_buffer_writes_the_documented_tails() {
-        // MODEL §1.3's examples: the NUL lands at [len], the rest keeps the
+        // The dirty-buffer examples: the NUL lands at [len], the rest keeps the
         // previous write's tail.
         let mut buf = DirtyBuf::new();
         assert_eq!(buf.write(b"fail"), *b"fail");
@@ -1030,8 +1025,8 @@ mod tests {
 
     /// The snapshot's sym table drives the generator; the generated streams compare
     /// against the snapshot's valid records (directory counts) at the record-set and
-    /// key-derivation layers. Expectations = the Python prototype's quantification
-    /// (`MODEL` §6): xab 12912/12959 exact (99.64%), 47 act-only (dirty tails), 836
+    /// key-derivation layers. Expectations = the Python prototype's quantification:
+    /// xab 12912/12959 exact (99.64%), 47 act-only (dirty tails), 836
     /// gen-only (instance-selection history); xsb 4104/4280 exact (95.89%), 4
     /// key-level misses (stack fragments). The exception tables close the act side
     /// to zero (and xsb to an exact multiset).
@@ -1127,7 +1122,7 @@ mod tests {
 
     /* ---------- the page / directory layer ---------- */
 
-    /// The snapshot's page facts (`MODEL` §4) and the generated volumes' clean-rebuild
+    /// The snapshot's page facts and the generated volumes' clean-rebuild
     /// page facts: empty slots only past `count`, stale bytes enumerated, page counts
     /// 54/17 against the snapshot's history-heavy 74/24.
     #[test]
@@ -1178,7 +1173,7 @@ mod tests {
             );
             assert_eq!(valid, expect_valid, "sum of counts");
             assert_eq!(stale, expect_stale, "stale records past count");
-            assert_eq!(violations, 0, "no all-zero record inside any count (MODEL §4)");
+            assert_eq!(violations, 0, "no all-zero record inside any count");
             assert_eq!(
                 empty,
                 records.len() - valid - stale,

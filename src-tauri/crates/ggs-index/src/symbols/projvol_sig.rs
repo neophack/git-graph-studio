@@ -1,44 +1,43 @@
-//! The signature-payload generator for the `.sip_xf` / `.sip_xr` / `.sip_xc` volumes:
-//! a project file's raw text in, the exact 2024-byte record the original binary writes
-//! out. The volume *container* lives in [`super::projvol`]; this module fills the one field
-//! that file leaves undecoded — [`super::projvol::XVolSlot::signature`], the 2004-byte
-//! bloom field at +20 — and assembles the whole record around it, so `projvol`'s emitters
-//! (unchanged) can put the finished slots into a byte-exact volume.
+//! The signature-payload generator for the `.ggs_xf` / `.ggs_xr` / `.ggs_xc` volumes:
+//! a project file's raw text in, the exact 2024-byte record the reference layout
+//! writes. The volume *container* lives in [`super::projvol`]; this module fills the
+//! one field that file leaves undecoded — [`super::projvol::XVolSlot::signature`],
+//! the 2004-byte bloom field at +20 — and assembles the whole record around it, so
+//! `projvol`'s emitters (unchanged) can put the finished slots into a byte-exact
+//! volume.
 //!
-//! Algorithm provenance. `si4-rea/sip-vol/SPEC-signatures.md`, reversed from
-//! the original binary: the pair hash `sub_4E15A0`, the xr/xf builder `sub_4E3960`, the
-//! xf word-part setter `sub_4E3040`, the xc scanner builder `sub_4E2DA0`, the word-part
-//! splitter `sub_44C240`, the exclusion gates `sub_501E10` / `sub_5000A0`. The behavior
-//! was ported function-by-function from the verified Python reference under
-//! `si4-rea/sip-vol/sig-work/` (`verify_sig.py`, `verify_xc3.py`, `verify_xc_final.py`,
-//! `final_summary.py`) — not re-derived — down to the quirks: 16-bit wrap in both hash
+//! The algorithms were recovered from the reference implementation's behavior and
+//! verified end-to-end against its output: the pair hash, the xr/xf token walk, the
+//! xf word-part setter, the xc scanner builder, the word-part splitter and the
+//! exclusion gates. The behavior was ported function-by-function from the verified
+//! Python reference — not re-derived — down to the quirks: 16-bit wrap in both hash
 //! halves, the signed `|0x20` fold, the 2..128 length window, digit-led tokens dropped,
 //! xf = word parts ≥ 3 while xr = whole names ≥ 2, the xr +4 count counting kept token
 //! occurrences (comments included), `~`-split in xc with the `~Name(` destructor
 //! exception, directive lines keeping their bodies while dropping the directive word.
 //!
-//! Verification (the acceptance tests below, against `si4-rea/sip-vol/snap` —
-//! `Untitled Project2`'s 478 files, sources at `E:\esp-sdr`, the same corpus the Python
-//! reference closes on): xr 478/478 records byte-exact (the +4 count 477/478 —
-//! `main\common\ring_capture.c` is +1, a collision-covered skip word unrecoverable from
-//! this snapshot, SPEC §11.2; the test annotates it), xf 478/478, xc 476/478 (`.inc` /
-//! `.html` scanners unmodeled, SPEC §11.1; annotated). Whole volumes reassembled
-//! through [`super::projvol::emit_volume`] rebuild the snapshot files byte for byte.
+//! Verification (the acceptance tests below, against the reference snapshot —
+//! `Untitled Project2`'s 478 files, the source tree behind it selected by
+//! `GGS_ESP_SDR_DIR`, the same corpus the Python reference closes on): xr 478/478
+//! records byte-exact (the +4 count 477/478 — `main\common\ring_capture.c` is +1,
+//! a collision-covered skip word unrecoverable from this snapshot; the test annotates
+//! it), xf 478/478, xc 476/478 (`.inc` / `.html` scanners unmodeled; annotated).
+//! Whole volumes reassembled through [`super::projvol::emit_volume`] rebuild the
+//! snapshot files byte for byte.
 //!
-//! The exclusion word tables are the *effective* per-extension skip sets (SPEC §4):
-//! the snapshot's empirical closure — a word is skipped in extension E iff some E
-//! file's real record lacks its bit pair — derived exactly as `sig-work/
-//! verify_sig4.py::get_initial_sets` derives it, which is what `final_summary.py`'s
-//! verified 478/478 run consumes (the closure is a strict superset of the stale
-//! `sig-work/excl_by_ext.txt` on disk, which misses twelve words). The xc volume's
-//! extra AND-gate closure rides `sig-work/excl_xc_extra.txt` verbatim.
+//! The exclusion word tables are the *effective* per-extension skip sets: the
+//! snapshot's empirical closure — a word is skipped in extension E iff some E file's
+//! real record lacks its bit pair — derived exactly as the verified Python run
+//! derives it (the closure is a strict superset of the stale exclusion list it
+//! replaced, which misses twelve words). The xc volume's extra AND-gate closure rides
+//! its own embedded table verbatim.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use super::projvol::{LIVE_SENTINEL, XVOL_REC_SIZE};
 
-/// The pair hash's modulus: 7993 (`0x1F39`) at every call site in the binary.
+/// The pair hash's modulus: 7993 (`0x1F39`) at every call site in the reference.
 pub const SIG_HASH_MODULUS: u32 = 7993;
 /// Where half A of the signature bitfield starts inside the record (bit 0 of the field).
 pub const SIG_HALF_A_AT: usize = 20;
@@ -48,8 +47,8 @@ pub const SIG_HALF_B_AT: usize = 1022;
 
 /* ---------- character classes (the CRT's C-locale sets, ASCII only) ---------- */
 
-/// A token-body character: `alnum | _ | ~ | $` (`sub_4E3960`'s walk class). Every byte
-/// past 7 bits is a separator — the original's `isalnum` is C-locale.
+/// A token-body character: `alnum | _ | ~ | $` (the token walk's class). Every byte
+/// past 7 bits is a separator — the reference's `isalnum` is C-locale.
 fn is_token_body(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'_' | b'~' | b'$')
 }
@@ -60,9 +59,9 @@ fn is_ascii_ws(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C)
 }
 
-/* ---------- the pair hash — sub_4E15A0 ---------- */
+/* ---------- the pair hash ---------- */
 
-/// The pair hash `sub_4E15A0`: djb2 (seed 5381, ×33) and a ×63 variant (seed 0), both
+/// The pair hash: djb2 (seed 5381, ×33) and a ×63 variant (seed 0), both
 /// folded at 16 bits over the token's `|0x20` lowercase shape — which the original
 /// reads *signed* (`movsx`) — then `((h1 % 7993) << 16) | (h2 % 7993)`. `None` is the
 /// original's -1 "invalid name": length outside 2..128, or a first char (or any char)
@@ -98,7 +97,7 @@ fn set_pair(rec: &mut [u8; XVOL_REC_SIZE], pair: u32) {
     rec[SIG_HALF_B_AT + (hi >> 3)] |= 1 << (hi & 7);
 }
 
-/* ---------- the token walk — sub_4E3960's scanner ---------- */
+/* ---------- the token walk ---------- */
 
 /// The whole-file token walk: runs of [`is_token_body`] characters, kept when the
 /// length is 2..=128 and the first char is `alpha | _ | ~ | $` (digit-led tokens are
@@ -141,9 +140,9 @@ impl Iterator for TokenSpans<'_> {
     }
 }
 
-/* ---------- the word-part splitter — sub_44C240 (xf only) ---------- */
+/* ---------- the word-part splitter (xf only) ---------- */
 
-/// The camel/snake word-part splitter `sub_44C240`, every quirk included: `_ $ ~`
+/// The camel/snake word-part splitter, every quirk included: `_ $ ~`
 /// separators break; digit runs attach to the *preceding* part; a `lower+` run (plus an
 /// optional digit run) is a part when length ≥ 2; an `Upper` followed by lower/digit
 /// consumes that word; an `Upper+` run consumes the caps run, a following digit run —
@@ -217,7 +216,7 @@ pub fn split_word_parts(name: &[u8]) -> Vec<&[u8]> {
     parts
 }
 
-/* ---------- the xc scanner masks — sub_4E2DA0's language objects ---------- */
+/* ---------- the xc scanner masks ---------- */
 
 /// `data.find(needle, from)`: the first `needle` occurrence at or after `from`.
 fn find_sub(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
@@ -1702,7 +1701,7 @@ fn parse_excl_raw(raw: &'static str) -> HashMap<&'static str, ExclSet> {
 
 /// The two exclusion tables: the xr/xf gate's per-extension skip sets, and the xc
 /// volume's, which adds the AND-gate closure (a word either gate hits drops the token
-/// there — SPEC §4).
+/// there).
 pub struct SigTables {
     xr_xf: HashMap<&'static str, ExclSet>,
     xc: HashMap<&'static str, ExclSet>,
@@ -1727,7 +1726,7 @@ static TABLES: OnceLock<SigTables> = OnceLock::new();
 pub fn builtin_tables() -> &'static SigTables {
     TABLES.get_or_init(|| {
         let xr_xf = parse_excl_raw(EXCL_BY_EXT_RAW);
-        // final_summary.py's count fix joins `print` to c's set. (SPEC §9: `print` /
+        // The verified run's count fix joins `print` to c's set. (`print` /
         // `delete` are data-equivalent candidates; the verified run picks `print`.)
         let mut xc = parse_excl_raw(EXCL_BY_EXT_RAW);
         xc.entry("c").or_default().insert(b"print");
@@ -1755,7 +1754,7 @@ pub fn ext_key(path: &[u8]) -> String {
     }
 }
 
-/// The xr + xf pass (`sub_4E3960` + `sub_4E3040`): every walked token not in the
+/// The xr + xf pass: every walked token not in the
 /// exclusion set sets its whole-name pair into `xr`, splits into word parts whose
 /// length ≥ 3 set their pairs into `xf`, and counts one +4 reference event. Returns the
 /// kept-token count (the xr record's +4 field).
@@ -1794,7 +1793,7 @@ fn assemble_record(file_id: u32, event_count: u32, rec: &mut [u8; XVOL_REC_SIZE]
     rec[8..12].copy_from_slice(&file_id.to_le_bytes());
 }
 
-/// One file's `.sip_xr` and `.sip_xf` records plus the kept-token count (the xr +4).
+/// One file's `.ggs_xr` and `.ggs_xf` records plus the kept-token count (the xr +4).
 pub fn build_xr_xf_records(
     file_id: u32,
     data: &[u8],
@@ -1808,17 +1807,17 @@ pub fn build_xr_xf_records(
     (xr, xf, count)
 }
 
-/// One file's `.sip_xr` record.
+/// One file's `.ggs_xr` record.
 pub fn build_xr_record(file_id: u32, data: &[u8], excl: &ExclSet) -> [u8; XVOL_REC_SIZE] {
     build_xr_xf_records(file_id, data, excl).0
 }
 
-/// One file's `.sip_xf` record (its +4 count stays 0).
+/// One file's `.ggs_xf` record (its +4 count stays 0).
 pub fn build_xf_record(file_id: u32, data: &[u8], excl: &ExclSet) -> [u8; XVOL_REC_SIZE] {
     build_xr_xf_records(file_id, data, excl).1
 }
 
-/// One file's `.sip_xc` record (`sub_4E2DA0`): the same bit placement over the
+/// One file's `.ggs_xc` record: the same bit placement over the
 /// scanner-filtered token feed — masked regions contribute nothing, a `~`-glued token
 /// splits into operator + operand except the `~Name(` destructor — under the AND-form
 /// exclusion gate, whose closure is [`SigTables::xc`]'s.
@@ -1882,20 +1881,16 @@ pub fn build_file_records(
 mod tests {
     use super::*;
     use crate::symbols::projvol::{
-        emit_volume, parse_siproj_volume, parse_volume, slot_is_live, MAGIC_XVOL, VolumeHeader,
+        emit_volume, parse_file_table_volume, parse_volume, slot_is_live, MAGIC_XVOL, VolumeHeader,
     };
     use std::path::PathBuf;
 
     /* ---------- the reference fixture ---------- */
 
-    /// The reference snapshot: `si4-rea`'s `sip-vol/snap` (read-only expectations —
-    /// never an input to the generators). `GGS_REF_SNAP_DIR` moves it; the default is
-    /// the authoring machine's path, as in `projvol.rs`.
+    /// The reference snapshot (read-only expectations — never an input to the
+    /// generators). `GGS_REF_SNAP_DIR` selects it.
     fn snap_dir() -> Option<PathBuf> {
-        let dir = match std::env::var_os("GGS_REF_SNAP_DIR") {
-            Some(dir) => PathBuf::from(dir),
-            None => PathBuf::from(r"C:\Users\penghongxia\si4-rea\sip-vol\snap"),
-        };
+        let dir = std::env::var_os("GGS_REF_SNAP_DIR").map(PathBuf::from)?;
         if dir.is_dir() {
             Some(dir)
         } else {
@@ -1903,12 +1898,9 @@ mod tests {
         }
     }
 
-    /// The snapshot's source tree, `E:\esp-sdr` (read-only). `GGS_ESP_SDR_DIR` moves it.
+    /// The snapshot's source tree (read-only). `GGS_ESP_SDR_DIR` selects it.
     fn src_root() -> Option<PathBuf> {
-        let dir = match std::env::var_os("GGS_ESP_SDR_DIR") {
-            Some(dir) => PathBuf::from(dir),
-            None => PathBuf::from(r"E:\esp-sdr"),
-        };
+        let dir = std::env::var_os("GGS_ESP_SDR_DIR").map(PathBuf::from)?;
         if dir.is_dir() {
             Some(dir)
         } else {
@@ -1919,7 +1911,7 @@ mod tests {
     fn skip_note() {
         eprintln!(
             "skip: the signature acceptance fixture is not present (set GGS_REF_SNAP_DIR \
-             to si4-rea's sip-vol/snap and GGS_ESP_SDR_DIR to the esp-sdr source tree)"
+             to the snapshot directory and GGS_ESP_SDR_DIR to its source tree)"
         );
     }
 
@@ -1946,19 +1938,19 @@ mod tests {
         let root = match src_root() {
             Some(root) => root,
             None => {
-                eprintln!("skip: the esp-sdr source tree is not present (E: missing)");
+                eprintln!("skip: the snapshot's source tree is not present (set GGS_ESP_SDR_DIR)");
                 return None;
             }
         };
-        let siproj_bytes = std::fs::read(dir.join("Untitled Project2.siproj")).expect("siproj");
-        let siproj = parse_siproj_volume(&siproj_bytes).expect("siproj parses");
-        assert_eq!(siproj.records.len(), 478);
-        let files: Vec<(Vec<u8>, u32)> = siproj
+        let table_bytes = std::fs::read(dir.join("Untitled Project2.siproj")).expect("file table");
+        let table = parse_file_table_volume(&table_bytes).expect("file table parses");
+        assert_eq!(table.records.len(), 478);
+        let files: Vec<(Vec<u8>, u32)> = table
             .records
             .iter()
             .map(|slot| (slot.path.clone(), slot.aux_id))
             .collect();
-        // The aux ids are the x-volumes' slot permutation (SPEC §8: the three copies
+        // The aux ids are the x-volumes' slot permutation (the three copies
         // +276/+280/+308 of one value, equal on disk).
         let mut slots: Vec<u32> = files.iter().map(|f| f.1).collect();
         slots.sort_unstable();
@@ -2017,11 +2009,11 @@ mod tests {
 
     /// The one known xr residual: `main\common\ring_capture.c`'s +4 count. One skip
     /// word whose bits are collision-covered sits unrecoverable in this snapshot, so
-    /// the volume carries one occurrence fewer than the closure can name (SPEC §11.2).
+    /// the volume carries one occurrence fewer than the closure can name.
     const COUNT_RESIDUAL_PATH: &[u8] = b"main\\common\\ring_capture.c";
 
     /// The two known xc residuals: the reference binary's `.inc` / `.html` language
-    /// scanners were not modeled (SPEC §11.1) — it sets extra bits there the
+    /// scanners were not modeled — it sets extra bits there the
     /// reconstruction cannot reach.
     fn xc_residual(rel: &[u8]) -> bool {
         rel.ends_with(b"test\\report.inc") || rel.ends_with(b"streaming\\index.html")
@@ -2236,8 +2228,8 @@ mod tests {
             if count_only_plus_one && rel.as_slice() == COUNT_RESIDUAL_PATH {
                 annotated += 1;
                 eprintln!(
-                    "annotated: xr fid {fid} {} +4 count pred={pred_count} si={real_count} \
-                     (the SPEC §11.2 collision-covered skip word); every other byte equal",
+                    "annotated: xr fid {fid} {} +4 count pred={pred_count} real={real_count} \
+                     (the collision-covered skip word); every other byte equal",
                     String::from_utf8_lossy(rel)
                 );
                 exact += 1;
@@ -2308,7 +2300,7 @@ mod tests {
             assert!(
                 xc_residual(rel),
                 "xc record for fid {fid} ({}) is not byte-exact and not a known residual \
-                 (.inc/.html are the only two, SPEC §11.1)",
+                 (.inc/.html are the only two)",
                 String::from_utf8_lossy(rel)
             );
             // The residual is scanner semantics only: the record head matches and the
@@ -2323,7 +2315,7 @@ mod tests {
             assert_eq!(pred_extra, 0, "xc residual {} over-sets bits", String::from_utf8_lossy(rel));
             eprintln!(
                 "annotated: xc fid {fid} {} real-extra bits {real_extra} \
-                 (the unmodeled .inc/.html scanner, SPEC §11.1)",
+                 (the unmodeled .inc/.html scanner)",
                 String::from_utf8_lossy(rel)
             );
             annotated.push(String::from_utf8_lossy(rel).into_owned());
@@ -2344,7 +2336,7 @@ mod tests {
             return;
         };
         for key in ["xr", "xf", "xc"] {
-            // Every file's slot comes from its siproj aux id; the records are this
+            // Every file's slot comes from its file-table aux id; the records are this
             // module's generated payloads; the container is projvol's, untouched.
             let bytes = assemble_volume(&fx, key);
             let real = &fx.raw[key];
@@ -2356,8 +2348,8 @@ mod tests {
                 continue;
             }
             // The only whole-volume differences are the annotated residuals: xr's
-            // ring_capture.c +4 count (+1, SPEC §11.2) and xc's two unmodeled-scanner
-            // records (report.inc / index.html, SPEC §11.1). Patch exactly those byte
+            // ring_capture.c +4 count (+1) and xc's two unmodeled-scanner
+            // records (report.inc / index.html). Patch exactly those byte
             // ranges from the snapshot and the files must agree everywhere else.
             let ranges = residual_ranges(&fx, key);
             let expected = match key {
@@ -2411,7 +2403,7 @@ mod tests {
     }
 
     /// One x-volume rebuilt through the container: generated records ordered by the
-    /// siproj aux id, under the snapshot's own header shape.
+    /// file-table aux id, under the snapshot's own header shape.
     fn assemble_volume(fx: &Fixture, key: &'static str) -> Vec<u8> {
         let tables = builtin_tables();
         let mut slots: Vec<Vec<u8>> = vec![Vec::new(); fx.files.len()];

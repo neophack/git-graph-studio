@@ -258,11 +258,11 @@ pub struct SymbolStore {
     /// Per name: the ids of the files containing the word, or `None` when the list is not
     /// trusted to be complete (the name first appeared in an incremental update).
     refs: Vec<Option<Vec<u32>>>,
-    /// The reference analysis database's tables (si4-rea's si-lite format), collected on
-    /// a full build and persisted beside the store as `si.db` + `si.tix`. `None` after a
-    /// disk resume — the saved `si.db` stays standing untouched until the next full
+    /// The six-table analysis database's tables, collected on a full build and
+    /// persisted beside the store as `ggs.db` + `ggs.tix`. `None` after a disk
+    /// resume — the saved `ggs.db` stays standing untouched until the next full
     /// build (the Rebuild command's delete-and-regenerate) rewrites it whole.
-    si: Option<anadb::AnaTables>,
+    ana: Option<anadb::AnaTables>,
 }
 
 pub struct BuildStats {
@@ -317,7 +317,7 @@ impl SymbolStore {
             files: Vec::new(),
             names: Vec::new(),
             refs: Vec::new(),
-            si: None,
+            ana: None,
         }
     }
 
@@ -812,7 +812,7 @@ impl SymbolStore {
                 .collect(),
             names,
             refs: Vec::new(),
-            si: None,
+            ana: None,
         };
         // The walk is sorted and phase 1 sorted again; the zip above keeps that order.
         debug_assert!(store.files.windows(2).all(|w| w[0].path < w[1].path));
@@ -832,7 +832,7 @@ impl SymbolStore {
             .into_iter()
             .map(|(_, _, _, _, hits)| hits)
             .collect();
-        store.si = Some(build_si_tables(&store, &calls_per_file, &hits_per_file));
+        store.ana = Some(build_ana_tables(&store, &calls_per_file, &hits_per_file));
         Some(store)
     }
 
@@ -1244,12 +1244,12 @@ impl SymbolStore {
             }
         }
         ggs_base::fsx::atomic_write(&dir.join("symbols.bin"), &out)?;
-        // The reference database rides beside the store in the same folder: a full build
+        // The analysis database rides beside the store in the same folder: a full build
         // collected its tables, so the delete-and-regenerate promise covers them too.
         // No tables (a resumed store) leaves the saved files standing untouched.
-        if let Some(si) = &self.si {
-            ggs_base::fsx::atomic_write(&dir.join(anadb::DB_FILE), &anadb::write_db(si))?;
-            ggs_base::fsx::atomic_write(&dir.join(anadb::TIX_FILE), &anadb::write_tix(si))?;
+        if let Some(tables) = &self.ana {
+            ggs_base::fsx::atomic_write(&dir.join(anadb::DB_FILE), &anadb::write_db(tables))?;
+            ggs_base::fsx::atomic_write(&dir.join(anadb::TIX_FILE), &anadb::write_tix(tables))?;
         }
         Ok(())
     }
@@ -1346,15 +1346,15 @@ impl SymbolStore {
         if at != bytes.len() {
             return None;
         }
-        // The words transpose comes back from the occurrence lists. The reference
-        // tables stay `None` — the saved `si.db` on disk keeps standing until the next
-        // full build rewrites it whole.
+        // The words transpose comes back from the occurrence lists. The analysis
+        // tables stay `None` — the saved `ggs.db` on disk keeps standing until the
+        // next full build rewrites it whole.
         let mut store = SymbolStore {
             root,
             files,
             names,
             refs,
-            si: None,
+            ana: None,
         };
         for (name, files_with) in store.refs.iter().enumerate() {
             for &file in files_with.as_deref().unwrap_or(&[]) {
@@ -1577,15 +1577,15 @@ fn is_si_tdr_kind(kind: u8) -> bool {
     )
 }
 
-/// Assemble the reference database's six tables from a fully built store plus the
-/// per-file call sites and positioned hits. Mirrors si-lite's parse flow: symbols
+/// Assemble the analysis database's six tables from a fully built store plus the
+/// per-file call sites and positioned hits. Mirrors the reference parse flow: symbols
 /// deduplicate by name (first declaration wins, and only a new symbol bumps its
 /// module's count); every declaration row lands in the code table with `enc = -1`;
 /// a call whose both ends resolve records the (caller, callee) edge — deduplicated on
 /// the exact pair, first line wins — plus its code row; a plain code-positioned
 /// identifier records its code row alone; member access and self-references never
 /// record. The tables are deterministic, so a rebuild regenerates the same bytes.
-fn build_si_tables(
+fn build_ana_tables(
     store: &SymbolStore,
     calls_per_file: &[Vec<(String, u32)>],
     hits_per_file: &[Vec<(u32, u32)>],
@@ -2232,7 +2232,7 @@ class Leaf : public Mid, Extra {};
 
         // The database's tables speak the parsed truth: one module, the declarations,
         // the call edge render -> draw, and the syllable fragments.
-        let tables = store.si.as_ref().unwrap();
+        let tables = store.ana.as_ref().unwrap();
         assert_eq!(tables.mods.len(), 1);
         assert_eq!(tables.mods[0].name, "src/shape.cpp");
         let names: Vec<&str> = tables.syms.iter().map(|s| s.name.as_str()).collect();

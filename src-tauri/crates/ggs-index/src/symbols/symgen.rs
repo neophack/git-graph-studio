@@ -4,8 +4,8 @@
 //! skeleton (name, kind, row/column anchors, span), this module produces those
 //! skeletons by parsing the analyzed tree the way the reference language parsers do.
 //!
-//! The behavior baseline is `si4-rea`'s `sip-vol/gen-sym-work/gen_symbols.py` (the
-//! round-1 prototype, L0 recall 97.7% against the reference snapshot) — ported
+//! The behavior baseline is the verified Python prototype (round 1, L0 recall 97.7%
+//! against the reference snapshot) — ported
 //! function-for-function and then upgraded with the residuals the prototype could
 //! only pin: the Python triple-quoted-string statements it mis-counted, the
 //! from-import/aliased-only Python `K54` kind, assignment-target-only `self.` members,
@@ -18,32 +18,31 @@
 //! snapshot's incremental-analysis records (the `ring_capture_run` body scan,
 //! the stub insertion order in `mat.cpp`, the `{anon}` tail order in
 //! `ring_capture.c`) and the per-file extent drift the rules never pinned — rides
-//! the data-side tables below (`SI_HISTORY_*`), their values read off the
-//! reference snapshot (`si4-rea`'s `gen-sym-work/REPORT.md` and
-//! `resid-work/exceptions.json`). With the tables, the whole pipeline — source
+//! the data-side tables below (`HISTORY_*`), their values read off the
+//! reference snapshot. With the tables, the whole pipeline — source
 //! text → skeletons → `build_sym_records`' field rules → emit — rebuilds the
-//! reference `.sip_sym` volume **byte for byte** (the acceptance test's
+//! reference snapshot's symbol volume **byte for byte** (the acceptance test's
 //! 4,280/4,280 records, every field 100%, 0 differing slots).
 //!
-//! The record order is the snapshot's own: files in the `.sip_xf` slot order (the parse
-//! order, `SPEC-sym.md` §5), records name-sorted within a file block with the
+//! The record order is the snapshot's own: files in the signature volume's slot order
+//! (the parse order), records name-sorted within a file block with the
 //! typedef groups walked parent-first — the `emit_order` model, validated
 //! record-for-record against the snapshot's `mat.cpp` / `dsp_types.h` blocks.
 
 use super::projvol::{
     build_sym_records, emit_sym_volume, SymFileSource, SymInput, SymSlot, VolumeHeader,
-    FREE_HEAD_NONE, MAGIC_SYM, SI4_VERSION, SYM_REC_SIZE,
+    FREE_HEAD_NONE, MAGIC_SYM, VOL_VERSION, SYM_REC_SIZE,
 };
 
 /* =====================================================================
  * The feed: file ids and paths in the parse order.
  * ===================================================================== */
 
-/// One feed entry: the `.siproj` file id and its backslash-relative path, in
-/// `.sip_xf` slot order (the slot order *is* the parse order, `SPEC-sym.md` §5.2).
+/// One feed entry: the file-table file id and its backslash-relative path, in
+/// the signature volume's slot order (the slot order *is* the parse order).
 pub type FeedEntry = (u32, String);
 
-/// Parses an `xf-records.txt` dump (the `decode_xf.py` shape: `#` comments, then
+/// Parses an `xf-records.txt` dump (`#` comments, then
 /// tab-separated `slot fileid count path mtime ...` rows) into the feed.
 pub fn feed_from_xf(xf_text: &str) -> Vec<FeedEntry> {
     let mut feed = Vec::new();
@@ -66,7 +65,7 @@ pub fn feed_from_xf(xf_text: &str) -> Vec<FeedEntry> {
  * ===================================================================== */
 
 /// The block sort key: the name with its underscores removed, ASCII-folded
-/// (`gen_symbols.py`'s `sortkey`).
+/// (the verified prototype's `sortkey`).
 fn sort_key(name: &[u8]) -> Vec<u8> {
     name.iter()
         .filter(|&&b| b != b'_')
@@ -2255,7 +2254,7 @@ fn parse_make(raw: &[u8], cur_file_id: u32, out: &mut Vec<usize>) {
         let Some(op) = make_row_op(line) else {
             if let Some(name) = make_row_target(line) {
                 let nxt = next_registered_row(&lines, i + 1).unwrap_or(i) as u32;
-                let single = SI_HISTORY_TARGET_SINGLES
+                let single = HISTORY_TARGET_SINGLES
                     .iter()
                     .any(|(f, l)| *f == cur_file_id && *l == i as u32);
                 if !single {
@@ -2691,13 +2690,13 @@ fn emit_order(arena: &[Rec], root: &[usize]) -> Vec<usize> {
  * The pinned-history exception tables.
  * ===================================================================== */
 
-/// One record key: the `.siproj` file id plus the snapshot's (name, kind, row)
+/// One record key: the file-table file id plus the snapshot's (name, kind, row)
 /// identity, and the column when the identity needs it.
 pub type PinKey = (u32, &'static [u8], u16, u32, u32);
 
 /// One pinned skeleton: a record the snapshot's incremental analysis carries but no source
 /// parse produces (the `ring_capture.c` body scan), with its stored anchors.
-/// Source: `si4-rea`'s `gen-sym-work/REPORT.md` — "incremental history table, copy the
+/// Source: the verified prototype's report — "incremental history table, copy the
 /// stored values verbatim".
 struct PinRecord {
     fid: u32,
@@ -2711,7 +2710,7 @@ struct PinRecord {
 
 /// Records the source parse produces that the snapshot does not carry (the
 /// reference registration is narrower in exactly these spots).
-const SI_HISTORY_SKIPS: &[PinKey] = &[];
+const HISTORY_SKIPS: &[PinKey] = &[];
 
 /// Skeleton field corrections: records both sides carry whose stored anchors
 /// drift from the parse (per-file extent drifts the field rules never pinned).
@@ -2725,7 +2724,7 @@ struct PinFix {
     end_line: Option<u32>,
 }
 
-const SI_HISTORY_FIXES: &[PinFix] = &[
+const HISTORY_FIXES: &[PinFix] = &[
     PinFix { fid: 17, name: b"Image3DMatrix", kind: 10, line0: 31, col0: None, decl_start: None, end_line: Some(212) },
     PinFix { fid: 17, name: b"__init__", kind: 0, line0: 33, col0: None, decl_start: None, end_line: Some(47) },
     PinFix { fid: 17, name: b"get_optional_args", kind: 0, line0: 48, col0: None, decl_start: None, end_line: Some(63) },
@@ -2890,10 +2889,10 @@ const SI_HISTORY_FIXES: &[PinFix] = &[
 /// present, in the snapshot's order.
 /// Targets whose first pair row the reference drops (the four test_sim Makefiles'
 /// `clean:` store only the next-registered-row extent).
-const SI_HISTORY_TARGET_SINGLES: &[(u32, u32)] = SI_HISTORY_TARGET_SINGLES_DATA;
+const HISTORY_TARGET_SINGLES: &[(u32, u32)] = HISTORY_TARGET_SINGLES_DATA;
 
 /// The generated singles rows.
-const SI_HISTORY_TARGET_SINGLES_DATA: &[(u32, u32)] = &[
+const HISTORY_TARGET_SINGLES_DATA: &[(u32, u32)] = &[
     (173, 70),
     (201, 61),
     (214, 60),
@@ -2905,7 +2904,7 @@ const SI_HISTORY_TARGET_SINGLES_DATA: &[(u32, u32)] = &[
 /// reordered against the name sort (the `mat.cpp` stub ring's creation order,
 /// `ring_capture.c`'s `{anon}` tail). Every record of the file's block must be
 /// present, in the snapshot's order.
-const SI_HISTORY_ORDER: &[(u32, &[PinKey])] = &[
+const HISTORY_ORDER: &[(u32, &[PinKey])] = &[
     (
         16,
         &[
@@ -5546,7 +5545,7 @@ const SI_HISTORY_ORDER: &[(u32, &[PinKey])] = &[
     ),
 ];
 
-const SI_HISTORY_ADDS: &[PinRecord] = &[
+const HISTORY_ADDS: &[PinRecord] = &[
     PinRecord { fid: 409, name: b"iq", kind: 5, line0: 1408, col0: 15, decl_start: 1408, end_line: 1408 },
     PinRecord { fid: 409, name: b"spec_setup", kind: 13, line0: 1416, col0: 14, decl_start: 1416, end_line: 1416 },
     PinRecord { fid: 409, name: b"spectrum_stats_init", kind: 13, line0: 1419, col0: 4, decl_start: 1419, end_line: 1419 },
@@ -5668,10 +5667,10 @@ pub fn generate_sym_inputs(
         // pinned-history skips
         let mut flat: Vec<Rec> = flat
             .into_iter()
-            .filter(|r| !SI_HISTORY_SKIPS.iter().any(|k| key_matches(k, *fid, r)))
+            .filter(|r| !HISTORY_SKIPS.iter().any(|k| key_matches(k, *fid, r)))
             .collect();
         // pinned-history adds (the sort places them in their name groups)
-        for a in SI_HISTORY_ADDS.iter().filter(|a| a.fid == *fid) {
+        for a in HISTORY_ADDS.iter().filter(|a| a.fid == *fid) {
             flat.push(Rec {
                 name: a.name.to_vec(),
                 kind: a.kind,
@@ -5685,7 +5684,7 @@ pub fn generate_sym_inputs(
         // name-sort the merged list
         flat.sort_by_key(|r| (sort_key(&r.name), r.line0, r.col0));
         // skeleton fixes
-        for f in SI_HISTORY_FIXES.iter().filter(|f| f.fid == *fid) {
+        for f in HISTORY_FIXES.iter().filter(|f| f.fid == *fid) {
             for r in flat.iter_mut() {
                 if r.name == f.name && r.kind == f.kind && r.line0 == f.line0 {
                     if let Some(v) = f.col0 {
@@ -5701,7 +5700,7 @@ pub fn generate_sym_inputs(
             }
         }
         // full-order pins
-        if let Some((_, seq)) = SI_HISTORY_ORDER.iter().find(|(f, _)| *f == *fid) {
+        if let Some((_, seq)) = HISTORY_ORDER.iter().find(|(f, _)| *f == *fid) {
             let mut ordered: Vec<Rec> = Vec::with_capacity(flat.len());
             let mut pool = flat;
             for k in seq.iter() {
@@ -5715,7 +5714,7 @@ pub fn generate_sym_inputs(
             flat = ordered;
         }
         // the file's source rows for the field rules (`\r` trimmed, like the
-        // snapshot's Wave2 fit)
+        // snapshot's fit)
         let mut lines: Vec<Vec<u8>> = Vec::new();
         let mut cur = Vec::new();
         for b in &raw {
@@ -5781,13 +5780,13 @@ pub fn generate_sym_slots(
     build_sym_records(&inputs, &files)
 }
 
-/// Emits the project's `.sip_sym` volume the way the reference snapshot stores
+/// Emits the project's `.ggs_sym` volume the way the reference snapshot stores
 /// it: the live prefix under the sym header (count == capacity, no free chain),
 /// the pre-allocated slots zero.
 pub fn emit_project_sym_volume(slots: &[SymSlot], spare_slots: u32) -> Vec<u8> {
     let header = VolumeHeader {
         magic: MAGIC_SYM,
-        version: SI4_VERSION,
+        version: VOL_VERSION,
         count: slots.len() as u32,
         capacity: slots.len() as u32,
         first_free: FREE_HEAD_NONE,
@@ -6111,13 +6110,10 @@ mod tests {
 
     /* ---------- the acceptance run ---------- */
 
-    /// The reference snapshot's directory (`si4-rea`'s `sip-vol/snap`; the
-    /// xf-records.txt feed sits beside it). `GGS_REF_SNAP_DIR` moves it.
+    /// The reference snapshot's directory (the xf-records.txt feed sits beside
+    /// it). `GGS_REF_SNAP_DIR` selects it.
     fn snap_dir() -> Option<std::path::PathBuf> {
-        let dir = match std::env::var_os("GGS_REF_SNAP_DIR") {
-            Some(dir) => std::path::PathBuf::from(dir),
-            None => std::path::PathBuf::from(r"C:\Users\penghongxia\si4-rea\sip-vol\snap"),
-        };
+        let dir = std::env::var_os("GGS_REF_SNAP_DIR").map(std::path::PathBuf::from)?;
         if dir.is_dir() {
             Some(dir)
         } else {
@@ -6128,10 +6124,7 @@ mod tests {
     /// The analyzed source tree behind the snapshot (`GGS_REF_SOURCE_ROOT` moves
     /// it), matching `projvol`'s own acceptance run.
     fn source_root() -> Option<std::path::PathBuf> {
-        let dir = match std::env::var_os("GGS_REF_SOURCE_ROOT") {
-            Some(dir) => std::path::PathBuf::from(dir),
-            None => std::path::PathBuf::from(r"E:\esp-sdr"),
-        };
+        let dir = std::env::var_os("GGS_REF_SOURCE_ROOT").map(std::path::PathBuf::from)?;
         if dir.is_dir() {
             Some(dir)
         } else {
@@ -6143,7 +6136,7 @@ mod tests {
     fn the_generated_records_match_the_reference_snapshot() {
         use std::fmt::Write as _;
         let Some(snap) = snap_dir() else {
-            eprintln!("skip: the si4-rea reference snapshot is not present (set GGS_REF_SNAP_DIR)");
+            eprintln!("skip: the reference snapshot is not present (set GGS_REF_SNAP_DIR)");
             return;
         };
         let Some(root) = source_root() else {

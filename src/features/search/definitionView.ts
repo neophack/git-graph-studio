@@ -1,6 +1,6 @@
 // The Definition panel page (module 5) — the bottom panel's answer to a click, the
-// whole declaring file as the page (2026-11-23, the si4-rea reconstruction's
-// SPEC-ui-references-definition §2): the file stands as a live read-only view — scrolled
+// whole declaring file as the page (2026-11-23, the owner's direction: the windows read
+// as one coherent set): the file stands as a live read-only view — scrolled
 // to the declaration, the symbol's own line span marked as the selection — not a slice.
 // Files over the 1 MiB+1 ceiling refuse with the same "file too big" note. The body's
 // one click relocates the page — chain browsing: the word under the caret resolves

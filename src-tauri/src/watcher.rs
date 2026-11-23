@@ -469,8 +469,8 @@ mod tests {
         let mut quiet = FsChange::default();
         for noise in [
             ".ggs/analysis/9f2c/symbols.bin",
-            ".ggs/analysis/9f2c/si.db",
-            ".ggs/analysis/9f2c/si.tix",
+            ".ggs/analysis/9f2c/ggs.db",
+            ".ggs/analysis/9f2c/ggs.tix",
             ".ggs/analysis/9f2c/symbols.bin.new",
         ] {
             fold_path(&mut quiet, root, &under(root, noise));

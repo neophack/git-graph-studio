@@ -1,20 +1,13 @@
-//! The reference analysis database (`si4-rea`'s si-lite): its six tables —
-//! dnMod (modules), dnSir (symbols), the call edges, dnSyl (syllable fragments), dnTdr
-//! (type definitions) and dnSirCode (code positions) — serialized byte-for-byte in
-//! si-lite's own flat-file shape, so its tooling (`db_load` / `tix_load` / `dbinfo`)
-//! reads ggs's database back and a delete-and-rebuild regenerates the same bytes.
+//! The analysis database's six tables — modules, symbols, call edges, syllable
+//! fragments, type definitions and code positions — serialized in a fixed flat-file
+//! layout: a little-endian header followed by the six fixed-width record arrays, plus
+//! a sorted syllable index beside it. External tooling that understands the same layout
+//! reads ggs's database back, and a delete-and-rebuild regenerates the same bytes.
 //!
 //! The owner's direction, 2026-11-21: the analyzed folder carries a hidden code-analysis
-//! database generated exactly like the reference implementation's. si-lite recovered
-//! the *algorithms* from the reference binary's behavior (2803 automated tests against
-//! it) and persists its tables through `db_save` — a little-endian header followed
-//! by the six fixed-width record arrays — and `tix_save`, the sorted syllable index.
-//! The reference binary's own `.sip_*` volumes are its memory-image snapshots (written
-//! incrementally against its live heap), a different container entirely; what "exactly
-//! the same" means here is byte-identity with the reference implementation's format.
-//!
-//! Every record's field order and width mirrors si-lite's structs on x64 (no padding:
-//! every field is 4-byte aligned): `Module { char name[260]; int sym_count; }`,
+//! database whose shape is stable across rebuilds. Every record's field order and width
+//! is fixed on x64 (no padding: every field is 4-byte aligned):
+//! `Module { char name[260]; int sym_count; }`,
 //! `Symbol { int id; char name[128]; SymType type; int mod; int line; }`,
 //! `CallEdge { int caller, callee, line; }`, `SylEntry { char frag[64]; int sym; }`,
 //! `TdrRec { char name[128]; SymType type; int mod; int line; }`,
@@ -23,21 +16,22 @@
 //! (the reference tokenizer counts from one); ggs's 0-based rows are shifted on the way
 //! in.
 
-/// `si.db` — the six-table database, `db_save`'s output shape.
-pub const DB_FILE: &str = "si.db";
-/// `si.tix` — the sorted syllable index, `tix_save`'s output shape.
-pub const TIX_FILE: &str = "si.tix";
+/// The six-table database file, written on every full build.
+pub const DB_FILE: &str = "ggs.db";
+/// The sorted syllable index file, written beside the database.
+pub const TIX_FILE: &str = "ggs.tix";
 
-/// `"SILD"` read as a little-endian u32 — si-lite's `DB_MAGIC`.
+/// The database file's magic marker.
 pub const DB_MAGIC: u32 = 0x5349_4C44;
-/// v3: dnSirCode carries the `enc` field (the enclosing function of a reference).
+/// v3: the code-position records carry the `enc` field (the enclosing function of a
+/// reference).
 pub const DB_VERSION: u32 = 3;
 
 const MOD_NAME_CAP: usize = 260;
 const SYM_NAME_CAP: usize = 128;
 const FRAG_CAP: usize = 64;
 
-/* ---------- The si-lite SymType values ---------- */
+/* ---------- The symbol-kind codes ---------- */
 
 pub const SYM_FUNCTION: i32 = 0;
 pub const SYM_PROTOTYPE: i32 = 1;
@@ -50,6 +44,8 @@ pub const SYM_TYPEDEF: i32 = 7;
 pub const SYM_MACRO: i32 = 8;
 pub const SYM_NAMESPACE: i32 = 9;
 pub const SYM_INTERFACE: i32 = 10;
+pub const SYM_MEMBER: i32 = 11;
+pub const SYM_ENUM_MEMBER: i32 = 12;
 pub const SYM_UNKNOWN: i32 = 18;
 
 /* ---------- The tables, as ggs assembles them ---------- */
@@ -109,7 +105,7 @@ pub struct AnaTables {
     pub code: Vec<AnaCode>,
 }
 
-/* ---------- The syllable splitter, ported from si-lite's split_syllables ---------- */
+/* ---------- The syllable splitter ---------- */
 
 /// The identifier fragment rules the fragment browse runs on: separators (`_ - . space`)
 /// split; a digit run stands alone; an uppercase run stops before an Upper-Lower pair
@@ -182,8 +178,8 @@ fn push_fixed_str(out: &mut Vec<u8>, text: &[u8], cap: usize) {
     out.resize(out.len() + (cap - n), 0);
 }
 
-/// The `db_save` bytes: the little-endian header (magic, version, the six counts) and
-/// then each table's records whole, in si-lite's field order.
+/// The database bytes: the little-endian header (magic, version, the six counts) and
+/// then each table's records whole, in the fixed field order.
 pub fn write_db(tables: &AnaTables) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&DB_MAGIC.to_le_bytes());
@@ -234,8 +230,8 @@ pub fn write_db(tables: &AnaTables) -> Vec<u8> {
     out
 }
 
-/// The `tix_save` bytes: the `"TIX1"` header (version, count) and the syllable entries
-/// sorted by `(frag, sym)` — an index, not a heap dump.
+/// The syllable-index bytes: the `"TIX1"` header (version, count) and the syllable
+/// entries sorted by `(frag, sym)` — an index, not a heap dump.
 pub fn write_tix(tables: &AnaTables) -> Vec<u8> {
     let mut sorted = tables.syls.clone();
     sorted.sort_by(|a, b| a.frag.cmp(&b.frag).then(a.sym.cmp(&b.sym)));
@@ -291,8 +287,8 @@ mod tests {
     }
 
     #[test]
-    fn the_db_bytes_mirror_si_lites_record_layout() {
-        // The exact widths si-lite's structs have on x64: header 32, Module 264,
+    fn the_db_bytes_mirror_the_reference_record_layout() {
+        // The exact widths of the reference record layout on x64: header 32, Module 264,
         // Symbol 144, CallEdge 12, SylEntry 68, TdrRec 140, SirCodeRec 20.
         let tables = AnaTables {
             mods: vec![AnaModule {

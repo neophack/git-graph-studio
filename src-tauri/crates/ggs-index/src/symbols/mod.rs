@@ -2,16 +2,15 @@
 //! databases behind Go-to-Definition / Find References / the Symbol Database page, and the
 //! extraction layer. `parse` is the tree-sitter parser (plan M4.1, one `.scm` query per
 //! language behind a `grammar-*` feature); `store` is the compact on-disk store in the
-//! analyzed folder's hidden `.ggs/analysis/` database; `anadb` is the reference analysis
-//! database (`si4-rea`'s si-lite format) written beside it; `projvol` is the project-volume
-//! format (`si4-rea`'s sip-vol container, a different format from `anadb`'s six
-//! tables) byte-exact; `projvol_sig` generates the signature volumes' payload bytes (the
-//! hash bloom behind `projvol`'s undecoded `signature` field, verified against the
-//! snapshot); `symgen` discovers the symbol skeletons from source text (the
-//! `gen_symbols.py` prototype ported: token-stream C/C++ plus Python/Make/HTML/
-//! INI/`.inc` scanners, the reference binary's block ordering, and the incremental-history
+//! analyzed folder's hidden `.ggs/analysis/` database; `anadb` is the six-table analysis
+//! database (`ggs.db` / `ggs.tix`) written beside it; `projvol` is the project-volume
+//! format (a different container from `anadb`'s six tables) byte-exact; `projvol_sig`
+//! generates the signature volumes' payload bytes (the hash bloom behind `projvol`'s
+//! undecoded `signature` field, verified against the snapshot); `symgen` discovers the
+//! symbol skeletons from source text (token-stream C/C++ plus Python/Make/HTML/
+//! INI/`.inc` scanners, the reference block ordering, and the incremental-history
 //! exception tables — its records through `projvol`'s structured rules rebuild the
-//! reference `.sip_sym` byte for byte); `cache` is the in-memory
+//! reference snapshot's symbol volume byte for byte); `cache` is the in-memory
 //! whole-workspace rebuild the window before an index lands is served from; `index` owns
 //! the per-root databases and the reference scan.
 

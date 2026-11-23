@@ -1,54 +1,53 @@
-//! The project-volume writer (`si4-rea`'s sip-vol format): the `.siproj`
-//! file table, the `.sip_sym` symbol table, the `.sip_xf` / `.sip_xr` / `.sip_xc`
-//! signature volumes, the `.sip_xm` parse-order map, the `.sip_xab` / `.sip_xsb`
-//! 16-byte name indexes and their `.sip_xad` / `.sip_xsd` page directories — emitters
-//! whose bytes match the originals, plus the reverse parsers the round-trip acceptance
-//! runs against.
+//! The project-volume writer: the `.ggs_sym` symbol table, the `.ggs_xf` /
+//! `.ggs_xr` / `.ggs_xc` signature volumes, the `.ggs_xm` parse-order map, the
+//! `.ggs_xab` / `.ggs_xsb` 16-byte name indexes and their `.ggs_xad` / `.ggs_xsd`
+//! page directories — emitters whose bytes match the reference snapshots, plus the
+//! reverse parsers the round-trip acceptance runs against. The reference project's
+//! own file-table container is read side only (an acceptance-test input); no such
+//! file is ever emitted, and every file this code may generate carries its own
+//! `.ggs_*` name.
 //!
 //! This is a *second*, independent container beside [`super::anadb`]: `anadb` writes
-//! si-lite's six-table reference database (`si.db` / `si.tix`), a clean whole-file
-//! format; `projvol` writes the reference binary's own fixed-record volumes, the
-//! memory-image format it grows incrementally through the volume module at `0x41A210`
-//! (`si4-rea`'s `SPEC-head.md` / `SPEC-sym.md` / `SPEC-xf-xr.md` / `SPEC-heaps.md`,
-//! reconstructed from Ghidra + IDA). They share no layout and no code.
+//! the six-table analysis database (`ggs.db` / `ggs.tix`), a clean whole-file
+//! format; `projvol` writes fixed-record volumes of the reference layout. They
+//! share no layout and no code.
 //!
-//! Every record type carries the fields the four specs decoded and passes the rest
-//! through as `raw` verbatim bytes, so a decode → encode round-trip never loses one.
-//! The `sym` record additionally *builds* through the structured path
-//! ([`build_sym_records`], the rules of `si4-rea`'s `SPEC-sym-fields.md`): every
-//! field comes off a named rule function, and the residuals no rule pins — the
-//! +108 control-flow stragglers, the five kind-21 stub flags, the mat.cpp ring,
-//! the CSS selector extents, the single-line typedef groups — ride the data-side
-//! exception tables (`*_EXCEPTIONS`, their values read off the reference snapshot,
-//! keyed by file id / row / kind / name). The signature bitfields (the `projvol_sig`
-//! module's jurisdiction), the xab `size` vocabulary and the xad `vm_addr` runs
-//! stay documented raw inputs.
+//! Every record type carries the fields the format analysis decoded and passes the
+//! rest through as `raw` verbatim bytes, so a decode → encode round-trip never loses
+//! one. The `sym` record additionally *builds* through the structured path
+//! ([`build_sym_records`]): every field comes off a named rule function, and the
+//! residuals no rule pins — the +108 control-flow stragglers, the five kind-21 stub
+//! flags, the mat.cpp ring, the CSS selector extents, the single-line typedef
+//! groups — ride the data-side exception tables (`*_EXCEPTIONS`, their values read
+//! off the reference snapshot, keyed by file id / row / kind / name). The signature
+//! bitfields (the `projvol_sig` module's jurisdiction), the xab `size` vocabulary
+//! and the xad `vm_addr` runs stay documented raw inputs.
 //!
 //! Scope notes. The writer covers the *snapshot class*: live slots as a contiguous
 //! prefix, every other slot zero (pre-allocated capacity, no free-chain links in the
 //! reference volumes), which the parsers enforce and return `None` outside of. The
-//! incremental stream protocol (append / LIFO delete / capacity growth clamps,
-//! `SPEC-head.md` §5) belongs to a live volume handle, not to these whole-file
-//! emitters; its shapes are kept here as the constants and [`free_slot_bytes`].
+//! incremental stream protocol (append / LIFO delete / capacity growth clamps)
+//! belongs to a live volume handle, not to these whole-file emitters; its shapes are
+//! kept here as the constants and [`free_slot_bytes`].
 
 /// The header region's whole width: 64 bytes of fields + 448 zero bytes. Record slots
-/// start at `0x200` (every slot address in the original module is
+/// start at `0x200` (every slot address in the reference layout is
 /// `index * recsize + 0x200`).
 pub const HEADER_BLOCK_SIZE: usize = 0x200;
 /// The header's field bytes; the rest of the base block is memset zero.
 pub const HEADER_FIELD_BYTES: usize = 64;
 
-/// The `.data` version constant `0x6696F8` (`dword_6696F8`): every mutation re-stamps
-/// the version to it; a clean snapshot carries it at +4.
-pub const SI4_VERSION: u32 = 0x0400_0096;
+/// The reference format's version stamp: every mutation re-stamps the version to
+/// it; a clean snapshot carries it at +4.
+pub const VOL_VERSION: u32 = 0x0400_0096;
 
-/// `.sip_sym` volume magic.
+/// `.ggs_sym` volume magic.
 pub const MAGIC_SYM: u32 = 0x0000_0715;
-/// `.siproj` volume magic.
-pub const MAGIC_SIPROJ: u32 = 0x0000_0730;
-/// `.sip_xf` / `.sip_xr` / `.sip_xc` volume magic (one value, three volumes).
+/// The reference project's file-table volume magic (read side only).
+pub const MAGIC_FILE_TABLE: u32 = 0x0000_0730;
+/// `.ggs_xf` / `.ggs_xr` / `.ggs_xc` volume magic (one value, three volumes).
 pub const MAGIC_XVOL: u32 = 0x0000_1011;
-/// `.sip_xad` / `.sip_xsd` page-directory magic.
+/// `.ggs_xad` / `.ggs_xsd` page-directory magic.
 pub const MAGIC_XDIR: u32 = 0x0000_1492;
 
 /// The live-record sentinel written as every record's first dword (`0xFFFFFFFD`, -3).
@@ -72,15 +71,15 @@ fn le_u16(bytes: &[u8], at: usize) -> Option<u16> {
 
 /* ---------- the container layer ---------- */
 
-/// The 64-byte volume header (`SPEC-head.md` §2, writer `FUN_0041BEE0`). The store
-/// order in the original is compiler-scheduled; this offset map is the contract.
+/// The 64-byte volume header. The store order in the reference is
+/// compiler-scheduled; this offset map is the contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VolumeHeader {
-    /// +0x00: the volume's format tag (`MAGIC_SYM` / `MAGIC_SIPROJ` / `MAGIC_XVOL`).
+    /// +0x00: the volume's format tag (`MAGIC_SYM` / `MAGIC_FILE_TABLE` / `MAGIC_XVOL`).
     /// The original's open path compares it 16-bit truncated; the written value is
     /// always the full dword.
     pub magic: u32,
-    /// +0x04: format version; mutations re-stamp [`SI4_VERSION`].
+    /// +0x04: format version; mutations re-stamp [`VOL_VERSION`].
     pub version: u32,
     /// +0x08: live record count.
     pub count: u32,
@@ -101,13 +100,13 @@ pub struct VolumeHeader {
 }
 
 impl VolumeHeader {
-    /// The create-path header (`FUN_0041C070`'s create arm): version stamped
-    /// [`SI4_VERSION`], no records, no free chain. `state` is carried 0 — the live
+    /// The create-path header: version stamped
+    /// [`VOL_VERSION`], no records, no free chain. `state` is carried 0 — the live
     /// protocol sets bit 0 while dirty and clears it before the clean-close write.
     pub fn initial(magic: u32, rec_size: u32) -> Self {
         Self {
             magic,
-            version: SI4_VERSION,
+            version: VOL_VERSION,
             count: 0,
             capacity: 0,
             first_free: FREE_HEAD_NONE,
@@ -128,7 +127,7 @@ impl VolumeHeader {
         block[0x10..0x14].copy_from_slice(&self.first_free.to_le_bytes());
         block[0x14..0x18].copy_from_slice(&self.rec_size.to_le_bytes());
         block[0x18..0x1C].copy_from_slice(&self.unk18.to_le_bytes());
-        // The original stores `vol[6] & 1` — one byte, the rest of the dword zero.
+        // The reference stores `vol[6] & 1` — one byte, the rest of the dword zero.
         block[0x1C] = (self.state & 1) as u8;
         block
     }
@@ -198,8 +197,8 @@ pub fn slot_is_zero(slot: &[u8]) -> bool {
 }
 
 /// A freed slot's bytes: the free-chain link in the first dword, the rest zero — the
-/// delete protocol's shape (`FUN_0041C610` pops push `vol[3]` into the slot's first
-/// dword and relink the head; the chain terminates at [`FREE_HEAD_NONE`]).
+/// delete protocol's shape (a delete pushes `vol[3]` into the slot's first
+/// dword and relinks the head; the chain terminates at [`FREE_HEAD_NONE`]).
 pub fn free_slot_bytes(rec_size: usize, next_head: i32) -> Vec<u8> {
     let mut slot = vec![0u8; rec_size];
     slot[..4].copy_from_slice(&next_head.to_le_bytes());
@@ -242,19 +241,19 @@ fn emit_fixed_volume(header: &VolumeHeader, records: &[Vec<u8>], spare_slots: u3
     emit_volume(header, &payloads)
 }
 
-/* ---------- .siproj — the real file table ---------- */
+/* ---------- the file table — the reference project's path table (read side) ---------- */
 
-/// `.siproj` record width.
-pub const SIPROJ_REC_SIZE: usize = 328;
+/// The reference file-table volume's record width.
+pub const FILE_TABLE_REC_SIZE: usize = 328;
 /// The path region is +4..+256 (252 bytes); the name truncates at 251 so the NUL
 /// always lands inside it (`cap - 1`, the same strncpy shape as `anadb`).
-pub const SIPROJ_PATH_MAX: usize = 251;
+pub const FILE_TABLE_PATH_MAX: usize = 251;
 
-/// One project file: the 328-byte record the specs call the *real* file table —
-/// everything the xf decode was expected to yield (path, mtime at scan time, size,
-/// line count, first-symbol id) lives here, not in the signature volumes.
+/// One project file of the reference project's file table: the 328-byte record —
+/// everything the signature volumes leave out (path, mtime at scan time, size,
+/// line count, first-symbol id) lives here.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SiprojSlot {
+pub struct FileTableSlot {
     /// +4: workspace-relative, backslash-separated, NUL-terminated ASCII. Unlike the
     /// sym name there is no length prefix — the path starts right at +4.
     pub path: Vec<u8>,
@@ -279,30 +278,10 @@ pub struct SiprojSlot {
     pub count_b: u32,
 }
 
-impl SiprojSlot {
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = vec![0u8; SIPROJ_REC_SIZE];
-        out[..4].copy_from_slice(&LIVE_SENTINEL.to_le_bytes());
-        let path = &self.path[..self.path.len().min(SIPROJ_PATH_MAX)];
-        out[4..4 + path.len()].copy_from_slice(path);
-        // out[4 + path.len()] stays the NUL; +256..+260 stays zero.
-        out[260..264].copy_from_slice(&self.mtime_low.to_le_bytes());
-        out[264..268].copy_from_slice(&self.mtime_high.to_le_bytes());
-        out[268..272].copy_from_slice(&self.first_symbol.to_le_bytes());
-        out[272..276].copy_from_slice(&self.lines.to_le_bytes());
-        out[276..280].copy_from_slice(&self.aux_id.to_le_bytes());
-        out[280..284].copy_from_slice(&self.aux_id.to_le_bytes());
-        out[284..288].copy_from_slice(&self.size.to_le_bytes());
-        out[288..292].copy_from_slice(&self.count_a.to_le_bytes());
-        out[292..296].copy_from_slice(&self.count_b.to_le_bytes());
-        // +296..+308 stays zero; +308 is the aux id's third copy; +312..+328 zero.
-        out[308..312].copy_from_slice(&self.aux_id.to_le_bytes());
-        out
-    }
-
+impl FileTableSlot {
     /// Decodes one live record; `None` on width, sentinel or path-region violations.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != SIPROJ_REC_SIZE || !slot_is_live(bytes) {
+        if bytes.len() != FILE_TABLE_REC_SIZE || !slot_is_live(bytes) {
             return None;
         }
         let region = &bytes[4..256];
@@ -321,46 +300,36 @@ impl SiprojSlot {
     }
 }
 
-/// A parsed `.siproj` volume.
-pub struct ParsedSiprojVolume {
+/// A parsed file-table volume.
+pub struct ParsedFileTableVolume {
     pub header: VolumeHeader,
-    pub records: Vec<SiprojSlot>,
+    pub records: Vec<FileTableSlot>,
     /// Pre-allocated, never-written slots after the live prefix.
     pub spare_slots: u32,
 }
 
-pub fn parse_siproj_volume(bytes: &[u8]) -> Option<ParsedSiprojVolume> {
+pub fn parse_file_table_volume(bytes: &[u8]) -> Option<ParsedFileTableVolume> {
     let volume = parse_volume(bytes)?;
-    if volume.header.magic != MAGIC_SIPROJ || volume.header.rec_size as usize != SIPROJ_REC_SIZE {
+    if volume.header.magic != MAGIC_FILE_TABLE || volume.header.rec_size as usize != FILE_TABLE_REC_SIZE {
         return None;
     }
-    let (records, spare_slots) = take_live_prefix(&volume.slots, SiprojSlot::decode)?;
-    Some(ParsedSiprojVolume {
+    let (records, spare_slots) = take_live_prefix(&volume.slots, FileTableSlot::decode)?;
+    Some(ParsedFileTableVolume {
         header: volume.header,
         records,
         spare_slots,
     })
 }
 
-pub fn emit_siproj_volume(
-    header: &VolumeHeader,
-    records: &[SiprojSlot],
-    spare_slots: u32,
-) -> Vec<u8> {
-    debug_assert_eq!(header.rec_size as usize, SIPROJ_REC_SIZE);
-    let encoded: Vec<Vec<u8>> = records.iter().map(SiprojSlot::encode).collect();
-    emit_fixed_volume(header, &encoded, spare_slots)
-}
+/* ---------- .ggs_sym — the symbol table ---------- */
 
-/* ---------- .sip_sym — the symbol table ---------- */
-
-/// `.sip_sym` record width.
+/// `.ggs_sym` record width.
 pub const SYM_REC_SIZE: usize = 180;
 /// The inline name's capacity: one length byte + up to 79 name bytes fill +4..+84.
 /// There is no name heap — the name rides the slot.
 pub const SYM_NAME_MAX: usize = 79;
 
-/// One symbol: the 180-byte record `SPEC-sym.md` §3 maps. Every address is 0-based
+/// One symbol: the 180-byte record of the reference layout. Every address is 0-based
 /// against the declaring file; the `-2` sentinels are [`FREE_HEAD_NONE`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SymSlot {
@@ -372,21 +341,21 @@ pub struct SymSlot {
     pub col0: u32,
     /// +92: the declaration's opener row (differs from `line0` on multi-line headers).
     pub decl_start: u32,
-    /// +96: the type/directive token's column (`SPEC-sym-fields` §10: the decl-start
+    /// +96: the type/directive token's column (the decl-start
     /// row's first token after the `{static, const, extern}`/string-literal lead,
     /// falling back to the name column on control-keyword lines; most other kinds
     /// carry the name column, C's macro/typedef kinds 0).
     pub token_col: u32,
     /// +100: the declaration's last row, inclusive.
     pub decl_end_line: u32,
-    /// +104: the declaration's end column (`SPEC-sym-fields` §9: the terminator
+    /// +104: the declaration's end column (the terminator
     /// scan's own `,`/`;`, the C function's brace-position constants and single-line
     /// brace match, the tag openers' 1/2/`col+1`, the macros' 4096, the Python
     /// assignment's `=` head; the CSS selector extent and the single-line typedef
     /// group are the two shapes the table pins).
     pub decl_end_col: u32,
-    /// +108: the packed function-body word `X<<16 | B<<8 | A` (`SPEC-sym-fields` §2:
-    /// effective body lines, a zero byte, the control-flow keyword count; nonzero
+    /// +108: the packed function-body word `X<<16 | B<<8 | A` (effective body
+    /// lines, a zero byte, the control-flow keyword count; nonzero
     /// only on function-kind records). The rules' stragglers ride
     /// [`PACKED108_EXCEPTIONS`]; decode carries it verbatim.
     pub raw108: u32,
@@ -395,31 +364,30 @@ pub struct SymSlot {
     /// +116: carried verbatim (observed 0 throughout the reference volume).
     pub raw116: u32,
     /// +120: the same-file scope chain's previous record in storage order
-    /// (`SPEC-sym-fields` §4); a chain head is [`FREE_HEAD_NONE`]. The mat.cpp ring
+    /// (the storage-order chain); a chain head is [`FREE_HEAD_NONE`]. The mat.cpp ring
     /// entries ride [`PREV_EXCEPTIONS`].
     pub prev: i32,
     /// +124: the owning scope's symbol id (class / struct / namespace / module /
-    /// class stub / the shadow rows' typedef; `SPEC-sym-fields` §3); file scope is
+    /// class stub / the shadow rows' typedef); file scope is
     /// [`FREE_HEAD_NONE`].
     pub scope: i32,
-    /// +128: the scope's last child in storage order (`SPEC-sym-fields` §5 — a
+    /// +128: the scope's last child in storage order (a
     /// typedef's linked id is its shadow row); none is [`FREE_HEAD_NONE`]. The one
     /// ring entry rides [`LINKED_EXCEPTIONS`].
     pub related: i32,
-    /// +132: the file's id — an index into the `.siproj` table.
+    /// +132: the file's id — an index into the file table.
     pub file_id: u32,
     /// +136: carried verbatim (observed 0 throughout the reference volume).
     pub raw136: u32,
-    /// +140 low half: the symbol kind (the reference palette's own numbering; see
-    /// `SPEC-sym.md` §4).
+    /// +140 low half: the symbol kind (the reference palette's own numbering).
     pub kind: u16,
-    /// +140 high half: the flags (`SPEC-sym-fields` §8: the 256 shadow/anon/import
+    /// +140 high half: the flags (the 256 shadow/anon/import
     /// family, the 1024 Python data members, the cross-kind or within-kind
     /// same-name ordinals; the five kind-21 stub stragglers ride
     /// [`FLAGS_EXCEPTIONS`]).
     pub flags: u16,
     /// +144: the name tag = `language id << 8 | parameter item count`
-    /// (`SPEC-sym-fields` §1 — the language id off the file's extension/kind,
+    /// (the language id off the file's extension/kind,
     /// the signature's classified parameter items for the function kinds, 0
     /// otherwise). Decode carries it verbatim.
     pub name_tag: u32,
@@ -487,7 +455,7 @@ impl SymSlot {
     }
 }
 
-/// A parsed `.sip_sym` volume.
+/// A parsed `.ggs_sym` volume.
 pub struct ParsedSymVolume {
     pub header: VolumeHeader,
     pub records: Vec<SymSlot>,
@@ -515,7 +483,7 @@ pub fn emit_sym_volume(header: &VolumeHeader, records: &[SymSlot], spare_slots: 
     emit_fixed_volume(header, &encoded, spare_slots)
 }
 
-/* ---------- .sip_xf / .sip_xr / .sip_xc — signature volumes ---------- */
+/* ---------- .ggs_xf / .ggs_xr / .ggs_xc — signature volumes ---------- */
 
 /// The x-volumes' record width.
 pub const XVOL_REC_SIZE: usize = 2024;
@@ -527,10 +495,10 @@ pub const XVOL_SIG_LEN: usize = 2004;
 /// is inference — the hashed items live only behind the hash function.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct XVolSlot {
-    /// +4: the per-file event count — nonzero only in `.sip_xr` (never 0 there);
-    /// `.sip_xf` / `.sip_xc` carry 0.
+    /// +4: the per-file event count — nonzero only in `.ggs_xr` (never 0 there);
+    /// `.ggs_xf` / `.ggs_xc` carry 0.
     pub event_count: u32,
-    /// +8: the file id into the `.siproj` table. The slot order is *not* the file
+    /// +8: the file id into the file table. The slot order is *not* the file
     /// order — slot p holds file `w2[p]`, and the writer reorders slots between writes; this
     /// id is the only stable key.
     pub file_id: u32,
@@ -589,7 +557,7 @@ pub fn emit_xvol_volume(header: &VolumeHeader, records: &[XVolSlot], spare_slots
     emit_fixed_volume(header, &encoded, spare_slots)
 }
 
-/* ---------- .sip_xm — the parse-order map ---------- */
+/* ---------- .ggs_xm — the parse-order map ---------- */
 
 /// Emits the bare `count * u32` array: no header, `xm[k]` = the file id of the k-th
 /// parsed file (a permutation of the file table; slot order is not stable across
@@ -614,7 +582,7 @@ pub fn parse_xm(bytes: &[u8]) -> Option<Vec<u32>> {
     Some(out)
 }
 
-/* ---------- .sip_xab / .sip_xsb — the 16-byte name indexes ---------- */
+/* ---------- .ggs_xab / .ggs_xsb — the 16-byte name indexes ---------- */
 
 /// The index volumes' page size: exact page multiples, 256 records per page, no
 /// per-page header.
@@ -624,7 +592,7 @@ pub const INDEX_REC_SIZE: usize = 16;
 /// Records per [`INDEX_PAGE_SIZE`] page.
 pub const INDEX_RECS_PER_PAGE: usize = INDEX_PAGE_SIZE / INDEX_REC_SIZE;
 
-/// One index record — `.sip_xsb` carries one per symbol, `.sip_xab` one per matching
+/// One index record — `.ggs_xsb` carries one per symbol, `.ggs_xab` one per matching
 /// word prefix (plus member records keyed under the owning struct's name head). The
 /// `aux`/`kind` fields mirror the sym slot's bytes so filtered lookups never re-read
 /// it.
@@ -701,7 +669,7 @@ pub fn parse_index_volume(bytes: &[u8]) -> Option<Vec<IndexRecord>> {
         .collect()
 }
 
-/* ---------- .sip_xad / .sip_xsd — the page directories ---------- */
+/* ---------- .ggs_xad / .ggs_xsd — the page directories ---------- */
 
 /// One directory entry's stride.
 pub const XDIR_ENTRY_STRIDE: usize = 40;
@@ -736,7 +704,7 @@ pub struct XdirEntry {
     // +0x10, +0x20, +0x24: zero in the reference volumes; emitted zero.
 }
 
-/// A parsed `.sip_xad` / `.sip_xsd`: the header fields, one entry per used page, and
+/// A parsed `.ggs_xad` / `.ggs_xsd`: the header fields, one entry per used page, and
 /// the footer carried whole.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct XdirVolume {
@@ -766,7 +734,7 @@ impl XdirVolume {
         let mut out =
             Vec::with_capacity(XDIR_ENTRIES_AT + n * XDIR_ENTRY_STRIDE + XDIR_FOOTER_BYTES);
         out.extend_from_slice(&MAGIC_XDIR.to_le_bytes());
-        out.extend_from_slice(&SI4_VERSION.to_le_bytes());
+        out.extend_from_slice(&VOL_VERSION.to_le_bytes());
         out.extend_from_slice(&self.bucket_space.to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes());
         out.resize(0x88, 0);
@@ -871,20 +839,19 @@ impl XdirVolume {
 
 
 /* =====================================================================
- * Structured record construction — the field rules of `si4-rea`'s
- * `SPEC-sym-fields.md` (the Wave2 pin-down, validated against all 4,280
- * live records of the reference snapshot). Each field is computed by one
- * named rule function; the residuals no rule pins — +108's control-flow
- * count (80.6% precise), its 13+2 X/B stragglers, the five kind-21 stub
- * flags, the mat.cpp namespace ring, the CSS selector extents and the
- * single-line typedef groups — ride the data-side exception tables below,
- * their values read off the reference snapshot (each table's header says
- * what the residual is). A decode → structured record → emit pass is
+ * Structured record construction — the structured field rules (validated
+ * against all 4,280 live records of the reference snapshot). Each field is
+ * computed by one named rule function; the residuals no rule pins — +108's
+ * control-flow count (80.6% precise), its 13+2 X/B stragglers, the five
+ * kind-21 stub flags, the mat.cpp namespace ring, the CSS selector extents
+ * and the single-line typedef groups — ride the data-side exception tables
+ * below, their values read off the reference snapshot (each table's header
+ * says what the residual is). A decode → structured record → emit pass is
  * therefore byte-exact, and a writer fed by its own parser only has to
  * satisfy the same rules.
  * ===================================================================== */
 
-/// One exception-table entry: the record key (`.siproj` file id, 0-based name row,
+/// One exception-table entry: the record key (file-table id, 0-based name row,
 /// kind, inline name) and the field value the snapshot carries. Link values store
 /// the raw i32 bit pattern (`0xFFFF_FFFE` = [`FREE_HEAD_NONE`]).
 pub type ExcEntry = (u32, u32, u16, &'static [u8], u32);
@@ -927,8 +894,8 @@ fn is_ident(t: &[u8]) -> bool {
     ident_len(t) == Some(t.len())
 }
 
-/// Erases quoted literals, blanking each with one space (`SPEC-sym-fields` §2.1's
-/// string-only row test).
+/// Erases quoted literals, blanking each with one space (the string-only row
+/// test).
 fn erase_strings(s: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
@@ -957,7 +924,7 @@ fn erase_strings(s: &[u8]) -> Vec<u8> {
 }
 
 /// Strips one row's comments; `state` carries an open `/*` across rows (the
-/// caller's block-comment scan owns it, `SPEC-sym-fields` §2.1's per-row form).
+/// caller's block-comment scan owns it, the per-row form).
 fn strip_comments(s: &[u8], state: &mut bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
@@ -1030,7 +997,7 @@ fn brace_row(line0: u32, end_line: u32, lines: &[&[u8]]) -> Option<usize> {
         .map(|k| k as usize)
 }
 
-/// The body's effective-line count (`SPEC-sym-fields` §2.1): non-blank, not a
+/// The body's effective-line count: non-blank, not a
 /// preprocessor row, a block comment run counts once, a string-literal-only row
 /// does not count.
 fn effective_body_lines(body: &[&[u8]]) -> u32 {
@@ -1062,7 +1029,7 @@ fn effective_body_lines(body: &[&[u8]]) -> u32 {
     n
 }
 
-/// The control-flow keyword count (`SPEC-sym-fields` §2.2): `\b(if|for|while|switch|do)\b`
+/// The control-flow keyword count: `\b(if|for|while|switch|do)\b`
 /// over the body rows, preprocessor rows skipped, same-line comments stripped.
 fn control_flow_count(body: &[&[u8]]) -> u32 {
     const CTL: [&[u8]; 5] = [b"if", b"for", b"while", b"switch", b"do"];
@@ -1095,7 +1062,7 @@ fn control_flow_count(body: &[&[u8]]) -> u32 {
 
 /* ---------- +144: the name tag = language id << 8 | parameter item count ---------- */
 
-/// The internal language id for a path + kind (`SPEC-sym-fields` §1.1; the
+/// The internal language id for a path + kind (the
 /// reference snapshot exercises exactly these seven values).
 pub fn lang_id(path: &[u8], kind: u16) -> u32 {
     let base = path.rsplit(|&b| b == b'\\').next().unwrap_or(path);
@@ -1128,7 +1095,7 @@ pub fn lang_id(path: &[u8], kind: u16) -> u32 {
     3
 }
 
-/// The declaration's parameter text list (`SPEC-sym-fields` §1.2): the name's first
+/// The declaration's parameter text list: the name's first
 /// `(` to its partner, split on top-level commas, over a ten-row window. The
 /// `operator()` spelling skips its empty pair.
 fn signature_params(col: u32, line0: u32, lines: &[&[u8]]) -> Option<Vec<Vec<u8>>> {
@@ -1201,7 +1168,7 @@ fn signature_params(col: u32, line0: u32, lines: &[&[u8]]) -> Option<Vec<Vec<u8>
     Some(segs)
 }
 
-/// §1.2's per-parameter classifier verdicts.
+/// The per-parameter classifier verdicts.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ParamVerdict {
     Entry,
@@ -1306,7 +1273,7 @@ const KW: &[&[u8]] = &[
     b"ptrdiff_t",
 ];
 
-/// §1.2's per-parameter classifier: entry / no-entry / skip / kill / vararg.
+/// The per-parameter classifier: entry / no-entry / skip / kill / vararg.
 fn tok_param(p: &[u8]) -> ParamVerdict {
     let mut p = p;
     if let Some(eq) = (0..p.len()).find(|&i| p[i] == b'=' && p.get(i + 1) != Some(&b'=')) {
@@ -1369,7 +1336,7 @@ fn tok_param(p: &[u8]) -> ParamVerdict {
     ParamVerdict::NoEntry
 }
 
-/// The +144 tag's low byte (`SPEC-sym-fields` §1): the signature's parameter item
+/// The +144 tag's low byte: the signature's parameter item
 /// count for the C function kinds and the JavaScript function kind (a plain
 /// top-level comma split), 0 for everything else. A `#define` counts its top-level
 /// items; `...` in a C signature answers the varargs 255.
@@ -1409,7 +1376,7 @@ pub fn param_count(lang: u32, kind: u16, col: u32, line0: u32, lines: &[&[u8]]) 
 
 /* ---------- +108: the packed word = effective lines << 16 | 0 << 8 | control flow ---------- */
 
-/// `SPEC-sym-fields` §2: `X<<16 | B<<8 | A` over the function body (`{` row through
+/// `X<<16 | B<<8 | A` over the function body (`{` row through
 /// the end row). B is 0 by the rule; its two snapshot stragglers ride the table.
 pub fn packed_108(kind: u16, line0: u32, end_line: u32, lines: &[&[u8]]) -> u32 {
     if !matches!(kind, 0 | 11 | 13) {
@@ -1524,7 +1491,7 @@ fn matching_brace(line: &[u8], at: usize) -> Option<usize> {
 
 const TAG_KEYWORDS: &[&[u8]] = &[b"struct", b"union", b"enum", b"class"];
 
-/// `SPEC-sym-fields` §9, the declaration end column. `None` marks the two extents
+/// The declaration end column. `None` marks the two extents
 /// no rule pins — the CSS selector's group extent and the single-line typedef
 /// group — which the exception table answers. Everything else is the rule: the
 /// object macros' 4096 constant, the C member function's brace-position constants
@@ -1625,7 +1592,7 @@ pub fn decl_end_col(
 const CONTROL_KEYWORDS: &[&[u8]] = &[b"if", b"for", b"while", b"switch", b"do", b"return", b"else"];
 const LEAD_QUALIFIERS: &[&[u8]] = &[b"static", b"const", b"extern"];
 
-/// `SPEC-sym-fields` §10, the type/directive token column: on the decl-start row,
+/// The type/directive token column: on the decl-start row,
 /// after skipping leading `{static, const, extern}` and a string literal
 /// (`extern "C"`), the first token's column; a line that opens with a control
 /// keyword or the symbol's own name (a macro-call fake prototype) falls back to
@@ -1698,11 +1665,11 @@ pub fn token_col(kind: u16, lang: u32, name: &[u8], col: u32, decl_start: u32, l
 
 /* ---------- the exception tables (data-side pinned residuals) ---------- */
 
-/// +108 records whose X/A/B the §2 rules miss: the 13 X stragglers (limits_command's
+/// +108 records whose X/A/B the rules miss: the 13 X stragglers (limits_command's
 /// mixed string continuations, receiver.c handle_command, ring_capture.c ×2, rx_lo.h —
 /// suspected statement-level scanning or macro expansion quirks), the two B=4/12
-/// records, and the control-flow counts outside §2.2's 80.6% precision (the
-/// else/continue attribution swings per sample; `SPEC-sym-fields` §12.1–12.3).
+/// records, and the control-flow counts outside the rule's 80.6% precision (the
+/// else/continue attribution swings per sample).
 /// Values read off the reference snapshot, keyed (file id, row, kind, name).
 const PACKED108_EXCEPTIONS: &[ExcEntry] = &[
     (3, 156, 0, b"draw_3d_image_task", 2424838),
@@ -1920,16 +1887,16 @@ const PACKED108_EXCEPTIONS: &[ExcEntry] = &[
     (477, 274, 0, b"main", 0),
 ];
 
-/// +104 records whose extent the §9 rules do not pin: the 44 CSS selector rows
+/// +104 records whose extent the end-column rules do not pin: the 44 CSS selector rows
 /// (the synthesized name's group extent needs the CSS tokenizer; typcol = the
 /// group's first selector start for the six grouped ones, answered by the
 /// TYPCOL table), the 25 single-line typedef groups (the `} NAME;` extent is the
-/// one `endcol` shape the §9 rules cannot read off the row), and the rule's
+/// one `endcol` shape the rules cannot read off the row), and the rule's
 /// documented stragglers — the two `inline` member declarations (5), the two
 /// `.inc` multi-line macro continuations (2), the two REG_WRITE macro-call fake
 /// prototypes (2), the two `RING_HOT`-prefixed definitions (2), the two Python
 /// multi-target assignments (2), the two `poll`-style minified rows and their
-/// kind-mates. `SPEC-sym-fields` §12 does not pin these; values from the snapshot.
+/// kind-mates. No rule pins these; values from the snapshot.
 const ENDCOL_EXCEPTIONS: &[ExcEntry] = &[
     (280, 47, 2, b"Rect", 5),
     (280, 219, 11, b"operator()", 5),
@@ -2012,7 +1979,7 @@ const ENDCOL_EXCEPTIONS: &[ExcEntry] = &[
     (477, 33, 17, b"s\x02port", 19),
 ];
 
-/// +96 records whose token column the §10 rules do not pin: the six CSS selectors
+/// +96 records whose token column the token-column rules do not pin: the six CSS selectors
 /// sitting behind another selector in a comma group (`typcol` = the group's first
 /// selector's start column). Values from the snapshot.
 const TYPCOL_EXCEPTIONS: &[ExcEntry] = &[
@@ -2024,10 +1991,10 @@ const TYPCOL_EXCEPTIONS: &[ExcEntry] = &[
     (444, 5, 43, b"select :focus - visible", 1299),
 ];
 
-/// The five kind-21 class-implementation stubs whose flags §8 leaves open
-/// (ekf.cpp's 2nd/3rd `ekf` stub and mat.cpp's three `Mat` stubs — the §8 guess
-/// "same-name K11 row count + stub ordinal" fits ekf's first stub and Rect but
-/// not these; `SPEC-sym-fields` §12.5). Values from the snapshot.
+/// The five kind-21 class-implementation stubs whose flags the flag rules leave
+/// open (ekf.cpp's 2nd/3rd `ekf` stub and mat.cpp's three `Mat` stubs — the
+/// guess "same-name K11 row count + stub ordinal" fits ekf's first stub and Rect
+/// but not these). Values from the snapshot.
 const FLAGS_EXCEPTIONS: &[ExcEntry] = &[
     (217, 277, 21, b"ekf", 1),
     (217, 303, 21, b"ekf", 2),
@@ -2036,16 +2003,16 @@ const FLAGS_EXCEPTIONS: &[ExcEntry] = &[
     (281, 56, 21, b"Mat", 7),
 ];
 
-/// +120 ring entries (SPEC-sym-fields §12.4): mat.cpp's `dspm` namespace child
+/// +120 ring entries: mat.cpp's `dspm` namespace child
 /// chain closes a ring — the first `Mat` stub's prev is the last `operator>>` and
 /// the first `operator*` starts a fresh -2 head. Values from the snapshot; a
-/// writer that re-emits its own records ignores the ring (§4).
+/// writer that re-emits its own records ignores the ring.
 const PREV_EXCEPTIONS: &[ExcEntry] = &[
     (281, 33, 21, b"Mat", 1938),
     (281, 932, 0, b"operator*", 0xFFFF_FFFE),
 ];
 
-/// +128's one ring entry (SPEC-sym-fields §12.4): `dspm`'s linked id stops at the
+/// +128's one ring entry: `dspm`'s linked id stops at the
 /// third `Mat` stub instead of its last child. Value from the snapshot.
 const LINKED_EXCEPTIONS: &[ExcEntry] = &[
     (281, 31, 29, b"dspm", 1878),
@@ -2055,14 +2022,14 @@ const LINKED_EXCEPTIONS: &[ExcEntry] = &[
 /* ---------- the relational rules: +124 scope, +120 prev, +128 linked, +140 flags ---------- */
 
 /// What one symbol's structured construction needs beyond the record itself: the
-/// parser's own skeleton (`SPEC-sym-fields` §3's record vocabulary — the name, the
+/// parser's own skeleton (the record vocabulary — the name, the
 /// declaring file, the kind, and the declaration's row/column anchors). Everything
 /// else on the record is derived.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SymInput {
     /// The inline name (≤ 79 bytes; `name_tag`'s and the signatures' subject).
     pub name: Vec<u8>,
-    /// The declaring file's `.siproj` id.
+    /// The declaring file's file-table id.
     pub file_id: u32,
     /// The symbol kind (the +140 low half).
     pub kind: u16,
@@ -2078,20 +2045,20 @@ pub struct SymInput {
 
 /// The declaring file's facts the rules scan.
 pub struct SymFileSource<'a> {
-    /// The file's `.siproj` path (backslash-separated; the language id reads it).
+    /// The file's file-table path (backslash-separated; the language id reads it).
     pub path: &'a str,
     /// The file's source rows, 0-based, terminators stripped.
     pub lines: &'a [&'a [u8]],
 }
 
-/// The kinds that may carry a symbol's scope (`SPEC-sym-fields` §3: Structure,
+/// The kinds that may carry a symbol's scope (Structure,
 /// Union, Enumeration, the typedef shadow's parent, Class, the class-implementation
 /// stub, Module/namespace).
 const fn is_parent_kind(kind: u16) -> bool {
     matches!(kind, 2 | 3 | 7 | 10 | 21 | 29)
 }
 
-/// The innermost enclosing composite of record `i` (§3): the parent-capable record
+/// The innermost enclosing composite of record `i`: the parent-capable record
 /// of the same file before it whose `[decl_start..decl_end_line]` span covers the
 /// record's name row — the latest such id wins (inner composites are emitted after
 /// their containers).
@@ -2109,7 +2076,7 @@ fn innermost_parent(inputs: &[SymInput], i: usize) -> Option<usize> {
     best
 }
 
-/// The cross-record relational fields (`SPEC-sym-fields` §3/§4/§5/§8): +124 scope,
+/// The cross-record relational fields: +124 scope,
 /// +120 prev, +128 linked and the +140 flags — all computed over the skeletons in
 /// storage order, with the ring and stub-flag residuals carried by the exception
 /// tables.
@@ -2120,7 +2087,7 @@ pub struct SymGraph {
     flags: Vec<u16>,
 }
 
-/// The +140 flag ordinal's kind set (`SPEC-sym-fields` §8: the same
+/// The +140 flag ordinal's kind set (the same
 /// (file, case-folded name) cross-kind group, ordered by row/column).
 const ORDINAL_KINDS: [u16; 9] = [0, 1, 5, 6, 12, 13, 16, 53, 43];
 
@@ -2129,7 +2096,7 @@ impl SymGraph {
     pub fn build(inputs: &[SymInput], files: &[SymFileSource<'_>]) -> Self {
         let n = inputs.len();
 
-        // +124 scope (§3): the innermost enclosing composite; the typedef row is
+        // +124 scope: the innermost enclosing composite; the typedef row is
         // never a container and its shadow row's scope is the typedef itself; a
         // kind-12 enum constant belongs to a named enum tag unless it is the
         // post-typedef rescan copy or the tag is anonymous.
@@ -2174,7 +2141,7 @@ impl SymGraph {
             };
         }
 
-        // +120 prev (§4): the storage-order previous record of the same file and
+        // +120 prev: the storage-order previous record of the same file and
         // scope; the mat.cpp ring rides PREV_EXCEPTIONS.
         let mut prev = vec![FREE_HEAD_NONE; n];
         for i in 0..n {
@@ -2186,7 +2153,7 @@ impl SymGraph {
             }
         }
 
-        // +128 linked (§5): the storage-order last record whose scope is this id;
+        // +128 linked: the storage-order last record whose scope is this id;
         // the dspm ring entry rides LINKED_EXCEPTIONS.
         let mut linked = vec![FREE_HEAD_NONE; n];
         for (j, s) in scope.iter().enumerate() {
@@ -2196,7 +2163,7 @@ impl SymGraph {
             }
         }
 
-        // +140 flags (§8)
+        // +140 flags
         let mut flags = vec![0u16; n];
         // the cross-kind ordinal groups, ordered by (row, column)
         let mut groups: std::collections::HashMap<(u32, Vec<u8>), Vec<usize>> =
@@ -2230,7 +2197,7 @@ impl SymGraph {
                 1024
             } else if r.kind == 12 {
                 // a file-scope constant with a same-name in-group 256 twin is the
-                // enum rescan copy (§6/§8)
+                // enum rescan copy
                 let twin = inputs.iter().enumerate().any(|(j, q)| {
                     q.file_id == r.file_id
                         && q.kind == 12
@@ -2256,7 +2223,7 @@ impl SymGraph {
             };
         }
 
-        // the data-side pinned residuals (each table's header names its §12 item)
+        // the data-side pinned residuals (each table's header names its residual)
         for (field, table) in [
             (
                 &mut prev as &mut Vec<i32>,
@@ -2396,8 +2363,8 @@ pub fn build_sym_records(inputs: &[SymInput], files: &[SymFileSource<'_>]) -> Ve
 
 /* ---------- the other records' named construction ---------- */
 
-/// The project volume's line count (`.siproj` +272): the newline count plus a final
-/// line that lacks its newline (`SPEC-xf-xr` §4, verified 478/478 against the snapshot).
+/// The project volume's line count (the file table's +272): the newline count plus a
+/// final line that lacks its newline (verified 478/478 against the snapshot).
 pub fn count_lines(bytes: &[u8]) -> u32 {
     let nl = bytes.iter().filter(|&&b| b == b'\n').count() as u32;
     if !bytes.is_empty() && !bytes.ends_with(b"\n") {
@@ -2407,7 +2374,7 @@ pub fn count_lines(bytes: &[u8]) -> u32 {
     }
 }
 
-/// The FILETIME halves of a `SystemTime` nanosecond reading (`.siproj` +260/+264):
+/// The FILETIME halves of a `SystemTime` nanosecond reading (the file table's +260/+264):
 /// 100 ns ticks since 1601-01-01, the Windows epoch 11 644 473 600 s ahead.
 pub fn filetime_from_unix_nanos(unix_nanos: u128) -> (u32, u32) {
     let ticks = unix_nanos / 100 + 116_444_736_000_000_000;
@@ -2416,7 +2383,7 @@ pub fn filetime_from_unix_nanos(unix_nanos: u128) -> (u32, u32) {
 
 impl XVolSlot {
     /// Named construction: the event count and file id are facts (the xr event
-    /// count is the only nonzero one, `SPEC-xf-xr` §3); the signature bitfield
+    /// count is the only nonzero one); the signature bitfield
     /// stays the signature module's raw vocabulary here.
     pub fn from_facts(event_count: u32, file_id: u32, signature: [u8; XVOL_SIG_LEN]) -> Self {
         Self {
@@ -2428,7 +2395,7 @@ impl XVolSlot {
 }
 
 impl IndexRecord {
-    /// The index record mirroring a sym slot (`SPEC-heaps` §1/§5: byte 2 = the sym
+    /// The index record mirroring a sym slot (byte 2 = the sym
     /// slot's 0x70, byte 3 = its kind byte, the u16 pair = its 0x6c/0x6e — verified
     /// 13115/13115 on the reference snapshot). `key` is the indexed word head (the
     /// xsb folds the name's head lowercase, the xab keeps it; the scope-chain
@@ -2446,8 +2413,7 @@ impl IndexRecord {
         }
     }
 
-    /// The xsb key: the symbol name's first four bytes ASCII-folded, NUL padded
-    /// (`SPEC-heaps` §1).
+    /// The xsb key: the symbol name's first four bytes ASCII-folded, NUL padded.
     pub fn xsb_key(name: &[u8]) -> [u8; 4] {
         let mut key = [0u8; 4];
         for (k, b) in name.iter().take(4).enumerate() {
@@ -2458,11 +2424,11 @@ impl IndexRecord {
 }
 
 impl XdirEntry {
-    /// The directory entry for one index page (`SPEC-heaps` §4): the anchor copy is
+    /// The directory entry for one index page: the anchor copy is
     /// the page's first record and the offset its byte offset (both rules verified
-    /// 74/74 and 24/24 against the snapshot); `bucket` (hashes key+position, §6.4)
-    /// and `vm_addr` (the volume's segmented-linear allocator state, COMPARISON-REPORT
-    /// §3.5) are allocation facts carried in as inputs.
+    /// 74/74 and 24/24 against the snapshot); `bucket` (hashes key+position)
+    /// and `vm_addr` (the volume's segmented-linear allocator state)
+    /// are allocation facts carried in as inputs.
     pub fn from_page(page: usize, anchor: IndexRecord, bucket: u32, vm_addr: u32) -> Self {
         Self {
             record: anchor,
@@ -2480,15 +2446,11 @@ mod tests {
 
     /* ---------- the reference snapshot ---------- */
 
-    /// The reference volume snapshot: `si4-rea`'s `sip-vol/snap`, ten volumes of one
-    /// reference project (`Untitled Project2`). Never written to — read only, the
-    /// acceptance baseline. `GGS_REF_SNAP_DIR` moves it; the default is the
-    /// authoring machine's path.
+    /// The reference volume snapshot, ten volumes of one reference project
+    /// (`Untitled Project2`). Never written to — read only, the acceptance
+    /// baseline. `GGS_REF_SNAP_DIR` selects it.
     fn snap_dir() -> Option<PathBuf> {
-        let dir = match std::env::var_os("GGS_REF_SNAP_DIR") {
-            Some(dir) => PathBuf::from(dir),
-            None => PathBuf::from(r"C:\Users\penghongxia\si4-rea\sip-vol\snap"),
-        };
+        let dir = std::env::var_os("GGS_REF_SNAP_DIR").map(PathBuf::from)?;
         if dir.is_dir() {
             Some(dir)
         } else {
@@ -2498,8 +2460,8 @@ mod tests {
 
     fn skip_note() {
         eprintln!(
-            "skip: the si4-rea reference snapshot is not present \
-             (set GGS_REF_SNAP_DIR to its sip-vol/snap directory)"
+            "skip: the reference snapshot is not present \
+             (set GGS_REF_SNAP_DIR to the snapshot directory)"
         );
     }
 
@@ -2512,10 +2474,10 @@ mod tests {
 
     #[test]
     fn the_header_block_carries_the_documented_write_order() {
-        // SPEC-head.md §2's observed sym header bytes, verbatim.
+        // The observed sym header bytes, verbatim.
         let header = VolumeHeader {
             magic: MAGIC_SYM,
-            version: SI4_VERSION,
+            version: VOL_VERSION,
             count: 0x10B8,
             capacity: 0x10B8,
             first_free: FREE_HEAD_NONE,
@@ -2548,7 +2510,7 @@ mod tests {
     fn the_container_splits_and_reassembles_slots() {
         let header = VolumeHeader {
             magic: MAGIC_XVOL,
-            version: SI4_VERSION,
+            version: VOL_VERSION,
             count: 1,
             capacity: 3,
             first_free: 1,
@@ -2588,59 +2550,8 @@ mod tests {
     /* ---------- the record codecs ---------- */
 
     #[test]
-    fn the_siproj_record_encodes_the_documented_layout() {
-        // The reference volume's record 0, byte for byte.
-        let record = SiprojSlot {
-            path: b"CMakeLists.txt".to_vec(),
-            mtime_low: 0x18B4_470F,
-            mtime_high: 0x01DD_547F,
-            first_symbol: 0xFFFF_FFFE,
-            lines: 21,
-            aux_id: 22,
-            size: 878,
-            count_a: 0,
-            count_b: 0,
-        };
-        let bytes = record.encode();
-        assert_eq!(bytes.len(), SIPROJ_REC_SIZE);
-        assert_eq!(&bytes[..4], &LIVE_SENTINEL.to_le_bytes());
-        assert_eq!(&bytes[4..18], b"CMakeLists.txt");
-        assert_eq!(bytes[18], 0); // NUL right after the path
-        assert!(bytes[18..256].iter().all(|&b| b == 0));
-        assert_eq!(&bytes[260..268], &0x01DD_547F_18B4_470Fu64.to_le_bytes());
-        assert_eq!(&bytes[268..272], &0xFFFF_FFFEu32.to_le_bytes());
-        assert_eq!(&bytes[272..276], &21u32.to_le_bytes());
-        // One aux id, three writes (+276, +280, +308).
-        for at in [276usize, 280, 308] {
-            assert_eq!(&bytes[at..at + 4], &22u32.to_le_bytes());
-        }
-        assert_eq!(&bytes[284..288], &878u32.to_le_bytes());
-        // The padding regions stay zero.
-        assert!(bytes[256..260].iter().all(|&b| b == 0));
-        assert!(bytes[296..308].iter().all(|&b| b == 0));
-        assert!(bytes[312..].iter().all(|&b| b == 0));
-        assert_eq!(SiprojSlot::decode(&bytes), Some(record.clone()));
-        // Long paths truncate at the NUL-fitting capacity.
-        let long = SiprojSlot {
-            path: vec![b'a'; 400],
-            ..record
-        };
-        let bytes = long.encode();
-        assert_eq!(bytes[4 + SIPROJ_PATH_MAX], 0);
-        assert_eq!(
-            SiprojSlot::decode(&bytes).unwrap().path.len(),
-            SIPROJ_PATH_MAX
-        );
-        // A mangled sentinel or a zero slot refuses to decode.
-        let mut mangled = bytes.clone();
-        mangled[..4].copy_from_slice(&2i32.to_le_bytes());
-        assert_eq!(SiprojSlot::decode(&mangled), None);
-        assert_eq!(SiprojSlot::decode(&vec![0u8; 328]), None);
-    }
-
-    #[test]
     fn the_sym_record_encodes_the_documented_layout() {
-        // SPEC-sym.md's own first record: app_main, 1-based line 23 -> line0 22.
+        // The snapshot's own first record: app_main, 1-based line 23 -> line0 22.
         let record = SymSlot {
             name: b"app_main".to_vec(),
             line0: 22,
@@ -2800,7 +2711,7 @@ mod tests {
             XDIR_ENTRIES_AT + 2 * XDIR_ENTRY_STRIDE + XDIR_FOOTER_BYTES
         );
         assert_eq!(&bytes[..4], &MAGIC_XDIR.to_le_bytes());
-        assert_eq!(&bytes[4..8], &SI4_VERSION.to_le_bytes());
+        assert_eq!(&bytes[4..8], &VOL_VERSION.to_le_bytes());
         assert_eq!(&bytes[8..12], &256u32.to_le_bytes());
         assert_eq!(
             &bytes[0x88..0x8C],
@@ -2848,26 +2759,6 @@ mod tests {
     }
 
     /* ---------- the reference-volume round trips ---------- */
-
-    #[test]
-    fn siproj_volume_round_trips_byte_exact() {
-        let Some(bytes) = snap_volume("Untitled Project2.siproj") else {
-            skip_note();
-            return;
-        };
-        // The snapshot's own size, pinning the acceptance input.
-        assert_eq!(bytes.len(), 157_296);
-        let parsed = parse_siproj_volume(&bytes).expect("siproj parses");
-        assert_eq!(parsed.header.magic, MAGIC_SIPROJ);
-        assert_eq!(parsed.header.version, SI4_VERSION);
-        assert_eq!(parsed.records.len(), 478);
-        assert_eq!(parsed.spare_slots, 0);
-        assert_eq!(parsed.records[0].path, b"CMakeLists.txt");
-        assert_eq!(parsed.records[3].path,
-            b"components\\esp-dsp\\applications\\azure_board_apps\\apps\\3d_graphics\\main\\3d_graphics_demo.cpp");
-        let rebuilt = emit_siproj_volume(&parsed.header, &parsed.records, parsed.spare_slots);
-        assert_eq!(rebuilt, bytes, "siproj must rebuild byte for byte");
-    }
 
     #[test]
     fn sym_volume_round_trips_byte_exact() {
@@ -2991,15 +2882,12 @@ mod tests {
         }
     }
 
-    /* ---------- the structured path (SPEC-sym-fields.md rules) ---------- */
+    /* ---------- the structured path ---------- */
 
     /// The analyzed source tree behind the snapshot (the reference project
     /// `Untitled Project2`'s root; `GGS_REF_SOURCE_ROOT` moves it).
     fn source_root() -> Option<PathBuf> {
-        let dir = match std::env::var_os("GGS_REF_SOURCE_ROOT") {
-            Some(dir) => PathBuf::from(dir),
-            None => PathBuf::from(r"E:\esp-sdr"),
-        };
+        let dir = std::env::var_os("GGS_REF_SOURCE_ROOT").map(PathBuf::from)?;
         if dir.is_dir() {
             Some(dir)
         } else {
@@ -3009,7 +2897,7 @@ mod tests {
 
     /// Reads one file's source rows the way the rules scan them: `\n`-separated,
     /// `\r` trimmed, a final line without its newline still a row (Python's
-    /// `splitlines`, which the Wave2 fit ran against).
+    /// `splitlines`, which the fit ran against).
     fn read_lines(path: &std::path::Path) -> Vec<Vec<u8>> {
         let raw = std::fs::read(path).expect("source file readable");
         let mut lines: Vec<Vec<u8>> = Vec::new();
@@ -3043,7 +2931,7 @@ mod tests {
 
     #[test]
     fn param_count_follows_the_spec_classifier() {
-        // SPEC-sym-fields §1.2's evidence samples, one source row each.
+        // The classifier's evidence samples, one source row each.
         fn rows(row: &[u8]) -> Vec<&[u8]> {
             vec![row]
         }
@@ -3247,7 +3135,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_construction_rebuilds_all_ten_volumes_byte_exact() {
+    fn structured_construction_rebuilds_the_volumes_byte_exact() {
         let volume = |name| snap_volume(name);
         let names = [
             "Untitled Project2.siproj",
@@ -3277,52 +3165,25 @@ mod tests {
             return;
         };
 
-        // .siproj — every record rebuilt from the file's own facts: the path, the
-        // scan-time mtime and size and line count off the disk (COMPARISON-REPORT
-        // B7: the tree is unchanged since the snapshot's scan); +268 first symbol,
-        // +276 aux id and the two definition counts are the table's historical
-        // bookkeeping, carried in (§2.2: +268 is not the block's first id).
-        let parsed_siproj = parse_siproj_volume(&snaps[0].1).expect("siproj parses");
-        let mut siproj_records = Vec::new();
+        // the file table — read side only: the reference project's path list, and
+        // each file's rows read off the disk (the tree is unchanged since the
+        // snapshot's scan). No file-table volume is ever emitted: the reference
+        // project container is not one of this codebase's outputs.
+        let parsed_table = parse_file_table_volume(&snaps[0].1).expect("file table parses");
         let mut file_rows: Vec<Vec<Vec<u8>>> = Vec::new();
-        for rec in &parsed_siproj.records {
+        for rec in &parsed_table.records {
             let rel = String::from_utf8_lossy(&rec.path).replace('\\', "/");
             let full = root.join(&rel);
-            let raw = std::fs::read(&full).expect("snapshot file present on disk");
-            let nanos = std::fs::metadata(&full)
-                .expect("snapshot file metadata")
-                .modified()
-                .expect("mtime")
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("after epoch")
-                .as_nanos();
-            let (mtime_low, mtime_high) = filetime_from_unix_nanos(nanos);
-            siproj_records.push(SiprojSlot {
-                path: rec.path.clone(),
-                mtime_low,
-                mtime_high,
-                first_symbol: rec.first_symbol,
-                lines: count_lines(&raw),
-                aux_id: rec.aux_id,
-                size: raw.len() as u32,
-                count_a: rec.count_a,
-                count_b: rec.count_b,
-            });
             file_rows.push(read_lines(&full));
         }
-        assert_eq!(
-            emit_siproj_volume(&parsed_siproj.header, &siproj_records, parsed_siproj.spare_slots),
-            snaps[0].1,
-            "siproj must rebuild byte for byte from the files' own facts"
-        );
 
-        // .sip_sym — all 4,280 live records through the structured path: skeleton
+        // .ggs_sym — all 4,280 live records through the structured path: skeleton
         // from the decode, every derived field off its rule or exception table.
         let parsed_sym = parse_sym_volume(&snaps[1].1).expect("sym parses");
         assert_eq!(parsed_sym.records.len(), 4280);
         let mut paths: Vec<String> = Vec::new();
         let mut lines: Vec<Vec<&[u8]>> = Vec::new();
-        for (fid, rec) in parsed_siproj.records.iter().enumerate() {
+        for (fid, rec) in parsed_table.records.iter().enumerate() {
             paths.push(String::from_utf8_lossy(&rec.path).into_owned());
             lines.push(file_rows[fid].iter().map(|r| r.as_slice()).collect());
         }
@@ -3376,18 +3237,18 @@ mod tests {
             assert_eq!(
                 emit_xvol_volume(&parsed.header, &records, parsed.spare_slots),
                 snaps[name].1,
-                "sip_{slot} must rebuild byte for byte through the named construction"
+                "{slot} must rebuild byte for byte through the named construction"
             );
         }
 
-        // .sip_xm — the bare u32 table through emit_xm
+        // .ggs_xm — the bare u32 table through emit_xm
         let xm = parse_xm(&snaps[5].1).expect("xm parses");
         assert_eq!(emit_xm(&xm), snaps[5].1);
 
         // the name indexes: every live record's mirror bytes re-derived from its
-        // sym slot (SPEC-heaps §1/§5: verified 13115/13115), the key head named by
+        // sym slot (verified 13115/13115), the key head named by
         // the index (the xsb's folded name head re-derived by the rule), the
-        // xab's word/scope keys and the size vocabulary carried (B3's residual)
+        // xab's word/scope keys and the size vocabulary carried (the residual)
         let sym_by_slot = |slot: u16| parsed_sym.records.get(slot as usize).expect("slot live");
         for (name, slot, folded) in [(6usize, "xab", false), (7, "xsb", true)] {
             let parsed = parse_index_volume(&snaps[name].1).expect("index volume parses");
@@ -3398,7 +3259,7 @@ mod tests {
                         return *r;
                     }
                     // the mirror bytes re-derived from the sym slot; the key head and
-                    // the size vocabulary stay inputs (B3/B4's residual: the xab's
+                    // the size vocabulary stay inputs (the xab's
                     // scope-chain heads and the xsb's non-head keys are unpinned)
                     IndexRecord::from_sym(r.slot, sym_by_slot(r.slot), r.key, r.size)
                 })
@@ -3406,11 +3267,11 @@ mod tests {
             assert_eq!(
                 emit_index_volume(&records),
                 snaps[name].1,
-                "sip_{slot} must rebuild byte for byte through the named construction"
+                "{slot} must rebuild byte for byte through the named construction"
             );
             if folded {
                 // a real structural claim on the side: the folded name-head rule
-                // covers the bulk of the xsb keys (B4's 3437 exact = this folded
+                // covers the bulk of the xsb keys (this folded
                 // family plus the case-sensitive bare one it subsumes elsewhere)
                 let head_matched = parsed
                     .iter()
@@ -3437,7 +3298,7 @@ mod tests {
                 let anchor = sibling_records[entry.file_offset as usize / INDEX_REC_SIZE];
                 *entry = XdirEntry::from_page(page, anchor, entry.bucket, entry.vm_addr);
             }
-            assert_eq!(parsed.emit(), snaps[name].1, "sip_{slot} must rebuild byte for byte through from_page");
+            assert_eq!(parsed.emit(), snaps[name].1, "{slot} must rebuild byte for byte through from_page");
         }
     }
 }

@@ -1,12 +1,11 @@
 // The Relation Graph (module 5) — the Symbol Window's lower half: the symbol under the
 // cursor's ring on an interactive graph, drawn on a hand-written SVG board. The drawing
 // reads as the reference relation window (2026-11-23, the owner's direction: calls carry
-// their line numbers on the graph; the drawing discipline rides the si4-rea
-// reconstruction's SPEC-ui-relation §1.2/§2): the cards joined by **orthogonal trunk
+// their line numbers on the graph): the cards joined by **orthogonal trunk
 // links** in the connection red — out of the parent card's facing face, down/across to
 // the shared bus band every sibling edge rides, then into each child's facing face, the
 // V-shaped arrowhead landing on the referenced side (the kind's own direction) — and a
-// **multi-site edge carries its numbered rows** ("1. line 113", SPEC §2.9): the card
+// **multi-site edge carries its numbered rows** ("1. line 113"): the card
 // grows downward, a separator under the label,
 // then one row per reference site, a click on a row jumping to that site. The layout is
 // still computed fresh on every draw over the visible tree (the owner's earlier
@@ -35,8 +34,9 @@
 // five levels of cards, the fifth a leaf — a ring cut short at the 64-children cap
 // carries the ⋯, and an empty root ring answers its verdict ("no callers", "no
 // contents", …).
-// Three views land too (2026-11-23, the si4-rea reconstruction's SPEC-ui-relation §7):
-// the Outline multi-column list, the vertical graph and the horizontal graph — one key
+// Three views land too (2026-11-23, the owner's direction: the windows read as one
+// coherent set): the Outline multi-column list, the vertical graph and the horizontal
+// graph — one key
 // cycles them, the horizontal layout advancing a column per depth with the siblings
 // stacked along Y and the card centered on its children's run. The Outline lists the
 // board's own facts in columns — the name with its Calls/Callers suffix, the reference

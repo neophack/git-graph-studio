@@ -243,9 +243,8 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'workbench.showExtensions', title: 'Extensions', category: 'View', keybinding: 'Ctrl+Shift+X', run: () => this.showView('extensions') });
 		register({ id: 'workbench.showAnalysis', title: 'Analysis', category: 'View', keybinding: 'Ctrl+Shift+A', run: () => this.showView('analysis') });
 		register({ id: 'workbench.showSymbolWindow', title: 'Symbol Window', category: 'View', keybinding: 'Alt+L', run: () => this.showView('symbolWindow') });
-		// The Symbol Window's and its relation graph's own commands
-		// (2026-11-23, the si4-rea reconstruction's SPECs §3/§4): the relation window's
-		// three-view cycle, the outline tree's expand set and the sort cycle.
+		// The Symbol Window's and its relation graph's own commands: the relation
+		// window's three-view cycle, the outline tree's expand set and the sort cycle.
 		register({ id: 'relations.nextView', title: 'Next Relation Window View', category: 'View', run: () => this.symbolWindow.cycleRelationView() });
 		register({ id: 'symbols.outlineExpandAll', title: 'Expand All', category: 'View', run: () => this.symbolWindow.expandAll() });
 		register({ id: 'symbols.outlineCollapseAll', title: 'Collapse All', category: 'View', run: () => this.symbolWindow.collapseAll() });
