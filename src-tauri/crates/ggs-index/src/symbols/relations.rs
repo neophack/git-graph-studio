@@ -699,8 +699,8 @@ fn contains_members(
 /* ---------- Calls and Callers ---------- */
 
 /// The combined view: the caller ring first, the callee ring merged in — a counterpart
-/// met on both sides keeps one node whose count is the pair's total sites (Source
-/// Insight's CallsAndCalls counter) and whose edge stays the caller side's. Every node's
+/// met on both sides keeps one node whose count is the pair's total sites (the
+/// classic IDE's CallsAndCalls counter) and whose edge stays the caller side's. Every node's
 /// ring marker asks its own side's question — callers for the caller nodes (whose edge
 /// site lives in their own file), calls for the callee nodes — so a drill never promises
 /// a ring the branch answers empty.

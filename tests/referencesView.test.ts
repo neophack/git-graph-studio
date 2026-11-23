@@ -1,4 +1,4 @@
-// The References panel page (module 5): Source-Insight-style Lookup References — the sites
+// The References panel page (module 5): classic-IDE-style Lookup References — the sites
 // grouped by file with counts, the folded context slice's shape (the enclosing definition's
 // head, the folds, the site window), a fold row opening in place, the site row's jump, the
 // def marker, the caps' cut notes, and the workbench wiring (the palette command, the panel

@@ -6,10 +6,10 @@
 //!
 //! The owner's direction, 2026-11-21: the analyzed folder carries a hidden code-analysis
 //! database generated exactly like the reference implementation's. si-lite reconstructed
-//! the *algorithms* from Source Insight 4 (2803 automated tests against the original's
+//! the *algorithms* from the classic IDE (2803 automated tests against the original's
 //! behavior) and persists its tables through `db_save` — a little-endian header followed
 //! by the six fixed-width record arrays — and `tix_save`, the sorted syllable index.
-//! Source Insight's own `.sip_*` volumes are its memory-image snapshots (written
+//! The classic IDE's own `.sip_*` volumes are its memory-image snapshots (written
 //! incrementally against its live heap), a different container entirely; what "exactly
 //! the same" means here is byte-identity with the reference implementation's format.
 //!

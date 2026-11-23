@@ -6,7 +6,7 @@
 //! (unchanged) can put the finished slots into a byte-exact volume.
 //!
 //! Algorithm provenance. `si4-rea/sip-vol/SPEC-signatures.md`, reversed from
-//! sourceinsight4.exe: the pair hash `sub_4E15A0`, the xr/xf builder `sub_4E3960`, the
+//! the original binary: the pair hash `sub_4E15A0`, the xr/xf builder `sub_4E3960`, the
 //! xf word-part setter `sub_4E3040`, the xc scanner builder `sub_4E2DA0`, the word-part
 //! splitter `sub_44C240`, the exclusion gates `sub_501E10` / `sub_5000A0`. The behavior
 //! was ported function-by-function from the verified Python reference under

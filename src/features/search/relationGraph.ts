@@ -61,8 +61,8 @@ const HGAP = 34;
 const VGAP = 16;
 const ROW_H = NODE_H + 2 * VGAP;
 
-/** How deep the graph may drill before a card's ring answers the cap instead — Source
- *  Insight's own guard: nodes are shown before the guard and the guard blocks
+/** How deep the graph may drill before a card's ring answers the cap instead — the
+ *  classic IDE's own guard: nodes are shown before the guard and the guard blocks
  *  expansion, so five levels of cards stand and the fifth is a leaf (the reference
  *  reconstruction's depth > 3). */
 const MAX_DEPTH = 4;

@@ -63,7 +63,7 @@ function or method through its body's end line, a macro through its directive an
 continuation, a struct or enum through its whole body — the index sizes the slice, a cap
 cuts the rare giant with a note, and the header's location jumps to the definition; the
 pin freezes the content against the cursor's roam), and a **References** panel page
-(Source-Insight-style Lookup References: every whole-word site of the clicked symbol
+(classic-IDE-style Lookup References: every whole-word site of the clicked symbol
 grouped by file with counts, and a site's click answering a specially processed context —
 the enclosing definition's declaration line, the lines around the site highlighted, the
 function body's middle folded into `… N lines …` rows that click open — the highlighted

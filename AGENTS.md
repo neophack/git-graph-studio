@@ -431,8 +431,8 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   the owner's direction: the wheel zooms in and out, it must not scroll the drawing up and
   down), a background drag pans, and Fit frames the whole drawing;
   2026-11-20, the relation TYPE is the classic window's own (the the reference reconstruction reconstruction the
-  reference; the owner's direction: the references and relations must match Source
-  Insight's usage experience):
+  reference; the owner's direction: the references and relations must match the
+  classic IDE's usage experience):
   the section head's picker lists the thirteen view names the relation window offers —
   Calls, Callers, Calls and Callers, Referenced by Functions/Files/Modules, Contains,
   Container, Base/Derived Classes, Member Types/Classes, Types Used (SI_KINDS, the
@@ -466,7 +466,7 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   freezes the content;
   `workbench.showDefinition`),
   `src/features/search/referencesView.ts` + `references.css` (the References panel page —
-  2026-11-20, Source-Insight-style Lookup References over the index's occurrence list
+  2026-11-20, classic-IDE-style Lookup References over the index's occurrence list
   (`symbol_references`) with the definitions' markers (`symbol_lookup`): the clicked
   symbol's every whole-word site grouped by file with per-group counts (two hits on one
   line are one site), a file group opening on its header's click over a cached
@@ -521,7 +521,7 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   call sites and the mask-filtered positioned hits, the assembly mirroring si-lite's
   `db_add_symbol`/`db_add_edge`/`db_add_code_rec_enc` semantics — first-declaration-wins
   names, exact-pair edge dedup, member access and self-references never recorded),
-  `symbols::sipb` + `symbols::sipb_sig` (the Source Insight 4 project-volume emitters,
+  `symbols::sipb` + `symbols::sipb_sig` (the classic IDE project-volume emitters,
   2026-11-21: the ten `.siproj` / `.sip_*` containers of the classic IDE's own database —
   the 0x200 base-block header, `0xFFFFFFFD`-marked fixed slots, the 180-byte symbol
   records, the 2024-byte djb2-bloom signature records — written from the `si4-rea`

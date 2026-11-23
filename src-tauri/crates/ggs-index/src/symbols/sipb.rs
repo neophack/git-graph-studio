@@ -1,4 +1,4 @@
-//! Source Insight 4's project-volume writer (`si4-rea`'s sip-vol format): the `.siproj`
+//! The classic IDE's project-volume writer (`si4-rea`'s sip-vol format): the `.siproj`
 //! file table, the `.sip_sym` symbol table, the `.sip_xf` / `.sip_xr` / `.sip_xc`
 //! signature volumes, the `.sip_xm` parse-order map, the `.sip_xab` / `.sip_xsb`
 //! 16-byte name indexes and their `.sip_xad` / `.sip_xsd` page directories — emitters

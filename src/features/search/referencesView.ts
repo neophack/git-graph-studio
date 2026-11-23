@@ -384,8 +384,8 @@ export class ReferencesView {
 		} else {
 			row.appendChild(el('span', 'refs-def-space'));
 		}
-		// The context's toggle is its own affordance — the row itself is the jump (Source
-		// Insight's search results: one click navigates), the arrow folds and unfolds.
+		// The context's toggle is its own affordance — the row itself is the jump (the
+		// classic IDE's search results: one click navigates), the arrow folds and unfolds.
 		const context = el('span', 'refs-ctx-toggle', [icon('chevron-right', 'twistie')]);
 		context.title = t('references.contextTitle');
 		context.addEventListener('click', (event) => {
