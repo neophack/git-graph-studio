@@ -177,3 +177,14 @@ export function highlightLine(text: string, ext: string, emphasis?: string): Cod
 export function extOf(path: string): string {
 	return path.split('.').pop() ?? '';
 }
+
+/** The word the caret sits on — the click-to-relocate's resolution seed shared by the
+ *  definition page and the context window. A caret off a word character answers null. */
+export function wordAt(text: string, at: number): string | null {
+	if (at < 0 || at >= text.length || !/[A-Za-z0-9_]/.test(text[at]!)) return null;
+	let from = at;
+	let to = at;
+	while (from > 0 && /[A-Za-z0-9_]/.test(text[from - 1]!)) from--;
+	while (to < text.length - 1 && /[A-Za-z0-9_]/.test(text[to + 1]!)) to++;
+	return text.slice(from, to + 1);
+}

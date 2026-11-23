@@ -1,15 +1,15 @@
-//! The reference analysis database (`si4-rea`'s si-lite): the classic engine's table set —
+//! The reference analysis database (`si4-rea`'s si-lite): its six tables —
 //! dnMod (modules), dnSir (symbols), the call edges, dnSyl (syllable fragments), dnTdr
 //! (type definitions) and dnSirCode (code positions) — serialized byte-for-byte in
 //! si-lite's own flat-file shape, so its tooling (`db_load` / `tix_load` / `dbinfo`)
 //! reads ggs's database back and a delete-and-rebuild regenerates the same bytes.
 //!
 //! The owner's direction, 2026-11-21: the analyzed folder carries a hidden code-analysis
-//! database generated exactly like the reference implementation's. si-lite reconstructed
-//! the *algorithms* from the classic IDE (2803 automated tests against the original's
-//! behavior) and persists its tables through `db_save` — a little-endian header followed
+//! database generated exactly like the reference implementation's. si-lite recovered
+//! the *algorithms* from the reference binary's behavior (2803 automated tests against
+//! it) and persists its tables through `db_save` — a little-endian header followed
 //! by the six fixed-width record arrays — and `tix_save`, the sorted syllable index.
-//! The classic IDE's own `.sip_*` volumes are its memory-image snapshots (written
+//! The reference binary's own `.sip_*` volumes are its memory-image snapshots (written
 //! incrementally against its live heap), a different container entirely; what "exactly
 //! the same" means here is byte-identity with the reference implementation's format.
 //!
@@ -55,13 +55,13 @@ pub const SYM_UNKNOWN: i32 = 18;
 /* ---------- The tables, as ggs assembles them ---------- */
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SiModule {
+pub struct AnaModule {
     pub name: String,
     pub sym_count: i32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SiSymbol {
+pub struct AnaSymbol {
     pub id: i32,
     pub name: String,
     pub type_: i32,
@@ -70,20 +70,20 @@ pub struct SiSymbol {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SiEdge {
+pub struct AnaEdge {
     pub caller: i32,
     pub callee: i32,
     pub line: i32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SiSyl {
+pub struct AnaSyl {
     pub frag: Vec<u8>,
     pub sym: i32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SiTdr {
+pub struct AnaTdr {
     pub name: String,
     pub type_: i32,
     pub module: i32,
@@ -91,7 +91,7 @@ pub struct SiTdr {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SiCode {
+pub struct AnaCode {
     pub sym: i32,
     pub module: i32,
     pub line: i32,
@@ -100,13 +100,13 @@ pub struct SiCode {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct SiTables {
-    pub mods: Vec<SiModule>,
-    pub syms: Vec<SiSymbol>,
-    pub edges: Vec<SiEdge>,
-    pub syls: Vec<SiSyl>,
-    pub tdrs: Vec<SiTdr>,
-    pub code: Vec<SiCode>,
+pub struct AnaTables {
+    pub mods: Vec<AnaModule>,
+    pub syms: Vec<AnaSymbol>,
+    pub edges: Vec<AnaEdge>,
+    pub syls: Vec<AnaSyl>,
+    pub tdrs: Vec<AnaTdr>,
+    pub code: Vec<AnaCode>,
 }
 
 /* ---------- The syllable splitter, ported from si-lite's split_syllables ---------- */
@@ -184,7 +184,7 @@ fn push_fixed_str(out: &mut Vec<u8>, text: &[u8], cap: usize) {
 
 /// The `db_save` bytes: the little-endian header (magic, version, the six counts) and
 /// then each table's records whole, in si-lite's field order.
-pub fn write_db(tables: &SiTables) -> Vec<u8> {
+pub fn write_db(tables: &AnaTables) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&DB_MAGIC.to_le_bytes());
     out.extend_from_slice(&DB_VERSION.to_le_bytes());
@@ -236,7 +236,7 @@ pub fn write_db(tables: &SiTables) -> Vec<u8> {
 
 /// The `tix_save` bytes: the `"TIX1"` header (version, count) and the syllable entries
 /// sorted by `(frag, sym)` — an index, not a heap dump.
-pub fn write_tix(tables: &SiTables) -> Vec<u8> {
+pub fn write_tix(tables: &AnaTables) -> Vec<u8> {
     let mut sorted = tables.syls.clone();
     sorted.sort_by(|a, b| a.frag.cmp(&b.frag).then(a.sym.cmp(&b.sym)));
     let mut out = Vec::new();
@@ -294,34 +294,34 @@ mod tests {
     fn the_db_bytes_mirror_si_lites_record_layout() {
         // The exact widths si-lite's structs have on x64: header 32, Module 264,
         // Symbol 144, CallEdge 12, SylEntry 68, TdrRec 140, SirCodeRec 20.
-        let tables = SiTables {
-            mods: vec![SiModule {
+        let tables = AnaTables {
+            mods: vec![AnaModule {
                 name: "src/a.c".to_owned(),
                 sym_count: 1,
             }],
-            syms: vec![SiSymbol {
+            syms: vec![AnaSymbol {
                 id: 0,
                 name: "draw".to_owned(),
                 type_: SYM_FUNCTION,
                 module: 0,
                 line: 12,
             }],
-            edges: vec![SiEdge {
+            edges: vec![AnaEdge {
                 caller: 0,
                 callee: 0,
                 line: 14,
             }],
-            syls: vec![SiSyl {
+            syls: vec![AnaSyl {
                 frag: b"draw".to_vec(),
                 sym: 0,
             }],
-            tdrs: vec![SiTdr {
+            tdrs: vec![AnaTdr {
                 name: "Shape".to_owned(),
                 type_: SYM_STRUCT,
                 module: 0,
                 line: 3,
             }],
-            code: vec![SiCode {
+            code: vec![AnaCode {
                 sym: 0,
                 module: 0,
                 line: 12,
@@ -354,12 +354,12 @@ mod tests {
 
     #[test]
     fn long_names_truncate_like_strncpy_into_a_zeroed_record() {
-        let tables = SiTables {
-            mods: vec![SiModule {
+        let tables = AnaTables {
+            mods: vec![AnaModule {
                 name: "x".repeat(400),
                 sym_count: 0,
             }],
-            syms: vec![SiSymbol {
+            syms: vec![AnaSymbol {
                 id: 0,
                 name: "y".repeat(200),
                 type_: 0,

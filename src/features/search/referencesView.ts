@@ -1,20 +1,26 @@
-// The References panel page (module 5) — the classic lookup-references page: the
-// clicked symbol's every whole-word site, grouped by file with per-file counts, each site
+// The References panel page (module 5) — the lookup-references page: the clicked
+// symbol's every whole-word site, grouped by file with per-file counts, each site
 // answered not raw but specially processed before it shows — the click opens a folded
 // context slice: the innermost enclosing definition's declaration line, a window of lines
 // around the site, and the body's middle folded into `… N lines …` rows that click open
-// (capped), the way the classic lookup page keeps a reference's context structural instead of a
-// wall of code. The workbench feeds it with the same gate and debounce discipline the
-// definition page keeps (the panel up, this page active, the pin off); the highlighted
-// site line — or the row's double click — jumps into the editor.
+// (capped), so a reference's context reads structural instead of a wall of code. The
+// workbench feeds it with the same gate and debounce discipline the definition page
+// keeps (the panel up, this page active, the pin off); the highlighted site line — or
+// the row's double click — jumps into the editor.
+// The search-results options land too (2026-11-23, the si4-rea reconstruction's
+// SPEC-ui-references-definition §1.2/§1.5): each site row carries the four display
+// switches — the container function or class's name, the file name, the line number, the
+// line text — and repeated lookups follow the output policy, appending to, replacing, or
+// asking about the old results, the page accumulating the lookups as sections.
 
 import { readFile } from '../../platform/ipc/fs';
 import { symbolFileOutline, symbolLookup, symbolReferences, type SymbolRefFile } from '../../platform/ipc/symbols';
 
 import { t, tf } from '../../platform/i18n';
+import { load, save } from '../../platform/state';
 import { KIND_ICONS } from './contextView';
 import { highlightLine, extOf } from '../../platform/highlight';
-import { actionButton, el, icon } from '../../platform/ui/index';
+import { actionButton, confirmDialog, el, icon, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 
 import './references.css';
 
@@ -49,6 +55,31 @@ export interface ContextRow {
 	to?: number;
 }
 
+/** The search-results options (SPEC §1.2's four switches and §1.5's output policy),
+ *  persisted — what each site row includes and what a repeated lookup does. */
+export interface ResultsOptions {
+	containers: boolean;
+	fileNames: boolean;
+	lineNumbers: boolean;
+	lineText: boolean;
+	output: 'append' | 'replace' | 'ask';
+}
+
+const DEFAULT_OPTIONS: ResultsOptions = { containers: false, fileNames: false, lineNumbers: true, lineText: true, output: 'replace' };
+
+const OPTIONS_KEY = 'references.options';
+
+/** One accumulated lookup: its subject and the answer, rendered as its own section of
+ *  the page. */
+interface ResultSection {
+	subject: ReferencesSubject;
+	files: SymbolRefFile[];
+	filesCapped: boolean;
+	totalSites: number;
+	/** 0-based definition lines per repo-relative path — the def rows' marker. */
+	defLines: Map<string, Map<number, string>>;
+}
+
 /** How many lines flank the site inside its enclosing body. */
 const SITE_WINDOW = 2;
 
@@ -58,7 +89,7 @@ const RAW_WINDOW = 4;
 /** A fold row's expansion cap — past it the rest stays folded with its own count. */
 const FOLD_MAX = 200;
 
-/** At most this many file groups render; a hotter name answers the cut note. */
+/** At most this many file groups render per section; a hotter name answers the cut note. */
 const FILE_CAP = 100;
 
 /** At most this many site rows render per file group. */
@@ -66,6 +97,10 @@ const SITE_CAP = 500;
 
 /** A site row's text is trimmed to this many characters. */
 const TEXT_MAX = 240;
+
+/** How many lookups the page accumulates before the oldest section retires — the page
+ *  keeps a recent window rather than growing without bound. */
+const SECTION_CAP = 8;
 
 /** The innermost definition span covering `siteLine` — the smallest span wins, the
  *  declaration line included (a definition site's own body is the enclosing structure). */
@@ -109,6 +144,14 @@ export function foldedContext(lines: string[], spans: RefSpan[], siteLine: numbe
 	return rows;
 }
 
+/** A site row's container prefix — the enclosing function's name, its own class's name
+ *  joined ahead of it by the colon (SPEC §1.2's two container queries). */
+export function containerPrefix(spans: RefSpan[], siteLine: number): string | null {
+	const span = enclosingSpan(spans, siteLine);
+	if (!span) return null;
+	return span.container ? `${span.container}:${span.name}:` : `${span.name}:`;
+}
+
 /** A path's basename over either separator. */
 function baseName(path: string): string {
 	const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
@@ -132,6 +175,7 @@ export class ReferencesView {
 
 	private readonly body: HTMLElement;
 	private readonly pinButton: HTMLButtonElement;
+	private readonly optionsButton: HTMLButtonElement;
 
 	private pinned = false;
 	private subject: ReferencesSubject | null = null;
@@ -141,15 +185,14 @@ export class ReferencesView {
 	private failed = false;
 	/** The fetch's staleness counter: every setSubject drops the answers before it. */
 	private generation = 0;
-	private files: SymbolRefFile[] = [];
-	/** 0-based definition lines per repo-relative path — the def rows' marker. */
-	private readonly defLines = new Map<string, Map<number, string>>();
-	private filesCapped = false;
-	private totalSites = 0;
+	/** The accumulated lookups, oldest first — one section per lookup. */
+	private sections: ResultSection[] = [];
 	private readonly openGroups = new Set<string>();
 	private readonly openSites = new Set<string>();
-	/** One file's read lines and outline, kept per repo-relative path and dropped when the
-	 *  subject changes — a group's rows and every folded context slice draw from it. */
+	/** The display options, persisted. */
+	private options: ResultsOptions = { ...DEFAULT_OPTIONS, ...load<Partial<ResultsOptions>>(OPTIONS_KEY, {}) };
+	/** One file's read lines and outline, kept per repo-relative path and dropped when a
+	 *  lookup lands — every section's rows and folded contexts draw from it. */
 	private readonly fileData = new Map<string, Promise<FileData | null>>();
 
 	constructor() {
@@ -157,7 +200,8 @@ export class ReferencesView {
 		this.element = el('div', 'panel-body refs-panel', [this.body]);
 		this.element.hidden = true;
 		this.pinButton = actionButton('pin', t('references.pin'), () => this.togglePin());
-		this.actions = el('div', 'actions', [this.pinButton]);
+		this.optionsButton = actionButton('settings-gear', t('references.options'), (event) => this.showOptionsMenu(event));
+		this.actions = el('div', 'actions', [this.optionsButton, this.pinButton]);
 		this.render();
 	}
 
@@ -174,7 +218,8 @@ export class ReferencesView {
 		return this.pinned;
 	}
 
-	/** Swap the subject (or clear it, `note` explaining why) and refetch the references. */
+	/** Swap the subject (or clear it, `note` explaining why) and refetch the references —
+	 *  under the output policy: replace, append, or ask. */
 	setSubject(subject: ReferencesSubject | null, note?: string): void {
 		const same =
 			this.subject !== null &&
@@ -185,9 +230,6 @@ export class ReferencesView {
 		if (same) return;
 		this.subject = subject ? { ...subject } : null;
 		this.note = note;
-		this.openGroups.clear();
-		this.openSites.clear();
-		this.fileData.clear();
 		void this.load();
 	}
 
@@ -196,25 +238,42 @@ export class ReferencesView {
 		const subject = this.subject;
 		this.loading = subject !== null;
 		this.failed = false;
-		this.files = [];
-		this.defLines.clear();
-		this.filesCapped = false;
-		this.totalSites = 0;
+		if (!subject) {
+			this.sections = [];
+			this.openGroups.clear();
+			this.openSites.clear();
+			this.fileData.clear();
+			this.render();
+			return;
+		}
+		// The output policy decides what happens to the old results.
+		let mode = this.options.output;
+		if (mode === 'ask' && this.sections.length > 0) {
+			const append = await confirmDialog(t('references.askReplace'), t('references.askAppend'));
+			if (generation !== this.generation) return;
+			mode = append ? 'append' : 'replace';
+		}
+		if (mode === 'replace') {
+			this.sections = [];
+			this.openGroups.clear();
+			this.openSites.clear();
+		}
+		this.fileData.clear();
 		this.render();
-		if (!subject) return;
 		try {
 			const [refs, defs] = await Promise.all([symbolReferences(subject.name), symbolLookup(subject.name)]);
 			// A newer setSubject owns the page now; this answer paints nothing.
 			if (generation !== this.generation) return;
+			const defLines = new Map<string, Map<number, string>>();
 			for (const def of defs ?? []) {
-				let lines = this.defLines.get(def.path);
-				if (!lines) this.defLines.set(def.path, (lines = new Map()));
+				let lines = defLines.get(def.path);
+				if (!lines) defLines.set(def.path, (lines = new Map()));
 				lines.set(def.line, def.kind);
 			}
-			this.files = (refs ?? [])
+			const files = (refs ?? [])
 				.map((file) => {
 					// Two hits on one line are one site — the folded context and the jump speak
-					// lines, as the classic window's "%s line %d" unit does.
+					// lines, and the "%s line %d" counter counts the same grain.
 					const seen = new Set<number>();
 					const matches = [...file.matches]
 						.sort((a, b) => a.line - b.line || a.column - b.column)
@@ -226,11 +285,21 @@ export class ReferencesView {
 					return { ...file, matches };
 				})
 				.sort((a, b) => a.path.localeCompare(b.path));
-			this.filesCapped = this.files.length > FILE_CAP;
-			if (this.filesCapped) this.files = this.files.slice(0, FILE_CAP);
-			this.totalSites = this.files.reduce((sum, file) => sum + file.matches.length, 0);
-			// The first group answers open, so the page opens showing sites, not a wall of headers.
-			if (this.files[0]) this.openGroups.add(this.files[0].path);
+			const filesCapped = files.length > FILE_CAP;
+			const kept = filesCapped ? files.slice(0, FILE_CAP) : files;
+			const section: ResultSection = {
+				subject,
+				files: kept,
+				filesCapped,
+				totalSites: kept.reduce((sum, file) => sum + file.matches.length, 0),
+				defLines
+			};
+			this.sections.push(section);
+			while (this.sections.length > SECTION_CAP) this.sections.shift();
+			// The newest section's first group answers open, so the page opens showing
+			// sites, not a wall of headers.
+			const at = this.sections.indexOf(section);
+			if (section.files[0]) this.openGroups.add(groupKey(at, section.files[0].path));
 		} catch {
 			if (generation !== this.generation) return;
 			this.failed = true;
@@ -276,6 +345,31 @@ export class ReferencesView {
 		this.onNeedRoot?.();
 	}
 
+	/* ---------- The search-results options (SPEC §1.2/§1.5) ---------- */
+
+	private showOptionsMenu(event: MouseEvent): void {
+		const toggle = (key: keyof Omit<ResultsOptions, 'output'>): void => {
+			this.options[key] = !this.options[key];
+			save(OPTIONS_KEY, this.options);
+			this.render();
+		};
+		const output = (mode: ResultsOptions['output']): void => {
+			this.options.output = mode;
+			save(OPTIONS_KEY, this.options);
+		};
+		const entries: MenuEntry[] = [
+			{ label: t('references.optLineText'), checked: this.options.lineText, run: () => toggle('lineText') },
+			{ label: t('references.optLineNumbers'), checked: this.options.lineNumbers, run: () => toggle('lineNumbers') },
+			{ label: t('references.optFileNames'), checked: this.options.fileNames, run: () => toggle('fileNames') },
+			{ label: t('references.optContainers'), checked: this.options.containers, run: () => toggle('containers') },
+			'separator',
+			{ label: t('references.optAppend'), checked: this.options.output === 'append', run: () => output('append') },
+			{ label: t('references.optReplace'), checked: this.options.output === 'replace', run: () => output('replace') },
+			{ label: t('references.optAsk'), checked: this.options.output === 'ask', run: () => output('ask') }
+		];
+		showContextMenu(event.clientX, event.clientY, entries);
+	}
+
 	/* ---------- Rendering ---------- */
 
 	private render(): void {
@@ -284,7 +378,6 @@ export class ReferencesView {
 			this.body.appendChild(el('div', 'refs-hint', [this.note ?? t('references.hint')]));
 			return;
 		}
-		this.body.appendChild(this.buildHeader(this.subject));
 		if (this.loading) {
 			this.body.appendChild(el('div', 'refs-hint', [icon('sync', 'codicon-modifier-spin'), t('relations.loading')]));
 			return;
@@ -293,28 +386,39 @@ export class ReferencesView {
 			this.body.appendChild(el('div', 'refs-hint', [t('relations.failed')]));
 			return;
 		}
-		if (this.files.length === 0) {
+		if (this.sections.length === 0) {
 			this.body.appendChild(el('div', 'refs-hint', [t('references.none')]));
 			return;
 		}
-		for (const file of this.files) this.body.appendChild(this.buildGroup(file));
-		if (this.filesCapped) this.body.appendChild(el('div', 'refs-cut', [t('references.filesCut')]));
+		this.sections.forEach((section, index) => this.body.appendChild(this.buildSection(section, index)));
 	}
 
-	/** The header row: the kind's icon and caption, the name, and the site/file summary. */
-	private buildHeader(subject: ReferencesSubject): HTMLElement {
-		return el('div', 'refs-title', [
-			icon(KIND_ICONS[subject.kind] ?? 'symbol-variable'),
-			el('span', 'refs-name', [subject.name]),
-			el('span', 'refs-kind', [subject.kind]),
-			el('span', 'refs-summary', [tf('references.sites', this.totalSites, this.files.length)])
-		]);
+	/** One accumulated lookup: its header row and its file groups. */
+	private buildSection(section: ResultSection, index: number): HTMLElement {
+		const wrap = el('div', 'refs-section');
+		if (index > 0) wrap.classList.add('refs-section-later');
+		wrap.appendChild(
+			el('div', 'refs-title', [
+				icon(KIND_ICONS[section.subject.kind] ?? 'symbol-variable'),
+				el('span', 'refs-name', [section.subject.name]),
+				el('span', 'refs-kind', [section.subject.kind]),
+				el('span', 'refs-summary', [tf('references.sites', section.totalSites, section.files.length)])
+			])
+		);
+		if (section.files.length === 0) {
+			wrap.appendChild(el('div', 'refs-hint', [t('references.none')]));
+			return wrap;
+		}
+		for (const file of section.files) wrap.appendChild(this.buildGroup(section, index, file));
+		if (section.filesCapped) wrap.appendChild(el('div', 'refs-cut', [t('references.filesCut')]));
+		return wrap;
 	}
 
 	/** One file group: the collapsible header with its count, the site rows, and the
 	 *  folded context under an expanded site. */
-	private buildGroup(file: SymbolRefFile): HTMLElement {
-		const open = this.openGroups.has(file.path);
+	private buildGroup(section: ResultSection, index: number, file: SymbolRefFile): HTMLElement {
+		const key = groupKey(index, file.path);
+		const open = this.openGroups.has(key);
 		const header = el('div', 'refs-file');
 		header.setAttribute('role', 'button');
 		header.tabIndex = 0;
@@ -324,8 +428,8 @@ export class ReferencesView {
 		header.appendChild(el('span', 'refs-file-count', [String(file.matches.length)]));
 		header.title = file.path;
 		const toggle = (): void => {
-			if (open) this.openGroups.delete(file.path);
-			else this.openGroups.add(file.path);
+			if (open) this.openGroups.delete(key);
+			else this.openGroups.add(key);
 			this.render();
 		};
 		header.addEventListener('click', toggle);
@@ -338,42 +442,42 @@ export class ReferencesView {
 		const group = el('div', 'refs-group', [header]);
 		if (open) {
 			if (file.matches.length > SITE_CAP) {
-				this.paintGroup(group, file, file.matches.slice(0, SITE_CAP));
+				this.paintGroup(section, index, group, file, file.matches.slice(0, SITE_CAP));
 				group.appendChild(el('div', 'refs-cut', [t('references.sitesCut')]));
 			} else {
-				this.paintGroup(group, file, file.matches);
+				this.paintGroup(section, index, group, file, file.matches);
 			}
 		}
 		return group;
 	}
 
-	/** The group's site rows: the def marker, the context arrow, the 1-based line number,
-	 *  and the line's code colored. */
-	private paintGroup(group: HTMLElement, file: SymbolRefFile, matches: SymbolRefFile['matches']): void {
+	/** The group's site rows: the def marker, the context arrow, the row's own segments
+	 *  (the container prefix, the file name, the 1-based line number, the line's code
+	 *  colored), each present per its switch. */
+	private paintGroup(section: ResultSection, index: number, group: HTMLElement, file: SymbolRefFile, matches: SymbolRefFile['matches']): void {
 		const pending = el('div', 'refs-hint', [icon('sync', 'codicon-modifier-spin')]);
 		group.appendChild(pending);
 		void this.loadFile(file.path).then((data) => {
-			if (!this.openGroups.has(file.path) || !pending.isConnected) return;
+			if (!this.openGroups.has(groupKey(index, file.path)) || !pending.isConnected) return;
 			pending.remove();
-			const lines = data?.lines ?? [];
-			const defs = this.defLines.get(file.path);
+			const defs = section.defLines.get(file.path);
 			for (const match of matches) {
-				if (!this.openGroups.has(file.path)) return;
-				group.appendChild(this.buildSite(file, match, lines, defs?.get(match.line - 1)));
+				if (!this.openGroups.has(groupKey(index, file.path))) return;
+				group.appendChild(this.buildSite(index, file, match, data, defs?.get(match.line - 1)));
 			}
 			// An expanded site of a re-rendered group repaints its folded context from the cache.
 			for (const match of matches) {
-				if (this.openSites.has(siteKey(file.path, match.line))) {
-					const key = siteKey(file.path, match.line);
+				if (this.openSites.has(siteKey(index, file.path, match.line))) {
+					const key = siteKey(index, file.path, match.line);
 					group.querySelector(`.refs-site[data-key="${cssEscape(key)}"] .refs-ctx-toggle`)?.classList.add('open');
-					void this.expandSite(group, file, match.line, false);
+					void this.expandSite(index, group, file, match.line, false);
 				}
 			}
 		});
 	}
 
-	private buildSite(file: SymbolRefFile, match: { line: number; column: number }, lines: string[], defKind: string | undefined): HTMLElement {
-		const key = siteKey(file.path, match.line);
+	private buildSite(index: number, file: SymbolRefFile, match: { line: number; column: number }, data: FileData | null, defKind: string | undefined): HTMLElement {
+		const key = siteKey(index, file.path, match.line);
 		const row = el('div', 'refs-site');
 		row.dataset['key'] = key;
 		row.tabIndex = 0;
@@ -384,20 +488,32 @@ export class ReferencesView {
 		} else {
 			row.appendChild(el('span', 'refs-def-space'));
 		}
-		// The context's toggle is its own affordance — the row itself is the jump (the
-		// classic IDE's search results: one click navigates), the arrow folds and unfolds.
+		// The context's toggle is its own affordance — the row itself is the jump (one
+		// click navigates), the arrow folds and unfolds.
 		const context = el('span', 'refs-ctx-toggle', [icon('chevron-right', 'twistie')]);
 		context.title = t('references.contextTitle');
 		context.addEventListener('click', (event) => {
 			event.stopPropagation();
-			void this.toggleSite(row, file, match.line, context);
+			void this.toggleSite(index, row, file, match.line, context);
 		});
 		row.appendChild(context);
-		// The index speaks 1-based lines; the file's lines array and the outline spans are
-		// 0-based — the site row shows the line as the backend named it.
-		const at = match.line - 1;
-		row.appendChild(el('span', 'refs-site-num', [String(match.line)]));
-		row.appendChild(this.paintLineText((lines[at] ?? '').trimEnd(), extOf(file.path)));
+		// The row's segments, each per its switch: the enclosing container's name,
+		// the file name, the 1-based line number, and the line's text.
+		if (this.options.containers) {
+			const prefix = containerPrefix(data?.spans ?? [], match.line - 1);
+			if (prefix) row.appendChild(el('span', 'refs-site-container', [prefix]));
+		}
+		if (this.options.fileNames) row.appendChild(el('span', 'refs-site-file', [tf('references.inFile', baseName(file.path))]));
+		if (this.options.lineNumbers) {
+			// The index speaks 1-based lines; the file's lines array and the outline spans are
+			// 0-based — the site row shows the line as the backend named it.
+			row.appendChild(el('span', 'refs-site-num', [String(match.line)]));
+		}
+		if (this.options.lineText) {
+			const lines = data?.lines ?? [];
+			const at = match.line - 1;
+			row.appendChild(this.paintLineText((lines[at] ?? '').trimEnd(), extOf(file.path)));
+		}
 		row.title = t('references.siteTitle');
 		row.addEventListener('click', () => this.onOpen?.(file.path, match.line));
 		row.addEventListener('keydown', (event) => {
@@ -427,12 +543,12 @@ export class ReferencesView {
 	}
 
 	/** Open or close one site's folded context; the row's chevron flips with it. */
-	private async toggleSite(row: HTMLElement, file: SymbolRefFile, line: number, toggle?: HTMLElement): Promise<void> {
-		const key = siteKey(file.path, line);
+	private async toggleSite(index: number, row: HTMLElement, file: SymbolRefFile, line: number, toggle?: HTMLElement): Promise<void> {
+		const key = siteKey(index, file.path, line);
 		if (!this.openSites.delete(key)) {
 			this.openSites.add(key);
 			toggle?.classList.add('open');
-			await this.expandSite(row.parentElement ?? row, file, line, true);
+			await this.expandSite(index, row.parentElement ?? row, file, line, true);
 			return;
 		}
 		toggle?.classList.remove('open');
@@ -442,8 +558,8 @@ export class ReferencesView {
 	/** Build and mount one site's folded context after its row: the pure slice over the
 	 *  file's cached lines and outline, the fold rows wired to open in place. `line` is the
 	 *  index's 1-based site line. */
-	private async expandSite(host: HTMLElement, file: SymbolRefFile, line: number, scroll: boolean): Promise<void> {
-		const key = siteKey(file.path, line);
+	private async expandSite(index: number, host: HTMLElement, file: SymbolRefFile, line: number, scroll: boolean): Promise<void> {
+		const key = siteKey(index, file.path, line);
 		const data = await this.loadFile(file.path);
 		if (!this.openSites.has(key) || !host.isConnected) return;
 		host.querySelector(`.refs-ctx[data-for="${cssEscape(key)}"]`)?.remove();
@@ -505,9 +621,15 @@ interface FileData {
 	spans: RefSpan[];
 }
 
-/** The site's identity within one subject: two same-line matches are one site. */
-function siteKey(path: string, line: number): string {
-	return `${path}:${line}`;
+/** A group's identity within the accumulated page: the section's own namespace. The
+ *  separator is the plain colon — these keys ride the attribute selectors too. */
+function groupKey(index: number, path: string): string {
+	return `${index}:${path}`;
+}
+
+/** The site's identity within one section: two same-line matches are one site. */
+function siteKey(index: number, path: string, line: number): string {
+	return `${index}:${path}:${line}`;
 }
 
 /** An attribute-selector escape that answers where `CSS.escape` does not (jsdom). */

@@ -1,8 +1,8 @@
-//! The signature-payload generator for SI4's `.sip_xf` / `.sip_xr` / `.sip_xc` volumes:
+//! The signature-payload generator for the `.sip_xf` / `.sip_xr` / `.sip_xc` volumes:
 //! a project file's raw text in, the exact 2024-byte record the original binary writes
-//! out. The volume *container* lives in [`super::sipb`]; this module fills the one field
-//! that file leaves undecoded — [`super::sipb::XVolSlot::signature`], the 2004-byte
-//! bloom field at +20 — and assembles the whole record around it, so `sipb`'s emitters
+//! out. The volume *container* lives in [`super::projvol`]; this module fills the one field
+//! that file leaves undecoded — [`super::projvol::XVolSlot::signature`], the 2004-byte
+//! bloom field at +20 — and assembles the whole record around it, so `projvol`'s emitters
 //! (unchanged) can put the finished slots into a byte-exact volume.
 //!
 //! Algorithm provenance. `si4-rea/sip-vol/SPEC-signatures.md`, reversed from
@@ -23,7 +23,7 @@
 //! `main\common\ring_capture.c` is +1, a collision-covered skip word unrecoverable from
 //! this snapshot, SPEC §11.2; the test annotates it), xf 478/478, xc 476/478 (`.inc` /
 //! `.html` scanners unmodeled, SPEC §11.1; annotated). Whole volumes reassembled
-//! through [`super::sipb::emit_volume`] rebuild the snapshot files byte for byte.
+//! through [`super::projvol::emit_volume`] rebuild the snapshot files byte for byte.
 //!
 //! The exclusion word tables are the *effective* per-extension skip sets (SPEC §4):
 //! the snapshot's empirical closure — a word is skipped in extension E iff some E
@@ -36,7 +36,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-use super::sipb::{LIVE_SENTINEL, XVOL_REC_SIZE};
+use super::projvol::{LIVE_SENTINEL, XVOL_REC_SIZE};
 
 /// The pair hash's modulus: 7993 (`0x1F39`) at every call site in the binary.
 pub const SIG_HASH_MODULUS: u32 = 7993;
@@ -1881,7 +1881,7 @@ pub fn build_file_records(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::symbols::sipb::{
+    use crate::symbols::projvol::{
         emit_volume, parse_siproj_volume, parse_volume, slot_is_live, MAGIC_XVOL, VolumeHeader,
     };
     use std::path::PathBuf;
@@ -1889,10 +1889,10 @@ mod tests {
     /* ---------- the reference fixture ---------- */
 
     /// The reference snapshot: `si4-rea`'s `sip-vol/snap` (read-only expectations —
-    /// never an input to the generators). `GGS_SIP_SNAP_DIR` moves it; the default is
-    /// the authoring machine's path, as in `sipb.rs`.
+    /// never an input to the generators). `GGS_REF_SNAP_DIR` moves it; the default is
+    /// the authoring machine's path, as in `projvol.rs`.
     fn snap_dir() -> Option<PathBuf> {
-        let dir = match std::env::var_os("GGS_SIP_SNAP_DIR") {
+        let dir = match std::env::var_os("GGS_REF_SNAP_DIR") {
             Some(dir) => PathBuf::from(dir),
             None => PathBuf::from(r"C:\Users\penghongxia\si4-rea\sip-vol\snap"),
         };
@@ -1918,7 +1918,7 @@ mod tests {
 
     fn skip_note() {
         eprintln!(
-            "skip: the signature acceptance fixture is not present (set GGS_SIP_SNAP_DIR \
+            "skip: the signature acceptance fixture is not present (set GGS_REF_SNAP_DIR \
              to si4-rea's sip-vol/snap and GGS_ESP_SDR_DIR to the esp-sdr source tree)"
         );
     }
@@ -2017,11 +2017,12 @@ mod tests {
 
     /// The one known xr residual: `main\common\ring_capture.c`'s +4 count. One skip
     /// word whose bits are collision-covered sits unrecoverable in this snapshot, so
-    /// SI counts one occurrence fewer than the closure can name (SPEC §11.2).
+    /// the volume carries one occurrence fewer than the closure can name (SPEC §11.2).
     const COUNT_RESIDUAL_PATH: &[u8] = b"main\\common\\ring_capture.c";
 
-    /// The two known xc residuals: SI's `.inc` / `.html` language scanners were not
-    /// modeled (SPEC §11.1) — SI sets extra bits there the reconstruction cannot reach.
+    /// The two known xc residuals: the reference binary's `.inc` / `.html` language
+    /// scanners were not modeled (SPEC §11.1) — it sets extra bits there the
+    /// reconstruction cannot reach.
     fn xc_residual(rel: &[u8]) -> bool {
         rel.ends_with(b"test\\report.inc") || rel.ends_with(b"streaming\\index.html")
     }
@@ -2337,14 +2338,14 @@ mod tests {
     }
 
     #[test]
-    fn whole_volumes_reassemble_through_the_sipb_container_byte_for_byte() {
+    fn whole_volumes_reassemble_through_the_projvol_container_byte_for_byte() {
         let Some(fx) = load_fixture() else {
             skip_note();
             return;
         };
         for key in ["xr", "xf", "xc"] {
             // Every file's slot comes from its siproj aux id; the records are this
-            // module's generated payloads; the container is sipb's, untouched.
+            // module's generated payloads; the container is projvol's, untouched.
             let bytes = assemble_volume(&fx, key);
             let real = &fx.raw[key];
             if bytes.as_slice() == real.as_slice() {
@@ -2384,7 +2385,7 @@ mod tests {
     /// The absolute byte ranges of one volume's annotated residuals inside the file:
     /// xr's ring_capture.c count field and xc's two scanner residuals' signatures.
     fn residual_ranges(fx: &Fixture, key: &str) -> Vec<(&'static [u8], usize, usize)> {
-        let base = crate::symbols::sipb::HEADER_BLOCK_SIZE;
+        let base = crate::symbols::projvol::HEADER_BLOCK_SIZE;
         let slot_of = |needle: &[u8]| {
             fx.files
                 .iter()

@@ -1,18 +1,24 @@
-// The Definition panel page (module 5) — the bottom panel's answer to a click: the
-// definition content of the symbol under the cursor (the caret a click leaves behind),
-// drawn from the persistent index. A function or method shows through its body's end
-// line, a macro through its directive and every continuation, a struct/enum/class through
-// its whole body, anything else through its declaration — the index's `endLine` sizes the
-// slice, capped with a faint cut note. The workbench feeds it with the same gate and
-// debounce discipline the relation page ran on (the panel up, this page active, the pin
-// off); the pin freezes the content, and the location button jumps to the definition.
+// The Definition panel page (module 5) — the bottom panel's answer to a click, the
+// whole declaring file as the page (2026-11-23, the si4-rea reconstruction's
+// SPEC-ui-references-definition §2): the file stands as a live read-only view — scrolled
+// to the declaration, the symbol's own line span marked as the selection — not a slice.
+// Files over the 1 MiB+1 ceiling refuse with the same "file too big" note. The body's
+// one click relocates the page — chain browsing: the word under the caret resolves
+// against the index and the view re-roots on its definition, until the next cursor feed
+// replaces it. The workbench feeds it with the same gate and debounce discipline the
+// relation page ran on (the panel up, this page active, the pin off); the pin freezes
+// the content, and the location button jumps to the definition. The relation window's
+// clicks land here too (2026-11-23, the owner's direction: 关系点击在定义里显示跳转，
+// 代码页面不跳转，定义里右键同步到代码页面) — and the page's own right-click carries
+// the sync, pushing its current position into the code editor when asked.
 
 import { readFile } from '../../platform/ipc/fs';
+import { symbolLookup } from '../../platform/ipc/symbols';
 
 import { t } from '../../platform/i18n';
-import { highlightLine, extOf } from '../../platform/highlight';
+import { highlightLine, extOf, wordAt } from '../../platform/highlight';
 import { KIND_ICONS } from './contextView';
-import { actionButton, el, icon } from '../../platform/ui/index';
+import { actionButton, el, icon, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 
 import './definition.css';
 
@@ -25,14 +31,13 @@ export interface DefinitionSubject {
 	/** 0-based declaration line. */
 	line: number;
 	/** 0-based line the definition's body ends on (the index's end_line; absent falls
-	 *  back to the declaration's line and the cap slices a window). */
+	 *  back to the declaration's line and the macro rule extends the span). */
 	endLine?: number;
 }
 
-/** The body slice's caps: at most this many lines and this many characters, past either
- *  the faint cut note answers. */
-const BODY_MAX_LINES = 400;
-const BODY_MAX_CHARS = 20000;
+/** The file-level ceiling (SPEC §2.2: `FUN_004174d0(file) < 0x100001` — one byte over a
+ *  mebibite refuses with "file too big"). */
+const FILE_MAX = 1024 * 1024 + 1;
 
 /** A path's basename over either separator. */
 function baseName(path: string): string {
@@ -64,14 +69,17 @@ export class DefinitionView {
 	private note: string | undefined;
 	private loading = false;
 	private failed = false;
-	/** The settled slice and whether a cap trimmed it — null while loading or failed. */
-	private bodyText: string | null = null;
-	private bodyCapped = false;
+	/** The file was past the ceiling — the page's own refusal. */
+	private tooBig = false;
+	/** The whole file's text once read, and its lines — the view's live document. */
+	private fileLines: string[] | null = null;
 	/** The fetch's staleness counter: every setDefinition drops the answers before it. */
 	private generation = 0;
 
 	constructor() {
 		this.body = el('div', 'def-body');
+		this.body.addEventListener('click', this.onBodyClick);
+		this.body.addEventListener('contextmenu', this.onBodyContextMenu);
 		this.element = el('div', 'panel-body def-panel', [this.body]);
 		this.element.hidden = true;
 		this.pinButton = actionButton('pin', t('definition.pin'), () => this.togglePin());
@@ -80,7 +88,14 @@ export class DefinitionView {
 	}
 
 	private togglePin(): void {
-		this.pinned = !this.pinned;
+		this.setPinned(!this.pinned);
+	}
+
+	/** The pin's state, from the host's side too: a relation click's feed pins the page
+	 *  ahead of its own activation, so the cursor-follow's gate refuses and the symbol
+	 *  the click named stays standing. */
+	setPinned(pinned: boolean): void {
+		this.pinned = pinned;
 		this.pinButton.title = this.pinned ? t('definition.unpin') : t('definition.pin');
 		this.pinButton.setAttribute('aria-label', this.pinButton.title);
 		this.pinButton.innerHTML = '';
@@ -111,8 +126,8 @@ export class DefinitionView {
 		const subject = this.subject;
 		this.loading = subject !== null;
 		this.failed = false;
-		this.bodyText = null;
-		this.bodyCapped = false;
+		this.tooBig = false;
+		this.fileLines = null;
 		this.render();
 		if (!subject) return;
 		try {
@@ -122,10 +137,10 @@ export class DefinitionView {
 			const contents = file?.contents;
 			if (contents == null) {
 				this.failed = true;
+			} else if (contents.length > FILE_MAX) {
+				this.tooBig = true;
 			} else {
-				const slice = this.sliceBody(subject, contents.split('\n'));
-				this.bodyText = slice.text;
-				this.bodyCapped = slice.capped;
+				this.fileLines = contents.split('\n');
 			}
 		} catch {
 			if (generation !== this.generation) return;
@@ -135,9 +150,9 @@ export class DefinitionView {
 		this.render();
 	}
 
-	/** The body slice: the declaration through the index's end line — a macro whose end
-	 *  never reached the index extends over its `\` continuations — capped. */
-	private sliceBody(subject: DefinitionSubject, lines: string[]): { text: string; capped: boolean } {
+	/** The selection's last line: the index's end span, a macro whose end never reached
+	 *  the index extending over its `\` continuations. */
+	private selectionEnd(subject: DefinitionSubject, lines: string[]): number {
 		let end = Math.max(subject.endLine ?? subject.line, subject.line);
 		if (subject.kind === 'macro' && (subject.endLine ?? 0) <= subject.line) {
 			end = subject.line;
@@ -146,15 +161,7 @@ export class DefinitionView {
 				if (!lines[at]!.trimEnd().endsWith('\\')) break;
 			}
 		}
-		let capped = end - subject.line + 1 > BODY_MAX_LINES;
-		if (capped) end = subject.line + BODY_MAX_LINES - 1;
-		let text = lines.slice(subject.line, Math.min(end + 1, lines.length)).join('\n');
-		if (text.length > BODY_MAX_CHARS) {
-			text = text.slice(0, BODY_MAX_CHARS);
-			capped = true;
-		}
-		if (capped) text += '\n…';
-		return { text, capped };
+		return Math.min(end, lines.length - 1);
 	}
 
 	/** The header row: the kind's icon and caption, the name, and the file:line button. */
@@ -187,19 +194,23 @@ export class DefinitionView {
 			this.body.appendChild(el('div', 'def-hint', [icon('sync', 'codicon-modifier-spin'), t('relations.loading')]));
 			return;
 		}
-		if (this.failed || this.bodyText === null) {
-			this.body.appendChild(el('div', 'def-hint', [t('relations.failed')]));
+		if (this.failed || this.fileLines === null) {
+			this.body.appendChild(el('div', 'def-hint', [this.tooBig ? t('definition.tooBig') : t('relations.failed')]));
 			return;
 		}
-		// The body's own colors: the shared tokenizer's runs, one colored span per line
-		// with the newline as text — the definition reads like the editor's code, and the
-		// pane's text content stays the code verbatim (the owner's direction: 定义的代码
-		// 也要着色).
+		// The whole file as the live view: every line one colored span with the newline
+		// as text — the pane's text content stays the code verbatim — the symbol's own
+		// span marked as the selection, and the declaration scrolled into view: the
+		// page's opening frame.
+		const subject = this.subject;
+		const selEnd = this.selectionEnd(subject, this.fileLines);
 		const code = el('pre', 'def-code');
-		const ext = extOf(this.subject.path);
-		const lines = this.bodyText.split('\n');
+		const ext = extOf(subject.path);
+		const lines = this.fileLines;
 		lines.forEach((line, index) => {
 			const row = el('span', 'def-line');
+			row.dataset['line'] = String(index);
+			if (index >= subject.line && index <= selEnd) row.classList.add('def-sel');
 			for (const segment of highlightLine(line, ext)) {
 				row.appendChild(segment.cls ? el('span', segment.cls, [segment.text]) : document.createTextNode(segment.text));
 			}
@@ -207,6 +218,84 @@ export class DefinitionView {
 			if (index < lines.length - 1) code.appendChild(document.createTextNode('\n'));
 		});
 		this.body.appendChild(code);
-		if (this.bodyCapped) this.body.appendChild(el('div', 'def-cut', [t('definition.cut')]));
+		const declaration = this.body.querySelector<HTMLElement>(`.def-line[data-line="${subject.line}"]`);
+		if (declaration && typeof declaration.scrollIntoView === 'function') declaration.scrollIntoView({ block: 'center' });
 	}
+
+	/* ---------- The click-to-relocate (chain browsing) ---------- */
+
+	private readonly onBodyClick = (event: MouseEvent): void => {
+		if (!this.fileLines) return;
+		const target = event.target as HTMLElement;
+		const row = target.closest<HTMLElement>('.def-line');
+		if (!row?.dataset['line']) return;
+		const at = this.caretOffsetIn(row, event);
+		if (at < 0) return;
+		const word = wordAt(this.fileLines[Number(row.dataset['line'])] ?? '', at);
+		if (word === null) return;
+		void this.revealWord(word);
+	};
+
+	/** The caret's character offset across the row's text — the browser's own hit test
+	 *  (`caretRangeFromPoint` / `caretPositionFromPoint`), read back through the row's
+	 *  text nodes. No layout (a harness), no offset. */
+	private caretOffsetIn(row: HTMLElement, event: MouseEvent): number {
+		const doc = document as Document & {
+			caretRangeFromPoint?: (x: number, y: number) => Range | null;
+			caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+		};
+		let node: Node | null = null;
+		let offset = 0;
+		if (typeof doc.caretRangeFromPoint === 'function') {
+			const range = doc.caretRangeFromPoint(event.clientX, event.clientY);
+			node = range?.startContainer ?? null;
+			offset = range?.startOffset ?? 0;
+		} else if (typeof doc.caretPositionFromPoint === 'function') {
+			const position = doc.caretPositionFromPoint(event.clientX, event.clientY);
+			node = position?.offsetNode ?? null;
+			offset = position?.offset ?? 0;
+		}
+		if (!node || !row.contains(node)) return -1;
+		const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+		let at = 0;
+		let current = walker.nextNode();
+		while (current) {
+			if (current === node) return at + offset;
+			at += current.textContent?.length ?? 0;
+			current = walker.nextNode();
+		}
+		return -1;
+	}
+
+	/** The clicked word's definition re-roots the page: the shown file's own definition
+	 *  wins, then one with a body, then the first — the same preference the declaration
+	 *  card reads by. A failed lookup leaves the page standing. */
+	private async revealWord(word: string): Promise<void> {
+		try {
+			const defs = (await symbolLookup(word)) ?? [];
+			if (defs.length === 0) return;
+			const def = (this.subject && defs.find((entry) => entry.path === this.subject!.path)) ?? defs.find((entry) => (entry.endLine ?? entry.line) > entry.line) ?? defs[0];
+			if (!def) return;
+			this.setDefinition({ kind: def.kind, name: def.name, path: def.path, line: def.line, endLine: def.endLine });
+		} catch {
+			// The click is an affordance, never an error surface.
+		}
+	}
+
+	/* ---------- The right-click sync (the page's own push into the code page) ---------- */
+
+	/** The page's right-click: "sync the current position to the code page" — the jump
+	 *  the location button makes, offered in place. Nothing stands without a subject. */
+	private readonly onBodyContextMenu = (event: MouseEvent): void => {
+		if (!this.subject) return;
+		event.preventDefault();
+		const subject = this.subject;
+		const entries: MenuEntry[] = [
+			{
+				label: t('definition.syncToEditor'),
+				run: () => this.onOpenDefinition?.(subject.path, subject.line + 1)
+			}
+		];
+		showContextMenu(event.clientX, event.clientY, entries);
+	};
 }

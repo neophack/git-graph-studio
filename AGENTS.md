@@ -352,7 +352,7 @@ over the persistent workspace symbol index: interned names,
 per-file fingerprints and per-name occurrence lists in the analyzed folder's own hidden
 analysis database (2026-11-21, the owner's direction: add a hidden code-analysis folder
 inside the project — the program may delete it, it never enters the git index, and the same
-files regenerate — the classic symbol IDEs' project-local database): `symbols.bin` (the native store) plus `si.db` / `si.tix` (the reference
+files regenerate — the project-local symbol database beside the code it describes): `symbols.bin` (the native store) plus `si.db` / `si.tix` (the reference
 implementation's six-table database — dnMod/dnSir/call-edges/dnSyl/dnTdr/dnSirCode —
 byte-format identical to `si4-rea`'s si-lite `db_save`/`tix_save`, which its tooling loads
 back) under `<root>/.ggs/analysis/<hash>/`, hidden in Explorer (the `.git` attribute
@@ -371,13 +371,17 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
 
 - Frontend: `src/features/search/searchView.ts`, `src/features/search/searchView.css` (the
   results' focus and the per-row replace styles), `src/features/search/callTree.ts`, `src/features/search/contextView.ts` (the Context
-  Window panel page - the definition of the symbol under the cursor),
+  Window panel page - the definition of the symbol under the cursor; 2026-11-23, the
+  live view beside the definition page: the fed fragment paints
+  first and the whole declaring file replaces it — the symbol's span marked, the
+  declaration scrolled to, files past the 1 MiB+1 ceiling keeping the fragment —
+  and the body's one click relocates onto the clicked word's definition),
   `src/features/search/symbolDbView.ts` (the Symbol Database page - the index as a collapsible
   folder / file / symbol tree with reference counts, filter and rebuild, with a
   Folders/Categories toggle over the same cached data — the category arm groups by kind
   with counts and the filter works across both arms; 2026-11-20),
   `src/features/search/symbolWindowView.ts` + `symbolWindow.css` (the Symbol Window sidebar
-  page — the classic outline pane: the active file's imports and its index outline
+  page — the outline pane: the active file's imports and its index outline
   as icon rows with the container prefix, click jumping through `onOpen`, the filter box,
   and the cursor's enclosing-symbol row highlighted from the cached [line, end_line] spans —
   a same-file cursor move only swaps the highlight class, never re-queries, and a highlight
@@ -394,16 +398,32 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   host-provided repo (`provideRepo`, the editor's absolute path relativized before it
   reaches the index), re-rooted on every covering-symbol identity change unless pinned or
   collapsed; the hover card's relations jump rides `openGraphRoot`, which pins the graph
-  on the hovered symbol and opens the section; 2026-11-20),
+  on the hovered symbol and opens the section; 2026-11-23, the outline is a collapsible
+  tree (the si4-rea reconstruction's
+  SPEC-ui-references-definition §6.3, the owner's direction: the windows must read as one
+  coherent set): the container rows carry their own +/− twisties folding their
+  members in place (`outlineRows`, pure and exported — structural depth kept, the filter
+  keeping a row when it or any descendant matches), Expand All / Collapse All /
+  Expand Special (the asked number of tree levels) answer the tree commands, reachable
+  from the palette too (`symbols.outlineExpandAll` / `…CollapseAll` / `…ExpandSpecial` /
+  `…Sort`), and the sort cycles three states — By Line (the tree,
+  the only state that folds, with the "Items can only be collapsed when sorted by
+  line." note answering elsewhere), By Name and By Type as the flat lists — cycled from the
+  head's button (persisted); the fold state starts over on a file switch; 2026-11-20),
   `src/features/search/relationGraph.ts` + `relationGraph.css` (the relation graph — the
-  Symbol Window's lower half, drawn on the view's **own SVG board** in the worktile/plait
-  mind-map manner (2026-11-21, the owner's direction: drop @antv/g6 and rewrite the
-  drawing after worktile/plait's code — Plait itself mounts through React/Angular
-  carriers, so the board takes its *ideas*: the logic layout stacking each branch's boxes
-  and centering a parent on its children, the bezier branch links — a straight lead out
-  of the parent card, then a cubic whose controls sit a third and a half of the
-  neighbouring gaps' sum into the run — and the circle expander at the branch point; no
-  engine, no canvas library, one `<svg>` with a world group). The layout is a **mind map,
+  Symbol Window's lower half, drawn on the view's **own SVG board** in the classic IDE
+  relation window's own manner (2026-11-23, the owner's direction: relation要做成经典
+  IDE 的效果 — 多出调用有行号，参考经典 IDE 的绘图代码, the si4-rea reconstruction's SPEC-ui-relation
+  §1.2/§2/§2.9): the cards joined by **orthogonal trunk links** in the connection red —
+  out of the parent card's facing face, to the mid-band bus every sibling edge shares,
+  into each child's facing face, the V-shaped arrowhead landing on the referenced side
+  (the kind's own direction); a **multi-site edge carries its numbered rows** ("1. line
+  113", the classic IDE's ShowGraphDetails — the card grows downward under a separator, one row per
+  kept site line, a row's click jumping to that site, a "+N" tail when the count outran
+  the backend's 16-line cap; a single-site edge stays a clean card, and its ×N label —
+  or the cross edge's — speaks the count instead). The board replaced the bezier
+  mind-map drawing that came out of the 2026-11-21 direction (drop @antv/g6, rewrite
+  after worktile/plait's code); the layout keeps that direction's shape: a **mind map,
   re-planned on every draw** over the visible tree, TOP-DOWN (2026-11-21, the owner's
   direction: the relation graph runs top to bottom) — the root's card at the top, every
   depth its own row, the children of one card packing side by side by their subtree
@@ -413,26 +433,33 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   direction: mind-map curve links, and the nodes move by themselves; it replaces the
   stable-slot tree, whose fixed slots crossed and overlapped), a short rAF tween moving
   each displaced card while the links redraw from the moving ends every frame
-  (`whenSettled` resolves once any glide has landed). The cards speak the classic
-  vocabulary (2026-11-20, the owner's direction: the panels'
-  operation logic aligned with the classic symbol IDEs): one click on a card opens its definition —
-  the relation window's own click — and the ring's +/− expander is its own small circle
+  (`whenSettled` resolves once any glide has landed). The cards speak the relation
+  window's own vocabulary (2026-11-20, the owner's direction: the panels'
+  operation logic one convention across the symbol views): one plain click on a card —
+  or an Outline row, or a numbered site row — shows the jump in the Definition page
+  (2026-11-23, the owner's direction: 关系点击在定义里显示跳转，代码页面不跳转，定义里
+  右键同步到代码页面 — `onShowDefinition` carries the subject, 0-based, and the host's
+  wiring pins the page, shows it and feeds it, so the activation's cursor-follow never
+  clobbers the symbol the click named; the code page stays where it stands) and the
+  double click and the card menu's "Open the definition" are the editor's jump
+  (`onOpen`); the ring's +/− expander is its own small circle
   at the branch point (the tree row's box), whose click alone drills and collapses,
   instantly — the deferred whole-card merge is gone; the right-click menu drills
   (expand/collapse), re-roots or opens; resting floats the declaration card (its file
   read resolving through `resolvePath`, the host-joined absolute spelling), its lines
   colored by the shared tokenizer. Cards size to their labels, carry the ⋯ a cut-short ring
-  appends, the root the accent, and an aggregating edge its ×N label (call solid blue,
-  use dashed, member green — palette literals, the SVG reads attributes, not CSS
+  appends, the root the accent, and an aggregating edge its ×N label (the numbered rows
+  standing it down where they speak the count; the kind colours went with the classic IDE
+  redrawing — one connection red — palette literals, the SVG reads attributes, not CSS
   variables); a symbol already drawn gains the cross edge instead of a second card (kept
   while both ends stand drawn), a ring naming only drawn symbols leaves the node a leaf,
   and the 3-depth cap answers the ⋯ instead of a request; `pinRoot` seeds an explicit
   pinned root; the board's viewport is its own — the wheel zooms at the cursor (2026-11-21,
   the owner's direction: the wheel zooms in and out, it must not scroll the drawing up and
   down), a background drag pans, and Fit frames the whole drawing;
-  2026-11-20, the relation TYPE is the classic window's own (the the reference reconstruction reconstruction the
-  reference; the owner's direction: the references and relations must match the
-  classic IDE's usage experience):
+  2026-11-20, the relation TYPE set is the relation window's own (the owner's
+  direction: the references and relations must give a fluid, predictable
+  navigation experience):
   the section head's picker lists the thirteen view names the relation window offers —
   Calls, Callers, Calls and Callers, Referenced by Functions/Files/Modules, Contains,
   Container, Base/Derived Classes, Member Types/Classes, Types Used (SI_KINDS, the
@@ -441,32 +468,58 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   site sits in the root's own file → Calls; anywhere else → Callers); the arrows point
   the kind's own way (the referencing side at the referenced — refsTo's family,
   Container, Derived Classes; the subject at what it names — refsFrom's family,
-  Contains, Base Classes; the `base` edge its own colour), the depth guard is the classic window's own
-  — five levels of cards, the fifth a leaf carrying the ⋯ — the per-ring cap the
+  Contains, Base Classes; the `base` edge its own colour), the depth guard — five levels of cards,
+  the fifth a leaf carrying the ⋯ — the per-ring cap the
   backend's 64, and an empty root ring answers the kind's own verdict ("No callers.",
   "No contents.", … — EMPTY_VERDICTS, the wording the relation window itself prints);
   the dev harness's `?relgraph=1` surface scripts the Symbol Window
   whole — outline, sash, graph, the type picker and the cursor buttons that re-root it
-  — for eyeballing; 2026-11-20),
+  — for eyeballing; 2026-11-23, the window speaks the relation
+  view set and commands (the si4-rea reconstruction's SPEC-ui-relation §7, the owner's
+  direction: the windows must read as one coherent set): the three views — the
+  Outline multi-column list (the name with its Calls/Callers suffix, the reference count,
+  the file, the 1-based line, under the relation type's own header; a row's click shows
+  the jump in the Definition page like a card's, its twistie drills — the rows walking
+  the same visible tree the board draws, so
+  the rings' state carries across the views), the Graph Horizontal (a column per depth
+  advanced by the layer's widest card, the siblings stacked down the Y, the card centered
+  on its children's run, the expander on the card's right face, the bezier links running
+  the X) and the Graph Vertical (the top-down mind map as before) — cycled from the head's
+  view button (persisted, `relations.nextView` the palette's cycle command); Back/Forward
+  replay the visited roots (capped at 100); a new root's category names its opening type
+  by the ViewRelationRules (functions and variables References, other types
+  Contents, classes Derived Classes — re-applied only across categories, so a manual pick
+  rides within one); and Expand Special expands a card's subtree an asked number of
+  levels at once (the card menu's entry, the prompt asking the level count); 2026-11-20),
   `src/features/search/definitionView.ts` + `definition.css` (the Definition panel page —
   2026-11-20, it replaces the relation tree the panel used to host: the clicked symbol's
   definition content, drawn from the index — the workbench resolves the cursor word
   (`followDefinitionSymbol` / `resolveDefinitionSymbol`, the same gate/debounce/generation
   discipline the context window keeps: the panel up, this page active, the pin off) and
-  hands the row over; the body slices the declaration through the index's `endLine`, a
-  macro whose end the index never recorded extends over its `\` continuations, the 400-line
-  / 20 000-char cap ends with the faint cut note, and the header's location button jumps
-  at the 1-based line through `onOpenDefinition`; the body's read resolves through
+  hands the row over; the header's location button jumps at the 1-based line through
+  `onOpenDefinition`; the page's own right-click carries the sync (2026-11-23, the
+  owner's direction: 定义里右键同步当前位置到代码页面) — "Sync the current position to
+  the code page", the location button's jump offered in place, riding the same
+  `onOpenDefinition` wiring; the body's read resolves through
   `resolvePath` (the index speaks repo-relative paths, the backend's `read_file` needs
   the absolute spelling — the same hook the references page and the graph's declaration
   card carry; 2026-11-20, the missing hook left the page answering "the symbol index is not responding" on
   every read); the body's code is colored through the shared tokenizer — each line one
   colored span and the newline as text, the pane's text content staying the code verbatim
-  (2026-11-21, the owner's direction: the definition code must be colored too); pin
-  freezes the content;
+  (2026-11-21, the owner's direction: the definition code must be colored too); 2026-11-23,
+  the page is a live view (the si4-rea reconstruction's
+  SPEC-ui-references-definition §2, the owner's direction: the windows must read as one
+  coherent set): the whole declaring file stands as the view — scrolled to the
+  declaration, the symbol's own span marked as the selection — not a slice, a file past
+  the 1 MiB+1 ceiling refusing with the same "ShowCode: file too big" note; and
+  the body's one click relocates the page (chain browsing): the word under
+  the caret (`caretRangeFromPoint`'s hit test read back through the row's text nodes,
+  `wordAt` in `src/platform/highlight.ts`) resolves against the index and re-roots the
+  page — the context window carries the same upgrade (the fed fragment paints first, the
+  whole file replaces it, the click relocates); pin freezes the content;
   `workbench.showDefinition`),
   `src/features/search/referencesView.ts` + `references.css` (the References panel page —
-  2026-11-20, classic-IDE-style Lookup References over the index's occurrence list
+  2026-11-20, Lookup References over the index's occurrence list
   (`symbol_references`) with the definitions' markers (`symbol_lookup`): the clicked
   symbol's every whole-word site grouped by file with per-group counts (two hits on one
   line are one site), a file group opening on its header's click over a cached
@@ -481,12 +534,22 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   and the body's middle folded into
   `… N lines …` rows that click open in place (200-line cap, the remainder its own fold
   row); with nothing enclosing, a raw ±4 window; a definition site is its own head with
-  the whole body folded behind it; a site row's one click is the jump — the classic window's
-  search-results read — the arrow alone folds (the arrow keys walk the rows, Enter
+  the whole body folded behind it; a site row's one click is the jump — the search-results
+  convention — the arrow alone folds (the arrow keys walk the rows, Enter
   jumps); the same cursor-follow gate the definition page keeps
   (the panel up, this page active, the pin off) resolves the subject — one
   `resolveDefinitionSymbol` feeding whichever of the two pages is active; the 100-file /
-  500-site caps answer cut notes; `workbench.showReferences`; the dev harness's
+  500-site caps answer cut notes; 2026-11-23, the page carries the Search
+  Results' own options (the si4-rea reconstruction's SPEC-ui-references-definition
+  §1.2/§1.5, the owner's direction: the windows must read as one coherent set) —
+  the four display switches on the head's gear
+  (`ResultsOptions`, persisted: the container function or class's name joined as
+  `Class:Function:` ahead of the site row through `containerPrefix`, the file name, the
+  line number, the line text — each segment present per its switch), and the
+  output policy for repeated lookups: append, replace, or ask — the ask answering the
+  confirm, the page accumulating the lookups as sections (8 kept, the group and
+  site keys namespaced per section);
+  `workbench.showReferences`; the dev harness's
   `?references=1` surface scripts a two-file fixture for eyeballing; 2026-11-20),
   `src/features/search/renameView.ts` + `rename.css` (the rename dialog over
   `symbol_rename_preview` / `symbol_rename_apply` — `symbols.rename` opens it with the
@@ -513,7 +576,7 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   the table, never the texts; since 2026-11-21 the store lives in the analyzed folder's
   hidden `.ggs/analysis/<hash>/` — hidden attribute, `.git/info/exclude` line, home
   fallback for a read-only folder, the Rebuild command wiping it before the clean
-  regenerate), `symbols::sidb` (the reference analysis database, 2026-11-21: the six
+  regenerate), `symbols::anadb` (the reference analysis database, 2026-11-21: the six
   tables — modules, symbols, call edges, syllable fragments, type definitions, code
   positions — serialized byte-for-byte in `si4-rea`'s si-lite `db_save`/`tix_save` shape
   (`si.db` + `si.tix` beside the store; the reference tooling loads ggs's files back and
@@ -521,14 +584,14 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   call sites and the mask-filtered positioned hits, the assembly mirroring si-lite's
   `db_add_symbol`/`db_add_edge`/`db_add_code_rec_enc` semantics — first-declaration-wins
   names, exact-pair edge dedup, member access and self-references never recorded),
-  `symbols::sipb` + `symbols::sipb_sig` (the classic IDE project-volume emitters,
-  2026-11-21: the ten `.siproj` / `.sip_*` containers of the classic IDE's own database —
+  `symbols::projvol` + `symbols::projvol_sig` (the project-volume emitters,
+  2026-11-21: the ten `.siproj` / `.sip_*` containers of the reference database —
   the 0x200 base-block header, `0xFFFFFFFD`-marked fixed slots, the 180-byte symbol
   records, the 2024-byte djb2-bloom signature records — written from the `si4-rea`
-  reverse-engineering specs in `sip-vol\SPEC-*.md`; `sipb` carries the container layer and
-  the structured record constructors, `sipb_sig` the xr/xf/xc signature hashes (djb2
+  reverse-engineering specs in `sip-vol\SPEC-*.md`; `projvol` carries the container layer and
+  the structured record constructors, `projvol_sig` the xr/xf/xc signature hashes (djb2
   5381×33 / ×63, %7993, verified 478/478 records against the reference volumes); the
-  round-trip tests read the reference snapshot through `GGS_SIP_SNAP_DIR` and skip when it
+  round-trip tests read the reference snapshot through `GGS_REF_SNAP_DIR` and skip when it
   is absent — research parity work, nothing in the app reads it yet),
   `symbols::index` (the per-root databases, the build / resume /
   rebuild, the reference scan; `wipe_disk` is the delete-and-regenerate surface), `symbols::mask` (the code mask — the comment/string/char-
@@ -543,32 +606,34 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   the root def's body for indexed names (call when followed by `(`, use otherwise, same-file
   def preferred as the target), `hasChildren` an exact peek for narrow names and refsFrom,
   optimistic for hot names; 2026-11-20, one node per counterpart with
-  `edge_count` accumulating every valid site at its earliest `edge_line`, a 250 ms
+  `edge_count` accumulating every valid site at its earliest `edge_line` (2026-11-23:
+  and `edge_lines` keeping every kept site's line, ascending, deduplicated, capped at
+  16 — the numbered rows the graph card draws for a multi-site edge, the classic IDE's
+  ShowGraphDetails), a 250 ms
   wall-clock budget checked every 32 files / 256 hits (a time-slice discipline) answering
   `RelationAnswer { nodes, truncated }` — the cap and the
   budget both set `truncated`; the third direction `contains` answers the root's members
   over the store's `members_of` (container-intern scan, member edges carrying the
   member's own declaration, `hasChildren` peeking whether the member is itself a
   container — nested types drill);
-  2026-11-20, the type set speaks the classic window's own relation window (the the reference reconstruction
-  reconstruction the reference; the owner's direction: the references and relations must
-  match the classic symbol IDEs' usage experience): `RelationKind` answers thirteen kinds — the three original
+  2026-11-20, the type set speaks the relation window's own vocabulary (the owner's
+  direction: the references and relations must read and navigate smoothly): `RelationKind` answers thirteen kinds — the three original
   directions plus `calls`/`callers` (the same scans through the call edges only, the
   peeks asking the same filtered question so a ring marker never promises an empty
   drill), `callsAndCallers` (the caller ring first, the callee ring merged in, a mutual
   counterpart keeping one node whose count is the pair's total — a caller's edge site
   lives in its own file and a callee's in the subject's, the coordinates the frontend
-  reads to pick the branch's drill kind), `referencedByFunctions` (refsTo under the classic window's
-  name), `referencedByFiles`/`referencedByModules` (the attributed sites keyed by their
+  reads to pick the branch's drill kind), `referencedByFunctions` (refsTo under its own
+  view's name), `referencedByFiles`/`referencedByModules` (the attributed sites keyed by their
   file — one node per file, count the kept sites, the earliest line, files answering
   leaves), `container` (the enclosing type one ring up, the membership edge at the
   subject's declaration, the chain walked upward one drill at a time),
   `memberTypes`/`memberClasses` (the members filtered by kind, the store-side filter
   keeping the truncation honest), `typesUsed` (the type-category targets only) and
   `baseClasses`/`derivedClasses` (the parser's base table walked both ways, the edges at
-  the derivations' own lines); parse() accepts the classic window's own view names in every spelling
-  (camelCase, lower case without spaces, the `callees` alias); the per-ring node cap is
-  the classic window's 64),
+  the derivations' own lines); parse() accepts the relation window's own view names in every spelling
+  (camelCase, lower case without spaces, the `callees` alias); the per-ring node cap
+  stands at 64),
   `symbols::rename` (the rename engine, 2026-11-20: the plan unions the old name's
   declarations with its masked reference sites and the conflicts refuse all-or-nothing —
   the new name already declared, the same name, not found, over the site cap — while the

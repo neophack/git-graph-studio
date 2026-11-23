@@ -11,12 +11,21 @@
 // symbol's ring drawn as an interactive box-and-arrow canvas over `relationGraph.ts` —
 // re-rooted on every covering-symbol identity change unless pinned, the same discipline
 // the locals run on.
+// The outline folds too (2026-11-23, the si4-rea reconstruction's
+// SPEC-ui-references-definition §6.3): a container row carries its own +/- twistie whose
+// click folds and opens its members in place, Expand All / Collapse All / Expand Special
+// are the tree commands (the special one asking its number of levels), and the sort
+// speaks three states — By Line (the tree, the only state that folds), By Name and By
+// Type as the flat lists.
 
 import { symbolFileOutline, symbolLocals } from '../../platform/ipc/symbols';
 
-import { t } from '../../platform/i18n';
+import { t, type LocaleKey } from '../../platform/i18n';
+import { load, save } from '../../platform/state';
+import { notify, quickInput } from '../../platform/ui/index';
 import { KIND_ICONS } from './contextView';
 import { RelationGraphView } from './relationGraph';
+import type { DefinitionSubject } from './definitionView';
 import { el, icon, relativeTo } from '../../platform/ui/index';
 
 import type { FileOutlineImport, FileOutlineSymbol, ScopeDefinition } from '../../platform/ipc/symbols';
@@ -48,6 +57,95 @@ function containerDepth(symbol: FileOutlineSymbol, depths: Map<string, number>):
 	return Math.min((depths.get(symbol.container) ?? -1) + 1, 3);
 }
 
+/* ---------- The collapsible tree ---------- */
+
+/** The sort's three states, in the header cycle's order — By Line is the tree, the only
+ *  state that folds ("Items can only be collapsed when sorted by line."); By Name and
+ *  By Type read as the flat lists. */
+export type SymbolSortMode = 'line' | 'name' | 'type';
+
+const SORT_ORDER: SymbolSortMode[] = ['line', 'name', 'type'];
+
+const SORT_LABELS: Record<SymbolSortMode, LocaleKey> = {
+	line: 'symbols.window.sortLine',
+	name: 'symbols.window.sortName',
+	type: 'symbols.window.sortType'
+};
+
+/** The kind order the flat By Type list groups by — the backend's own KINDS order, the
+ *  format's vocabulary. */
+const KIND_ORDER = ['function', 'method', 'class', 'struct', 'interface', 'enum', 'module', 'type', 'macro', 'variable'];
+
+/** One rendered outline row: the symbol, its structural depth, whether it carries a
+ *  fold twistie (some listed row names it as the container), and the identity key the
+ *  collapse set holds. */
+interface OutlineRow {
+	symbol: FileOutlineSymbol;
+	depth: number;
+	toggle: boolean;
+	key: string;
+}
+
+function rowKey(symbol: FileOutlineSymbol): string {
+	return `${symbol.name}\u0000${symbol.line}`;
+}
+
+/** The line-sorted outline as the collapsible tree (pure for the tests): the container
+ *  chain gives every row its structural depth (capped at three, the flat view's own
+ *  rule), a row carries its twistie when a later row names it as the container, the
+ *  filter keeps a row when it or any descendant matches, and a row whose ancestor sits
+ *  in the collapsed set stays folded away. */
+export function outlineRows(symbols: FileOutlineSymbol[], filter: string, collapsed: Set<string>): OutlineRow[] {
+	const parentOf: number[] = [];
+	const depth: number[] = [];
+	const lastSeen = new Map<string, number>();
+	for (let index = 0; index < symbols.length; index++) {
+		const container = symbols[index]!.container;
+		const parent = container === null ? -1 : (lastSeen.get(container) ?? -1);
+		parentOf.push(parent);
+		depth.push(parent === -1 ? 0 : Math.min(depth[parent]! + 1, 3));
+		lastSeen.set(symbols[index]!.name, index);
+	}
+	const hasKids = new Set<number>();
+	for (let index = 0; index < symbols.length; index++) if (parentOf[index]! >= 0) hasKids.add(parentOf[index]!);
+	// The filter shows a row when it matches or something under it does.
+	const matching = symbols.map((symbol) => filter === '' || symbol.name.toLowerCase().includes(filter));
+	const shown = matching.slice();
+	for (let index = symbols.length - 1; index >= 0; index--) {
+		const parent = parentOf[index]!;
+		if (shown[index] && parent >= 0) shown[parent] = true;
+	}
+	const rows: OutlineRow[] = [];
+	for (let index = 0; index < symbols.length; index++) {
+		if (!shown[index]) continue;
+		let hidden = false;
+		for (let at = parentOf[index]!; at >= 0 && !hidden; at = parentOf[at]!) hidden = collapsed.has(rowKey(symbols[at]!));
+		if (hidden) continue;
+		rows.push({ symbol: symbols[index]!, depth: depth[index]!, toggle: hasKids.has(index), key: rowKey(symbols[index]!) });
+	}
+	return rows;
+}
+
+/** The flat list the name and type sorts show — the tree folded away, the depth kept
+ *  for the indentation. */
+export function flatRows(symbols: FileOutlineSymbol[], mode: Exclude<SymbolSortMode, 'line'>): OutlineRow[] {
+	const sorted = symbols.slice();
+	if (mode === 'name') sorted.sort((a, b) => a.name.localeCompare(b.name) || a.line - b.line);
+	else
+		sorted.sort(
+			(a, b) =>
+				(KIND_ORDER.indexOf(a.kind) === -1 ? KIND_ORDER.length : KIND_ORDER.indexOf(a.kind)) -
+					(KIND_ORDER.indexOf(b.kind) === -1 ? KIND_ORDER.length : KIND_ORDER.indexOf(b.kind)) ||
+				a.line - b.line
+		);
+	const depthOf = new Map<string, number>();
+	return sorted.map((symbol) => {
+		const depth = containerDepth(symbol, depthOf);
+		depthOf.set(symbol.name, depth);
+		return { symbol, depth, toggle: false, key: rowKey(symbol) };
+	});
+}
+
 export class SymbolWindowView {
 	private readonly title: HTMLElement;
 
@@ -75,6 +173,16 @@ export class SymbolWindowView {
 	private importsCollapsed = false;
 
 	private filterText = '';
+
+	/** The sort's state — the three states, persisted; only the line sort folds. */
+	private sortMode: SymbolSortMode = load<SymbolSortMode>('symbolWindow.sort', 'line');
+
+	/** The folded containers' identity keys (name + declaration line) — the twisties'
+	 *  state, per file (a file switch starts the tree over). */
+	private readonly collapsed = new Set<string>();
+
+	/** The sort cycle's header button — the cycle command living on the head. */
+	private readonly sortButton: HTMLButtonElement;
 
 	/** The cursor line the highlight is painted for (0-based); -1 is none. */
 	private cursorLine = -1;
@@ -135,6 +243,11 @@ export class SymbolWindowView {
 
 	onOpen?: (path: string, line: number) => void;
 
+	/** The relation graph's plain click, shown in the Definition page — the host (boot)
+	 *  pins the page, shows it and feeds it; the code page stays where it stands
+	 *  (2026-11-23, the owner's direction: 关系点击在定义里显示跳转，代码页面不跳转). */
+	onShowDefinition?: (subject: DefinitionSubject) => void;
+
 	constructor(private readonly container: HTMLElement) {
 		container.classList.add('symbol-window');
 		this.title = el('span', 'sw-title');
@@ -146,10 +259,16 @@ export class SymbolWindowView {
 			this.filterText = this.filterInput.value.trim().toLowerCase();
 			this.render();
 		});
-		const header = el('div', 'sw-header', [icon('symbol-class'), this.title, this.filterInput]);
+		this.sortButton = el('button', 'sw-sort');
+		this.sortButton.addEventListener('click', () => this.cycleSort());
+		const header = el('div', 'sw-header', [icon('symbol-class'), this.title, this.filterInput, this.sortButton]);
+		this.paintSort();
 		this.body = el('div', 'sw-list');
 		this.graph = new RelationGraphView();
 		this.graph.onOpen = (path, line) => this.onOpen?.(path, line);
+		// The plain click's jump lands in the Definition page — the host's wiring pins,
+		// shows and feeds it (the code page never jumps for a graph click).
+		this.graph.onShowDefinition = (subject) => this.onShowDefinition?.(subject);
 		// The declaration card's file read: the index speaks repo-relative paths and the
 		// backend's read_file needs the absolute spelling, so the graph resolves through
 		// the host's root (an absolute path passes through).
@@ -289,7 +408,9 @@ export class SymbolWindowView {
 			return;
 		}
 		// A new file: drop the previous file's rows at once (they name another path) and
-		// load, unless the page is hidden — its showView() refresh pulls then.
+		// load, unless the page is hidden — its showView() refresh pulls then. The fold
+		// state starts over: the keys name another file's symbols.
+		this.collapsed.clear();
 		this.generation++;
 		this.loadedPath = null;
 		this.loadingPath = null;
@@ -375,16 +496,77 @@ export class SymbolWindowView {
 			return;
 		}
 		const query = this.filterText;
-		// The indentation walks the listed rows: a row whose container names an earlier
-		// listed row sits one level under that row's depth (capped at three).
-		const depths = new Map<string, number>();
-		for (const symbol of this.symbols) {
-			if (query !== '' && !symbol.name.toLowerCase().includes(query)) continue;
-			const depth = containerDepth(symbol, depths);
-			depths.set(symbol.name, depth);
-			this.body.appendChild(this.symbolRow(symbol, depth));
-		}
+		// The sort decides the shape: the line sort is the collapsible tree, the name and
+		// type sorts the flat lists.
+		const rows = this.sortMode === 'line' ? outlineRows(this.symbols, query, this.collapsed) : flatRows(this.symbols, this.sortMode);
+		for (const row of rows) this.body.appendChild(this.symbolRow(row));
 		this.updateHighlight();
+	}
+
+	/* ---------- The collapsible tree and the sort ---------- */
+
+	private toggleCollapse(key: string): void {
+		if (this.collapsed.has(key)) this.collapsed.delete(key);
+		else this.collapsed.add(key);
+		this.render();
+	}
+
+	/** The tree commands: fold every container (line sort only — the fold constraint
+	 *  answers the note otherwise), open everything, or open an asked number of tree
+	 *  levels. */
+	collapseAll(): void {
+		if (this.sortMode !== 'line') {
+			notify('info', t('symbols.window.sortedNote'));
+			return;
+		}
+		for (const row of outlineRows(this.symbols, '', this.collapsed)) if (row.toggle) this.collapsed.add(row.key);
+		this.render();
+	}
+
+	expandAll(): void {
+		this.collapsed.clear();
+		this.render();
+	}
+
+	async expandSpecial(): Promise<void> {
+		const raw = await quickInput({
+			title: t('symbols.window.expandSpecial'),
+			placeholder: t('relations.expandSpecial.prompt'),
+			validate: (value) => (/^[1-8]$/.test(value.trim()) ? null : t('relations.expandSpecial.bad'))
+		});
+		if (raw === null) return;
+		const levels = Number(raw.trim());
+		if (!Number.isFinite(levels) || levels < 1) return;
+		// N passes open the first N container levels: each pass re-lists what the
+		// previous pass unfolded, so the newly visible depth answers the next.
+		for (let level = 0; level < Math.min(8, Math.round(levels)); level++) {
+			for (const row of outlineRows(this.symbols, '', this.collapsed)) {
+				if (row.toggle && this.collapsed.has(row.key) && row.depth <= level) this.collapsed.delete(row.key);
+			}
+		}
+		this.render();
+	}
+
+	/** The sort cycle: By Line → By Name → By Type → By Line. */
+	cycleSort(): void {
+		const at = SORT_ORDER.indexOf(this.sortMode);
+		this.sortMode = SORT_ORDER[(at + 1) % SORT_ORDER.length]!;
+		save('symbolWindow.sort', this.sortMode);
+		this.paintSort();
+		this.render();
+	}
+
+	private paintSort(): void {
+		this.sortButton.textContent = '';
+		this.sortButton.append(el('span', 'sw-sort-label', [t(SORT_LABELS[this.sortMode])]), icon('chevron-down'));
+		this.sortButton.title = t('symbols.window.sortCycle');
+		this.sortButton.setAttribute('aria-label', this.sortButton.title);
+	}
+
+	/** The palette's relation-window command: the three-view cycle, riding the graph
+	 *  below whether its section stands open or not. */
+	cycleRelationView(): void {
+		this.graph.cycleView();
 	}
 
 	private importsSection(): HTMLElement {
@@ -433,17 +615,31 @@ export class SymbolWindowView {
 		return section;
 	}
 
-	private symbolRow(symbol: FileOutlineSymbol, depth: number): HTMLElement {
+	private symbolRow(entry: OutlineRow): HTMLElement {
 		const path = this.targetPath!;
+		const symbol = entry.symbol;
 		const row = el('div', 'sw-row');
 		row.dataset['path'] = path;
 		row.dataset['line'] = String(symbol.line);
+		// The fold gutter: every row carries the slot — the container rows their +/-, the
+		// leaves the empty one, so the indents line up.
+		if (entry.toggle) {
+			const twist = el('span', 'twistie sw-fold', [icon(this.collapsed.has(entry.key) ? 'chevron-right' : 'chevron-down')]);
+			twist.title = this.collapsed.has(entry.key) ? t('symbols.window.expand') : t('symbols.window.collapse');
+			twist.addEventListener('click', (event) => {
+				event.stopPropagation();
+				this.toggleCollapse(entry.key);
+			});
+			row.appendChild(twist);
+		} else {
+			row.appendChild(el('span', 'twistie sw-fold-space'));
+		}
 		row.append(icon(KIND_ICONS[symbol.kind] ?? 'symbol-variable'));
 		if (symbol.container) row.appendChild(el('span', 'sw-container', [`${symbol.container}·`]));
 		row.appendChild(el('span', 'sw-name', [symbol.name]));
 		row.appendChild(el('span', 'sw-line', [String(symbol.line + 1)]));
 		// The container chain's depth as padding — the row structure stays untouched.
-		if (depth > 0) row.style.paddingLeft = `${8 + depth * 14}px`;
+		if (entry.depth > 0) row.style.paddingLeft = `${8 + entry.depth * 14}px`;
 		row.addEventListener('click', () => this.onOpen?.(path, symbol.line + 1));
 		this.renderedRows.push(row);
 		this.renderedSymbols.push(symbol);

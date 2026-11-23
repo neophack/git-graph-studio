@@ -148,7 +148,7 @@ export class Panel {
 	 *  a function through its body, a macro through its continuations. */
 	readonly definition: DefinitionView;
 	/** The References page (module 5): the clicked symbol's every site, each answered with
-	 *  a folded context slice — the classic lookup-references page. */
+	 *  a folded context slice — the lookup-references page. */
 	readonly references: ReferencesView;
 	private readonly element: HTMLElement;
 	private readonly tabs: HTMLElement;

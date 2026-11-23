@@ -243,11 +243,24 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'workbench.showExtensions', title: 'Extensions', category: 'View', keybinding: 'Ctrl+Shift+X', run: () => this.showView('extensions') });
 		register({ id: 'workbench.showAnalysis', title: 'Analysis', category: 'View', keybinding: 'Ctrl+Shift+A', run: () => this.showView('analysis') });
 		register({ id: 'workbench.showSymbolWindow', title: 'Symbol Window', category: 'View', keybinding: 'Alt+L', run: () => this.showView('symbolWindow') });
+		// The Symbol Window's and its relation graph's own commands
+		// (2026-11-23, the si4-rea reconstruction's SPECs §3/§4): the relation window's
+		// three-view cycle, the outline tree's expand set and the sort cycle.
+		register({ id: 'relations.nextView', title: 'Next Relation Window View', category: 'View', run: () => this.symbolWindow.cycleRelationView() });
+		register({ id: 'symbols.outlineExpandAll', title: 'Expand All', category: 'View', run: () => this.symbolWindow.expandAll() });
+		register({ id: 'symbols.outlineCollapseAll', title: 'Collapse All', category: 'View', run: () => this.symbolWindow.collapseAll() });
+		register({ id: 'symbols.outlineExpandSpecial', title: 'Expand Special…', category: 'View', run: () => void this.symbolWindow.expandSpecial() });
+		register({ id: 'symbols.outlineSort', title: 'Sort Symbol Window', category: 'View', run: () => this.symbolWindow.cycleSort() });
 		// The new view's and its activity-bar tooltip's zh-cn twins (the localization sweep
 		// reads the command title through trText, as it does every registry title).
 		registerZhCnText({
 			'Symbol Window': '符号窗口',
-			'Symbols (Alt+L)': '符号 (Alt+L)'
+			'Symbols (Alt+L)': '符号 (Alt+L)',
+			'Next Relation Window View': '下一个关系窗口视图',
+			'Expand All': '全部展开',
+			'Collapse All': '全部折叠',
+			'Expand Special…': '特殊展开…',
+			'Sort Symbol Window': '排序符号窗口'
 		});
 		register({ id: 'analysis.showModules', title: 'Module Analysis', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('modules') });
 		register({ id: 'analysis.showMetrics', title: 'Complexity & Hotspots', category: 'Analysis', enabled: hasRepo, run: () => void this.editors.openAnalysisPage('metrics') });
@@ -588,7 +601,12 @@ export const bootMethods: ThisType<Workbench> = {
 		this.statusBar.onIndentClick = () => void this.pickIndent();
 		this.statusBar.onSymbolsClick = () => void commands.execute('symbols.rebuild');
 		this.panel.context.onOpenDefinition = (definition) => {
-			void this.editors.openFile(definition.path, { line: definition.line + 1 });
+			// The context window's feed speaks absolute paths, its chain browse the index's
+			// repo-relative ones — an open joins the root, an absolute path passes through.
+			const path = /^([a-zA-Z]:[\\/]|\\|\/)/.test(definition.path) || !this.repoPath
+				? definition.path
+				: joinRepo(this.repoPath, definition.path);
+			void this.editors.openFile(path, { line: definition.line + 1 });
 		};
 		// The Definition page's jump: the header's location button opens the definition at
 		// the 1-based line; the index speaks repo-relative paths, so an open joins the
@@ -609,12 +627,25 @@ export const bootMethods: ThisType<Workbench> = {
 			/^([a-zA-Z]:[\\/]|\\|\/)/.test(path) || !this.repoPath ? path : joinRepo(this.repoPath, path);
 		this.panel.definition.resolvePath = resolveSymbolPath;
 		this.panel.references.resolvePath = resolveSymbolPath;
+		this.panel.context.resolvePath = resolveSymbolPath;
 		// The Symbol Window's jumps: an outline row, an import, a current-function local,
 		// and the relation graph's card click open the target at the 1-based line. The
 		// outline's rows speak the editor's absolute path, the graph's cards the index's
 		// repo-relative one — an open joins the root, an absolute path passes through.
 		this.symbolWindow.onOpen = (path, line) => {
 			void this.editors.openFile(resolveSymbolPath(path), { line });
+		};
+		// The relation graph's plain click shows its jump in the Definition page — the
+		// code page stays where it stands (2026-11-23, the owner's direction: 关系点击在
+		// 定义里显示跳转，代码页面不跳转，定义里右键同步到代码页面). The pin rides FIRST:
+		// the page's own activation below (show's shown()) re-resolves the cursor's
+		// symbol through the debounced follow, whose gate the pin is — without it every
+		// activation would clobber the symbol the card named. The page's right-click
+		// carries the sync into the code page from there.
+		this.symbolWindow.onShowDefinition = (subject) => {
+			this.panel.definition.setPinned(true);
+			this.panel.show('definition');
+			this.panel.definition.setDefinition(subject);
 		};
 		// The hover card's relations click: the card's symbol — the index's own
 		// { kind, name, path, line } vocabulary — becomes the Symbol Window's relation

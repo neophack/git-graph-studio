@@ -1,10 +1,10 @@
 //! TEMP: the real-folder probe for the 2026-11-21 analysis-folder work — index a root
-//! the way the app does, run the classic relation kinds on a named subject, and leave
+//! the way the app does, run the relation kinds on a named subject, and leave
 //! the project analysis folder (`.ggs/`, si.db + si.tix + symbols.bin) standing for the
 //! reference implementation to read back.
 //!
 //! ```text
-//! cargo run -p ggs-index --example si_probe -- <root> [subject-name]
+//! cargo run -p ggs-index --example index_probe -- <root> [subject-name]
 //! ```
 
 use std::time::Instant;
@@ -14,13 +14,13 @@ use ggs_index::symbols::relations::{relation_children, RelationKind};
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let root = args.next().expect("usage: si_probe <root> [subject]");
+    let root = args.next().expect("usage: index_probe <root> [subject]");
     let subject = args.next().unwrap_or_else(|| "main".to_owned());
 
     // The probe's own index home, beside this repository's generated output.
     let home = std::env::current_dir()
         .unwrap()
-        .join("../../target/studio/si-probe-home");
+        .join("../../target/studio/index-probe-home");
     std::fs::create_dir_all(&home).unwrap();
     let index = SymbolIndex::with_home(home);
 

@@ -14,7 +14,10 @@
 //! file reads at all. Repeated sites of
 //! one edge merge into the single node whose `edge_count` accumulates and whose
 //! `edge_line` keeps the earliest site — the callers-and-calls count, one node per
-//! counterpart. Nothing here materializes the index: each step asks
+//! counterpart — and whose `edge_lines` keeps every site's line (ascending, at most
+//! [`MAX_EDGE_LINES`]), the numbered rows the relation graph draws under a multi-site
+//! card (the reference reconstruction's ShowGraphDetails, "N. line L"). Nothing here
+//! materializes the index: each step asks
 //! the store for one file's rows or one name's declarations.
 //!
 //! One call answers one ring under one wall-clock budget (a time-slice
@@ -39,8 +42,8 @@ use crate::symbols::store::{FileOutlineRow, SymbolStore};
 use crate::symbols::WorkspaceSymbol;
 
 /// The children one direction returns at most: the window expands ring by ring, and a
-/// hub name's caller list is read, not painted as a graph. the classic window's relation
-/// window caps every node's children at 64 and answers the overflow's own verdict; the
+/// hub name's caller list is read, not painted as a graph. The 64-children cap keeps
+/// every node's ring answerable — the overflow is reported, not painted; the
 /// same ceiling here marks the answer truncated — the ring had more to show.
 const MAX_NODES: usize = 64;
 /// One relation call's wall-clock budget, a time-slice discipline: a
@@ -58,6 +61,10 @@ const PEEK_FILE_CAP: usize = 16;
 /// only holds the head the attribution consumes, and skips (declaration lines, sites no
 /// interval covers) may eat into it before a real edge lands.
 const SCAN_KEEP: usize = 4096;
+/// A node's edge keeps at most this many site lines — the numbered rows the graph card
+/// draws under it; `edge_count` stays the whole truth past the cap, the "+N" tail the
+/// card appends reading its remainder.
+const MAX_EDGE_LINES: usize = 16;
 /// The budget check's rhythm: the clock is read every 32
 /// files or 256 hits, not on every item — the check itself is never the scan's cost.
 const BUDGET_FILES_PER_CHECK: usize = 32;
@@ -81,6 +88,9 @@ pub struct RelationNode {
     pub edge_kind: String,
     /// How many reference sites this edge aggregates — the callers-and-calls count.
     pub edge_count: usize,
+    /// Every kept site's 0-based line, ascending, at most [`MAX_EDGE_LINES`] — the
+    /// numbered rows the graph card draws for a multi-site edge (ShowGraphDetails).
+    pub edge_lines: Vec<usize>,
     /// Whether expanding this node again yields children — best effort (the peek
     /// helpers below document which side answers precisely and which heuristically).
     pub has_children: bool,
@@ -111,16 +121,14 @@ impl Budget {
 }
 
 /// `refsTo`: who references the subject. `refsFrom`: what the subject references.
-/// `contains`: the members declared inside the subject. The rest speak the classic window's
-/// relation window's own type set (2026-11-20, the owner's direction: the relation and
-/// references experience aligned with the classic symbol IDEs, the the reference reconstruction reconstruction the
-/// reference): Calls (the call edges out), Callers (the call edges in), Calls and
-/// Callers (both, caller branches first), Referenced by Functions (== refsTo), Referenced
-/// by Files / Modules (the references keyed by their file — files are leaves), Container
-/// (the enclosing type, the chain walked upward one ring per drill), Member Types /
-/// Member Classes (the members by kind), Types Used (the type-category declarations the
-/// body references), Base Classes / Derived Classes (the inheritance the parser
-/// captures).
+/// `contains`: the members declared inside the subject. The remaining ten kinds
+/// (added 2026-11-20) complete the relation-type set: Calls (the call edges out),
+/// Callers (the call edges in), Calls and Callers (both, caller branches first),
+/// Referenced by Functions (== refsTo), Referenced by Files / Modules (the references
+/// keyed by their file — files are leaves), Container (the enclosing type, the chain
+/// walked upward one ring per drill), Member Types / Member Classes (the members by
+/// kind), Types Used (the type-category declarations the body references), Base Classes
+/// / Derived Classes (the inheritance the parser captures).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RelationKind {
     RefsTo,
@@ -140,9 +148,9 @@ pub enum RelationKind {
 }
 
 impl RelationKind {
-    /// The wire spelling the frontend sends. the classic window's own view names answer in
-    /// every spelling they are written in — camelCase, lower case without spaces, the
-    /// `callees` legacy alias — anything else is an error, not a default.
+    /// The wire spelling the frontend sends. Every view name answers in every spelling
+    /// it is written in — camelCase, lower case without spaces, the `callees` legacy
+    /// alias for Calls — anything else is an error, not a default.
     pub fn parse(value: &str) -> Result<RelationKind, String> {
         let name: String = value.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase();
         match name.as_str() {
@@ -166,8 +174,8 @@ impl RelationKind {
 }
 
 /// The reference edges a ring keeps: every site (the refsTo/refsFrom vocabulary), or one
-/// of the classic window's filtered views — the call edges only, or the edges landing on
-/// type-category declarations.
+/// of the filtered views — the call edges only, or the edges landing on type-category
+/// declarations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EdgeFilter {
     All,
@@ -186,9 +194,9 @@ impl EdgeFilter {
     }
 }
 
-/// The declaration kinds that count as types — the classic window's `refs_is_typeish`
-/// vocabulary over the index's own kind names: the types a `Types Used` ring keeps and
-/// the `Member Types` filter's members.
+/// The declaration kinds that count as types — the `refs_is_typeish` vocabulary of the
+/// reference reconstruction, over the index's own kind names: the types a `Types Used`
+/// ring keeps and the `Member Types` filter's members.
 const TYPEISH: &[&str] = &["class", "struct", "interface", "enum", "type", "module"];
 
 /// The class-kind members only — `Member Classes`' filter.
@@ -296,7 +304,7 @@ pub fn relation_children_budgeted(
         RelationKind::RefsFrom => refs_from(store, name, path, line, RingOpts::new(MAX_NODES, true, EdgeFilter::All), &budget),
         // A pure store query: no file read, no wall-clock budget to respect.
         RelationKind::Contains => contains_members(store, name, MAX_NODES, true, MemberFilter::All),
-        // The classic Calls / Callers: the same scans through the call edges only —
+        // The Calls / Callers views: the same scans through the call edges only —
         // the peeks ask the same filtered question, so a node's ring marker never promises
         // a drill the kind answers empty.
         RelationKind::Calls => refs_from(store, name, path, line, RingOpts::new(MAX_NODES, true, EdgeFilter::CallsOnly), &budget),
@@ -307,7 +315,7 @@ pub fn relation_children_budgeted(
         // coordinates tell the frontend which side it stands on: a caller's edge lives in
         // its own file, a callee's in the subject's).
         RelationKind::CallsAndCallers => calls_and_callers(root, store, name, path, line, &budget),
-        // the classic referenced-by-files/modules: the same attributed sites keyed
+        // Referenced by Files / Modules: the same attributed sites keyed
         // by their file; the files are leaves.
         RelationKind::RefByFiles | RelationKind::RefByModules => {
             refs_by_files(root, store, name, MAX_NODES, &budget)
@@ -323,6 +331,20 @@ pub fn relation_children_budgeted(
 }
 
 /* ---------- refsTo ---------- */
+
+/// The ring's final shape: each edge's site lines sorted, deduplicated and capped (two
+/// sites on one line are one row — the references view's own dedup), the nodes ordered
+/// by their earliest site. Every direction returns through here.
+fn finish_ring(mut nodes: Vec<RelationNode>) -> Vec<RelationNode> {
+    for node in &mut nodes {
+        node.edge_lines.sort_unstable();
+        node.edge_lines.dedup();
+        node.edge_lines.truncate(MAX_EDGE_LINES);
+    }
+    nodes.sort_by_key(|node| node.edge_line);
+    nodes
+}
+
 
 /// The definitions that reference `name`: every whole-word occurrence of it (the
 /// occurrence-narrowed scan), attributed through the file's own def intervals, hits the
@@ -396,6 +418,7 @@ fn refs_to(
                 // The pair's later sites only thicken the edge they already made.
                 nodes[at].edge_count += 1;
                 nodes[at].edge_line = nodes[at].edge_line.min(site);
+                nodes[at].edge_lines.push(site);
                 continue;
             }
             index_of.insert(key, nodes.len());
@@ -409,6 +432,7 @@ fn refs_to(
                 edge_line: site,
                 edge_kind: edge_kind.to_owned(),
                 edge_count: 1,
+                edge_lines: vec![site],
                 // The peek turns its own flags off: a flag computed inside a peek would
                 // chase the whole ring depth-first, one scan per level. The filtered
                 // rings' peeks ask the same filtered question.
@@ -421,8 +445,10 @@ fn refs_to(
             }
         }
     }
-    nodes.sort_by_key(|node| node.edge_line);
-    Ok(RelationAnswer { nodes, truncated })
+    Ok(RelationAnswer {
+        nodes: finish_ring(nodes),
+        truncated,
+    })
 }
 
 /// The file's comment/string mask, read and computed once per file per call (`masks`
@@ -556,11 +582,15 @@ fn refs_from(
             words_seen += 1;
             if words_seen.is_multiple_of(BUDGET_HITS_PER_CHECK) && budget.expired() {
                 truncated = true;
-                return Ok(RelationAnswer { nodes, truncated });
+                return Ok(RelationAnswer {
+                    nodes: finish_ring(nodes),
+                    truncated,
+                });
             }
             if let Some(&at) = node_of.get(word) {
                 // The word's target is fixed; later sites only thicken its edge.
                 nodes[at].edge_count += 1;
+                nodes[at].edge_lines.push(line_no);
                 continue;
             }
             // The first unmasked occurrence carries the edge; later ones only count.
@@ -602,20 +632,26 @@ fn refs_from(
                 edge_line: line_no,
                 edge_kind: edge_kind.to_owned(),
                 edge_count: 1,
+                edge_lines: vec![line_no],
                 has_children: with_flags
                     && has_refs_from_children(store, &target, opts.bare(), budget),
             });
             if nodes.len() >= limit {
                 truncated = true;
-                return Ok(RelationAnswer { nodes, truncated });
+                return Ok(RelationAnswer {
+                    nodes: finish_ring(nodes),
+                    truncated,
+                });
             }
         }
         if seen.len() > MAX_WORDS {
             break;
         }
     }
-    nodes.sort_by_key(|node| node.edge_line);
-    Ok(RelationAnswer { nodes, truncated })
+    Ok(RelationAnswer {
+        nodes: finish_ring(nodes),
+        truncated,
+    })
 }
 
 /// Whether expanding a node as refsFrom yields children — **precise**: the peek re-runs
@@ -684,6 +720,7 @@ fn contains_members(
             kind: row.kind.to_owned(),
             container: row.container,
             edge_count: 1,
+            edge_lines: vec![row.line],
             edge_kind: "member".to_owned(),
             edge_line: row.line,
             edge_path: path.clone(),
@@ -699,8 +736,8 @@ fn contains_members(
 /* ---------- Calls and Callers ---------- */
 
 /// The combined view: the caller ring first, the callee ring merged in — a counterpart
-/// met on both sides keeps one node whose count is the pair's total sites (the
-/// classic IDE's CallsAndCalls counter) and whose edge stays the caller side's. Every node's
+/// met on both sides keeps one node whose count is the pair's total sites, the caller's
+/// counter and the callee's summed, and whose edge stays the caller side's. Every node's
 /// ring marker asks its own side's question — callers for the caller nodes (whose edge
 /// site lives in their own file), calls for the callee nodes — so a drill never promises
 /// a ring the branch answers empty.
@@ -727,8 +764,10 @@ fn calls_and_callers(
         let key = (callee.name.clone(), callee.path.clone(), callee.line);
         if let Some(&at) = index_of.get(&key) {
             // The caller side's coordinates stay — the branch drills as Callers — and
-            // the count is the pair's total sites (the classic window's CallsAndCalls).
+            // the count is the pair's total sites, the caller's and the callee's summed,
+            // the site lines both sides kept.
             nodes[at].edge_count += callee.edge_count;
+            nodes[at].edge_lines.extend(callee.edge_lines);
             continue;
         }
         index_of.insert(key, nodes.len());
@@ -755,13 +794,15 @@ fn calls_and_callers(
     if !truncated && (nodes.len() >= MAX_NODES) {
         truncated = true;
     }
-    nodes.sort_by_key(|node| node.edge_line);
-    Ok(RelationAnswer { nodes, truncated })
+    Ok(RelationAnswer {
+        nodes: finish_ring(nodes),
+        truncated,
+    })
 }
 
 /* ---------- Referenced by Files / Modules ---------- */
 
-/// The attributed reference sites keyed by their file — the classic Referenced by
+/// The attributed reference sites keyed by their file — the Referenced by
 /// Files / Modules view (`refs_refby_mods` in the reference reconstruction): one node per
 /// file, count the file's kept sites, line the earliest. The same attribution discipline
 /// `refs_to` keeps (the declaration lines, the comment/string mask, the intervals), and
@@ -811,6 +852,7 @@ fn refs_by_files(
             if let Some(&at) = index_of.get(&file.path) {
                 nodes[at].edge_count += 1;
                 nodes[at].edge_line = nodes[at].edge_line.min(site);
+                nodes[at].edge_lines.push(site);
                 nodes[at].line = nodes[at].line.min(site);
                 continue;
             }
@@ -825,6 +867,7 @@ fn refs_by_files(
                 edge_line: site,
                 edge_kind: "use".to_owned(),
                 edge_count: 1,
+                edge_lines: vec![site],
                 has_children: false,
             });
             if nodes.len() >= limit {
@@ -833,13 +876,15 @@ fn refs_by_files(
             }
         }
     }
-    nodes.sort_by_key(|node| node.edge_line);
-    Ok(RelationAnswer { nodes, truncated })
+    Ok(RelationAnswer {
+        nodes: finish_ring(nodes),
+        truncated,
+    })
 }
 
 /* ---------- Container ---------- */
 
-/// The subject's enclosing type — the classic Container view, walked one ring per
+/// The subject's enclosing type — the Container view, walked one ring per
 /// drill: the ring names the container, the next drill on that node names its own. The
 /// edge is the membership fact itself (the subject's declaration line); the ring marker
 /// answers whether the container has a container of its own.
@@ -887,6 +932,7 @@ fn container_chain(
             edge_line: subject.line,
             edge_kind: "member".to_owned(),
             edge_count: 1,
+            edge_lines: vec![subject.line],
             has_children: def.container.is_some(),
         }],
         truncated: false,
@@ -895,7 +941,7 @@ fn container_chain(
 
 /* ---------- Base Classes / Derived Classes ---------- */
 
-/// The base types the subject derives from — the classic Base Classes view: one node
+/// The base types the subject derives from — the Base Classes view: one node
 /// per base in source order, the edge at the derivation's own line (the declaration line
 /// the `extends`/`: public Base` clause sits on), and the ring marker peeking whether the
 /// base derives from anything itself — the chain drills upward the same way.
@@ -945,6 +991,7 @@ fn base_classes(
                 edge_line: subject.as_ref().map_or(line, |s| s.line),
                 edge_kind: "base".to_owned(),
                 edge_count: 1,
+                edge_lines: vec![subject.as_ref().map_or(line, |s| s.line)],
             })
         })
         .collect();
@@ -954,7 +1001,7 @@ fn base_classes(
     Ok(RelationAnswer { nodes, truncated })
 }
 
-/// The declarations that derive from the subject — the classic Derived Classes view:
+/// The declarations that derive from the subject — the Derived Classes view:
 /// the store's base table scanned the other way, one node per derived declaration with
 /// its own declaration line for the edge, and the ring marker peeking its own bases.
 fn derived_classes(
@@ -984,6 +1031,7 @@ fn derived_classes(
             edge_line: row.line,
             edge_kind: "base".to_owned(),
             edge_count: 1,
+            edge_lines: vec![row.line],
         })
         .collect();
     Ok(RelationAnswer { nodes, truncated })
@@ -1436,9 +1484,13 @@ mod tests {
             ),
             ("wrap", "src/a.c", 7, "call")
         );
-        // beta is itself called from gamma's body; wrap is called from nowhere.
+        // beta is itself called from gamma's body; wrap is called from nowhere. The
+        // numbered rows the graph card draws: each edge's own site lines, wrap's two
+        // same-line calls deduplicated into one.
         assert!(nodes[0].has_children);
         assert!(!nodes[1].has_children);
+        assert_eq!(nodes[0].edge_lines, vec![3]);
+        assert_eq!(nodes[1].edge_lines, vec![7]);
     }
 
     /// A hit on a definition's own line is skipped as the declaration; a hit inside the
@@ -1513,6 +1565,10 @@ mod tests {
             ),
             ("MAGIC_NUM", "macro", 8, "use")
         );
+        // alpha's three sites — two on one line, one further down — keep both their
+        // lines, ascending and deduplicated, for the card's numbered rows.
+        assert_eq!(nodes[0].edge_count, 3);
+        assert_eq!(nodes[0].edge_lines, vec![7, 9]);
     }
 
     /// The subject's body extent: an exact `(path, line, name)` hit wins; a wrong line
@@ -1585,15 +1641,15 @@ mod tests {
         assert!(nodes.is_empty());
     }
 
-    /// The kind parses the wire spellings and the classic window's own view names in every
-    /// spelling they are written in; anything else is an error.
+    /// The kind parses the wire spellings and the view names in every spelling they are
+    /// written in; anything else is an error.
     #[test]
     fn direction_parses_the_wire_spelling_only() {
         assert_eq!(RelationKind::parse("refsTo"), Ok(RelationKind::RefsTo));
         assert_eq!(RelationKind::parse("refsFrom"), Ok(RelationKind::RefsFrom));
         assert_eq!(RelationKind::parse("contains"), Ok(RelationKind::Contains));
-        // The classic window's view names: camelCase, lower case without spaces, and the
-        // `callees` legacy alias of the Calls view.
+        // The view names' alternate spellings: camelCase, lower case without spaces, and
+        // the `callees` legacy alias of the Calls view.
         assert_eq!(
             RelationKind::parse("referencedByFunctions"),
             Ok(RelationKind::RefsTo)
@@ -1949,7 +2005,7 @@ mod tests {
         assert!(ans.truncated);
     }
 
-    /// The classic Calls view: the body's call edges only — a macro reference and a
+    /// The Calls view: the body's call edges only — a macro reference and a
     /// local never answer; the `callees` spelling rides parse() into the same view.
     #[test]
     fn calls_keeps_only_the_call_edges() {
@@ -1969,7 +2025,7 @@ mod tests {
         );
     }
 
-    /// The classic Callers view: refsTo through the call edges only — a use-site
+    /// The Callers view: refsTo through the call edges only — a use-site
     /// reference never poses as a caller.
     #[test]
     fn callers_keeps_only_the_call_edges() {
@@ -2017,9 +2073,13 @@ mod tests {
         assert_eq!(nodes[0].name, "beta");
         assert_eq!(nodes[0].edge_count, 2);
         assert_eq!(nodes[0].edge_path, "src/beta.c");
+        // The merged edge keeps both sides' site lines (here the same line twice — the
+        // dedup collapses them; the count stays the pair's total).
+        assert_eq!(nodes[0].edge_lines, vec![2]);
         assert!(nodes[0].has_children);
         assert_eq!(nodes[1].name, "gamma");
         assert_eq!(nodes[1].edge_path, "src/other.c");
+        assert_eq!(nodes[1].edge_lines, vec![2]);
         assert!(!nodes[1].has_children, "nobody calls gamma");
     }
 
@@ -2051,7 +2111,10 @@ mod tests {
         let b = nodes.iter().find(|node| node.path == "src/b.c").unwrap();
         assert_eq!((a.edge_count, a.edge_line), (2, 6));
         assert_eq!((b.edge_count, b.edge_line), (1, 2));
-        // The classic window's own view name spells the same ring.
+        // The file node's own numbered rows: a.c's two same-line sites dedup into one.
+        assert_eq!(a.edge_lines, vec![6]);
+        assert_eq!(b.edge_lines, vec![2]);
+        // The Referenced by Modules spelling parses into the same ring.
         let modules = children(
             &store,
             store.root(),
@@ -2142,7 +2205,7 @@ mod tests {
 
     /// Base Classes / Derived Classes: the parser's base table walked both ways — the
     /// chain's edges at the derivations' own lines, and the markers peeking one level
-    /// up, so the chain drills the way the classic tree does.
+    /// up, so the inheritance chain drills ring by ring.
     #[test]
     fn base_and_derived_classes_walk_the_inheritance() {
         let (_dir, store) = seeded(&[(
@@ -2194,8 +2257,8 @@ mod tests {
         assert_eq!(none.len(), 0);
     }
 
-    /// Referenced by Functions is refsTo under the classic window's own name — the same ring, the same
-    /// answer, one query.
+    /// Referenced by Functions is refsTo under its own view name — the same ring, the
+    /// same answer, one query.
     #[test]
     fn referenced_by_functions_is_refs_to() {
         let (_dir, store) = seeded(&[(

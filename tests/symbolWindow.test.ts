@@ -14,7 +14,7 @@ import { trText } from '../src/platform/i18n';
 import { updateSetting } from '../src/platform/settings';
 import { Workbench } from '../src/workbench';
 import { backend } from './tauriMock';
-import { click, flush, texts } from './helpers';
+import { click, flush, key, texts, type } from './helpers';
 
 const FILE = 'C:\\repo\\src\\main.c';
 
@@ -134,7 +134,8 @@ describe('the filter', () => {
 		const filter = host.querySelector<HTMLInputElement>('.sw-filter')!;
 		filter.value = 'LOA';
 		filter.dispatchEvent(new Event('input', { bubbles: true }));
-		expect(texts('.sw-row .sw-name', host)).toEqual(['load']);
+		// The tree filter keeps the matching row's ancestor — 'load' under its Config.
+		expect(texts('.sw-row .sw-name', host)).toEqual(['Config', 'load']);
 
 		filter.value = '';
 		filter.dispatchEvent(new Event('input', { bubbles: true }));
@@ -628,3 +629,129 @@ describe('the workbench wiring', () => {
 			]);
 		});
 	});
+
+
+/* ---------- The collapsible tree and the sort (2026-11-23) ---------- */
+
+const DEEP = {
+	symbols: [
+		{ kind: 'class', name: 'Widget', container: null, line: 0, endLine: 90 },
+		{ kind: 'method', name: 'paint', container: 'Widget', line: 2, endLine: 8 },
+		{ kind: 'class', name: 'Inner', container: 'Widget', line: 10, endLine: 40 },
+		{ kind: 'method', name: 'tick', container: 'Inner', line: 12, endLine: 16 },
+		{ kind: 'function', name: 'level0', container: null, line: 30, endLine: 80 },
+		{ kind: 'function', name: 'level1', container: 'level0', line: 32, endLine: 70 },
+		{ kind: 'function', name: 'level2', container: 'level1', line: 34, endLine: 60 },
+		{ kind: 'function', name: 'level3', container: 'level2', line: 36, endLine: 50 }
+	],
+	imports: []
+};
+
+describe('the collapsible tree', () => {
+	beforeEach(async () => {
+		localStorage.clear();
+		backend.reset();
+		updateSetting('locale', 'en');
+	});
+
+	function mountDeep(): { host: HTMLElement; view: SymbolWindowView } {
+		backend.on('symbol_file_outline', () => DEEP);
+		const pair = mountView();
+		pair.view.setFile(FILE);
+		return pair;
+	}
+
+	function names(host: HTMLElement): string[] {
+		return texts('.sw-row .sw-name', host);
+	}
+
+	function twistOf(host: HTMLElement, name: string): HTMLElement {
+		const row = rowOf(host, name)!;
+		return row.querySelector('.sw-fold')!;
+	}
+
+	it('a container row carries its twistie, and folding hides exactly its members', async () => {
+		const { host } = mountDeep();
+		await flush(4);
+		expect(names(host)).toEqual(['Widget', 'paint', 'Inner', 'tick', 'level0', 'level1', 'level2', 'level3']);
+		expect(twistOf(host, 'Widget')).toBeTruthy(); // the containers carry twists, the leaves a bare slot
+		expect(rowOf(host, 'paint')!.querySelector('.sw-fold')).toBeNull();
+		// Folding Widget hides its members, itself staying.
+		click(twistOf(host, 'Widget'));
+		expect(names(host)).toEqual(['Widget', 'level0', 'level1', 'level2', 'level3']);
+		// The state survives a re-render (the filter runs one).
+		const filter = host.querySelector<HTMLInputElement>('.sw-filter')!;
+		filter.value = 'level';
+		filter.dispatchEvent(new Event('input', { bubbles: true }));
+		filter.value = '';
+		filter.dispatchEvent(new Event('input', { bubbles: true }));
+		expect(names(host)).toEqual(['Widget', 'level0', 'level1', 'level2', 'level3']);
+		// Unfolding restores the members.
+		click(twistOf(host, 'Widget'));
+		expect(names(host)).toHaveLength(8);
+		host.remove();
+	});
+
+	it('Collapse All folds every container, Expand All opens them, Expand Special opens the asked levels', async () => {
+		const { host, view } = mountDeep();
+		await flush(4);
+		view.collapseAll();
+		// The folded containers' own rows hide with their parents — the tops and the
+		// unfolded level-1 members stand alone.
+		expect(names(host)).toEqual(['Widget', 'level0']);
+		view.expandAll();
+		expect(names(host)).toHaveLength(8);
+		// All-fold, then special-open one level: the top containers open, their
+		// containers' own members stay folded.
+		view.collapseAll();
+		const pending = view.expandSpecial();
+		const input = document.querySelector<HTMLInputElement>('.quick-input input')!;
+		type(input, '1');
+		key(input, 'Enter');
+		await pending;
+		// One level: the top containers open — their members show, the members' own
+		// containers (Inner, level1) stand folded.
+		expect(names(host)).toEqual(['Widget', 'paint', 'Inner', 'level0', 'level1']);
+		host.remove();
+	});
+
+	it('the sort cycles Line → Name → Type, the flats unfold and do not fold', async () => {
+		const { host, view } = mountDeep();
+		await flush(4);
+		view.collapseAll();
+		// The folded containers' own rows hide with their parents — the tops and the
+		// unfolded level-1 members stand alone.
+		expect(names(host)).toEqual(['Widget', 'level0']);
+		const sort = host.querySelector<HTMLButtonElement>('.sw-sort')!;
+		expect(sort.textContent).toContain('Line');
+		click(sort);
+		expect(sort.textContent).toContain('Name');
+		// The name sort is the flat list — the folds do not apply.
+		expect(names(host)).toEqual(['Inner', 'level0', 'level1', 'level2', 'level3', 'paint', 'tick', 'Widget']);
+		// Collapsing is the line sort's own: the folds apply again.
+		view.collapseAll();
+		expect(names(host)).toHaveLength(8);
+		click(sort);
+		expect(sort.textContent).toContain('Type');
+		click(sort);
+		expect(sort.textContent).toContain('Line');
+		// Back on the line sort the fold state stands as it was left.
+		expect(names(host)).toEqual(['Widget', 'level0']);
+		host.remove();
+	});
+
+	it('the fold state starts over on a file switch', async () => {
+		const { host, view } = mountDeep();
+		await flush(4);
+		view.collapseAll();
+		// The folded containers' own rows hide with their parents — the tops and the
+		// unfolded level-1 members stand alone.
+		expect(names(host)).toEqual(['Widget', 'level0']);
+		view.setFile('C:\repo\src\other.c');
+		await flush(4);
+		view.setFile(FILE);
+		await flush(4);
+		expect(names(host)).toHaveLength(8);
+		host.remove();
+	});
+});

@@ -128,6 +128,10 @@ export interface RelationNode {
 	edgeKind: string;
 	/** How many reference sites this edge aggregates — 1 for a single site. */
 	edgeCount: number;
+	/** Every kept site's 0-based line, ascending, at most 16 — the numbered rows the
+	 *  relation graph draws under a multi-site card (`1. line 113`, the classic IDE's
+	 *  ShowGraphDetails). */
+	edgeLines: number[];
 	/** Whether expanding this node again yields children (best effort). */
 	hasChildren: boolean;
 }
@@ -139,8 +143,8 @@ export interface RelationAnswer {
 	truncated: boolean;
 }
 
-/** The relation kinds the window drills — the classic window's own relation-type set
- *  (2026-11-20): the three original directions plus Calls/Callers (the call edges only),
+/** The relation kinds the window drills — the full relation-type set (added
+ *  2026-11-20): the three original directions plus Calls/Callers (the call edges only),
  *  their combined view, the referenced-by files/modules keys, the upward Container walk,
  *  the member rings by kind, the body's type references, and the inheritance chains the
  *  parser captures. `refsTo` doubles as `Referenced by Functions` — every edge's site is
@@ -168,7 +172,7 @@ export type RelationDirection = 'refsTo' | 'refsFrom' | 'contains';
 /** The children of one relation node — the next ring of the box-and-arrow relation
  *  graph, computed over the persistent index. The subject is a definition: the symbol under
  *  the cursor with the location the context-symbol resolution reported for it. The kind
- *  accepts the classic window's own view-name spellings too (`calls`, `callers`,
+ *  accepts the view-name spellings too (`calls`, `callers`,
  *  `callsandcallers`, `referencedbyfiles`, … — the backend lower-cases and de-spaces
  *  before it matches). */
 export const symbolRelationChildren = (name: string, path: string, line: number, kind: RelationKind) =>

@@ -42,6 +42,12 @@
 .rg-card.rg-root rect { filter: none; }
 .rg-card.rg-root:hover rect { filter: brightness(1.08); }
 
+/* The numbered reference rows a multi-site edge draws under its card (the classic
+   IDE's ShowGraphDetails): each is its own click target — the row jumps to that site —
+   the +N more tail is inert. */
+.rg-detail-row { cursor: pointer; }
+.rg-detail-row:hover { text-decoration: underline; }
+
 .rg-expander { cursor: pointer; }
 .rg-expander circle { transition: stroke 0.12s ease; }
 .rg-expander:hover circle { stroke: var(--vscode-focusBorder, #0078d4); }
@@ -69,3 +75,32 @@
 .rg-decl-line { white-space: pre; }
 
 .rg-decl-meta { margin-top: 4px; color: var(--vscode-descriptionForeground); font-size: 11px; white-space: nowrap; }
+
+/* The Outline view — the multi-column list: the sticky column header, the tree rows with
+   their +/- toggles, and the count/file/line columns riding one grid. */
+.rg-outline { flex: 1; min-height: 0; overflow: auto; }
+.rg-ol-head,
+.rg-ol-row {
+	display: grid; grid-template-columns: 18px minmax(110px, 1fr) 44px minmax(80px, 120px) 40px;
+	gap: 6px; align-items: center; white-space: nowrap;
+}
+.rg-ol-head {
+	position: sticky; top: 0; z-index: 1; padding: 4px 8px 4px 4px;
+	background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+	border-bottom: 1px solid var(--vscode-panel-border);
+	color: var(--vscode-descriptionForeground); font-size: 11px; font-weight: 600;
+}
+.rg-ol-row {
+	height: 22px; padding-right: 8px; cursor: pointer; border-radius: 3px;
+	color: var(--vscode-sideBar-foreground); font-size: 12px;
+}
+.rg-ol-row:hover { background: var(--vscode-list-hoverBackground); }
+.rg-ol-twistie {
+	width: 18px; display: inline-flex; justify-content: center; align-items: center;
+	color: var(--vscode-descriptionForeground); font-size: 13px; user-select: none;
+}
+.rg-ol-toggle { cursor: pointer; font-family: var(--vscode-editor-font-family, monospace); }
+.rg-ol-toggle:hover { color: var(--vscode-sideBar-foreground); }
+.rg-ol-name { overflow: hidden; text-overflow: ellipsis; }
+.rg-ol-count, .rg-ol-line { text-align: right; color: var(--vscode-descriptionForeground); font-size: 11px; }
+.rg-ol-file { overflow: hidden; text-overflow: ellipsis; color: var(--vscode-descriptionForeground); font-size: 11px; }

@@ -18,3 +18,12 @@
 	white-space: pre; overflow-x: auto;
 }
 .def-cut { padding: 4px 0 0; color: var(--vscode-descriptionForeground); font-size: 11px; }
+
+/* The whole-file live view: the symbol's own span marked as the selection — the page's
+   opening frame (the declaration scrolled to, the span highlighted). The theme's own
+   find-match colour at half its strength: the raw orange read too bright, and the mix
+   keeps every theme's hue while dropping its alpha. */
+.def-line.def-sel {
+	background: color-mix(in srgb, var(--vscode-editor-findMatchHighlightBackground) 50%, transparent);
+	display: inline-block; width: 100%;
+}

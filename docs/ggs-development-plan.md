@@ -12,14 +12,14 @@
 
 ## 0. The goal in one sentence
 
-**GGS is a single desktop binary under 10 MB that does everything VS Code does, opens and searches 100,000-file projects instantly like the classic symbol IDEs, compares and merges like Beyond Compare, feels as polished as Xcode, and installs git-graph-rs and other VSIX extensions.**
+**GGS is a single desktop binary under 10 MB that does everything VS Code does, opens and searches 100,000-file projects instantly, compares and merges like Beyond Compare, feels as polished as Xcode, and installs git-graph-rs and other VSIX extensions.**
 
 Each of the five benchmarks contributes one thing, and each has a measurable acceptance line (section 4):
 
 | Benchmark | What we take | What we leave |
 |---|---|---|
 | VS Code | The workbench model (activity bar / side bar / editor groups / panel / status bar / command palette), keybindings, the settings system, the extension contract | Electron, the Node extension host, debugger / remote development / notebooks |
-| Classic symbol IDEs | The project-wide symbol database, references / call trees / relation window, startup and open speed on huge projects, the context window | Its UI style and proprietary parser scripts |
+| Symbol-centric IDEs | The project-wide symbol database, references / call trees / relation window, startup and open speed on huge projects, the context window | Their UI style and proprietary parser scripts |
 | Beyond Compare | Folder compare and sync, three-way merge, comparison rules (ignore whitespace / case / regex), hex / image compare, sessions | FTP / cloud remote sessions |
 | Xcode | Restrained visual hierarchy, motion and feedback, native window feel, keyboard-first, empty-state design | Interface Builder, Instruments |
 | Size | One exe, no runtime dependency (system WebView2 on Windows), installer ≤ 8 MB | — |
@@ -288,7 +288,7 @@ Release numbers on 20,000 files (Windows, NVMe): walk 30 ms, raw read 938 ms, se
 | Zen mode / full screen / layout presets | None | All | M7 |
 | Debugger / tasks / remote / notebooks | None | **Explicitly out of scope** (tasks are replaced by "run in terminal") | — |
 
-### 2.2 Classic symbol IDEs (large projects, speed, symbols)
+### 2.2 Symbol-centric IDEs (large projects, speed, symbols)
 
 | Capability | Today | Gap | Milestone |
 |---|---|---|---|

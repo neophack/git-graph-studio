@@ -204,7 +204,58 @@ describe('the Context Window', () => {
 		view.show(null, '3 symbols share this name');
 		expect(view.element.querySelector('.context-empty')!.textContent).toContain('3 symbols share this name');
 	});
+
+	it('the whole file replaces the fed fragment, the span marked and the declaration scrolled to', async () => {
+		const body = ['int alpha(void)', '{', '    return beta();', '}', 'int beta(void)', '{', '    return 1;', '}'].join(String.fromCharCode(10));
+		backend.on('read_file', () => ({ contents: body, binary: false, size: body.length }));
+		const view = new ContextView();
+		document.getElementById('overlays')!.appendChild(view.element);
+		view.element.hidden = false;
+		// The fed fragment paints at once.
+		view.show({ kind: 'function', name: 'alpha', path: 'C:\repo\src\a.ts', line: 0, endLine: 3, fragment: 'fn alpha();' });
+		expect(view.element.querySelector('.context-code')!.textContent).toBe('fn alpha();');
+		await flush();
+		// The whole file replaces it, the symbol's span marked.
+		expect(view.element.querySelector('.context-code')!.textContent).toBe(body);
+		const selected = [...view.element.querySelectorAll<HTMLElement>('.context-line.context-sel')];
+		expect(selected.map((row) => row.dataset['line'])).toEqual(['0', '1', '2', '3']);
+		// The clicked word relocates: 'beta' resolves and re-roots the window.
+		const AFTER = [{ kind: 'function', name: 'beta', path: 'C:\repo\src\a.ts', line: 4, endLine: 7 }];
+		backend.on('symbol_lookup', () => AFTER);
+		const row = view.element.querySelector<HTMLElement>('.context-line[data-line="2"]')!;
+		const doc = document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range };
+		doc.caretRangeFromPoint = () => caretIn(row, 11) as Range;
+		click(row);
+		await flush();
+		expect(view.element.querySelector('.context-name')!.textContent).toBe('beta');
+		doc.caretRangeFromPoint = undefined;
+	});
+
+	it('a file past the ceiling keeps the fed fragment', async () => {
+		const padded = 'x'.repeat(1024 * 1024 + 8);
+		backend.on('read_file', () => ({ contents: padded, binary: false, size: padded.length }));
+		const view = new ContextView();
+		document.getElementById('overlays')!.appendChild(view.element);
+		view.show({ kind: 'function', name: 'alpha', path: 'C:\repo\src\a.ts', line: 0, fragment: 'fn alpha();' });
+		await flush();
+		expect(view.element.querySelector('.context-code')!.textContent).toBe('fn alpha();');
+	});
 });
+
+/** The caret point `charAt` characters into the row's text — the mocked
+ *  caretRangeFromPoint's answer, walked off the row's own text nodes. */
+function caretIn(row: HTMLElement, charAt: number): { startContainer: Node; startOffset: number } {
+	const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+	let at = 0;
+	let node = walker.nextNode();
+	while (node) {
+		const length = node.textContent?.length ?? 0;
+		if (at + length > charAt) return { startContainer: node, startOffset: charAt - at };
+		at += length;
+		node = walker.nextNode();
+	}
+	throw new Error('the caret walked past the row');
+}
 
 describe('the Symbol Database page', () => {
 	const outline: { path: string; symbols: { kind: string; name: string; line: number; refs: number }[] }[] = [
@@ -836,6 +887,7 @@ describe('the quick-info hover (any indexed symbol)', () => {
 			edgeLine: 0,
 			edgeKind: 'use',
 			edgeCount: 1,
+			edgeLines: [0],
 			hasChildren: false
 		}));
 		backend.on('symbol_relation_children', ({ name, path, line, direction }) => {

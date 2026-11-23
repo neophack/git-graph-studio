@@ -1,14 +1,14 @@
-//! The classic IDE's project-volume writer (`si4-rea`'s sip-vol format): the `.siproj`
+//! The project-volume writer (`si4-rea`'s sip-vol format): the `.siproj`
 //! file table, the `.sip_sym` symbol table, the `.sip_xf` / `.sip_xr` / `.sip_xc`
 //! signature volumes, the `.sip_xm` parse-order map, the `.sip_xab` / `.sip_xsb`
 //! 16-byte name indexes and their `.sip_xad` / `.sip_xsd` page directories — emitters
 //! whose bytes match the originals, plus the reverse parsers the round-trip acceptance
 //! runs against.
 //!
-//! This is a *second*, independent container beside [`super::sidb`]: `sidb` writes
+//! This is a *second*, independent container beside [`super::anadb`]: `anadb` writes
 //! si-lite's six-table reference database (`si.db` / `si.tix`), a clean whole-file
-//! format; `sipb` writes SI4's own fixed-record volumes, the memory-image format the
-//! original binary grows incrementally through the volume module at `0x41A210`
+//! format; `projvol` writes the reference binary's own fixed-record volumes, the
+//! memory-image format it grows incrementally through the volume module at `0x41A210`
 //! (`si4-rea`'s `SPEC-head.md` / `SPEC-sym.md` / `SPEC-xf-xr.md` / `SPEC-heaps.md`,
 //! reconstructed from Ghidra + IDA). They share no layout and no code.
 //!
@@ -20,7 +20,7 @@
 //! +108 control-flow stragglers, the five kind-21 stub flags, the mat.cpp ring,
 //! the CSS selector extents, the single-line typedef groups — ride the data-side
 //! exception tables (`*_EXCEPTIONS`, their values read off the reference snapshot,
-//! keyed by file id / row / kind / name). The signature bitfields (the `sipb_sig`
+//! keyed by file id / row / kind / name). The signature bitfields (the `projvol_sig`
 //! module's jurisdiction), the xab `size` vocabulary and the xad `vm_addr` runs
 //! stay documented raw inputs.
 //!
@@ -247,7 +247,7 @@ fn emit_fixed_volume(header: &VolumeHeader, records: &[Vec<u8>], spare_slots: u3
 /// `.siproj` record width.
 pub const SIPROJ_REC_SIZE: usize = 328;
 /// The path region is +4..+256 (252 bytes); the name truncates at 251 so the NUL
-/// always lands inside it (`cap - 1`, the same strncpy shape as `sidb`).
+/// always lands inside it (`cap - 1`, the same strncpy shape as `anadb`).
 pub const SIPROJ_PATH_MAX: usize = 251;
 
 /// One project file: the 328-byte record the specs call the *real* file table —
@@ -410,7 +410,7 @@ pub struct SymSlot {
     pub file_id: u32,
     /// +136: carried verbatim (observed 0 throughout the reference volume).
     pub raw136: u32,
-    /// +140 low half: the SI symbol kind (the palette's own numbering; see
+    /// +140 low half: the symbol kind (the reference palette's own numbering; see
     /// `SPEC-sym.md` §4).
     pub kind: u16,
     /// +140 high half: the flags (`SPEC-sym-fields` §8: the 256 shadow/anon/import
@@ -419,7 +419,7 @@ pub struct SymSlot {
     /// [`FLAGS_EXCEPTIONS`]).
     pub flags: u16,
     /// +144: the name tag = `language id << 8 | parameter item count`
-    /// (`SPEC-sym-fields` §1 — the SI language id off the file's extension/kind,
+    /// (`SPEC-sym-fields` §1 — the language id off the file's extension/kind,
     /// the signature's classified parameter items for the function kinds, 0
     /// otherwise). Decode carries it verbatim.
     pub name_tag: u32,
@@ -531,7 +531,7 @@ pub struct XVolSlot {
     /// `.sip_xf` / `.sip_xc` carry 0.
     pub event_count: u32,
     /// +8: the file id into the `.siproj` table. The slot order is *not* the file
-    /// order — slot p holds file `w2[p]`, and SI reorders slots between writes; this
+    /// order — slot p holds file `w2[p]`, and the writer reorders slots between writes; this
     /// id is the only stable key.
     pub file_id: u32,
     /// +20: the sparse bloom-style signature, ~1.1% set bits spread over the full
@@ -592,8 +592,8 @@ pub fn emit_xvol_volume(header: &VolumeHeader, records: &[XVolSlot], spare_slots
 /* ---------- .sip_xm — the parse-order map ---------- */
 
 /// Emits the bare `count * u32` array: no header, `xm[k]` = the file id of the k-th
-/// parsed file (a permutation of the file table; slot order is not stable across SI's
-/// writes).
+/// parsed file (a permutation of the file table; slot order is not stable across
+/// successive writes).
 pub fn emit_xm(file_ids: &[u32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(file_ids.len() * 4);
     for id in file_ids {
@@ -634,7 +634,7 @@ pub struct IndexRecord {
     pub slot: u16,
     /// +2: mirrors the sym slot's byte 0x70.
     pub aux1: u8,
-    /// +3: the SI symbol kind — mirrors the sym slot's byte 0x8c.
+    /// +3: the symbol kind — mirrors the sym slot's byte 0x8c.
     pub kind: u8,
     /// +4: mirrors the sym slot's u16 at 0x6c.
     pub aux_c: u16,
@@ -725,7 +725,7 @@ pub struct XdirEntry {
     /// the reference xad carries one 256, so the value is carried verbatim, not
     /// range-clamped.
     pub bucket: u32,
-    /// +0x18: SI's virtual-memory page address: run base + page offset, with the runs
+    /// +0x18: the virtual-memory page address: run base + page offset, with the runs
     /// relocated over the file's life (the reference xad jumps +0x100000, +0x370000,
     /// +0x380000 and allocated page 47 out of order) — not derivable from the page
     /// index, carried verbatim.
@@ -1095,7 +1095,7 @@ fn control_flow_count(body: &[&[u8]]) -> u32 {
 
 /* ---------- +144: the name tag = language id << 8 | parameter item count ---------- */
 
-/// The SI4 internal language id for a path + kind (`SPEC-sym-fields` §1.1; the
+/// The internal language id for a path + kind (`SPEC-sym-fields` §1.1; the
 /// reference snapshot exercises exactly these seven values).
 pub fn lang_id(path: &[u8], kind: u16) -> u32 {
     let base = path.rsplit(|&b| b == b'\\').next().unwrap_or(path);
@@ -1554,7 +1554,7 @@ pub fn decl_end_col(
         54 => return Some(col),
         35 => {
             // the synthesized name's char length (the `<title>` text may carry
-            // non-ASCII; SI counts characters, not bytes)
+            // non-ASCII; the count is characters, not bytes)
             let chars = name.iter().filter(|&&b| b & 0xC0 != 0x80).count() as u32;
             return Some(chars - 1);
         }
@@ -1700,7 +1700,7 @@ pub fn token_col(kind: u16, lang: u32, name: &[u8], col: u32, decl_start: u32, l
 
 /// +108 records whose X/A/B the §2 rules miss: the 13 X stragglers (limits_command's
 /// mixed string continuations, receiver.c handle_command, ring_capture.c ×2, rx_lo.h —
-/// suspected SI statement-level scanning or macro expansion), the two B=4/12
+/// suspected statement-level scanning or macro expansion quirks), the two B=4/12
 /// records, and the control-flow counts outside §2.2's 80.6% precision (the
 /// else/continue attribution swings per sample; `SPEC-sym-fields` §12.1–12.3).
 /// Values read off the reference snapshot, keyed (file id, row, kind, name).
@@ -1921,7 +1921,7 @@ const PACKED108_EXCEPTIONS: &[ExcEntry] = &[
 ];
 
 /// +104 records whose extent the §9 rules do not pin: the 44 CSS selector rows
-/// (the synthesized name's group extent needs SI's CSS tokenizer; typcol = the
+/// (the synthesized name's group extent needs the CSS tokenizer; typcol = the
 /// group's first selector start for the six grouped ones, answered by the
 /// TYPCOL table), the 25 single-line typedef groups (the `} NAME;` extent is the
 /// one `endcol` shape the §9 rules cannot read off the row), and the rule's
@@ -2064,7 +2064,7 @@ pub struct SymInput {
     pub name: Vec<u8>,
     /// The declaring file's `.siproj` id.
     pub file_id: u32,
-    /// The SI symbol kind (the +140 low half).
+    /// The symbol kind (the +140 low half).
     pub kind: u16,
     /// The name's 0-based row.
     pub line0: u32,
@@ -2396,8 +2396,8 @@ pub fn build_sym_records(inputs: &[SymInput], files: &[SymFileSource<'_>]) -> Ve
 
 /* ---------- the other records' named construction ---------- */
 
-/// SI's line count (`.siproj` +272): the newline count plus a final line that
-/// lacks its newline (`SPEC-xf-xr` §4, verified 478/478 against the snapshot).
+/// The project volume's line count (`.siproj` +272): the newline count plus a final
+/// line that lacks its newline (`SPEC-xf-xr` §4, verified 478/478 against the snapshot).
 pub fn count_lines(bytes: &[u8]) -> u32 {
     let nl = bytes.iter().filter(|&&b| b == b'\n').count() as u32;
     if !bytes.is_empty() && !bytes.ends_with(b"\n") {
@@ -2461,7 +2461,7 @@ impl XdirEntry {
     /// The directory entry for one index page (`SPEC-heaps` §4): the anchor copy is
     /// the page's first record and the offset its byte offset (both rules verified
     /// 74/74 and 24/24 against the snapshot); `bucket` (hashes key+position, §6.4)
-    /// and `vm_addr` (SI's segmented-linear allocator state, COMPARISON-REPORT
+    /// and `vm_addr` (the volume's segmented-linear allocator state, COMPARISON-REPORT
     /// §3.5) are allocation facts carried in as inputs.
     pub fn from_page(page: usize, anchor: IndexRecord, bucket: u32, vm_addr: u32) -> Self {
         Self {
@@ -2481,11 +2481,11 @@ mod tests {
     /* ---------- the reference snapshot ---------- */
 
     /// The reference volume snapshot: `si4-rea`'s `sip-vol/snap`, ten volumes of one
-    /// SI4 project (`Untitled Project2`). Never written to — read only, the
-    /// acceptance baseline. `GGS_SIP_SNAP_DIR` moves it; the default is the
+    /// reference project (`Untitled Project2`). Never written to — read only, the
+    /// acceptance baseline. `GGS_REF_SNAP_DIR` moves it; the default is the
     /// authoring machine's path.
     fn snap_dir() -> Option<PathBuf> {
-        let dir = match std::env::var_os("GGS_SIP_SNAP_DIR") {
+        let dir = match std::env::var_os("GGS_REF_SNAP_DIR") {
             Some(dir) => PathBuf::from(dir),
             None => PathBuf::from(r"C:\Users\penghongxia\si4-rea\sip-vol\snap"),
         };
@@ -2499,7 +2499,7 @@ mod tests {
     fn skip_note() {
         eprintln!(
             "skip: the si4-rea reference snapshot is not present \
-             (set GGS_SIP_SNAP_DIR to its sip-vol/snap directory)"
+             (set GGS_REF_SNAP_DIR to its sip-vol/snap directory)"
         );
     }
 
@@ -2994,9 +2994,9 @@ mod tests {
     /* ---------- the structured path (SPEC-sym-fields.md rules) ---------- */
 
     /// The analyzed source tree behind the snapshot (the reference project
-    /// `Untitled Project2`'s root; `GGS_SIP_SOURCE_ROOT` moves it).
+    /// `Untitled Project2`'s root; `GGS_REF_SOURCE_ROOT` moves it).
     fn source_root() -> Option<PathBuf> {
-        let dir = match std::env::var_os("GGS_SIP_SOURCE_ROOT") {
+        let dir = match std::env::var_os("GGS_REF_SOURCE_ROOT") {
             Some(dir) => PathBuf::from(dir),
             None => PathBuf::from(r"E:\esp-sdr"),
         };
@@ -3272,7 +3272,7 @@ mod tests {
         let Some(root) = source_root() else {
             eprintln!(
                 "skip: the snapshot's analyzed source tree is not present \
-                 (set GGS_SIP_SOURCE_ROOT to its project root)"
+                 (set GGS_REF_SOURCE_ROOT to its project root)"
             );
             return;
         };
@@ -3428,7 +3428,7 @@ mod tests {
 
         // the page directories: each entry re-derived by from_page — the anchor
         // copy off the sibling index volume and the offset off the page number
-        // (the bucket and VM address are SI allocation state, carried)
+        // (the bucket and VM address are allocator state, carried)
         for (name, slot, sibling) in [(8usize, "xad", 6usize), (9, "xsd", 7)] {
             let mut parsed = XdirVolume::parse(&snaps[name].1).expect("directory parses");
             let sibling_records = parse_index_volume(&snaps[sibling].1).expect("sibling parses");

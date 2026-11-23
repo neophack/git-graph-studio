@@ -48,7 +48,7 @@ declarations and their occurrences indexed once under `~/.ggs/index/`, resumed o
 updated file-by-file as files change — powering Go-to-Definition (with a list on ambiguous
 names), Find References narrowed to the files that contain the word, Quick Open's `@`
 (file symbols) and `#` (workspace symbols) modes, the Call Tree, and a Context Window panel
-that shows the definition of the symbol under the cursor. Two classic windows
+that shows the definition of the symbol under the cursor. Two more tool windows
 complete the set: a **Symbol Window** sidebar page (the active file's imports and its
 outline as icon rows — click jumps, the cursor's enclosing symbol stays highlighted, and
 the enclosing function's parameters and locals ride along as a Current-function section;
@@ -63,7 +63,7 @@ function or method through its body's end line, a macro through its directive an
 continuation, a struct or enum through its whole body — the index sizes the slice, a cap
 cuts the rare giant with a note, and the header's location jumps to the definition; the
 pin freezes the content against the cursor's roam), and a **References** panel page
-(classic-IDE-style Lookup References: every whole-word site of the clicked symbol
+(Lookup References: every whole-word site of the clicked symbol
 grouped by file with counts, and a site's click answering a specially processed context —
 the enclosing definition's declaration line, the lines around the site highlighted, the
 function body's middle folded into `… N lines …` rows that click open — the highlighted

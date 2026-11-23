@@ -1,7 +1,7 @@
 //! The symbol store: the workspace's declarations and their occurrences in one compact,
 //! little-endian binary per root, living in the analyzed folder's own hidden analysis
-//! database (`.ggs/analysis/<hash>/symbols.bin` — 2026-11-21, the owner's direction: the
-//! classic IDEs' project-local database, a hidden folder the program may delete at any
+//! database (`.ggs/analysis/<hash>/symbols.bin` — 2026-11-21, the owner's direction: a
+//! project-local analysis database, a hidden folder the program may delete at any
 //! time and never enters the git index; the next query regenerates the same files; a
 //! read-only folder falls back to `~/.ggs/index/<hash>/`, the pre-2026-11-21 home whose
 //! older copies still resume). Design:
@@ -24,7 +24,7 @@ use std::time::UNIX_EPOCH;
 use rayon::prelude::*;
 
 use crate::scan::is_symbol_source;
-use crate::symbols::sidb;
+use crate::symbols::anadb;
 use crate::symbols::WorkspaceSymbol;
 use ggs_fs::walk_files;
 
@@ -76,7 +76,7 @@ const VERSION: u8 = 7;
 
 /// The hidden per-project analysis folder (2026-11-21, the owner's direction: 在项目中增加
 /// 一个代码分析的隐藏文件夹，程序可以删除这个，不加入 git 索引，可以生成一样的文件): the
-/// store lives beside the code it describes, like the classic IDEs' project databases.
+/// store lives beside the code it describes, one hidden folder per project.
 /// Deleting it loses nothing — the next query regenerates the same bytes — and the walk's
 /// `SKIPPED_DIRS` keeps search and re-index out of it.
 pub const PROJECT_ANALYSIS_DIR: &str = ".ggs";
@@ -261,7 +261,7 @@ pub struct SymbolStore {
     /// a full build and persisted beside the store as `si.db` + `si.tix`. `None` after a
     /// disk resume — the saved `si.db` stays standing untouched until the next full
     /// build (the Rebuild command's delete-and-regenerate) rewrites it whole.
-    si: Option<sidb::SiTables>,
+    si: Option<anadb::AnaTables>,
 }
 
 pub struct BuildStats {
@@ -1247,8 +1247,8 @@ impl SymbolStore {
         // collected its tables, so the delete-and-regenerate promise covers them too.
         // No tables (a resumed store) leaves the saved files standing untouched.
         if let Some(si) = &self.si {
-            ggs_base::fsx::atomic_write(&dir.join(sidb::DB_FILE), &sidb::write_db(si))?;
-            ggs_base::fsx::atomic_write(&dir.join(sidb::TIX_FILE), &sidb::write_tix(si))?;
+            ggs_base::fsx::atomic_write(&dir.join(anadb::DB_FILE), &anadb::write_db(si))?;
+            ggs_base::fsx::atomic_write(&dir.join(anadb::TIX_FILE), &anadb::write_tix(si))?;
         }
         Ok(())
     }
@@ -1553,17 +1553,17 @@ fn enclosing_symbol(symbols: &[StoredSymbol], line: u32) -> Option<&StoredSymbol
 /// The reference database's SymType for one of the store's kinds.
 fn si_type_of(kind: u8) -> i32 {
     match kind_name(kind) {
-        "function" => sidb::SYM_FUNCTION,
-        "method" => sidb::SYM_PROTOTYPE,
-        "class" => sidb::SYM_CLASS,
-        "struct" => sidb::SYM_STRUCT,
-        "interface" => sidb::SYM_INTERFACE,
-        "enum" => sidb::SYM_ENUM,
-        "module" => sidb::SYM_NAMESPACE,
-        "type" => sidb::SYM_TYPEDEF,
-        "macro" => sidb::SYM_MACRO,
-        "variable" => sidb::SYM_VARIABLE,
-        _ => sidb::SYM_UNKNOWN,
+        "function" => anadb::SYM_FUNCTION,
+        "method" => anadb::SYM_PROTOTYPE,
+        "class" => anadb::SYM_CLASS,
+        "struct" => anadb::SYM_STRUCT,
+        "interface" => anadb::SYM_INTERFACE,
+        "enum" => anadb::SYM_ENUM,
+        "module" => anadb::SYM_NAMESPACE,
+        "type" => anadb::SYM_TYPEDEF,
+        "macro" => anadb::SYM_MACRO,
+        "variable" => anadb::SYM_VARIABLE,
+        _ => anadb::SYM_UNKNOWN,
     }
 }
 
@@ -1588,17 +1588,17 @@ fn build_si_tables(
     store: &SymbolStore,
     calls_per_file: &[Vec<(String, u32)>],
     hits_per_file: &[Vec<(u32, u32)>],
-) -> sidb::SiTables {
-    let mut tables = sidb::SiTables {
+) -> anadb::AnaTables {
+    let mut tables = anadb::AnaTables {
         mods: store
             .files
             .iter()
-            .map(|file| sidb::SiModule {
+            .map(|file| anadb::AnaModule {
                 name: file.path.clone(),
                 sym_count: 0,
             })
             .collect(),
-        ..sidb::SiTables::default()
+        ..anadb::AnaTables::default()
     };
     let mut si_id_of: HashMap<&str, i32> = HashMap::new();
     let mut tdr_of: HashSet<&str> = HashSet::new();
@@ -1614,7 +1614,7 @@ fn build_si_tables(
                 Some(&id) => id,
                 None => {
                     let id = tables.syms.len() as i32;
-                    tables.syms.push(sidb::SiSymbol {
+                    tables.syms.push(anadb::AnaSymbol {
                         id,
                         name: name.to_owned(),
                         type_: si_type_of(symbol.kind),
@@ -1623,15 +1623,15 @@ fn build_si_tables(
                     });
                     tables.mods[module].sym_count += 1;
                     si_id_of.insert(name, id);
-                    for frag in sidb::split_syllables(name) {
+                    for frag in anadb::split_syllables(name) {
                         if syl_seen.insert((id, frag.clone())) {
-                            tables.syls.push(sidb::SiSyl { frag, sym: id });
+                            tables.syls.push(anadb::AnaSyl { frag, sym: id });
                         }
                     }
                     id
                 }
             };
-            tables.code.push(sidb::SiCode {
+            tables.code.push(anadb::AnaCode {
                 sym: id,
                 module: module as i32,
                 line,
@@ -1639,7 +1639,7 @@ fn build_si_tables(
                 enc: -1,
             });
             if is_si_tdr_kind(symbol.kind) && tdr_of.insert(name) {
-                tables.tdrs.push(sidb::SiTdr {
+                tables.tdrs.push(anadb::AnaTdr {
                     name: name.to_owned(),
                     type_: si_type_of(symbol.kind),
                     module: module as i32,
@@ -1653,7 +1653,7 @@ fn build_si_tables(
     // positioned words, both attributed to their innermost enclosing declaration.
     let id_of_name = |name: &str| si_id_of.get(name).copied();
     for (module, file) in store.files.iter().enumerate() {
-        let record = |tables: &mut sidb::SiTables,
+        let record = |tables: &mut anadb::AnaTables,
                       subject: &str,
                       line: u32,
                       want_edge: bool,
@@ -1670,13 +1670,13 @@ fn build_si_tables(
                 return;
             }
             if want_edge && edge_seen.insert((enc_id, subject_id)) {
-                tables.edges.push(sidb::SiEdge {
+                tables.edges.push(anadb::AnaEdge {
                     caller: enc_id,
                     callee: subject_id,
                     line: line as i32 + 1,
                 });
             }
-            tables.code.push(sidb::SiCode {
+            tables.code.push(anadb::AnaCode {
                 sym: subject_id,
                 module: module as i32,
                 line: line as i32 + 1,
@@ -2213,11 +2213,11 @@ class Leaf : public Mid, Extra {};
         let store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
         store.save(home.path()).unwrap();
         let dir_path = dir.path().join(PROJECT_ANALYSIS_DIR).join("analysis").join(store_hash(&root));
-        let db = dir_path.join(sidb::DB_FILE);
-        let tix = dir_path.join(sidb::TIX_FILE);
+        let db = dir_path.join(anadb::DB_FILE);
+        let tix = dir_path.join(anadb::TIX_FILE);
         let db_bytes = fs::read(&db).expect("the reference database rides beside the store");
         let tix_bytes = fs::read(&tix).expect("the syllable index rides beside the store");
-        assert_eq!(&db_bytes[0..4], &sidb::DB_MAGIC.to_le_bytes());
+        assert_eq!(&db_bytes[0..4], &anadb::DB_MAGIC.to_le_bytes());
         assert_eq!(&tix_bytes[0..4], b"TIX1");
 
         // The delete-and-regenerate surface: wipe, then a fresh build writes the same

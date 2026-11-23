@@ -1722,7 +1722,11 @@
 				const node = (name, edgePath, edgeLine, count, drills, kind, edgeKind) => ({
 					kind: kind ?? 'function', name, container: null,
 					path: DEFS[name].path, line: DEFS[name].line,
-					edgePath, edgeLine, edgeKind: edgeKind ?? 'call', edgeCount: count, hasChildren: drills === true
+					edgePath, edgeLine, edgeKind: edgeKind ?? 'call', edgeCount: count,
+					// The multi-site edge keeps one line per site (the numbered rows a card
+					// hangs beneath it); the single-site edge keeps its one.
+					edgeLines: count > 1 ? Array.from({ length: count }, (_, i) => edgeLine + i) : [edgeLine],
+					hasChildren: drills === true
 				});
 				const answer = (nodes, truncated) => ({ nodes, truncated: truncated === true });
 				const handlers = {
@@ -1803,12 +1807,20 @@
 				const view = new SymbolWindowView(host);
 				view.provideRepo = () => REPO;
 				const opens = [];
+				const shows = [];
 				const openLog = document.createElement('span');
 				openLog.style.cssText = 'margin-left:auto;color:#8ec07c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
 				view.onOpen = (path, line) => {
 					opens.push(path + ':' + line);
-					openLog.textContent = 'jumps: ' + opens.length + ' — last: ' + path + ':' + line + ' (1-based)';
+					openLog.textContent = 'opens: ' + opens.length + ' — last: ' + path + ':' + line + ' (1-based)';
 					console.log('[relgraph] open ' + path + ':' + line);
+				};
+				// The plain click's jump lands in the Definition page (2026-11-23, the owner's
+				// direction) — here it logs, the fixture standing in for the page.
+				view.onShowDefinition = (subject) => {
+					shows.push(subject.path + ':' + (subject.line + 1));
+					openLog.textContent = 'shows: ' + shows.length + ' — last: ' + subject.name + ' ' + subject.path + ':' + (subject.line + 1) + ' (1-based)';
+					console.log('[relgraph] show ' + subject.name + ' ' + subject.path + ':' + (subject.line + 1));
 				};
 				const button = (label, title) => {
 					const b = document.createElement('button');
@@ -1828,20 +1840,27 @@
 				cursors.appendChild(openLog);
 				const note = document.createElement('div');
 				note.style.cssText = 'padding:4px 10px;color:#aaa;border-bottom:1px solid #444;line-height:1.5;';
-				note.textContent = 'RELATION-GRAPH FIXTURE (?relgraph=1) — verify by eye: the outline on top roots the graph below on the ' +
+				note.textContent = 'RELATION-GRAPH FIXTURE (?relgraph=1) — verify by eye: the outline on top is the collapsible tree ' +
+					'(the containers\' +/- fold their members; the sort button beside the filter cycles Line/Name/Type; Expand/Collapse ' +
+					'All and Expand Special ride the palette) and roots the graph below on the ' +
 					'covering function (alpha opens); the cursor buttons re-root it (hook answers an empty ring, in Circle shows the ' +
-					'inheritance kinds); the type picker beside the section head swaps the relation type — the classic symbol IDEs\'s own thirteen ' +
+					'inheritance kinds); the type picker beside the section head swaps the relation type — the graph\'s own thirteen views ' +
 					'(Calls, Callers, Calls and Callers, Referenced by Functions/Files/Modules, Contains, Container, Base/Derived ' +
-					'Classes, Member Types/Classes, Types Used — an empty root ring answers the verdict); ' +
+					'Classes, Member Types/Classes, Types Used — an empty root ring answers the verdict; a new root\'s category names ' +
+					'its opening type — the rules); the view button cycles the three views — Outline (the ' +
+					'multi-column list: name with its Calls/Callers suffix, count, file, line; the rows jump, the twisties drill), ' +
+					'Graph Horizontal (a column per depth, the siblings stacked) and Graph Vertical — and Back/Forward replay the ' +
+					'visited roots; right-click a card carries Expand Special (the asked number of levels at once); ' +
 					'the drawing is the view\'s own SVG board in the Plait mind-map manner, TOP-DOWN — every draw re-plans the tree ' +
-					'(mind-map bezier links dropping from a card\'s bottom face to the child\'s top face, branch expanders beneath the ' +
-					'cards, cards sized to their labels) and the cards GLIDE to their new spots, so drilling ' +
-					'gamma grows its branch and beta/delta slide right to clear it (the ×2 label rides gamma\'s edge; the delta→gamma ' +
-					'cross edge joins when a ring names a drawn symbol); wheel pans, ctrl/cmd+wheel zooms at the cursor, drag the ' +
-					'bare board to pan, Fit to frame; the interaction follows the classic relation window — one ' +
-					'click on a card opens its definition (logged right), the small +/− circle beside a drillable card alone drills and ' +
-					'collapses its ring, right-click a card for the drill / re-root / open menu; the pin ' +
-					'freezes the root; ' +
+						'(mind-map bezier links dropping from a card\'s bottom face to the child\'s top face, branch expanders beneath the ' +
+						'cards, cards sized to their labels) and the cards GLIDE to their new spots, so drilling ' +
+						'gamma grows its branch and beta/delta slide right to clear it (the ×2 label rides gamma\'s edge; the delta→gamma ' +
+						'cross edge joins when a ring names a drawn symbol); wheel pans, ctrl/cmd+wheel zooms at the cursor, drag the ' +
+						'bare board to pan, Fit to frame; the interaction follows the graph\'s pointer vocabulary — one ' +
+						'plain click on a card (or an Outline row, or a numbered site row) SHOWS the jump in the Definition page ' +
+						'(logged right; the app pins the page and shows it — the code page never moves), the small +/− circle beside a drillable card alone drills and ' +
+						'collapses its ring, double-click a card (or its menu\'s Open the definition) for the editor\'s own open, right-click a card for the drill / re-root / open menu; the pin ' +
+						'freezes the root; ' +
 					'the sash resizes the halves; the section head (Relations) collapses the graph.';
 				const stage = document.createElement('div');
 				stage.style.cssText = 'position:fixed;inset:0;z-index:9000;display:flex;flex-direction:column;background:var(--vscode-editor-background,#1e1e1e);';

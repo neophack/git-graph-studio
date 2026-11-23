@@ -646,6 +646,15 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 	color: var(--vscode-textLink-foreground); font-size: 12px;
 }
 .context-location:hover { background: var(--vscode-toolbar-hoverBackground); }
+/* The whole-file live view: the symbol's own span marked as the selection — the quick
+   view's opening frame (the declaration scrolled to, the span marked). The marked rows
+   read inline-block full-width so the highlight spans the pane; the theme's own find-match
+   colour at half its strength, the same dimming the Definition page's marked span keeps. */
+.context-line.context-sel {
+	background: color-mix(in srgb, var(--vscode-editor-findMatchHighlightBackground) 50%, transparent);
+	display: inline-block; width: 100%;
+}
+
 .context-code {
 	margin: 0; padding: 6px 8px; border-radius: 4px; overflow: auto;
 	background: var(--vscode-editor-background);

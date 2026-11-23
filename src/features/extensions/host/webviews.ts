@@ -75,7 +75,7 @@ function webviewBoot(nonce: string | null, fileRoot: string): string {
 		// whose origin is not the page's own — the chat's replies, the sessions list's
 		// answers, all of it. The value must be window.origin (the document origin this
 		// srcdoc page inherits from the workbench, what the client's gate compares
-		// against), never location.origin — that is "null" for an about:srcdoc URL.
+		// against) — the location-based spelling is "null" for an about:srcdoc URL.
 		if (data.type === 'message') window.dispatchEvent(new MessageEvent('message', { data: data.message, origin: String(window.origin) }));
 		if (data.type === 'theme') {
 			// VS Code defines the --vscode-* variables (and the kind class) in every webview

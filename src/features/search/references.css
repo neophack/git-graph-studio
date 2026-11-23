@@ -36,8 +36,8 @@
 .refs-site:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 .refs-def { font-size: 14px; flex: none; color: var(--vscode-symbolIcon-functionForeground, var(--vscode-descriptionForeground)); }
 .refs-def-space { width: 14px; flex: none; }
-/* The folded context's arrow — the row itself is the jump (the classic search
-   results); this affordance alone folds and unfolds. */
+/* The folded context's arrow — the row itself is the jump, one click navigates; this
+   affordance alone folds and unfolds. */
 .refs-ctx-toggle {
 	flex: none; display: inline-flex; align-items: center; cursor: pointer;
 	color: var(--vscode-descriptionForeground); border-radius: 3px;
@@ -69,3 +69,11 @@
 }
 .ref-ctx-fold:hover { color: var(--vscode-textLink-foreground); }
 .ref-ctx-fold:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+
+/* The accumulated lookups, one section each, and the site row's own segments — the
+   container prefix and the file name riding dim beside the line number. */
+.refs-section-later { border-top: 1px solid var(--vscode-panel-border); margin-top: 6px; padding-top: 4px; }
+.refs-site-container, .refs-site-file {
+	flex: none; color: var(--vscode-descriptionForeground); font-size: 11px;
+	white-space: nowrap;
+}

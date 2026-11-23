@@ -6,11 +6,11 @@
 // centered on its outermost children, a branch's expansion gliding the siblings aside —
 // the owner's ask: 思维导图曲线连线 + 自动移动节点), the lazy rings behind the right-click
 // menu (cached, depth-capped), the three-way direction switch, the cross edge a repeated
-// symbol draws, the pointer's vocabulary in the classic window's terms (one click on a
-// ringed card drills, a card without a ring opens, the double click opens and never
-// expands on its way), the declaration card reading through the joined path — and the
-// Symbol Window feeding the graph from the covering symbol over the repo-relative path,
-// with the pin freeze and the collapsed section's gate.
+// symbol draws, the pointer's vocabulary (one click on a
+// ringed card drills, a plain click shows the jump in the Definition page, the double
+// click opens the editor and never expands on its way), the declaration card reading
+// through the joined path — and the Symbol Window feeding the graph from the covering
+// symbol over the repo-relative path, with the pin freeze and the collapsed section's gate.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -23,23 +23,28 @@ import type { RelationAnswer, RelationNode } from '../src/platform/ipc/symbols';
 const ROOT = { kind: 'function', name: 'alpha', path: 'src/a.c', line: 0 };
 
 const RING: RelationNode[] = [
-	{ kind: 'function', name: 'beta', container: null, path: 'src/b.c', line: 2, edgePath: 'src/main.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, hasChildren: false },
-	{ kind: 'function', name: 'gamma', container: null, path: 'src/c.c', line: 1, edgePath: 'src/main.c', edgeLine: 5, edgeKind: 'call', edgeCount: 2, hasChildren: true },
-	{ kind: 'struct', name: 'Config', container: null, path: 'src/d.c', line: 0, edgePath: 'src/main.c', edgeLine: 6, edgeKind: 'use', edgeCount: 1, hasChildren: false }
+	{ kind: 'function', name: 'beta', container: null, path: 'src/b.c', line: 2, edgePath: 'src/main.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, edgeLines: [4], hasChildren: false },
+	// gamma's edge aggregates two sites (main.c lines 5 and 6, 0-based) — the numbered
+	// rows hang under its card; Config's two sites share one line, so its edge speaks
+	// the count as the ×N label instead.
+	{ kind: 'function', name: 'gamma', container: null, path: 'src/c.c', line: 1, edgePath: 'src/main.c', edgeLine: 4, edgeKind: 'call', edgeCount: 2, edgeLines: [4, 5], hasChildren: true },
+	{ kind: 'struct', name: 'Config', container: null, path: 'src/d.c', line: 0, edgePath: 'src/main.c', edgeLine: 6, edgeKind: 'use', edgeCount: 2, edgeLines: [6], hasChildren: false }
 ];
 
 const GAMMA_RING: RelationNode[] = [
-	{ kind: 'function', name: 'beta', container: null, path: 'src/b.c', line: 2, edgePath: 'src/c.c', edgeLine: 3, edgeKind: 'call', edgeCount: 1, hasChildren: false }
+	{ kind: 'function', name: 'beta', container: null, path: 'src/b.c', line: 2, edgePath: 'src/c.c', edgeLine: 3, edgeKind: 'call', edgeCount: 1, edgeLines: [3], hasChildren: false }
 ];
 
 const answer = (nodes: RelationNode[], truncated = false): RelationAnswer => ({ nodes, truncated });
 
 /** The graph's scripted backend: alpha's ring (cut short), gamma's ring re-naming beta —
- *  the cross edge's fixture; everything else answers empty. */
+ *  the cross edge's fixture; everything else answers empty. The fixture answers every
+ *  direction: a function root's own default type is named by the rules, so the asks no
+ *  longer spell one fixed direction. */
 function scriptEngine(): void {
-	backend.on('symbol_relation_children', ({ name, direction }) => {
-		if (direction === 'refsTo' && name === 'alpha') return answer(RING, true);
-		if (direction === 'refsTo' && name === 'gamma') return answer(GAMMA_RING);
+	backend.on('symbol_relation_children', ({ name }) => {
+		if (name === 'alpha') return answer(RING, true);
+		if (name === 'gamma') return answer(GAMMA_RING);
 		return answer([]);
 	});
 }
@@ -131,13 +136,25 @@ describe('drawing the ring', () => {
 		expect(expanders()).toHaveLength(2);
 		expect(expanderOf('alpha').querySelector('text')?.textContent).toBe('−');
 		expect(expanderOf('gamma').querySelector('text')?.textContent).toBe('+');
-		// The links: three tree edges (dashed for the use) plus the ×N on gamma's edge,
-		// every one of them a bezier — the mind-map curve, not a straight line.
+		// The links: three tree edges plus the ×N on Config's edge (its two sites share
+		// one line — the count is the label's own), every one of them an orthogonal
+		// trunk polyline — the classic IDE's connection manner, not a curve — in the connection red,
+		// and gamma's two-site edge speaking its count in numbered rows instead.
 		expect(edgePairs()).toHaveLength(3);
 		const curves = [...view.element.querySelectorAll<SVGPathElement>('.rg-edge path')].map((path) => path.getAttribute('d') ?? '');
-		expect(curves.every((d) => d.includes('C'))).toBe(true);
-		expect([...view.element.querySelectorAll<SVGTextElement>('.rg-edge text')].some((text) => text.textContent === '×2')).toBe(true);
-		expect([...view.element.querySelectorAll<SVGPathElement>('.rg-edge path')].some((path) => path.getAttribute('stroke-dasharray'))).toBe(true);
+		expect(curves.every((d) => !d.includes('C') && (d.match(/L /g) ?? []).length === 3)).toBe(true);
+		expect(curves.every((d) => !d.includes('C'))).toBe(true);
+		const countLabels = [...view.element.querySelectorAll<SVGTextElement>('.rg-edge text')].map((text) => text.textContent);
+		expect(countLabels).toContain('×2');
+		expect(countLabels.filter((text) => text?.startsWith('×'))).toEqual(['×2']);
+		expect([...view.element.querySelectorAll<SVGPathElement>('.rg-edge path')].every((path) => path.getAttribute('stroke') === '#c00000')).toBe(true);
+		expect([...view.element.querySelectorAll<SVGPathElement>('.rg-edge path')].every((path) => path.getAttribute('marker-end') === 'url(#rg-arr)')).toBe(true);
+		// gamma's numbered rows (the classic IDE's ShowGraphDetails): a row per site, 1-based, and the
+		// card grew to hold them.
+		expect([...cardOf('gamma').querySelectorAll('.rg-detail-row')].map((row) => row.textContent)).toEqual(['1. line 5', '2. line 6']);
+		expect(Number(cardOf('gamma').querySelector('rect')!.getAttribute('height'))).toBe(28 + 2 * 15);
+		// The single-site edges keep their clean cards.
+		expect(cardOf('beta').querySelector('.rg-detail-row')).toBeNull();
 		// The root carries the accent stroke.
 		expect(cardOf('alpha').querySelector('rect')?.getAttribute('stroke-width')).toBe('1.5');
 		view.dispose();
@@ -178,10 +195,12 @@ describe('the mind layout (draw, glide, no overlap)', () => {
 		view.setRoot({ ...ROOT });
 		await untilCards(4);
 		await view.whenSettled();
-		// Every card owns a rectangle no other card crosses — the tidy tree's promise.
+		// Every card owns a rectangle no other card crosses — the tidy tree's promise (a
+		// card's height is its own: gamma's numbered rows made it taller than the label
+		// row).
 		const boxes = cards().map((card) => {
 			const at = spot(card);
-			return { x: at.x, y: at.y, w: Number(card.querySelector('rect')!.getAttribute('width')), h: 28 };
+			return { x: at.x, y: at.y, w: Number(card.querySelector('rect')!.getAttribute('width')), h: Number(card.querySelector('rect')!.getAttribute('height')) };
 		});
 		for (let i = 0; i < boxes.length; i++) {
 			for (let j = i + 1; j < boxes.length; j++) {
@@ -209,8 +228,8 @@ describe('the mind layout (draw, glide, no overlap)', () => {
 			if (name === 'gamma') {
 				return answer([
 					...GAMMA_RING,
-					{ kind: 'function', name: 'epsilon', container: null, path: 'src/e.c', line: 0, edgePath: 'src/c.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, hasChildren: false },
-					{ kind: 'function', name: 'zeta', container: null, path: 'src/z.c', line: 0, edgePath: 'src/c.c', edgeLine: 5, edgeKind: 'call', edgeCount: 1, hasChildren: false }
+					{ kind: 'function', name: 'epsilon', container: null, path: 'src/e.c', line: 0, edgePath: 'src/c.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, edgeLines: [4], hasChildren: false },
+					{ kind: 'function', name: 'zeta', container: null, path: 'src/z.c', line: 0, edgePath: 'src/c.c', edgeLine: 5, edgeKind: 'call', edgeCount: 1, edgeLines: [5], hasChildren: false }
 				]);
 			}
 			return answer([]);
@@ -232,7 +251,7 @@ describe('the mind layout (draw, glide, no overlap)', () => {
 		expect(spot(cardOf('epsilon')).y).toBeGreaterThan(spot(cardOf('gamma')).y);
 		const boxes = cards().map((card) => {
 			const at = spot(card);
-			return { x: at.x, y: at.y, w: Number(card.querySelector('rect')!.getAttribute('width')), h: 28 };
+			return { x: at.x, y: at.y, w: Number(card.querySelector('rect')!.getAttribute('width')), h: Number(card.querySelector('rect')!.getAttribute('height')) };
 		});
 		for (let i = 0; i < boxes.length; i++) {
 			for (let j = i + 1; j < boxes.length; j++) {
@@ -277,8 +296,8 @@ describe('the mind layout (draw, glide, no overlap)', () => {
 			if (name === 'gamma') {
 				return answer([
 					...GAMMA_RING,
-					{ kind: 'function', name: 'epsilon', container: null, path: 'src/e.c', line: 0, edgePath: 'src/c.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, hasChildren: false },
-					{ kind: 'function', name: 'zeta', container: null, path: 'src/z.c', line: 0, edgePath: 'src/c.c', edgeLine: 5, edgeKind: 'call', edgeCount: 1, hasChildren: false }
+					{ kind: 'function', name: 'epsilon', container: null, path: 'src/e.c', line: 0, edgePath: 'src/c.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, edgeLines: [4], hasChildren: false },
+					{ kind: 'function', name: 'zeta', container: null, path: 'src/z.c', line: 0, edgePath: 'src/c.c', edgeLine: 5, edgeKind: 'call', edgeCount: 1, edgeLines: [5], hasChildren: false }
 				]);
 			}
 			return answer([]);
@@ -298,11 +317,12 @@ describe('the mind layout (draw, glide, no overlap)', () => {
 		const at = spot(cardOf('Config'));
 		expect(at.x).toBeGreaterThan(configBefore.x);
 		// Landed: the link now leads out of Config's TOP face (alpha sits on the row
-		// above) at its new column, a bezier the whole way.
+		// above) at its new column, an orthogonal trunk the whole way — no curve.
 		const dAfter = linkOfConfig.querySelector('path')!.getAttribute('d')!;
 		expect(dAfter).not.toBe(dBefore);
 		expect(dAfter).toContain(`M ${at.x + Number(cardOf('Config').querySelector('rect')!.getAttribute('width')) / 2} ${at.y}`);
-		expect(dAfter).toContain('C');
+		expect(dAfter).not.toContain('C');
+		expect((dAfter.match(/L /g) ?? []).length).toBe(3);
 		view.dispose();
 	});
 });
@@ -316,7 +336,7 @@ describe('drilling rings', () => {
 			if (name === 'gamma') {
 				return answer([
 					...GAMMA_RING,
-					{ kind: 'function', name: 'epsilon', container: null, path: 'src/e.c', line: 0, edgePath: 'src/c.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, hasChildren: false }
+					{ kind: 'function', name: 'epsilon', container: null, path: 'src/e.c', line: 0, edgePath: 'src/c.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, edgeLines: [4], hasChildren: false }
 				]);
 			}
 			return answer([]);
@@ -354,8 +374,8 @@ describe('drilling rings', () => {
 			if (name === 'gamma') {
 				return answer([
 					...GAMMA_RING,
-					{ kind: 'function', name: 'epsilon', container: null, path: 'src/e.c', line: 0, edgePath: 'src/c.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, hasChildren: false },
-					{ kind: 'function', name: 'zeta', container: null, path: 'src/z.c', line: 0, edgePath: 'src/c.c', edgeLine: 5, edgeKind: 'call', edgeCount: 1, hasChildren: false }
+					{ kind: 'function', name: 'epsilon', container: null, path: 'src/e.c', line: 0, edgePath: 'src/c.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, edgeLines: [4], hasChildren: false },
+					{ kind: 'function', name: 'zeta', container: null, path: 'src/z.c', line: 0, edgePath: 'src/c.c', edgeLine: 5, edgeKind: 'call', edgeCount: 1, edgeLines: [5], hasChildren: false }
 				]);
 			}
 			return answer([]);
@@ -375,14 +395,16 @@ describe('drilling rings', () => {
 
 	it('the depth cap answers with the ⋯ marker instead of a request', async () => {
 		// A ring chain naming the next symbol each time: alpha → child-of-alpha → … — the
-		// root's ring opens itself, so the chain starts one level down. the classic guard shows
+		// root's ring opens itself, so the chain starts one level down. The depth guard shows
 		// five levels of cards (depths 0..4); a card at depth 4 is the leaf.
-		backend.on('symbol_relation_children', ({ name, direction }) => {
-			if (direction !== 'refsTo') return answer([]);
-			const ring: RelationNode[] = [
-				{ kind: 'function', name: `child-of-${name}`, container: null, path: `src/${name}.c`, line: 1, edgePath: 'src/x.c', edgeLine: 0, edgeKind: 'call', edgeCount: 1, hasChildren: true }
-			];
-			return answer(ring);
+		backend.on('symbol_relation_children', ({ name }) => {
+			if (name === 'alpha' || name.startsWith('child-of-')) {
+				const ring: RelationNode[] = [
+					{ kind: 'function', name: `child-of-${name}`, container: null, path: `src/${name}.c`, line: 1, edgePath: 'src/x.c', edgeLine: 0, edgeKind: 'call', edgeCount: 1, edgeLines: [0], hasChildren: true }
+				];
+				return answer(ring);
+			}
+			return answer([]);
 		});
 		const view = mountView();
 		view.setRoot({ ...ROOT });
@@ -425,13 +447,13 @@ describe('drilling rings', () => {
 	});
 });
 
-describe("the pointer (the classic window's vocabulary)", () => {
+describe("the pointer (the graph's own vocabulary)", () => {
 	it('the type picker lists the thirteen view names and swaps the kind', async () => {
 		const view = mountView();
 		view.setRoot({ ...ROOT });
 		await untilCards(4);
 		// The picker is the head's first button; its click opens the thirteen entries,
-		// The classic window's own set in its own order, the active one checked.
+		// the thirteen views in their own order, the active one checked.
 		click(view.controls.children[0] as HTMLElement);
 		await flush();
 		expect(menuLabels()).toEqual([
@@ -475,8 +497,8 @@ describe("the pointer (the classic window's vocabulary)", () => {
 			if (name !== 'alpha') return answer([]);
 			if (direction === 'callsAndCallers') {
 				return answer([
-					{ kind: 'function', name: 'beta', container: null, path: 'src/b.c', line: 2, edgePath: 'src/b.c', edgeLine: 3, edgeKind: 'call', edgeCount: 1, hasChildren: true },
-					{ kind: 'function', name: 'hook', container: null, path: 'src/a.c', line: 8, edgePath: 'src/a.c', edgeLine: 5, edgeKind: 'call', edgeCount: 2, hasChildren: true }
+					{ kind: 'function', name: 'beta', container: null, path: 'src/b.c', line: 2, edgePath: 'src/b.c', edgeLine: 3, edgeKind: 'call', edgeCount: 1, edgeLines: [3], hasChildren: true },
+					{ kind: 'function', name: 'hook', container: null, path: 'src/a.c', line: 8, edgePath: 'src/a.c', edgeLine: 5, edgeKind: 'call', edgeCount: 2, edgeLines: [5, 6], hasChildren: true }
 				]);
 			}
 			return answer([]);
@@ -512,14 +534,16 @@ describe("the pointer (the classic window's vocabulary)", () => {
 			if (name === 'gamma') {
 				return answer([
 					...GAMMA_RING,
-					{ kind: 'function', name: 'epsilon', container: null, path: 'src/e.c', line: 0, edgePath: 'src/c.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, hasChildren: false }
+					{ kind: 'function', name: 'epsilon', container: null, path: 'src/e.c', line: 0, edgePath: 'src/c.c', edgeLine: 4, edgeKind: 'call', edgeCount: 1, edgeLines: [4], hasChildren: false }
 				]);
 			}
 			return answer([]);
 		});
 		const view = mountView();
 		const opens: string[] = [];
+		const shows: unknown[] = [];
 		view.onOpen = (path, line) => opens.push(`${path}:${line}`);
+		view.onShowDefinition = (subject) => shows.push(subject);
 		view.setRoot({ ...ROOT });
 		await untilCards(4);
 		// The press on the circle must not start a board pan: the pointerdown a real
@@ -536,6 +560,7 @@ describe("the pointer (the classic window's vocabulary)", () => {
 		await untilCards(5);
 		expect(edgePairs()).toHaveLength(5);
 		expect(opens).toEqual([]);
+		expect(shows).toEqual([]);
 		// The box flipped to −; the second click collapses (the cached ring, no re-ask).
 		expect(expanderOf('gamma').querySelector('text')?.textContent).toBe('−');
 		const after = backend.callsTo('symbol_relation_children').length;
@@ -546,18 +571,61 @@ describe("the pointer (the classic window's vocabulary)", () => {
 		view.dispose();
 	});
 
-	it("a card's click opens the definition — the relation window's own click", async () => {
+	it("a card's plain click shows the jump in the Definition page, never the editor", async () => {
 		const view = mountView();
 		const opens: string[] = [];
+		const shows: { path: string; line: number }[] = [];
 		view.onOpen = (path, line) => opens.push(`${path}:${line}`);
+		view.onShowDefinition = (subject) => shows.push({ path: subject.path, line: subject.line });
 		view.setRoot({ ...ROOT });
 		await untilCards(4);
 		const asked = backend.callsTo('symbol_relation_children').length;
-		// The drillable card itself jumps on the plain click — the box owns the drilling.
+		// The drillable card itself shows its definition on the plain click — the box
+		// owns the drilling, the code page never moves (2026-11-23, the owner's
+		// direction: the line rides 0-based, the Definition page's own vocabulary).
 		cardOf('gamma').dispatchEvent(new MouseEvent('click', { bubbles: true }));
 		await flush();
-		expect(opens).toEqual(['src/c.c:2']);
+		expect(shows).toEqual([{ path: 'src/c.c', line: 1 }]);
+		expect(opens).toEqual([]);
 		expect(backend.callsTo('symbol_relation_children').length).toBe(asked);
+		// The double click is the editor's open, and it alone.
+		cardOf('gamma').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+		await flush();
+		expect(opens).toEqual(['src/c.c:2']);
+		expect(shows).toHaveLength(1);
+		view.dispose();
+	});
+
+	it("a multi-site edge draws its numbered rows, and a row click shows that site in the Definition page", async () => {
+		// gamma's edge aggregates two sites in main.c (0-based lines 4 and 5): the card
+		// hangs the numbered rows beneath a separator (the classic IDE's ShowGraphDetails), each row
+		// its own show — the card's definition click never sees it.
+		const view = mountView();
+		const opens: string[] = [];
+		const shows: { path: string; line: number }[] = [];
+		view.onOpen = (path, line) => opens.push(`${path}:${line}`);
+		view.onShowDefinition = (subject) => shows.push({ path: subject.path, line: subject.line });
+		view.setRoot({ ...ROOT });
+		await untilCards(4);
+		const gamma = cardOf('gamma');
+		const rows = [...gamma.querySelectorAll('.rg-detail-row')];
+		expect(rows.map((row) => row.textContent)).toEqual(['1. line 5', '2. line 6']);
+		expect(Number(gamma.querySelector('rect')!.getAttribute('height'))).toBe(28 + 2 * 15);
+		// The separator sits under the label row, the rows below it.
+		const sep = gamma.querySelector('.rg-details line')!;
+		expect(Number(sep.getAttribute('y1'))).toBe(28);
+		click(rows[1]!);
+		expect(shows).toEqual([{ path: 'src/main.c', line: 5 }]);
+		// The row's click never doubled as the card's definition show; the card's own
+		// click still is one — the row rides the edge's own site file (main.c), the
+		// card's the definition's (c.c). The editor never opened for either.
+		gamma.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		expect(shows).toEqual([
+			{ path: 'src/main.c', line: 5 },
+			{ path: 'src/c.c', line: 1 }
+		]);
+		expect(opens).toEqual([]);
 		view.dispose();
 	});
 });
@@ -604,6 +672,21 @@ describe('the symbol window feed', () => {
 		host.remove();
 	});
 
+	it('a graph card click forwards the subject to the Definition page feed', async () => {
+		scriptWindow();
+		const { host, view } = mountWindow();
+		const shows: { name: string; path: string; line: number }[] = [];
+		view.onShowDefinition = (subject) => shows.push({ name: subject.name, path: subject.path, line: subject.line });
+		view.setFile(FILE, 8); // the cursor inside main — the root card
+		await until(() => host.querySelector('.rg-card'));
+		const card = host.querySelector<SVGGElement>('.rg-card')!;
+		card.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		// The window's own hook answers in the Definition page's vocabulary (0-based).
+		expect(shows).toEqual([{ name: 'main', path: 'src/main.c', line: 6 }]);
+		host.remove();
+	});
+
 	it('the cursor roaming inside the same function never re-roots', async () => {
 		scriptWindow();
 		const { host, view } = mountWindow();
@@ -622,7 +705,7 @@ describe('the symbol window feed', () => {
 		view.setFile(FILE, 8);
 		await flush();
 		const asked = backend.callsTo('symbol_relation_children').length;
-		const pin = host.querySelector('.sw-graph-head .rg-controls button:nth-child(2)')!;
+		const pin = host.querySelector('.sw-graph-head .rg-controls .rg-pin')!;
 		click(pin);
 		await flush();
 		view.setFile(FILE, 1); // the cursor into Config — pinned, so nothing asks
@@ -670,5 +753,196 @@ describe('the symbol window feed', () => {
 		const { host } = mountWindow();
 		expect(host.querySelector('.sw-graph-label')?.textContent).toBe('关系');
 		host.remove();
+	});
+});
+
+/* ---------- The three views, history and rules (2026-11-23) ---------- */
+
+describe("the three views, history and rules", () => {
+	beforeEach(() => {
+		localStorage.clear();
+		backend.reset();
+		updateSetting('locale', 'en');
+		scriptEngine();
+	});
+
+	it('the view key cycles Outline → Graph Horizontal → Graph Vertical, the Outline speaking its four columns', async () => {
+		const view = mountView();
+		view.setRoot({ ...ROOT });
+		await untilCards(4);
+		const viewButton = view.controls.querySelector('.rg-view')!;
+		// The button names the view it shows; the click walks the cycle.
+		expect(viewButton.textContent).toContain('Graph Vertical');
+		click(viewButton);
+		await flush();
+		// The first step is the Outline: the board hides, the list shows.
+		expect(view.controls.querySelector('.rg-view')!.textContent).toContain('Outline');
+		expect((view.element.querySelector('.rg-stage') as HTMLElement).style.display).toBe('none');
+		const head = [...view.element.querySelectorAll<HTMLElement>('.rg-ol-head > span')]
+			.map((span) => span.textContent)
+			.filter((text) => text !== '');
+		expect(head).toEqual(['Referenced by Functions', 'Count', 'File', 'Line']);
+		// The rows: the root with its suffix, then the ring — name, count, file, 1-based line.
+		const rows = [...view.element.querySelectorAll<HTMLElement>('.rg-ol-row')];
+		// The cut-short root keeps its ⋯ in the list too, and every row of a
+		// referenced-by view reads as a caller — the caller suffix on each.
+		expect(rows.map((row) => row.querySelector('.rg-ol-name')?.textContent)).toEqual([
+			'alpha ⋯ Callers',
+			'beta Callers',
+			'gamma Callers',
+			'Config Callers'
+		]);
+		expect(rows[2]!.querySelector('.rg-ol-count')?.textContent).toBe('2');
+		expect(rows[1]!.querySelector('.rg-ol-file')?.textContent).toBe('b.c');
+		expect(rows[1]!.querySelector('.rg-ol-line')?.textContent).toBe('3');
+		// The second step is the horizontal board — its cards carry the same rings.
+		click(viewButton);
+		await flush();
+		expect(view.controls.querySelector('.rg-view')!.textContent).toContain('Graph Horizontal');
+		expect((view.element.querySelector('.rg-stage') as HTMLElement).style.display).toBe('');
+		// The third step is back on the vertical board, the rings' state carried across.
+		click(viewButton);
+		await flush();
+		expect(view.controls.querySelector('.rg-view')!.textContent).toContain('Graph Vertical');
+		expect(cards().length).toBe(4);
+		// The cycle's title is the command itself.
+		expect(viewButton.title).toBe('Next Relation Window View');
+		view.dispose();
+	});
+
+	it('the Outline rows show their jump in the Definition page, the twistie folds', async () => {
+		const view = mountView();
+		const opens: string[] = [];
+		const shows: { path: string; line: number }[] = [];
+		view.onOpen = (path, line) => opens.push(`${path}:${line}`);
+		view.onShowDefinition = (subject) => shows.push({ path: subject.path, line: subject.line });
+		view.setRoot({ ...ROOT });
+		await untilCards(4);
+		click(view.controls.querySelector('.rg-view')!);
+		await flush();
+		const rows = [...view.element.querySelectorAll<HTMLElement>('.rg-ol-row')];
+		click(rows[1]!); // beta's row — the show, not the editor's open
+		expect(shows).toEqual([{ path: 'src/b.c', line: 2 }]);
+		expect(opens).toEqual([]);
+		// gamma's twistie drills its ring right in the list: its beta is already drawn,
+		// so the list grows no second beta row — the fold shows as the extra arrow.
+		const gammaTwist = rows[2]!.querySelector('.rg-ol-toggle')!;
+		click(gammaTwist);
+		await flush();
+		const after = [...view.element.querySelectorAll<HTMLElement>('.rg-ol-row')];
+		expect(after.map((row) => row.querySelector('.rg-ol-name')?.textContent)).toContain('gamma Callers');
+		expect(after.length).toBe(4); // root, beta, gamma, Config — gamma's beta is the cross edge
+		// Back on a graph view the drill's cross edge is there.
+		click(view.controls.querySelector('.rg-view')!);
+		await flush();
+		click(view.controls.querySelector('.rg-view')!);
+		await flush();
+		expect(edgePairs().length).toBe(4);
+		view.dispose();
+	});
+
+	it('the horizontal layout advances a column per depth and stacks the siblings along Y', async () => {
+		const view = mountView();
+		view.setRoot({ ...ROOT });
+		await untilCards(4);
+		view.setViewMode('graphHorizontal');
+		await flush();
+		const rootSpot = spot(cardOf('alpha'));
+		const rootW = Number(cardOf('alpha').querySelector('rect')!.getAttribute('width'));
+		const betaSpot = spot(cardOf('beta'));
+		const gammaSpot = spot(cardOf('gamma'));
+		const configSpot = spot(cardOf('Config'));
+		// The children sit one column right of the root, stacked without overlap.
+		expect(betaSpot.x).toBeGreaterThan(rootSpot.x + rootW);
+		expect(betaSpot.y).not.toBe(gammaSpot.y);
+		// The root centers on its children's run — the outermost two, beta and Config.
+		const midY = (betaSpot.y + configSpot.y) / 2;
+		expect(Math.abs(rootSpot.y - midY)).toBeLessThan(20); // half a card
+		// The expander stands on the card's right face now.
+		const exp = expanders().find((box) => box.dataset.for === cardOf('alpha').dataset.id)!;
+		const expSpot = spot(exp);
+		expect(expSpot.x).toBeGreaterThan(rootSpot.x + rootW);
+		// The view persists — a fresh view comes back horizontal.
+		const again = mountView();
+		expect(again.element.querySelector('.rg-outline')!.getAttribute('style')).toContain('none');
+		again.dispose();
+		view.dispose();
+	});
+
+	it('the view choice persists across a fresh view', () => {
+		localStorage.clear();
+		const view = mountView();
+		view.setViewMode('outline');
+		view.dispose();
+		const again = new RelationGraphView();
+		expect((again.element.querySelector('.rg-stage') as HTMLElement).style.display).toBe('none');
+		again.dispose();
+	});
+});
+
+describe("the visited roots' history and the category rules", () => {
+	beforeEach(() => {
+		localStorage.clear();
+		backend.reset();
+		updateSetting('locale', 'en');
+		scriptEngine();
+	});
+
+	it('Back and Forward replay the visited roots', async () => {
+		const view = mountView();
+		view.setRoot({ ...ROOT });
+		await untilCards(4);
+		expect((view.controls.querySelector('.rg-back') as HTMLButtonElement).disabled).toBe(true);
+		// A re-root joins the history; the back button wakes.
+		view.setRoot({ kind: 'function', name: 'beta', path: 'src/b.c', line: 2 });
+		await flush();
+		expect((view.controls.querySelector('.rg-back') as HTMLButtonElement).disabled).toBe(false);
+		click(view.controls.querySelector('.rg-back')!);
+		await flush();
+		expect(backend.callsTo('symbol_relation_children').at(-1)!['name']).toBe('alpha');
+		click(view.controls.querySelector('.rg-forward')!);
+		await flush();
+		expect(backend.callsTo('symbol_relation_children').at(-1)!['name']).toBe('beta');
+		view.dispose();
+	});
+
+	it('the root category names the opening type, and a manual pick rides within the category', async () => {
+		const view = mountView();
+		// A function root opens under the rules' own default, References.
+		view.setRoot({ ...ROOT });
+		await flush();
+		expect(backend.callsTo('symbol_relation_children').at(-1)!['direction']).toBe('referencedByFunctions');
+		// Crossing to a struct re-opens under Contains.
+		view.setRoot({ kind: 'struct', name: 'Config', path: 'src/d.c', line: 0 });
+		await flush();
+		expect(backend.callsTo('symbol_relation_children').at(-1)!['direction']).toBe('contains');
+		// A sibling struct keeps the type — no reset within the category.
+		view.setRoot({ kind: 'struct', name: 'Other', path: 'src/o.c', line: 0 });
+		await flush();
+		expect(backend.callsTo('symbol_relation_children').at(-1)!['direction']).toBe('contains');
+		// And back to a function restores its own.
+		view.setRoot({ kind: 'function', name: 'beta', path: 'src/b.c', line: 2 });
+		await flush();
+		expect(backend.callsTo('symbol_relation_children').at(-1)!['direction']).toBe('referencedByFunctions');
+		view.dispose();
+	});
+
+	it('Expand Special expands the subtree an asked number of levels, and the menu names it', async () => {
+		const view = mountView();
+		view.setRoot({ ...ROOT });
+		await untilCards(4);
+		// The card menu carries the Expand Special entry.
+		cardOf('alpha').dispatchEvent(new MouseEvent('contextmenu', { clientX: 10, clientY: 10, bubbles: true }));
+		expect(menuLabels()).toContain('Expand Special…');
+		document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+		// "to 2 levels": the root's children expand their rings too — gamma asks once.
+		const asked = backend.callsTo('symbol_relation_children').length;
+		await view.expandLevels(cardOf('alpha').dataset.id!, 2);
+		const gammaAsk = backend.callsTo('symbol_relation_children').slice(asked).find((call) => call['name'] === 'gamma');
+		expect(gammaAsk).toBeTruthy();
+		// gamma's ring re-names the drawn beta — the cards stay four, the arrows grow.
+		expect(cards().length).toBe(4);
+		expect(edgePairs().length).toBeGreaterThan(3);
+		view.dispose();
 	});
 });

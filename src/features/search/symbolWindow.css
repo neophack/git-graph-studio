@@ -64,3 +64,19 @@
 .sw-graph-label { font-weight: 600; }
 .sw-graph-head .rg-controls { margin-left: auto; padding-right: 8px; }
 .sw-graph.collapsed .sw-graph-head { border-bottom: none; }
+
+/* The collapsible tree: the fold gutter rides every row, the sort cycle sits beside the
+   filter. */
+.sw-fold, .sw-fold-space {
+	width: 16px; flex: none; display: inline-flex; justify-content: center; align-items: center;
+}
+.sw-fold { cursor: pointer; color: var(--vscode-descriptionForeground); }
+.sw-fold > .codicon { font-size: 14px; transition: transform 0.1s ease; }
+.sw-fold:hover { color: var(--vscode-sideBar-foreground); }
+.sw-sort {
+	background: none; border: 1px solid transparent; border-radius: 3px; padding: 1px 5px;
+	color: var(--vscode-descriptionForeground); font-size: 11px; white-space: nowrap;
+	display: inline-flex; align-items: center; gap: 2px; flex: none;
+}
+.sw-sort:hover { background: var(--vscode-toolbar-hoverBackground); color: var(--vscode-sideBar-foreground); }
+.sw-sort > .codicon { font-size: 12px; }

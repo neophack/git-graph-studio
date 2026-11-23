@@ -1491,11 +1491,23 @@ export const en = {
 	'symbols.window.empty': 'Open a file to see its symbols.',
 	'symbols.window.imports': 'Includes / Imports',
 	'symbols.window.noIndex': 'No symbols indexed for this file.',
+	// The collapsible tree and the sort cycle — the Symbol Window's own commands
+	// (SPEC-ui-references-definition §4.1/§4.2, 2026-11-23).
+	'symbols.window.expand': 'Expand',
+	'symbols.window.collapse': 'Collapse',
+	'symbols.window.expandAll': 'Expand All',
+	'symbols.window.collapseAll': 'Collapse All',
+	'symbols.window.expandSpecial': 'Expand Special…',
+	'symbols.window.sortedNote': 'Items can only be collapsed when sorted by line.',
+	'symbols.window.sortCycle': 'Sort Symbol Window',
+	'symbols.window.sortLine': 'Line',
+	'symbols.window.sortName': 'Name',
+	'symbols.window.sortType': 'Type',
 	// The Definition panel page (module 5): the clicked symbol's definition content —
 	// a function through its body, a macro through its continuations. The relation
 	// graph lives in the Symbol Window; the direction keys below serve its buttons.
 	'panel.definition': 'Definition',
-	// The References panel page (module 5): the classic lookup-references page — every
+	// The References panel page (module 5): the Lookup References page — every
 	// site of the clicked symbol grouped by file, a site's click answering a folded
 	// context slice (the enclosing definition's head, the lines around the site, the
 	// body's middle folded into rows that click open).
@@ -1508,12 +1520,25 @@ export const en = {
 	'references.filesCut': 'More files — cut short.',
 	'references.sitesCut': 'More sites in this file — cut short.',
 	'references.fold': '… {0} line(s) …',
+	// The Search Results options — the four switches and the output policy, in
+	// the options dialog's own wording (SPEC-ui-references-definition §1.2/§1.5).
+	'references.options': 'Search Results Options…',
+	'references.optLineText': 'Include line text',
+	'references.optLineNumbers': 'Include line numbers',
+	'references.optFileNames': 'Include file names',
+	'references.optContainers': 'Include name of container function or class',
+	'references.optAppend': 'Always append to old Search Results',
+	'references.optReplace': 'Always replace old Search Results',
+	'references.optAsk': 'Ask before replacing old Search Results',
+	'references.askReplace': 'Search Results already contains text.',
+	'references.askAppend': 'Append',
+	'references.inFile': 'in {0}',
 	'references.defTitle': 'Definition',
 	'references.siteTitle': 'Click to jump to this reference',
 	'references.contextTitle': 'The folded context — click to expand or collapse',
 	'references.openTitle': 'Jump to this site',
-	// The relation graph's type picker — the classic window's own relation-type set (the
-	// names its relation window offers, 2026-11-20).
+	// The relation graph's type picker — the relation window's own relation-type set (the
+	// thirteen view names, 2026-11-20).
 	'relations.kind.pick': 'The relation type the graph draws',
 	'relations.kind.calls': 'Calls',
 	'relations.kind.callers': 'Callers',
@@ -1549,13 +1574,34 @@ export const en = {
 	'definition.hint': 'Click a symbol in the editor to see its definition here.',
 	'definition.pin': 'Pin the definition page to the current symbol',
 	'definition.unpin': 'Unpin the definition page',
+	// The page's right-click: the relation click's jump lands here, this pushes it into
+	// the code editor when asked (the location button's own jump, in place).
+	'definition.syncToEditor': 'Sync the current position to the code page',
 	'definition.cut': 'The body was cut short.',
+	// The ShowCode refusal — the file is past the whole-file ceiling.
+	'definition.tooBig': 'ShowCode: file too big.',
 	'relations.loading': 'Loading…',
 	'relations.failed': 'The symbol index did not answer.',
 	'relations.pin': 'Pin the relation graph to the current symbol',
 	'relations.unpin': 'Unpin the relation graph',
 	'relations.expand': 'Expand this ring',
 	'relations.collapse': 'Collapse this ring',
+	'relations.expandSpecial': 'Expand Special…',
+	'relations.expandSpecial.prompt': 'Number of levels to expand?',
+	'relations.expandSpecial.bad': 'Enter a number of levels from 1 to 8.',
+	'relations.back': 'Back',
+	'relations.forward': 'Forward',
+	// The three views and the Outline list's columns — the relation window's own
+	// view set (SPEC-ui-relation §1.1/§1.3) and its list headers.
+	'relations.view.next': 'Next Relation Window View',
+	'relations.view.outline': 'Outline',
+	'relations.view.graphVertical': 'Graph Vertical',
+	'relations.view.graphHorizontal': 'Graph Horizontal',
+	'relations.suffix.calls': 'Calls',
+	'relations.suffix.callers': 'Callers',
+	'relations.outline.count': 'Count',
+	'relations.outline.file': 'File',
+	'relations.outline.line': 'Line',
 	'relations.reRoot': 'Re-root the graph here',
 	'relations.openDef': 'Open the definition',
 	'rename.title': 'Rename Symbol',
@@ -1573,7 +1619,7 @@ export const en = {
 	'rename.close': 'Close',
 	'symbols.window.locals': 'Current function',
 	'symbols.graph.title': 'Relations',
-	'symbols.graph.hint': 'Rest the cursor inside a function to see its relations here. Click a card with + or − to drill its ring; double-click opens the definition.',
+	'symbols.graph.hint': 'Rest the cursor inside a function to see its relations here. Click a card with + or − to drill its ring; a plain click shows the jump in the Definition page, double-click opens it in the editor.',
 	'symbols.graph.fit': 'Fit the graph',
 	'symbols.graph.cut': 'More relations — cut short.',
 	'symbols.page.byFolder': 'Folders',

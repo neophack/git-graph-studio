@@ -769,7 +769,7 @@ export class Workbench {
 			return;
 		}
 		const name = view.state.sliceDoc(word.from, word.to);
-		let defs: { kind: string; name: string; path: string; line: number }[] = [];
+		let defs: { kind: string; name: string; path: string; line: number; endLine?: number }[] = [];
 		try {
 			defs = (await symbolLookup(name)) ?? [];
 		} catch {
@@ -796,7 +796,7 @@ export class Workbench {
 			fragment = '';
 		}
 
-		this.panel.context.show({ kind: def.kind, name: def.name, path: absolute, line: def.line, fragment });
+		this.panel.context.show({ kind: def.kind, name: def.name, path: absolute, line: def.line, endLine: def.endLine, fragment });
 
 	}
 
