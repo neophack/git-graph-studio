@@ -7,12 +7,13 @@
 // Claude column (§5.4's right pane) is S2's chat bridge work; the layout reserves nothing
 // for it yet.
 //
-// The rail carries no titles under its icons (the owner's 2026-10-16 direction, 平板模式
-// 下左边栏的图标不需要写标题 — VS Code's activity bar shape): the 72 px widening and the
+// The rail carries no titles under its icons (the owner's 2026-10-16 direction: in tablet
+// mode the left rail's icons need no titles — VS Code's activity bar shape): the 72 px widening and the
 // `.rail-label` injection that went with it are gone, and the bar keeps the desktop form's
 // own 48 px icon-only drawing.
 //
-// The ☰ at the rail's head (the owner's 2026-10-16 direction, 平板界面没有菜单入口):
+// The ☰ at the rail's head (the owner's 2026-10-16 direction, the tablet UI has no menu
+// entry):
 // this form draws no title bar (§5.4's three-column frame has none), so the drawer — every
 // page, the workspace actions, the transfers, the full application menus, Settings — opens
 // from the activity rail's first item instead, the same surface the phone's app bar and

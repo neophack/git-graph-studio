@@ -206,8 +206,8 @@ mod desktop {
         // Remote Access setup — password, relay, links — from a command line, no window.
         if args.get(1).map(String::as_str) == Some("config") {
             // The bundled-extension install the GUI boot pass performs, run headless
-            // first (2026-10-24, the owner's direction: 安装后就运行 remote,不需要启动一次
-            // 界面): until now the bundled Remote Access VSIX only reached the store
+            // first (2026-10-24, the owner's direction: run remote right after install, no
+            // UI launch needed): until now the bundled Remote Access VSIX only reached the store
             // through a window's first launch, so a headless box — a container — had to
             // open a desktop once, Xvfb and all. Here the package is installed before the
             // daemon is looked for, so `find_daemon` finds the extension's own binary and

@@ -10,7 +10,7 @@
 // top one, and while any closer remains the entry is pushed again — the next back peels the
 // next layer, and only an empty stack lets the back leave the workbench.
 //
-// The STAY GUARD (2026-10-18, the owner's direction: 手机远程时浏览器手势会导致页面退出) sits
+// The STAY GUARD (2026-10-18, the owner's direction: over the phone remote a browser gesture exited the workbench) sits
 // at the BOTTOM of that stack on the page-stack shells: when a back reaches it — every
 // overlay and page already closed — it shows the "press back again to leave" hint instead of
 // leaving, and does NOT re-arm; a second back within the window leaves (the browser is at

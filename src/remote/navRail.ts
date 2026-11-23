@@ -2,11 +2,11 @@
 // navigation's destinations stood on their side — icon-only at 56 px on every form that
 // shows it (a landscape phone has no bottom bar: the height is 360–430 px and the content
 // needs all of it; the portrait tablet's icon-over-label form went with the owner's
-// 2026-10-16 direction, 左轨图标不配文字 — VS Code's activity bar shape). The same page
+// 2026-10-16 direction, the rail's icons carry no text — VS Code's activity bar shape). The same page
 // model (pages.ts) drives it: a tap always shows its page, the active page is marked, and
 // the badges (open editors, pending changes) carry what the hidden status and activity
-// bars would. The destination SET is the form's (the owner's 2026-10-16 direction, 平板
-// 左轨要有搜索、插件、终端): the portrait tablet's rail carries the drawer's full page
+// bars would. The destination SET is the form's (the owner's 2026-10-16 direction, the tablet
+// rail must have search, extensions and terminal): the portrait tablet's rail carries the drawer's full page
 // list uncapped (railTabs), the landscape phone's keeps the bottom bar's five-cap economy.
 import { onLocaleChange, t } from '../platform/i18n';
 import { currentPage, extensionContainers, goTo, onWorkbenchChange, pageIcon, type PageId } from './pages';
@@ -75,8 +75,8 @@ function railMenuButton(open: () => void): HTMLButtonElement {
 
 /** The rail's ‹ (the portrait tablet's back entry — the form draws no app bar, so the ‹ the
  *  phone's app bar carries rides the rail's foot instead, pinned beneath the destinations
- *  while a page covers the editor — the owner's 2026-10-16 direction, 平板模式下返回按钮放
- *  左边栏底下; the head position it first took, above ☰, went with the move). The landscape
+ *  while a page covers the editor — the owner's 2026-10-16 direction, in tablet mode the
+ *  back button goes beneath the left rail; the head position it first took, above ☰, went with the move). The landscape
  *  phone hides it (layouts.css): its app bar carries its own ‹. */
 function railBackButton(): HTMLButtonElement {
 	const button = document.createElement('button');
@@ -92,7 +92,7 @@ function railBackButton(): HTMLButtonElement {
 
 /** The current page's action sheet — the phone app bar's trailing cluster, reached from the
  *  rail on the form that draws no app bar (the portrait tablet; the owner's 2026-10-18
- *  direction, 平板模式相对手机模式有些页面有内容缺失 — the editor's save/find/format sheet,
+ *  direction, tablet mode was missing content the phone mode's pages have — the editor's save/find/format sheet,
  *  the git commands, the terminal's new/kill had no entry point there). Null on the pages
  *  whose phone app bar carries no actions either (Search), so the ⋯ hides with them. The
  *  landscape phone hides the button in CSS: its app bar owns the actions. */
@@ -120,8 +120,8 @@ function railActionsButton(): HTMLButtonElement {
 }
 
 /** The rail's destinations by form: the portrait tablet's rail carries every page the drawer
- *  lists — search, extensions and terminal with them (the owner's 2026-10-16 direction, 平板
- *  左轨要有搜索、插件、终端; the five-cap is the bottom bar's economy, and a tablet's rail has
+ *  lists — search, extensions and terminal with them (the owner's 2026-10-16 direction, the
+ *  tablet rail must have search, extensions and terminal; the five-cap is the bottom bar's economy, and a tablet's rail has
  *  an activity bar's height to spend); every other form that shows the rail (the landscape
  *  phone, height 360–430 px) keeps the capped set. */
 function railTabs(): { id: PageId; label: string }[] {
@@ -142,7 +142,8 @@ function syncButtons(bar: HTMLElement, onTap: (page: PageId) => void, menu: HTML
 		bar.dataset.tabsKey = key;
 		// The rail builds as two halves: a scrolling body (the ☰ and the destinations — the
 		// portrait tablet's uncapped set rolls inside it) over a pinned foot (the ⋯ and the
-		// ‹, the owner's 2026-10-16 direction 平板模式下返回按钮放左边栏底下: the back rides the
+		// ‹, the owner's 2026-10-16 direction: in tablet mode the back button goes beneath the
+		// left rail: the back rides the
 		// rail's bottom, VS Code's activity bar shape, however many destinations ride above;
 		// the page actions ⋯ pin above it — the last item stays the back).
 		const body = document.createElement('div');

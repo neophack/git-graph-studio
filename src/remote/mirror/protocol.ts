@@ -131,8 +131,8 @@ export type MirrorOp =
 	 *  index (an empty editable anchors on itself). A bare `{ o: 'caret' }` means no
 	 *  editable holds the caret. */
 	| ({ o: 'caret' } & CaretState)
-	/** The focused element chain (2026-10-13, the owner's direction: 远程不额外画光标和
-	 *  边框,镜像把状态解析进内容显示): one entry per document along the way into the
+	/** The focused element chain (2026-10-13, the owner's direction: the remote draws no
+	 *  extra cursor or border — the mirror resolves the state into the copy's own display): one entry per document along the way into the
 	 *  focused same-origin frame — the workbench's iframe element, then the chat page's
 	 *  composer — each carrying `v` when the PC's engine also matches it `:focus-visible`.
 	 *  An empty chain is "nothing focused". The copy marks the named elements and their

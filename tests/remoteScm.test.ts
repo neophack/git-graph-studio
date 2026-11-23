@@ -1,7 +1,9 @@
 // The phone's Source Control page (module 19, docs/remote-client-plan.md §6.4, the owner's
-// 2026-10-16 direction: 手机端源代码管理界面不适合触控，要重新设计): the branch chip riding
-// the commit card's action row (the owner's 2026-10-16 direction: ggs-scm-branch 要放到第一
-// 行增加一个按钮就可以，不要单独一行) with the shared branch sheet (切换分支), the commit card whose primary action follows the
+// 2026-10-16 direction: the phone's Source Control UI is not touch-friendly — redesign
+// it): the branch chip riding the commit card's action row (the owner's 2026-10-16
+// direction: ggs-scm-branch just needs one more button on the first row, never a row of
+// its own) with the shared branch sheet (switch branch), the commit card whose primary
+// action follows the
 // repository's state, the change groups as touch sections — a tap opens the change, the ⋮
 // opens the row's sheet, the group's own verbs stage / unstage / discard — and the page's
 // seamlessness: it renders the ONE SourceControlView's state, so a device-class switch
@@ -96,12 +98,13 @@ describe('the phone Source Control page (§6.4)', () => {
 		expect(branch.querySelector('.meta')!.textContent).toContain('1');
 		expect(branch.querySelector('.meta')!.textContent).toContain('2');
 		// The chip is a button in the commit card's action row — never a row of its own
-		// (the owner's 2026-10-16 direction: ggs-scm-branch 要放到第一行增加一个按钮就可以，
-		// 不要单独一行): the page's own children are the commit card and the scroll.
+		// (the owner's 2026-10-16 direction: ggs-scm-branch just needs one more button on
+		// the first row, never a row of its own): the page's own children are the commit
+		// card and the scroll.
 		expect(branch.closest('.ggs-scm-commitrow')).not.toBeNull();
 		const pageChildren = [...document.querySelector('.ggs-scm-page')!.children];
 		expect(pageChildren.map((child) => child.className)).toEqual(['ggs-scm-commit', 'ggs-scm-scroll']);
-		// The groups: the staged change under 已暂存的更改, the unstaged under 更改.
+		// The groups: the staged change under "Staged Changes", the unstaged under "Changes".
 		expect(groupSection(t('remote.scm.group.staged'))).not.toBeNull();
 		expect(groupSection(t('remote.scm.group.changes'))).not.toBeNull();
 		expect(rowOf('b.md')).not.toBeNull();

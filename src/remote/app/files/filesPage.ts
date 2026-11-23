@@ -58,8 +58,8 @@ export function installFilesPage(): void {
 		updateBranchChip();
 	};
 
-	// The branch chip (the owner's 2026-10-16 direction: 手机端文件管理页面没有切换分支的
-	// 按钮): the repository's own state off the SCM view, re-read whenever a refresh or a
+	// The branch chip (the owner's 2026-10-16 direction: the phone files page had no branch
+	// switch button): the repository's own state off the SCM view, re-read whenever a refresh or a
 	// setRepo crossed the status feed, and whenever the head moved.
 	const branchChip = el('button', 'ggs-files-branch', [icon('git-branch'), el('span', 'name', [])]);
 	branchChip.type = 'button';
@@ -83,7 +83,7 @@ export function installFilesPage(): void {
 	let filterText = '';
 
 	/** One row's menu (§6.1's long-press sheet, the owner's 2026-10-16 direction): open /
-	 *  enter, the transfers, rename, delete, copy path, and the 多选 entry — the same
+	 *  enter, the transfers, rename, delete, copy path, and the multi-select entry — the same
 	 *  verbs the multi-select bars carry, one row at a time. */
 	const rowMenu = (entry: DirEntryInfo): MenuEntry[] => [
 		{
@@ -101,7 +101,7 @@ export function installFilesPage(): void {
 		{ label: t('remote.files.delete'), run: () => void deleteOne(entry) },
 		// The desktop explorer's copy pair, one row each: absolute, and relative to the open
 		// folder. The relative label is the desktop menu's own literal — no string-table key —
-		// which the sheet's trText resolves (the zh-cn table carries '复制相对路径').
+		// which the sheet's trText resolves (the zh-cn table carries its Chinese wording).
 		{ label: t('remote.files.copyPath'), run: () => void copyText(entry.path) },
 		{ label: 'Copy Relative Path', run: () => void copyText(relativeTo(workspaceRoot(), entry.path)) },
 		'separator',
@@ -309,7 +309,7 @@ export function installFilesPage(): void {
 	// The page mounts at the shell's install moment — the title bar's first frame, which
 	// the workbench builds synchronously while the boot context's roots are still one wire
 	// round trip away (2026-10-16: the page booted with `dir === ''` and showed the
-	// "空目录" placeholder forever — nothing retried once the workspace landed). The
+	// "empty directory" placeholder forever — nothing retried once the workspace landed). The
 	// explorer renders into this same view, and its header/rows appear exactly when
 	// setRoots applies, so that render is the signal; the check itself no-ops unless the
 	// first open folder actually moved (a directory still inside it keeps its place).

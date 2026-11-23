@@ -1,6 +1,7 @@
 // mirror.spec.ts (module 19, the DOM replica's browser half): the copy's INPUT layer in a
-// real engine — the exact Safari break the owner reported (2026-10-17: claude 的页面输入框
-// 不能输入、new session 点击没反应, Chrome 正常). WebKit treats every listener the remote
+// real engine — the exact Safari break the owner reported (2026-10-17: Claude's page
+// input box would not take input and the new-session tap did nothing; Chrome was fine).
+// WebKit treats every listener the remote
 // page registers on the copy's sandboxed document as that document's own script execution
 // and silently drops them all unless the sandbox carries allow-scripts (Chromium runs them),
 // so the copy renders but no tap, key or scroll ever reaches the PC. jsdom cannot see the

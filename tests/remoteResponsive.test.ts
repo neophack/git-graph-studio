@@ -100,7 +100,8 @@ describe('form factors', () => {
 	});
 });
 
-// The manual override (§4.2's 设备级设置 "布局"): the entry Settings and the palette pick —
+// The manual override (§4.2's device-level setting "Layout"): the entry Settings and the
+// palette pick —
 // forced at once (never the resize debounce), aspect-aware, persisted, and worn from the
 // first frame of the next load.
 describe('the layout override', () => {
@@ -452,8 +453,9 @@ describe('navigation rail', () => {
 		document.body.appendChild(rail);
 		expect(document.documentElement.dataset.device).toBe('tablet-portrait');
 		const ids = () => [...rail.querySelectorAll<HTMLButtonElement>('button[data-tab]')].map((button) => button.dataset.tab);
-		// The drawer's own page list, uncapped (the owner's 2026-10-16 direction, 平板左轨要有
-		// 搜索、插件、终端): the launchers and containers ride between Changes and Terminal
+		// The drawer's own page list, uncapped (the owner's 2026-10-16 direction, the
+		// tablet's left rail must also carry Search, Extensions and Terminal): the
+		// launchers and containers ride between Changes and Terminal
 		// when installed.
 		expect(ids()).toEqual(['explorer', 'editor', 'search', 'scm', 'panel', 'extensions', 'analysis']);
 		expect(rail.querySelector<HTMLButtonElement>('button[data-tab="extensions"]')!.getAttribute('aria-label')).toBe('Extensions');
@@ -551,9 +553,10 @@ describe('app bar', () => {
 	});
 });
 
-// The page back (pageBack.ts, §5.1's 层级 rule — 返回手势、系统返回键和 App 栏的返回按钮都
-// 弹出栈顶): a full-screen page over the editor — a side view, the panel, a launcher page —
-// carries a back affordance on every page-stack shell (the app bar's ‹ on the phone forms,
+// The page back (pageBack.ts, §5.1's hierarchy rule — the back gesture, the system back
+// key and the app bar's back button all pop the stack top): a full-screen page over the
+// editor — a side view, the panel, a launcher page — carries a back affordance on every
+// page-stack shell (the app bar's ‹ on the phone forms,
 // the rail's ‹ on the portrait tablet, which draws no app bar), and the system back key
 // closes the page before it could ever leave the workbench.
 describe('page back', () => {
@@ -747,8 +750,9 @@ describe('quick input back', () => {
 	});
 });
 
-// The horizontal pager (swipeNav.ts, the owner's 2026-10-18 direction — 手机远程时浏览器
-// 手势会导致页面退出,左右滑改为切换底部按钮): a horizontal drag over the page column
+// The horizontal pager (swipeNav.ts, the owner's 2026-10-18 direction — on the phone
+// remote the browser gestures exited the page, so horizontal swipes became bottom-tab
+// switching): a horizontal drag over the page column
 // follows the finger and pages the bottom navigation's ring — left to the next destination,
 // right to the previous, rubber-banded at the ends; the claim yields to the gestures that
 // own their own drag (a swipe-reveal row, a horizontally scrollable strip), and the click
@@ -1184,7 +1188,8 @@ describe('navigation drawer', () => {
 		setRemoteEnv(undefined);
 	});
 
-	// The regression this pins (2026-10-16, 点击窗口选择页 不能进入页面): a drawer row that
+	// The regression this pins (2026-10-16, tapping the window-picker page could not enter
+	// the page): a drawer row that
 	// leaves the page closes the drawer first, whose release queues a history.back() one tick
 	// out — and that traversal cancels the location.assign the same click started (verified
 	// live in a browser: assign + a deferred back() stays on the origin page). The leave must
@@ -1451,8 +1456,9 @@ describe('edit lock', () => {
 	});
 });
 
-// The app bar's Markdown source⇄preview toggle (the owner's 2026-10-16 direction: 顶栏加
-// 按钮，切换源码还是预览查看): the button rides the Editor page's trailing actions, flips a
+// The app bar's Markdown source⇄preview toggle (the owner's 2026-10-16 direction: add a
+// top-bar button to switch between source and preview): the button rides the Editor
+// page's trailing actions, flips a
 // Markdown file to its preview and back, and hides for every other editor. The state reads
 // the workbench's active input, so the test boots the real workbench.
 describe('markdown source⇄preview toggle', () => {
@@ -1752,8 +1758,9 @@ describe('the device classifier (§4.1)', () => {
 	});
 });
 
-// The display language follows the remote shell (the owner's 2026-10-16 direction: 远程
-// 设置中文后菜单还是英文): the shell's surfaces must speak whatever locale the settings
+// The display language follows the remote shell (the owner's 2026-10-16 direction: the
+// remote set Chinese and the menus stayed English): the shell's surfaces must speak
+// whatever locale the settings
 // say — the ones built once relabel on a switch, the sheets localize at open, and the
 // registry's English command literals resolve through the display layer like everywhere else.
 describe('the display language follows the shell', () => {

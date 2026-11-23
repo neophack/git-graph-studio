@@ -1,5 +1,6 @@
-//! The app's own update channel (2026-11-10, the owner's direction: 软件本身可以 github
-//! 下载): Help → Check for App Updates reads THIS application's repository's newest
+//! The app's own update channel (2026-11-10, the owner's direction: the application
+//! itself can be downloaded from GitHub): Help → Check for App Updates reads THIS
+//! application's repository's newest
 //! release, and a newer one downloads the installer for THIS platform through the same
 //! streaming progress (bytes, the recent speed, the remaining time) and the same
 //! download mirror setting the marketplace's GitHub channel rides. Windows launches the

@@ -1,6 +1,6 @@
 // page-bench.spec.ts (docs/remote-client-plan.md §5, the 2026-10-16 response-latency
-// pass): the page-switch latency in a REAL engine — the owner's "remote 测试多个界面，要
-// 做到 100 微秒内". The phone context taps the bottom navigation's every tab in a loop and
+// pass): the page-switch latency in a REAL engine — the owner's "test multiple remote
+// pages, within 100 µs". The phone context taps the bottom navigation's every tab in a loop and
 // measures two marks per switch in the page: the synchronous DOM settle (the switch work
 // itself, read after a forced layout) and the presented frame (two rAFs). What this can
 // show under 100 µs is the switch's own local work; anything the wire carries is

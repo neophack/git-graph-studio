@@ -39,7 +39,7 @@ export function currentDeviceClass(): DeviceClass | null {
 	return device;
 }
 
-/** The manual override's storage key (§4.2's "设备级设置"): this browser's own choice,
+/** The manual override's storage key (§4.2's "device-level settings"): this browser's own choice,
  *  like Data Saver — never the backend's registry, which is shared with the PC. */
 const OVERRIDE_KEY = 'ggsr.deviceOverride';
 

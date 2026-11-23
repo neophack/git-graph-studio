@@ -17,7 +17,7 @@
 //! status crosses verbatim, and the answer streams back as it arrives (SSE included).
 //!
 //! It is also the credential seam (2026-11-16, the owner's direction: once the user has
-//! set the key it must not be readable — 盗刷 protection): a managed route carries the
+//! set the key it must not be readable — abuse protection): a managed route carries the
 //! profile's real key, strips the placeholder `x-api-key` / `authorization` headers the
 //! engine sends, and injects the real pair upstream-side. The spawn env holds the
 //! relay's URL and a placeholder pair instead of the key, so nothing the engine spawns

@@ -75,8 +75,9 @@ export const framesMethods: ThisType<ExtensionHost> = {
 		this.frames.set(extId, handle);
 		// A mirrored create or reveal this frontend's own user caused — they were just
 		// interacting with this extension's copy, and the tap's replay into the PC's real
-		// page opened the panel (a "new session" tap in the mirrored chat, 2026-10-16: 手机端
-		// claude 打开新的 session 页面没有到前台显示) — is the one create/reveal that may
+		// page opened the panel (a "new session" tap in the mirrored chat, 2026-10-16: on the
+		// phone, claude's newly opened session page never came to the foreground) — is the
+		// one create/reveal that may
 		// take the foreground: the holds below are K7's "another frontend's act stays in the
 		// background", and this act is not another frontend's. The backend cannot say it (a
 		// replayed tap reads as the PC user's own input, and `caller` names no one); the
@@ -102,7 +103,8 @@ export const framesMethods: ThisType<ExtensionHost> = {
 		// flight, a catch-up merge, a close of the stale tab the same click deduplicated) —
 		// `revealEditorPage`'s hold gate would eat the pull and the page this user's own tap
 		// opened would stay in the background behind a hold that exists to stop REMOTE acts
-		// (2026-10-16: 手机端 claude 的 new session/history 点击后新页面没有到前台). This act
+		// (2026-10-16: on the phone, a tap on claude's new session/history opened a new page
+		// that never came to the foreground). This act
 		// is the user's own navigation, and that is the one thing no hold gates.
 		const revealOwnAct = (): void => (hook('navigation').revealEditorPageUngated ?? hook('navigation').revealEditorPage)();
 		if (this.sharesWebviews(extId)) {
@@ -117,8 +119,9 @@ export const framesMethods: ThisType<ExtensionHost> = {
 					// this side's copy of a panel the other side opened in the background —
 					// each side's fresh-tab suppression then eats the activation on both
 					// ends, the open never reaches the other side, and its next activation
-					// drags this phone's just-opened page away (2026-10-16: 远程某个界面
-					// 打开，没有同步到 pc 端，导致又被 pc 端激活页面覆盖).
+					// drags this phone's just-opened page away (2026-10-16: a page opened
+					// on the remote side never synced to the PC, so the PC's activation
+					// of its page covered it again).
 					if (ownAct) {
 						const create = [...args];
 						create[4] = false;
@@ -132,8 +135,9 @@ export const framesMethods: ThisType<ExtensionHost> = {
 				case 'webview.reveal': {
 					// Another frontend's reveal, mirrored here: the tab comes forward, but
 					// never the page — a page hold wraps the reveal (its activation is the
-					// OTHER side's act, not this user's; 2026-10-16, 文件页面会被其他页面
-					// 顶到最前 — K7, each frontend's layout is its own). Except the reveal
+					// OTHER side's act, not this user's; 2026-10-16, the files page kept
+					// being pushed to the front by other pages — K7, each frontend's layout
+					// is its own). Except the reveal
 					// this frontend's own copy interaction caused: that one comes forward,
 					// ungated — a hold another operation still holds must not keep it back.
 					const release = ownAct ? null : hook('navigation').holdPage();

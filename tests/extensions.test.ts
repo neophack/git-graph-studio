@@ -3117,17 +3117,18 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 			// panel — preserveFocus true) joins here in the same posture: the copy keeps the
 			// extension's choice instead of forcing the foreground, or the two sides' active
 			// tabs diverge silently — each side's fresh-tab suppression eats its activation,
-			// the PC never learns this page opened, and its next activation drags this
-			// phone's view away (2026-10-16: 远程打开的界面没有同步到 pc 端，随后被 pc 端激活的页面覆盖).
+				// the PC never learns this page opened, and its next activation drags this
+				// phone's view away (2026-10-16: the remotely opened page never synced to the PC
+				// and was then covered by the page the PC activated next).
 			backend.emit('ext-host-state', { extId: 'acme.engine', method: 'webview.create', args: [9, 'chat', 'Claude Code', 1, true], served: 'main', caller: null });
 			await flush();
 			expect(opened.slice(2)).toEqual([[9, false]]);
 			expect(holdsTaken).toBe(3);
-			// The hole the first cut left (2026-10-16: 手机端 claude 的 new session/history
-			// 点击后新的页面没有到前台): the own-act create/reveal can land while ANOTHER
-			// operation's page hold is still live — a sync apply in flight, a catch-up
-			// merge, the close of the stale tab the same history click deduplicated. The
-			// hold exists to keep REMOTE acts in the background, and this act is not one:
+			// The hole the first cut left (2026-10-16: the phone Claude's new session/history
+			// taps left the new page short of the foreground): the own-act create/reveal can
+			// land while ANOTHER operation's page hold is still live — a sync apply in flight,
+			// a catch-up merge, the close of the stale tab the same history click deduplicated.
+			// The hold exists to keep REMOTE acts in the background, and this act is not one:
 			// the page pull must cut through it, which the ungated door does.
 			const foreignHold = (hook('navigation') as { holdPage(): () => void }).holdPage();
 			expect(holds).toBe(1);

@@ -504,8 +504,9 @@ export async function quickInfoFor(source: MacroHoverSource, name: string, curre
 
 /** The scope-local quick info: when the hovered site sits inside a function that
  *  declares the name — one of its parameters or locals — that definition IS the answer,
- *  and a same-named global never appears (2026-11-18, the owner's direction: 局部变量
- *  只显示局部范围的定义). The declaration line is sliced from the passed buffer text —
+ *  and a same-named global never appears (2026-11-18, the owner's direction: a local
+ *  variable shows only the definitions within its local scope). The declaration line is
+ *  sliced from the passed buffer text —
  *  the editor's own document, so an unsaved edit shows as written and no disk read
  *  happens at all. Null when the site is outside every local's scope, or the source
  *  carries no scope lookup: the caller falls back to the global index answer. */
@@ -594,8 +595,9 @@ export function wordRangeAt(view: EditorView, pos: number): { from: number; to: 
 
 /** How long the pointer must rest on a word before the quick-info card shows: a full
  *  second, so a mouse passing over code never flashes a card on the way (2026-11-20,
- *  the owner's direction: 鼠标放上去1s后才显示宏 结构体等，不要立马显示). The extension
- *  providers' hover beside this one keeps its own shorter delay. */
+ *  the owner's direction: show macros, structs and the like only after the pointer rests
+ *  for 1s — never immediately). The extension providers' hover beside this one keeps its
+ *  own shorter delay. */
 const SYMBOL_HOVER_SHOW_MS = 1000;
 
 /** The workbench's own hover (CLion's quick info, over the symbol index): a hovered

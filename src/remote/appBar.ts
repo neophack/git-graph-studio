@@ -202,7 +202,7 @@ function syncEditLockButton(button: HTMLButtonElement): void {
 }
 
 /** The ＋ leads the Files page's trailing buttons (the owner's 2026-10-16 direction:
- *  codicon-add 放在 ggs-appbar-btn 前面) — its sheet is the files page's own, the current
+ *  codicon-add ahead of the ggs-appbar-btn) — its sheet is the files page's own, the current
  *  directory's uploads and the new file/folder rows. Hidden until the page registered its
  *  sheet; the forms without an app bar (the tablet portrait) keep the toolbar's own ＋. */
 function filesAddButton(): HTMLButtonElement {
@@ -225,8 +225,8 @@ export function hasFilesActions(): boolean {
 	return filesActions !== null;
 }
 
-/** The Markdown source⇄preview toggle (the owner's 2026-10-16 direction: 顶栏加按钮，
- *  切换源码还是预览查看): on a Markdown file's tab it opens the rendered preview, on the
+/** The Markdown source⇄preview toggle (the owner's 2026-10-16 direction: add a button to
+ *  the top bar that switches between source and preview): on a Markdown file's tab it opens the rendered preview, on the
  *  preview it returns to the source. Hidden for every other editor — the active input says
  *  which side is up (`file` + .md is the source, `markdown` the preview). */
 function markdownToggle(): HTMLButtonElement {
@@ -269,7 +269,7 @@ function trailingActions(page: PageId, hooks: AppBarHooks): HTMLElement[] {
 export function createAppBar(hooks: AppBarHooks): HTMLElement {
 	const bar = document.createElement('header');
 	bar.className = 'ggs-appbar';
-	// The ‹ ahead of ☰ while a page covers the editor (§5.1's 层级 rule: the app bar's back
+	// The ‹ ahead of ☰ while a page covers the editor (§5.1's hierarchy rule: the app bar's back
 	// button pops the page stack) — the drawer stays beside it, one tap from every page.
 	const back = barButton('chevron-left', t('remote.page.back'), () => void pageBack(), 'back');
 	back.hidden = true;

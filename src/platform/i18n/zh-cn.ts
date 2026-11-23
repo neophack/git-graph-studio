@@ -219,13 +219,14 @@ export const zhCn: typeof en = {
 	'scm.discardMany.confirm': '确定要放弃 {0} 个文件中的更改吗？\n此操作不可撤销！\n继续操作将永久丢失当前工作区中的这些更改。',
 	'scm.discardMany.confirmUntracked': '确定要放弃 {0} 个文件中的更改吗？其中 {1} 个未跟踪文件将被删除！\n此操作不可撤销！\n继续操作将永久丢失当前工作区中的这些更改。',
 	'scm.discardMany.action': '放弃更改',
-	// 单个未跟踪文件的放弃：与"删除文件"一样移入回收站，不再使用"不可撤销"的措辞。
+	// Discarding a single untracked file: moves it to the recycle bin, exactly like
+	// "Delete File" — the "irreversible" wording is gone.
 	'scm.discardUntracked.confirm': '确定要删除 {0} 吗？\n文件将移入系统回收站，可在其中恢复。',
 	'scm.discardUntracked.action': '删除文件',
-	// git 自身解码损坏的路径（无法解码的字节由 U+FFFD 替代）：任何 pathspec 都无法匹配
-	// 真实文件，批量写入操作会直接拒绝。
+	// Git's own decoding of mangled paths (undecodable bytes become U+FFFD): no pathspec
+	// can match the real file, and batch write operations refuse outright.
 	'scm.pathUnrepresentable': '“{0}”：文件名包含 git 无法解码的字符（U+FFFD），无法按报告的名称定位该文件。请重命名该文件，或在终端中使用原始名称操作。',
-	// 提交改写操作（拣选、还原、重置）及其输入提示。
+	// Commit-rewrite operations (cherry-pick, revert, reset) and their input prompts.
 	'scm.target.required': '需要提交哈希、分支或标签',
 	'scm.target.invalid': '请输入提交哈希、分支或标签',
 	'scm.cherryPick.placeholder': '要拣选到当前分支的提交哈希、分支或标签',
@@ -241,18 +242,18 @@ export const zhCn: typeof en = {
 	'scm.reset.hardConfirm': '确定要将当前分支重置到 {0} 吗？所有未提交的更改都将被丢弃。\n此操作不可撤销！',
 	'scm.reset.hardAction': '重置（硬）',
 	'scm.reset.done': '当前分支已重置到 {0}（{1}）',
-	// 检出选择器的分离 HEAD 入口。
+	// The detached-HEAD entry of the checkout picker.
 	'scm.checkoutDetached.pick': '检出某个提交（分离 HEAD）...',
 	'scm.checkoutDetached.placeholder': '要检出的提交哈希（分离 HEAD）',
 	'scm.checkoutDetached.required': '需要提交哈希',
 	'scm.checkoutDetached.invalid': '请输入有效的提交哈希（4-64 位十六进制数字）',
 	'scm.checkoutDetached.confirm': '检出提交将使 HEAD 进入分离状态：你不位于任何分支上，在此所做的提交只有在创建分支或检出分支后才会保留。\n\n是否继续？',
 	'scm.checkoutDetached.action': '检出（分离 HEAD）',
-	// 删除分支的未合并警告，以及推送到指定分支的第二步。
+	// The unmerged warning of branch deletion, and the second step of push-to-branch.
 	'scm.deleteBranch.unmergedConfirm': '分支 {0} 尚未完全合并。删除它可能会丢失仅它可达的提交。\n此操作不可撤销！',
 	'scm.deleteBranch.forceAction': '仍要删除',
 	'scm.pushTo.pickBranch': '选择要推送到 {0} 的分支',
-	// 远程分支/标签的删除：分支与标签命令的远程一半。
+	// Remote branch/tag deletion: the remote half of the branch and tag commands.
 	'scm.deleteRemoteBranch.confirm': '分支 {0} 将从 {1} 删除。\n此操作不可撤销！仅它在该远程可达的提交将变得不可达。',
 	'scm.deleteRemoteBranch.action': '删除远程分支',
 	'scm.deleteRemoteBranch.done': '已删除远程分支 {0}（{1}）。',
@@ -260,7 +261,7 @@ export const zhCn: typeof en = {
 	'scm.deleteRemoteTag.action': '删除远程标签',
 	'scm.deleteRemoteTag.done': '已删除远程标签 {0}（{1}）。',
 	'scm.pushTags.done': '标签已推送到 {0}。',
-	// 中止条目：终止进行中的合并或变基，空闲时仅提示。
+	// Abort entries: terminate an in-progress merge or rebase; the idle case only notes.
 	'scm.abortMerge.none': '当前没有进行中的合并可中止。',
 	'scm.abortMerge.confirm': '确定要中止合并吗？工作区将恢复到合并前的状态。',
 	'scm.abortMerge.action': '中止合并',
@@ -360,7 +361,7 @@ export const zhCn: typeof en = {
 	'symbols.context.empty': '将光标放在符号上，即可在此查看它的定义。',
 	'symbols.context.ambiguous': '个符号同名——请在编辑器中选择其一。',
 	'symbols.context.pin': '将上下文窗口固定到当前符号',
-	// “外观”菜单的窗口/视图模式。
+	// The Appearance menu's window/view modes.
 	'view.fullScreen': '全屏',
 	'view.zoomIn': '放大',
 	'view.zoomOut': '缩小',
@@ -879,7 +880,8 @@ export const zhCn: typeof en = {
 	'csv.plot.reset.title': '缩放回整个文件',
 	'csv.plot.hint': '没有可绘制的数值列 — 此文件的每一列都是文本。',
 	'csv.plot.seriesTip': '最小 {0} · 最大 {1} · 平均 {2} · {3} 个值',
-	/* 内存转储查看器（模块 21）：minidump 浏览、carve 扫描、模块列表、预览与提取。 */
+	/* Memory Dump Viewer (module 21): minidump browsing, the carve scan, the module list,
+	 * preview and extraction. */
 	'dump.tab.files': '文件',
 	'dump.tab.files.title': 'carve 扫描在转储内存中找到的内嵌文件',
 	'dump.tab.modules': '模块',
@@ -951,7 +953,7 @@ export const zhCn: typeof en = {
 	'dump.preview.truncated': '预览已截断 — 提取后可查看完整文件。',
 	'dump.preview.failed': '预览失败：{0}',
 	'dump.preview.moduleHint': '提取此模块会用转储内存重建其 PE（未转储的页以零填充）。',
-	/* CAN 数据库（模块 13）:.dbc 报文浏览器与解码面板。 */
+	/* CAN Database (module 13): the .dbc message browser and its decode panel. */
 	'dbc.live.opening': '打开中…',
 	'dbc.live.done': '{0} 个报文 · {1} 个节点',
 	'dbc.live.failed': '失败',
@@ -989,7 +991,7 @@ export const zhCn: typeof en = {
 	'dbc.decode.run': '解码',
 	'dbc.decode.raw': '原始值 {0}',
 	'dbc.decode.badId': '该 ID 不是本面板能读取的数字。',
-	/* ELF 查看器（模块 21）:.elf/.axf 概要、段与符号。 */
+	/* ELF Inspector (module 22): the .elf/.axf summary, segments and symbols. */
 	'elf.live.opening': '打开中…',
 	'elf.live.done': '{0} 个段 · {1} 个符号',
 	'elf.live.failed': '失败',
@@ -1023,7 +1025,7 @@ export const zhCn: typeof en = {
 	'elf.seg.vaddr': '虚拟地址',
 	'elf.seg.file': '文件大小',
 	'elf.seg.mem': '内存大小',
-	/* 设备树（模块 22）:.dts/.dtb 节点树。 */
+	/* Device Tree (module 23): the .dts/.dtb node tree over one parse. */
 	'dt.live.opening': '打开中…',
 	'dt.live.done': '{0} · {1} 个节点 · {2} 个属性',
 	'dt.live.failed': '失败',
@@ -1255,7 +1257,7 @@ export const zhCn: typeof en = {
 	'transfer.canceled': '传输已取消',
 	'transfer.cancel': '取消',
 	'remote.traffic': '本次会话：↑ {0} ↓ {1}',
-	// 流量页(§10.5):本会话的线上流量账目,实时刷新。
+	// Traffic page (§10.5): this session's on-the-wire traffic ledger, refreshed live.
 	'remote.traffic.page': '流量统计',
 	'remote.traffic.reset': '清零计数',
 	'remote.traffic.total': '本次会话',
@@ -1277,7 +1279,8 @@ export const zhCn: typeof en = {
 	'remote.traffic.type.event': '事件',
 	'remote.traffic.type.channel': '通道数据',
 	'remote.traffic.type.listen': '订阅',
-	// 文件页(docs/remote-client-plan.md §6.1,P1):页面栈外壳的"文件"目的地——MT 管理器式平铺列表。
+	// Files page (docs/remote-client-plan.md §6.1, P1): the page-stack shell's "files"
+	// destination — an MT Manager-style flat list.
 	'remote.files.filter': '筛选当前目录',
 	'remote.files.empty': '空目录',
 	'remote.files.moreLoaded': '已加载 {0}/{1} 项',
@@ -1488,12 +1491,14 @@ export const zhCn: typeof en = {
 	'symbols.window.sortLine': '行',
 	'symbols.window.sortName': '名称',
 	'symbols.window.sortType': '类型',
-	// 底部面板的定义页（模块 5）：点击的符号的定义内容——函数显示整个函数体，宏显示
-	// 指令及其续行。关系图在符号窗口里；下面的方向键供它的按钮使用。
+	// The bottom panel's Definition page (module 5): the clicked symbol's definition —
+	// a function shows its whole body, a macro its directive and continuations. The
+	// relation graph lives in the Symbol Window; the arrow keys below serve its buttons.
 	'panel.definition': '定义',
-	// 底部面板的引用页（模块 5）：Lookup References——点击符号的全部
-	// 引用位置按文件分组，点开一个位置显示特殊处理过的折叠上下文（外围定义的声明行、
-	// 引用行附近的窗口、函数体中段折叠成可点开的行）。
+	// The bottom panel's References page (module 5): Lookup References — the clicked
+	// symbol's every reference site grouped by file, a site opening the specially
+	// processed folded context (the enclosing definition's declaration line, a window
+	// around the reference line, the function body's middle folded into clickable rows).
 	'panel.references': '引用',
 	'references.hint': '在编辑器里点击一个符号，这里会显示它的引用。',
 	'references.pin': '将引用页固定到当前符号',
@@ -1518,7 +1523,7 @@ export const zhCn: typeof en = {
 	'references.siteTitle': '点击跳转到此引用',
 	'references.contextTitle': '折叠上下文 — 点击展开或收起',
 	'references.openTitle': '跳转到此引用',
-	// 关系图的类型选择器——十三个关系视图类型（2026-11-20）。
+	// The relation graph's type picker — the thirteen relation view types (2026-11-20).
 	'relations.kind.pick': '关系图绘制的关系类型',
 	'relations.kind.calls': '调用',
 	'relations.kind.callers': '被调用',
@@ -1534,7 +1539,7 @@ export const zhCn: typeof en = {
 	'relations.kind.memberTypes': '成员类型',
 	'relations.kind.memberClasses': '成员类',
 	'relations.kind.typesUsed': '用到的类型',
-	// 空环判定，与关系窗口自己的空结果文案一致。
+	// The empty-ring verdicts, worded the same as the relation window's own empty results.
 	'relations.empty.calls': '没有被调用。',
 	'relations.empty.callers': '没有被调用它。',
 	'relations.empty.callsAndCallers': '没有调用与被调用。',

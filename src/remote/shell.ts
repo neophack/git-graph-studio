@@ -118,7 +118,7 @@ function registerCommands(): void {
 		}
 	});
 	commands.register({ ...remoteOnly, id: 'remote.toggleDataSaver', title: 'Data Saver', category: 'Remote', run: () => setDataSaver(!document.documentElement.hasAttribute('data-data-saver')) });
-	// The layout override (§4.2's 设备级设置 "布局"): the entry every form factor reaches —
+	// The layout override (§4.2's device-level settings, "Layout"): the entry every form factor reaches —
 	// the phone Settings page serves the page-stack shells, the palette serves them all
 	// (a desktop-form browser cannot open the phone page, and tablet mode is its offer).
 	commands.register({

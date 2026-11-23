@@ -1,8 +1,8 @@
-// The branch sheet (docs/remote-client-plan.md §6, the owner's 2026-10-16 direction: 手机端
-// 文件管理页面没有切换分支的按钮): one touch surface for the repository's branches, shared
+// The branch sheet (docs/remote-client-plan.md §6, the owner's 2026-10-16 direction: the
+// phone files page had no branch switch button): one touch surface for the repository's branches, shared
 // by the Files page's toolbar chip and the phone Source Control page's branch row. The
 // current branch leads (checked), the locals follow, the remote branches close (the
-// backend's own checkout turns `origin/x` into a tracking `x`), and 新建分支… asks for one
+// backend's own checkout turns `origin/x` into a tracking `x`), and `New Branch…` asks for one
 // name — `scm_create_branch` is a checkout -b, so the new branch is the one left on. Every
 // switch ends in the SCM view's own refresh, whose onHead/onStatus chain updates the status
 // bar, the phone pages' letters and the app bar behind this sheet.

@@ -141,7 +141,7 @@ mod tests {
     /// The events cross the Channel as JSON, and the view reads `elapsedMs` — serde's
     /// enum-level `rename_all` names the variants alone, so the `Done` variant carries
     /// its own field casing. This pins the wire shape the frontend's `DumpEvent` type
-    /// is typed against (the "用时 NaNs" regression, 2026-11-15).
+    /// is typed against (the "elapsed NaNs" regression, 2026-11-15).
     #[test]
     fn the_done_event_crosses_the_wire_with_camel_case_fields() {
         let json = serde_json::to_value(DumpEvent::Done {

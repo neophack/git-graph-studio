@@ -29,7 +29,7 @@
 //!   webviews only; the owner's 2026-10-18 report: the phone's Git Graph file click opened
 //!   the diff on the PC and nothing on the phone). A session's document open also MIRRORS
 //!   to the desktop window ([`routed`]) — one user's two screens stay on the same file
-//!   (the owner's 2026-10-18 direction: remote打开了，pc也要同步打开);
+//!   (the owner's 2026-10-18 direction: open on the remote and the PC follows in sync);
 //! - the rest — the activation's own requests, timers, background work — has no caller,
 //!   and the composition root's default policy decides.
 //!
@@ -58,8 +58,9 @@ const JOURNAL_CAP: usize = 4096;
 pub const WEBVIEW_HOME: &str = "main";
 
 /// The extensions whose webview pages are PER-FRONTEND instances (2026-10-18, the owner's
-/// direction: 远程和 PC 尺寸不一样，git graph 一个 remote 是手机端页面一个是 pc 端页面，不需要
-/// 同步滚动条): every frontend — the desktop window, a phone — runs its own page of the
+/// direction: the remote and the PC run different sizes — git graph keeps a phone-side page
+/// and a PC-side page, their scrollbars need not sync): every frontend — the desktop
+/// window, a phone — runs its own page of the
 /// view, laid out and scrolled where it lives, and the extension's pushes reach each of
 /// them. Every other backend-hosted extension keeps the model below: ONE live page per
 /// instance in the desktop window, with remote pages showing its copy (§22.6) — Claude
@@ -366,8 +367,8 @@ pub fn routed(ext_id: &str, method: &str, args: &Value) -> Mirrored {
         // A page click's document open mirrors to the desktop window: the phone's own page
         // answers the request (its tab opens there) and the PC opens the same document
         // beside it — one user's two screens stay on the same file (the owner's 2026-10-18
-        // direction: remote打开了，pc也要同步打开). Only a SESSION's click mirrors: the
-        // desktop's own click served here already, and mirroring it back would open the
+        // direction: what opens on the remote opens on the PC too). Only a SESSION's click
+        // mirrors: the desktop's own click served here already, and mirroring it back would open the
         // document twice; through a Hub the other sessions are other people, and one
         // user's click must never land in another's page. Prompts (an input box, a quick
         // pick) mirror nowhere — they expect one answer, not one per screen.

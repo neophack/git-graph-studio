@@ -496,7 +496,7 @@ mod tests {
         let utf16 = utf16_of(&head.encoding);
         let index = build_index(&path, head.bom, head.total, utf16, head.bom).expect("index");
         // Three lines of text plus the empty line after the last break — the count the
-        // viewer shows; the failure mode this pins is `alpha\nb你c` merging into one.
+        // viewer shows; the failure mode this pins is `alpha\nb\u{4F60}c` merging into one.
         assert_eq!(
             index.line_count(),
             4,

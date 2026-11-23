@@ -8,8 +8,9 @@
 // replaces it. The workbench feeds it with the same gate and debounce discipline the
 // relation page ran on (the panel up, this page active, the pin off); the pin freezes
 // the content, and the location button jumps to the definition. The relation window's
-// clicks land here too (2026-11-23, the owner's direction: 关系点击在定义里显示跳转，
-// 代码页面不跳转，定义里右键同步到代码页面) — and the page's own right-click carries
+// clicks land here too (2026-11-23, the owner's direction: a relation click shows the
+// jump in the Definition page, the code page never jumps, and the Definition page's
+// right-click syncs its position onto the code page) — and the page's own right-click carries
 // the sync, pushing its current position into the code editor when asked.
 
 import { readFile } from '../../platform/ipc/fs';

@@ -1,10 +1,11 @@
-// The phone's editor page chrome (docs/ggs-remote-plan.md §11.2, "标签页变下拉列表"): a
+// The phone's editor page chrome (docs/ggs-remote-plan.md §11.2, "tabs become a dropdown"): a
 // 390 px screen has no room for a tab strip, so the strip is hidden and its jobs move here —
 // the open editors as a sheet (tap to switch, ✕ to close, Close All in the header; every
 // group's tabs, so an editor an extension opened "beside" is one tap away too), the editor's
 // actions as a sheet (save, undo, find, go to line, history, the tab's own menu with its
 // extension entries), and — when nothing is open — the page itself as a small dashboard of
-// the workspace (the owner's 2026-10-16 direction: 远程这个页面要重新设计,要更好用,更专业):
+// the workspace (the owner's 2026-10-16 direction: redesign this page on the remote — it must
+// be better to use and more professional):
 // the workspace's name, the repository's own state as a card one tap from the Source Control
 // page, the three ways to something open as tiles, this device's recently opened files, and
 // what is already open elsewhere. Every action goes through the tab's own DOM, the command
@@ -191,7 +192,8 @@ function rememberRecent(path: string): void {
 	}
 }
 
-/** The editor page's empty state (the owner's 2026-10-16 direction: 更好用,更专业): the
+/** The editor page's empty state (the owner's 2026-10-16 direction: better to use, more
+ *  professional): the
  *  desktop's welcome page is a desktop layout, so the phone's Editor page answers with its
  *  own — a small dashboard of the workspace instead of three lone buttons. */
 export function createEditorEmptyState(): HTMLElement {

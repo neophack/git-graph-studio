@@ -1,8 +1,10 @@
 // The phone's Source Control page (docs/remote-client-plan.md §6.4, the owner's
-// 2026-10-16 direction: 手机端源代码管理界面不适合触控，要重新设计): the desktop view's
+// 2026-10-16 direction: the phone source-control UI was not touch-friendly and had to be
+// redesigned): the desktop view's
 // 22 px rows, hover buttons and context menus rebuilt as a touch page — the branch chip
 // riding the commit card's action row (tap to switch, the shared branch sheet — the owner's
-// 2026-10-16 direction: ggs-scm-branch 要放到第一行增加一个按钮就可以，不要单独一行), the
+// 2026-10-16 direction: adding one button on the first row of ggs-scm-branch is enough —
+// no separate row), the
 // commit card (a 16 px message box over a 44 px primary action whose label follows the
 // repository's state: Commit, Push n, Sync, Publish), the change groups as sections with
 // thumb-sized stage-all / unstage-all /

@@ -296,7 +296,7 @@ const LAYOUT_CHOICES: { value: DeviceOverride | 'auto'; label: () => string }[] 
 	{ value: 'desktop', label: () => t('remote.layout.desktop') }
 ];
 
-/** The layout override (§4.2's 设备级设置 "布局"): this browser's own choice — the same
+/** The layout override (§4.2's device-level settings, "Layout"): this browser's own choice — the same
  *  setting the palette's `remote.layoutMode` picks, reached here from Settings. */
 function layoutRow(): HTMLButtonElement {
 	const current: DeviceOverride | 'auto' = deviceOverride() ?? 'auto';

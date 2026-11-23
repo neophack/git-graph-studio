@@ -1,6 +1,6 @@
 // The files page's multi-select (docs/remote-client-plan.md §6.1): a long-press starts it
 // with the pressed row; every row then carries a checkbox, the count bar replaces the
-// toolbar (已选 N 项 + 全选 + 取消), and the bottom action bar offers the selection's
+// toolbar (`N selected` + `Select all` + `Cancel`), and the bottom action bar offers the selection's
 // verbs — download (a multi-selection packs ONE zip, §6.7), delete (a confirm, then the
 // paths go), rename (single selection only, an inline edit in the row) and the desktop
 // explorer's copy pair (Copy Path / Copy Relative Path, one path a line when several are

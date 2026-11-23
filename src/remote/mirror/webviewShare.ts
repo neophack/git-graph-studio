@@ -7,8 +7,8 @@
 // replica's own (recorder.ts, replay.ts), rooted at the frame's document instead of the
 // window's; a frame that reloads (`setHtml`) or is replaced (the sidebar rebuilt) restarts
 // them, and every viewer gets a fresh snapshot. The page the copy shows is Claude's own,
-// composer included (2026-10-16, the owner's direction: 远程 claude 使用原始界面 — no
-// hand-written remote chat UI), so every control in it replays through the same input path.
+// composer included (2026-10-16, the owner's direction: the remote Claude uses the original
+// UI — no hand-written remote chat UI), so every control in it replays through the same input path.
 
 import { DomRecorder } from './recorder';
 import { InputReplayer } from './replay';

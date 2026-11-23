@@ -4,7 +4,8 @@
 //! its range, the class or impl it sits in, its visibility, its parameter count and its
 //! cyclomatic complexity. It also separates the scopes: a function's parameters and local
 //! variables are extracted with their enclosing function's range (2026-11-18, the owner's
-//! direction: 函数传参的变量要能识别，局部变量只显示局部范围的定义) and ride [`ParsedFile::locals`],
+//! direction: variables passed as function arguments must be recognized, and a local variable
+//! shows only the local scope's definition) and ride [`ParsedFile::locals`],
 //! answered per file through [`scope_definitions`]; the global declarations ride `symbols`
 //! and are the only ones the workspace index stores. Each grammar is a Cargo feature
 //! (plan §3.1's single sanctioned exception to the pure-Rust rule); a language whose feature
@@ -1272,7 +1273,8 @@ mod tests {
     /// such rows rode the global index (stored as kind "function", the KINDS table's
     /// fallback) and the hover's fallback showed one as ANOTHER function's parameter
     /// whenever the hovered local's declaration form escaped the query (2026-11-19,
-    /// the owner's report: hover 的局部变量显示了别的函数的传参).
+    /// the owner's report: the hover's local-variable answer showed another function's
+    /// parameter).
     #[test]
     fn type_position_parameters_own_no_scope_and_no_index() {
         let text = "typedef int (*handler_t)(void *ctx, int code);\nint compute(int total, int n);\nstatic int run(int (*cb)(void *ctx), int code) {\n    int r = cb(0, code);\n    return r;\n}\n";

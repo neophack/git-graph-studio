@@ -1,6 +1,6 @@
 // transfer.spec.ts (module 3's transfer layer, the remote half): the browser's own
 // Download entries against the REAL daemon and app — the exact click the owner reported
-// failing (2026-10-13, "远程在浏览器上下载文件失败"): a file's context menu carries
+// failing (2026-10-13, "downloading a file in the browser failed"): a file's context menu carries
 // Download, the one-time ticket is minted, and the browser's download lands with the file's
 // bytes; a folder's Download as Zip lands a real archive. Gated behind GGS_REMOTE_E2E_FULL
 // exactly like workbench.spec.ts (the built app, the built remote bundle, the Vite dev

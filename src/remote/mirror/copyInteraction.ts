@@ -5,8 +5,8 @@
 // (each frontend's layout is its own) keeps in the background. The input trail is the one
 // honest way back: the backend reads a replayed tap as the PC user's own input and the
 // mirror's `caller` names no one, so nothing on the PC side can say the create was this
-// phone's act — only the phone, which sent the input, knows (2026-10-16: 手机端 claude
-// 打开新的 session 页面没有到前台显示).
+// phone's act — only the phone, which sent the input, knows (2026-10-16: on the phone side
+// a Claude "new session" page never came to the front).
 
 /** How long an interaction keeps counting as this frontend's own act — generous for the
  *  round trip it witnesses: the input's replay into the PC's page, the extension's panel

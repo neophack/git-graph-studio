@@ -205,7 +205,7 @@ mod tests {
                 eol: "lf"
             }
         );
-        // 中文 in GBK: the bytes are not valid UTF-8 and decode cleanly as GB18030.
+        // Chinese text in GBK: the bytes are not valid UTF-8 and decode cleanly as GB18030.
         let gbk = encode("中文注释\r\n", "gb18030", "crlf");
         assert_eq!(gbk, b"\xD6\xD0\xCE\xC4\xD7\xA2\xCA\xCD\r\n");
         assert_eq!(

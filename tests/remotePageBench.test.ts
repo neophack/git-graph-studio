@@ -1,5 +1,5 @@
 // Remote Access, the page-switch bench (module 19, docs/remote-client-plan.md §5): the
-// owner's 2026-10-16 direction — "remote 测试多个界面，要做到 100 微秒内". What can be
+// owner's 2026-10-16 direction — "test multiple remote pages, within 100 µs". What can be
 // 100 µs is the SWITCH's own local work; anything the wire carries is physics (~1.3 ms
 // loopback RTT, the --bench rows). The real-engine numbers live in
 // tests/e2e/remote/page-bench.spec.ts (WebKit: every tab tap settles the DOM in ~1 ms,

@@ -46,7 +46,7 @@ export interface FileListHooks {
 	selection: {
 		active(): boolean;
 		isSelected(path: string): boolean;
-		/** The row menu's 多选 entry (and a long-press while a selection is already on):
+		/** The row menu's multi-select entry (and a long-press while a selection is already on):
 		 *  the first call starts the mode with this row; later ones toggle. */
 		longPress(path: string): void;
 		toggle(path: string): void;
@@ -54,7 +54,7 @@ export interface FileListHooks {
 	/** The current filter text (the toolbar's search box), or ''. */
 	filter(): string;
 	/** One row's menu (§6.1's long-press sheet): open/enter, the transfers, rename, delete,
-	 *  copy path, 多选 — built by the page, which owns the actions. */
+	 *  copy path, multi-select — built by the page, which owns the actions. */
 	menu(entry: DirEntryInfo): MenuEntry[];
 }
 
@@ -188,7 +188,8 @@ export function createFileList(hooks: FileListHooks) {
 		}
 		// The row's menu entry (§6.1): a ⋮ at the trailing edge, always tappable — the
 		// long-press is the gesture, this is the discoverable one (the owner's 2026-10-16
-		// direction: 长按要弹出菜单，或者要有打开菜单的入口).
+		// direction: the long-press must pop a menu, or there must be an entry point that
+		// opens one).
 		const more = el('button', 'ggs-file-more', [icon('ellipsis')]);
 		more.type = 'button';
 		more.setAttribute('aria-label', t('remote.files.rowMenu'));
@@ -347,7 +348,7 @@ function letterClass(letter: string): string {
 	return 'mod';
 }
 
-/** "刚刚 · 5 分钟前 · 3 天前", the date itself past a week (§6.1's second line). */
+/** "just now · 5 minutes ago · 3 days ago", the date itself past a week (§6.1's second line). */
 export function relativeTime(seconds: number): string {
 	const delta = Math.max(0, Date.now() / 1000 - seconds);
 	if (delta < 60) return t('remote.files.time.now');

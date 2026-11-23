@@ -129,8 +129,7 @@ export interface RelationNode {
 	/** How many reference sites this edge aggregates — 1 for a single site. */
 	edgeCount: number;
 	/** Every kept site's 0-based line, ascending, at most 16 — the numbered rows the
-	 *  relation graph draws under a multi-site card (`1. line 113`, the classic IDE's
-	 *  ShowGraphDetails). */
+	 *  relation graph draws under a multi-site card (`1. line 113`). */
 	edgeLines: number[];
 	/** Whether expanding this node again yields children (best effort). */
 	hasChildren: boolean;

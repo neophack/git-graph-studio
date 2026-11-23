@@ -192,7 +192,8 @@ pub fn install_missing_bundled(app: &tauri::AppHandle) -> Vec<Result<String, Str
 }
 
 /// The same first-launch install for a command-line run that opens no window (2026-10-24,
-/// the owner's direction: 安装后就运行 remote,不需要启动一次界面 — until now the bundled
+/// the owner's direction: run remote right after install, without launching the UI once —
+/// until now the bundled
 /// Remote Access package only reached the store through the GUI boot pass, so a headless
 /// box had to open a desktop once, Xvfb and all). No app handle exists this early: the
 /// store is `~/.ggs/extensions` and the bundled roots resolve beside this executable the

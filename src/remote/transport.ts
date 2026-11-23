@@ -425,8 +425,8 @@ export class Transport {
 	 *  closes and presence words die at the fresh relay: the workbench sync turns one-way,
 	 *  the presence table then expires the PC (its gate shuts besides), and the closes the
 	 *  phone forms while alone are recorded and flush late — files the PC re-opened in the
-	 *  deaf window close out from under their reader (2026-11-18: 网页的页面和桌面应用的
-	 *  操作不同步，导致打开文件又消失了). The subscriptions must cross again. */
+	 *  deaf window close out from under their reader (2026-11-18: the web page's and the
+	 *  desktop app's operations fell out of sync, so a re-opened file vanished again). The subscriptions must cross again. */
 	private relayRestarted(): void {
 		this.resyncPending = true;
 		this.resyncAttempts = 0;

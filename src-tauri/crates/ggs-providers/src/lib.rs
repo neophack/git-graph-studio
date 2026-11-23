@@ -390,7 +390,7 @@ pub fn write_store(home: &Path, store: &ProviderStore) -> Result<(), String> {
 /* ---------- The Claude tweaks ---------- */
 
 /// One switch over a Claude Code behaviour the forum complaint list names (2026-11-07,
-/// the owner's direction: 定制 Claude 的难用功能). Every entry was read off the installed
+/// the owner's direction: customize Claude's hard-to-use features). Every entry was read off the installed
 /// package itself — the env vars out of the CLI binary's own `env::var` names, the
 /// settings keys out of its bundled `claude-code-settings.schema.json` — so a switch
 /// names a control Claude Code actually reads, not a wish. A tweak rides one of two
@@ -567,7 +567,8 @@ pub fn tweak_env_vars(tweaks: &[String]) -> Vec<(String, String)> {
 /* ---------- The key sealing ---------- */
 
 /// The machine identity the master key derives from (2026-11-16, the owner's
-/// direction: 加密要跟机器绑定 — `ai-providers.json` copied to another PC must not
+/// direction: the encryption must be bound to the machine — `ai-providers.json` copied to
+/// another PC must not
 /// decrypt, `keys/ai-providers.key` carried along included). Windows reads the OS
 /// install's MachineGuid, Linux its machine-id, macOS the platform UUID; a host
 /// where none answers falls back to hostname + username — still machine-varying,
@@ -894,7 +895,7 @@ pub fn apply_save(store: &mut ProviderStore, input: &ProviderInput) -> Result<()
 /* ---------- The spawn-time environment ---------- */
 
 /// The credential pair's stand-in in the spawn environment (2026-11-16, the owner's
-/// direction: once the user has set the key it must not be readable — 盗刷 protection):
+/// direction: once the user has set the key it must not be readable — abuse protection):
 /// the engine authenticates against it exactly as it did against the real key, the
 /// relay swaps it for the real pair upstream-side, and every process the engine spawns
 /// — PowerShell, Git Bash, a Linux terminal, an MCP server — inherits nothing
@@ -1002,7 +1003,7 @@ pub fn claude_dir_for(profile: Option<&ProviderProfile>, home: &Path) -> PathBuf
 /// for exactly the keyless-auth shape — a token there is Claude Code's own, and the
 /// chat authenticates from the first state push instead of rendering the official
 /// login page until a config probe says otherwise. Since 2026-11-16 (the owner's
-/// direction: once the user has set the key it must not be readable — 盗刷 protection)
+/// direction: once the user has set the key it must not be readable — abuse protection)
 /// the key itself no longer rides the environment: the endpoint URL becomes the
 /// loopback relay's ([`compat::managed_base_url`], whose route carries the real key)
 /// and the pair becomes [`MANAGED_CREDENTIAL_PLACEHOLDER`] the engine authenticates

@@ -162,8 +162,9 @@ describe('settings store', () => {
 	});
 
 	it("seeds a remote session's device-scope settings from the PC file once, then keeps the device's own (§5.5)", async () => {
-		// docs/remote-linkage-and-settings-plan.md §5.5: 布局、主题、字号、语言 are
-		// DEVICE-level — the remote reads the PC file "首次运行时…作为初值，之后各存各的".
+		// docs/remote-linkage-and-settings-plan.md §5.5: layout, theme, font size and
+		// language are DEVICE-level — the remote reads the PC file "taken as the initial
+		// values on first run, then each side keeps its own".
 		// Before this, every reload re-applied the PC file over the browser's stored picks,
 		// so a zh-cn remote of an en PC booted English menus no matter what it had set.
 		provideHook('session', { remote: () => true, frontendId: () => 'remote/1', frontendClass: () => 'remote', addressedHere: (frontend) => frontend === 'remote/1' });

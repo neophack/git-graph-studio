@@ -148,8 +148,9 @@ describe('the five layouts', () => {
 		expect(document.documentElement.hasAttribute('data-page-stack')).toBe(true);
 
 		// Tablet landscape: the workbench's own three-column frame — the activity bar in
-		// VS Code's icon-only shape (the owner's 2026-10-16 direction, 左轨图标不配标题:
-		// no label under any icon; the ☰ menu entry still leads the bar), the side bar,
+		// VS Code's icon-only shape (the owner's 2026-10-16 direction, the left rail's icons
+		// must not carry titles: no label under any icon; the ☰ menu entry still leads the
+		// bar), the side bar,
 		// the editor — plus the status bar; the phone chrome is parked behind (no ids).
 		await become(1133, 744, true);
 		expect(frame().dataset.layout).toBe('tablet-landscape');

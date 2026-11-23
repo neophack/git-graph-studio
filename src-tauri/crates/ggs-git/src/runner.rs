@@ -17,8 +17,8 @@ use std::time::Instant;
 
 /// ERROR_FILENAME_EXCED_RANGE — CreateProcess's answer when the command line, the
 /// environment block or the working-directory path exceeds its length ceiling. On a
-/// Chinese Windows it prints as the "文件名或扩展名太长 (os error 206)" every git
-/// invocation on an affected machine fails with, whatever git's own availability.
+/// Chinese Windows it prints as the "filename or extension is too long (os error 206)" every
+/// git invocation on an affected machine fails with, whatever git's own availability.
 #[cfg(windows)]
 const ERROR_FILENAME_EXCED_RANGE: i32 = 206;
 
@@ -473,8 +473,8 @@ fn spawn_error(error: &std::io::Error) -> String {
 /// when the located Git is not on it. A backend's own git discovery scans the standard
 /// install roots and then `PATH` — VS Code's Git-extension order, the Git Graph view's
 /// `findGit` among them — so a Git installed to a custom directory the PATH never names
-/// is invisible to it (the "未找到 Git，写入类操作需要安装 Git" notice); with the
-/// directory on the backend's `PATH` the extension finds and writes with the same
+/// is invisible to it (the "Git not found; write operations need Git installed" notice);
+/// with the directory on the backend's `PATH` the extension finds and writes with the same
 /// install the app runs. Registered at the composition root onto `ext_process`'s
 /// spawn-env sources; the id is unused — git is no extension's private concern.
 pub fn backend_env(_ext_id: &str) -> Vec<(String, String)> {

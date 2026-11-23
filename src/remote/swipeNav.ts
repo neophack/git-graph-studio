@@ -1,5 +1,5 @@
-// The page-stack shells' horizontal pager (the owner's 2026-10-18 direction: 手机远程时
-// 浏览器手势会导致页面退出 — a phone browser's back gesture left the workbench, and the old
+// The page-stack shells' horizontal pager (the owner's 2026-10-18 direction: over the phone
+// remote a browser gesture exited the workbench — a phone browser's back gesture left the workbench, and the old
 // left-edge swipe-back raced it): a horizontal drag anywhere in the page column now switches
 // the bottom navigation's destinations — a leftward swipe goes to the next destination, a
 // rightward one to the previous — with the page following the finger (translate + an edge

@@ -930,7 +930,8 @@ mod tests {
     fn a_non_utf8_file_still_scans_for_secrets() {
         use ggs_base::sink::VecSink;
         let dir = tempfile::tempdir().unwrap();
-        // GBK bytes for "中文注释" — invalid as UTF-8, so the old read_to_string skipped
+        // GBK bytes for the text "Chinese comment" — invalid as UTF-8, so the old
+        // read_to_string skipped
         // the file whole and the ASCII secret inside it never reached the scanner. Lossy
         // decoding keeps the ASCII line, and SEC-003 must report it.
         let mut gbk = vec![0xD6, 0xD0, 0xCE, 0xC4, 0xD7, 0xA2, 0xCA, 0xCD, b'\n'];

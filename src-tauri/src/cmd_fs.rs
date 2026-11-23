@@ -1255,7 +1255,7 @@ mod revision_read_tests {
     fn a_gbk_blob_at_a_revision_decodes_like_the_working_tree() {
         let scratch = Scratch::new("read-file-at-gbk");
         let git = scratch.repo("repo");
-        // GBK bytes for "中文注释" — a lossy UTF-8 decode turns them into replacement
+        // GBK bytes for the text "Chinese comment" — a lossy UTF-8 decode turns them into replacement
         // characters, so one side of a mixed-encoding diff used to show them while the
         // working-tree side (the detecting `read_file`) rendered the text fine. The
         // revision read runs the same detection now.

@@ -994,7 +994,7 @@ describe('the presence gate (§7.0, K11)', () => {
  * A close formed while the gate is shut crosses nothing (K11), but is recorded — in this
  * browser's storage, so even a page refresh carries it — and crosses the moment the gate
  * opens again. Without it, the side that missed the close kept the tab and every catch-up
- * handed it back: 远程关闭的文件，刷新后又都出来了. */
+ * handed it back: the files the remote closed all came back after a refresh. */
 const deferredRecord = (): { files: string[]; tabs: string[] } => {
 	const raw = localStorage.getItem('ggstudio.' + DEFERRED_CLOSES_KEY);
 	const parsed = raw === null ? null : (JSON.parse(raw) as { files: Record<string, unknown>; tabs: Record<string, unknown> });
@@ -1140,7 +1140,8 @@ describe('closes under a shut gate survive it (K11 vs E7)', () => {
  * screen-off, browser-backgrounded state a phone rests in between glances — and crossed
  * only on the phone's next sign of activity: the user's wake, or a heartbeat away. The
  * owner watched a tab the PC had closed linger on a phone page in their hand
- * (pc端关闭页面后，remote页面要等很久才关闭). A close is convergence, not disturbance:
+ * (after the PC closed a page, the remote page took a long while to close). A close is
+ * convergence, not disturbance:
  * the daemon holds what a sleeping page cannot take now and replays it on return, and a
  * hidden page applies socket deliveries in real time — so a close crosses whenever any
  * other frontend is LIVE, and only a truly lone frontend stays silent (K11's promise). */
@@ -1385,7 +1386,8 @@ describe('the catch-up (§7.0.3, K14)', () => {
 		pc.setActive(README);
 		pcSync.localOnly(false);
 		channel.sent.length = 0;
-		// The remote connects FRESH (2026-10-16: 远程编辑器没有同步打开 PC 的打开页面): its
+		// The remote connects FRESH (2026-10-16: the remote editor never synced the PC's
+		// open pages): its
 		// own table is still empty — the PC's heartbeat has not arrived and the connect's
 		// WINDOWS word raced the workbench — so its start's catch-up finds no other active
 		// frontend and skips, exactly a fresh phone's first seconds.
@@ -2169,7 +2171,8 @@ describe('the wired workbench', () => {
 		expect([...desktopHost.querySelectorAll('.link')].map((a) => a.textContent)).toContain('Open Folder...');
 		// The remote composition root switches the profile BEFORE the workbench constructs:
 		// the bottom-left button of every remote desktop form never mounts (the owner's
-		// 2026-10-16 direction: 远程时候左下角的文件打开按钮不要), and the welcome page
+		// 2026-10-16 direction: the remote must not have the bottom-left file-open button),
+		// and the welcome page
 		// names no command the wire would refuse. The skeleton lives across tests, and
 		// buildActivityBar appends into it: cleared here so the remote build's own set is
 		// what the DOM holds.

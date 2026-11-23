@@ -1,10 +1,11 @@
-// The page-stack shells' back affordance (docs/remote-client-plan.md §5.1's 层级 rule: 返回
-// 手势、系统返回键和 App 栏的返回按钮都弹出栈顶): on the phone orientations and the
+// The page-stack shells' back affordance (docs/remote-client-plan.md §5.1's hierarchy rule:
+// the back gesture, the system back key and the app bar's back button all pop the stack top): on the phone orientations and the
 // portrait tablet, a full-screen page — a side view (Files, Search, Changes, an extension's
 // container) or the panel — covers the editor, and until this module the only ways back were
 // the edge swipe and the destination bars. Three surfaces share this one vocabulary: the app
 // bar's leading ‹ (the phone forms), the navigation rail's foot ‹ (the portrait tablet,
-// which draws no app bar — the owner's 2026-10-16 direction, 平板模式下返回按钮放左边栏底下),
+// which draws no app bar — the owner's 2026-10-16 direction: in tablet mode the back button
+// goes beneath the left rail),
 // and the system back key — the page rides backStack as the BOTTOM
 // closer, so a back closes the page (any sheet over it peels first) before it could ever
 // leave the workbench.

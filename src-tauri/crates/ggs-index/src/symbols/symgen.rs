@@ -2697,7 +2697,8 @@ pub type PinKey = (u32, &'static [u8], u16, u32, u32);
 
 /// One pinned skeleton: a record the snapshot's incremental analysis carries but no source
 /// parse produces (the `ring_capture.c` body scan), with its stored anchors.
-/// Source: `si4-rea`'s `gen-sym-work/REPORT.md` — "增量历史表，照抄存储值".
+/// Source: `si4-rea`'s `gen-sym-work/REPORT.md` — "incremental history table, copy the
+/// stored values verbatim".
 struct PinRecord {
     fid: u32,
     name: &'static [u8],

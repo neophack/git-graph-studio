@@ -35,7 +35,7 @@ export function formFactorOfClass(device: DeviceClass): 'phone' | 'tablet' | 'de
 /** The page-stack shells (§5.1–§5.3): the forms whose content is ONE full-screen column —
  *  a side view, the editor or the panel as full pages over each other — rather than the
  *  side-by-side frame. Both phone orientations and the portrait tablet page this way
- *  (§5.3's "页面单栏显示"); the landscape tablet and the desktop browser keep VS Code's
+ *  (§5.3's "pages in a single column"); the landscape tablet and the desktop browser keep VS Code's
  *  side-by-side arrangement. remote.css's whole phone block keys on the attribute. */
 export function pageStackOfClass(device: DeviceClass): boolean {
 	return device === 'phone-portrait' || device === 'phone-landscape' || device === 'tablet-portrait';

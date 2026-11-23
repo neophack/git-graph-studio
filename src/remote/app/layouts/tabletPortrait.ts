@@ -1,5 +1,5 @@
 // The tablet portrait layout (docs/remote-client-plan.md §5.3): the 56 px icon-only
-// navigation rail (the owner's 2026-10-16 direction, 左轨图标不配文字 — VS Code's activity
+// navigation rail (the owner's 2026-10-16 direction, the rail's icons carry no text — VS Code's activity
 // bar shape; the icon-over-label form went) and one single-column stage beside it — the
 // same page-stack model as the phone (a side view covers the stage, the editor beneath
 // it). Hardware keyboards work (§5.3), so the phone's key gating does not apply to this

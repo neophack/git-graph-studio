@@ -721,9 +721,10 @@ describe('webview streams (§22.6)', () => {
 	});
 
 	it('a copy\'s input trail marks this frontend\'s own act — fresh within the window, stale beyond it, keyed per extension', () => {
-		// The trail a mirrored create reads (2026-10-16: 手机端 claude 打开新的 session 页面
-		// 没有到前台显示): the tap crossed from here, so within the window the panel it
-		// opened is this user's own act and may take the foreground.
+		// The trail a mirrored create reads (2026-10-16: the phone's Claude opening a new
+		// session page that never came to the foreground): the tap crossed from here, so
+		// within the window the panel it opened is this user's own act and may take the
+		// foreground.
 		resetCopyInteractions();
 		expect(recentCopyInteraction('Anthropic.claude-code')).toBe(false);
 		noteCopyInteraction('Anthropic.claude-code');

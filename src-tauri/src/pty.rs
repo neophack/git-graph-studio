@@ -806,8 +806,8 @@ mod tests {
 
     #[test]
     fn a_split_multibyte_sequence_decides_whole() {
-        // "你" is three bytes; a kernel split after the first lands it in the next
-        // chunk — the output must carry the whole character, no U+FFFD.
+        // The sample character (U+4F60) is three bytes; a split after its first byte lands
+        // it in the next chunk — the output must carry the whole character, no U+FFFD.
         let mut carry = Vec::new();
         let bytes = "你".as_bytes();
         let first = decode_pty_chunk(&mut carry, &bytes[..1]);

@@ -1,4 +1,4 @@
-// The Hub load probe (docs/ggs-remote-plan.md §20.12 压测): N fake PCs tunnel into one real
+// The Hub load probe (docs/ggs-remote-plan.md §20.12 load test): N fake PCs tunnel into one real
 // Hub (each an Ed25519 key proving its uuid, the exact handshake the daemon speaks), M
 // browser sessions ride them (4 per PC by default), and the probe records what the plan
 // asked for — the Hub's memory and CPU — next to its own /metrics. Nothing gates a build;

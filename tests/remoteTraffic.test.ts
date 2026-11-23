@@ -557,7 +557,7 @@ describe('§7.4 budget rows — the sync family', () => {
 		// §7.0.1's "~80 B" is the payload; with the EVENT envelope and frame header it
 		// still lands far under the idle row's budget.
 		expect(Buffer.byteLength(JSON.stringify(message))).toBeLessThanOrEqual(96);
-		// Row "空闲 60 秒 ≤ 2 KB": a lone active frontend sends exactly one heartbeat in
+		// Row "idle 60 s ≤ 2 KB": a lone active frontend sends exactly one heartbeat in
 		// that minute (PRESENCE_EVERY_MS), and nothing else — the gate holds every intent.
 		expect(PRESENCE_EVERY_MS).toBeGreaterThanOrEqual(60_000);
 		expect(wire(message)).toBeLessThanOrEqual(2048);

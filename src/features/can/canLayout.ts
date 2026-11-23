@@ -1,8 +1,9 @@
 // The CAN pages' responsive layer: the width watch that decides the wide dashboard from
 // the narrow (phone) form, the coarse-pointer fact the touch row heights key on, the
 // touch-drag scroller the raw trace browses with on a phone, and the bottom action sheet
-// the narrow toolbar's ⋯ opens (2026-10-19, the owner's direction: 重写 can 页面，要适配
-// 不同屏幕尺寸，要支持手机端显示，手机端风格沿用 git-graph-rs 的 mobile.css 设计语言).
+// the narrow toolbar's ⋯ opens (2026-10-19, the owner's direction: rewrite the CAN pages
+// to adapt to different screen sizes, support phone display, and carry the mobile.css
+// design language git-graph-rs uses).
 //
 // The width is the VIEW's own, read off its root — not the window's: an editor group's
 // pane is the space the page actually gets, and a split desktop column answers narrow

@@ -411,14 +411,14 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   line." note answering elsewhere), By Name and By Type as the flat lists — cycled from the
   head's button (persisted); the fold state starts over on a file switch; 2026-11-20),
   `src/features/search/relationGraph.ts` + `relationGraph.css` (the relation graph — the
-  Symbol Window's lower half, drawn on the view's **own SVG board** in the classic IDE
-  relation window's own manner (2026-11-23, the owner's direction: relation要做成经典
-  IDE 的效果 — 多出调用有行号，参考经典 IDE 的绘图代码, the si4-rea reconstruction's SPEC-ui-relation
+  Symbol Window's lower half, drawn on the view's **own SVG board** reading as the reference
+  relation window (2026-11-23, the owner's direction: calls carry their line numbers on
+  the graph — the drawing discipline rides the si4-rea reconstruction's SPEC-ui-relation
   §1.2/§2/§2.9): the cards joined by **orthogonal trunk links** in the connection red —
   out of the parent card's facing face, to the mid-band bus every sibling edge shares,
   into each child's facing face, the V-shaped arrowhead landing on the referenced side
   (the kind's own direction); a **multi-site edge carries its numbered rows** ("1. line
-  113", the classic IDE's ShowGraphDetails — the card grows downward under a separator, one row per
+  113", the reference ShowGraphDetails — the card grows downward under a separator, one row per
   kept site line, a row's click jumping to that site, a "+N" tail when the count outran
   the backend's 16-line cap; a single-site edge stays a clean card, and its ×N label —
   or the cross edge's — speaks the count instead). The board replaced the bezier
@@ -437,8 +437,9 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   window's own vocabulary (2026-11-20, the owner's direction: the panels'
   operation logic one convention across the symbol views): one plain click on a card —
   or an Outline row, or a numbered site row — shows the jump in the Definition page
-  (2026-11-23, the owner's direction: 关系点击在定义里显示跳转，代码页面不跳转，定义里
-  右键同步到代码页面 — `onShowDefinition` carries the subject, 0-based, and the host's
+  (2026-11-23, the owner's direction: a relation click shows the jump in the Definition
+  page, the code page never jumps, the Definition page's right-click syncs to the code
+  page — `onShowDefinition` carries the subject, 0-based, and the host's
   wiring pins the page, shows it and feeds it, so the activation's cursor-follow never
   clobbers the symbol the click named; the code page stays where it stands) and the
   double click and the card menu's "Open the definition" are the editor's jump
@@ -449,7 +450,7 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   read resolving through `resolvePath`, the host-joined absolute spelling), its lines
   colored by the shared tokenizer. Cards size to their labels, carry the ⋯ a cut-short ring
   appends, the root the accent, and an aggregating edge its ×N label (the numbered rows
-  standing it down where they speak the count; the kind colours went with the classic IDE
+  standing it down where they speak the count; the kind colours went with the reference
   redrawing — one connection red — palette literals, the SVG reads attributes, not CSS
   variables); a symbol already drawn gains the cross edge instead of a second card (kept
   while both ends stand drawn), a ring naming only drawn symbols leaves the node a leaf,
@@ -498,7 +499,8 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   discipline the context window keeps: the panel up, this page active, the pin off) and
   hands the row over; the header's location button jumps at the 1-based line through
   `onOpenDefinition`; the page's own right-click carries the sync (2026-11-23, the
-  owner's direction: 定义里右键同步当前位置到代码页面) — "Sync the current position to
+  owner's direction: the Definition page's right-click syncs its current position onto
+  the code page) — "Sync the current position to
   the code page", the location button's jump offered in place, riding the same
   `onOpenDefinition` wiring; the body's read resolves through
   `resolvePath` (the index speaks repo-relative paths, the backend's `read_file` needs
@@ -608,7 +610,7 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   optimistic for hot names; 2026-11-20, one node per counterpart with
   `edge_count` accumulating every valid site at its earliest `edge_line` (2026-11-23:
   and `edge_lines` keeping every kept site's line, ascending, deduplicated, capped at
-  16 — the numbered rows the graph card draws for a multi-site edge, the classic IDE's
+  16 — the numbered rows the graph card draws for a multi-site edge, the reference
   ShowGraphDetails), a 250 ms
   wall-clock budget checked every 32 files / 256 hits (a time-slice discipline) answering
   `RelationAnswer { nodes, truncated }` — the cap and the

@@ -407,8 +407,9 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'help.selfTest', title: 'Run Module Self-Tests', category: 'Help', run: () => this.editors.openSelfTest() });
 		register({ id: 'ai.providers', title: 'Manage Model Providers', category: 'AI', run: () => this.editors.openProviders() });
 		register({ id: 'help.repository', title: 'Report Issue / Project Page', category: 'Help', run: () => void openUrl('https://github.com/neophack/git-graph-studio') });
-		// The app's own update check (2026-11-10, the owner's direction: 软件本身可以 github
-		// 下载): the repository's newest release, this platform's installer downloaded
+		// The app's own update check (2026-11-10, the owner's direction: the app itself
+		// should be downloadable from GitHub): the repository's newest release, this
+		// platform's installer downloaded
 		// through the streaming progress toast, then launched (Windows) or revealed.
 		registerZhCnText({ 'Check for App Updates': '检查应用更新' });
 		register({ id: 'help.checkForUpdates', title: 'Check for App Updates', category: 'Help', run: () => void checkForAppUpdate() });
@@ -636,8 +637,10 @@ export const bootMethods: ThisType<Workbench> = {
 			void this.editors.openFile(resolveSymbolPath(path), { line });
 		};
 		// The relation graph's plain click shows its jump in the Definition page — the
-		// code page stays where it stands (2026-11-23, the owner's direction: 关系点击在
-		// 定义里显示跳转，代码页面不跳转，定义里右键同步到代码页面). The pin rides FIRST:
+		// code page stays where it stands (2026-11-23, the owner's direction: a relation
+		// click shows the jump in the definition, the code page does not jump, and the
+		// definition's right-click syncs the position to the code page). The pin rides
+		// FIRST:
 		// the page's own activation below (show's shown()) re-resolves the cursor's
 		// symbol through the debounced follow, whose gate the pin is — without it every
 		// activation would clobber the symbol the card named. The page's right-click

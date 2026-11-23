@@ -7,7 +7,7 @@
 // Finder AppleScript to lay out the DMG window, then detaches the scratch
 // volume with three short retries. Finder — and Spotlight racing on the
 // freshly mounted copy of the app — sometimes still holds the volume past
-// that window, every retry answers `资源忙` (EBUSY, exit 16), and the build
+// that window, every retry answers `Resource busy` (EBUSY, exit 16), and the build
 // fails with `error running bundle_dmg.sh` while leaking the mounted scratch
 // volume and a Finder window (the pile-up makes the next race likelier).
 // tauri rewrites bundle_dmg.sh on every build, so the retry patience cannot

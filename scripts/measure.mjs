@@ -6,7 +6,7 @@
 //   node scripts/measure.mjs --repo <path>   sizes + the backend probes on <path>
 //
 // Sizes are recorded, never gated: the exe / installer / dist / first-paint budgets and the
-// `--gate` exit code were removed on 2026-09-15 at the owner's request ("不要限制大小了"),
+// `--gate` exit code were removed on 2026-09-15 at the owner's request ("stop gating sizes"),
 // after the exe crossed the old 10 MB line. Backend performance stays gated where it always
 // was, in src-tauri/tests/perf.rs.
 

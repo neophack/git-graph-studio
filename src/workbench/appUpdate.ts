@@ -1,4 +1,5 @@
-// The app's own update flow (2026-11-10, the owner's direction: 软件本身可以 github 下载):
+// The app's own update flow (2026-11-10, the owner's direction: the app itself should be
+// downloadable from GitHub):
 // Help → Check for App Updates reads the repository's newest release, offers a strictly
 // newer one, and downloads this platform's installer through the marketplace downloads'
 // progress toast — bytes, the recent speed, the remaining time, cancellable mid-body —

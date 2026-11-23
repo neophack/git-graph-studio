@@ -82,7 +82,7 @@ function mountList(dirs: Record<string, Entry[]>, letters: Record<string, string
 		letter: (path) => letters[path] ?? null,
 		selection: selectionHook,
 		filter: () => '',
-		// The page's row menu, shaped as filesPage builds it — the 多选 row is the one the
+		// The page's row menu, shaped as filesPage builds it — the Select row is the one the
 		// long-press tests tap to enter the selection mode.
 		menu: (entry) => [
 			{ label: `open:${entry.path}`, run: () => (entry.isDir ? entered.push(entry.path) : opened.push(entry.path)) },
@@ -285,7 +285,7 @@ describe('the row menu (§6.1, the owner\'s 2026-10-16 direction: 长按要弹�
 		const sheet = document.querySelector('.ggs-action-sheet');
 		expect(sheet).not.toBeNull();
 		expect(sheet!.textContent).toContain('a.ts');
-		// The sheet's rows are the menu's actions, the 多选 entry among them.
+		// The sheet's rows are the menu's actions, the Select entry among them.
 		expect([...sheet!.querySelectorAll('button')].map((button) => button.textContent)).toContain('Select');
 		// The touch release's trailing click lands on the row under the sheet — swallowed,
 		// the file does not open (the symptom the owner reported read as a dead long-press).
@@ -537,7 +537,8 @@ describe('the installed page follows the workspace root', () => {
 	/** The booted workbench with the files page mounted the way the shell mounts it — before
 	 *  the roots land. The shell installs at the title bar's first frame, which the workbench
 	 *  builds synchronously while `boot_context` (a wire round trip on the remote) is still in
-	 *  flight: the page must not stay on its "空目录" placeholder once the workspace applies. */
+	 *  flight: the page must not stay on its "empty directory" placeholder once the
+	 *  workspace applies. */
 	async function bootWithoutRoots(): Promise<void> {
 		localStorage.clear();
 		workbenchShell();
@@ -573,7 +574,8 @@ describe('the installed page follows the workspace root', () => {
 
 	it('loads the root once it arrives, and follows a switch to another folder', { timeout: 30_000 }, async () => {
 		await bootWithoutRoots();
-		// The symptom as reported (2026-10-16: 远程文件也显示空目录): the placeholder, no rows.
+		// The symptom as reported (2026-10-16: the remote files page showed an empty
+		// directory too): the placeholder, no rows.
 		expect(pageRows()).toEqual([]);
 		expect(document.querySelector('.ggs-files-page .ggs-file-empty')).not.toBeNull();
 		await currentWorkbench!.applyRoots(['C:/repo'], true, null);
@@ -586,8 +588,9 @@ describe('the installed page follows the workspace root', () => {
 		expect(pageRows()).toEqual(['b.md']);
 	});
 
-	// The owner's 2026-10-16 direction (右下角的加号遮挡文件的 ... 按钮，放到顶上，风格要和
-	// 其他按钮一致) and its continuation (codicon-add 放在 ggs-appbar-btn 前面): the ＋ is an
+	// The owner's 2026-10-16 direction (the bottom-right ＋ covered the file rows' ⋯ button;
+	// move it to the top, styled like the other buttons) and its continuation (codicon-add
+	// placed before the ggs-appbar-btn): the ＋ is an
 	// app bar button — the FIRST of the Files page's trailing actions, ahead of the bar's own
 	// go-to-file and kebab — never a floating corner over the rows. The toolbar keeps a copy
 	// for the form that draws no app bar (the tablet portrait), hidden by the layout's CSS.
@@ -621,8 +624,9 @@ describe('the installed page follows the workspace root', () => {
 		bar.remove();
 	});
 
-	// The owner's direction (2026-10-16: md文件要支持使用预览打开): a Markdown row opens
-	// rendered — the row menu carries the preview entry, the tap opens the preview tab.
+	// The owner's direction (2026-10-16: .md files must open through the preview): a
+	// Markdown row opens rendered — the row menu carries the preview entry, the tap opens
+	// the preview tab.
 	it('a Markdown row\'s menu opens the file\'s preview', { timeout: 30_000 }, async () => {
 		await bootWithoutRoots();
 		(window as unknown as { markdownIt: unknown }).markdownIt = { render: (text: string) => `<h1>${text.trim().replace(/^#\s*/, '')}</h1>` };

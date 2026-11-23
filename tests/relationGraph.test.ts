@@ -4,7 +4,7 @@
 // markers, the root's accent, the dashed use arrows, the bezier `C` in every link's
 // path), the layout re-planned on every draw (children stacked without overlap, a parent
 // centered on its outermost children, a branch's expansion gliding the siblings aside —
-// the owner's ask: 思维导图曲线连线 + 自动移动节点), the lazy rings behind the right-click
+// the owner's ask: curved mind-map links + nodes that move by themselves), the lazy rings behind the right-click
 // menu (cached, depth-capped), the three-way direction switch, the cross edge a repeated
 // symbol draws, the pointer's vocabulary (one click on a
 // ringed card drills, a plain click shows the jump in the Definition page, the double
@@ -138,7 +138,7 @@ describe('drawing the ring', () => {
 		expect(expanderOf('gamma').querySelector('text')?.textContent).toBe('+');
 		// The links: three tree edges plus the ×N on Config's edge (its two sites share
 		// one line — the count is the label's own), every one of them an orthogonal
-		// trunk polyline — the classic IDE's connection manner, not a curve — in the connection red,
+		// trunk polyline — the orthogonal connection manner, not a curve — in the connection red,
 		// and gamma's two-site edge speaking its count in numbered rows instead.
 		expect(edgePairs()).toHaveLength(3);
 		const curves = [...view.element.querySelectorAll<SVGPathElement>('.rg-edge path')].map((path) => path.getAttribute('d') ?? '');
@@ -149,7 +149,7 @@ describe('drawing the ring', () => {
 		expect(countLabels.filter((text) => text?.startsWith('×'))).toEqual(['×2']);
 		expect([...view.element.querySelectorAll<SVGPathElement>('.rg-edge path')].every((path) => path.getAttribute('stroke') === '#c00000')).toBe(true);
 		expect([...view.element.querySelectorAll<SVGPathElement>('.rg-edge path')].every((path) => path.getAttribute('marker-end') === 'url(#rg-arr)')).toBe(true);
-		// gamma's numbered rows (the classic IDE's ShowGraphDetails): a row per site, 1-based, and the
+		// gamma's numbered rows: a row per site, 1-based, and the
 		// card grew to hold them.
 		expect([...cardOf('gamma').querySelectorAll('.rg-detail-row')].map((row) => row.textContent)).toEqual(['1. line 5', '2. line 6']);
 		expect(Number(cardOf('gamma').querySelector('rect')!.getAttribute('height'))).toBe(28 + 2 * 15);
@@ -598,7 +598,7 @@ describe("the pointer (the graph's own vocabulary)", () => {
 
 	it("a multi-site edge draws its numbered rows, and a row click shows that site in the Definition page", async () => {
 		// gamma's edge aggregates two sites in main.c (0-based lines 4 and 5): the card
-		// hangs the numbered rows beneath a separator (the classic IDE's ShowGraphDetails), each row
+		// hangs the numbered rows beneath a separator, each row
 		// its own show — the card's definition click never sees it.
 		const view = mountView();
 		const opens: string[] = [];

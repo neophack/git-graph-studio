@@ -1876,7 +1876,8 @@ button.ggs-symbol-hover-relations:hover { text-decoration: underline; color: var
  * contrast themes all hold. The wide layout above is untouched — every rule
  * here keys on [data-compact].
  *
- * The toolbar (2026-10-19's redesign, the owner's direction: 顶部不超过两行按钮，排布紧凑)
+ * The toolbar (2026-10-19's redesign, the owner's direction: no more than two rows of
+ * buttons at the top, laid out compactly)
  * is TWO compact rows at every width — the command row (title/path, the live chip, the
  * actions at the right) over the filter row (the identifier box, the channel, direction
  * and type selects). No third row ever appears at any width: the title truncates, the

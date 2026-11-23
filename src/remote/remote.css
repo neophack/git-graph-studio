@@ -224,7 +224,7 @@
 
 .ggs-editor-empty[hidden] { display: none !important; }
 /* The empty Editor page as a small dashboard of the workspace (the owner's 2026-10-16
-   direction: 更好用,更专业): the mark and the workspace's name up top, the repository's
+   direction: better to use, more professional): the mark and the workspace's name up top, the repository's
    own state as a card, the three ways to something open as tiles, and the two lists below.
    Top-aligned and scrolling — a list-bearing page, not a centered apology. */
 .ggs-editor-empty {
@@ -341,8 +341,8 @@
 :root.remote-shell[data-page-stack] #sidebar .row:active { background: var(--vscode-list-hoverBackground); }
 /* An extension's webview page (Claude Code's chat) takes the whole page height. */
 :root.remote-shell[data-page-stack] #sidebar .ext-container-view > .ext-webview-view-section { flex: 1 1 0; min-height: 0; }
-/* ---------- One scroller per page (2026-10-18, the owner's report: 手机模式显示时候出现
-   两个滚动条) ----------
+/* ---------- One scroller per page (2026-10-18, the owner's report: two scrollbars appeared
+   in phone mode) ----------
    The desktop sidebar's architecture is scroll containers inside scroll containers — a view
    stack of pane bodies that each scroll (`.pane-body` overflow:auto), a views container that
    scrolls its sections (`.ext-container-view` overflow:auto) beside the webview panes' own

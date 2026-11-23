@@ -387,7 +387,8 @@ fn resolve_paths(shell: &Shell, paths: &[String]) -> Vec<PathBuf> {
 }
 
 /// The POSIX wording Git Bash's coreutils print for the common IO errors. The
-/// raw Windows message (`系统找不到指定的文件。 (os error 2)`) is a locale
+/// raw Windows message ("The system cannot find the file specified.", os error 2)
+/// is a locale
 /// artifact a bash session never sees.
 fn io_error_text(error: &std::io::Error) -> String {
     match error.kind() {

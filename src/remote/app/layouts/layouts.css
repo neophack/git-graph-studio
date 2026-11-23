@@ -25,7 +25,7 @@
 /* ---------- The navigation rail (§5.2 and §5.3, icon-only at 56 px) ----------
    The bottom navigation's vocabulary stood upright: the same buttons, the same badges, the
    pills on their side. Every form that shows it — the landscape phone's, the portrait
-   tablet's — is icon-only (the owner's 2026-10-16 direction, 左轨图标不配文字 — VS Code's
+   tablet's — is icon-only (the owner's 2026-10-16 direction, the rail's icons carry no text — VS Code's
    activity bar shape; the portrait tablet's icon-over-label form went with it); the rail
    hugs the leading edge with the safe area. */
 .ggs-nav-rail {
@@ -38,10 +38,11 @@
 	user-select: none;
 }
 /* The rail's two halves: the destinations (with the ☰) scroll — the portrait tablet carries
-   the drawer's full page set (the owner's 2026-10-16 direction, 平板左轨要有搜索、插件、终端),
+   the drawer's full page set (the owner's 2026-10-16 direction, the tablet rail must have
+   search, extensions and terminal),
    and a set taller than the rail rolls inside the body — while the foot never moves: the ‹
-   pinned at the rail's bottom (the owner's 2026-10-16 direction, 平板模式下返回按钮放左边栏
-   底下) stays reachable however many destinations ride above it. */
+   pinned at the rail's bottom (the owner's 2026-10-16 direction: in tablet mode the back
+   button goes beneath the left rail) stays reachable however many destinations ride above it. */
 .ggs-rail-body {
 	flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; align-items: stretch; gap: 2px;
 	overflow-y: auto;
@@ -69,7 +70,7 @@
 }
 .ggs-nav-rail .badge[hidden] { display: none; }
 .ggs-nav-rail .badge.dirty { background: var(--ggs-dirty, #e2c08d); color: #1f1f1f; }
-/* The rail's head ☰ (the owner's 2026-10-16 direction, 平板界面没有菜单入口): the portrait
+/* The rail's head ☰ (the owner's 2026-10-16 direction, the tablet UI has no menu entry): the portrait
    tablet has no app bar, so the drawer — every page, the workspace actions, the transfers,
    the full application menus, Settings — opens from the rail's head, set off from the
    destinations by a hairline. The landscape phone's app bar carries its own ☰; its rail
@@ -79,10 +80,10 @@
 	border-bottom: 1px solid var(--vscode-activityBar-border, var(--ggs-sep, rgba(128, 128, 128, 0.25)));
 }
 .ggs-layout[data-layout="phone-landscape"] .ggs-nav-rail .ggs-rail-menu { display: none; }
-/* The rail's ‹ (§5.1's 层级 rule: a full-screen page over the editor pops back to it): the
+/* The rail's ‹ (§5.1's hierarchy rule: a full-screen page over the editor pops back to it): the
    portrait tablet's own back entry — the form draws no app bar, so the ‹ the phone's app
-   bar carries rides the rail's foot (the owner's 2026-10-16 direction, 平板模式下返回按钮放
-   左边栏底下), set off from the destinations by a hairline like the head ☰'s, only while a
+   bar carries rides the rail's foot (the owner's 2026-10-16 direction: in tablet mode the
+   back button goes beneath the left rail), set off from the destinations by a hairline like the head ☰'s, only while a
    page covers the editor. The landscape phone's app bar carries its own ‹; its rail shows
    none. */
 .ggs-nav-rail .ggs-rail-back[hidden] { display: none; }
@@ -93,7 +94,8 @@
 .ggs-layout[data-layout="phone-landscape"] .ggs-nav-rail .ggs-rail-back { display: none; }
 /* The rail's ⋯ (the portrait tablet's page actions — the phone app bar's trailing cluster:
    the editor's actions sheet, the git commands, the terminal's new/kill, the files page's
-   ＋ sheet; the owner's 2026-10-18 direction, 平板模式相对手机模式有些页面有内容缺失):
+   ＋ sheet; the owner's 2026-10-18 direction, tablet mode was missing content the phone mode's
+   pages have):
    pinned in the foot above the ‹, hidden on the pages whose phone app bar carries no
    actions either (Search). The landscape phone's app bar owns the actions; its rail shows
    none. */
@@ -115,12 +117,12 @@
 
 /* ---------- Tablet landscape (§5.4) ----------
    The workbench's own frame in three columns: the activity bar in its own icon-only shape
-   (the owner's 2026-10-16 direction, 左轨图标不配文字 — VS Code's activity bar: the 72 px
+   (the owner's 2026-10-16 direction, the rail's icons carry no text — VS Code's activity bar: the 72 px
    widening and the label under each icon went together, the bar keeps the desktop form's
    drawing), the side bar as a 320 px collapsible main column (the sash still drags it),
    the editor area as the detail. No title bar — the frame's own drawing has none; the
    rail's head ☰ opens the drawer that carries the menus (the owner's 2026-10-16
-   direction, 平板界面没有菜单入口). */
+   direction, the tablet UI has no menu entry). */
 .ggs-layout[data-layout="tablet-landscape"] #titlebar { display: none !important; }
 /* The rail's head ☰: a native button for the touch form, reset onto the activity item's
    own chrome (the bar's items are divs; this one is the form's menu entry, opening the
@@ -156,7 +158,7 @@
 .ggs-files-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 
 /* The path bar (§6.1): root chip + one capsule per level, horizontally scrollable. The
-   2026-10-16 redesign (the owner's direction: 可以看出每个文件夹胶囊) — every level is a
+   2026-10-16 redesign (the owner's direction: every folder must read as a visible capsule) — every level is a
    visible pill, the same raised background vocabulary as the toolbar's branch chip. */
 .ggs-path-bar {
 	flex: none; display: flex; align-items: center; gap: 4px;
@@ -188,7 +190,7 @@
 /* The toolbar: the filter box, the sort button and the actions ＋ (the owner's
    2026-10-16 direction: the ＋ moved off the list's corner, where it covered the rows'
    ⋮). Its continued direction puts the ＋ ON the app bar, ahead of its own buttons
-   (codicon-add 放在 ggs-appbar-btn 前面) — this toolbar copy shows only on the form that
+   (codicon-add ahead of the ggs-appbar-btn) — this toolbar copy shows only on the form that
    draws no app bar (the tablet portrait, §5.3); the phone forms' bar owns the ＋. */
 .ggs-files-toolbar {
 	flex: none; display: flex; align-items: center; gap: 6px; padding: 6px max(8px, env(safe-area-inset-right)) 6px max(8px, env(safe-area-inset-left));
@@ -209,8 +211,8 @@
    2026-10-16 direction), and the toolbar copy stands in only where no app bar exists. */
 .ggs-files-addbtn { display: none; }
 .ggs-layout[data-layout="tablet-portrait"] .ggs-files-addbtn { display: inline-flex; }
-/* The branch chip (the owner's 2026-10-16 direction: 手机端文件管理页面没有切换分支的按
-   钮): the current branch at the toolbar's leading edge, one tap from the switch sheet. It
+/* The branch chip (the owner's 2026-10-16 direction: the phone files page had no branch
+   switch button): the current branch at the toolbar's leading edge, one tap from the switch sheet. It
    yields its width to the filter — the name truncates, never the field. */
 .ggs-files-branch {
 	flex: 0 1 auto; min-width: 0; max-width: 42%; height: 36px; display: inline-flex; align-items: center; gap: 6px;
@@ -315,8 +317,8 @@
 }
 .ggs-scm-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 
-/* The branch chip (the owner's 2026-10-16 direction: ggs-scm-branch 要放到第一行增加一
-   个按钮就可以，不要单独一行): the current branch as a button at the COMMIT ROW's leading
+/* The branch chip (the owner's 2026-10-16 direction: adding one button on the first row of
+   ggs-scm-branch is enough — no separate row): the current branch as a button at the COMMIT ROW's leading
    edge — name and ahead/behind, one tap from the switch sheet (the same sheet the Files
    page's chip opens). The name truncates, never the commit button's label. */
 .ggs-scm-branch {
@@ -337,7 +339,7 @@
    the repository (Commit / Push n / Sync / Publish — commitInput's own rule); the ⋮
    carries the variants (amend, commit & push, staged only). The action row is 44 px —
    the thumb floor the page's every other button takes (the owner's 2026-10-16 direction:
-   提交按钮太高了,48 px read chunky beside the message box). */
+   the commit button was too tall — 48 px read chunky beside the message box). */
 .ggs-scm-commit {
 	flex: none; display: flex; flex-direction: column; gap: 8px;
 	padding: 10px max(12px, env(safe-area-inset-right)) 10px max(12px, env(safe-area-inset-left));

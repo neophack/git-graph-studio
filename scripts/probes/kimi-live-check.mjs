@@ -1,7 +1,7 @@
 // The Kimi Code live check: the moonshot-ai.kimi-code extension, downloaded from Open VSX
 // and installed through the app's OWN installer, then exercised feature by feature in the
 // real app (release exe + WebView2 CDP) — the installer's derived backend, the palette
-// rows, the activity-bar container, the sidebar webview view (timed — the "打开速度快"
+// rows, the activity-bar container, the sidebar webview view (timed — the "fast open"
 // bar), the tab-hosted chat, the remaining commands, the declared settings, the
 // keybinding, and a clean extension-host log.
 //
@@ -329,7 +329,7 @@ try {
 	for (let attempt = 0; attempt < 40 && (await countKimiEntries()) === 0; attempt++) await sleep(500);
 	check('one Kimi Code activity-bar entry', (await countKimiEntries()) === 1);
 
-	/* 5. Open in Side Panel: the sidebar webview view mounts (the 打开速度快 bar) and
+	/* 5. Open in Side Panel: the sidebar webview view mounts (the "fast open" bar) and
 	 *    shows the extension's own login UI. */
 	const sideStarted = Date.now();
 	const side = await runByPalette('Kimi Code: Open in Side', /Open in Side Panel/);

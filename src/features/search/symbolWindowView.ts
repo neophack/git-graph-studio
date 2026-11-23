@@ -245,7 +245,8 @@ export class SymbolWindowView {
 
 	/** The relation graph's plain click, shown in the Definition page — the host (boot)
 	 *  pins the page, shows it and feeds it; the code page stays where it stands
-	 *  (2026-11-23, the owner's direction: 关系点击在定义里显示跳转，代码页面不跳转). */
+	 *  (2026-11-23, the owner's direction: a relation click shows the jump in the
+	 *  Definition page, the code page never jumps). */
 	onShowDefinition?: (subject: DefinitionSubject) => void;
 
 	constructor(private readonly container: HTMLElement) {

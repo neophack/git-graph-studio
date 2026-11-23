@@ -185,7 +185,7 @@ function inputPaths(input: SyncedTabInput): string[] {
  * window hidden while a phone works) crosses nothing, and nothing repairs it later: the
  * catch-up's union never closes, so the side that missed the close keeps the tab and hands
  * it back at every catch-up — a phone's closed files all reappear after a refresh the
- * moment the PC window returns (远程关闭的文件，刷新后又都出来了). The closes are therefore
+ * moment the PC window returns (the remote closed the files, and after a refresh they all came back). The closes are therefore
  * RECORDED when they cannot cross, in this browser's own storage (a phone's scoped storage
  * keys it per PC under a Hub) so a page refresh carries them into the next frontend, and
  * delivered the moment the gate opens — K11's silence itself is untouched: nothing crosses
@@ -375,7 +375,7 @@ export function attachWorkbenchSync(
 	 *  hold: while a remote operation is landing, the tab it activates opens in the
 	 *  background — the phone's page keeps its place (each frontend's layout is its own,
 	 *  K7; the phone user's own opens run outside these walls and still navigate,
-	 *  2026-10-16: 文件页面会被其他页面顶到最前). */
+	 *  2026-10-16: other pages were pushing the files page to the front). */
 	let applying = 0;
 	let navHold: (() => void) | null = null;
 	const beginApply = (): void => {
@@ -427,8 +427,8 @@ export function attachWorkbenchSync(
 	const canSend = (): boolean => live && !quiet && (presence ? presence.syncAllowed() : true);
 	/** Whether a CLOSE may cross right now. Closes are convergence, not disturbance: they
 	 *  cross whenever any other frontend is live at all — a phone resting screen-off is
-	 *  exactly when a PC close must not wait for its wake (2026-10-19:
-	 *  pc端关闭页面后，remote页面要等很久才关闭; the daemon holds what the sleeping page
+	 *  exactly when a PC close must not wait for its wake (2026-10-19: after the PC closed
+	 *  a page, the remote page took a long time to close it; the daemon holds what the sleeping page
 	 *  cannot take now and replays it on return, and a hidden page applies socket
 	 *  deliveries in real time) — while opens and switches wait for the active gate (K11)
 	 *  and the catch-up's union repairs those. A frontend alone on the window still sends
@@ -607,7 +607,7 @@ export function attachWorkbenchSync(
 	/** A live remote operation that OPENED something here: it applies under a page hold
 	 *  (K7 — the phone's page keeps its place), so when it lands behind a full-screen page
 	 *  the open is invisible — to its user the phone "never got the page" (the owner's
-	 *  2026-10-18 report: a diff opened on the PC, 远程没有). The navigation hook decides
+	 *  2026-10-18 report: a diff opened on the PC, none of it reached the remote). The navigation hook decides
 	 *  whether anything shows; a `quiet` message (the catch-up's union opens — the
 	 *  joiner's direct ones never reach this handler, the answerer's returning ones cross
 	 *  tagged) never announces at all. */
@@ -673,8 +673,8 @@ export function attachWorkbenchSync(
 					// to stop REMOTE acts from yanking the page, and the activation's own
 					// `revealEditorPage` already honoured it; the page this tap asked for comes
 					// forward anyway, ungated — the same cut the webview ops' own-act reveal
-					// makes (2026-10-16: 手机端 claude 的 new session/history 点击后新页面没有到
-					// 前台). Off a page-stack shell the ungated reveal is a no-op.
+					// makes (2026-10-16: on the phone side a Claude new-session/history tap's new
+					// page never came to the front). Off a page-stack shell the ungated reveal is a no-op.
 					(hook('navigation').revealEditorPageUngated ?? hook('navigation').revealEditorPage)();
 				}
 			}
@@ -902,7 +902,7 @@ export function attachWorkbenchSync(
 			// follow runs as one remote apply (beginApply): the page hold keeps this
 			// frontend's own page in place — the joiner is often a phone back from the
 			// background, and the reveal it is about to receive is the OTHER side's act, not
-			// this user's (K7; 2026-10-16, the owner's direction: 远程点击页面后又被替换) —
+			// this user's (K7; 2026-10-16, the owner's direction: a page tapped on the remote was replaced again) —
 			// and the applying guard keeps the reveal's own activation from announcing back
 			// (the answerer is already on that tab). A recorded close guards this too: the
 			// stale answerer's active tab is not followed back open.

@@ -31,7 +31,7 @@ pub struct DirEntryInfo {
     /// second line (docs/remote-client-plan.md §6.1). Same metadata call the size rides.
     #[serde(default)]
     pub modified: Option<u64>,
-    /// A folder's direct child count (the "12 项" of the same line), one `read_dir` on the
+    /// A folder's direct child count (the "12 items" of the same line), one `read_dir` on the
     /// PC — the browser never pays for it. Files carry none.
     #[serde(default)]
     pub children: Option<u32>,

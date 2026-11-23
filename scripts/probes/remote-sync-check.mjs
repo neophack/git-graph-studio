@@ -7,8 +7,9 @@
 // own messages (window.__ggsDevEvents) against what the DOM replica would have paid for the
 // very same session — a real DomRecorder (src/remote/mirror/recorder.ts) observing the PC
 // page, its snapshot plus every mutation batch counted — asserting the operation sync stays
-// under a TENTH of the replica's bytes (the owner's bar, 2026-10-12: "1/10 的流量实现同步，
-// 防止流量浪费"). The phone's Git Graph / Claude Code bottom tabs are the preview's no-op
+// under a TENTH of the replica's bytes (the owner's bar, 2026-10-12: "achieve the sync with
+// a tenth of the traffic, so no bandwidth goes to waste"). The phone's Git Graph / Claude
+// Code bottom tabs are the preview's no-op
 // stand-ins (a no-op command has nothing to sync); the real extension pages are covered by
 // the mirror-policy tests in tests/extensions.test.ts.
 //

@@ -41,7 +41,7 @@ export function panelPageOpen(): boolean {
  *  A remote-originated operation (the workbench sync applying the PC's tab switch), a
  *  session restore, a panel another frontend created — none of them is this user's act,
  *  and none of them may close the page under them (2026-10-16, the owner's direction:
- *  文件页面会被其他页面顶到最前). */
+ *  other pages were pushing the files page to the front). */
 let pageHolds = 0;
 
 /** Take one hold; the returned function releases it (idempotent). */
@@ -85,7 +85,7 @@ export function revealEditorPage(): void {
 /** A remote-originated open landed while a full-screen page kept the editor in the
  *  background (the page holds above): the tab is open and active, but nothing on the
  *  screen says so — to its user the phone "never got the page" (the owner's 2026-10-18
- *  report: a diff opened on the PC, 远程没有). A tappable banner names what opened and
+ *  report: a diff opened on the PC, none of it reached the remote). A tappable banner names what opened and
  *  brings the editor page forward on demand — the current page keeps its place (K7), the
  *  open stops being invisible. Off a page-stack shell, or with the editor page already
  *  showing, it is nothing: the activation itself was the affordance. */

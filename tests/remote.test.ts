@@ -468,8 +468,9 @@ describe('transport', () => {
 	// but the relay-side subscriptions died with the old process's state. Without a resync
 	// the session receives no events at all from then on (the PC's opens, closes and
 	// presence words all die at the fresh relay): the sync turns one-way and the phone's
-	// presence table then expires the PC and shuts the gate besides (2026-11-18:
-	// 网页的页面和桌面应用的操作不同步，导致打开文件又消失了).
+	// presence table then expires the PC and shuts the gate besides (2026-11-18: the web
+	// page's and the desktop app's operations fell out of sync, so an opened file
+	// disappeared again).
 	it('re-establishes every event subscription after the relay restarts', async () => {
 		const { transport, socket } = await connected();
 		const seen: unknown[] = [];

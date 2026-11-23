@@ -74,8 +74,9 @@ const MAGIC: &[u8; 6] = b"GGSIDX";
 /// is rebuilt.
 const VERSION: u8 = 7;
 
-/// The hidden per-project analysis folder (2026-11-21, the owner's direction: 在项目中增加
-/// 一个代码分析的隐藏文件夹，程序可以删除这个，不加入 git 索引，可以生成一样的文件): the
+/// The hidden per-project analysis folder (2026-11-21, the owner's direction: add a hidden
+/// code-analysis folder inside the project — the program may delete it, it never enters
+/// the git index, and the same files regenerate): the
 /// store lives beside the code it describes, one hidden folder per project.
 /// Deleting it loses nothing — the next query regenerates the same bytes — and the walk's
 /// `SKIPPED_DIRS` keeps search and re-index out of it.

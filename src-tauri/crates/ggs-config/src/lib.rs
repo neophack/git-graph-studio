@@ -390,8 +390,8 @@ fn configure(args: &[String]) -> Result<(), String> {
 
     // 3. The LAN listener: its port, protocol and bind address (empty answers keep the
     //    current ones). The bind is honoured in every mode (2026-10-24, the owner's
-    //    direction: 直接 http 可以绑定 0.0.0.0 — a container publishes the port, no forwarder
-    //    beside the daemon); keep loopback where TLS ends in front of the daemon, and
+    //    direction: plain http can bind 0.0.0.0 directly — a container publishes the port, no
+    //    forwarder beside the daemon); keep loopback where TLS ends in front of the daemon, and
     //    prefer https wherever the network itself is not trusted — plain http crosses it
     //    in the clear.
     let status = daemon_status(&daemon)?;

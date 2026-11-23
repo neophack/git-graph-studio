@@ -25,8 +25,8 @@ const XLINK = 'http://www.w3.org/1999/xlink';
  *  treats a listener this page registered on the sandboxed document as that document's own
  *  script execution and silently blocks every one of them without `allow-scripts` (Chromium
  *  runs them), which left the copy a dead picture in Safari — no tap, no key, no scroll
- *  ever reached the PC (2026-10-17: Safari 的 Claude 页面输入框不能输入、new session 没
- *  反应). The copy still runs nothing: the serialized tree carries nothing executable. */
+ *  ever reached the PC (2026-10-17: in Safari the Claude page's input box would not accept
+ *  typing and "new session" did nothing). The copy still runs nothing: the serialized tree carries nothing executable. */
 const COPY_SANDBOX = 'allow-same-origin allow-scripts';
 /** The element names the copy never instantiates. Because the sandbox runs scripts, the
  *  viewer cannot lean on the recorder alone: a script element (HTML or SVG — the SVG one's
@@ -55,8 +55,8 @@ const SCAN_MISS_CAP = 10;
 /** How often a fluid copy reports a scroller's position while it scrolls. */
 const SCROLL_REPORT_MS = 100;
 
-/** The marker classes the mirrored focus wears (2026-10-13, the owner's direction: 远程不
- *  额外画光标和边框——镜像把焦点状态解析进副本自己的显示): the focused element carries
+/** The marker classes the mirrored focus wears (2026-10-13, the owner's direction: the
+ *  remote draws no extra cursor or border — the mirror resolves the focus state into the copy's own display): the focused element carries
  *  `mirror-focus` (and `mirror-focus-visible` when the PC's engine matched it so), its
  *  ancestors `mirror-focus-within`, and every `:focus` rule of the copy's own sheets gains
  *  a class variant right beside it (deriveFocusRules) — Claude's composer border is drawn
@@ -370,8 +370,8 @@ export class MirrorViewer {
 	/** A frame whose browsing context was discarded and reborn — its pane re-parented through
 	 *  a detach (a device-class switch adopts the workbench part into the next arrangement by
 	 *  removing it and re-attaching it) — answers a different, EMPTY document, and nothing
-	 *  refills it: the written copy would sit blank forever (2026-10-16, 切换窗口尺寸后
-	 *  Claude 页面空白). The reborn frame's own load event, the batches that keep naming the
+	 *  refills it: the written copy would sit blank forever (2026-10-16: after a window-size
+	 *  switch the Claude page went blank). The reborn frame's own load event, the batches that keep naming the
 	 *  stream and the layout switch's resize nudge all land here; the answer is a fresh
 	 *  snapshot — asked for only once the frame is back IN the document, so the rebuilt copy
 	 *  lands in a context the next move does not take with it. */

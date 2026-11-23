@@ -1,22 +1,23 @@
 // The Relation Graph (module 5) — the Symbol Window's lower half: the symbol under the
 // cursor's ring on an interactive graph, drawn on a hand-written SVG board. The drawing
-// speaks the classic IDE relation window's own manner (2026-11-23, the owner's
-// direction: relation要做成经典 IDE 的效果 — 参考经典 IDE 的绘图代码, the si4-rea
+// reads as the reference relation window (2026-11-23, the owner's direction: calls carry
+// their line numbers on the graph; the drawing discipline rides the si4-rea
 // reconstruction's SPEC-ui-relation §1.2/§2): the cards joined by **orthogonal trunk
 // links** in the connection red — out of the parent card's facing face, down/across to
 // the shared bus band every sibling edge rides, then into each child's facing face, the
-// V-shaped arrowhead landing on the referenced side (the kind's own direction, the
-// classic IDE's Arrows) — and a **multi-site edge carries its numbered rows**
-// ("1. line 113", the classic IDE's ShowGraphDetails, SPEC §2.9): the card grows
-// downward, a separator under the label,
+// V-shaped arrowhead landing on the referenced side (the kind's own direction) — and a
+// **multi-site edge carries its numbered rows** ("1. line 113", SPEC §2.9): the card
+// grows downward, a separator under the label,
 // then one row per reference site, a click on a row jumping to that site. The layout is
 // still computed fresh on every draw over the visible tree (the owner's earlier
-// direction: 要像思维导图一样自动排列 — the drawing always lands on the tidy
-// arrangement), so a ring's expansion or collapse re-plans the whole drawing and the
-// cards **glide** to their new spots — a short rAF tween moves each displaced card and
-// the links redraw from the moving cards every frame. The cards carry one interaction
-// grammar (2026-11-20; 2026-11-23, the owner's direction: 关系点击在定义里显示跳转，
-// 代码页面不跳转，定义里右键同步到代码页面): a card's plain click shows its jump in the
+// direction: the layout re-plans by itself, like a mind map — the drawing always lands
+// on the tidy arrangement), so a ring's expansion or collapse re-plans the whole drawing
+// and the cards **glide** to their new spots — a short rAF tween moves each displaced
+// card and the links redraw from the moving cards every frame. The cards carry one
+// interaction grammar (2026-11-20; 2026-11-23, the owner's direction: a relation click
+// shows the jump in the Definition page, the code page never jumps, and the Definition
+// page's right-click syncs its position onto the code page): a card's plain click shows
+// its jump in the
 // Definition page — the card's symbol, or a numbered row's site on the edge's own file —
 // and the code page stays where it stands, the double click and the card menu's
 // "Open the definition" being the editor's jump; the ring's +/− expander is its own small
@@ -81,8 +82,7 @@ const HGAP = 34;
 const VGAP = 16;
 
 /** One numbered reference row's height under the card — the "N. line L" rows hang
- *  beneath a separator under the label (the classic IDE's ShowGraphDetails,
- *  SPEC-ui-relation §2.9). */
+ *  beneath a separator under the label (SPEC-ui-relation §2.9). */
 const DETAIL_ROW_H = 15;
 
 /** The numbered rows' left inset inside the card. */
@@ -212,7 +212,7 @@ interface GraphNode {
 	edgeKind: string;
 	edgeCount: number;
 	/** Every site's 0-based line the edge kept, ascending — the numbered rows a
-	 *  multi-site edge draws under its card (the classic IDE's ShowGraphDetails). */
+	 *  multi-site edge draws under its card. */
 	edgeLines: number[];
 	hasChildren: boolean;
 	expanded: boolean;
@@ -227,8 +227,8 @@ interface GraphEdge {
 	from: string;
 	to: string;
 	/** `call`, `use`, or `member` (a contains ring's edge) — the wire's classification,
-	 *  kept for the cross-edge bookkeeping; the drawing itself reads the classic IDE's
-	 *  one connection red. */
+	 *  kept for the cross-edge bookkeeping; the drawing itself reads one connection
+	 *  red. */
 	kind: string;
 	/** How many reference sites this edge aggregates — 1 for a single site. */
 	count: number;
@@ -293,8 +293,7 @@ interface DetailRow {
 	line: number | null;
 }
 
-/** A multi-site edge's numbered rows (the classic IDE's ShowGraphDetails,
- *  SPEC-ui-relation §2.9):
+/** A multi-site edge's numbered rows (SPEC-ui-relation §2.9):
  *  one row per kept site line, a "+N" tail when the count outran them. A single-site
  *  edge answers none — its card stays clean. */
 function detailRows(node: GraphNode): DetailRow[] {
@@ -340,8 +339,8 @@ export class RelationGraphView {
 
 	/** A plain click's jump, shown in the Definition page — the card's symbol (or the
 	 *  numbered row's site, on its edge's own file) handed over in the page's own
-	 *  vocabulary (2026-11-23, the owner's direction: 关系点击在定义里显示跳转，代码页面
-	 *  不跳转 — the code page stays where it is). */
+	 *  vocabulary (2026-11-23, the owner's direction: a relation click shows the jump
+	 *  in the Definition page, the code page never jumps). */
 	onShowDefinition?: (subject: DefinitionSubject) => void;
 
 	/** The pin's toggle — the host re-feeds the cursor's symbol when the pin lifts. */
@@ -824,11 +823,12 @@ export class RelationGraphView {
 	/* ---------- Expansion ---------- */
 
 	/** The drill toggles the ring and repaints: the layout re-plans the visible tree
-	 *  (the mind map's own 自动排列 — the drawing always lands on the tidy arrangement,
-	 *  never a drifted one) and the displaced cards **glide** to their new spots, so the
-	 *  fold reads as the branch opening and the tree closing up — the same drawing,
-	 *  animated; no flash, no camera jump (the owner's directions: 点击打开折叠内容，
-	 *  或者关闭折叠内容，不要重新刷新图形 + 要像思维导图一样自动排列). */
+	 *  (re-planned by itself, like a mind map — the drawing always lands on the tidy
+	 *  arrangement, never a drifted one) and the displaced cards **glide** to their new
+	 *  spots, so the fold reads as the branch opening and the tree closing up — the same
+	 *  drawing, animated; no flash, no camera jump (the owner's directions: a click opens
+	 *  or closes the fold in place, never re-refreshing the whole drawing, and the
+	 *  layout re-plans by itself). */
 	private async toggleExpand(key: string): Promise<void> {
 		const node = this.nodes.get(key);
 		if (!node || node.loading) return;
@@ -931,13 +931,15 @@ export class RelationGraphView {
 	}
 
 	/** Build the scene: the visible tree walks the layered layout fresh on
-	 *  every draw — VERTICAL top-down (the owner's direction: relation的图改成从上到下 —
+	 *  every draw — VERTICAL top-down (the owner's direction: the relation graph runs top
+	 *  to bottom —
 	 *  the root's card at the top, every depth its own row, the children of one card
 	 *  packing side by side by their subtree widths, the card centered between its
 	 *  outermost children) or HORIZONTAL left-to-right (the GraphHorizontal layout —
 	 *  every depth its own column advanced by the layer's widest card, the siblings
 	 *  stacking down the Y by their subtree heights, the card centered on its children's
-	 *  run) — so the drawing always lands on the tidy arrangement (the mind map's 自动排列),
+	 *  run) — so the drawing always lands on the tidy arrangement (the mind map's own
+	 *  self-re-planning layout),
 	 *  and the paint's glide carries the re-planned cards there smoothly. */
 	private buildScene(): Scene {
 		const nodes: Scene['nodes'] = [];
@@ -1280,7 +1282,7 @@ export class RelationGraphView {
 		if (this.moves.size > 0) this.beginMoves();
 	}
 
-	/** The arrowhead marker — the classic IDE's V-shaped head (three line segments, not
+	/** The arrowhead marker — the V-shaped head (three line segments, not
 	 *  a filled wedge), in the connection red, rebuilt each draw: the palette may have
 	 *  flipped with the theme. */
 	private paintMarkers(palette: ReturnType<typeof themePalette>): void {
@@ -1365,8 +1367,8 @@ export class RelationGraphView {
 		return g;
 	}
 
-	/** The numbered rows a multi-site edge draws under its card (the classic IDE's
-	 *  ShowGraphDetails, SPEC-ui-relation §2.9): a separator under the label, then one "N. line L" row per
+	/** The numbered rows a multi-site edge draws under its card (SPEC-ui-relation
+	 *  §2.9): a separator under the label, then one "N. line L" row per
 	 *  site, a "+N more" tail when the count outran the kept lines. A row's click jumps
 	 *  to that site — the edge's own file at the row's line — and stops before the card's
 	 *  definition jump. Reconciled by signature, so an unchanged card repaints nothing. */
@@ -1459,8 +1461,8 @@ export class RelationGraphView {
 
 	/** One link's paint: the connection red, the V arrowhead riding the end, the ×N
 	 *  label on the bus run (standing down when the edge's own card speaks the count in
-	 *  numbered rows), and the orthogonal path itself — the classic IDE's Orthogonal
-	 *  connection (SPEC-ui-relation §2 连线): out of the `from` card's facing face, the mid-band
+	 *  numbered rows), and the orthogonal path itself — the Orthogonal connection
+	 *  (SPEC-ui-relation §2): out of the `from` card's facing face, the mid-band
 	 *  bus every sibling edge shares, into the `to` card's facing face, the head on the
 	 *  referenced side. */
 	private paintEdge(g: SVGGElement, edge: Scene['edges'][number], palette: ReturnType<typeof themePalette>): void {
@@ -1490,7 +1492,7 @@ export class RelationGraphView {
 	 *  the bottom/top faces and runs the bus along the mid-band between the rows;
 	 *  HORIZONTAL (the GraphHorizontal layout) leaves the right/left faces and runs it
 	 *  between the columns. Sibling edges of one parent share the band, so their runs
-	 *  merge into the classic IDE's one trunk line. An edge whose ends share a band (a cross edge
+	 *  merge into one trunk line. An edge whose ends share a band (a cross edge
 	 *  between two cards of one row) routes around both instead of through them — under
 	 *  the row (right of the column), entering the near face. */
 	private linkPoints(from: LayoutPoint, to: LayoutPoint): [number, number][] {

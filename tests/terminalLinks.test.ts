@@ -149,7 +149,7 @@ describe('the link provider over the view', () => {
 		term.lines[0] = '错误 at C:\\src\\main.rs:10';
 		const [link] = linksFor(term);
 		expect(link!.text).toBe('C:\\src\\main.rs:10');
-		// 错 and 误 paint two cells each: the path begins at string index 6 but cell
+		// Each of the two leading hanzi paints two cells: the path begins at string index 6 but cell
 		// column 8, so the 1-based underline covers cells 9..25 — exactly the path,
 		// not two cells to its left (the misalignment this fixes).
 		expect(link!.range).toEqual({ start: { x: 9, y: 1 }, end: { x: 25, y: 1 } });
@@ -158,7 +158,7 @@ describe('the link provider over the view', () => {
 		const [wide] = linksFor(term);
 		expect(wide!.text).toBe('/c/proj/测试.ts:2');
 		// The wide characters INSIDE the link text count too: five cells precede the
-		// link, and its 15 code units (测、试 two of them wide) paint 17 cells — 6..22.
+		// link, and its 15 code units (two wide hanzi among them) paint 17 cells — 6..22.
 		expect(wide!.range).toEqual({ start: { x: 6, y: 1 }, end: { x: 22, y: 1 } });
 		await view.killActive();
 	});
