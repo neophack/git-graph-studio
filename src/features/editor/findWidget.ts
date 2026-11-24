@@ -220,6 +220,13 @@ export function createFindPanel(view: EditorView): Panel {
 			event.preventDefault();
 			closeSearchPanel(view);
 			view.focus();
+		} else if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'f') {
+			// Ctrl+F again while the widget holds the focus re-selects the query (VS Code);
+			// the workbench's keydown suppresses the key, so the webview's own find bar
+			// never pops over the widget.
+			event.preventDefault();
+			input.focus();
+			input.select();
 		} else if (event.key === 'Enter' && event.altKey && (event.ctrlKey || event.metaKey)) {
 			// Ctrl+Alt+Enter replaces every match, from either field (VS Code's binding).
 			event.preventDefault();

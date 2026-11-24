@@ -277,12 +277,16 @@ function indentSettings(): Extension {
 	return [indentUnit.of(' '.repeat(settings.tabSize)), EditorState.tabSize.of(settings.tabSize)];
 }
 
-/** VS Code's comment keys (Ctrl+/, Shift+Alt+A) against a file's comment tokens. */
+/** VS Code's comment keys (Ctrl+/, Shift+Alt+A) against a file's comment tokens. Both stop
+ *  propagation like the ladder keys above: the keys are ALSO registry keybindings
+ *  (editor.toggleLineComment / editor.toggleBlockComment), and a handled key that bubbles to
+ *  the workbench's keydown toggles a second time — the press would comment and immediately
+ *  uncomment, netting nothing. */
 function commentBindings(path: string): KeyBinding[] {
 	const comment = commentKeymapFor(() => path);
 	return [
-		{ key: 'Mod-/', run: comment.line, preventDefault: true },
-		{ key: 'Shift-Alt-a', run: comment.block, preventDefault: true }
+		{ key: 'Mod-/', run: comment.line, preventDefault: true, stopPropagation: true },
+		{ key: 'Shift-Alt-a', run: comment.block, preventDefault: true, stopPropagation: true }
 	];
 }
 

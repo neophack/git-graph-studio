@@ -1007,7 +1007,15 @@ export class Workbench {
 		// was swallowed and nothing reached the clipboard.
 		if ((command.id === 'editor.copy' || command.id === 'editor.cut') && isNativeClipboardKey(event)) return;
 		// Text editing keys stay with the focused editor / input.
-		if (inEditor && ['editor.undo', 'editor.redo', 'editor.paste', 'editor.selectAll', 'editor.find', 'editor.replace'].includes(command.id)) return;
+		if (inEditor && ['editor.undo', 'editor.redo', 'editor.paste', 'editor.selectAll'].includes(command.id)) return;
+		// Find / replace while a field already holds the focus (the widget's input, the panel,
+		// any view's search box): the key is claimed but nobody re-opens the widget from here,
+		// so it must still be suppressed — a keydown left unprevented reaches the webview's
+		// own find bar, which pops over the widget (the white Edge box).
+		if (command.id === 'editor.find' || command.id === 'editor.replace') {
+			event.preventDefault();
+			return;
+		}
 		event.preventDefault();
 		void commands.execute(command.id);
 	}

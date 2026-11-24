@@ -100,6 +100,17 @@ describe('DocFindController', () => {
 		key(find, 'Enter');
 		await flush();
 		expect(calls).toEqual(['reveal']);
+
+		// Ctrl+F again while a field holds the focus re-selects the query (VS Code) — it
+		// neither closes the bar nor steps, and stays suppressed so the webview's own
+		// find bar never pops over the widget.
+		const again = key(find, 'f', { ctrlKey: true });
+		expect(again.defaultPrevented).toBe(true);
+		expect(document.activeElement).toBe(find);
+		expect(find.selectionStart).toBe(0);
+		expect(find.selectionEnd).toBe(find.value.length);
+		expect(controller.isOpen).toBe(true);
+		calls.length = 0;
 		controller.close();
 	});
 });

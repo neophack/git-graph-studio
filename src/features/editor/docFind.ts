@@ -361,6 +361,13 @@ export class DocFindController {
 		if (event.key === 'Escape') {
 			event.preventDefault();
 			this.close();
+		} else if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'f') {
+			// Ctrl+F again while the bar holds the focus re-selects the query (VS Code);
+			// the workbench's keydown suppresses the key, so the webview's own find bar
+			// never pops over the widget.
+			event.preventDefault();
+			this.input.focus();
+			this.input.select();
 		} else if (event.key === 'Enter' && event.altKey && (event.ctrlKey || event.metaKey)) {
 			event.preventDefault();
 			void this.replace(true);
