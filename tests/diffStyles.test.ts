@@ -137,10 +137,10 @@ describe('diff decoration styles', () => {
 		expect(wrapper).toMatch(/flex-direction:\s*column/);
 	});
 
-	it('the sash owns the pane junction — above its pointer-cursor neighbours, with a wider grab strip', () => {
+	it('the sash owns the pane junction — above its cursor-taking neighbours, with a wider grab strip', () => {
 		// The base pane's overview ruler and the revert arrows' column sit flush against the
-		// sash (both z-index 6, the wrappers are no stacking contexts) with pointer cursors:
-		// a mouse aimed at the bar landed on them — hand cursor, and the drag never started.
+		// sash (both z-index 6, the wrappers are no stacking contexts): a mouse aimed at the
+		// bar landed on them, and the drag never started.
 		// The sash must sit above both, and its own 4px is too narrow a target: an ::after
 		// extends its hit area 6px into each pane so everything near the line drags.
 		const sash = ruleBody('.cm-merge-view .cm-mergeViewEditors .cm-diff-sash');
@@ -159,5 +159,16 @@ describe('diff decoration styles', () => {
 		// button rule earlier in the sheet styles colours only).
 		const buttonRule = css.match(/\.cm-merge-revert button \{([^}]*position:\s*absolute[^}]*)\}/)?.[1] ?? '';
 		expect(buttonRule).toMatch(/pointer-events:\s*auto/);
+	});
+
+	it('the overview ruler carries the drag itself — the strip over the scrollbar takes the press', () => {
+		// The strip sits over the native scrollbar's inner edge, so a drag aimed at the
+		// scrollbar thumb lands on it: the strip must answer the drag (the handler scrolls
+		// proportionally, editorExtras' rulerDragScrollTop) and keep the owner's plain
+		// arrow cursor — no hand on the ruler. touch-action none keeps a touch drag feeding
+		// pointermove instead of the browser's scroll takeover.
+		const ruler = ruleBody('.cm-overview-ruler');
+		expect(ruler).toMatch(/touch-action:\s*none/);
+		expect(ruler).toMatch(/cursor:\s*default/);
 	});
 });

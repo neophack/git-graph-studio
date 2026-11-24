@@ -390,9 +390,10 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
 .cm-merge-view > .cm-mergeView > .cm-mergeViewEditors > .cm-mergeViewEditor > .cm-editor > .cm-scroller { height: 100% !important; overflow-y: auto !important; }
 /* The diff overview ruler (VS Code's scrollbar change map): a narrow strip at each pane's
    right edge where every changed region shows as a green (inserted) or red (deleted) mark,
-   heightmap-mapped so collapsed ranges compress it like the content. The click centres the
-   spot; the strip rides over the native scrollbar's inner edge, which keeps dragging. */
-.cm-overview-ruler { position: absolute; top: 0; bottom: 0; right: 1px; width: 5px; z-index: 6; cursor: pointer; }
+   heightmap-mapped so collapsed ranges compress it like the content. The strip sits over
+   the native scrollbar's inner edge, so it carries the pointer itself: a drag on it
+   scrolls proportionally (the drawn scrollbar's geometry), a plain click centres the spot. */
+.cm-overview-ruler { position: absolute; top: 0; bottom: 0; right: 1px; width: 5px; z-index: 6; cursor: default; touch-action: none; }
 .cm-overview-mark { position: absolute; left: 0; width: 4px; border-radius: 1px; }
 /* The per-chunk revert controls (VS Code's "Revert Change" arrows) in the column between
    the diff panes: theme colours, a hover highlight, the package's glyph kept. */
@@ -403,12 +404,13 @@ body.no-folder #statusbar { background: var(--vscode-statusBar-noFolderBackgroun
    panes' inline flex; until the first drag the package's 50/50 grow stands). A 1px centre
    line reads as the pane boundary; hover or drag widens it in the theme's sash colour.
    The sash sits ABOVE its neighbours and owns the whole junction: the base pane's overview
-   ruler and the revert arrows' column (both z-index 6, both pointer-cursor surfaces) sit
-   flush against its 4px box, and a mouse aimed at the bar landed on them — hand cursor,
+   ruler and the revert arrows' column (both z-index 6) sit
+   flush against its 4px box, and a mouse aimed at the bar landed on them —
    the drag never started. The ::after is an invisible grab strip reaching 6px into each
    pane, so everything near the line is ew-resize and every press there starts the drag;
    the ruler keeps painting beneath it (the marks stay visible) and the modified pane's
-   ruler at the window's far edge keeps its click-to-centre. */
+   ruler at the window's far edge keeps its click-to-centre (the plain arrow cursor —
+   the owner's direction: the two bars read the same, no hand on the ruler). */
 .cm-merge-view .cm-mergeViewEditors .cm-diff-sash { flex: 0 0 4px; position: relative; z-index: 7; cursor: ew-resize; }
 .cm-merge-view .cm-mergeViewEditors .cm-diff-sash::after { content: ''; position: absolute; top: 0; bottom: 0; left: -6px; right: -6px; }
 .cm-merge-view .cm-mergeViewEditors .cm-diff-sash::before { content: ''; position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; transform: translateX(-0.5px); background: var(--vscode-editorGroup-border); }

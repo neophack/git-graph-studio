@@ -251,6 +251,26 @@ describe('the diff overview ruler (chunkOverviewMarks)', () => {
 	});
 });
 
+describe('the overview ruler drag (rulerDragScrollTop)', () => {
+	it('maps the pointer through the thumb\u2019s share of the track and clamps to the scrollable range', async () => {
+		const { rulerDragScrollTop } = await import('../src/features/editor/editorExtras');
+		// A 10 000px document in a 1 000px viewport on an 800px strip: the thumb is a tenth
+		// of the track (80px), so the pointer's pixels read back through the drawn
+		// scrollbar's geometry — the strip covers the native scrollbar's inner edge, and a
+		// drag aimed at the thumb has to land here.
+		const track = 800;
+		expect(rulerDragScrollTop(0, track, 10000, 1000)).toBe(0);
+		expect(rulerDragScrollTop(track, track, 10000, 1000)).toBe(9000);
+		const mid = rulerDragScrollTop(track / 2, track, 10000, 1000);
+		expect(mid).toBeGreaterThan(4000);
+		expect(mid).toBeLessThan(5000);
+		// A document that fits, or a strip with no height, scrolls nothing wherever the
+		// pointer sits.
+		expect(rulerDragScrollTop(400, track, 800, 1000)).toBe(0);
+		expect(rulerDragScrollTop(400, 0, 10000, 1000)).toBe(0);
+	});
+});
+
 describe('the revert arrows (positionRevertArrows)', () => {
 	/** A column with one button per chunk; the tops are preset the way the old package wrote
 	 *  them — positionRevertArrows must keep writing them itself (the diff-view rewrite lost

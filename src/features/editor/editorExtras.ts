@@ -8,6 +8,7 @@ import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate
 import { syntaxTree } from '@codemirror/language';
 
 import { SETTINGS_EVENT, THEME_EVENT, settings } from '../../platform/settings';
+import { MIN_THUMB_PX } from '../../scroll/scrollbar';
 import { deltaToPixels, OngoingScroll, wheelToDelta } from '../../scroll/wheel';
 
 /** A coalesced redraw around a callback: the returned trigger runs the callback once per
@@ -537,6 +538,19 @@ export function chunkOverviewMarks(
 	return marks;
 }
 
+/** The overview ruler strip's drag mapping — the drawn scrollbar's own geometry (the thumb
+ *  is the viewport's share of the track, one track pixel per scrolled row past the thumb)
+ *  reading the pointer's pixels back to a scrollTop. Clamped to the scrollable range; 0
+ *  where nothing scrolls. The strip sits over the native scrollbar's inner edge, so it has
+ *  to carry the drag itself: a press aimed at the scrollbar thumb lands here. */
+export function rulerDragScrollTop(y: number, track: number, scrollHeight: number, viewHeight: number): number {
+	const maxScroll = scrollHeight - viewHeight;
+	if (track <= 0 || maxScroll <= 0 || viewHeight <= 0) return 0;
+	const thumb = Math.min(track, Math.max(MIN_THUMB_PX, track * (viewHeight / scrollHeight)));
+	const pxPerPx = (track - thumb) / maxScroll;
+	return Math.max(0, Math.min((y - thumb / 2) / pxPerPx, maxScroll));
+}
+
 /** VS Code's diff overview ruler: the narrow strip at the pane's right edge where every
  *  changed region shows as a green (insertions) or red (deletions) mark — the scrollbar's
  *  map of where the changes sit, so a glance finds them in a thousand-line file. The marks
@@ -582,24 +596,68 @@ export function attachOverviewRuler(
 	// A pane resize (window, panel sash, group split) rescales the strip's mapping.
 	const resize = new ResizeObserver(refresh);
 	resize.observe(pane.scrollDOM);
-	const onClick = options.clickable === false
-		? null
-		: (event: MouseEvent): void => {
-			const rulerHeight = ruler.clientHeight;
-			const height = pane.scrollDOM.scrollHeight;
-			if (rulerHeight <= 0 || height <= 0) return;
-			const at = ((event.clientY - ruler.getBoundingClientRect().top) / rulerHeight) * height;
-			const view = pane.scrollDOM.clientHeight;
-			pane.scrollDOM.scrollTop = Math.max(0, Math.min(at - view / 2, height - view));
-		};
-	if (onClick) ruler.addEventListener('click', onClick);
+	// The strip covers the native scrollbar's inner edge, so it carries the pointer itself:
+	// a press that moves follows it proportionally (rulerDragScrollTop — the thumb under the
+	// pointer, exactly the drawn scrollbar's drag), and a press that stays put keeps the
+	// click-to-centre. Before the drag half existed the strip swallowed every drag aimed at
+	// the scrollbar thumb — the drag answered nothing and only the release jumped.
+	let drag: { pointerId: number; startY: number; moved: boolean } | null = null;
+	const centre = (event: PointerEvent): void => {
+		const rulerHeight = ruler.clientHeight;
+		const height = pane.scrollDOM.scrollHeight;
+		if (rulerHeight <= 0 || height <= 0) return;
+		const at = ((event.clientY - ruler.getBoundingClientRect().top) / rulerHeight) * height;
+		const view = pane.scrollDOM.clientHeight;
+		pane.scrollDOM.scrollTop = Math.max(0, Math.min(at - view / 2, height - view));
+	};
+	const onPointerDown = (event: PointerEvent): void => {
+		if (event.button !== 0 || drag !== null) return;
+		event.preventDefault();
+		drag = { pointerId: event.pointerId, startY: event.clientY, moved: false };
+		// A test DOM has no pointer capture; a browser keeps the drag past the strip's edge.
+		if (typeof ruler.setPointerCapture === 'function') {
+			try { ruler.setPointerCapture(event.pointerId); } catch { /* a plain mouse, or jsdom */ }
+		}
+	};
+	const onPointerMove = (event: PointerEvent): void => {
+		if (drag === null || event.pointerId !== drag.pointerId) return;
+		// A wiggle under a couple of pixels is still the click, not the drag.
+		if (!drag.moved && Math.abs(event.clientY - drag.startY) <= 2) return;
+		drag.moved = true;
+		const track = ruler.clientHeight;
+		if (track <= 0) return;
+		const scroller = pane.scrollDOM;
+		const y = event.clientY - ruler.getBoundingClientRect().top;
+		scroller.scrollTop = rulerDragScrollTop(y, track, scroller.scrollHeight, scroller.clientHeight);
+	};
+	const onPointerUp = (event: PointerEvent): void => {
+		if (drag === null || event.pointerId !== drag.pointerId) return;
+		const moved = drag.moved;
+		drag = null;
+		if (typeof ruler.hasPointerCapture === 'function' && ruler.hasPointerCapture(event.pointerId)) {
+			ruler.releasePointerCapture(event.pointerId);
+		}
+		if (!moved) centre(event);
+	};
+	const interactive = options.clickable !== false;
+	if (interactive) {
+		ruler.addEventListener('pointerdown', onPointerDown);
+		ruler.addEventListener('pointermove', onPointerMove);
+		ruler.addEventListener('pointerup', onPointerUp);
+		ruler.addEventListener('pointercancel', onPointerUp);
+	}
 	refresh();
 	return {
 		refresh,
 		detach: (): void => {
 			resize.disconnect();
 			unregisterRedraw();
-			if (onClick) ruler.removeEventListener('click', onClick);
+			if (interactive) {
+				ruler.removeEventListener('pointerdown', onPointerDown);
+				ruler.removeEventListener('pointermove', onPointerMove);
+				ruler.removeEventListener('pointerup', onPointerUp);
+				ruler.removeEventListener('pointercancel', onPointerUp);
+			}
 			ruler.remove();
 		}
 	};

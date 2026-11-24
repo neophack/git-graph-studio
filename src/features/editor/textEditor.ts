@@ -26,7 +26,7 @@ export { EditorState, EditorView, keymap, openSearchPanel, openReplacePanel, red
 export { addCursorAbove, addCursorBelow, copyLineDown, copyLineUp, cursorMatchingBracket, deleteLine, moveLineDown, moveLineUp };
 // The diff overview ruler rides the text-editor chunk: compare modules (merge toolbar,
 // folder compare) reach it through this module (lazy.ts), never across module files (R2).
-export { attachOverviewRuler, chunkOverviewMarks, type OverviewMark } from './editorExtras';
+export { attachOverviewRuler, chunkOverviewMarks, rulerDragScrollTop, type OverviewMark } from './editorExtras';
 
 /** The phone's read-only open's reconfigure point (src/remote/editLock.ts): the locked
  *  configuration is editor state, lifted and restored in place by the app bar's lock toggle. */
