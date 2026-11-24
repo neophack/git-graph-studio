@@ -162,8 +162,8 @@ export class ReferencesView {
 	readonly element: HTMLElement;
 	readonly actions: HTMLElement;
 
-	/** A jump into the editor — the line arrives 1-based. */
-	onOpen?: (path: string, line: number) => void;
+	/** A jump into the editor — the line arrives 1-based, the column 1-based when known. */
+	onOpen?: (path: string, line: number, column?: number) => void;
 
 	/** The panel page's shown() asks the workbench to re-resolve the cursor symbol. */
 	onNeedRoot?: () => void;
@@ -239,10 +239,15 @@ export class ReferencesView {
 		this.loading = subject !== null;
 		this.failed = false;
 		if (!subject) {
-			this.sections = [];
-			this.openGroups.clear();
-			this.openSites.clear();
-			this.fileData.clear();
+			// A cursor resting on nothing never wipes accumulated results under the
+			// append / ask policies — only the replace policy clears the page.
+			if (this.options.output === 'replace') {
+				this.sections = [];
+				this.openGroups.clear();
+				this.openSites.clear();
+				this.fileData.clear();
+			}
+			this.loading = false;
 			this.render();
 			return;
 		}
@@ -257,8 +262,8 @@ export class ReferencesView {
 			this.sections = [];
 			this.openGroups.clear();
 			this.openSites.clear();
+			this.fileData.clear();
 		}
-		this.fileData.clear();
 		this.render();
 		try {
 			const [refs, defs] = await Promise.all([symbolReferences(subject.name), symbolLookup(subject.name)]);
@@ -374,7 +379,7 @@ export class ReferencesView {
 
 	private render(): void {
 		this.body.textContent = '';
-		if (!this.subject) {
+		if (!this.subject && this.sections.length === 0) {
 			this.body.appendChild(el('div', 'refs-hint', [this.note ?? t('references.hint')]));
 			return;
 		}
@@ -515,11 +520,11 @@ export class ReferencesView {
 			row.appendChild(this.paintLineText((lines[at] ?? '').trimEnd(), extOf(file.path)));
 		}
 		row.title = t('references.siteTitle');
-		row.addEventListener('click', () => this.onOpen?.(file.path, match.line));
+		row.addEventListener('click', () => this.onOpen?.(file.path, match.line, match.column));
 		row.addEventListener('keydown', (event) => {
 			if (event.key === 'Enter') {
 				event.preventDefault();
-				this.onOpen?.(file.path, match.line);
+				this.onOpen?.(file.path, match.line, match.column);
 			} else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
 				event.preventDefault();
 				const rows = this.body.querySelectorAll<HTMLElement>('.refs-site');

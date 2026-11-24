@@ -7,7 +7,7 @@ import { Channel } from '../platform/ipc/core';
 import { bootStage } from '../platform/ipc/app';
 import { encodings, listFiles, readFile, type WatcherReport } from '../platform/ipc/fs';
 import { workspaceSymbols } from '../platform/ipc/search';
-import { symbolLookup, symbolsRebuild, type SymbolIndexEvent } from '../platform/ipc/symbols';
+import { symbolLookup, symbolScopeLookup, symbolsRebuild, type SymbolIndexEvent } from '../platform/ipc/symbols';
 import { viewerClose, viewerOpen } from '../platform/ipc/viewer';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
@@ -743,9 +743,9 @@ export class Workbench {
 	definitionGeneration = 0;
 
 	followContextSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): void {
-		// The view only follows while it is the one being looked at (or pinned to a symbol);
+		// The view only follows while it is the one being looked at and not pinned;
 		// anything else leaves it as it is - never a background query per keystroke.
-		if (!this.panel.context.isPinned() && this.panel.activeView() !== 'context') return;
+		if (this.panel.context.isPinned() || !this.panel.isVisible() || this.panel.activeView() !== 'context') return;
 		if (this.contextTimer !== null) window.clearTimeout(this.contextTimer);
 		const generation = ++this.contextGeneration;
 		this.contextTimer = window.setTimeout(() => {
@@ -769,17 +769,38 @@ export class Workbench {
 			return;
 		}
 		const name = view.state.sliceDoc(word.from, word.to);
+		const line0 = Math.max(0, editor.line - 1);
+		const ext = editor.path ? (editor.path.split('.').pop() ?? '') : '';
+		if (editor.path && ext) {
+			try {
+				const text = view.state.doc.toString();
+				const locals = (await symbolScopeLookup(name, line0, text, ext)) ?? [];
+				const local = locals[0];
+				if (local) {
+					const lines = text.split('\n');
+					const from = Math.max(0, local.line - 2);
+					const to = Math.min(lines.length, local.line + 25);
+					const fragment = lines.slice(from, to).join('\n');
+					this.panel.context.show({ kind: local.kind, name: local.name, path: editor.path, line: local.line, endLine: local.line, fragment });
+					return;
+				}
+			} catch {
+				// Scope lookup is opportunistic; fall back to the workspace index.
+			}
+		}
 		let defs: { kind: string; name: string; path: string; line: number; endLine?: number }[] = [];
 		try {
 			defs = (await symbolLookup(name)) ?? [];
 		} catch {
 			defs = [];
 		}
-		if (defs.length !== 1) {
-			this.panel.context.show(null, defs.length > 1 ? `${defs.length} ${t('symbols.context.ambiguous')}` : undefined);
+		const wanted = editor.path ? editor.path.replaceAll('\\', '/').toLowerCase() : '';
+		const picked = pickDefinition(defs, (path) => joinRepo(this.repoPath!, path).replaceAll('\\', '/').toLowerCase() === wanted, line0);
+		if (!picked) {
+			this.panel.context.show(null);
 			return;
 		}
-		const def = defs[0]!;
+		const def = picked;
 		const absolute = /^([a-zA-Z]:[\\/]|\\|\/)/.test(def.path) ? def.path : joinRepo(this.repoPath, def.path);
 		let fragment = '';
 		try {
@@ -836,6 +857,21 @@ export class Workbench {
 			return;
 		}
 		const name = view.state.sliceDoc(word.from, word.to);
+		const line0 = Math.max(0, editor.line - 1);
+		const ext = editor.path ? (editor.path.split('.').pop() ?? '') : '';
+		if (page !== 'references' && editor.path && ext) {
+			try {
+				const locals = (await symbolScopeLookup(name, line0, view.state.doc.toString(), ext)) ?? [];
+				const local = locals[0];
+				if (local) {
+					const relPath = relativeTo(this.repoPath, editor.path).replaceAll('\\', '/');
+					this.panel.definition.setDefinition({ kind: local.kind, name: local.name, path: relPath, line: local.line, endLine: local.line });
+					return;
+				}
+			} catch {
+				// Scope lookup is opportunistic; fall back to the workspace index.
+			}
+		}
 		let defs: { kind: string; name: string; path: string; line: number; endLine?: number }[] = [];
 		try {
 			defs = (await symbolLookup(name)) ?? [];
@@ -846,11 +882,12 @@ export class Workbench {
 			clears();
 			return;
 		}
-		// A same-file definition outranks the first hit; the index speaks repo-relative
-		// paths and the definition backend expects them, so the row crosses as reported
-		// (the view's open callback joins the root, not here).
+		// A same-file definition outranks cross-file hits (preferring one covering the cursor,
+		// then one with a body, then the nearest line); across files a definition with a body
+		// outranks a bare prototype. The index speaks repo-relative paths and the definition
+		// backend expects them, so the row crosses as reported.
 		const wanted = editor.path ? editor.path.replaceAll('\\', '/').toLowerCase() : '';
-		const def = defs.find((candidate) => joinRepo(this.repoPath!, candidate.path).replaceAll('\\', '/').toLowerCase() === wanted) ?? defs[0]!;
+		const def = pickDefinition(defs, (path) => joinRepo(this.repoPath!, path).replaceAll('\\', '/').toLowerCase() === wanted, line0)!;
 		if (page === 'references') this.panel.references.setSubject({ kind: def.kind, name: def.name, path: def.path, line: def.line });
 		else this.panel.definition.setDefinition({ kind: def.kind, name: def.name, path: def.path, line: def.line, endLine: def.endLine });
 	}
@@ -1143,6 +1180,19 @@ export function whenIdle(work: () => void, timeoutMs = 2000): void {
 export function joinRepo(root: string, relative: string): string {
 	const separator = root.includes('\\') ? '\\' : '/';
 	return root.replace(/[\\/]+$/, '') + separator + relative.replaceAll('/', separator);
+}
+
+/** The one definition preference every symbol surface shares: a same-file entry covering
+ *  the line, then a same-file one with a body, then the nearest same-file line; across
+ *  files an implementation with a body outranks a bare prototype. */
+export function pickDefinition<T extends { line: number; endLine?: number }>(defs: T[], inFile: (path: string) => boolean, line0: number, pathOf: (def: T) => string = (def) => (def as unknown as { path: string }).path): T | undefined {
+	const sameFile = defs.filter((def) => inFile(pathOf(def)));
+	if (sameFile.length > 0) {
+		return sameFile.find((def) => def.line <= line0 && line0 <= (def.endLine ?? def.line))
+			?? sameFile.find((def) => (def.endLine ?? def.line) > def.line)
+			?? sameFile.reduce((best, def) => (Math.abs(def.line - line0) < Math.abs(best.line - line0) ? def : best), sameFile[0]!);
+	}
+	return defs.find((def) => (def.endLine ?? def.line) > def.line) ?? defs[0];
 }
 
 /** Quick Open's modes in one source, as VS Code switches them: a leading "?" is the help

@@ -9,11 +9,11 @@
 // one click relocates the window onto the clicked word's own definition, chain browsing.
 
 import { readFile } from '../../platform/ipc/fs';
-import { symbolLookup } from '../../platform/ipc/symbols';
+import { symbolLookup, symbolScopeLookup } from '../../platform/ipc/symbols';
 
 import { t } from '../../platform/i18n';
 import { highlightLine, extOf, wordAt } from '../../platform/highlight';
-import { actionButton, el, icon } from '../../platform/ui/index';
+import { actionButton, el, icon, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 
 /** What the workbench resolved the symbol under the cursor to. */
 export interface ContextDefinition {
@@ -56,6 +56,7 @@ export const KIND_ICONS: Record<string, string> = {
 	typeParameter: 'symbol-type-parameter',
 	macro: 'symbol-snippet',
 	label: 'symbol-keyword',
+	parameter: 'symbol-parameter',
 	variable: 'symbol-variable'
 };
 
@@ -79,6 +80,12 @@ export class ContextView {
 
 	onOpenDefinition: ((definition: ContextDefinition) => void) | null = null;
 
+	/** The panel page's shown() asks the workbench to re-resolve the cursor symbol. */
+	onNeedRoot?: () => void;
+
+	/** Notifies the host when the user toggles the pin button. */
+	onPinChange?: (pinned: boolean) => void;
+
 	/** The index's repo-relative paths against the workspace: the hook the host wires so
 	 *  the whole-file read (and the chain browse's feed) opens the absolute spelling the
 	 *  backend's read_file needs. Unwired, the path passes through as-is. */
@@ -87,6 +94,7 @@ export class ContextView {
 	constructor() {
 		this.body = el('div', 'context-body');
 		this.body.addEventListener('click', this.onBodyClick);
+		this.body.addEventListener('contextmenu', this.onBodyContextMenu);
 		this.element = el('div', 'panel-body context-panel', [this.body]);
 		this.element.hidden = true;
 		this.pinButton = actionButton('pin', t('symbols.context.pin'), () => this.togglePin());
@@ -95,11 +103,17 @@ export class ContextView {
 	}
 
 	private togglePin(): void {
-		this.pinned = !this.pinned;
+		this.setPinned(!this.pinned);
+		this.onPinChange?.(this.pinned);
+	}
+
+	setPinned(pinned: boolean): void {
+		this.pinned = pinned;
 		this.pinButton.title = this.pinned ? t('symbols.context.unpin') : t('symbols.context.pin');
 		this.pinButton.setAttribute('aria-label', this.pinButton.title);
 		this.pinButton.innerHTML = '';
 		this.pinButton.appendChild(icon(this.pinned ? 'pinned' : 'pin'));
+		this.pinButton.classList.toggle('active', this.pinned);
 		this.element.classList.toggle('pinned', this.pinned);
 	}
 
@@ -136,14 +150,24 @@ export class ContextView {
 	}
 
 	/** The whole declaring file: the live view's document. A vanished file, a failed
-	 *  read, or one past the ceiling keeps the fragment; a newer show() drops this one. */
+	 *  read, or one past the ceiling keeps the fragment (or shows the refusal when
+	 *  chain-browsing without a fed fragment); a newer show() drops this one. */
 	private async loadWhole(definition: ContextDefinition, token: object): Promise<void> {
 		const generation = ++this.generation;
+		const resolved = this.resolvePath?.(definition.path) ?? definition.path;
 		try {
-			const file = await readFile(this.resolvePath?.(definition.path) ?? definition.path);
+			const file = await readFile(resolved);
 			if (token !== this.currentToken || generation !== this.generation) return;
 			const contents = file?.contents;
-			if (contents == null || contents.length > FILE_MAX) return;
+			if (contents == null) return;
+			if (contents.length > FILE_MAX) {
+				if (!definition.fragment) {
+					this.body.textContent = '';
+					this.body.appendChild(this.buildHeader(definition));
+					this.body.appendChild(el('div', 'context-empty', [t('definition.tooBig')]));
+				}
+				return;
+			}
 			this.wholeLines = contents.split('\n');
 		} catch {
 			return; // the fragment stands
@@ -152,10 +176,7 @@ export class ContextView {
 		this.paint(definition, this.wholeLines!, true);
 	}
 
-	/** The window's paint: the header, then the lines — the fed fragment's slice, or the
-	 *  whole file with the symbol's span marked and the declaration scrolled to. */
-	private paint(definition: ContextDefinition, lines: string[], whole: boolean): void {
-		this.body.textContent = '';
+	private buildHeader(definition: ContextDefinition): HTMLElement {
 		const header = el('div', 'context-header', [
 			icon(KIND_ICONS[definition.kind] ?? 'symbol-variable'),
 			el('span', 'context-name', [definition.name]),
@@ -166,12 +187,34 @@ export class ContextView {
 		location.title = t('symbols.context.open');
 		location.addEventListener('click', () => this.onOpenDefinition?.(definition));
 		header.appendChild(location);
+		return header;
+	}
+
+	/** The selection's last line: the index's end span, a macro whose end never reached
+	 *  the index extending over its `\` continuations. */
+	private selectionEnd(definition: ContextDefinition, lines: string[]): number {
+		let end = Math.max(definition.endLine ?? definition.line, definition.line);
+		if (definition.kind === 'macro' && (definition.endLine ?? 0) <= definition.line) {
+			end = definition.line;
+			for (let at = definition.line; at < Math.min(lines.length, definition.line + 40); at++) {
+				end = at;
+				if (!lines[at]!.trimEnd().endsWith('\\')) break;
+			}
+		}
+		return Math.min(end, Math.max(0, lines.length - 1));
+	}
+
+	/** The window's paint: the header, then the lines — the fed fragment's slice, or the
+	 *  whole file with the symbol's span marked and the declaration scrolled to. */
+	private paint(definition: ContextDefinition, lines: string[], whole: boolean): void {
+		this.body.textContent = '';
+		const header = this.buildHeader(definition);
 		// The definition's own colors: the shared tokenizer's runs, one colored span per
 		// line with the newline as text — the context reads like the editor's code, and
 		// the pane's text content stays the code verbatim.
 		const code = el('pre', 'context-code');
 		const ext = extOf(definition.path);
-		const selEnd = Math.max(definition.endLine ?? definition.line, definition.line);
+		const selEnd = whole ? this.selectionEnd(definition, lines) : Math.max(definition.endLine ?? definition.line, definition.line);
 		lines.forEach((line, index) => {
 			const row = el('span', 'context-line');
 			if (whole && index >= definition.line && index <= selEnd) row.classList.add('context-sel');
@@ -193,14 +236,17 @@ export class ContextView {
 
 	private readonly onBodyClick = (event: MouseEvent): void => {
 		if (this.wholeLines === null) return; // the fragment's rows carry no line coordinates
+		if ((window.getSelection?.()?.toString().length ?? 0) > 0) return;
 		const target = event.target as HTMLElement;
+		if (target.closest('.hl-comment, .hl-string, .hl-keyword, .hl-number')) return;
 		const row = target.closest<HTMLElement>('.context-line');
 		if (!row?.dataset['line'] || row.dataset['line'] === '-1') return;
 		const at = this.caretOffsetIn(row, event);
 		if (at < 0) return;
-		const word = wordAt(this.wholeLines[Number(row.dataset['line'])] ?? '', at);
+		const line0 = Number(row.dataset['line']);
+		const word = wordAt(this.wholeLines[line0] ?? '', at);
 		if (word === null) return;
-		void this.revealWord(word);
+		void this.revealWord(word, line0);
 	};
 
 	/** The caret's character offset across the row's text — the browser's own hit test,
@@ -235,11 +281,42 @@ export class ContextView {
 
 	/** The clicked word's definition re-roots the window — the same resolution the
 	 *  workbench feeds by, resolved here for the chain browsing. */
-	private async revealWord(word: string): Promise<void> {
+	private async revealWord(word: string, line0: number): Promise<void> {
 		try {
+			if (this.current && this.wholeLines) {
+				const ext = extOf(this.current.path);
+				if (ext) {
+					try {
+						const locals = (await symbolScopeLookup(word, line0, this.wholeLines.join('\n'), ext)) ?? [];
+						const local = locals[0];
+						if (local) {
+							this.show({
+								kind: local.kind,
+								name: local.name,
+								path: this.current.path,
+								line: local.line,
+								endLine: local.line,
+								fragment: ''
+							});
+							return;
+						}
+					} catch {
+						// Scope lookup is opportunistic; fall back to the workspace index.
+					}
+				}
+			}
 			const defs = (await symbolLookup(word)) ?? [];
 			if (defs.length === 0) return;
-			const def = (this.current && defs.find((entry) => entry.path === this.current!.path)) ?? defs.find((entry) => (entry.endLine ?? entry.line) > entry.line) ?? defs[0];
+			const norm = (p: string): string => (this.resolvePath?.(p) ?? p).replaceAll('\\', '/').toLowerCase();
+			const currentNorm = this.current ? norm(this.current.path) : '';
+			const sameFile = this.current ? defs.filter((entry) => norm(entry.path) === currentNorm) : [];
+			const def = (sameFile.length > 0
+				? (sameFile.find((entry) => entry.line <= line0 && line0 <= (entry.endLine ?? entry.line))
+					?? sameFile.find((entry) => (entry.endLine ?? entry.line) > entry.line)
+					?? sameFile.reduce((best, entry) => Math.abs(entry.line - line0) < Math.abs(best.line - line0) ? entry : best, sameFile[0]!))
+				: undefined)
+				?? defs.find((entry) => (entry.endLine ?? entry.line) > entry.line)
+				?? defs[0];
 			if (!def) return;
 			this.show({
 				kind: def.kind,
@@ -249,6 +326,7 @@ export class ContextView {
 				// page's chain browse rides.
 				path: def.path,
 				line: def.line,
+				endLine: def.endLine,
 				fragment: ''
 			});
 		} catch {
@@ -256,7 +334,20 @@ export class ContextView {
 		}
 	}
 
+	private readonly onBodyContextMenu = (event: MouseEvent): void => {
+		if (!this.current) return;
+		event.preventDefault();
+		const current = this.current;
+		const entries: MenuEntry[] = [
+			{
+				label: t('definition.syncToEditor'),
+				run: () => this.onOpenDefinition?.(current)
+			}
+		];
+		showContextMenu(event.clientX, event.clientY, entries);
+	};
+
 	shown(): void {
-		// Nothing to load lazily - the workbench pushes into this view.
+		this.onNeedRoot?.();
 	}
 }

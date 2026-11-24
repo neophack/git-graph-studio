@@ -132,6 +132,29 @@ beforeEach(() => {
 		view.element.remove();
 	});
 
+	it('a click on a scope-local variable stays in the current file instead of jumping to another file', async () => {
+		const OTHER_SUM = [{ kind: 'variable', name: 'sum', path: 'src/other.c', line: 0, endLine: 0 }];
+		backend.on('symbol_lookup', ({ name }) => (name === 'sum' ? OTHER_SUM : DEFS));
+		backend.on('symbol_scope_lookup', ({ name, line }) =>
+			name === 'sum' && line === 3 ? [{ kind: 'variable', name: 'sum', line: 2, column: 8, signature: 'int sum = a + b;' }] : []
+		);
+		const view = mountView();
+		view.setDefinition({ kind: 'function', name: 'total', path: 'src/math.c', line: 0, endLine: 4 });
+		await flush();
+		// Click on `sum` on line 3 ('    return sum;') — scope lookup resolves it to line 2 in src/math.c.
+		const row = view.element.querySelector<HTMLElement>('.def-line[data-line="3"]')!;
+		const doc = document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range };
+		doc.caretRangeFromPoint = () => caretAt(row, 11) as Range;
+		click(row);
+		await flush();
+		expect(view.element.querySelector('.def-name')?.textContent).toBe('sum');
+		expect(view.element.querySelector('.def-location')?.textContent).toBe('math.c:3');
+		const chosen = [...view.element.querySelectorAll<HTMLElement>('.def-line.def-sel')];
+		expect(chosen.map((sel) => sel.dataset['line'])).toEqual(['2']);
+		doc.caretRangeFromPoint = undefined;
+		view.element.remove();
+	});
+
 	it('the location button jumps at the 1-based line', async () => {
 		const view = mountView();
 		const opens: string[] = [];

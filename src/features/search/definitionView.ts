@@ -14,7 +14,7 @@
 // the sync, pushing its current position into the code editor when asked.
 
 import { readFile } from '../../platform/ipc/fs';
-import { symbolLookup } from '../../platform/ipc/symbols';
+import { symbolLookup, symbolScopeLookup } from '../../platform/ipc/symbols';
 
 import { t } from '../../platform/i18n';
 import { highlightLine, extOf, wordAt } from '../../platform/highlight';
@@ -232,9 +232,10 @@ export class DefinitionView {
 		if (!row?.dataset['line']) return;
 		const at = this.caretOffsetIn(row, event);
 		if (at < 0) return;
-		const word = wordAt(this.fileLines[Number(row.dataset['line'])] ?? '', at);
+		const line0 = Number(row.dataset['line']);
+		const word = wordAt(this.fileLines[line0] ?? '', at);
 		if (word === null) return;
-		void this.revealWord(word);
+		void this.revealWord(word, line0);
 	};
 
 	/** The caret's character offset across the row's text — the browser's own hit test
@@ -268,14 +269,37 @@ export class DefinitionView {
 		return -1;
 	}
 
-	/** The clicked word's definition re-roots the page: the shown file's own definition
-	 *  wins, then one with a body, then the first — the same preference the declaration
-	 *  card reads by. A failed lookup leaves the page standing. */
-	private async revealWord(word: string): Promise<void> {
+	/** The clicked word's definition re-roots the page: a scope-local parameter or variable
+	 *  at the clicked line wins first, then the shown file's own definition, then one with a
+	 *  body, then the first — the same preference the declaration card reads by. A failed
+	 *  lookup leaves the page standing. */
+	private async revealWord(word: string, line0: number): Promise<void> {
 		try {
+			if (this.subject && this.fileLines) {
+				const ext = extOf(this.subject.path);
+				if (ext) {
+					try {
+						const locals = (await symbolScopeLookup(word, line0, this.fileLines.join('\n'), ext)) ?? [];
+						const local = locals[0];
+						if (local) {
+							this.setDefinition({ kind: local.kind, name: local.name, path: this.subject.path, line: local.line, endLine: local.line });
+							return;
+						}
+					} catch {
+						// Scope lookup is opportunistic; fall back to the workspace index.
+					}
+				}
+			}
 			const defs = (await symbolLookup(word)) ?? [];
 			if (defs.length === 0) return;
-			const def = (this.subject && defs.find((entry) => entry.path === this.subject!.path)) ?? defs.find((entry) => (entry.endLine ?? entry.line) > entry.line) ?? defs[0];
+			const sameFile = this.subject ? defs.filter((entry) => entry.path === this.subject!.path) : [];
+			const def = (sameFile.length > 0
+				? (sameFile.find((entry) => entry.line <= line0 && line0 <= (entry.endLine ?? entry.line))
+					?? sameFile.find((entry) => (entry.endLine ?? entry.line) > entry.line)
+					?? sameFile.reduce((best, entry) => Math.abs(entry.line - line0) < Math.abs(best.line - line0) ? entry : best, sameFile[0]!))
+				: undefined)
+				?? defs.find((entry) => (entry.endLine ?? entry.line) > entry.line)
+				?? defs[0];
 			if (!def) return;
 			this.setDefinition({ kind: def.kind, name: def.name, path: def.path, line: def.line, endLine: def.endLine });
 		} catch {

@@ -615,10 +615,10 @@ export const bootMethods: ThisType<Workbench> = {
 			void this.editors.openFile(/^([a-zA-Z]:[\\/]|\\|\/)/.test(path) || !this.repoPath ? path : joinRepo(this.repoPath, path), { line });
 		};
 		// The References page's jump: a highlighted site line — or the row's double click —
-		// opens the site at the 1-based line; the index speaks repo-relative paths, so an
-		// open joins the workspace root.
-		this.panel.references.onOpen = (path, line) => {
-			void this.editors.openFile(/^([a-zA-Z]:[\\/]|\\|\/)/.test(path) || !this.repoPath ? path : joinRepo(this.repoPath, path), { line });
+		// opens the site at the 1-based line and column; the index speaks repo-relative
+		// paths, so an open joins the workspace root.
+		this.panel.references.onOpen = (path, line, column) => {
+			void this.editors.openFile(/^([a-zA-Z]:[\\/]|\\|\/)/.test(path) || !this.repoPath ? path : joinRepo(this.repoPath, path), { line, column });
 		};
 		// Both pages' file reads: the index speaks repo-relative paths and the backend's
 		// read_file needs the absolute spelling, so the views resolve through the open
@@ -669,6 +669,21 @@ export const bootMethods: ThisType<Workbench> = {
 		// The References page's activation re-resolves the cursor symbol through the same
 		// live-selection payload the definition page hands over.
 		this.panel.references.onNeedRoot = this.panel.definition.onNeedRoot;
+		// The Context page's activation re-resolves through the context follow (whose own
+		// gate reads the context pin), and unpinning re-follows right away — the relation
+		// graph's unpin convention.
+		const reResolveContext = () => {
+			const view = this.editors.activeView;
+			const input = this.editors.activeInput;
+			if (input?.kind !== 'file' || !view) return;
+			const position = view.state.selection.main.head;
+			const line = view.state.doc.lineAt(position);
+			this.followContextSymbol({ kind: 'file', path: input.path, line: line.number, column: position - line.from + 1 });
+		};
+		this.panel.context.onNeedRoot = reResolveContext;
+		this.panel.context.onPinChange = (pinned) => {
+			if (!pinned) reResolveContext();
+		};
 
 		document.addEventListener('keydown', this.onKeyDownBound);
 		// External changes arrive from the backend's file watcher; the focus refresh stays as
