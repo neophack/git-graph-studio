@@ -74,7 +74,7 @@ const SORT_LABELS: Record<SymbolSortMode, LocaleKey> = {
 
 /** The kind order the flat By Type list groups by — the backend's own KINDS order, the
  *  format's vocabulary. */
-const KIND_ORDER = ['function', 'method', 'class', 'struct', 'interface', 'enum', 'module', 'type', 'macro', 'variable'];
+const KIND_ORDER = ['function', 'method', 'class', 'struct', 'interface', 'enum', 'module', 'type', 'macro', 'variable', 'field', 'constant'];
 
 /** One rendered outline row: the symbol, its structural depth, whether it carries a
  *  fold twistie (some listed row names it as the container), and the identity key the

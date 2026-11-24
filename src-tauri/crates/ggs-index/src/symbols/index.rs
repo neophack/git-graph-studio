@@ -74,6 +74,25 @@ pub enum SymbolIndexEvent {
     },
 }
 
+/// One root's volume-save gate: the drainer claim (`running`), the "another batch
+/// moved the store while a save was in flight" flag (`pending`), and when the last
+/// write landed. A batch that lands during a save only raises `pending` — the
+/// in-flight drainer folds it into its next pass instead of queueing one full
+/// volume write per batch — and the drainer spaces its passes by
+/// [`MIN_SAVE_INTERVAL`], so a typing session pays one write per interval, not one
+/// per autosave.
+#[derive(Default)]
+struct SaveGate {
+    running: bool,
+    pending: bool,
+    last_write: Option<Instant>,
+}
+
+/// The minimum spacing between two volume writes of one root. The first batch
+/// after a quiet spell lands at once; only a burst folding into consecutive
+/// drainer passes waits out the remainder.
+const MIN_SAVE_INTERVAL: Duration = Duration::from_millis(1500);
+
 /// The per-root symbol databases plus their build state. The generation counter cancels a
 /// running build the way the text search's does: a folder switch or a newer build bumps it,
 /// and the old build stops at its next batch boundary. `last_used` is what `release_idle`
@@ -84,6 +103,7 @@ pub struct SymbolIndex {
     stores: Mutex<HashMap<String, Arc<Mutex<SymbolStore>>>>,
     progress: Mutex<HashMap<String, IndexStatus>>,
     last_used: Mutex<HashMap<String, Instant>>,
+    save_gates: Mutex<HashMap<String, Arc<Mutex<SaveGate>>>>,
     ensure: Mutex<()>,
     generation: AtomicU64,
 }
@@ -105,6 +125,7 @@ impl SymbolIndex {
             stores: Mutex::new(HashMap::new()),
             progress: Mutex::new(HashMap::new()),
             last_used: Mutex::new(HashMap::new()),
+            save_gates: Mutex::new(HashMap::new()),
             ensure: Mutex::new(()),
             generation: AtomicU64::new(0),
         }
@@ -502,7 +523,9 @@ impl SymbolIndex {
     }
 
     /// Apply a watcher batch to the root's index on a background thread, persisting only
-    /// when the batch actually moved the store.
+    /// when the batch actually moved the store — and with the store's lock released while
+    /// the volumes write: the batch's own incremental update is the only store-locked
+    /// work, the save snapshots under the lock and writes from the snapshot.
     pub fn apply_changes(
         self: &Arc<Self>,
         sink: Option<Arc<dyn EventSink>>,
@@ -515,15 +538,24 @@ impl SymbolIndex {
             let Some(store) = index.resident(&root) else {
                 return;
             };
-            {
+            let changed = {
+                let guard = store.lock().unwrap();
+                let fingerprints = guard.fingerprints();
+                drop(guard);
+                // The drift walk stats every known file — O(files), a few hundred
+                // milliseconds on a 20k-file root — and runs with the store's lock
+                // RELEASED, so a symbol query never queues behind it. The batch's own
+                // paths re-extract regardless.
+                let drifted = SymbolStore::drift_of(&root, &fingerprints, &paths);
                 let mut store = store.lock().unwrap();
                 // A batch naming nothing the store holds (a non-source write, another app's
                 // churn) ends here: saving unchanged bytes would only put new watcher events
                 // on the tree the watch reports, so the store's own persistence never feeds
                 // the watch.
-                if store.apply_changes(&paths) {
-                    let _ = store.save(&index.home);
-                }
+                store.apply_drifted(&paths, &drifted)
+            };
+            if changed {
+                index.drain_volume_saves(&root);
             }
             if let Some(sink) = sink.as_deref() {
                 if let Ok(payload) = serde_json::to_value(index.status(&root)) {
@@ -531,6 +563,84 @@ impl SymbolIndex {
                 }
             }
         });
+    }
+
+    /// Persist the root's volumes with the store lock released. Each pass snapshots
+    /// whatever store stands for the root under the locks (milliseconds of pure CPU) and
+    /// writes the nine volumes from the snapshot with no lock held, so a save never
+    /// blocks the symbol queries — and a store swapped by a rebuild (or dropped by a
+    /// folder switch) mid-save is never written back stale. The per-root gate folds a
+    /// burst of batches into one drainer: a batch landing while a save is in flight only
+    /// raises `pending`, and this thread loops until the flag stays quiet. The caller's
+    /// thread runs the drain — a batch that finds the gate claimed returns at once,
+    /// trusting the drainer to cover its flag.
+    fn drain_volume_saves(&self, root: &str) {
+        let gate = Arc::clone(
+            self.save_gates
+                .lock()
+                .unwrap()
+                .entry(root.to_owned())
+                .or_default(),
+        );
+        {
+            let mut gate = gate.lock().unwrap();
+            gate.pending = true;
+            if gate.running {
+                return;
+            }
+            gate.running = true;
+        }
+        loop {
+            // The pending consume, the quiet exit and the store lookup share one critical
+            // section, so a batch is either covered by this drainer (its flag lands before
+            // the consume) or sees `running == false` and drains itself — no flag can
+            // fall between the two.
+            let next = {
+                let mut gate = gate.lock().unwrap();
+                if gate.pending {
+                    gate.pending = false;
+                    Some(self.resident(root))
+                } else {
+                    gate.running = false;
+                    None
+                }
+            };
+            let Some(store) = next else {
+                return;
+            };
+            let Some(store) = store else {
+                // The store was dropped under this drain (a folder switch): nothing left
+                // to snapshot — stand the gate down so a later batch claims cleanly.
+                gate.lock().unwrap().running = false;
+                return;
+            };
+            // Space consecutive writes apart: the first batch after a quiet spell lands
+            // at once, a burst folds into one write per interval. The queries answer
+            // from the store's memory either way — the spacing is disk courtesy.
+            let wait = gate
+                .lock()
+                .unwrap()
+                .last_write
+                .map(|last| MIN_SAVE_INTERVAL.saturating_sub(last.elapsed()))
+                .unwrap_or(Duration::ZERO);
+            if !wait.is_zero() {
+                std::thread::sleep(wait);
+            }
+            let (snapshot, dirty_paths) = {
+                let store = store.lock().unwrap();
+                let snapshot = store.save_snapshot();
+                let dirty_paths = snapshot.dirty_paths.clone();
+                (snapshot, dirty_paths)
+            };
+            let landed = SymbolStore::write_volumes(&snapshot, &self.home).is_ok();
+            gate.lock().unwrap().last_write = Some(Instant::now());
+            if landed {
+                // The write holds exactly these paths' facts on disk; only they leave
+                // the dirty set. A batch that applied meanwhile re-marked its own
+                // paths, and the next drain covers them.
+                store.lock().unwrap().clear_dirty(&dirty_paths);
+            }
+        }
     }
 }
 
@@ -773,7 +883,7 @@ mod tests {
     #[test]
     fn a_no_op_batch_never_rewrites_the_store() {
         let (root_dir, home, index, root) = seeded_index();
-        let store_path = SymbolStore::index_dir(&root, home.path()).join("symbols.bin");
+        let store_path = SymbolStore::index_dir(&root, home.path()).join(crate::symbols::store::SYM_VOL_FILE);
         let before = std::fs::metadata(&store_path).unwrap();
 
         index.apply_changes(None, &root, vec!["notes.txt".to_owned()]);
@@ -783,7 +893,7 @@ mod tests {
         assert_eq!(
             (after.modified().unwrap(), after.len()),
             (before.modified().unwrap(), before.len()),
-            "a no-op batch left symbols.bin untouched"
+            "a no-op batch left project.ggs_sym untouched"
         );
 
         // The positive control: a real edit reaches the store on disk.

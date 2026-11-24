@@ -2,15 +2,15 @@
 //! databases behind Go-to-Definition / Find References / the Symbol Database page, and the
 //! extraction layer. `parse` is the tree-sitter parser (plan M4.1, one `.scm` query per
 //! language behind a `grammar-*` feature); `store` is the compact on-disk store in the
-//! analyzed folder's hidden `.ggs/analysis/` database; `anadb` is the six-table analysis
-//! database (`ggs.db` / `ggs.tix`) written beside it; `projvol` is the project-volume
-//! format (a different container from `anadb`'s six tables) byte-exact; `projvol_sig`
+//! analyzed folder's hidden `.ggs/analysis/` database — the nine `project.ggs_*` volumes
+//! the store writes itself, whose symbol table and indexes the reference layout's
+//! emitters build; `projvol` is the project-volume format byte-exact; `projvol_sig`
 //! generates the signature volumes' payload bytes (the hash bloom behind `projvol`'s
 //! undecoded `signature` field, verified against the snapshot); `symgen` discovers the
 //! symbol skeletons from source text (token-stream C/C++ plus Python/Make/HTML/
 //! INI/`.inc` scanners, the reference block ordering, and the incremental-history
 //! exception tables — its records through `projvol`'s structured rules rebuild the
-//! reference snapshot's symbol volume byte for byte); `cache` is the in-memory
+//! reference snapshot's symbol volume byte for byte); `sites` is the masked token scanner the store-backed reports and the MCP bridge read their call sites and import spellings from (the mask discipline, one read per file at report time); `cache` is the in-memory
 //! whole-workspace rebuild the window before an index lands is served from; `index` owns
 //! the per-root databases and the reference scan.
 
@@ -22,7 +22,7 @@ pub mod mask;
 pub mod parse;
 pub mod relations;
 pub mod rename;
-pub mod anadb;
+pub mod sites;
 pub mod projvol;
 pub mod projvol_indexgen;
 pub mod projvol_sig;

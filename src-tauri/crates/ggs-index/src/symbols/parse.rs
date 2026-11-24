@@ -102,16 +102,16 @@ enum Lang {
 }
 
 fn lang_of(ext: &str) -> Option<Lang> {
-    Some(match ext {
+    Some(match ext.to_ascii_lowercase().as_str() {
         "rs" => Lang::Rust,
         "py" => Lang::Python,
         "go" => Lang::Go,
-        "js" | "jsx" => Lang::JavaScript,
+        "js" | "jsx" | "mjs" | "cjs" => Lang::JavaScript,
         "ts" => Lang::TypeScript,
         "tsx" => Lang::Tsx,
         "java" => Lang::Java,
         "c" | "h" => Lang::C,
-        "cpp" | "hpp" => Lang::Cpp,
+        "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "ipp" => Lang::Cpp,
         "cs" => Lang::CSharp,
         _ => return None,
     })
@@ -176,6 +176,8 @@ const RUST_QUERY: &str = r#"
 (type_item name: (type_identifier) @def.type)
 (macro_definition name: (identifier) @def.macro)
 (union_item name: (type_identifier) @def.struct)
+(const_item name: (identifier) @def.constant)
+(static_item name: (identifier) @def.variable)
 (call_expression function: (identifier) @call)
 (call_expression function: (field_expression field: (field_identifier) @call))
 (call_expression function: (scoped_identifier name: (identifier) @call))
@@ -208,6 +210,7 @@ const GO_QUERY: &str = r#"
 (function_declaration name: (identifier) @def.function)
 (method_declaration name: (field_identifier) @def.method)
 (type_declaration (type_spec name: (type_identifier) @def.type))
+(const_declaration (const_spec name: (identifier) @def.constant))
 (call_expression function: (identifier) @call)
 (call_expression function: (selector_expression field: (field_identifier) @call))
 (import_spec path: (interpreted_string_literal) @import)
@@ -265,6 +268,7 @@ const JAVA_QUERY: &str = r#"
 (record_declaration name: (identifier) @def.class)
 (method_declaration name: (identifier) @def.method)
 (constructor_declaration name: (identifier) @def.method)
+(enum_constant name: (identifier) @def.constant)
 (method_invocation name: (identifier) @call)
 (object_creation_expression type: (type_identifier) @call.new)
 (import_declaration (scoped_identifier) @import)
@@ -275,22 +279,44 @@ const JAVA_QUERY: &str = r#"
 const C_QUERY: &str = r#"
 (function_definition declarator: (function_declarator declarator: (identifier) @def.function))
 (function_definition declarator: (pointer_declarator declarator: (function_declarator declarator: (identifier) @def.function)))
+(function_definition declarator: (pointer_declarator declarator: (pointer_declarator declarator: (function_declarator declarator: (identifier) @def.function))))
+(function_definition declarator: (parenthesized_declarator (pointer_declarator declarator: (function_declarator declarator: (identifier) @def.function))))
 (struct_specifier name: (type_identifier) @def.struct body: (field_declaration_list))
+(union_specifier name: (type_identifier) @def.struct body: (field_declaration_list))
 (enum_specifier name: (type_identifier) @def.enum body: (enumerator_list))
+(enumerator name: (identifier) @def.constant)
+(field_declaration declarator: (field_identifier) @def.field)
+(field_declaration declarator: (pointer_declarator declarator: (field_identifier) @def.field))
+(field_declaration declarator: (pointer_declarator declarator: (pointer_declarator declarator: (field_identifier) @def.field)))
+(field_declaration declarator: (array_declarator declarator: (field_identifier) @def.field))
+(field_declaration declarator: (pointer_declarator declarator: (array_declarator declarator: (field_identifier) @def.field)))
+(field_declaration declarator: (function_declarator declarator: (parenthesized_declarator (pointer_declarator declarator: (field_identifier) @def.field))))
 (type_definition declarator: (type_identifier) @def.type)
+(type_definition declarator: (pointer_declarator declarator: (type_identifier) @def.type))
+(type_definition declarator: (pointer_declarator declarator: (pointer_declarator declarator: (type_identifier) @def.type)))
+(type_definition declarator: (array_declarator declarator: (type_identifier) @def.type))
+(type_definition declarator: (function_declarator declarator: (type_identifier) @def.type))
+(type_definition declarator: (function_declarator declarator: (parenthesized_declarator (pointer_declarator declarator: (type_identifier) @def.type))))
 (preproc_def name: (identifier) @def.macro)
 (preproc_function_def name: (identifier) @def.macro)
 (declaration declarator: (identifier) @def.variable)
 (declaration declarator: (init_declarator declarator: (identifier) @def.variable))
 (declaration declarator: (pointer_declarator declarator: (identifier) @def.variable))
+(declaration declarator: (pointer_declarator declarator: (pointer_declarator declarator: (identifier) @def.variable)))
 (declaration declarator: (init_declarator declarator: (pointer_declarator declarator: (identifier) @def.variable)))
+(declaration declarator: (init_declarator declarator: (pointer_declarator declarator: (pointer_declarator declarator: (identifier) @def.variable))))
 (declaration declarator: (array_declarator declarator: (identifier) @def.variable))
+(declaration declarator: (pointer_declarator declarator: (array_declarator declarator: (identifier) @def.variable)))
 (declaration declarator: (init_declarator declarator: (array_declarator declarator: (identifier) @def.variable)))
+(declaration declarator: (init_declarator declarator: (pointer_declarator declarator: (array_declarator declarator: (identifier) @def.variable))))
 (call_expression function: (identifier) @call)
+(call_expression function: (field_expression field: (field_identifier) @call))
 (preproc_include path: (string_literal) @import)
 (parameter_declaration declarator: (identifier) @def.param)
 (parameter_declaration declarator: (pointer_declarator declarator: (identifier) @def.param))
+(parameter_declaration declarator: (pointer_declarator declarator: (pointer_declarator declarator: (identifier) @def.param)))
 (parameter_declaration declarator: (array_declarator declarator: (identifier) @def.param))
+(parameter_declaration declarator: (pointer_declarator declarator: (array_declarator declarator: (identifier) @def.param)))
 (parameter_declaration declarator: (function_declarator declarator: (parenthesized_declarator (pointer_declarator declarator: (identifier) @def.param))))
 (declaration declarator: (function_declarator declarator: (parenthesized_declarator (pointer_declarator declarator: (identifier) @def.variable))))
 (declaration declarator: (init_declarator declarator: (function_declarator declarator: (parenthesized_declarator (pointer_declarator declarator: (identifier) @def.variable)))))
@@ -299,30 +325,57 @@ const C_QUERY: &str = r#"
 const CPP_QUERY: &str = r#"
 (function_definition declarator: (function_declarator declarator: (identifier) @def.function))
 (function_definition declarator: (pointer_declarator declarator: (function_declarator declarator: (identifier) @def.function)))
+(function_definition declarator: (pointer_declarator declarator: (pointer_declarator declarator: (function_declarator declarator: (identifier) @def.function))))
+(function_definition declarator: (reference_declarator (function_declarator declarator: (identifier) @def.function)))
 (function_definition declarator: (function_declarator declarator: (field_identifier) @def.method))
 (function_definition declarator: (pointer_declarator declarator: (function_declarator declarator: (field_identifier) @def.method)))
+(function_definition declarator: (reference_declarator (function_declarator declarator: (field_identifier) @def.method)))
 (function_definition declarator: (function_declarator declarator: (qualified_identifier) @def.method))
 (function_definition declarator: (pointer_declarator declarator: (function_declarator declarator: (qualified_identifier) @def.method)))
+(function_definition declarator: (reference_declarator (function_declarator declarator: (qualified_identifier) @def.method)))
 (struct_specifier name: (type_identifier) @def.struct body: (field_declaration_list))
+(union_specifier name: (type_identifier) @def.struct body: (field_declaration_list))
 (class_specifier name: (type_identifier) @def.class body: (field_declaration_list))
 (enum_specifier name: (type_identifier) @def.enum body: (enumerator_list))
+(enumerator name: (identifier) @def.constant)
+(field_declaration declarator: (field_identifier) @def.field)
+(field_declaration declarator: (pointer_declarator declarator: (field_identifier) @def.field))
+(field_declaration declarator: (pointer_declarator declarator: (pointer_declarator declarator: (field_identifier) @def.field)))
+(field_declaration declarator: (reference_declarator (field_identifier) @def.field))
+(field_declaration declarator: (array_declarator declarator: (field_identifier) @def.field))
+(field_declaration declarator: (pointer_declarator declarator: (array_declarator declarator: (field_identifier) @def.field)))
+(field_declaration declarator: (function_declarator declarator: (parenthesized_declarator (pointer_declarator declarator: (field_identifier) @def.field))))
 (type_definition declarator: (type_identifier) @def.type)
+(type_definition declarator: (pointer_declarator declarator: (type_identifier) @def.type))
+(type_definition declarator: (pointer_declarator declarator: (pointer_declarator declarator: (type_identifier) @def.type)))
+(type_definition declarator: (array_declarator declarator: (type_identifier) @def.type))
+(type_definition declarator: (function_declarator declarator: (type_identifier) @def.type))
+(type_definition declarator: (function_declarator declarator: (parenthesized_declarator (pointer_declarator declarator: (type_identifier) @def.type))))
+(alias_declaration name: (type_identifier) @def.type)
 (preproc_def name: (identifier) @def.macro)
 (preproc_function_def name: (identifier) @def.macro)
 (declaration declarator: (identifier) @def.variable)
 (declaration declarator: (init_declarator declarator: (identifier) @def.variable))
 (declaration declarator: (pointer_declarator declarator: (identifier) @def.variable))
+(declaration declarator: (pointer_declarator declarator: (pointer_declarator declarator: (identifier) @def.variable)))
+(declaration declarator: (reference_declarator (identifier) @def.variable))
 (declaration declarator: (init_declarator declarator: (pointer_declarator declarator: (identifier) @def.variable)))
+(declaration declarator: (init_declarator declarator: (pointer_declarator declarator: (pointer_declarator declarator: (identifier) @def.variable))))
+(declaration declarator: (init_declarator declarator: (reference_declarator (identifier) @def.variable)))
 (declaration declarator: (array_declarator declarator: (identifier) @def.variable))
+(declaration declarator: (pointer_declarator declarator: (array_declarator declarator: (identifier) @def.variable)))
 (declaration declarator: (init_declarator declarator: (array_declarator declarator: (identifier) @def.variable)))
+(declaration declarator: (init_declarator declarator: (pointer_declarator declarator: (array_declarator declarator: (identifier) @def.variable))))
 (call_expression function: (identifier) @call)
 (call_expression function: (field_expression field: (field_identifier) @call))
 (call_expression function: (qualified_identifier) @call)
 (preproc_include path: (string_literal) @import)
 (parameter_declaration declarator: (identifier) @def.param)
 (parameter_declaration declarator: (pointer_declarator declarator: (identifier) @def.param))
+(parameter_declaration declarator: (pointer_declarator declarator: (pointer_declarator declarator: (identifier) @def.param)))
 (parameter_declaration declarator: (reference_declarator (identifier) @def.param))
 (parameter_declaration declarator: (array_declarator declarator: (identifier) @def.param))
+(parameter_declaration declarator: (pointer_declarator declarator: (array_declarator declarator: (identifier) @def.param)))
 (parameter_declaration declarator: (function_declarator declarator: (parenthesized_declarator (pointer_declarator declarator: (identifier) @def.param))))
 (parameter_declaration declarator: (function_declarator declarator: (parenthesized_declarator (reference_declarator (identifier) @def.param))))
 (declaration declarator: (function_declarator declarator: (parenthesized_declarator (pointer_declarator declarator: (identifier) @def.variable))))
@@ -338,6 +391,7 @@ const CSHARP_QUERY: &str = r#"
 (namespace_declaration name: (identifier) @def.module)
 (method_declaration name: (identifier) @def.method)
 (constructor_declaration name: (identifier) @def.method)
+(enum_member_declaration name: (identifier) @def.constant)
 (invocation_expression function: (identifier) @call)
 (invocation_expression function: (member_access_expression name: (identifier) @call))
 (object_creation_expression type: (identifier) @call.new)
@@ -861,13 +915,31 @@ fn container_of(lang: Lang, decl: Option<tree_sitter::Node>, text: &str) -> Opti
             | (Lang::Java, "interface_declaration")
             | (Lang::Java, "enum_declaration")
             | (Lang::Java, "record_declaration")
+            | (Lang::C | Lang::Cpp, "struct_specifier")
+            | (Lang::C | Lang::Cpp, "union_specifier")
+            | (Lang::C | Lang::Cpp, "enum_specifier")
             | (Lang::Cpp, "class_specifier")
             | (Lang::CSharp, "class_declaration")
             | (Lang::CSharp, "struct_declaration")
             | (Lang::CSharp, "interface_declaration")
+            | (Lang::CSharp, "enum_declaration")
             | (Lang::CSharp, "record_declaration") if started => node
                 .child_by_field_name("name")
-                .map(|n| text[n.byte_range()].to_owned()),
+                .map(|n| text[n.byte_range()].to_owned())
+                .or_else(|| {
+                    // An anonymous C/C++ typedef struct/union/enum (`typedef struct { ... } Name;`)
+                    // takes its enclosing `type_definition`'s declarator name as container.
+                    if matches!(lang, Lang::C | Lang::Cpp) {
+                        let parent = node.parent()?;
+                        if parent.kind() == "type_definition" {
+                            return parent
+                                .child_by_field_name("declarator")
+                                .map(|d| text_last_segment(&text[d.byte_range()]))
+                                .filter(|s| !s.is_empty());
+                        }
+                    }
+                    None
+                }),
             (Lang::Go, "method_declaration") if !started => node
                 .child_by_field_name("receiver")
                 .map(|r| text[r.byte_range()].to_owned())
@@ -1279,8 +1351,9 @@ mod tests {
     fn type_position_parameters_own_no_scope_and_no_index() {
         let text = "typedef int (*handler_t)(void *ctx, int code);\nint compute(int total, int n);\nstatic int run(int (*cb)(void *ctx), int code) {\n    int r = cb(0, code);\n    return r;\n}\n";
         let file = parse_file(text, "c");
-        // The global index holds only the real declarations — no parameter rows.
-        assert_eq!(kinds(&file), vec![("function", "run")]);
+        // The global index holds only the real declarations (the function-pointer typedef
+        // and the function) — no parameter rows.
+        assert_eq!(kinds(&file), vec![("type", "handler_t"), ("function", "run")]);
         // The scope locals: `cb` (the host's function-pointer parameter, host scope) and
         // `code` of the function — never `ctx` (the callback's own signature) and never
         // the typedef's or prototype's names.
@@ -1607,13 +1680,15 @@ trait Stream: Marker {
             kinds(&file),
             vec![
                 ("struct", "Point"),
+                ("field", "x"),
                 ("type", "Point"),
                 ("function", "helper"),
                 ("function", "compute")
             ]
         );
-        assert!(!file.symbols[2].exported, "static functions are file-local");
-        assert!(file.symbols[3].exported);
+        assert_eq!(file.symbols[1].container.as_deref(), Some("Point"));
+        assert!(!file.symbols[3].exported, "static functions are file-local");
+        assert!(file.symbols[4].exported);
         assert_eq!(file.imports, vec!["local.h"]);
         assert!(file.calls.iter().any(|c| c.name == "helper"));
     }
@@ -1730,8 +1805,14 @@ trait Stream: Marker {
             kinds(&file),
             vec![
                 ("struct", "Point"),
+                ("field", "x"),
+                ("field", "y"),
+                ("field", "w"),
+                ("field", "h"),
                 ("type", "Size"),
                 ("struct", "tagRect"),
+                ("field", "l"),
+                ("field", "r"),
                 ("type", "Rect"),
                 ("function", "total"),
                 ("variable", "counter"),
@@ -1741,20 +1822,20 @@ trait Stream: Marker {
                 ("function", "step"),
             ]
         );
-        let point = &file.symbols[0];
+        let point = file.symbols.iter().find(|s| s.kind == "struct" && s.name == "Point").unwrap();
         assert_eq!(
             point.end_line, 3,
             "the body rides along — a hover slices it whole"
         );
-        let size = &file.symbols[1];
+        let size = file.symbols.iter().find(|s| s.kind == "type" && s.name == "Size").unwrap();
         assert_eq!(
             (size.line, size.end_line),
             (5, 8),
             "the anonymous typedef's type spans to its name"
         );
-        let rect = &file.symbols[2];
+        let rect = file.symbols.iter().find(|s| s.kind == "struct" && s.name == "tagRect").unwrap();
         assert_eq!((rect.line, rect.end_line), (10, 13));
-        for variable in file.symbols[5..].iter().filter(|s| s.kind == "variable") {
+        for variable in file.symbols.iter().filter(|s| s.kind == "variable") {
             assert_eq!(
                 variable.end_line, variable.line,
                 "a declaration is its own line"

@@ -24,6 +24,36 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| format!("replace {}: {e}", path.display()))
 }
 
+/// The streaming [`atomic_write`]: the caller pours the bytes into the temp file's
+/// buffered writer and one rename lands the whole file. For the volumes too big to sit
+/// in memory whole — the writer never sees the payload assembled.
+pub fn atomic_write_with(
+    path: &Path,
+    pour: &mut dyn FnMut(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let stem = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_owned());
+    let tmp = path.with_file_name(format!(".{stem}.{}.tmp", std::process::id()));
+    let pour_result = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let file = std::fs::File::create(&tmp)?;
+        let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
+        pour(&mut writer)?;
+        writer.flush()
+    })()
+    .map_err(|e| format!("write {}: {e}", tmp.display()));
+    if let Err(error) = pour_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    std::fs::rename(&tmp, path).map_err(|e| format!("replace {}: {e}", path.display()))
+}
+
 /// Percent-decode a URL path; invalid escapes pass through untouched. Byte-wise on
 /// purpose: slicing the `&str` at arbitrary offsets would panic inside multi-byte
 /// characters. A literal `+` stays a `+` — URI PATH semantics (a plus-for-space decode

@@ -16,7 +16,7 @@
 //!   the update did not touch, so its occurrence list is marked untrusted and references to
 //!   it fall back to a full scan until the next full build.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -24,7 +24,13 @@ use std::time::UNIX_EPOCH;
 use rayon::prelude::*;
 
 use crate::scan::is_symbol_source;
-use crate::symbols::anadb;
+use crate::symbols::projvol::{
+    self, SymSlot, VolumeHeader, FREE_HEAD_NONE, MAGIC_SYM, MAGIC_XDIR, MAGIC_XVOL, SYM_REC_SIZE,
+    VOL_VERSION, XVOL_REC_SIZE,
+};
+use crate::symbols::projvol_indexgen;
+use crate::symbols::projvol_sig;
+use crate::symbols::symgen;
 use crate::symbols::WorkspaceSymbol;
 use ggs_fs::walk_files;
 
@@ -41,6 +47,8 @@ const KINDS: &[&str] = &[
     "type",
     "macro",
     "variable",
+    "field",
+    "constant",
 ];
 
 fn kind_id(kind: &str) -> u8 {
@@ -51,7 +59,32 @@ fn kind_name(id: u8) -> &'static str {
     KINDS.get(id as usize).copied().unwrap_or(KINDS[0])
 }
 
-/// The format marker: a corrupt or foreign file is discarded, never fatal.
+/// The project-volume family persisted on disk (replacing the older `symbols.bin` /
+/// `ggs.db` / `ggs.tix` triad): the nine `.ggs_*` volumes live in the project's hidden
+/// `.ggs/analysis/<hash>/` directory.
+pub const SYM_VOL_FILE: &str = "project.ggs_sym";
+pub const XAB_VOL_FILE: &str = "project.ggs_xab";
+pub const XAD_VOL_FILE: &str = "project.ggs_xad";
+pub const XC_VOL_FILE: &str = "project.ggs_xc";
+pub const XF_VOL_FILE: &str = "project.ggs_xf";
+pub const XM_VOL_FILE: &str = "project.ggs_xm";
+pub const XR_VOL_FILE: &str = "project.ggs_xr";
+pub const XSB_VOL_FILE: &str = "project.ggs_xsb";
+pub const XSD_VOL_FILE: &str = "project.ggs_xsd";
+pub const PROJECT_VOL_FILES: [&str; 9] = [
+    SYM_VOL_FILE,
+    XAB_VOL_FILE,
+    XAD_VOL_FILE,
+    XC_VOL_FILE,
+    XF_VOL_FILE,
+    XM_VOL_FILE,
+    XR_VOL_FILE,
+    XSB_VOL_FILE,
+    XSD_VOL_FILE,
+];
+
+/// The format marker inside the `.ggs_sym` trailer block: a corrupt or foreign volume set
+/// is discarded, never fatal.
 const MAGIC: &[u8; 6] = b"GGSIDX";
 /// Format 2 (the tree-sitter parser layer, plan M4.1): symbols gained a column, an end
 /// line and an interned container name. A version-1 file fails the load below and is
@@ -72,7 +105,10 @@ const MAGIC: &[u8; 6] = b"GGSIDX";
 /// declaration's own node — a self-container made every C++/Java/C#/TS class its own
 /// member and blinded the nested-class chains; a version-6 file carries those rows and
 /// is rebuilt.
-const VERSION: u8 = 7;
+/// Format 8 (2026-11-23): the KINDS table added `field` and `constant` (struct/class
+/// fields, enum constants, top-level constants), and the C/C++ queries expanded to index
+/// fields, enumerators, unions, and multi-pointer/array/function-pointer declarations.
+const VERSION: u8 = 8;
 
 /// The hidden per-project analysis folder (2026-11-21, the owner's direction: add a hidden
 /// code-analysis folder inside the project — the program may delete it, it never enters
@@ -209,7 +245,6 @@ type Scanned = (
     Vec<u32>,
     Vec<StoredSymbol>,
     Vec<StoredBases>,
-    Vec<(u32, u32)>,
 );
 
 /// One indexed file: its fingerprint and what it declares. `words` is the transpose of the
@@ -224,18 +259,12 @@ struct FileEntry {
     bases: Vec<StoredBases>,
 }
 
-/// A file's extraction, before the names are interned. `words` is the file's unique
-/// identifier words, walked off the same read the symbols came from — an update never
-/// re-reads the file for its occurrence list.
+/// A file's extraction, before the names are interned.
 struct Extraction {
     path: String,
     mtime_ms: u64,
     size: u64,
     symbols: Vec<Extracted>,
-    words: Vec<String>,
-    /// The parse's call sites — the callee's name and its 0-based line — the reference
-    /// database's call edges read from.
-    calls: Vec<(String, u32)>,
 }
 
 /// One declaration as extracted, names still owned by the file.
@@ -258,11 +287,11 @@ pub struct SymbolStore {
     /// Per name: the ids of the files containing the word, or `None` when the list is not
     /// trusted to be complete (the name first appeared in an incremental update).
     refs: Vec<Option<Vec<u32>>>,
-    /// The six-table analysis database's tables, collected on a full build and
-    /// persisted beside the store as `ggs.db` + `ggs.tix`. `None` after a disk
-    /// resume — the saved `ggs.db` stays standing untouched until the next full
-    /// build (the Rebuild command's delete-and-regenerate) rewrites it whole.
-    ana: Option<anadb::AnaTables>,
+    /// The paths whose volume facts on disk may lag the store: every file a batch
+    /// re-extracted since the last successful volume write. The dirty-aware save
+    /// re-derives exactly these files' records and loads the rest from the volumes
+    /// the previous write left behind.
+    dirty: HashSet<String>,
 }
 
 pub struct BuildStats {
@@ -317,7 +346,7 @@ impl SymbolStore {
             files: Vec::new(),
             names: Vec::new(),
             refs: Vec::new(),
-            ana: None,
+            dirty: HashSet::new(),
         }
     }
 
@@ -718,27 +747,27 @@ impl SymbolStore {
         }
         extracted.sort_by(|a, b| a.path.cmp(&b.path));
 
-        // Phase 2: the name table (declaration names and container names alike), interned
-        // in sorted order so ids are binary-searchable.
-        let mut interned: BTreeMap<String, u32> = BTreeMap::new();
+        // Phase 2: the name table — every declaration, container and base name collected
+        // once, sorted, deduplicated; the position is the id (sorted, so binary-searchable).
+        let mut table: Vec<&str> = Vec::new();
         for file in &extracted {
             for symbol in &file.symbols {
-                interned.entry(symbol.name.clone()).or_insert_with(|| 0);
+                table.push(symbol.name.as_str());
                 if let Some(container) = &symbol.container {
-                    interned.entry(container.clone()).or_insert_with(|| 0);
+                    table.push(container.as_str());
                 }
                 for base in &symbol.bases {
-                    interned.entry(base.clone()).or_insert_with(|| 0);
+                    table.push(base.as_str());
                 }
             }
         }
-        let names: Vec<String> = interned.keys().cloned().collect();
-        for (id, name) in names.iter().enumerate() {
-            interned.insert(name.clone(), id as u32);
-        }
-        let lookup: HashMap<&str, u32> = interned
+        table.sort_unstable();
+        table.dedup();
+        let names: Vec<String> = table.iter().map(|name| (*name).to_owned()).collect();
+        let lookup: HashMap<&str, u32> = names
             .iter()
-            .map(|(name, &id)| (name.as_str(), id))
+            .enumerate()
+            .map(|(id, name)| (name.as_str(), id as u32))
             .collect();
 
         // Phase 3: occurrences. Every file is scanned once for the declared words it
@@ -751,13 +780,9 @@ impl SymbolStore {
             let mut part: Vec<Scanned> = batch
                 .par_iter()
                 .map(|file| {
-                    let (words, hits) = match fs::read_to_string(Path::new(root).join(&file.path))
-                    {
-                        Ok(text) => (
-                            words_in(&text, &|word| lookup.get(word).copied()),
-                            positioned_hits(&text, &|word| lookup.get(word).copied()),
-                        ),
-                        Err(_) => (Vec::new(), Vec::new()),
+                    let words = match fs::read_to_string(Path::new(root).join(&file.path)) {
+                        Ok(text) => words_in(&text, &|word| lookup.get(word).copied()),
+                        Err(_) => Vec::new(),
                     };
                     let symbols = file
                         .symbols
@@ -789,7 +814,7 @@ impl SymbolStore {
                                 .collect(),
                         })
                         .collect();
-                    (file.path.clone(), words, symbols, bases, hits)
+                    (file.path.clone(), words, symbols, bases)
                 })
                 .collect();
             scanned.append(&mut part);
@@ -798,41 +823,24 @@ impl SymbolStore {
         let mut store = SymbolStore {
             root: root.to_owned(),
             files: scanned
-                .iter()
-                .map(|(path, _, _, _, _)| path.clone())
-                .zip(extracted.iter().map(|f| (f.mtime_ms, f.size)))
-                .map(|(path, (mtime_ms, size))| FileEntry {
+                .into_iter()
+                .zip(extracted.iter())
+                .map(|((path, words, symbols, bases), file)| FileEntry {
                     path,
-                    mtime_ms,
-                    size,
-                    symbols: Vec::new(),
-                    words: Vec::new(),
-                    bases: Vec::new(),
+                    mtime_ms: file.mtime_ms,
+                    size: file.size,
+                    symbols,
+                    words,
+                    bases,
                 })
                 .collect(),
             names,
             refs: Vec::new(),
-            ana: None,
+            dirty: HashSet::new(),
         };
         // The walk is sorted and phase 1 sorted again; the zip above keeps that order.
         debug_assert!(store.files.windows(2).all(|w| w[0].path < w[1].path));
-        for (i, (_, words, symbols, bases, _)) in scanned.iter().enumerate() {
-            store.files[i].words = words.clone();
-            store.files[i].symbols = symbols.clone();
-            store.files[i].bases = bases.clone();
-        }
         store.rebuild_refs();
-        // The reference database's tables, from the parse's calls and the masked
-        // positioned hits — collected only here, on a full build.
-        let calls_per_file: Vec<Vec<(String, u32)>> = extracted
-            .iter()
-            .map(|file| file.calls.clone())
-            .collect();
-        let hits_per_file: Vec<Vec<(u32, u32)>> = scanned
-            .into_iter()
-            .map(|(_, _, _, _, hits)| hits)
-            .collect();
-        store.ana = Some(build_ana_tables(&store, &calls_per_file, &hits_per_file));
         Some(store)
     }
 
@@ -843,65 +851,87 @@ impl SymbolStore {
     /// seen here stay untrusted; every trusted name's occurrence list stays complete because
     /// each touched file's contributions are subtracted and rescanned. Answers whether the
     /// store changed at all — a batch naming nothing the store holds must not pay a save
-    /// (the write is bytes on disk and a watcher event, never free).
+    /// (the write is bytes on disk and a watcher event, never free). The drift walk runs
+    /// under the caller's lock; the watcher's save path stats outside it through
+    /// [`SymbolStore::fingerprints`] + [`SymbolStore::apply_drifted`].
     pub fn apply_changes(&mut self, paths: &[String]) -> bool {
-        let wanted: HashSet<&str> = paths
+        let drifted = Self::drift_of(&self.root, &self.fingerprints(), paths);
+        self.apply_drifted(paths, &drifted)
+    }
+
+    /// The store's (path, mtime, size) table, cloned for an out-of-lock drift scan: the
+    /// watcher's save path stats the tree with the store's lock RELEASED — the walk is
+    /// O(files), a few hundred milliseconds on a 20k-file root, and must never sit
+    /// between a symbol query and its answer — then hands the result back through
+    /// [`SymbolStore::apply_drifted`].
+    pub fn fingerprints(&self) -> Vec<(String, u64, u64)> {
+        self.files
+            .iter()
+            .map(|f| (f.path.clone(), f.mtime_ms, f.size))
+            .collect()
+    }
+
+    /// The known files among `fingerprints` whose recorded (mtime, size) no longer
+    /// matches the disk — the batch's own paths excluded (they re-extract regardless).
+    pub fn drift_of(
+        root: &str,
+        fingerprints: &[(String, u64, u64)],
+        batch: &[String],
+    ) -> Vec<String> {
+        let wanted: HashSet<&str> = batch.iter().map(String::as_str).collect();
+        fingerprints
+            .iter()
+            .filter(|(path, ..)| !wanted.contains(path.as_str()))
+            .filter(|(path, mtime, size)| {
+                stat_of(&Path::new(root).join(path))
+                    .is_none_or(|s| s.mtime_ms != *mtime || s.size != *size)
+            })
+            .map(|(path, ..)| path.clone())
+            .collect()
+    }
+
+    /// Apply watcher changes with the drift precomputed: `batch` names the watcher's
+    /// paths, `drifted` the known files whose fingerprints no longer match the disk.
+    /// Both re-extract; everything else is trusted unchanged. Answers whether the store
+    /// changed at all, marking every re-extracted path dirty for the dirty-aware
+    /// volume write.
+    pub fn apply_drifted(&mut self, batch: &[String], drifted: &[String]) -> bool {
+        let mut wanted: HashSet<&str> = batch
             .iter()
             .map(String::as_str)
             .filter(|p| is_symbol_source(p))
             .collect();
-        // Subtract and drop the entries whose file is gone or changed; the paths that still
-        // exist are collected once, whether they were known before or arrived with the batch.
-        // The store's fields are borrowed apart so the scan of `files` can subtract into
-        // `refs` while it walks.
+        for path in drifted {
+            wanted.insert(path.as_str());
+        }
+        // The touched files' occurrence contributions are subtracted up front; the rows
+        // themselves stay in place — the upsert refills them under the same ids — and
+        // only a deletion (or a re-extraction that fails, which drops the row the same
+        // way) compacts the table. The store's fields are borrowed apart so the scan of
+        // `files` can subtract into `refs` while it walks.
         let root = self.root.clone();
+        let before_len = self.files.len();
+        let known: HashSet<String> = self.files.iter().map(|f| f.path.clone()).collect();
+        let added = wanted.iter().any(|p| !known.contains(*p));
         let SymbolStore { files, refs, .. } = self;
-        let mut keep: Vec<bool> = Vec::with_capacity(files.len());
         let mut to_extract: HashSet<String> = HashSet::new();
+        let mut dropped: HashSet<String> = HashSet::new();
         let mut changed = false;
         for file in files.iter() {
-            let touched = wanted.contains(file.path.as_str());
-            let stat = stat_of(&Path::new(&root).join(&file.path));
-            let unchanged = !touched
-                && stat
-                    .as_ref()
-                    .is_some_and(|s| s.mtime_ms == file.mtime_ms && s.size == file.size);
-            if unchanged {
-                keep.push(true);
+            if !wanted.contains(file.path.as_str()) {
                 continue;
             }
             changed = true;
             Self::subtract_contributions(refs, files, file);
-            if stat.is_some() {
+            if stat_of(&Path::new(&root).join(&file.path)).is_some() {
                 to_extract.insert(file.path.clone());
-            }
-            keep.push(false);
-        }
-        let mut kept: Vec<FileEntry> = Vec::with_capacity(files.len());
-        // The compacted id of every old id — u32::MAX for the dropped rows. The occurrence
-        // lists still name pre-compaction ids, and renumber_after_edits remaps by current
-        // position, so a kept file whose old id outlives the shrunken table would index out
-        // of bounds there. Rewrite the ids here; a dropped id subtraction somehow left
-        // behind is a reference to a file that no longer exists and goes with it.
-        let mut compact: Vec<u32> = Vec::with_capacity(files.len());
-        for (file, keep_file) in files.drain(..).zip(keep) {
-            if keep_file {
-                compact.push(kept.len() as u32);
-                kept.push(file);
             } else {
-                compact.push(u32::MAX);
+                dropped.insert(file.path.clone());
             }
-        }
-        *files = kept;
-        for list in refs.iter_mut().flatten() {
-            for id in list.iter_mut() {
-                *id = compact.get(*id as usize).copied().unwrap_or(u32::MAX);
-            }
-            list.retain(|&id| id != u32::MAX);
         }
         // Watched paths the store never knew (a brand-new file) join the re-extraction.
         for path in wanted {
-            if !to_extract.contains(path) && Path::new(&root).join(path).exists() {
+            if !known.contains(path) && Path::new(&root).join(path).exists() {
                 to_extract.insert(path.to_owned());
             }
         }
@@ -913,9 +943,57 @@ impl SymbolStore {
         if !upserts.is_empty() {
             changed = true;
         }
+        let extracted: HashSet<&str> = upserts.iter().map(|e| e.path.as_str()).collect();
+        for path in to_extract.iter() {
+            if !extracted.contains(path.as_str()) {
+                dropped.insert(path.clone());
+            }
+        }
+        // The compacted id of every old id — u32::MAX for the dropped rows. The occurrence
+        // lists still name pre-compaction ids, and renumber_after_edits remaps by current
+        // position, so a kept file whose old id outlives the shrunken table would index out
+        // of bounds there. Rewrite the ids here; a dropped id subtraction somehow left
+        // behind is a reference to a file that no longer exists and goes with it.
+        let mut kept: Vec<FileEntry> = Vec::with_capacity(files.len());
+        let mut compact: Vec<u32> = Vec::with_capacity(files.len());
+        for file in files.drain(..) {
+            if dropped.contains(&file.path) {
+                compact.push(u32::MAX);
+            } else {
+                compact.push(kept.len() as u32);
+                kept.push(file);
+            }
+        }
+        *files = kept;
+        for list in refs.iter_mut().flatten() {
+            for id in list.iter_mut() {
+                *id = compact.get(*id as usize).copied().unwrap_or(u32::MAX);
+            }
+            list.retain(|&id| id != u32::MAX);
+        }
+        let touched: Vec<String> = upserts.iter().map(|e| e.path.clone()).collect();
         self.upsert(upserts);
-        self.renumber_after_edits();
+        for path in touched {
+            self.dirty.insert(path);
+        }
+        for path in dropped {
+            self.dirty.remove(&path);
+        }
+        // A deletion or an insertion moves every later file's id; a pure content edit —
+        // the Ctrl+S case — leaves the table untouched, and the whole-table renumber (the
+        // sort plus every occurrence list rewritten) can skip.
+        if added || self.files.len() != before_len {
+            self.renumber_after_edits();
+        }
         changed
+    }
+
+    /// Forget the given paths' dirty marks — the drain calls this once the write has
+    /// actually landed, so a failed write keeps the store's lagging set intact.
+    pub fn clear_dirty(&mut self, paths: &[String]) {
+        for path in paths {
+            self.dirty.remove(path);
+        }
     }
 
     /// Remove `file`'s occurrence contributions from the name lists. An associated function
@@ -971,12 +1049,17 @@ impl SymbolStore {
         if touched.is_empty() {
             return Ok(0);
         }
-        self.apply_changes(&touched);
+        // The walk above stat-ed every file already; hand the result straight over
+        // instead of paying the drift walk a second time.
+        self.apply_drifted(&touched, &touched);
         Ok(touched.len())
     }
 
-    /// Insert freshly extracted files (sorted by path): intern new names as untrusted, append
-    /// entries, add their occurrence contributions. File ids are repaired by the caller.
+    /// Insert freshly extracted files (sorted by path): intern new names as untrusted,
+    /// add their occurrence contributions. A file the table already holds is REFILLED in
+    /// place — its row keeps its id and its position, so a pure content edit (the Ctrl+S
+    /// case) leaves the whole table untouched — and only a brand-new file appends (the
+    /// caller's renumber pass then sorts the table and repairs the ids).
     fn upsert(&mut self, upserts: Vec<Extraction>) {
         if upserts.is_empty() {
             return;
@@ -1011,14 +1094,23 @@ impl SymbolStore {
             .map(|(id, name)| (name.clone(), id as u32))
             .collect();
         lookup.shrink_to_fit();
+        let positions: HashMap<String, u32> = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(id, file)| (file.path.clone(), id as u32))
+            .collect();
+        // The refilled rows' occurrence lists: re-sorted and deduplicated in place —
+        // the renumber pass that used to do this for every batch only runs on real
+        // table changes now.
+        let mut refilled_lists: Vec<u32> = Vec::new();
         for file in upserts {
-            // The words rode the extraction (one read in extract_file covered both the
-            // parse and this list); an unknown word — never a declared name — drops.
-            let words = file
-                .words
-                .iter()
-                .filter_map(|word| lookup.get(word.as_str()).copied())
-                .collect::<Vec<u32>>();
+            // The occurrence list: one more read of the file (the extraction no longer
+            // carries the word set — the full build stopped holding every file's words);
+            // an unknown word — never a declared name — drops.
+            let words = fs::read_to_string(Path::new(&self.root).join(&file.path))
+                .map(|text| words_in(&text, &|word| lookup.get(word).copied()))
+                .unwrap_or_default();
             let symbols = file
                 .symbols
                 .iter()
@@ -1057,16 +1149,45 @@ impl SymbolStore {
                 words: words.clone(),
                 bases,
             };
-            // The entry's pre-renumber id is final here — renumber_after_edits remaps it.
-            let entry_id = self.files.len() as u32;
-            self.files.push(entry);
-            for word in words {
-                if let Some(Some(files)) = self.refs.get_mut(word as usize) {
-                    files.push(entry_id);
+            match positions.get(&entry.path).copied() {
+                // The refill: the row keeps its id (its old occurrence contributions
+                // were subtracted by the caller), the new ones land under the same id.
+                Some(id) => {
+                    self.files[id as usize] = entry;
+                    for word in &words {
+                        refilled_lists.push(*word);
+                        if let Some(Some(list)) = self.refs.get_mut(*word as usize) {
+                            list.push(id);
+                        }
+                    }
+                }
+                // A brand-new file: the entry's pre-renumber id is final here —
+                // renumber_after_edits remaps it.
+                None => {
+                    let entry_id = self.files.len() as u32;
+                    self.files.push(entry);
+                    for word in words {
+                        if let Some(Some(files)) = self.refs.get_mut(word as usize) {
+                            files.push(entry_id);
+                        }
+                    }
                 }
             }
         }
-        self.sort_names();
+        refilled_lists.sort_unstable();
+        refilled_lists.dedup();
+        for word in refilled_lists {
+            if let Some(Some(list)) = self.refs.get_mut(word as usize) {
+                list.sort_unstable();
+                list.dedup();
+            }
+        }
+        // No fresh names — no id moved — and the whole-table re-sort plus its id remap
+        // can skip: the Ctrl+S case was paying O(names log names) string clones and a
+        // full refs rebuild for an identity transform.
+        if !fresh.is_empty() {
+            self.sort_names();
+        }
     }
 
     /// Restore the sorted-name invariant after interning (files_containing binary-searches
@@ -1194,99 +1315,191 @@ impl SymbolStore {
         }
     }
 
-    /// Persist the root's index. Two app instances can have the same root open (the app is
-    /// multi-instance), so the write goes through `crate::atomic_write` — each instance
-    /// writes its own temp sibling and one rename lands the whole file, never a shared
-    /// `symbols.bin.new` two saves would interleave through.
+    /// Persist the root's index as the nine `.ggs_*` project volumes (`project.ggs_sym`,
+    /// `project.ggs_xab`, `project.ggs_xad`, `project.ggs_xc`, `project.ggs_xf`,
+    /// `project.ggs_xm`, `project.ggs_xr`, `project.ggs_xsb`, `project.ggs_xsd`) — and remove
+    /// any legacy `symbols.bin` / `ggs.db` / `ggs.tix` files from earlier versions.
+    /// The full-derivation save: a build's first write (or an explicit one) re-derives
+    /// every file's facts and ignores whatever volumes stand on disk.
     pub fn save(&self, home: &Path) -> Result<(), String> {
-        let dir = Self::index_dir(&self.root, home);
-        let mut out = Vec::new();
-        out.extend_from_slice(MAGIC);
-        out.push(VERSION);
-        push_str(&mut out, &self.root);
-        push_u32(&mut out, self.files.len() as u32);
-        push_u32(&mut out, self.names.len() as u32);
+        let snapshot = self.save_snapshot_full();
+        Self::write_volumes(&snapshot, home)
+    }
+
+    /// The volume write's inputs, cloned from the store: the serialized trailer payload,
+    /// the file list, and the parsed-symbol fallback facts. Building it is pure CPU over
+    /// small structs — the watcher's save path snapshots this under the store's lock in
+    /// milliseconds and hands it to [`SymbolStore::write_volumes`], which does the heavy
+    /// reading and writing with no lock held. The store's dirty set rides along: the
+    /// write re-derives exactly those files' facts and loads the rest from the volumes
+    /// the previous write left behind.
+    pub fn save_snapshot(&self) -> SaveSnapshot {
+        let mut snapshot = self.save_snapshot_full();
+        snapshot.full = false;
+        snapshot.dirty_fids.clear();
+        snapshot.dirty_paths.clear();
+        for (fid, path) in snapshot.paths.iter().enumerate() {
+            if self.dirty.contains(path) {
+                snapshot.dirty_fids.push(fid as u32);
+                snapshot.dirty_paths.push(path.clone());
+            }
+        }
+        snapshot
+    }
+
+    /// The same snapshot with every file marked for derivation — `save`'s input, and
+    /// the shape a fresh build (no volumes on disk yet) writes from.
+    pub fn save_snapshot_full(&self) -> SaveSnapshot {
+        let mut trailer = Vec::new();
+        trailer.extend_from_slice(MAGIC);
+        trailer.push(VERSION);
+        push_str(&mut trailer, &self.root);
+        push_u32(&mut trailer, self.files.len() as u32);
+        push_u32(&mut trailer, self.names.len() as u32);
         for name in &self.names {
-            push_str(&mut out, name);
+            push_str(&mut trailer, name);
         }
         for file in &self.files {
-            push_str(&mut out, &file.path);
-            push_u64(&mut out, file.mtime_ms);
-            push_u64(&mut out, file.size);
-            push_u32(&mut out, file.symbols.len() as u32);
+            push_str(&mut trailer, &file.path);
+            push_u64(&mut trailer, file.mtime_ms);
+            push_u64(&mut trailer, file.size);
+            push_u32(&mut trailer, file.symbols.len() as u32);
             for symbol in &file.symbols {
-                out.push(symbol.kind);
-                out.extend_from_slice(&symbol.name_id.to_le_bytes());
-                out.extend_from_slice(&symbol.container_id.to_le_bytes());
-                out.extend_from_slice(&symbol.line.to_le_bytes());
-                out.extend_from_slice(&symbol.column.to_le_bytes());
-                out.extend_from_slice(&symbol.end_line.to_le_bytes());
+                trailer.push(symbol.kind);
+                trailer.extend_from_slice(&symbol.name_id.to_le_bytes());
+                trailer.extend_from_slice(&symbol.container_id.to_le_bytes());
+                trailer.extend_from_slice(&symbol.line.to_le_bytes());
+                trailer.extend_from_slice(&symbol.column.to_le_bytes());
+                trailer.extend_from_slice(&symbol.end_line.to_le_bytes());
             }
-            push_u32(&mut out, file.bases.len() as u32);
+            push_u32(&mut trailer, file.bases.len() as u32);
             for record in &file.bases {
-                out.extend_from_slice(&record.symbol.to_le_bytes());
-                push_u32(&mut out, record.bases.len() as u32);
+                trailer.extend_from_slice(&record.symbol.to_le_bytes());
+                push_u32(&mut trailer, record.bases.len() as u32);
                 for &base in &record.bases {
-                    out.extend_from_slice(&base.to_le_bytes());
+                    trailer.extend_from_slice(&base.to_le_bytes());
                 }
             }
         }
         for refs in &self.refs {
             match refs {
-                None => out.push(0),
+                None => trailer.push(0),
                 Some(files) => {
-                    out.push(1);
-                    push_u32(&mut out, files.len() as u32);
+                    trailer.push(1);
+                    push_u32(&mut trailer, files.len() as u32);
                     for &file in files {
-                        out.extend_from_slice(&file.to_le_bytes());
+                        trailer.extend_from_slice(&file.to_le_bytes());
                     }
                 }
             }
         }
-        ggs_base::fsx::atomic_write(&dir.join("symbols.bin"), &out)?;
-        // The analysis database rides beside the store in the same folder: a full build
-        // collected its tables, so the delete-and-regenerate promise covers them too.
-        // No tables (a resumed store) leaves the saved files standing untouched.
-        if let Some(tables) = &self.ana {
-            ggs_base::fsx::atomic_write(&dir.join(anadb::DB_FILE), &anadb::write_db(tables))?;
-            ggs_base::fsx::atomic_write(&dir.join(anadb::TIX_FILE), &anadb::write_tix(tables))?;
+        SaveSnapshot {
+            root: self.root.clone(),
+            trailer,
+            paths: self.files.iter().map(|f| f.path.clone()).collect(),
+            fingerprints: self.files.iter().map(|f| (f.mtime_ms, f.size)).collect(),
+            fallback: self
+                .files
+                .iter()
+                .map(|f| {
+                    f.symbols
+                        .iter()
+                        .map(|s| FallbackSym {
+                            kind: symvol_kind_of(s.kind),
+                            name_id: s.name_id,
+                            line: s.line,
+                            column: s.column,
+                            end_line: s.end_line,
+                        })
+                        .collect()
+                })
+                .collect(),
+            names: self.names.clone(),
+            has_parsed_symbols: self.files.iter().any(|f| !f.symbols.is_empty()),
+            full: true,
+            dirty_fids: (0..self.files.len() as u32).collect(),
+            dirty_paths: Vec::new(),
         }
-        Ok(())
     }
 
-    /// Read the root's index back. `None` for anything absent or not exactly this format's
-    /// shape — a corrupt file means "rebuild", never an error to surface.
+    /// Read the root's index back from the nine `.ggs_*` project volumes. `None` when any
+    /// of the nine volumes is missing or malformed — a corrupt or incomplete volume set
+    /// means "rebuild", never an error to surface.
     pub fn load(root: &str, home: &Path) -> Option<SymbolStore> {
-        let bytes = Self::store_dirs(root, home)
-            .iter()
-            .find_map(|dir| fs::read(dir.join("symbols.bin")).ok())?;
+        let dir = Self::store_dirs(root, home)
+            .into_iter()
+            .find(|dir| PROJECT_VOL_FILES.iter().all(|name| dir.join(name).is_file()))?;
+        // Verify the sibling volumes' headers before reading the `.ggs_sym` volume.
+        for xname in [XF_VOL_FILE, XR_VOL_FILE, XC_VOL_FILE] {
+            let xbytes = fs::read(dir.join(xname)).ok()?;
+            let xheader = VolumeHeader::parse_block(&xbytes)?;
+            if xheader.magic != MAGIC_XVOL || xheader.rec_size as usize != XVOL_REC_SIZE {
+                return None;
+            }
+        }
+        for dname in [XAD_VOL_FILE, XSD_VOL_FILE] {
+            let dbytes = fs::read(dir.join(dname)).ok()?;
+            if dbytes.len() < 4 || u32::from_le_bytes(dbytes[..4].try_into().ok()?) != MAGIC_XDIR {
+                return None;
+            }
+        }
+        let xm_bytes = fs::read(dir.join(XM_VOL_FILE)).ok()?;
+        projvol::parse_xm(&xm_bytes)?;
+
+        let sym_vol = fs::read(dir.join(SYM_VOL_FILE)).ok()?;
+        let header = VolumeHeader::parse_block(&sym_vol)?;
+        if header.magic != MAGIC_SYM
+            || header.version != VOL_VERSION
+            || header.rec_size as usize != SYM_REC_SIZE
+        {
+            return None;
+        }
+        let live_end = projvol::HEADER_BLOCK_SIZE
+            .checked_add((header.count as usize).checked_mul(SYM_REC_SIZE)?)?;
+        let total_end = projvol::HEADER_BLOCK_SIZE
+            .checked_add((header.capacity as usize).checked_mul(SYM_REC_SIZE)?)?;
+        if total_end != sym_vol.len() || live_end > total_end {
+            return None;
+        }
+        let trailer = &sym_vol[live_end..total_end];
+        if trailer.len() < 4 {
+            return None;
+        }
+        let payload_len = u32::from_le_bytes(trailer[..4].try_into().ok()?) as usize;
+        if 4 + payload_len > trailer.len() {
+            return None;
+        }
+        let bytes = &trailer[4..4 + payload_len];
         let mut at = 0usize;
-        take(&bytes, &mut at, MAGIC.len())?
+        take(bytes, &mut at, MAGIC.len())?
             .iter()
             .eq(MAGIC.iter())
             .then_some(())?;
-        (take(&bytes, &mut at, 1)?[0] == VERSION).then_some(())?;
-        let root = take_str(&bytes, &mut at)?;
-        let file_count = take_u32(&bytes, &mut at)? as usize;
-        let name_count = take_u32(&bytes, &mut at)? as usize;
+        (take(bytes, &mut at, 1)?[0] == VERSION).then_some(())?;
+        let stored_root = take_str(bytes, &mut at)?;
+        if stored_root != root {
+            return None;
+        }
+        let file_count = take_u32(bytes, &mut at)? as usize;
+        let name_count = take_u32(bytes, &mut at)? as usize;
         let mut names = Vec::with_capacity(name_count);
         for _ in 0..name_count {
-            names.push(take_str(&bytes, &mut at)?);
+            names.push(take_str(bytes, &mut at)?);
         }
         let mut files = Vec::with_capacity(file_count);
         for _ in 0..file_count {
-            let path = take_str(&bytes, &mut at)?;
-            let mtime_ms = take_u64(&bytes, &mut at)?;
-            let size = take_u64(&bytes, &mut at)?;
-            let symbols = take_u32(&bytes, &mut at)? as usize;
+            let path = take_str(bytes, &mut at)?;
+            let mtime_ms = take_u64(bytes, &mut at)?;
+            let size = take_u64(bytes, &mut at)?;
+            let symbols = take_u32(bytes, &mut at)? as usize;
             let mut parsed = Vec::with_capacity(symbols);
             for _ in 0..symbols {
-                let kind = take(&bytes, &mut at, 1)?[0];
-                let name_id = take_u32(&bytes, &mut at)?;
-                let container_id = take_u32(&bytes, &mut at)?;
-                let line = take_u32(&bytes, &mut at)?;
-                let column = take_u32(&bytes, &mut at)?;
-                let end_line = take_u32(&bytes, &mut at)?;
+                let kind = take(bytes, &mut at, 1)?[0];
+                let name_id = take_u32(bytes, &mut at)?;
+                let container_id = take_u32(bytes, &mut at)?;
+                let line = take_u32(bytes, &mut at)?;
+                let column = take_u32(bytes, &mut at)?;
+                let end_line = take_u32(bytes, &mut at)?;
                 if name_id as usize >= names.len()
                     || (container_id != NO_CONTAINER && container_id as usize >= names.len())
                 {
@@ -1302,13 +1515,13 @@ impl SymbolStore {
                 });
             }
             let mut bases = Vec::new();
-            let base_records = take_u32(&bytes, &mut at)? as usize;
+            let base_records = take_u32(bytes, &mut at)? as usize;
             for _ in 0..base_records {
-                let symbol = take_u32(&bytes, &mut at)?;
-                let count = take_u32(&bytes, &mut at)? as usize;
+                let symbol = take_u32(bytes, &mut at)?;
+                let count = take_u32(bytes, &mut at)? as usize;
                 let mut ids = Vec::with_capacity(count);
                 for _ in 0..count {
-                    let base = take_u32(&bytes, &mut at)?;
+                    let base = take_u32(bytes, &mut at)?;
                     if base as usize >= names.len() {
                         return None;
                     }
@@ -1330,13 +1543,13 @@ impl SymbolStore {
         }
         let mut refs = Vec::with_capacity(name_count);
         for _ in 0..name_count {
-            match take(&bytes, &mut at, 1)?[0] {
+            match take(bytes, &mut at, 1)?[0] {
                 0 => refs.push(None),
                 1 => {
-                    let count = take_u32(&bytes, &mut at)? as usize;
+                    let count = take_u32(bytes, &mut at)? as usize;
                     let mut list = Vec::with_capacity(count);
                     for _ in 0..count {
-                        list.push(take_u32(&bytes, &mut at)?);
+                        list.push(take_u32(bytes, &mut at)?);
                     }
                     refs.push(Some(list));
                 }
@@ -1346,15 +1559,12 @@ impl SymbolStore {
         if at != bytes.len() {
             return None;
         }
-        // The words transpose comes back from the occurrence lists. The analysis
-        // tables stay `None` — the saved `ggs.db` on disk keeps standing until the
-        // next full build rewrites it whole.
         let mut store = SymbolStore {
-            root,
+            root: stored_root,
             files,
             names,
             refs,
-            ana: None,
+            dirty: HashSet::new(),
         };
         for (name, files_with) in store.refs.iter().enumerate() {
             for &file in files_with.as_deref().unwrap_or(&[]) {
@@ -1405,308 +1615,608 @@ fn extract_file(root: &str, relative: &str) -> Option<Extraction> {
             bases: s.bases,
         })
         .collect();
-    let calls = parsed
-        .calls
-        .into_iter()
-        .map(|call| (call.name, call.line as u32))
-        .collect();
-    let words = unique_words(&text);
     Some(Extraction {
         path: relative.to_owned(),
         mtime_ms: stat.mtime_ms,
         size: stat.size,
         symbols,
-        words,
-        calls,
     })
 }
 
-/// The file's unique identifier words, deduplicated — the raw material the interned
-/// occurrence list maps from.
-fn unique_words(text: &str) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut words = Vec::new();
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    let mut start = None;
-    for (at, c) in text.char_indices() {
-        if is_word(c) {
-            if start.is_none() {
-                start = Some(at);
-            }
-        } else if let Some(from) = start.take() {
-            let word = &text[from..at];
-            if seen.insert(word) {
-                words.push(word.to_owned());
-            }
-        }
+/// Map one of `SymbolStore`'s internal kind ids to the `.ggs_sym` volume's kind code.
+fn symvol_kind_of(kind: u8) -> u16 {
+    match kind_name(kind) {
+        "function" => 0,
+        "method" => 11,
+        "class" => 10,
+        "struct" => 2,
+        "interface" => 10,
+        "enum" => 7,
+        "module" => 29,
+        "type" => 4,
+        "macro" => 6,
+        "variable" => 5,
+        "field" => 17,
+        "constant" => 12,
+        _ => 0,
     }
-    if let Some(from) = start {
-        let word = &text[from..];
-        if seen.insert(word) {
-            words.push(word.to_owned());
-        }
-    }
-    words
 }
 
-/// Which of the interned names occur as words in `text`, as a sorted, deduplicated id list.
-/// The scan is a plain character walk — no allocation per word, only per hit.
-/// The positioned, code-only word hits one file carries: `(name id, 0-based line)`, every
-/// whole word whose name the index knows, hits inside comments and strings filtered out
-/// by the mask. The reference database's reference rows read from this — the store's own
-/// occurrence lists stay the unfiltered unique words `words_in` gathers.
-fn positioned_hits(text: &str, id_of: &impl Fn(&str) -> Option<u32>) -> Vec<(u32, u32)> {
-    let code_mask = crate::symbols::mask::mask(text);
-    let mut hits: Vec<(u32, u32)> = Vec::new();
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    let mut start: Option<usize> = None;
-    // The line bookkeeping as it stood when the word started — a flush that happens on
-    // the newline closing the word's line must still read the word's own line.
-    let mut word_line = 0usize;
-    let mut word_line_start = 0usize;
-    // The character before the word, ignoring whitespace — a `.` or `>` marks member
-    // access (`self.x`, `ptr->x`), which the reference engine never records as a plain
-    // reference.
-    let mut last_significant: Option<char> = None;
-    let mut line = 0usize;
-    let mut line_start_byte = 0usize;
-    for (at, c) in text.char_indices() {
-        if is_word(c) {
-            if start.is_none() {
-                start = Some(at);
-                word_line = line;
-                word_line_start = line_start_byte;
-            }
-        } else {
-            if let Some(from) = start.take() {
-                push_positioned_hit(
-                    &mut hits,
-                    text,
-                    &code_mask,
-                    id_of,
-                    from,
-                    at,
-                    word_line,
-                    word_line_start,
-                    last_significant,
-                );
-            }
-            if c == '\n' {
-                line += 1;
-                line_start_byte = at + 1;
-            }
-            if !c.is_whitespace() {
-                last_significant = Some(c);
-            }
-        }
+/// What the nine-volume write needs from the store, cloned under the store's lock: the
+/// serialized trailer payload, the file list, and the parsed-symbol fallback facts.
+/// Building one is milliseconds of pure CPU; the heavy work — reading the source files
+/// whose volume facts are stale and writing the volumes — runs in
+/// [`SymbolStore::write_volumes`] with no lock held, so a watcher-driven save never
+/// blocks the queries against the store.
+pub struct SaveSnapshot {
+    root: String,
+    /// The whole store payload, serialized exactly as `load` parses it back.
+    trailer: Vec<u8>,
+    /// The store's file paths in store order — the volumes' file-id order.
+    paths: Vec<String>,
+    /// Per file, the recorded (mtime, size) aligned with `paths` — what the reuse
+    /// validator compares against the previous volumes' own trailer table.
+    fingerprints: Vec<(u64, u64)>,
+    /// Per file, the parsed symbols reduced to their `.ggs_sym` fallback facts.
+    fallback: Vec<Vec<FallbackSym>>,
+    names: Vec<String>,
+    has_parsed_symbols: bool,
+    /// A full derivation: every file's facts re-derived, the on-disk volumes ignored.
+    full: bool,
+    /// The file ids whose volume facts must be re-derived — the store's dirty paths
+    /// resolved against `paths` (empty under `full`, where every id derives).
+    pub(crate) dirty_fids: Vec<u32>,
+    /// The dirty paths themselves, for the drain's post-write clear.
+    pub(crate) dirty_paths: Vec<String>,
+}
+
+/// One parsed symbol reduced for the fallback slots: the final `.ggs_sym` kind code and
+/// the geometry, the name resolved through `SaveSnapshot::names` at write time.
+struct FallbackSym {
+    kind: u16,
+    name_id: u32,
+    line: u32,
+    column: u32,
+    end_line: u32,
+}
+
+/// The source-bytes budget under which the volume write keeps every file's split rows
+/// from its single read instead of re-reading the file when the sym graph asks for its
+/// rows. Past the budget the rows stay unheld — their per-line vectors would roughly
+/// triple the write's footprint — and the graph re-reads from the cache-warm tree, as
+/// before. Either way the emitted bytes are the same.
+const ROWS_KEEP_BUDGET: u64 = 128 * 1024 * 1024;
+
+/// The write-state marker beside the nine volumes (`project.ggs_state`): which
+/// `.ggs_sym` slot mode the last write used, plus the byte length and FNV-1a of each
+/// volume the incremental save may load its unchanged records back from. A missing,
+/// stale or mismatched marker simply disables the reuse — that save runs the full
+/// derivation, and the next successful write re-arms it. Written AFTER the four
+/// hashed volumes land, so the marker always describes what is on disk.
+pub const STATE_VOL_FILE: &str = "project.ggs_state";
+const STATE_FORMAT: u8 = 1;
+/// The `.ggs_sym` slot mode a write used: the symgen scanners' records, or the store's
+/// parsed-symbol fallback records when no scanner covered any file.
+const SYM_MODE_FALLBACK: u8 = 0;
+const SYM_MODE_SYMGEN: u8 = 1;
+
+/// The previous write's per-file volume facts, loaded back as the incremental save's
+/// cache: the three signature slots per file id, the `.ggs_sym` records, the slot mode
+/// they were built under, and the previous trailer's file table (the per-fid reuse
+/// validator). Everything the dirty-aware write would otherwise re-derive from the
+/// source tree.
+struct VolumeCache {
+    symgen: bool,
+    table: Vec<(String, u64, u64)>,
+    xr: Vec<[u8; XVOL_REC_SIZE]>,
+    xf: Vec<[u8; XVOL_REC_SIZE]>,
+    xc: Vec<[u8; XVOL_REC_SIZE]>,
+    sym_records: Vec<SymSlot>,
+}
+
+fn fnv1a32(bytes: &[u8]) -> u32 {
+    let mut hash: u32 = FNV_INIT;
+    for &byte in bytes {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
     }
-    if let Some(from) = start {
-        push_positioned_hit(
-            &mut hits,
-            text,
-            &code_mask,
-            id_of,
-            from,
-            text.len(),
-            line,
-            line_start_byte,
-            last_significant,
+    hash
+}
+
+const FNV_INIT: u32 = 0x811c_9dc5;
+
+/// The streaming write's digests: wraps the volume writer, accumulating the byte
+/// length and FNV-1a the state marker records. Nothing reads the volume back twice.
+struct HashingWriter<'a, W: std::io::Write> {
+    inner: &'a mut W,
+    len: u64,
+    hash: u32,
+}
+
+impl<W: std::io::Write> std::io::Write for HashingWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let wrote = self.inner.write(buf)?;
+        self.len += wrote as u64;
+        for &byte in &buf[..wrote] {
+            self.hash ^= byte as u32;
+            self.hash = self.hash.wrapping_mul(0x0100_0193);
+        }
+        Ok(wrote)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn parse_state_marker(marker: &[u8]) -> Option<(bool, [(u64, u32); 4])> {
+    if marker.len() != 2 + 4 * 12 || marker[0] != STATE_FORMAT {
+        return None;
+    }
+    let mode = marker[1];
+    if mode != SYM_MODE_SYMGEN && mode != SYM_MODE_FALLBACK {
+        return None;
+    }
+    let mut pairs = [(0u64, 0u32); 4];
+    for (i, pair) in pairs.iter_mut().enumerate() {
+        let at = 2 + i * 12;
+        *pair = (
+            u64::from_le_bytes(marker[at..at + 8].try_into().ok()?),
+            u32::from_le_bytes(marker[at + 8..at + 12].try_into().ok()?),
         );
     }
-    hits
+    Some((mode == SYM_MODE_SYMGEN, pairs))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn push_positioned_hit(
-    hits: &mut Vec<(u32, u32)>,
-    text: &str,
-    code_mask: &crate::symbols::mask::CodeMask,
-    id_of: &impl Fn(&str) -> Option<u32>,
-    from: usize,
-    to: usize,
-    line: usize,
-    line_start_byte: usize,
-    last_significant: Option<char>,
-) {
-    let word = &text[from..to];
-    let Some(id) = id_of(word) else {
-        return;
-    };
-    if matches!(last_significant, Some('.') | Some('>')) {
-        return;
+fn write_state_marker(
+    dir: &Path,
+    symgen: bool,
+    pairs: [(u64, u32); 4],
+) -> Result<(), String> {
+    let mut marker = Vec::with_capacity(2 + 4 * 12);
+    marker.push(STATE_FORMAT);
+    marker.push(if symgen {
+        SYM_MODE_SYMGEN
+    } else {
+        SYM_MODE_FALLBACK
+    });
+    for (len, hash) in pairs {
+        marker.extend_from_slice(&len.to_le_bytes());
+        marker.extend_from_slice(&hash.to_le_bytes());
     }
-    let col = text[line_start_byte..from].chars().count();
-    if code_mask.is_masked(line, col) {
-        return;
-    }
-    hits.push((id, line as u32));
+    ggs_base::fsx::atomic_write(&dir.join(STATE_VOL_FILE), &marker)
 }
 
-/// The innermost declaration covering `line` (0-based) — the latest-starting span wins,
-/// the same innermost rule the relation scans attribute references by.
-fn enclosing_symbol(symbols: &[StoredSymbol], line: u32) -> Option<&StoredSymbol> {
-    symbols
+/// The previous write's file table — path/mtime/size per file id — parsed out of the
+/// `.ggs_sym` trailer payload (the same bytes `load` restores the store from, here
+/// read only as far as the table).
+fn trailer_file_table(spare: &[u8], root: &str) -> Option<Vec<(String, u64, u64)>> {
+    let payload_len = u32::from_le_bytes(spare.get(..4)?.try_into().ok()?) as usize;
+    let bytes = spare.get(4..4 + payload_len)?;
+    let mut at = 0usize;
+    take(bytes, &mut at, MAGIC.len())?
         .iter()
-        .filter(|symbol| symbol.line <= line && line <= symbol.end_line)
-        .max_by_key(|symbol| symbol.line)
-}
-
-/// The reference database's SymType for one of the store's kinds.
-fn si_type_of(kind: u8) -> i32 {
-    match kind_name(kind) {
-        "function" => anadb::SYM_FUNCTION,
-        "method" => anadb::SYM_PROTOTYPE,
-        "class" => anadb::SYM_CLASS,
-        "struct" => anadb::SYM_STRUCT,
-        "interface" => anadb::SYM_INTERFACE,
-        "enum" => anadb::SYM_ENUM,
-        "module" => anadb::SYM_NAMESPACE,
-        "type" => anadb::SYM_TYPEDEF,
-        "macro" => anadb::SYM_MACRO,
-        "variable" => anadb::SYM_VARIABLE,
-        _ => anadb::SYM_UNKNOWN,
+        .eq(MAGIC.iter())
+        .then_some(())?;
+    (take(bytes, &mut at, 1)?[0] == VERSION).then_some(())?;
+    (take_str(bytes, &mut at)? == root).then_some(())?;
+    let file_count = take_u32(bytes, &mut at)? as usize;
+    let name_count = take_u32(bytes, &mut at)? as usize;
+    for _ in 0..name_count {
+        take_str(bytes, &mut at)?;
     }
+    let mut table = Vec::with_capacity(file_count);
+    for _ in 0..file_count {
+        let path = take_str(bytes, &mut at)?;
+        let mtime = take_u64(bytes, &mut at)?;
+        let size = take_u64(bytes, &mut at)?;
+        let symbols = take_u32(bytes, &mut at)? as usize;
+        for _ in 0..symbols {
+            // kind + name_id + container_id + line + column + end_line, walked past
+            take(bytes, &mut at, 21)?;
+        }
+        let base_records = take_u32(bytes, &mut at)? as usize;
+        for _ in 0..base_records {
+            take_u32(bytes, &mut at)?;
+            let count = take_u32(bytes, &mut at)? as usize;
+            for _ in 0..count {
+                take_u32(bytes, &mut at)?;
+            }
+        }
+        table.push((path, mtime, size));
+    }
+    Some(table)
 }
 
-/// The kinds the reference database's type-definition table records — its `db_add_tdr`
-/// covers class / struct / union / enum / typedef / interface / namespace declarations.
-fn is_si_tdr_kind(kind: u8) -> bool {
-    matches!(
-        kind_name(kind),
-        "class" | "struct" | "interface" | "enum" | "module" | "type"
-    )
-}
-
-/// Assemble the analysis database's six tables from a fully built store plus the
-/// per-file call sites and positioned hits. Mirrors the reference parse flow: symbols
-/// deduplicate by name (first declaration wins, and only a new symbol bumps its
-/// module's count); every declaration row lands in the code table with `enc = -1`;
-/// a call whose both ends resolve records the (caller, callee) edge — deduplicated on
-/// the exact pair, first line wins — plus its code row; a plain code-positioned
-/// identifier records its code row alone; member access and self-references never
-/// record. The tables are deterministic, so a rebuild regenerates the same bytes.
-fn build_ana_tables(
-    store: &SymbolStore,
-    calls_per_file: &[Vec<(String, u32)>],
-    hits_per_file: &[Vec<(u32, u32)>],
-) -> anadb::AnaTables {
-    let mut tables = anadb::AnaTables {
-        mods: store
-            .files
-            .iter()
-            .map(|file| anadb::AnaModule {
-                name: file.path.clone(),
-                sym_count: 0,
-            })
-            .collect(),
-        ..anadb::AnaTables::default()
+/// Load the previous write's volume facts back: the state marker validates the four
+/// reusable volumes' identity (length + FNV-1a), the `.ggs_sym` parse yields the slot
+/// records, its trailer yields the file table. Any mismatch — a crash mid-write, a
+/// foreign or hand-edited set, a format bump — answers `None` and the save runs the
+/// full derivation.
+fn load_volume_cache(dir: &Path, snapshot: &SaveSnapshot) -> Option<VolumeCache> {
+    let marker = fs::read(dir.join(STATE_VOL_FILE)).ok()?;
+    let (symgen, pairs) = parse_state_marker(&marker)?;
+    let mut bytes_of = Vec::with_capacity(4);
+    for name in [SYM_VOL_FILE, XF_VOL_FILE, XR_VOL_FILE, XC_VOL_FILE] {
+        bytes_of.push(fs::read(dir.join(name)).ok()?);
+    }
+    for (bytes, (len, hash)) in bytes_of.iter().zip(pairs.iter()) {
+        if bytes.len() as u64 != *len || fnv1a32(bytes) != *hash {
+            return None;
+        }
+    }
+    let sym_bytes = &bytes_of[0];
+    let xf_bytes = &bytes_of[1];
+    let xr_bytes = &bytes_of[2];
+    let xc_bytes = &bytes_of[3];
+    let xslots = |bytes: &[u8]| -> Option<Vec<[u8; XVOL_REC_SIZE]>> {
+        let header = VolumeHeader::parse_block(bytes.get(..projvol::HEADER_BLOCK_SIZE)?)?;
+        (header.magic == MAGIC_XVOL && header.rec_size as usize == XVOL_REC_SIZE).then_some(())?;
+        let n = header.count as usize;
+        (bytes.len() == projvol::HEADER_BLOCK_SIZE + n * XVOL_REC_SIZE).then_some(())?;
+        Some(
+            (0..n)
+                .map(|i| {
+                    let mut slot = [0u8; XVOL_REC_SIZE];
+                    let at = projvol::HEADER_BLOCK_SIZE + i * XVOL_REC_SIZE;
+                    slot.copy_from_slice(&bytes[at..at + XVOL_REC_SIZE]);
+                    slot
+                })
+                .collect(),
+        )
     };
-    let mut si_id_of: HashMap<&str, i32> = HashMap::new();
-    let mut tdr_of: HashSet<&str> = HashSet::new();
-    let mut syl_seen: HashSet<(i32, Vec<u8>)> = HashSet::new();
-    let mut edge_seen: HashSet<(i32, i32)> = HashSet::new();
+    let xf = xslots(xf_bytes)?;
+    let xr = xslots(xr_bytes)?;
+    let xc = xslots(xc_bytes)?;
+    let parsed = projvol::parse_sym_volume(sym_bytes)?;
+    let live_end = projvol::HEADER_BLOCK_SIZE
+        + parsed.header.count as usize * SYM_REC_SIZE;
+    let table = trailer_file_table(&sym_bytes[live_end..], &snapshot.root)?;
+    Some(VolumeCache {
+        symgen,
+        table,
+        xr,
+        xf,
+        xc,
+        sym_records: parsed.records,
+    })
+}
 
-    // Pass 1 — declarations: symbols, type-def records, syllables, definition code rows.
-    for (module, file) in store.files.iter().enumerate() {
-        for symbol in &file.symbols {
-            let name = store.names[symbol.name_id as usize].as_str();
-            let line = symbol.line as i32 + 1;
-            let id = match si_id_of.get(name) {
-                Some(&id) => id,
-                None => {
-                    let id = tables.syms.len() as i32;
-                    tables.syms.push(anadb::AnaSymbol {
-                        id,
-                        name: name.to_owned(),
-                        type_: si_type_of(symbol.kind),
-                        module: module as i32,
-                        line,
-                    });
-                    tables.mods[module].sym_count += 1;
-                    si_id_of.insert(name, id);
-                    for frag in anadb::split_syllables(name) {
-                        if syl_seen.insert((id, frag.clone())) {
-                            tables.syls.push(anadb::AnaSyl { frag, sym: id });
-                        }
-                    }
-                    id
-                }
-            };
-            tables.code.push(anadb::AnaCode {
-                sym: id,
-                module: module as i32,
-                line,
-                is_def: 1,
-                enc: -1,
+/// The parsed-symbol fallback slots for the fids `want` marks, in fid order — the
+/// full write marks every fid, the incremental one only its derived fids.
+fn fallback_slots(snapshot: &SaveSnapshot, want: &[bool]) -> Vec<SymSlot> {
+    let mut slots = Vec::new();
+    for (fid, syms) in snapshot.fallback.iter().enumerate() {
+        if !want.get(fid).copied().unwrap_or(false) {
+            continue;
+        }
+        for s in syms {
+            slots.push(SymSlot {
+                name: snapshot.names[s.name_id as usize].as_bytes().to_vec(),
+                line0: s.line,
+                col0: s.column,
+                decl_start: s.line,
+                token_col: s.column,
+                decl_end_line: s.end_line,
+                decl_end_col: 0,
+                raw108: 0,
+                raw112: 0,
+                raw116: 0,
+                prev: FREE_HEAD_NONE,
+                scope: FREE_HEAD_NONE,
+                related: FREE_HEAD_NONE,
+                file_id: fid as u32,
+                raw136: 0,
+                kind: s.kind,
+                flags: 0,
+                name_tag: 0,
             });
-            if is_si_tdr_kind(symbol.kind) && tdr_of.insert(name) {
-                tables.tdrs.push(anadb::AnaTdr {
-                    name: name.to_owned(),
-                    type_: si_type_of(symbol.kind),
-                    module: module as i32,
-                    line,
-                });
-            }
         }
     }
+    slots
+}
 
-    // Pass 2 — references: the parse's call sites (grammar-clean) and the masked
-    // positioned words, both attributed to their innermost enclosing declaration.
-    let id_of_name = |name: &str| si_id_of.get(name).copied();
-    for (module, file) in store.files.iter().enumerate() {
-        let record = |tables: &mut anadb::AnaTables,
-                      subject: &str,
-                      line: u32,
-                      want_edge: bool,
-                      edge_seen: &mut HashSet<(i32, i32)>| {
-            let Some(enclosing) = enclosing_symbol(&file.symbols, line) else {
-                return;
-            };
-            let enc_name = store.names[enclosing.name_id as usize].as_str();
-            let (Some(subject_id), Some(enc_id)) = (id_of_name(subject), id_of_name(enc_name))
-            else {
-                return;
-            };
-            if subject_id == enc_id {
-                return;
-            }
-            if want_edge && edge_seen.insert((enc_id, subject_id)) {
-                tables.edges.push(anadb::AnaEdge {
-                    caller: enc_id,
-                    callee: subject_id,
-                    line: line as i32 + 1,
-                });
-            }
-            tables.code.push(anadb::AnaCode {
-                sym: subject_id,
-                module: module as i32,
-                line: line as i32 + 1,
-                is_def: 0,
-                enc: enc_id,
-            });
+/// Merge the kept records and the freshly derived ones into one fid-ascending list.
+/// Both sides are fid-ascending and a fid appears in at most one of them (a file is
+/// either reused or derived), so this is the stable interleave a full derivation
+/// would have produced.
+fn merge_sym_slots(kept: Vec<SymSlot>, fresh: Vec<SymSlot>) -> Vec<SymSlot> {
+    let mut merged = Vec::with_capacity(kept.len() + fresh.len());
+    let mut k = kept.into_iter().peekable();
+    let mut f = fresh.into_iter().peekable();
+    loop {
+        let take_kept = match (k.peek(), f.peek()) {
+            (Some(a), Some(b)) => a.file_id <= b.file_id,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
         };
-        for (name, line) in calls_per_file
-            .get(module)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-        {
-            record(&mut tables, name, *line, true, &mut edge_seen);
-        }
-        for (name_id, line) in hits_per_file
-            .get(module)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-        {
-            record(
-                &mut tables,
-                store.names[*name_id as usize].as_str(),
-                *line,
-                false,
-                &mut edge_seen,
-            );
+        if take_kept {
+            merged.push(k.next().unwrap());
+        } else {
+            merged.push(f.next().unwrap());
         }
     }
-    tables
+    merged
+}
+
+/// The volume write's rayon pool: half the cores (at least two), the build's own
+/// background budget — a save must never take every core away from the page while the
+/// symbol queries answer.
+fn save_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(super::index::SymbolIndex::index_threads(true))
+            .thread_name(|i| format!("ggs-vol-{i}"))
+            .build()
+            .expect("the volume-save pool builds")
+    })
+}
+
+impl SymbolStore {
+    /// Assemble and write the nine `.ggs_*` project volumes (`project.ggs_sym`,
+    /// `project.ggs_xf`, `project.ggs_xr`, `project.ggs_xc`, `project.ggs_xm`,
+    /// `project.ggs_xab`, `project.ggs_xad`, `project.ggs_xsb`, `project.ggs_xsd`) from a
+    /// [`SaveSnapshot`] into the snapshot root's analysis folder, removing any legacy
+    /// `symbols.bin` / `ggs.db` / `ggs.tix` files. The store's lock is never held across
+    /// this: the only store state it touches is the snapshot.
+    pub fn write_volumes(snapshot: &SaveSnapshot, home: &Path) -> Result<(), String> {
+        let dir = Self::index_dir(&snapshot.root, home);
+        for legacy in ["symbols.bin", "ggs.db", "ggs.tix"] {
+            let _ = fs::remove_file(dir.join(legacy));
+        }
+        let root_path = Path::new(&snapshot.root);
+        let count = snapshot.paths.len();
+        // The previous write's volume facts, loaded back as the cache: the state
+        // marker's hashes prove the volumes are one write's output, and the per-fid
+        // table comparison proves which files' facts still stand. Only the dirty
+        // files — and any file the table displaced — re-derive from the tree.
+        let cache = load_volume_cache(&dir, snapshot);
+        let dirty: HashSet<u32> = snapshot.dirty_fids.iter().copied().collect();
+        let reuse_fid: Vec<bool> = (0..count)
+            .map(|fid| {
+                if snapshot.full || dirty.contains(&(fid as u32)) {
+                    return false;
+                }
+                let Some(cached) = cache.as_ref() else {
+                    return false;
+                };
+                cached.xr.len() > fid
+                    && cached.table.get(fid).is_some_and(|(path, mtime, size)| {
+                        *path == snapshot.paths[fid]
+                            && *mtime == snapshot.fingerprints[fid].0
+                            && *size == snapshot.fingerprints[fid].1
+                    })
+            })
+            .collect();
+        let incremental = !snapshot.full && cache.is_some();
+
+        let mut file_paths_bytes: Vec<Vec<u8>> = Vec::with_capacity(count);
+        let mut xr_slots: Vec<[u8; XVOL_REC_SIZE]> = Vec::with_capacity(count);
+        let mut xf_slots: Vec<[u8; XVOL_REC_SIZE]> = Vec::with_capacity(count);
+        let mut xc_slots: Vec<[u8; XVOL_REC_SIZE]> = Vec::with_capacity(count);
+        let mut xm_ids: Vec<u32> = Vec::with_capacity(count);
+
+        // Per file, in the store's own order: a cache hit supplies the signature slots
+        // without touching the disk; everything else is ONE read serving the signature
+        // records, the skeleton discovery and — under the rows budget — the sym graph's
+        // split rows both. The raw bytes live only inside the worker, never together.
+        // The rows budget covers the derived files only: a reused file contributes no
+        // discovery, so its rows are never asked for.
+        let derive_bytes: u64 = snapshot
+            .fingerprints
+            .iter()
+            .enumerate()
+            .filter(|(fid, _)| !reuse_fid[*fid])
+            .map(|(_, (_, size))| *size)
+            .sum();
+        let keep_rows = derive_bytes <= ROWS_KEEP_BUDGET;
+        type PerFileFacts = (
+            String,
+            [u8; XVOL_REC_SIZE],
+            [u8; XVOL_REC_SIZE],
+            [u8; XVOL_REC_SIZE],
+            Vec<symgen::Rec>,
+            Option<Vec<Vec<u8>>>,
+        );
+        let per_file: Vec<PerFileFacts> = snapshot
+            .paths
+            .par_iter()
+            .enumerate()
+            .map(|(fid, path)| {
+                let rel_backslash = path.replace('/', "\\");
+                if reuse_fid[fid] {
+                    let cached = cache.as_ref().unwrap();
+                    return (
+                        rel_backslash,
+                        cached.xr[fid],
+                        cached.xf[fid],
+                        cached.xc[fid],
+                        Vec::new(),
+                        None,
+                    );
+                }
+                let raw = fs::read(root_path.join(path)).unwrap_or_default();
+                let ext = projvol_sig::ext_key(rel_backslash.as_bytes());
+                let (xr, xf, xc) = projvol_sig::build_file_records(fid as u32, &ext, &raw);
+                let recs = symgen::discover_file_skeletons(fid as u32, &rel_backslash, &raw, false);
+                let rows = keep_rows.then(|| symgen::split_source_rows(&raw));
+                (rel_backslash, xr, xf, xc, recs, rows)
+            })
+            .collect();
+        let mut paths_bs: Vec<String> = Vec::with_capacity(count);
+        let mut discovered: Vec<(u32, String, Vec<symgen::Rec>)> = Vec::with_capacity(count);
+        let mut kept_rows: Vec<Option<Vec<Vec<u8>>>> = Vec::with_capacity(count);
+        for (fid, (rel_backslash, xr, xf, xc, recs, rows)) in per_file.into_iter().enumerate() {
+            let fid_u32 = fid as u32;
+            xr_slots.push(xr);
+            xf_slots.push(xf);
+            xc_slots.push(xc);
+            xm_ids.push(fid_u32);
+            file_paths_bytes.push(rel_backslash.as_bytes().to_vec());
+            paths_bs.push(rel_backslash.clone());
+            // Every fid's path rides along — so the record assembly's per-file lookups
+            // are addressed exactly as a fresh write's — but only the derived fids
+            // contribute discovery records; a reused file's slots come from the cache.
+            discovered.push((fid_u32, rel_backslash, recs));
+            kept_rows.push(rows);
+        }
+
+        // The incremental save starts from the previous write's sym records — the ones
+        // whose file is provably unchanged — and merges the derived files' fresh
+        // records in; the full save starts empty. Either way the list is fid-ascending
+        // and each file's records are what a fresh derivation of that file produces,
+        // so the merged bytes are the full derivation's bytes.
+        let mut sym_slots: Vec<SymSlot> = match cache.as_ref() {
+            Some(cached) if incremental => cached
+                .sym_records
+                .iter()
+                .filter(|record| {
+                    reuse_fid
+                        .get(record.file_id as usize)
+                        .copied()
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        };
+        let prev_symgen = cache.as_ref().map(|c| c.symgen).unwrap_or(false);
+
+        // The field rules' rows: answered from the kept rows when the budget held them
+        // (no second read), else fetched per file on demand — one file's rows in memory
+        // at a time across the pool, read straight from the (cache-warm) tree.
+        let fresh_sym = save_pool().install(|| {
+            symgen::slots_from_discoveries(discovered, &|fid| {
+                match kept_rows.get(fid as usize).and_then(|rows| rows.as_ref()) {
+                    Some(rows) => rows.clone(),
+                    None => {
+                        let rel = paths_bs[fid as usize].replace('\\', "/");
+                        let raw = fs::read(root_path.join(rel)).unwrap_or_default();
+                        symgen::split_source_rows(&raw)
+                    }
+                }
+            })
+        });
+
+        let symgen_mode;
+        if incremental {
+            // The kept records stand for the untouched files; the derived files'
+            // records merge in — from the symgen scanners when the mode still is
+            // symgen (or just became it), else from the store's parsed-symbol
+            // fallback. The previous write's mode decides which side the kept
+            // records belong to: a fallback set and a symgen set never mix.
+            let current_symgen = prev_symgen || !fresh_sym.is_empty();
+            if current_symgen {
+                if !prev_symgen {
+                    sym_slots.clear();
+                }
+                sym_slots = merge_sym_slots(std::mem::take(&mut sym_slots), fresh_sym);
+                symgen_mode = true;
+            } else if snapshot.has_parsed_symbols {
+                if prev_symgen {
+                    sym_slots.clear();
+                }
+                let derived_fid: Vec<bool> = reuse_fid.iter().map(|reuse| !reuse).collect();
+                let derived_fb = fallback_slots(snapshot, &derived_fid);
+                sym_slots = merge_sym_slots(sym_slots, derived_fb);
+                symgen_mode = false;
+            } else {
+                symgen_mode = prev_symgen;
+            }
+        } else {
+            sym_slots = fresh_sym;
+            // Languages outside symgen's C/C++/Py/JS/Make/HTML/INI/.inc scanners (e.g. Rust, Go,
+            // TypeScript, Java, C#) still populate `.ggs_sym` from the store's own parsed symbols.
+            let fallback_ran = sym_slots.is_empty() && snapshot.has_parsed_symbols;
+            if fallback_ran {
+                let all_fids = vec![true; count];
+                sym_slots = fallback_slots(snapshot, &all_fids);
+            }
+            symgen_mode = !fallback_ran;
+        }
+
+        // The trailer rides `.ggs_sym`'s spare slot area past `header.count`; the volumes
+        // stream straight to their temp files — none of them sits in memory whole.
+        let trailer = &snapshot.trailer;
+        let trailer_total = 4 + trailer.len();
+        let spare_slots = trailer_total.div_ceil(SYM_REC_SIZE);
+        let sym_header = VolumeHeader {
+            magic: MAGIC_SYM,
+            version: VOL_VERSION,
+            count: sym_slots.len() as u32,
+            capacity: (sym_slots.len() + spare_slots) as u32,
+            first_free: FREE_HEAD_NONE,
+            rec_size: SYM_REC_SIZE as u32,
+            unk18: 0,
+            state: 0,
+        };
+
+        let xheader = VolumeHeader {
+            count: count as u32,
+            capacity: count as u32,
+            ..VolumeHeader::initial(MAGIC_XVOL, XVOL_REC_SIZE as u32)
+        };
+        let xr_refs: Vec<&[u8]> = xr_slots.iter().map(|s| s.as_slice()).collect();
+        let xf_refs: Vec<&[u8]> = xf_slots.iter().map(|s| s.as_slice()).collect();
+        let xc_refs: Vec<&[u8]> = xc_slots.iter().map(|s| s.as_slice()).collect();
+        let xm_bytes = projvol::emit_xm(&xm_ids);
+
+        let file_refs: Vec<&[u8]> = file_paths_bytes.iter().map(|p| p.as_slice()).collect();
+        let idx_vols = projvol_indexgen::from_sym_records(&sym_slots, &file_refs);
+
+        // The four reusable volumes stream through the digesting writer, so the state
+        // marker can pin their identity without a second pass over the bytes.
+        let mut sym_digest = (0u64, FNV_INIT);
+        ggs_base::fsx::atomic_write_with(&dir.join(SYM_VOL_FILE), &mut |out| {
+            let mut hashed = HashingWriter {
+                inner: out,
+                len: 0,
+                hash: FNV_INIT,
+            };
+            projvol::write_sym_volume(&mut hashed, &sym_header, &sym_slots, spare_slots as u32, trailer)?;
+            sym_digest = (hashed.len, hashed.hash);
+            Ok(())
+        })?;
+        let mut xf_digest = (0u64, FNV_INIT);
+        let mut xr_digest = (0u64, FNV_INIT);
+        let mut xc_digest = (0u64, FNV_INIT);
+        for (name, header, slots, digest) in [
+            (XF_VOL_FILE, &xheader, &xf_refs, &mut xf_digest),
+            (XR_VOL_FILE, &xheader, &xr_refs, &mut xr_digest),
+            (XC_VOL_FILE, &xheader, &xc_refs, &mut xc_digest),
+        ] {
+            ggs_base::fsx::atomic_write_with(&dir.join(name), &mut |out| {
+                let mut hashed = HashingWriter {
+                    inner: out,
+                    len: 0,
+                    hash: FNV_INIT,
+                };
+                projvol::write_volume(&mut hashed, header, slots, 0)?;
+                *digest = (hashed.len, hashed.hash);
+                Ok(())
+            })?;
+        }
+        ggs_base::fsx::atomic_write(&dir.join(XM_VOL_FILE), &xm_bytes)?;
+        for (name, bytes) in [
+            (XAB_VOL_FILE, idx_vols.xab.as_slice()),
+            (XAD_VOL_FILE, idx_vols.xad.as_slice()),
+            (XSB_VOL_FILE, idx_vols.xsb.as_slice()),
+            (XSD_VOL_FILE, idx_vols.xsd.as_slice()),
+        ] {
+            ggs_base::fsx::atomic_write(&dir.join(name), bytes)?;
+        }
+        // The marker lands last: it names exactly the four volumes above, so a save
+        // that died anywhere before this point simply leaves no trustworthy cache
+        // and the next write re-derives everything.
+        write_state_marker(
+            &dir,
+            symgen_mode,
+            [sym_digest, xf_digest, xr_digest, xc_digest],
+        )?;
+        Ok(())
+    }
 }
 
 fn words_in(text: &str, id_of: &impl Fn(&str) -> Option<u32>) -> Vec<u32> {
@@ -1877,10 +2387,12 @@ class Leaf : public Mid, Extra {};
             names(store.derived_of("Base", 10))
         );
 
-        // A version-5 file has no base table — a clean rebuild, never a partial answer.
-        let index_file = SymbolStore::index_dir(&root, home.path()).join("symbols.bin");
+        // A version-5 trailer has no base table — a clean rebuild, never a partial answer.
+        let index_file = SymbolStore::index_dir(&root, home.path()).join(SYM_VOL_FILE);
         let mut bytes = fs::read(&index_file).unwrap();
-        bytes[6] = 5; // the version byte, past the magic
+        let header = VolumeHeader::parse_block(&bytes).unwrap();
+        let trailer_at = projvol::HEADER_BLOCK_SIZE + header.count as usize * SYM_REC_SIZE;
+        bytes[trailer_at + 4 + MAGIC.len()] = 5; // the version byte inside the trailer
         fs::write(&index_file, &bytes).unwrap();
         assert!(SymbolStore::load(&root, home.path()).is_none());
     }
@@ -1903,7 +2415,7 @@ class Leaf : public Mid, Extra {};
 
         // A foreign root gets no index; a corrupt file is discarded, not fatal.
         assert!(SymbolStore::load("Z:\\nowhere", home.path()).is_none());
-        let index_file = SymbolStore::index_dir(&root, home.path()).join("symbols.bin");
+        let index_file = SymbolStore::index_dir(&root, home.path()).join(SYM_VOL_FILE);
         let good = fs::read(&index_file).unwrap();
         fs::write(&index_file, &good[..good.len() - 3]).unwrap();
         assert!(SymbolStore::load(&root, home.path()).is_none());
@@ -2108,13 +2620,18 @@ class Leaf : public Mid, Extra {};
             .join(PROJECT_ANALYSIS_DIR)
             .join("analysis")
             .join(store_hash(&root));
-        assert!(local.join("symbols.bin").exists());
+        for name in PROJECT_VOL_FILES {
+            assert!(local.join(name).exists(), "{name} exists in the analysis folder");
+        }
+        assert!(!local.join("symbols.bin").exists());
+        assert!(!local.join("ggs.db").exists());
+        assert!(!local.join("ggs.tix").exists());
         assert!(
             !home
                 .path()
                 .join("index")
                 .join(store_hash(&root))
-                .join("symbols.bin")
+                .join(SYM_VOL_FILE)
                 .exists()
         );
         // A load reads the project copy back.
@@ -2195,7 +2712,7 @@ class Leaf : public Mid, Extra {};
         let store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
         store.save(home.path()).unwrap();
         assert!(
-            home.path().join("index").join(store_hash(&root)).join("symbols.bin").exists(),
+            home.path().join("index").join(store_hash(&root)).join(SYM_VOL_FILE).exists(),
             "an unwritable project keeps its store in the GGS home"
         );
     }
@@ -2214,37 +2731,320 @@ class Leaf : public Mid, Extra {};
         let store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
         store.save(home.path()).unwrap();
         let dir_path = dir.path().join(PROJECT_ANALYSIS_DIR).join("analysis").join(store_hash(&root));
-        let db = dir_path.join(anadb::DB_FILE);
-        let tix = dir_path.join(anadb::TIX_FILE);
-        let db_bytes = fs::read(&db).expect("the reference database rides beside the store");
-        let tix_bytes = fs::read(&tix).expect("the syllable index rides beside the store");
-        assert_eq!(&db_bytes[0..4], &anadb::DB_MAGIC.to_le_bytes());
-        assert_eq!(&tix_bytes[0..4], b"TIX1");
+        for name in PROJECT_VOL_FILES {
+            assert!(dir_path.join(name).exists(), "{name} is written to the analysis folder");
+        }
+        assert!(!dir_path.join("symbols.bin").exists());
+        assert!(!dir_path.join("ggs.db").exists());
+        assert!(!dir_path.join("ggs.tix").exists());
+        let sym_bytes = fs::read(dir_path.join(SYM_VOL_FILE)).unwrap();
+        let xab_bytes = fs::read(dir_path.join(XAB_VOL_FILE)).unwrap();
+        let xsb_bytes = fs::read(dir_path.join(XSB_VOL_FILE)).unwrap();
 
         // The delete-and-regenerate surface: wipe, then a fresh build writes the same
         // bytes whole.
         SymbolStore::remove_store_dirs(&root, home.path());
         assert!(SymbolStore::load(&root, home.path()).is_none());
-        assert!(!db.exists());
+        assert!(!dir_path.join(SYM_VOL_FILE).exists());
         let rebuilt = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
         rebuilt.save(home.path()).unwrap();
-        assert_eq!(fs::read(&db).unwrap(), db_bytes, "the same analysis regenerates the same file");
+        assert_eq!(
+            fs::read(dir_path.join(SYM_VOL_FILE)).unwrap(),
+            sym_bytes,
+            "the same analysis regenerates the same .ggs_sym volume"
+        );
+        assert_eq!(
+            fs::read(dir_path.join(XAB_VOL_FILE)).unwrap(),
+            xab_bytes,
+            "the same analysis regenerates the same .ggs_xab volume"
+        );
+        assert_eq!(
+            fs::read(dir_path.join(XSB_VOL_FILE)).unwrap(),
+            xsb_bytes,
+            "the same analysis regenerates the same .ggs_xsb volume"
+        );
+        let loaded = SymbolStore::load(&root, home.path()).expect("loads from the nine project volumes");
+        assert_eq!(loaded.all_symbols(), rebuilt.all_symbols());
+    }
 
-        // The database's tables speak the parsed truth: one module, the declarations,
-        // the call edge render -> draw, and the syllable fragments.
-        let tables = store.ana.as_ref().unwrap();
-        assert_eq!(tables.mods.len(), 1);
-        assert_eq!(tables.mods[0].name, "src/shape.cpp");
-        let names: Vec<&str> = tables.syms.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"draw") && names.contains(&"render") && names.contains(&"Shape"));
-        assert!(tables.syls.iter().any(|s| s.frag == b"draw"));
-        let edges: Vec<(i32, i32)> = tables.edges.iter().map(|e| (e.caller, e.callee)).collect();
-        assert_eq!(edges.len(), 1, "the call inside render is the one edge: {edges:?}");
-        // `use(s.area)` — a member access after '.', never a reference row.
-        let plain: Vec<_> = tables.code.iter().filter(|c| c.is_def == 0).collect();
-        assert!(
-            plain.iter().all(|c| tables.syms[c.sym as usize].name != "area"),
-            "member access records no reference: {plain:?}"
+    /// The live `.ggs_sym` records of a written volume: the header's count slots after
+    /// the base block, decoded directly. (`parse_sym_volume` reads the whole slot area,
+    /// whose spare half carries the store's trailer bytes — it cannot parse a
+    /// store-written volume.)
+    fn live_sym_records(volume: &[u8]) -> Vec<SymSlot> {
+        let header =
+            VolumeHeader::parse_block(&volume[..projvol::HEADER_BLOCK_SIZE]).expect("header");
+        (0..header.count as usize)
+            .map(|i| {
+                let at = projvol::HEADER_BLOCK_SIZE + i * SYM_REC_SIZE;
+                SymSlot::decode(&volume[at..at + SYM_REC_SIZE]).expect("live record decodes")
+            })
+            .collect()
+    }
+
+    /// The dirty-aware incremental save's volume bytes are the full derivation's bytes:
+    /// the previous write's facts stand in for every untouched file, the edited file
+    /// re-derives, and the merged result is indistinguishable from re-deriving
+    /// everything. The edit must only use names the store already knows — a genuinely
+    /// new name stays untrusted in the incremental store (its occurrence list is
+    /// `None` until the next full build), which is a store-level difference the
+    /// trailer legitimately carries.
+    #[test]
+    fn an_incremental_save_writes_the_full_derivation_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "src/shape.cpp",
+            "struct Shape { int area; };\nvoid draw(Shape s) { use(s.area); }\nvoid render(void) { draw(*(Shape*)0); }\n",
+        );
+        write(
+            dir.path(),
+            "src/main.cpp",
+            "int main(void) { Shape s; draw(s); return 0; }\n",
+        );
+        write(dir.path(), "src/util.rs", "pub fn helper(x: i32) -> i32 { x + 1 }\n");
+        let root = dir.path().display().to_string();
+        let home = tempfile::tempdir().unwrap();
+        let dir_path = dir
+            .path()
+            .join(PROJECT_ANALYSIS_DIR)
+            .join("analysis")
+            .join(store_hash(&root));
+
+        let mut store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        store.save(home.path()).unwrap();
+
+        // One file's content changes; the batch re-extracts exactly that file and the
+        // save re-derives exactly its facts.
+        write(
+            dir.path(),
+            "src/main.cpp",
+            "int main(void) { Shape s; draw(s); render(); return area(s); }\n",
+        );
+        store.apply_drifted(&["src/main.cpp".to_owned()], &[]);
+        let snapshot = store.save_snapshot();
+        assert_eq!(snapshot.dirty_fids, [0], "only the edited file is dirty");
+        SymbolStore::write_volumes(&snapshot, home.path()).unwrap();
+
+        let read_all = || -> Vec<(String, Vec<u8>)> {
+            let mut all: Vec<_> = PROJECT_VOL_FILES
+                .iter()
+                .map(|name| (name.to_string(), fs::read(dir_path.join(name)).unwrap()))
+                .collect();
+            all.push((
+                STATE_VOL_FILE.to_string(),
+                fs::read(dir_path.join(STATE_VOL_FILE)).unwrap(),
+            ));
+            all
+        };
+        let incremental_bytes = read_all();
+        assert_eq!(
+            incremental_bytes[9].1[1], SYM_MODE_SYMGEN,
+            "the symgen-covered project writes the symgen mode into the marker"
+        );
+
+        // The full derivation over the same tree must land on the same bytes — the
+        // reused files' slots included.
+        let fresh = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        fresh.save(home.path()).unwrap();
+        assert_eq!(
+            read_all(),
+            incremental_bytes,
+            "the incremental save wrote the full derivation's bytes"
+        );
+    }
+
+    /// The same byte-equality in the parsed-symbol fallback mode: a pure-Rust tree has
+    /// no symgen coverage, every file's `.ggs_sym` records come from the store's own
+    /// parsed symbols, and the incremental save must merge the edited file's fresh
+    /// fallback records with the kept ones exactly as a full derivation would.
+    #[test]
+    fn an_incremental_save_matches_in_the_fallback_mode_too() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "alpha.rs", "pub fn alpha() {}\nfn beta() { alpha(); }\n");
+        write(dir.path(), "gamma.rs", "fn gamma() { beta(); alpha(); }\n");
+        let root = dir.path().display().to_string();
+        let home = tempfile::tempdir().unwrap();
+        let dir_path = dir
+            .path()
+            .join(PROJECT_ANALYSIS_DIR)
+            .join("analysis")
+            .join(store_hash(&root));
+
+        let mut store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        store.save(home.path()).unwrap();
+
+        write(dir.path(), "gamma.rs", "fn gamma() { alpha(); alpha(); beta(); }\n");
+        store.apply_drifted(&["gamma.rs".to_owned()], &[]);
+        SymbolStore::write_volumes(&store.save_snapshot(), home.path()).unwrap();
+        let incremental_bytes: Vec<u8> = fs::read(dir_path.join(SYM_VOL_FILE)).unwrap();
+        let marker = fs::read(dir_path.join(STATE_VOL_FILE)).unwrap();
+        assert_eq!(marker[1], SYM_MODE_FALLBACK, "the Rust tree saves in the fallback mode");
+
+        let fresh = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        fresh.save(home.path()).unwrap();
+        assert_eq!(
+            fs::read(dir_path.join(SYM_VOL_FILE)).unwrap(),
+            incremental_bytes,
+            "the incremental fallback save wrote the full derivation's sym bytes"
+        );
+    }
+
+    /// A symgen-covered file arriving in a fallback tree flips the slot mode: the
+    /// flipped incremental save discards the fallback records the way a fresh
+    /// derivation does (a fallback set and a symgen set never mix) and re-arms the
+    /// marker under the new mode.
+    #[test]
+    fn a_mode_flip_discards_the_other_mode_records() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "alpha.rs", "pub fn alpha() {}\n");
+        write(dir.path(), "beta.rs", "fn beta() { alpha(); }\n");
+        let root = dir.path().display().to_string();
+        let home = tempfile::tempdir().unwrap();
+        let dir_path = dir
+            .path()
+            .join(PROJECT_ANALYSIS_DIR)
+            .join("analysis")
+            .join(store_hash(&root));
+
+        let mut store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        store.save(home.path()).unwrap();
+        assert_eq!(
+            fs::read(dir_path.join(STATE_VOL_FILE)).unwrap()[1],
+            SYM_MODE_FALLBACK,
+            "the pure-Rust tree starts in the fallback mode"
+        );
+
+        // The first C file lands; the store re-extracts it (the name it declares is
+        // new, so the store's own payload legitimately differs from a fresh build —
+        // the sym RECORDS must not).
+        write(dir.path(), "lib.cpp", "int the_answer(void) { return 42; }\n");
+        store.apply_drifted(&["lib.cpp".to_owned()], &[]);
+        SymbolStore::write_volumes(&store.save_snapshot(), home.path()).unwrap();
+        let flipped = live_sym_records(&fs::read(dir_path.join(SYM_VOL_FILE)).unwrap());
+        assert_eq!(
+            fs::read(dir_path.join(STATE_VOL_FILE)).unwrap()[1],
+            SYM_MODE_SYMGEN,
+            "the marker names the new mode"
+        );
+
+        let fresh = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        fresh.save(home.path()).unwrap();
+        let fresh_sym = live_sym_records(&fs::read(dir_path.join(SYM_VOL_FILE)).unwrap());
+        assert_eq!(
+            flipped, fresh_sym,
+            "the flipped save's sym records are the full derivation's sym records"
+        );
+    }
+
+    /// A file inserted ahead of the sort order displaces every later file's id; the
+    /// per-fid table comparison invalidates the displaced files and the save re-derives
+    /// them, landing on the full derivation's bytes again. The added file declares only
+    /// names the store already knows, so the store payload (and with it the trailer)
+    /// stays comparable.
+    #[test]
+    fn a_table_shift_still_lands_on_the_full_derivation_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a_first.cpp", "void alpha_fn(void) {}\nvoid beta_fn(void) {}\n");
+        write(dir.path(), "c_last.cpp", "void main_fn(void) { beta_fn(); alpha_fn(); }\n");
+        let root = dir.path().display().to_string();
+        let home = tempfile::tempdir().unwrap();
+        let dir_path = dir
+            .path()
+            .join(PROJECT_ANALYSIS_DIR)
+            .join("analysis")
+            .join(store_hash(&root));
+
+        let mut store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        store.save(home.path()).unwrap();
+
+        write(dir.path(), "b_mid.cpp", "void beta_fn(void) { alpha_fn(); }\n");
+        store.apply_drifted(&["b_mid.cpp".to_owned()], &[]);
+        SymbolStore::write_volumes(&store.save_snapshot(), home.path()).unwrap();
+
+        let fresh = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        fresh.save(home.path()).unwrap();
+        for name in PROJECT_VOL_FILES {
+            assert_eq!(
+                fs::read(dir_path.join(name)).unwrap().len(),
+                fs::read(dir_path.join(name)).unwrap().len(),
+                "{name} survives the shift"
+            );
+        }
+        let shifted_sym = live_sym_records(&fs::read(dir_path.join(SYM_VOL_FILE)).unwrap());
+        let fresh_sym = live_sym_records(&fs::read(dir_path.join(SYM_VOL_FILE)).unwrap());
+        assert_eq!(shifted_sym, fresh_sym);
+    }
+
+    /// A marker that does not describe the volumes on disk — foreign bytes, a stale
+    /// hash — disables the reuse and the save falls back to the full derivation,
+    /// writing the same bytes and re-arming the marker.
+    #[test]
+    fn a_broken_marker_falls_back_to_the_full_derivation() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "alpha.rs", "pub fn alpha() {}\nfn beta() { alpha(); }\n");
+        let root = dir.path().display().to_string();
+        let home = tempfile::tempdir().unwrap();
+        let dir_path = dir
+            .path()
+            .join(PROJECT_ANALYSIS_DIR)
+            .join("analysis")
+            .join(store_hash(&root));
+
+        let mut store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        store.save(home.path()).unwrap();
+        // The edit keeps both declarations (a fresh build's name table holds declared
+        // names only, so a dropped declaration would legitimately differ).
+        write(
+            dir.path(),
+            "alpha.rs",
+            "pub fn alpha() { beta(); beta(); }\nfn beta() { alpha(); alpha(); }\n",
+        );
+        store.apply_drifted(&["alpha.rs".to_owned()], &[]);
+
+        fs::write(dir_path.join(STATE_VOL_FILE), b"garbage").unwrap();
+        SymbolStore::write_volumes(&store.save_snapshot(), home.path()).unwrap();
+        let incremental_bytes = fs::read(dir_path.join(SYM_VOL_FILE)).unwrap();
+
+        let fresh = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        fresh.save(home.path()).unwrap();
+        assert_eq!(
+            fs::read(dir_path.join(SYM_VOL_FILE)).unwrap(),
+            incremental_bytes,
+            "the full derivation the broken marker forced wrote the same bytes"
+        );
+    }
+
+    /// A pure content edit — the Ctrl+S case — leaves the file table untouched: the
+    /// paths keep their order (their ids with it), so the renumber pass, the name
+    /// re-sort and their occurrence-list rewrites all skip.
+    #[test]
+    fn a_content_edit_skips_the_table_renumber() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "alpha.rs", "pub fn alpha() {}\nfn beta() { alpha(); }\n");
+        write(dir.path(), "gamma.rs", "fn gamma() { beta(); }\n");
+        let root = dir.path().display().to_string();
+        let mut store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        let order_before: Vec<String> = store.files.iter().map(|f| f.path.clone()).collect();
+
+        write(dir.path(), "gamma.rs", "fn gamma() { alpha(); beta(); }\n");
+        store.apply_drifted(&["gamma.rs".to_owned()], &[]);
+        let order_after: Vec<String> = store.files.iter().map(|f| f.path.clone()).collect();
+        assert_eq!(order_after, order_before, "the table kept its order");
+
+        // The occurrence lists still answer: gamma.rs gained an alpha site.
+        assert_eq!(
+            store.files_containing("alpha"),
+            Some(vec!["alpha.rs".to_owned(), "gamma.rs".to_owned()])
+        );
+
+        // A deletion still compacts: the table shrinks and renumbers.
+        fs::remove_file(dir.path().join("alpha.rs")).unwrap();
+        store.apply_drifted(&["alpha.rs".to_owned()], &[]);
+        assert_eq!(store.files.len(), 1);
+        assert_eq!(
+            store.files_containing("beta"),
+            Some(vec!["gamma.rs".to_owned()])
         );
     }
 }

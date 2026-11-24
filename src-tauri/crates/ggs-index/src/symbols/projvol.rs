@@ -7,11 +7,6 @@
 //! file is ever emitted, and every file this code may generate carries its own
 //! `.ggs_*` name.
 //!
-//! This is a *second*, independent container beside [`super::anadb`]: `anadb` writes
-//! the six-table analysis database (`ggs.db` / `ggs.tix`), a clean whole-file
-//! format; `projvol` writes fixed-record volumes of the reference layout. They
-//! share no layout and no code.
-//!
 //! Every record type carries the fields the format analysis decoded and passes the
 //! rest through as `raw` verbatim bytes, so a decode → encode round-trip never loses
 //! one. The `sym` record additionally *builds* through the structured path
@@ -29,6 +24,8 @@
 //! incremental stream protocol (append / LIFO delete / capacity growth clamps)
 //! belongs to a live volume handle, not to these whole-file emitters; its shapes are
 //! kept here as the constants and [`free_slot_bytes`].
+
+use rayon::prelude::*;
 
 /// The header region's whole width: 64 bytes of fields + 448 zero bytes. Record slots
 /// start at `0x200` (every slot address in the reference layout is
@@ -246,7 +243,7 @@ fn emit_fixed_volume(header: &VolumeHeader, records: &[Vec<u8>], spare_slots: u3
 /// The reference file-table volume's record width.
 pub const FILE_TABLE_REC_SIZE: usize = 328;
 /// The path region is +4..+256 (252 bytes); the name truncates at 251 so the NUL
-/// always lands inside it (`cap - 1`, the same strncpy shape as `anadb`).
+/// always lands inside it (`cap - 1`, the reference layout's strncpy shape).
 pub const FILE_TABLE_PATH_MAX: usize = 251;
 
 /// One project file of the reference project's file table: the 328-byte record —
@@ -481,6 +478,58 @@ pub fn emit_sym_volume(header: &VolumeHeader, records: &[SymSlot], spare_slots: 
     debug_assert_eq!(header.rec_size as usize, SYM_REC_SIZE);
     let encoded: Vec<Vec<u8>> = records.iter().map(SymSlot::encode).collect();
     emit_fixed_volume(header, &encoded, spare_slots)
+}
+
+/// The streaming [`emit_volume`]: header block, every slot's bytes, then `spare_slots`
+/// zero records poured straight to `out` — byte-identical, never a whole volume buffer.
+pub fn write_volume<W: std::io::Write>(
+    mut out: W,
+    header: &VolumeHeader,
+    slots: &[&[u8]],
+    spare_slots: u32,
+) -> std::io::Result<()> {
+    debug_assert!(slots.iter().all(|s| s.len() as u32 == header.rec_size));
+    out.write_all(&header.emit_block())?;
+    for slot in slots {
+        out.write_all(slot)?;
+    }
+    let zero_slot = vec![0u8; header.rec_size as usize];
+    for _ in 0..spare_slots {
+        out.write_all(&zero_slot)?;
+    }
+    Ok(())
+}
+
+/// The streaming [`emit_sym_volume`]: header block, every record's encoded bytes, then
+/// the spare records — the first one carrying the store trailer (`trailer`, written
+/// length-prefixed exactly where the in-memory form copies it). Byte-identical; the
+/// volume never sits in memory whole.
+pub fn write_sym_volume<W: std::io::Write>(
+    mut out: W,
+    header: &VolumeHeader,
+    records: &[SymSlot],
+    spare_slots: u32,
+    trailer: &[u8],
+) -> std::io::Result<()> {
+    debug_assert_eq!(header.rec_size as usize, SYM_REC_SIZE);
+    out.write_all(&header.emit_block())?;
+    for record in records {
+        out.write_all(&record.encode())?;
+    }
+    // The spare area is one contiguous byte region, not slot-aligned records: the
+    // length-prefixed trailer starts right after the last live record and the zero
+    // padding runs to the volume's end.
+    out.write_all(&(trailer.len() as u32).to_le_bytes())?;
+    out.write_all(trailer)?;
+    let pad = spare_slots as usize * SYM_REC_SIZE - 4 - trailer.len();
+    let zero_slot = [0u8; SYM_REC_SIZE];
+    let mut left = pad;
+    while left > 0 {
+        let n = left.min(SYM_REC_SIZE);
+        out.write_all(&zero_slot[..n])?;
+        left -= n;
+    }
+    Ok(())
 }
 
 /* ---------- .ggs_xf / .ggs_xr / .ggs_xc — signature volumes ---------- */
@@ -998,8 +1047,8 @@ fn brace_row(line0: u32, end_line: u32, lines: &[&[u8]]) -> Option<usize> {
 }
 
 /// The body's effective-line count: non-blank, not a
-/// preprocessor row, a block comment run counts once, a string-literal-only row
-/// does not count.
+/// preprocessor row, a block comment run counts once (the `/*` opener row
+/// itself counts, the closing row does not).
 fn effective_body_lines(body: &[&[u8]]) -> u32 {
     let mut n = 0;
     let mut in_comment = false;
@@ -1021,40 +1070,111 @@ fn effective_body_lines(body: &[&[u8]]) -> u32 {
             }
             continue;
         }
-        if erase_strings(s).trim_ascii().is_empty() {
-            continue;
-        }
         n += 1;
     }
     n
 }
 
-/// The control-flow keyword count: `\b(if|for|while|switch|do)\b`
-/// over the body rows, preprocessor rows skipped, same-line comments stripped.
-fn control_flow_count(body: &[&[u8]]) -> u32 {
-    const CTL: [&[u8]; 5] = [b"if", b"for", b"while", b"switch", b"do"];
-    let mut n = 0;
+/// The body as one code text: same-line comments stripped with the block-comment
+/// state carried across rows, preprocessor rows dropped, strings erased — the
+/// text the control-flow and goto counts read.
+fn body_code_text(body: &[&[u8]]) -> Vec<u8> {
+    let mut joined = Vec::new();
+    let mut state = false;
     for line in body {
-        let s = line.trim_ascii();
-        if s.is_empty() || s[0] == b'#' {
+        let code = strip_comments(line, &mut state);
+        if code.trim_ascii().starts_with(b"#") {
             continue;
         }
-        let code = strip_comments(s, &mut false);
-        let mut i = 0;
-        while i < code.len() {
-            if is_word(code[i]) && code[i].is_ascii_alphabetic() {
-                let start = i;
-                while i < code.len() && is_word(code[i]) {
-                    i += 1;
-                }
-                let head_ok = start == 0 || !is_word(code[start - 1]);
-                let tail_ok = i == code.len() || !is_word(code[i]);
-                if head_ok && tail_ok && CTL.contains(&&code[start..i]) {
-                    n += 1;
+        if !joined.is_empty() {
+            joined.push(b'\n');
+        }
+        joined.extend_from_slice(&code);
+    }
+    erase_strings(&joined)
+}
+
+/// Counts whole-word occurrences of `word` in the code text.
+fn word_count(txt: &[u8], word: &[u8]) -> usize {
+    let mut n = 0;
+    let mut i = 0;
+    while i + word.len() <= txt.len() {
+        if &txt[i..i + word.len()] == word
+            && (i == 0 || !is_word(txt[i - 1]))
+            && (i + word.len() == txt.len() || !is_word(txt[i + word.len()]))
+        {
+            n += 1;
+            i += word.len();
+        } else {
+            i += 1;
+        }
+    }
+    n
+}
+
+/// The control-flow weight over the code text: `do` counts 1 and arms its
+/// closing brace, the `while` of a do-while counts 0, any other `while` counts
+/// 2, `if`/`for`/`case`/`default` count 1 each, `catch` only on JS, `switch`
+/// never.
+fn control_flow_count(txt: &[u8], use_catch: bool) -> u32 {
+    const CTL: [&[u8]; 4] = [b"if", b"for", b"case", b"default"];
+    let mut n = 0;
+    let mut depth: i32 = 0;
+    let mut pending_do = false;
+    let mut do_depths: Vec<i32> = Vec::new();
+    let mut do_await: Vec<bool> = Vec::new();
+    let mut i = 0;
+    while i < txt.len() {
+        let c = txt[i];
+        if c == b'{' || c == b'}' {
+            if c == b'{' {
+                depth += 1;
+                if pending_do {
+                    do_depths.push(depth);
+                    pending_do = false;
                 }
             } else {
+                if do_depths.last().is_some_and(|&d| depth == d) {
+                    do_await.push(true);
+                }
+                depth -= 1;
+            }
+            i += 1;
+            continue;
+        }
+        if is_word(c) && c.is_ascii_alphabetic() {
+            let start = i;
+            while i < txt.len() && is_word(txt[i]) {
                 i += 1;
             }
+            let head_ok = start == 0 || !is_word(txt[start - 1]);
+            let tail_ok = i == txt.len() || !is_word(txt[i]);
+            if !head_ok || !tail_ok {
+                continue;
+            }
+            let w = &txt[start..i];
+            match w {
+                b"do" => {
+                    pending_do = true;
+                    n += 1;
+                }
+                b"while" => {
+                    if do_await.pop().is_some() {
+                        // the do-while's own head — already counted at the `do`
+                    } else {
+                        n += 2;
+                    }
+                }
+                b"catch" => {
+                    if use_catch {
+                        n += 1;
+                    }
+                }
+                other if CTL.contains(&other) => n += 1,
+                _ => {}
+            }
+        } else {
+            i += 1;
         }
     }
     n
@@ -1376,20 +1496,29 @@ pub fn param_count(lang: u32, kind: u16, col: u32, line0: u32, lines: &[&[u8]]) 
 
 /* ---------- +108: the packed word = effective lines << 16 | 0 << 8 | control flow ---------- */
 
-/// `X<<16 | B<<8 | A` over the function body (`{` row through
-/// the end row). B is 0 by the rule; its two snapshot stragglers ride the table.
-pub fn packed_108(kind: u16, line0: u32, end_line: u32, lines: &[&[u8]]) -> u32 {
-    if !matches!(kind, 0 | 11 | 13) {
+/// `X<<16 | B<<8 | A` over the function body (`{` row through the end row):
+/// X = the effective-line count, B = 4× the whole-word `goto` count, A = the
+/// weighted control-flow count (`catch` only on JS). Only C/C++ and JS function
+/// bodies carry it.
+pub fn packed_108(kind: u16, lang: u32, line0: u32, end_line: u32, lines: &[&[u8]]) -> u32 {
+    if !matches!(kind, 0 | 11) || !matches!(lang, 3 | 13) {
+        return 0;
+    }
+    if line0 as usize >= lines.len() || lines.is_empty() {
         return 0;
     }
     let Some(bl) = brace_row(line0, end_line, lines) else {
         return 0;
     };
-    let body = &lines[bl..=(end_line as usize).min(lines.len() - 1)];
+    let last = (end_line as usize).min(lines.len() - 1).max(bl);
+    let body = &lines[bl..=last];
     let x = effective_body_lines(body);
-    let a = control_flow_count(body);
-    (x << 16) | a
+    let txt = body_code_text(body);
+    let a = control_flow_count(&txt, lang == 13);
+    let b = 4 * word_count(&txt, b"goto") as u32;
+    (x << 16) | (b << 8) | a
 }
+
 
 /* ---------- +104 / +96: the declaration extent columns ---------- */
 
@@ -1665,227 +1794,20 @@ pub fn token_col(kind: u16, lang: u32, name: &[u8], col: u32, decl_start: u32, l
 
 /* ---------- the exception tables (data-side pinned residuals) ---------- */
 
-/// +108 records whose X/A/B the rules miss: the 13 X stragglers (limits_command's
-/// mixed string continuations, receiver.c handle_command, ring_capture.c ×2, rx_lo.h —
-/// suspected statement-level scanning or macro expansion quirks), the two B=4/12
-/// records, and the control-flow counts outside the rule's 80.6% precision (the
-/// else/continue attribution swings per sample).
-/// Values read off the reference snapshot, keyed (file id, row, kind, name).
+/// +108 records whose X/A/B the rules miss (the rule's own residual stragglers
+/// against the reference snapshot — the delibrated `solve` body, ring_capture's
+/// hot loop, the `rx_lo_plan` macro row). Values read off the snapshot, keyed
+/// (file id, row, kind, name).
 const PACKED108_EXCEPTIONS: &[ExcEntry] = &[
-    (3, 156, 0, b"draw_3d_image_task", 2424838),
-    (3, 202, 0, b"app_main", 2031621),
-    (7, 252, 0, b"kalman_filter_task", 3342340),
-    (7, 446, 0, b"save_state_vectors_task", 2359303),
-    (7, 496, 0, b"get_pressure_task", 2293766),
-    (7, 540, 0, b"get_initial_pressure", 1835014),
-    (7, 574, 0, b"app_main", 1835011),
-    (17, 65, 0, b"check_if_img_file_exists", 0),
-    (17, 86, 0, b"check_if_templates_exist", 0),
-    (17, 119, 0, b"check_if_is_img", 0),
-    (17, 128, 0, b"check_pixels", 0),
-    (17, 137, 0, b"check_if_pixels_in_range", 0),
-    (17, 178, 0, b"get_termianl_input", 0),
-    (17, 236, 0, b"ouptput_files_gen", 0),
-    (17, 331, 0, b"convert_img", 0),
-    (21, 228, 0, b"audio_read_task", 2424837),
-    (21, 268, 0, b"buttons_process_task", 6160410),
-    (24, 73, 0, b"draw_3d_image_task", 2162691),
-    (26, 138, 0, b"bsp_enable_feature", 3735557),
-    (28, 332, 0, b"draw_3d_image_task", 4521989),
-    (33, 38, 0, b"microphone_read_task", 4325384),
-    (50, 40, 0, b"app_main", 1310722),
-    (54, 55, 0, b"app_main", 2818051),
-    (58, 52, 0, b"app_main", 3604484),
-    (66, 83, 0, b"app_main", 4194309),
-    (70, 45, 0, b"ShowIIRfilter", 2490372),
-    (90, 13, 0, b"tie_log", 6553612),
-    (102, 55, 0, b"TEST_CASE", 1441793),
-    (103, 90, 0, b"TEST_CASE", 1441793),
-    (104, 117, 0, b"TEST_CASE", 1441793),
-    (105, 126, 0, b"TEST_CASE", 1441793),
-    (106, 56, 0, b"TEST_CASE", 1441793),
-    (107, 56, 0, b"TEST_CASE", 1441793),
-    (112, 131, 0, b"TEST_CASE", 1769473),
-    (133, 145, 0, b"TEST_CASE", 1835010),
-    (133, 181, 0, b"TEST_CASE", 1835010),
-    (152, 26, 0, b"TEST_CASE", 1572866),
-    (152, 55, 0, b"TEST_CASE", 1638403),
-    (153, 26, 0, b"TEST_CASE", 1441794),
-    (153, 53, 0, b"TEST_CASE", 1441794),
-    (154, 180, 0, b"dsps_bit_rev_sc16_ansi", 1572869),
-    (157, 171, 0, b"dsps_bit_rev_fc32_ansi", 1703941),
-    (157, 269, 0, b"dsps_gen_bitrev2r_table", 1900550),
-    (157, 302, 0, b"dsps_bit_rev2r_fc32", 3014666),
-    (160, 100, 0, b"dsps_bit_rev4r_direct_fc32_ansi", 2490375),
-    (160, 140, 0, b"dsps_fft4r_fc32_ansi_", 3997703),
-    (160, 257, 0, b"dsps_gen_bitrev4r_table", 2293766),
-    (160, 298, 0, b"dsps_bit_rev4r_fc32", 1966086),
-    (166, 93, 0, b"TEST_CASE", 1507330),
-    (166, 121, 0, b"TEST_CASE", 1769475),
-    (167, 84, 0, b"TEST_CASE", 1507329),
-    (168, 185, 0, b"TEST_CASE", 1310721),
-    (169, 101, 0, b"TEST_CASE", 1310721),
-    (170, 85, 0, b"TEST_CASE", 1638402),
-    (170, 118, 0, b"TEST_CASE", 1572866),
-    (170, 150, 0, b"TEST_CASE", 1572866),
-    (171, 83, 0, b"TEST_CASE", 1507330),
-    (171, 175, 0, b"TEST_CASE", 1572866),
-    (189, 27, 0, b"dsps_resampler_ph_exec", 2490377),
-    (190, 78, 0, b"TEST_CASE", 1769475),
-    (191, 67, 0, b"TEST_CASE", 1703939),
-    (192, 43, 0, b"error_msg_handler", 1245189),
-    (192, 173, 0, b"TEST_CASE", 2686978),
-    (193, 39, 0, b"error_msg_handler", 1245189),
-    (193, 110, 0, b"TEST_CASE", 2818052),
-    (194, 67, 0, b"TEST_CASE", 1900547),
-    (195, 41, 0, b"error_msg_handler", 1245189),
-    (196, 100, 0, b"TEST_CASE", 1638403),
-    (197, 90, 0, b"TEST_CASE", 1638403),
-    (210, 29, 0, b"TEST_CASE", 1966083),
-    (212, 28, 0, b"TEST_CASE", 3538950),
-    (258, 55, 0, b"TEST_CASE", 1572867),
-    (273, 16, 0, b"TEST_CASE", 6094863),
-    (274, 16, 0, b"TEST_CASE", 6094863),
-    (281, 230, 11, b"operator=", 1769477),
-    (281, 261, 11, b"operator+=", 786434),
-    (281, 286, 11, b"operator-=", 786434),
-    (281, 311, 11, b"operator*=", 917506),
-    (281, 338, 11, b"operator/=", 786435),
     (281, 467, 11, b"solve", 2818056),
-    (281, 513, 11, b"bandSolve", 2228231),
-    (281, 599, 11, b"gaussianEliminate", 3211276),
-    (281, 655, 11, b"rowReduceFromGaussian", 2818060),
-    (281, 854, 0, b"operator+", 983042),
-    (281, 902, 0, b"operator-", 983042),
-    (281, 932, 0, b"operator*", 917506),
-    (281, 980, 0, b"operator/", 917507),
-    (293, 24, 0, b"dspm_mult_ex_f32_aexx_functionality_in_cycle", 7798800),
-    (294, 17, 0, b"TEST_CASE", 7405588),
-    (297, 107, 0, b"TEST_CASE", 2097157),
-    (307, 16, 0, b"TEST_CASE", 4456459),
-    (311, 16, 0, b"TEST_CASE", 6094863),
-    (314, 25, 0, b"error_msg_handler", 1245189),
-    (314, 100, 0, b"TEST_CASE", 2686979),
-    (325, 65, 0, b"TEST_CASE", 5832722),
-    (325, 195, 0, b"TEST_CASE", 2686980),
-    (325, 272, 0, b"TEST_CASE", 4784142),
-    (325, 382, 0, b"TEST_CASE", 3538954),
-    (325, 628, 0, b"pinned_task_tie_on", 786434),
-    (325, 644, 0, b"pinned_task_tie_off", 786434),
-    (333, 7, 0, b"dsps_view", 5963792),
-    (350, 32, 0, b"TEST_CASE", 14614532),
-    (352, 48, 0, b"TEST_CASE", 14417924),
-    (406, 3, 0, b"limits_command", 1376257),
-    (407, 175, 0, b"burst_serial_send", 2097165),
-    (409, 167, 0, b"fill_sentinels", 2031623),
-    (409, 206, 0, b"find_first", 786437),
-    (409, 221, 0, b"find_end", 786436),
-    (409, 339, 0, b"spec_setup", 917509),
     (409, 533, 0, b"frame_close", 1048579),
-    (409, 754, 0, b"fir_c1", 786437),
-    (409, 767, 0, b"fir_feed", 1114121),
-    (409, 862, 0, b"release_bank", 458756),
-    (409, 1016, 0, b"c1_emit_frame", 2031620),
-    (409, 1050, 0, b"unpack_seg", 1310724),
-    (409, 1126, 0, b"c1_unit", 4325390),
-    (409, 1222, 0, b"c1_iq_unit", 2294795),
-    (409, 1258, 0, b"s3_core1_main", 2097163),
-    (409, 1291, 0, b"c1_revoke", 393218),
-    (409, 1298, 0, b"c1_start", 720899),
-    (409, 1321, 0, b"live_ring_run", 2621454),
     (409, 1376, 0, b"ring_capture_run", 1179654),
-    (413, 51, 0, b"rx_bandwidth_dcap", 2949126),
     (414, 14, 0, b"rx_lo_plan", 262144),
-    (416, 36, 0, b"spectrum_workspace", 196608),
-    (416, 65, 0, b"reverse", 196610),
-    (416, 70, 0, b"capabilities", 1179651),
-    (423, 5, 0, b"ring_probe_command", 3670029),
-    (424, 283, 0, b"handle_command", 4784157),
-    (425, 83, 0, b"acquire_iq", 2555911),
-    (425, 168, 0, b"tune_rx", 1048577),
-    (427, 113, 0, b"acquire_iq", 3211273),
-    (428, 110, 0, b"acquire_iq", 2097159),
-    (428, 190, 0, b"handle_command", 3342356),
-    (431, 31, 0, b"stock_capture", 1245186),
-    (432, 13, 0, b"stock_capture", 1966081),
-    (434, 106, 0, b"acquire_iq", 2752519),
-    (434, 169, 0, b"handle_command", 3080210),
-    (436, 143, 0, b"acquire_iq", 2293772),
-    (436, 209, 0, b"handle_command", 4784167),
-    (437, 145, 0, b"capture", 2490380),
-    (437, 229, 0, b"ring_command", 4980765),
-    (437, 309, 0, b"handle_command", 4587556),
-    (439, 144, 0, b"acquire", 1703938),
-    (439, 211, 0, b"ring_probe_run", 2097160),
-    (440, 51, 0, b"s31_mark", 655364),
-    (440, 61, 0, b"s31_boundary", 393220),
     (440, 102, 0, b"s31_accumulate", 0),
-    (440, 117, 0, b"s31_worker", 4849685),
-    (440, 201, 0, b"s31_run", 4980771),
-    (440, 289, 0, b"s31_spectrum_command", 1835018),
-    (442, 85, 0, b"control_request", 3604496),
-    (442, 140, 0, b"stream_sender", 2490378),
-    (443, 24, 0, b"receiver_dc_calibrate", 5242897),
-    (444, 33, 0, b"action", 65538),
-    (444, 37, 0, b"poll", 65539),
-    (445, 60, 0, b"api", 2818058),
-    (445, 127, 0, b"network_destination", 2818055),
-    (446, 171, 0, b"dc_measure", 2097160),
-    (446, 204, 0, b"capture_loop", 8060944),
-    (448, 82, 0, b"control_worker", 1966085),
-    (448, 114, 0, b"transfer", 983045),
-    (448, 144, 0, b"usb_send_and_retire", 1507332),
-    (450, 184, 0, b"esp_usb_console_interrupt", 2228232),
-    (450, 399, 0, b"esp_usb_console_write_buf", 1507331),
-    (451, 177, 0, b"cdcacm_read", 3211276),
-    (451, 249, 0, b"cdcacm_enable_blocking", 1903621),
-    (451, 319, 0, b"select_notif_callback_isr", 1900552),
-    (457, 9, 0, b"test_hardware_default_manual_selection_and_removed_software_command", 0),
-    (458, 10, 0, b"test_commands", 0),
-    (459, 10, 0, b"test_trims_regions_without_assuming_a_rom_reservation_boundary", 0),
-    (460, 10, 0, b"test_commands", 0),
-    (461, 9, 0, b"test_both_chips", 0),
-    (462, 9, 0, b"test_c6", 0),
-    (464, 9, 0, b"test_protocol", 0),
-    (465, 20, 0, b"test_ready_to_serve_layout", 0),
-    (465, 32, 0, b"test_missing_profile_fails_complete_release", 0),
-    (466, 12, 0, b"setUp", 0),
-    (466, 39, 0, b"test_streaming_profile_identifies_its_application", 0),
-    (466, 78, 0, b"test_out_of_flash_rejected", 0),
-    (466, 84, 0, b"test_detect_resolves_configured_size_and_preserves_no_stub", 0),
-    (466, 94, 0, b"test_c2_records_required_crystal", 0),
-    (467, 10, 0, b"test_commands", 0),
-    (468, 9, 0, b"test_rx_commands_and_removed_transmit_commands", 0),
-    (469, 11, 0, b"test_retirement_at_each_processing_phase", 0),
-    (470, 17, 0, b"test_bandwidth_curves_and_interpolation", 0),
-    (470, 87, 0, b"test_c61_mirror_and_agc_restore", 0),
-    (470, 111, 0, b"test_original_esp32_filter_restores_calibration", 0),
-    (470, 138, 0, b"test_c3_filter_restores_calibration", 0),
-    (470, 163, 0, b"test_c2_filter_restores_calibration", 0),
-    (470, 188, 0, b"test_h2_filter_preserves_high_bit_and_restores_calibration", 0),
-    (471, 11, 0, b"test_sliced_fft_complex_tones_and_power_quantization", 0),
-    (471, 79, 0, b"test_dc_tracker_preserves_changes_and_bounds_hann_correction", 0),
-    (472, 20, 0, b"test_receive_frequency_maps_to_each_chip_pll", 0),
-    (472, 103, 0, b"test_alternate_lo_setup_and_return_to_normal", 0),
-    (472, 160, 0, b"test_s2_capacitor_search_and_failure_restore", 0),
-    (472, 194, 0, b"test_c5_bandwidth_mode_survives_prepare_and_retuning", 0),
-    (472, 230, 0, b"test_s2_s3_s31_production_parsers", 0),
-    (473, 13, 0, b"main", 0),
-    (474, 13, 0, b"exact", 0),
-    (474, 28, 0, b"check", 0),
-    (475, 10, 0, b"collect", 0),
-    (476, 22, 0, b"export", 0),
-    (477, 45, 0, b"cmd", 0),
-    (477, 52, 0, b"read_exact", 0),
-    (477, 59, 0, b"parse_report", 0),
-    (477, 68, 0, b"print_report", 0),
-    (477, 90, 0, b"do_ring", 0),
-    (477, 101, 0, b"do_ringcap", 0),
-    (477, 121, 0, b"check_gapless", 0),
-    (477, 179, 0, b"do_spec", 0),
-    (477, 250, 0, b"write_summary", 0),
-    (477, 274, 0, b"main", 0),
+    (416, 36, 0, b"spectrum_workspace", 196608),
 ];
+
+
 
 /// +104 records whose extent the end-column rules do not pin: the 44 CSS selector rows
 /// (the synthesized name's group extent needs the CSS tokenizer; typcol = the
@@ -2058,24 +1980,6 @@ const fn is_parent_kind(kind: u16) -> bool {
     matches!(kind, 2 | 3 | 7 | 10 | 21 | 29)
 }
 
-/// The innermost enclosing composite of record `i`: the parent-capable record
-/// of the same file before it whose `[decl_start..decl_end_line]` span covers the
-/// record's name row — the latest such id wins (inner composites are emitted after
-/// their containers).
-fn innermost_parent(inputs: &[SymInput], i: usize) -> Option<usize> {
-    let r = &inputs[i];
-    let mut best: Option<usize> = None;
-    for (j, q) in inputs.iter().enumerate().take(i) {
-        if q.file_id != r.file_id || !is_parent_kind(q.kind) {
-            continue;
-        }
-        if q.decl_start <= r.line0 && r.line0 <= q.decl_end_line && best.is_none_or(|b| j > b) {
-            best = Some(j);
-        }
-    }
-    best
-}
-
 /// The cross-record relational fields: +124 scope,
 /// +120 prev, +128 linked and the +140 flags — all computed over the skeletons in
 /// storage order, with the ring and stub-flag residuals carried by the exception
@@ -2092,9 +1996,49 @@ pub struct SymGraph {
 const ORDINAL_KINDS: [u16; 9] = [0, 1, 5, 6, 12, 13, 16, 53, 43];
 
 impl SymGraph {
-    /// Builds the graph over the skeletons in storage order.
+    /// Builds the graph over the skeletons in storage order (including the reference
+    /// snapshot's exception tables).
     pub fn build(inputs: &[SymInput], files: &[SymFileSource<'_>]) -> Self {
+        Self::build_with(inputs, files, true)
+    }
+
+    /// Builds the graph over the skeletons in storage order; when `apply_exceptions` is
+    /// `false`, only the clean-rebuild relational rules run.
+    pub fn build_with(
+        inputs: &[SymInput],
+        files: &[SymFileSource<'_>],
+        apply_exceptions: bool,
+    ) -> Self {
         let n = inputs.len();
+
+        // Per-file row indexes for the relational passes: each file's kind-4 typedef
+        // rows (in storage order, and grouped by opener row) and its parent-capable
+        // rows, so every record's lookups stay inside its own file. A whole-table scan
+        // per record made this pass quadratic and a 20k-symbol workspace a stall.
+        let file_count = inputs
+            .iter()
+            .map(|r| r.file_id)
+            .max()
+            .map_or(0, |f| f as usize + 1);
+        let mut typedef_rows: Vec<Vec<usize>> = vec![Vec::new(); file_count];
+        let mut typedef_rows_by_start: Vec<std::collections::HashMap<u32, Vec<usize>>> =
+            vec![std::collections::HashMap::new(); file_count];
+        let mut parent_rows: Vec<Vec<usize>> = vec![Vec::new(); file_count];
+        let mut rows_by_file: Vec<Vec<usize>> = vec![Vec::new(); file_count];
+        for (i, r) in inputs.iter().enumerate() {
+            let f = r.file_id as usize;
+            if r.kind == 4 {
+                typedef_rows[f].push(i);
+                typedef_rows_by_start[f]
+                    .entry(r.decl_start)
+                    .or_default()
+                    .push(i);
+            }
+            if is_parent_kind(r.kind) {
+                parent_rows[f].push(i);
+            }
+            rows_by_file[f].push(i);
+        }
 
         // +124 scope: the innermost enclosing composite; the typedef row is
         // never a container and its shadow row's scope is the typedef itself; a
@@ -2106,15 +2050,24 @@ impl SymGraph {
                 FREE_HEAD_NONE
             } else if r.kind == 22 {
                 // shadow row: the nearest preceding typedef row of the same file
-                let mut best = FREE_HEAD_NONE;
-                for (j, q) in inputs.iter().enumerate().take(i) {
-                    if q.file_id == r.file_id && q.kind == 4 {
-                        best = j as i32;
+                let rows = &typedef_rows[r.file_id as usize];
+                let at = rows.partition_point(|&j| j < i);
+                at.checked_sub(1).map_or(FREE_HEAD_NONE, |at| rows[at] as i32)
+            } else {
+                // the innermost parent: the latest storage-order parent-capable row of
+                // the same file whose span covers the name row (the rows ascend, so the
+                // last covering one is the innermost)
+                let mut owner = None;
+                for &j in &parent_rows[r.file_id as usize] {
+                    if j >= i {
+                        break;
+                    }
+                    let q = &inputs[j];
+                    if q.decl_start <= r.line0 && r.line0 <= q.decl_end_line {
+                        owner = Some(j);
                     }
                 }
-                best
-            } else {
-                match innermost_parent(inputs, i) {
+                match owner {
                     None => FREE_HEAD_NONE,
                     Some(owner) => {
                         if r.kind == 12 && inputs[owner].kind == 7 {
@@ -2122,12 +2075,12 @@ impl SymGraph {
                                 FREE_HEAD_NONE
                             } else {
                                 // rescan copy: registered after the group's typedef row
-                                let t4 = (0..n).find(|&j| {
-                                    inputs[j].file_id == r.file_id
-                                        && inputs[j].kind == 4
-                                        && inputs[j].decl_start == inputs[owner].decl_start
-                                        && j > owner
-                                });
+                                let t4 = typedef_rows_by_start[r.file_id as usize]
+                                    .get(&inputs[owner].decl_start)
+                                    .and_then(|rows| {
+                                        let at = rows.partition_point(|&j| j <= owner);
+                                        rows.get(at).copied()
+                                    });
                                 match t4 {
                                     Some(t4) if i > t4 => FREE_HEAD_NONE,
                                     _ => owner as i32,
@@ -2142,15 +2095,15 @@ impl SymGraph {
         }
 
         // +120 prev: the storage-order previous record of the same file and
-        // scope; the mat.cpp ring rides PREV_EXCEPTIONS.
+        // scope; the mat.cpp ring rides PREV_EXCEPTIONS. One forward pass with the
+        // (file, scope) → last row map answers the backward scan's first match.
         let mut prev = vec![FREE_HEAD_NONE; n];
+        let mut last_of_scope: std::collections::HashMap<(u32, i32), usize> =
+            std::collections::HashMap::new();
         for i in 0..n {
-            for j in (0..i).rev() {
-                if inputs[j].file_id == inputs[i].file_id && scope[j] == scope[i] {
-                    prev[i] = j as i32;
-                    break;
-                }
-            }
+            let key = (inputs[i].file_id, scope[i]);
+            prev[i] = last_of_scope.get(&key).map_or(FREE_HEAD_NONE, |&j| j as i32);
+            last_of_scope.insert(key, i);
         }
 
         // +128 linked: the storage-order last record whose scope is this id;
@@ -2183,6 +2136,18 @@ impl SymGraph {
                 rank[i] = pos as u32;
             }
         }
+        // the scoped kind-12 rows of each (file, name), and the per (file, kind, name)
+        // forward counters the prototype/method records count themselves by — both
+        // collected once instead of rescanning the whole table per record
+        let mut scoped_constants: std::collections::HashSet<(u32, &[u8])> =
+            std::collections::HashSet::new();
+        for (i, r) in inputs.iter().enumerate() {
+            if r.kind == 12 && scope[i] != FREE_HEAD_NONE {
+                scoped_constants.insert((r.file_id, r.name.as_slice()));
+            }
+        }
+        let mut same_name_before: std::collections::HashMap<(u32, u16, &[u8]), u32> =
+            std::collections::HashMap::new();
         for (i, r) in inputs.iter().enumerate() {
             let py = files
                 .get(r.file_id as usize)
@@ -2198,24 +2163,18 @@ impl SymGraph {
             } else if r.kind == 12 {
                 // a file-scope constant with a same-name in-group 256 twin is the
                 // enum rescan copy
-                let twin = inputs.iter().enumerate().any(|(j, q)| {
-                    q.file_id == r.file_id
-                        && q.kind == 12
-                        && q.name == r.name
-                        && scope[j] != FREE_HEAD_NONE
-                });
-                if twin {
+                if scoped_constants.contains(&(r.file_id, r.name.as_slice())) {
                     0
                 } else {
                     rank[i] as u16
                 }
             } else if matches!(r.kind, 10 | 11 | 36) {
-                inputs[..i]
-                    .iter()
-                    .filter(|q| {
-                        q.file_id == r.file_id && q.kind == r.kind && q.name == r.name
-                    })
-                    .count() as u16
+                let before = same_name_before
+                    .entry((r.file_id, r.kind, r.name.as_slice()))
+                    .or_insert(0);
+                let count = *before;
+                *before += 1;
+                count as u16
             } else if ORDINAL_KINDS.contains(&r.kind) {
                 rank[i] as u16
             } else {
@@ -2223,33 +2182,50 @@ impl SymGraph {
             };
         }
 
-        // the data-side pinned residuals (each table's header names its residual)
-        for (field, table) in [
-            (
-                &mut prev as &mut Vec<i32>,
-                PREV_EXCEPTIONS.iter().map(|e| (e.0, e.1, e.2, e.3, e.4 as i32)).collect::<Vec<_>>(),
-            ),
-            (
-                &mut linked,
-                LINKED_EXCEPTIONS.iter().map(|e| (e.0, e.1, e.2, e.3, e.4 as i32)).collect::<Vec<_>>(),
-            ),
-        ] {
-            for (file_id, line, kind, name, value) in table {
-                for i in 0..n {
-                    if inputs[i].file_id == file_id
-                        && inputs[i].line0 == line
-                        && inputs[i].kind == kind
-                        && inputs[i].name == *name
-                    {
-                        field[i] = value;
-                        break;
+        if apply_exceptions {
+            // the data-side pinned residuals (each table's header names its residual):
+            // the tables are tiny, but each row's record lookup only has to walk its
+            // own file's rows
+            for (field, table) in [
+                (
+                    &mut prev as &mut Vec<i32>,
+                    PREV_EXCEPTIONS.iter().map(|e| (e.0, e.1, e.2, e.3, e.4 as i32)).collect::<Vec<_>>(),
+                ),
+                (
+                    &mut linked,
+                    LINKED_EXCEPTIONS.iter().map(|e| (e.0, e.1, e.2, e.3, e.4 as i32)).collect::<Vec<_>>(),
+                ),
+            ] {
+                for (file_id, line, kind, name, value) in table {
+                    let Some(rows) = rows_by_file.get(file_id as usize) else {
+                        continue;
+                    };
+                    for &i in rows {
+                        let r = &inputs[i];
+                        if r.line0 == line && r.kind == kind && r.name.as_slice() == name {
+                            field[i] = value;
+                            break;
+                        }
                     }
                 }
             }
-        }
-        for (i, r) in inputs.iter().enumerate() {
-            if let Some(v) = exc_lookup(FLAGS_EXCEPTIONS, r.file_id, r.line0, r.kind, &r.name) {
-                flags[i] = v as u16;
+            type FlagRow = (u32, u16, &'static [u8], u32);
+            let mut flag_rows: std::collections::HashMap<u32, Vec<FlagRow>> =
+                std::collections::HashMap::new();
+            for e in FLAGS_EXCEPTIONS.iter() {
+                flag_rows.entry(e.0).or_default().push((e.1, e.2, e.3, e.4));
+            }
+            for (i, r) in inputs.iter().enumerate() {
+                if let Some(rows) = flag_rows.get(&r.file_id) {
+                    if let Some(&(_, _, _, v)) = rows
+                        .iter()
+                        .find(|(line, kind, name, _)| {
+                            *line == r.line0 && *kind == r.kind && *name == r.name.as_slice()
+                        })
+                    {
+                        flags[i] = v as u16;
+                    }
+                }
             }
         }
 
@@ -2283,81 +2259,163 @@ impl SymGraph {
 /// function, the residuals off the exception tables, the +112/+116/+136 padding
 /// and the +148..+180 tail zero (the reference snapshot's whole-image constants).
 pub fn build_sym_records(inputs: &[SymInput], files: &[SymFileSource<'_>]) -> Vec<SymSlot> {
-    let graph = SymGraph::build(inputs, files);
+    build_sym_records_with(inputs, files, true)
+}
+
+/// Builds every sym record using the clean-rebuild rules alone (no reference-snapshot
+/// exception tables).
+pub fn build_sym_records_clean(inputs: &[SymInput], files: &[SymFileSource<'_>]) -> Vec<SymSlot> {
+    build_sym_records_with(inputs, files, false)
+}
+
+fn build_sym_records_with(
+    inputs: &[SymInput],
+    files: &[SymFileSource<'_>],
+    apply_exceptions: bool,
+) -> Vec<SymSlot> {
+    let graph = SymGraph::build_with(inputs, files, apply_exceptions);
     inputs
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, input)| {
             let file = files.get(input.file_id as usize);
             let path = file.map_or(&[] as &[u8], |f| f.path.as_bytes());
             let lines: &[&[u8]] = file.map_or(&[], |f| f.lines);
-            let lang = lang_id(path, input.kind);
-            let argc = param_count(lang, input.kind, input.col0, input.line0, lines);
-            let raw108 = exc_lookup(
+            encode_sym_record(inputs, path, lines, &graph, i, apply_exceptions)
+        })
+        .collect()
+}
+
+/// One record's structured fields off its rule — the shared body of the whole-table
+/// encoder and the per-file-grouped one.
+fn encode_sym_record(
+    inputs: &[SymInput],
+    path: &[u8],
+    lines: &[&[u8]],
+    graph: &SymGraph,
+    i: usize,
+    apply_exceptions: bool,
+) -> SymSlot {
+    let input = &inputs[i];
+    let lang = lang_id(path, input.kind);
+    let argc = param_count(lang, input.kind, input.col0, input.line0, lines);
+    let raw108 = apply_exceptions
+        .then(|| {
+            exc_lookup(
                 PACKED108_EXCEPTIONS,
                 input.file_id,
                 input.line0,
                 input.kind,
                 &input.name,
             )
-            .unwrap_or_else(|| packed_108(input.kind, input.line0, input.decl_end_line, lines));
-            let end_col = exc_lookup(
+        })
+        .flatten()
+        .unwrap_or_else(|| packed_108(input.kind, lang, input.line0, input.decl_end_line, lines));
+    let end_col = apply_exceptions
+        .then(|| {
+            exc_lookup(
                 ENDCOL_EXCEPTIONS,
                 input.file_id,
                 input.line0,
                 input.kind,
                 &input.name,
             )
+        })
+        .flatten()
+        .unwrap_or_else(|| {
+            decl_end_col(
+                input.kind,
+                lang,
+                &input.name,
+                input.col0,
+                input.line0,
+                input.decl_end_line,
+                lines,
+            )
             .unwrap_or_else(|| {
-                decl_end_col(
-                    input.kind,
-                    lang,
-                    &input.name,
-                    input.col0,
-                    input.line0,
-                    input.decl_end_line,
-                    lines,
-                )
-                .unwrap_or_else(|| {
-                    span_scan(input.name.len(), input.col0, input.line0, input.decl_end_line, lines, b",;")
-                        .unwrap_or_else(|| {
-                            lines
-                                .get(input.decl_end_line as usize)
-                                .map_or(0, |l| last_char_col(l))
-                        })
-                })
-            });
-            let tok_col = exc_lookup(
+                span_scan(input.name.len(), input.col0, input.line0, input.decl_end_line, lines, b",;")
+                    .unwrap_or_else(|| {
+                        lines
+                            .get(input.decl_end_line as usize)
+                            .map_or(0, |l| last_char_col(l))
+                    })
+            })
+        });
+    let tok_col = apply_exceptions
+        .then(|| {
+            exc_lookup(
                 TYPCOL_EXCEPTIONS,
                 input.file_id,
                 input.line0,
                 input.kind,
                 &input.name,
             )
-            .unwrap_or_else(|| {
-                token_col(input.kind, lang, &input.name, input.col0, input.decl_start, lines)
-            });
-            SymSlot {
-                name: input.name.clone(),
-                line0: input.line0,
-                col0: input.col0,
-                decl_start: input.decl_start,
-                token_col: tok_col,
-                decl_end_line: input.decl_end_line,
-                decl_end_col: end_col,
-                raw108,
-                raw112: 0,
-                raw116: 0,
-                prev: graph.prev(i),
-                scope: graph.scope(i),
-                related: graph.linked(i),
-                file_id: input.file_id,
-                raw136: 0,
-                kind: input.kind,
-                flags: graph.flags(i),
-                name_tag: (lang << 8) | argc,
-            }
         })
+        .flatten()
+        .unwrap_or_else(|| {
+            token_col(input.kind, lang, &input.name, input.col0, input.decl_start, lines)
+        });
+    SymSlot {
+        name: input.name.clone(),
+        line0: input.line0,
+        col0: input.col0,
+        decl_start: input.decl_start,
+        token_col: tok_col,
+        decl_end_line: input.decl_end_line,
+        decl_end_col: end_col,
+        raw108,
+        raw112: 0,
+        raw116: 0,
+        prev: graph.prev(i),
+        scope: graph.scope(i),
+        related: graph.linked(i),
+        file_id: input.file_id,
+        raw136: 0,
+        kind: input.kind,
+        flags: graph.flags(i),
+        name_tag: (lang << 8) | argc,
+    }
+}
+
+/// Builds every sym record with the per-file rows fetched on demand: the graph runs off
+/// the file paths alone, and each pool worker materializes only its own group's rows
+/// through `lines_of`, so the tree's rows are never resident all together. The records
+/// land in `inputs` order, identical to [`build_sym_records_clean`] over the same
+/// skeletons.
+pub fn build_sym_records_clean_grouped(
+    inputs: &[SymInput],
+    paths: &[&str],
+    lines_of: &(dyn Fn(u32) -> Vec<Vec<u8>> + Sync),
+) -> Vec<SymSlot> {
+    let sources: Vec<SymFileSource<'_>> = paths
+        .iter()
+        .map(|p| SymFileSource {
+            path: p,
+            lines: &[],
+        })
+        .collect();
+    let graph = SymGraph::build_with(inputs, &sources, false);
+    // the records sit grouped by file (the assembly is per file, in feed order)
+    let mut groups: Vec<(u32, usize, usize)> = Vec::new();
+    for (i, input) in inputs.iter().enumerate() {
+        match groups.last_mut() {
+            Some((fid, _, end)) if *fid == input.file_id => *end = i + 1,
+            _ => groups.push((input.file_id, i, i + 1)),
+        }
+    }
+    groups
+        .par_iter()
+        .map(|&(fid, start, end)| {
+            let lines = lines_of(fid);
+            let line_refs: Vec<&[u8]> = lines.iter().map(|l| l.as_slice()).collect();
+            let path = paths[fid as usize].as_bytes();
+            (start..end)
+                .map(|i| encode_sym_record(inputs, path, &line_refs, &graph, i, false))
+                .collect::<Vec<SymSlot>>()
+        })
+        .collect::<Vec<Vec<SymSlot>>>()
+        .into_iter()
+        .flatten()
         .collect()
 }
 
@@ -2992,13 +3050,25 @@ mod tests {
             b"    \"only a string\"",
             b"}",
         ];
-        // X = 5: the brace row, the two control rows, the one open block comment run,
-        // the closing brace; the continuation, the preprocessor row and the
-        // string-only row do not count. A = the `if` + `for` pair. B = 0.
-        assert_eq!(packed_108(0, 0, 7, &lines), (5 << 16) | 2);
-        // a prototype (no braces in range) and a variable carry 0
-        assert_eq!(packed_108(13, 0, 0, &[b"extern void app_main();"]), 0);
-        assert_eq!(packed_108(5, 0, 0, &[b"static bool b = true;"]), 0);
+        // X = 6: the brace row, the two control rows, the one open block comment
+        // run, the string-only row, the closing brace; the continuation and the
+        // preprocessor row do not count. A = the `if` + `for` pair; B = 0.
+        assert_eq!(packed_108(0, 3, 0, 7, &lines), (6 << 16) | 2);
+        // a JS body weights its catch (+1), the do counts 1 and its while 0
+        let js: Vec<&[u8]> = vec![
+            b"function h() {",
+            b"    do { x(); } while (y);",
+            b"    try {} catch (e) {}",
+            b"}",
+        ];
+        assert_eq!(packed_108(0, 13, 0, 3, &js), (4 << 16) | 2);
+        // a goto rides B at 4 a piece (the closing brace row counts)
+        let gotos: Vec<&[u8]> = vec![b"void g() {", b"    goto end;", b"end: ;", b"}"];
+        assert_eq!(packed_108(0, 3, 0, 3, &gotos), (4 << 16) | (4 << 8));
+        // kind 13 (prototypes) and kind 5 (variables) carry 0; so does py
+        assert_eq!(packed_108(13, 3, 0, 0, &[b"extern void app_main();"]), 0);
+        assert_eq!(packed_108(5, 3, 0, 0, &[b"static bool b = true;"]), 0);
+        assert_eq!(packed_108(0, 22, 0, 0, &[b"def f():"]), 0);
     }
 
     #[test]

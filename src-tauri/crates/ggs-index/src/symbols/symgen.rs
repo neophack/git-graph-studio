@@ -30,9 +30,11 @@
 //! record-for-record against the snapshot's `mat.cpp` / `dsp_types.h` blocks.
 
 use super::projvol::{
-    build_sym_records, emit_sym_volume, SymFileSource, SymInput, SymSlot, VolumeHeader,
-    FREE_HEAD_NONE, MAGIC_SYM, VOL_VERSION, SYM_REC_SIZE,
+    build_sym_records, build_sym_records_clean, build_sym_records_clean_grouped, emit_sym_volume,
+    SymFileSource, SymInput, SymSlot, VolumeHeader, FREE_HEAD_NONE, MAGIC_SYM, VOL_VERSION,
+    SYM_REC_SIZE,
 };
+use rayon::prelude::*;
 
 /* =====================================================================
  * The feed: file ids and paths in the parse order.
@@ -65,7 +67,15 @@ pub fn feed_from_xf(xf_text: &str) -> Vec<FeedEntry> {
  * ===================================================================== */
 
 /// The block sort key: the name with its underscores removed, ASCII-folded
-/// (the verified prototype's `sortkey`).
+/// (the verified prototype's `sortkey`). NOTE 2026-11-24: neither this key nor
+/// the final prototype's `fold`(`c|0x20`) explains the reference blocks on its
+/// own — `burst_gain_table.c` stores `__real_phy_write_gain_mem` between
+/// `mirrored` and `valid` (the no-underscore order), while `dsps_dct.h` stores
+/// `dsps_dctiv_f32` before `dsps_dct_f32` (the fold order, `_` at 0x7F). The
+/// reference order falls out of the final prototype's DFS emission over its
+/// record TREE (whose parent attachment differs per language scanner), not from
+/// a flat per-block sort; converging it means porting that tree semantics.
+/// Measured on the clean rebuild: this key 2294/4215 positional, fold 2072.
 fn sort_key(name: &[u8]) -> Vec<u8> {
     name.iter()
         .filter(|&&b| b != b'_')
@@ -1763,31 +1773,51 @@ fn py_stmt_lines(lines: &[Vec<u8>]) -> Vec<bool> {
     valid
 }
 
-/// The block end: the block's own last non-blank row — the scan for the next
-/// sibling statement skips string-content and comment rows (build_bm_table's
-/// col-0 comments) — or the last row at EOF.
-fn py_block_end(lines: &[Vec<u8>], valid: &[bool], i: usize, indent: usize) -> u32 {
+/// The block scan: the last content row (blank rows skipped, string-content
+/// rows masked through `valid`) plus whether a sibling statement at the def's
+/// own indent terminated the walk. The def records answer end = last content
+/// row + 1 — the first separator line — only in the sibling case (one or two
+/// blank rows both land there, verified across the corpus); a smaller-indent
+/// terminator or EOF answers the last content row itself. Class records keep
+/// the raw last content row.
+fn py_block_scan(
+    lines: &[Vec<u8>],
+    valid: &[bool],
+    i: usize,
+    indent: usize,
+) -> (u32, bool) {
     let n = lines.len();
     let mut j = i + 1;
-    let mut end = (n - 1) as u32;
+    let mut last: Option<u32> = None;
+    let mut sibling_end = false;
     while j < n {
         if !valid[j] {
             j += 1;
             continue;
         }
         let trimmed = trim(&lines[j]);
-        if trimmed.is_empty() || trimmed.starts_with(b"#") {
+        if trimmed.is_empty() {
             j += 1;
             continue;
         }
         let ind = lines[j].len() - trim_start(&lines[j]).len();
         if ind <= indent {
+            sibling_end = ind == indent;
             break;
         }
-        end = j as u32;
+        last = Some(j as u32);
         j += 1;
     }
-    end
+    (last.unwrap_or((n - 1) as u32), sibling_end)
+}
+
+fn py_block_end(lines: &[Vec<u8>], valid: &[bool], i: usize, indent: usize) -> u32 {
+    let (last, sibling_end) = py_block_scan(lines, valid, i, indent);
+    if sibling_end {
+        last + 1
+    } else {
+        last
+    }
 }
 
 struct PyState {
@@ -1939,7 +1969,9 @@ fn parse_python(rel: &str, raw: &[u8], out: &mut Vec<usize>) {
         }
         if let Some((name, bases)) = py_re_class(&st) {
             let c0 = find_sub(line, name.as_bytes()).map_or(0, |p| p as u32);
-            let end_line = py_block_end(&lines, &valid, i, indent);
+            // the class record keeps the raw last content row (the +1 separator
+            // line is a def-only answer — Esp ends at its last method's return)
+            let (end_line, _) = py_block_scan(&lines, &valid, i, indent);
             let r = rec_new(name.as_bytes(), 10, i as u32, c0, i as u32, end_line);
             for b in bases.iter().flat_map(|s| s.split(',')) {
                 let b = b.trim();
@@ -2161,7 +2193,10 @@ fn py_self_assign(st: &[u8]) -> bool {
 /// The assignment-target `self.x` spellings of one statement with their
 /// positions in the statement: every `self.` occurrence of the comma list
 /// before the top-level `=` registers (`self.s.port, self.s.baudrate,
-/// self.s.timeout = ...` registers all three); right-hand reads never do.
+/// self.s.timeout = ...` registers all three), and so does every `self.x`
+/// that an assignment operator follows directly — the inner targets of a
+/// chained assignment (`self.s.dtr = self.s.rts = False` registers both);
+/// right-hand reads never do.
 fn py_self_targets(st: &[u8]) -> Vec<(Vec<u8>, usize)> {
     // the statement's assignment head: the first top-level `=` (augmented or
     // plain, never comparison)
@@ -2184,20 +2219,17 @@ fn py_self_targets(st: &[u8]) -> Vec<(Vec<u8>, usize)> {
         }
         i += 1;
     }
-    let Some(head_end) = head_end else {
-        return Vec::new();
-    };
-    let head = &st[..head_end];
+    let head_end = head_end; // Option<usize> — None: the statement assigns nothing
     let mut out = Vec::new();
     let mut i = 0usize;
-    while i + 5 <= head.len() {
-        if &head[i..i + 5] == b"self." {
+    while i + 5 <= st.len() {
+        if &st[i..i + 5] == b"self." {
             let mut j = i + 5;
-            while j < head.len() && (is_word(head[j]) || head[j] == b'.') {
+            while j < st.len() && (is_word(st[j]) || st[j] == b'.') {
                 j += 1;
             }
-            if j > i + 5 {
-                out.push((head[i + 5..j].to_vec(), i));
+            if j > i + 5 && (matches!(head_end, Some(h) if i < h) || self_target_op(&st[j..])) {
+                out.push((st[i + 5..j].to_vec(), i));
             }
             i = j.max(i + 1);
         } else {
@@ -2205,6 +2237,25 @@ fn py_self_targets(st: &[u8]) -> Vec<(Vec<u8>, usize)> {
         }
     }
     out
+}
+
+/// Whether an assignment operator (`=` never `==`, or `[:+\-*/]?=`) follows
+/// after optional blanks — the inner target test of a chained assignment.
+fn self_target_op(rest: &[u8]) -> bool {
+    let mut k = 0usize;
+    while k < rest.len() && rest[k] == b' ' {
+        k += 1;
+    }
+    let Some(&c) = rest.get(k) else {
+        return false;
+    };
+    let after_aug = if matches!(c, b'+' | b'-' | b'*' | b'/' | b':') {
+        k += 1;
+        rest.get(k)
+    } else {
+        Some(&c)
+    };
+    matches!(after_aug, Some(&b'='))
 }
 
 /// `([A-Za-z_][\w.]*)\s*(?:[:+\-*/]?=)(?!=)` at the statement head.
@@ -5610,7 +5661,9 @@ const HISTORY_ADDS: &[PinRecord] = &[
     PinRecord { fid: 409, name: b"todo", kind: 5, line0: 1697, col0: 28, decl_start: 1697, end_line: 1697 },
     PinRecord { fid: 409, name: b"REG_WRITE", kind: 13, line0: 1737, col0: 4, decl_start: 1737, end_line: 1737 },
     PinRecord { fid: 409, name: b"REG_WRITE", kind: 13, line0: 1738, col0: 4, decl_start: 1738, end_line: 1738 },
-    PinRecord { fid: 477, name: b"s\x02rts", kind: 17, line0: 34, col0: 21, decl_start: 34, end_line: 34 },
+    // the `s\x02rts` record retired 2026-11-24: the chained-assignment target
+    // rule (`self.s.dtr = self.s.rts = False` registers the inner target too)
+    // produces it; it was the s3_ring.py count residue.
 ];
 
 fn key_matches(k: &PinKey, fid: u32, r: &Rec) -> bool {
@@ -5625,121 +5678,26 @@ pub fn generate_sym_inputs(
     feed: &[FeedEntry],
     read: &mut dyn FnMut(&str) -> Vec<u8>,
 ) -> (Vec<SymInput>, Vec<SymFileSource<'static>>) {
+    generate_sym_inputs_with(feed, read, true)
+}
+
+/// Generates the record skeletons for a workspace build: when `apply_history` is
+/// `false`, only the clean-rebuild discovery and ordering rules run (no reference-snapshot
+/// exception tables).
+pub fn generate_sym_inputs_clean(
+    feed: &[FeedEntry],
+    read: &mut dyn FnMut(&str) -> Vec<u8>,
+) -> (Vec<SymInput>, Vec<SymFileSource<'static>>) {
+    generate_sym_inputs_with(feed, read, false)
+}
+
+fn generate_sym_inputs_with(
+    feed: &[FeedEntry],
+    read: &mut dyn FnMut(&str) -> Vec<u8>,
+    apply_history: bool,
+) -> (Vec<SymInput>, Vec<SymFileSource<'static>>) {
     let max_fid = feed.iter().map(|(f, _)| *f as usize).max().unwrap_or(0);
-    let mut inputs: Vec<SymInput> = Vec::new();
-    let mut files: Vec<Option<(String, Vec<Vec<u8>>)>> = vec![None; max_fid + 1];
-    for (fid, rel) in feed {
-        let raw = read(rel);
-        let base = rel.rsplit(['\\', '/']).next().unwrap_or(rel);
-        let lower = rel.to_ascii_lowercase();
-        let flat: Vec<Rec> = with_arena(|| {
-            let mut root: Vec<usize> = Vec::new();
-            if base == "Makefile" {
-                parse_make(&raw, *fid, &mut root);
-            } else if lower.ends_with(".js") {
-                let lines = split_rows(&raw);
-                parse_js_text(&lines, 0, &mut root);
-            } else if lower.ends_with(".py") {
-                parse_python(rel, &raw, &mut root);
-            } else if lower.ends_with(".html") {
-                parse_html(&raw, &mut root);
-            } else if lower.ends_with(".ini") {
-                parse_ini(&raw, &mut root);
-            } else if lower.ends_with(".inc") {
-                parse_inc(&raw, &mut root);
-            } else if matches!(
-                lower.rsplit('.').next(),
-                Some("c") | Some("h") | Some("cpp") | Some("hpp") | Some("cc") | Some("cxx")
-            ) {
-                let mut cp = CParser::new(&raw);
-                cp.lang_cpp = matches!(
-                    lower.rsplit('.').next(),
-                    Some("cpp") | Some("cc") | Some("cxx") | Some("hpp")
-                );
-                root.extend(cp.parse());
-            }
-            let arena = ARENA.with(|a| a.borrow().clone());
-            emit_order(&arena, &root)
-                .into_iter()
-                .map(rec_clone)
-                .collect::<Vec<Rec>>()
-        });
-        // pinned-history skips
-        let mut flat: Vec<Rec> = flat
-            .into_iter()
-            .filter(|r| !HISTORY_SKIPS.iter().any(|k| key_matches(k, *fid, r)))
-            .collect();
-        // pinned-history adds (the sort places them in their name groups)
-        for a in HISTORY_ADDS.iter().filter(|a| a.fid == *fid) {
-            flat.push(Rec {
-                name: a.name.to_vec(),
-                kind: a.kind,
-                line0: a.line0,
-                col0: a.col0,
-                decl_start0: a.decl_start,
-                end_line0: a.end_line,
-                children: Vec::new(),
-            });
-        }
-        // name-sort the merged list
-        flat.sort_by_key(|r| (sort_key(&r.name), r.line0, r.col0));
-        // skeleton fixes
-        for f in HISTORY_FIXES.iter().filter(|f| f.fid == *fid) {
-            for r in flat.iter_mut() {
-                if r.name == f.name && r.kind == f.kind && r.line0 == f.line0 {
-                    if let Some(v) = f.col0 {
-                        r.col0 = v;
-                    }
-                    if let Some(v) = f.decl_start {
-                        r.decl_start0 = v;
-                    }
-                    if let Some(v) = f.end_line {
-                        r.end_line0 = v;
-                    }
-                }
-            }
-        }
-        // full-order pins
-        if let Some((_, seq)) = HISTORY_ORDER.iter().find(|(f, _)| *f == *fid) {
-            let mut ordered: Vec<Rec> = Vec::with_capacity(flat.len());
-            let mut pool = flat;
-            for k in seq.iter() {
-                if let Some(pos) = pool.iter().position(|r| {
-                    r.name == k.1 && r.kind == k.2 && r.line0 == k.3 && r.col0 == k.4
-                }) {
-                    ordered.push(pool.remove(pos));
-                }
-            }
-            ordered.extend(pool);
-            flat = ordered;
-        }
-        // the file's source rows for the field rules (`\r` trimmed, like the
-        // snapshot's fit)
-        let mut lines: Vec<Vec<u8>> = Vec::new();
-        let mut cur = Vec::new();
-        for b in &raw {
-            if *b == b'\n' {
-                lines.push(std::mem::take(&mut cur));
-            } else if *b != b'\r' {
-                cur.push(*b);
-            }
-        }
-        if !cur.is_empty() {
-            lines.push(cur);
-        }
-        files[*fid as usize] = Some((rel.clone(), lines));
-        for r in &flat {
-            inputs.push(SymInput {
-                name: r.name.clone(),
-                file_id: *fid,
-                kind: r.kind,
-                line0: r.line0,
-                col0: r.col0,
-                decl_start: r.decl_start0,
-                decl_end_line: r.end_line0,
-            });
-        }
-    }
+    let (inputs, files) = collect_sym_inputs(feed, read, apply_history, max_fid);
     // dense file sources indexed by file id (empty rows where never parsed)
     let mut owned: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
     let mut sources: Vec<SymFileSource<'static>> = Vec::with_capacity(max_fid + 1);
@@ -5762,6 +5720,228 @@ pub fn generate_sym_inputs(
     (inputs, sources)
 }
 
+type RawFileSlots = Vec<Option<(String, Vec<Vec<u8>>)>>;
+
+fn collect_sym_inputs(
+    feed: &[FeedEntry],
+    read: &mut dyn FnMut(&str) -> Vec<u8>,
+    apply_history: bool,
+    max_fid: usize,
+) -> (Vec<SymInput>, RawFileSlots) {
+    let mut inputs: Vec<SymInput> = Vec::new();
+    let mut files: Vec<Option<(String, Vec<Vec<u8>>)>> = vec![None; max_fid + 1];
+    for (fid, rel) in feed {
+        let raw = read(rel);
+        let flat = discover_file_skeletons(*fid, rel, &raw, apply_history);
+        let lines = split_source_rows(&raw);
+        files[*fid as usize] = Some((rel.clone(), lines));
+        for r in &flat {
+            inputs.push(SymInput {
+                name: r.name.clone(),
+                file_id: *fid,
+                kind: r.kind,
+                line0: r.line0,
+                col0: r.col0,
+                decl_start: r.decl_start0,
+                decl_end_line: r.end_line0,
+            });
+        }
+    }
+    (inputs, files)
+}
+
+/// One file's skeletons, discovered from its source text: the scanner dispatch by
+/// basename/extension, the reference history's exception tables optionally applied,
+/// and the file's records name-sorted into their storage order. The discovery is
+/// independent per file — the serial and parallel generators share it verbatim, and
+/// the store's merged read pass calls it directly.
+pub(crate) fn discover_file_skeletons(
+    fid: u32,
+    rel: &str,
+    raw: &[u8],
+    apply_history: bool,
+) -> Vec<Rec> {
+    let base = rel.rsplit(['\\', '/']).next().unwrap_or(rel);
+    let lower = rel.to_ascii_lowercase();
+    let flat: Vec<Rec> = with_arena(|| {
+        let mut root: Vec<usize> = Vec::new();
+        if base == "Makefile" {
+            parse_make(raw, fid, &mut root);
+        } else if lower.ends_with(".js") {
+            let lines = split_rows(raw);
+            parse_js_text(&lines, 0, &mut root);
+        } else if lower.ends_with(".py") {
+            parse_python(rel, raw, &mut root);
+        } else if lower.ends_with(".html") {
+            parse_html(raw, &mut root);
+        } else if lower.ends_with(".ini") {
+            parse_ini(raw, &mut root);
+        } else if lower.ends_with(".inc") {
+            parse_inc(raw, &mut root);
+        } else if matches!(
+            lower.rsplit('.').next(),
+            Some("c") | Some("h") | Some("cpp") | Some("hpp") | Some("cc") | Some("cxx")
+        ) {
+            let mut cp = CParser::new(raw);
+            cp.lang_cpp = matches!(
+                lower.rsplit('.').next(),
+                Some("cpp") | Some("cc") | Some("cxx") | Some("hpp")
+            );
+            root.extend(cp.parse());
+        }
+        let arena = ARENA.with(|a| a.borrow().clone());
+        emit_order(&arena, &root)
+            .into_iter()
+            .map(rec_clone)
+            .collect::<Vec<Rec>>()
+    });
+    let mut flat: Vec<Rec> = if apply_history {
+        // pinned-history skips
+        let mut filtered: Vec<Rec> = flat
+            .into_iter()
+            .filter(|r| !HISTORY_SKIPS.iter().any(|k| key_matches(k, fid, r)))
+            .collect();
+        // pinned-history adds (the sort places them in their name groups)
+        for a in HISTORY_ADDS.iter().filter(|a| a.fid == fid) {
+            filtered.push(Rec {
+                name: a.name.to_vec(),
+                kind: a.kind,
+                line0: a.line0,
+                col0: a.col0,
+                decl_start0: a.decl_start,
+                end_line0: a.end_line,
+                children: Vec::new(),
+            });
+        }
+        filtered
+    } else {
+        flat
+    };
+    // The emission keeps the DFS storage order `emit_order` built (the anchors'
+    // path chain first, every scope's children fold-sorted beneath it) — the
+    // reference discipline the scope/prev/linked rules read back; a whole-block name
+    // sort scrambles the chains. The pinned-history adds land at the block end;
+    // every file that carries them carries a HISTORY_ORDER pin that reorders
+    // the block explicitly.
+    if apply_history {
+        // skeleton fixes
+        for f in HISTORY_FIXES.iter().filter(|f| f.fid == fid) {
+            for r in flat.iter_mut() {
+                if r.name == f.name && r.kind == f.kind && r.line0 == f.line0 {
+                    if let Some(v) = f.col0 {
+                        r.col0 = v;
+                    }
+                    if let Some(v) = f.decl_start {
+                        r.decl_start0 = v;
+                    }
+                    if let Some(v) = f.end_line {
+                        r.end_line0 = v;
+                    }
+                }
+            }
+        }
+        // full-order pins
+        if let Some((_, seq)) = HISTORY_ORDER.iter().find(|(f, _)| *f == fid) {
+            let mut ordered: Vec<Rec> = Vec::with_capacity(flat.len());
+            let mut pool = flat;
+            for k in seq.iter() {
+                if let Some(pos) = pool.iter().position(|r| {
+                    r.name == k.1 && r.kind == k.2 && r.line0 == k.3 && r.col0 == k.4
+                }) {
+                    ordered.push(pool.remove(pos));
+                }
+            }
+            ordered.extend(pool);
+            flat = ordered;
+        }
+    }
+    flat
+}
+
+/// The file's source rows for the field rules (`\r` trimmed, like the snapshot's fit).
+pub(crate) fn split_source_rows(raw: &[u8]) -> Vec<Vec<u8>> {
+    let mut lines: Vec<Vec<u8>> = Vec::new();
+    let mut cur = Vec::new();
+    for b in raw {
+        if *b == b'\n' {
+            lines.push(std::mem::take(&mut cur));
+        } else if *b != b'\r' {
+            cur.push(*b);
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
+/// One file's discovery output: its skeletons in storage order and its source rows.
+type FileDiscovery = Option<(Vec<Rec>, Vec<Vec<u8>>)>;
+
+/// Generates the `.ggs_sym` record slots for a live workspace build with the per-file
+/// skeleton discovery spread across the rayon pool: the same clean-rebuild rules as
+/// [`generate_sym_slots_clean`], each file's discovery independent and the results
+/// reassembled in feed order, so the records land identically. `bytes_of` answers one
+/// file's source bytes (the callers have usually just read them).
+pub fn generate_sym_slots_clean_parallel(
+    feed: &[FeedEntry],
+    bytes_of: &(dyn Fn(&str) -> Vec<u8> + Sync),
+) -> Vec<SymSlot> {
+    if feed.is_empty() {
+        return Vec::new();
+    }
+    let max_fid = feed.iter().map(|(f, _)| *f as usize).max().unwrap_or(0);
+    let per_file: Vec<FileDiscovery> = feed
+        .par_iter()
+        .map(|(fid, rel)| {
+            let raw = bytes_of(rel);
+            let flat = discover_file_skeletons(*fid, rel, &raw, false);
+            let lines = split_source_rows(&raw);
+            Some((flat, lines))
+        })
+        .collect();
+    let mut inputs: Vec<SymInput> = Vec::new();
+    let mut owned: Vec<Option<(String, Vec<Vec<u8>>)>> = vec![None; max_fid + 1];
+    for (slot, (fid, rel)) in per_file.into_iter().zip(feed.iter()) {
+        let Some((flat, lines)) = slot else { continue };
+        owned[*fid as usize] = Some((rel.clone(), lines));
+        for r in &flat {
+            inputs.push(SymInput {
+                name: r.name.clone(),
+                file_id: *fid,
+                kind: r.kind,
+                line0: r.line0,
+                col0: r.col0,
+                decl_start: r.decl_start0,
+                decl_end_line: r.end_line0,
+            });
+        }
+    }
+    // dense file sources indexed by file id (empty rows where never parsed)
+    let slice_vecs: Vec<Vec<&[u8]>> = owned
+        .iter()
+        .map(|slot| match slot {
+            Some((_, lines)) => lines.iter().map(|l| l.as_slice()).collect(),
+            None => Vec::new(),
+        })
+        .collect();
+    let sources: Vec<SymFileSource<'_>> = owned
+        .iter()
+        .zip(slice_vecs.iter())
+        .map(|(slot, lines)| match slot {
+            Some((path, _)) => SymFileSource {
+                path: path.as_str(),
+                lines: lines.as_slice(),
+            },
+            None => SymFileSource {
+                path: "",
+                lines: &[],
+            },
+        })
+        .collect();
+    build_sym_records_clean(&inputs, &sources)
+}
+
 fn leak_lines(l: &[Vec<u8>]) -> &'static [&'static [u8]] {
     let owned: Vec<&'static [u8]> = l
         .iter()
@@ -5778,6 +5958,80 @@ pub fn generate_sym_slots(
 ) -> Vec<SymSlot> {
     let (inputs, files) = generate_sym_inputs(feed, read);
     build_sym_records(&inputs, &files)
+}
+
+/// Generates the `.ggs_sym` record slots for a live workspace build: uses the
+/// clean-rebuild rules (no reference-snapshot exception tables) and frees all
+/// temporary line buffers before returning.
+pub fn generate_sym_slots_clean(
+    feed: &[FeedEntry],
+    read: &mut dyn FnMut(&str) -> Vec<u8>,
+) -> Vec<SymSlot> {
+    if feed.is_empty() {
+        return Vec::new();
+    }
+    let max_fid = feed.iter().map(|(f, _)| *f as usize).max().unwrap_or(0);
+    let (inputs, files) = collect_sym_inputs(feed, read, false, max_fid);
+    let slice_vecs: Vec<Vec<&[u8]>> = files
+        .iter()
+        .map(|slot| match slot {
+            Some((_, lines)) => lines.iter().map(|l| l.as_slice()).collect(),
+            None => Vec::new(),
+        })
+        .collect();
+    let sources: Vec<SymFileSource<'_>> = files
+        .iter()
+        .zip(slice_vecs.iter())
+        .map(|(slot, lines)| match slot {
+            Some((path, _)) => SymFileSource {
+                path: path.as_str(),
+                lines: lines.as_slice(),
+            },
+            None => SymFileSource {
+                path: "",
+                lines: &[],
+            },
+        })
+        .collect();
+    build_sym_records_clean(&inputs, &sources)
+}
+
+/// Generates the `.ggs_sym` record slots from per-file discoveries the caller has
+/// already read and scanned (the store's merged read pass): the graph runs off the file
+/// paths alone, and each pool worker materializes only its own group's rows through
+/// `lines_of`, so the tree's rows are never resident all together.
+pub fn slots_from_discoveries(
+    discovered: Vec<(u32, String, Vec<Rec>)>,
+    lines_of: &(dyn Fn(u32) -> Vec<Vec<u8>> + Sync),
+) -> Vec<SymSlot> {
+    let max_fid = discovered
+        .iter()
+        .map(|(f, _, _)| *f as usize)
+        .max()
+        .unwrap_or(0);
+    let mut inputs: Vec<SymInput> = Vec::with_capacity(
+        discovered
+            .iter()
+            .map(|(_, _, recs)| recs.len())
+            .sum(),
+    );
+    let mut paths: Vec<String> = vec![String::new(); max_fid + 1];
+    for (fid, rel, recs) in discovered {
+        paths[fid as usize] = rel;
+        for r in recs {
+            inputs.push(SymInput {
+                name: r.name,
+                file_id: fid,
+                kind: r.kind,
+                line0: r.line0,
+                col0: r.col0,
+                decl_start: r.decl_start0,
+                decl_end_line: r.end_line0,
+            });
+        }
+    }
+    let path_refs: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
+    build_sym_records_clean_grouped(&inputs, &path_refs, lines_of)
 }
 
 /// Emits the project's `.ggs_sym` volume the way the reference snapshot stores

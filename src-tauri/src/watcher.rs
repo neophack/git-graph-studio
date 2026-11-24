@@ -468,9 +468,10 @@ mod tests {
         let root = &std::env::temp_dir().join("repo");
         let mut quiet = FsChange::default();
         for noise in [
-            ".ggs/analysis/9f2c/symbols.bin",
-            ".ggs/analysis/9f2c/ggs.db",
-            ".ggs/analysis/9f2c/ggs.tix",
+            ".ggs/analysis/9f2c/project.ggs_sym",
+            ".ggs/analysis/9f2c/project.ggs_xf",
+            ".ggs/analysis/9f2c/project.ggs_xr",
+            ".ggs/analysis/9f2c/project.ggs_xab",
             ".ggs/analysis/9f2c/symbols.bin.new",
         ] {
             fold_path(&mut quiet, root, &under(root, noise));

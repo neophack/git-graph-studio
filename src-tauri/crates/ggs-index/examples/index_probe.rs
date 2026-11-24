@@ -1,6 +1,6 @@
 //! TEMP: the real-folder probe for the 2026-11-21 analysis-folder work — index a root
 //! the way the app does, run the relation kinds on a named subject, and leave
-//! the project analysis folder (`.ggs/`, ggs.db + ggs.tix + symbols.bin) standing for
+//! the project analysis folder (`.ggs/`, the nine `project.ggs_*` volumes) standing for
 //! external tooling to read back.
 //!
 //! ```text

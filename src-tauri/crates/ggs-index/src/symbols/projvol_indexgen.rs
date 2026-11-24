@@ -48,6 +48,8 @@
 
 use std::collections::HashMap;
 
+use rayon::prelude::*;
+
 use super::projvol::{
     IndexRecord, SymSlot, XdirEntry, XdirVolume, INDEX_PAGE_SIZE, INDEX_REC_SIZE,
     INDEX_RECS_PER_PAGE,
@@ -637,113 +639,170 @@ pub fn gen_index_streams(
         .map(|&(slot, key, size, flag)| (slot, (key, size, flag)))
         .collect();
 
-    let mut abuf = DirtyBuf::new();
-    let mut xbuf = DirtyBuf::new();
-    let mut prev_path: Option<&[u8]> = None;
-    let mut xab: Vec<(XabSortKey, IndexRecord)> = Vec::new();
-    let mut xsb: Vec<(XsbSortKey, IndexRecord)> = Vec::new();
-
     // The volume's slot field is u16; a table beyond 65 536 slots is outside the
     // format's own addressing.
     let count = sym.len().min(usize::from(u16::MAX) + 1);
-    for slot in 0..count {
-        let s = &sym[slot];
-        let path: &[u8] = files.get(s.file_id as usize).copied().unwrap_or(&[]);
-        if prev_path == Some(path) {
-            // same file batch: the buffer chains continue
-        } else if prev_path.is_some() {
-            abuf.reset();
-            xbuf.reset();
+    // The slots sit grouped by file (the assembly is per file), and the buffers reset at
+    // the file boundaries — so one segment per file run, run serially inside its pool
+    // worker, reproduces the serial key sequence exactly while the files go in parallel.
+    let mut segments: Vec<(usize, usize)> = Vec::new();
+    let mut at = 0usize;
+    while at < count {
+        let fid = sym[at].file_id;
+        let mut end = at + 1;
+        while end < count && sym[end].file_id == fid {
+            end += 1;
         }
-        prev_path = Some(path);
-
-        // ---- xsb: one record per symbol (written before the xab exclusion) ----
-        let token = xsb_key_token(sym, slot, files);
-        let mut key = xbuf.write(&token);
-        let mut size = 0u32;
-        let mut flag = token.len() <= 4;
-        if options.reference_history {
-            if let Some(&(ekey, esize, eflag)) = xsb_exceptions.get(&(slot as u16)) {
-                key = ekey;
-                size = esize;
-                flag = eflag;
-            }
-        }
-        xsb.push((
-            XsbSortKey {
-                token: fold(&token),
-                slot: slot as u16,
-            },
-            IndexRecord::from_sym(slot as u16, s, key, size | ((flag as u32) << 31)),
-        ));
-
-        // kind 22 shadow / 23 baseref rows produce no xab records at all
-        if s.kind == SHADOW_KIND || s.kind == BASEREF_KIND {
-            continue;
-        }
-
-        // ---- xab: the scope ancestors' words outermost first, then the own name's ----
-        let chain = scope_chain(sym, slot);
-        let mut tokens: Vec<Vec<u8>> = Vec::new();
-        for ancestor in chain.iter().rev() {
-            tokens.extend(camel_split(&sym[*ancestor].name));
-        }
-        tokens.extend(camel_split(&s.name));
-        let kept: Vec<&Vec<u8>> = tokens.iter().filter(|t| t.len() >= 2).collect();
-        let fname = fold(&s.name);
-        for (i, token) in kept.iter().enumerate() {
-            let size = WORD_SIZE_BASE + WORD_SIZE_STEP * i as u32;
-            let flag = token.len() <= 4;
-            let mut key = abuf.write(token);
-            if options.reference_history {
-                if let Some(&ekey) = xab_exceptions.get(&(slot as u16, size, flag)) {
-                    key = ekey;
+        segments.push((at, end));
+        at = end;
+    }
+    type SegmentStreams = (Vec<(XabSortKey, IndexRecord)>, Vec<(XsbSortKey, IndexRecord)>);
+    let per_segment: Vec<SegmentStreams> = segments
+            .par_iter()
+            .map(|&(start, end)| {
+                let mut abuf = DirtyBuf::new();
+                let mut xbuf = DirtyBuf::new();
+                let mut prev_path: Option<&[u8]> = None;
+                let mut xab: Vec<(XabSortKey, IndexRecord)> = Vec::new();
+                let mut xsb: Vec<(XsbSortKey, IndexRecord)> = Vec::new();
+                for slot in start..end {
+                    gen_index_slot(
+                        sym,
+                        files,
+                        options,
+                        &xab_exceptions,
+                        &xsb_exceptions,
+                        &mut abuf,
+                        &mut xbuf,
+                        &mut prev_path,
+                        &mut xab,
+                        &mut xsb,
+                        slot,
+                    );
                 }
-            }
-            xab.push((
-                XabSortKey {
-                    tok: fold(token),
-                    name: fname.clone(),
-                    slot: slot as u16,
-                    raw_last: 0,
-                    wi: i as u16,
-                },
-                IndexRecord::from_sym(slot as u16, s, key, size | ((flag as u32) << 31)),
-            ));
-        }
-        // the raw-name record: members only, after the word records
-        if s.scope >= 0 && !NO_RAW_KINDS.contains(&s.kind) {
-            let flag = s.name.len() <= 4;
-            let mut key = abuf.write(&s.name);
-            if options.reference_history {
-                if let Some(&ekey) = xab_exceptions.get(&(slot as u16, RAW_NAME_SIZE, flag)) {
-                    key = ekey;
-                }
-            }
-            xab.push((
-                XabSortKey {
-                    tok: fold(&s.name),
-                    name: fname,
-                    slot: slot as u16,
-                    raw_last: 1,
-                    wi: RAW_NAME_WI,
-                },
-                IndexRecord::from_sym(
-                    slot as u16,
-                    s,
-                    key,
-                    RAW_NAME_SIZE | ((flag as u32) << 31),
-                ),
-            ));
-        }
+                (xab, xsb)
+            })
+            .collect();
+    let mut xab: Vec<(XabSortKey, IndexRecord)> = Vec::new();
+    let mut xsb: Vec<(XsbSortKey, IndexRecord)> = Vec::new();
+    for (segment_xab, segment_xsb) in per_segment {
+        xab.extend(segment_xab);
+        xsb.extend(segment_xsb);
     }
 
-    xab.sort_by(|a, b| a.0.cmp(&b.0));
-    xsb.sort_by(|a, b| a.0.cmp(&b.0));
+    xab.par_sort_by(|a, b| a.0.cmp(&b.0));
+    xsb.par_sort_by(|a, b| a.0.cmp(&b.0));
     (
         xab.into_iter().map(|(_, r)| r).collect(),
         xsb.into_iter().map(|(_, r)| r).collect(),
     )
+}
+
+/// One slot's records, exactly as the serial stream wrote them — the body
+/// `gen_index_streams` runs per file segment inside its pool worker.
+#[allow(clippy::too_many_arguments)]
+fn gen_index_slot<'a>(
+    sym: &[SymSlot],
+    files: &[&'a [u8]],
+    options: &IndexGenOptions,
+    xab_exceptions: &HashMap<(u16, u32, bool), [u8; 4]>,
+    xsb_exceptions: &HashMap<u16, ([u8; 4], u32, bool)>,
+    abuf: &mut DirtyBuf,
+    xbuf: &mut DirtyBuf,
+    prev_path: &mut Option<&'a [u8]>,
+    xab: &mut Vec<(XabSortKey, IndexRecord)>,
+    xsb: &mut Vec<(XsbSortKey, IndexRecord)>,
+    slot: usize,
+) {
+    let s = &sym[slot];
+    let path: &[u8] = files.get(s.file_id as usize).copied().unwrap_or(&[]);
+    if *prev_path == Some(path) {
+        // same file batch: the buffer chains continue
+    } else if prev_path.is_some() {
+        abuf.reset();
+        xbuf.reset();
+    }
+    *prev_path = Some(path);
+
+    // ---- xsb: one record per symbol (written before the xab exclusion) ----
+    let token = xsb_key_token(sym, slot, files);
+    let mut key = xbuf.write(&token);
+    let mut size = 0u32;
+    let mut flag = token.len() <= 4;
+    if options.reference_history {
+        if let Some(&(ekey, esize, eflag)) = xsb_exceptions.get(&(slot as u16)) {
+            key = ekey;
+            size = esize;
+            flag = eflag;
+        }
+    }
+    xsb.push((
+        XsbSortKey {
+            token: fold(&token),
+            slot: slot as u16,
+        },
+        IndexRecord::from_sym(slot as u16, s, key, size | ((flag as u32) << 31)),
+    ));
+
+    // kind 22 shadow / 23 baseref rows produce no xab records at all
+    if s.kind == SHADOW_KIND || s.kind == BASEREF_KIND {
+        return;
+    }
+
+    // ---- xab: the scope ancestors' words outermost first, then the own name's ----
+    let chain = scope_chain(sym, slot);
+    let mut tokens: Vec<Vec<u8>> = Vec::new();
+    for ancestor in chain.iter().rev() {
+        tokens.extend(camel_split(&sym[*ancestor].name));
+    }
+    tokens.extend(camel_split(&s.name));
+    let kept: Vec<&Vec<u8>> = tokens.iter().filter(|t| t.len() >= 2).collect();
+    let fname = fold(&s.name);
+    for (i, token) in kept.iter().enumerate() {
+        let size = WORD_SIZE_BASE + WORD_SIZE_STEP * i as u32;
+        let flag = token.len() <= 4;
+        let mut key = abuf.write(token);
+        if options.reference_history {
+            if let Some(&ekey) = xab_exceptions.get(&(slot as u16, size, flag)) {
+                key = ekey;
+            }
+        }
+        xab.push((
+            XabSortKey {
+                tok: fold(token),
+                name: fname.clone(),
+                slot: slot as u16,
+                raw_last: 0,
+                wi: i as u16,
+            },
+            IndexRecord::from_sym(slot as u16, s, key, size | ((flag as u32) << 31)),
+        ));
+    }
+    // the raw-name record: members only, after the word records
+    if s.scope >= 0 && !NO_RAW_KINDS.contains(&s.kind) {
+        let flag = s.name.len() <= 4;
+        let mut key = abuf.write(&s.name);
+        if options.reference_history {
+            if let Some(&ekey) = xab_exceptions.get(&(slot as u16, RAW_NAME_SIZE, flag)) {
+                key = ekey;
+            }
+        }
+        xab.push((
+            XabSortKey {
+                tok: fold(&s.name),
+                name: fname,
+                slot: slot as u16,
+                raw_last: 1,
+                wi: RAW_NAME_WI,
+            },
+            IndexRecord::from_sym(
+                slot as u16,
+                s,
+                key,
+                RAW_NAME_SIZE | ((flag as u32) << 31),
+            ),
+        ));
+    }
 }
 
 /* =====================================================================
