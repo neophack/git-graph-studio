@@ -91,6 +91,10 @@ pub struct RelationNode {
     /// Every kept site's 0-based line, ascending, at most [`MAX_EDGE_LINES`] — the
     /// numbered rows the graph card draws for a multi-site edge (ShowGraphDetails).
     pub edge_lines: Vec<usize>,
+    /// In a combined `CallsAndCallers` ring, whether this node came from the caller side
+    /// (`Some(true)`) or the callee side (`Some(false)`) — same-file callers included.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_side: Option<bool>,
     /// Whether expanding this node again yields children — best effort (the peek
     /// helpers below document which side answers precisely and which heuristically).
     pub has_children: bool,
@@ -370,8 +374,10 @@ fn refs_to(
     let narrow = store.files_containing(name);
     let (files, _) = scan_references_bounded(root, name, narrow, SCAN_KEEP, "")?;
     let mut nodes: Vec<RelationNode> = Vec::new();
-    let mut index_of: HashMap<(String, String, usize), usize> = HashMap::new();
+    let mut index_of: HashMap<(String, String, String, usize), usize> = HashMap::new();
     let mut masks: HashMap<String, Option<CodeMask>> = HashMap::new();
+    let mut locals_by_file: HashMap<String, Vec<crate::symbols::parse::ParsedSymbol>> =
+        HashMap::new();
     let mut truncated = false;
     let mut files_seen = 0usize;
     let mut hits_seen = 0usize;
@@ -398,8 +404,27 @@ fn refs_to(
             if site == def.line {
                 continue;
             }
+            // A multi-line typedef (`typedef struct { ... } Foo;`) records `def.line` at
+            // the `typedef` opener and `def.end_line` on the closing `} Foo;` row: the
+            // closing declarator token itself is the declaration, not a reference.
+            if def.kind == "type" && def.name == name && site == def.end_line {
+                continue;
+            }
             if file_mask(root, &mut masks, &file.path)
                 .is_some_and(|mask| mask.is_masked(site, hit.column - 1))
+            {
+                continue;
+            }
+            // A parameter or local variable declared in the enclosing function shadows any
+            // same-named global symbol in the workspace index.
+            if file_locals(root, &mut locals_by_file, &file.path)
+                .iter()
+                .any(|local| {
+                    local.name == name
+                        && local
+                            .scope
+                            .is_some_and(|(from, to)| from <= site && site <= to)
+                })
             {
                 continue;
             }
@@ -413,7 +438,12 @@ fn refs_to(
             if !filter.keeps(def.kind, edge_kind) {
                 continue;
             }
-            let key = (def.name.clone(), def.kind.to_owned(), def.line);
+            let key = (
+                file.path.clone(),
+                def.name.clone(),
+                def.kind.to_owned(),
+                def.line,
+            );
             if let Some(&at) = index_of.get(&key) {
                 // The pair's later sites only thicken the edge they already made.
                 nodes[at].edge_count += 1;
@@ -433,6 +463,7 @@ fn refs_to(
                 edge_kind: edge_kind.to_owned(),
                 edge_count: 1,
                 edge_lines: vec![site],
+                caller_side: None,
                 // The peek turns its own flags off: a flag computed inside a peek would
                 // chase the whole ring depth-first, one scan per level. The filtered
                 // rings' peeks ask the same filtered question.
@@ -448,6 +479,23 @@ fn refs_to(
     Ok(RelationAnswer {
         nodes: finish_ring(nodes),
         truncated,
+    })
+}
+
+/// The file's scope-local declarations (parameters and local variables), parsed once per
+/// file per call so `refs_to` can drop hits shadowed by a local variable or parameter.
+fn file_locals<'a>(
+    root: &str,
+    locals: &'a mut HashMap<String, Vec<crate::symbols::parse::ParsedSymbol>>,
+    path: &str,
+) -> &'a [crate::symbols::parse::ParsedSymbol] {
+    locals.entry(path.to_owned()).or_insert_with(|| {
+        let ext = path.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
+        read_searchable(&Path::new(root).join(path))
+            .map(|(bytes, _)| {
+                crate::symbols::parse::parse_file(&String::from_utf8_lossy(&bytes), ext).locals
+            })
+            .unwrap_or_default()
     })
 }
 
@@ -550,6 +598,12 @@ fn refs_from(
     let text = String::from_utf8_lossy(&bytes);
     let same_file = store.file_symbols(&subject.path).unwrap_or_default();
     let keywords = keywords_for(&subject.path);
+    let ext = subject
+        .path
+        .rsplit_once('.')
+        .map(|(_, ext)| ext)
+        .unwrap_or("");
+    let locals = crate::symbols::parse::parse_file(&text, ext).locals;
     let body_mask = mask(&text);
     let mut seen: HashSet<&str> = HashSet::new();
     let mut node_of: HashMap<&str, usize> = HashMap::new();
@@ -587,10 +641,34 @@ fn refs_from(
                     truncated,
                 });
             }
+            // A parameter or local variable declared in the enclosing function shadows any
+            // same-named global symbol in the workspace index.
+            if locals.iter().any(|local| {
+                local.name == word
+                    && local
+                        .scope
+                        .is_some_and(|(from, to)| from <= line_no && line_no <= to)
+            }) {
+                continue;
+            }
+            let edge_kind = if line_text[end..].trim_start().starts_with('(') {
+                "call"
+            } else {
+                "use"
+            };
             if let Some(&at) = node_of.get(word) {
-                // The word's target is fixed; later sites only thicken its edge.
-                nodes[at].edge_count += 1;
-                nodes[at].edge_lines.push(line_no);
+                // The word's target is fixed; later sites that pass the ring's filter
+                // thicken its edge.
+                if filter.keeps(&nodes[at].kind, edge_kind) {
+                    nodes[at].edge_count += 1;
+                    nodes[at].edge_lines.push(line_no);
+                    if edge_kind == "call" && nodes[at].edge_kind != "call" {
+                        nodes[at].edge_kind = "call".to_owned();
+                    }
+                }
+                continue;
+            }
+            if filter == EdgeFilter::CallsOnly && edge_kind != "call" {
                 continue;
             }
             // The first unmasked occurrence carries the edge; later ones only count.
@@ -605,16 +683,12 @@ fn refs_from(
             }
             let Some(target) = same_file
                 .iter()
-                .find(|def| def.name == word)
+                .filter(|def| def.name == word)
+                .max_by_key(|def| def.end_line > def.line)
                 .map(|row| row_def(&subject.path, row))
                 .or_else(|| pick_def(&store.lookup(word)).map(sym_def))
             else {
                 continue;
-            };
-            let edge_kind = if line_text[end..].trim_start().starts_with('(') {
-                "call"
-            } else {
-                "use"
             };
             // A filtered ring (Calls, Types Used) drops the target before it counts —
             // the ring is the kept edges', never the scan's.
@@ -633,6 +707,7 @@ fn refs_from(
                 edge_kind: edge_kind.to_owned(),
                 edge_count: 1,
                 edge_lines: vec![line_no],
+                caller_side: None,
                 has_children: with_flags
                     && has_refs_from_children(store, &target, opts.bare(), budget),
             });
@@ -724,6 +799,7 @@ fn contains_members(
             edge_kind: "member".to_owned(),
             edge_line: row.line,
             edge_path: path.clone(),
+            caller_side: None,
             has_children: with_flags && drillable.contains(&row.name),
             line: row.line,
             name: row.name,
@@ -753,7 +829,7 @@ fn calls_and_callers(
     let callers = refs_to(root, store, name, bare, budget)?;
     let callees = refs_from(store, name, path, line, bare, budget)?;
     let mut truncated = callers.truncated || callees.truncated;
-    let root_path = path;
+    let caller_count = callers.nodes.len();
     let mut nodes = callers.nodes;
     let mut index_of: HashMap<(String, String, usize), usize> = nodes
         .iter()
@@ -773,10 +849,11 @@ fn calls_and_callers(
         index_of.insert(key, nodes.len());
         nodes.push(callee);
     }
-    for node in &mut nodes {
-        // The caller side's edge site is the node's own file; the callee side's is the
-        // subject's. The branch's drill kind follows the side, and so does the peek.
-        let caller_side = node.edge_path != root_path;
+    for (at, node) in nodes.iter_mut().enumerate() {
+        // The first `caller_count` entries came from the caller ring (same-file callers
+        // included); everything appended after came from the callee ring.
+        let caller_side = at < caller_count;
+        node.caller_side = Some(caller_side);
         node.has_children = if caller_side {
             has_refs_to_children(root, store, &node.name, RingOpts::new(1, false, EdgeFilter::All), budget)
         } else {
@@ -819,6 +896,8 @@ fn refs_by_files(
     let mut nodes: Vec<RelationNode> = Vec::new();
     let mut index_of: HashMap<String, usize> = HashMap::new();
     let mut masks: HashMap<String, Option<CodeMask>> = HashMap::new();
+    let mut locals_by_file: HashMap<String, Vec<crate::symbols::parse::ParsedSymbol>> =
+        HashMap::new();
     let mut truncated = false;
     let mut files_seen = 0usize;
     let mut hits_seen = 0usize;
@@ -849,6 +928,17 @@ fn refs_by_files(
             {
                 continue;
             }
+            if file_locals(root, &mut locals_by_file, &file.path)
+                .iter()
+                .any(|local| {
+                    local.name == name
+                        && local
+                            .scope
+                            .is_some_and(|(from, to)| from <= site && site <= to)
+                })
+            {
+                continue;
+            }
             if let Some(&at) = index_of.get(&file.path) {
                 nodes[at].edge_count += 1;
                 nodes[at].edge_line = nodes[at].edge_line.min(site);
@@ -868,6 +958,7 @@ fn refs_by_files(
                 edge_kind: "use".to_owned(),
                 edge_count: 1,
                 edge_lines: vec![site],
+                caller_side: None,
                 has_children: false,
             });
             if nodes.len() >= limit {
@@ -933,6 +1024,7 @@ fn container_chain(
             edge_kind: "member".to_owned(),
             edge_count: 1,
             edge_lines: vec![subject.line],
+            caller_side: None,
             has_children: def.container.is_some(),
         }],
         truncated: false,
@@ -981,6 +1073,7 @@ fn base_classes(
                     })
                 })?;
             Some(RelationNode {
+                caller_side: None,
                 has_children: !budget.expired() && !store.bases_of(base).is_empty(),
                 kind: def.kind.clone(),
                 name: def.name.clone(),
@@ -1003,7 +1096,8 @@ fn base_classes(
 
 /// The declarations that derive from the subject — the Derived Classes view:
 /// the store's base table scanned the other way, one node per derived declaration with
-/// its own declaration line for the edge, and the ring marker peeking its own bases.
+/// its own declaration line for the edge, and the ring marker peeking its own derived
+/// classes.
 fn derived_classes(
     store: &SymbolStore,
     name: &str,
@@ -1021,7 +1115,8 @@ fn derived_classes(
         .into_iter()
         .take(limit)
         .map(|(child_path, row)| RelationNode {
-            has_children: !store.bases_of(&row.name).is_empty(),
+            caller_side: None,
+            has_children: !store.derived_of(&row.name, 1).is_empty(),
             kind: row.kind.to_owned(),
             name: row.name.clone(),
             container: row.container.clone(),
@@ -1038,12 +1133,32 @@ fn derived_classes(
 }
 
 /// The subject's definition row: the exact `(path, line, name)` hit in that file's
-/// outline first — the coordinates the context-symbol resolution reported — then the
-/// best global declaration of the name. `None` answers an empty direction, never an
-/// error: a subject the index never declared has no body to walk.
+/// outline first — the coordinates the context-symbol resolution reported — then any
+/// covering or nearest declaration of `name` in that same file, and only when the file
+/// itself declares nothing of that name does it fall back to the best global declaration.
+/// `None` answers an empty direction, never an error: a subject the index never declared
+/// has no body to walk.
 fn resolve_def(store: &SymbolStore, name: &str, path: &str, line: usize) -> Option<DefRow> {
     if let Some(rows) = store.file_symbols(path) {
         if let Some(row) = rows.iter().find(|row| row.line == line && row.name == name) {
+            return Some(row_def(path, row));
+        }
+        if let Some(row) = rows
+            .iter()
+            .find(|row| row.name == name && row.line <= line && line <= row.end_line)
+        {
+            return Some(row_def(path, row));
+        }
+        if let Some(row) = rows
+            .iter()
+            .filter(|row| row.name == name)
+            .min_by_key(|row| {
+                (
+                    row.end_line <= row.line,
+                    row.line.abs_diff(line),
+                )
+            })
+        {
             return Some(row_def(path, row));
         }
     }
@@ -1065,13 +1180,13 @@ fn pick_def(defs: &[WorkspaceSymbol]) -> Option<&WorkspaceSymbol> {
 /// keeps that noise out.
 fn keywords_for(path: &str) -> &'static [&'static str] {
     let ext = path.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
-    match ext {
+    match ext.to_ascii_lowercase().as_str() {
         "c" | "h" => C_KEYWORDS,
-        "cpp" | "hpp" => CPP_KEYWORDS,
+        "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "ipp" => CPP_KEYWORDS,
         "rs" => RUST_KEYWORDS,
         "py" => PYTHON_KEYWORDS,
         "go" => GO_KEYWORDS,
-        "js" | "jsx" | "ts" | "tsx" => JS_KEYWORDS,
+        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" => JS_KEYWORDS,
         "java" => JAVA_KEYWORDS,
         "cs" => CSHARP_KEYWORDS,
         _ => &[],
@@ -2284,5 +2399,54 @@ mod tests {
         assert_eq!(by_functions, refs_to);
         assert_eq!(by_functions.nodes.len(), 1);
         assert_eq!(by_functions.nodes[0].name, "wrap");
+    }
+
+    /// A parameter or local variable declared in the first few lines of a function
+    /// shadows any global symbol of the same name in other files during refsFrom, and
+    /// same-line callers in different files stay distinct during refsTo.
+    #[test]
+    fn refs_from_ignores_shadowing_locals_and_refs_to_keeps_same_line_callers_across_files() {
+        let (_dir, store) = seeded(&[
+            (
+                "src/a.c",
+                "int target(void)\n{\n    return 1;\n}\nint step(int count)\n{\n    int res = count + 1;\n    return target() + res;\n}\n",
+            ),
+            (
+                "src/b.c",
+                "int step(int n)\n{\n    return target() + n;\n}\n",
+            ),
+            (
+                "src/globals.c",
+                "int count = 10;\nint res = 20;\nint step(void)\n{\n    return target();\n}\n",
+            ),
+        ]);
+        let root = store.root().to_owned();
+
+        // Inside `src/a.c::step`, `count` is a parameter and `res` is a local variable;
+        // neither may resolve to `src/globals.c`'s global variables of the same name.
+        let callees = children(&store, &root, "step", "src/a.c", 5, RelationKind::RefsFrom);
+        assert_eq!(
+            callees.iter().map(|n| (n.name.as_str(), n.path.as_str())).collect::<Vec<_>>(),
+            vec![("target", "src/a.c")]
+        );
+
+        // Both `src/a.c` and `src/b.c` define a caller `work` on line 0 that calls `target`:
+        // `refs_to` must keep every file's caller separate even when two files define the
+        // caller on the same line number.
+        let (_dir2, store2) = seeded(&[
+            (
+                "src/a.c",
+                "int work(void)\n{\n    return target();\n}\nint target(void)\n{\n    return 0;\n}\n",
+            ),
+            (
+                "src/b.c",
+                "int work(void)\n{\n    return target();\n}\n",
+            ),
+        ]);
+        let callers = children(&store2, store2.root(), "target", "src/a.c", 4, RelationKind::RefsTo);
+        assert_eq!(
+            callers.iter().map(|n| (n.name.as_str(), n.path.as_str(), n.line)).collect::<Vec<_>>(),
+            vec![("work", "src/a.c", 0), ("work", "src/b.c", 0)]
+        );
     }
 }

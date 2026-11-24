@@ -131,6 +131,9 @@ export interface RelationNode {
 	/** Every kept site's 0-based line, ascending, at most 16 — the numbered rows the
 	 *  relation graph draws under a multi-site card (`1. line 113`). */
 	edgeLines: number[];
+	/** Whether the node belongs to the caller side in a combined `callsAndCallers` ring
+	 *  (true for callers, false for callees — same-file callers included). */
+	callerSide?: boolean;
 	/** Whether expanding this node again yields children (best effort). */
 	hasChildren: boolean;
 }
