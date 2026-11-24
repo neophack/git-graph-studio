@@ -1,6 +1,7 @@
 //! ggs-mcp (L1, module 16): the Model Context Protocol server behind `ggs --mcp
-//! <folder>` (plan M4's AI bridge): the persistent symbol index and the Code Analysis
-//! engine served to AI assistants over stdio. One process, one repository,
+//! <folder>` (plan M4's AI bridge): the persistent symbol index — the nine
+//! `project.ggs_*` volumes — and the Code Analysis engine served to AI assistants
+//! over stdio. One process, one repository,
 //! newline-delimited JSON-RPC 2.0 — the transport every MCP client (Claude Desktop,
 //! Cline, Cursor, …) launches servers with. The protocol surface is deliberately the
 //! small complete set: the `initialize` handshake, `ping`, `tools/list`, `tools/call`.
@@ -15,15 +16,19 @@
 //! model must understand a project it cannot load without ever being handed a flood.
 //! `project_overview` draws the whole picture in one bounded answer (totals, the
 //! language and kind mixes, the top directories, the hub files and names, the heaviest
-//! module edges); `directory_tree` walks the folder hierarchy with per-directory
-//! counts, ranked and capped per level; `file_outline` opens one file's declarations
-//! (with the containers the flat listings never showed); `read_file` serves explicit
-//! line windows. The point tools stay: `symbol_lookup`, `symbol_references`
-//! (occurrence-narrowed like the app's own Find References), `search_symbols`,
-//! `search_text`, `index_status` — plus the module-17 analysis tools:
-//! `analysis_call_graph`, `analysis_call_path`, `analysis_module_graph`,
-//! `analysis_metrics`, `analysis_dead_code`, `analysis_security`,
-//! `analysis_import_graph` and `analysis_import_cycles`. Every list-shaped tool speaks
+//! module edges, the dead-code count); `directory_tree` walks the folder hierarchy with
+//! per-directory counts, ranked and capped per level; `file_outline` opens one file's
+//! declarations (with the containers the flat listings never showed); `read_file`
+//! serves explicit line windows. The point tools stay: `symbol_lookup`,
+//! `symbol_references` (occurrence-narrowed like the app's own Find References),
+//! `search_symbols`, `search_text`, `index_status`. The comprehension tools read the
+//! volumes directly, no engine build behind them: `symbol_context` (one symbol
+//! understood in one call — declaration, container, callers, callees, bases, derived,
+//! members, body) and `file_dependencies` (one file's import edges resolved), plus the
+//! module-17 reports that read the volumes the same way: `analysis_dead_code`,
+//! `analysis_security`, `analysis_import_graph` and `analysis_import_cycles`. The
+//! measured graphs stay engine-backed: `analysis_call_graph`, `analysis_call_path`,
+//! `analysis_module_graph` and `analysis_metrics`. Every list-shaped tool speaks
 //! the same paging contract: `limit` + `offset`, the exact total in the header, and a
 //! trailer naming the continuation. stderr carries the one startup line; stdout is
 //! protocol only.
@@ -37,8 +42,8 @@ use serde_json::{json, Value};
 
 use std::collections::BinaryHeap;
 
-use ggs_analysis::deadcode::DeadFilter;
-use ggs_analysis::imports::import_graph;
+
+
 use ggs_analysis::metrics::{rows_for_file, MetricRow};
 use ggs_analysis::modules::{module_edge_summary, ModuleEdge};
 use ggs_analysis::security::{scan_file, Finding, Severity};
@@ -48,6 +53,7 @@ use ggs_fs::walk_files;
 use ggs_index::scan::build_matcher;
 use ggs_index::search::search_files;
 use ggs_index::symbols::index::{scan_references_bounded, SymbolIndex};
+use ggs_index::symbols::relations::{relation_children, RelationKind, RelationNode};
 
 /// The protocol revision we speak; a client asking for another is echoed its own (the
 /// tool surface here is stable across the revisions clients ship today).
@@ -89,6 +95,12 @@ const DIR_MAX_TOP: u64 = 50;
 /// `file_outline`'s default page — one file's declarations, a generated monster's
 /// among them.
 const OUTLINE_LIMIT_DEFAULT: usize = 200;
+/// `symbol_context`'s ring cap per relation and per member list — the one-call
+/// picture stays one answer, never a flood; `more` names the rest.
+const CONTEXT_RING: usize = 12;
+/// `file_dependencies`' resolved-edge cap — the sample names the rest.
+const FILES_DEPS_LIMIT: usize = 40;
+
 /// Past this size the call log is trimmed to its newest [`LOG_KEEP_BYTES`], so a
 /// long-lived bridge cannot grow it without bound.
 const LOG_ROTATE_BYTES: usize = 1_000_000;
@@ -178,6 +190,28 @@ impl McpServer {
             .ok_or((-32603, "the analysis index is still building".to_owned()))
     }
 
+    /// The symbol store behind the project volumes, for the store-backed tools: the
+    /// same resumed index every symbol query serves from.
+    fn with_store<R>(
+        &self,
+        query: impl FnOnce(&ggs_index::symbols::store::SymbolStore) -> R,
+    ) -> Result<R, (i64, String)> {
+        self.index
+            .with_store(&self.root, query)
+            .ok_or((-32603, "the symbol index is still building".to_owned()))
+    }
+
+    /// The volumes' file table as one snapshot — the store-backed reports' input.
+    fn store_files(&self) -> Result<Vec<String>, (i64, String)> {
+        self.with_store(|store| {
+            store
+                .files_with_counts()
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>()
+        })
+    }
+
     /// One received line becomes at most one response line. Notifications (no `id`) and
     /// blank lines answer nothing; a broken line answers the JSON-RPC parse error.
     pub fn handle_line(&self, line: &str) -> Option<String> {
@@ -242,6 +276,8 @@ impl McpServer {
             "read_file" => self.tool_read_file(&args),
             "search_text" => self.tool_search_text(&args),
             "index_status" => Ok(self.tool_status()),
+            "symbol_context" => self.tool_symbol_context(&args),
+            "file_dependencies" => self.tool_file_dependencies(&args),
             "analysis_call_graph" => self.tool_call_graph(&args),
             "analysis_call_path" => self.tool_call_path(&args),
             "analysis_module_graph" => self.tool_module_graph(&args),
@@ -474,9 +510,8 @@ impl McpServer {
                 out.push_str(&format!("{n}  {name} — {count} file(s)", n = '\n'));
             }
         }
-        // The analysis half, one lock: the heaviest module edges and the dead-code
-        // candidate count — both cheap over the built tables, and both degrade to a
-        // note when the analysis has not landed.
+        // The analysis half: the heaviest module edges — cheap over the built tables,
+        // degrading to a note when the analysis has not landed.
         match self.analysis_data() {
             Err(_) => {
                 out.push_str("\nanalysis: still building — the analysis tools answer once it lands")
@@ -504,12 +539,19 @@ impl McpServer {
                         ));
                     }
                 }
-                out.push_str(&format!(
-                    "{n}dead code: {dead} candidate(s) (analysis_dead_code lists them)",
-                    n = '\n',
-                    dead = ggs_analysis::deadcode::dead_count(&data, false)
-                ));
             }
+        }
+        // The dead-code candidates read the project volumes' store — no analysis build
+        // behind the count.
+        match self.with_store(|store| {
+            let catalogue = ggs_analysis::deadcode::dead_catalogue(store);
+            ggs_analysis::deadcode::dead_count(&self.root, &catalogue, false)
+        }) {
+            Ok(dead) => out.push_str(&format!(
+                "{n}dead code: {dead} candidate(s) (analysis_dead_code lists them)",
+                n = '\n'
+            )),
+            Err(_) => out.push_str("\ndead code: the symbol index is still building"),
         }
         out.push_str(
             "\ndrill down: directory_tree(path, depth) → file_outline(path) → read_file(path, startLine)",
@@ -1084,30 +1126,30 @@ impl McpServer {
             .unwrap_or_default()
             .replace('\\', "/");
         let (limit, offset) = Self::page_args(args, LIST_LIMIT_DEFAULT);
-        let data = self.analysis_data()?;
-        // The rule filter walks the files once under the lock; only the page's window
-        // (at most `limit` rows) is built while every candidate is counted — a large
-        // workspace's whole dead list never sits in memory to show a page of it.
+        // The rule reads the project volumes' store — the catalogue and the occurrence
+        // lists snapshot under the store's lock, the masked call confirmation walks the
+        // files lock-free. Only the page's window (at most `limit` rows) is built while
+        // every candidate is counted.
         let (rows, total) = {
-            let data = data.lock().unwrap();
-            let filter = DeadFilter::new(&data, include_exported);
+            let catalogue = self.with_store(ggs_analysis::deadcode::dead_catalogue)?;
             let mut total = 0usize;
-            let mut rows: Vec<_> = Vec::new();
-            for file in data.files() {
-                if !prefix.is_empty() && !file.path.starts_with(&prefix) {
-                    continue;
-                }
-                for sym in &file.symbols {
-                    if !filter.is_dead(sym) {
-                        continue;
+            let mut rows: Vec<ggs_analysis::deadcode::DeadRow> = Vec::new();
+            ggs_analysis::deadcode::dead_rows_streaming(
+                &self.root,
+                &catalogue,
+                include_exported,
+                &|| true,
+                |row| {
+                    if !prefix.is_empty() && !row.path.starts_with(&prefix) {
+                        return;
                     }
                     let index = total;
                     total += 1;
                     if index >= offset && rows.len() < limit {
-                        rows.push(filter.row(&file.path, sym));
+                        rows.push(row);
                     }
-                }
-            }
+                },
+            );
             (rows, total)
         };
         if total == 0 {
@@ -1168,12 +1210,14 @@ impl McpServer {
             .map(|want| format!(" of severity '{}'", severity_name(want)))
             .unwrap_or_default();
         let (limit, offset) = Self::page_args(args, LIST_LIMIT_DEFAULT);
-        let data = self.analysis_data()?;
-        // Two bounded passes over the files (the scan is cheap regex work): the first
-        // counts each severity's findings, the second keeps only the ranked page's
-        // window — errors first, then warnings, then info, file order within, the old
-        // stable sort's exact order — so the whole workspace's findings never sit in
-        // memory to show one page.
+        // The scan's file list: the volumes' table widened by the tree walk — the scan
+        // reads raw text lossily, so a file the store's decoder refused still reports.
+        let files = ggs_analysis::AnalysisData::report_files(&self.root, self.store_files()?);
+        // Two bounded passes over the volumes' file table (the scan is cheap regex and
+        // masked-token work, one read per file): the first counts each severity's
+        // findings, the second keeps only the ranked page's window — errors first, then
+        // warnings, then info, file order within, the old stable sort's exact order — so
+        // the whole workspace's findings never sit in memory to show one page.
         let class_of = |severity: Severity| match severity {
             Severity::Error => 0usize,
             Severity::Warning => 1,
@@ -1181,33 +1225,28 @@ impl McpServer {
         };
         let mut counts = [0usize; 3];
         let mut findings: Vec<Finding> = Vec::new();
-        {
-            let data = data.lock().unwrap();
-            for pass_collects in [false, true] {
-                let mut seen = [0usize; 3];
-                for file in data.files() {
-                    // Secrets are usually ASCII: a non-UTF-8 file decodes lossily and
-                    // stays scannable, instead of silently dropping out of the answer.
-                    let Ok(bytes) =
-                        std::fs::read(std::path::Path::new(&self.root).join(&file.path))
-                    else {
-                        continue;
-                    };
-                    let text = String::from_utf8_lossy(&bytes);
-                    let ext = file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-                    for finding in scan_file(&file.path, ext, &text, &file.calls, data.names()) {
-                        if severity.is_none_or(|want| finding.severity == want) {
-                            let class = class_of(finding.severity);
-                            if !pass_collects {
-                                counts[class] += 1;
-                                continue;
-                            }
-                            let before: usize = counts[..class].iter().sum();
-                            let position = before + seen[class];
-                            seen[class] += 1;
-                            if position >= offset && position < offset + limit {
-                                findings.push(finding);
-                            }
+        for pass_collects in [false, true] {
+            let mut seen = [0usize; 3];
+            for path in &files {
+                // Secrets are usually ASCII: a non-UTF-8 file decodes lossily and
+                // stays scannable, instead of silently dropping out of the answer.
+                let Ok(bytes) = std::fs::read(std::path::Path::new(&self.root).join(path)) else {
+                    continue;
+                };
+                let text = String::from_utf8_lossy(&bytes);
+                let ext = path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+                for finding in scan_file(path, ext, &text) {
+                    if severity.is_none_or(|want| finding.severity == want) {
+                        let class = class_of(finding.severity);
+                        if !pass_collects {
+                            counts[class] += 1;
+                            continue;
+                        }
+                        let before: usize = counts[..class].iter().sum();
+                        let position = before + seen[class];
+                        seen[class] += 1;
+                        if position >= offset && position < offset + limit {
+                            findings.push(finding);
                         }
                     }
                 }
@@ -1247,11 +1286,10 @@ impl McpServer {
             .unwrap_or_default()
             .replace('\\', "/");
         let (limit, offset) = Self::page_args(args, LIST_LIMIT_DEFAULT);
-        let data = self.analysis_data()?;
-        let graph = {
-            let data = data.lock().unwrap();
-            import_graph(&data)
-        };
+        // The graph's file list: the volumes' table widened by the tree walk — the scan
+        // reads raw text lossily, so a file the store's decoder refused still resolves.
+        let files = ggs_analysis::AnalysisData::report_files(&self.root, self.store_files()?);
+        let graph = ggs_analysis::imports::import_graph(&self.root, &files);
         let edges: Vec<&(String, String)> = graph
             .edges
             .iter()
@@ -1288,11 +1326,8 @@ impl McpServer {
 
     fn tool_import_cycles(&self, args: &Value) -> Result<String, (i64, String)> {
         let (limit, offset) = Self::page_args(args, MODULE_EDGES_LIMIT_DEFAULT);
-        let data = self.analysis_data()?;
-        let graph = {
-            let data = data.lock().unwrap();
-            import_graph(&data)
-        };
+        let files = self.store_files()?;
+        let graph = ggs_analysis::imports::import_graph(&self.root, &files);
         if graph.cycles.is_empty() {
             return Ok(format!(
                 "No import cycles among the {edges} dependency edge(s).",
@@ -1315,6 +1350,276 @@ impl McpServer {
         if offset + shown < graph.cycles.len() {
             out.push_str(&Self::more_trailer(graph.cycles.len(), offset, shown));
         }
+        Ok(out)
+    }
+
+    /// `symbol_context`: one call that makes a symbol understood — where it is declared
+    /// and what its declaration spells, what contains it, its bases and its derivations,
+    /// its members, who calls it and what it calls, and (when the body is small) the
+    /// body itself. Every fact rides the project volumes' store and its relation
+    /// engine — the same reads the app's relation graph serves — so an indexed folder
+    /// answers in place, no Code Analysis engine behind it.
+    fn tool_symbol_context(&self, args: &Value) -> Result<String, (i64, String)> {
+        let name = args
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or((-32602, "missing argument: name".to_owned()))?
+            .to_owned();
+        let asked_path = args
+            .get("path")
+            .and_then(Value::as_str)
+            .map(|p| p.replace('\\', "/"));
+        let body_lines: usize = args
+            .get("bodyLines")
+            .and_then(Value::as_u64)
+            .unwrap_or(30)
+            .clamp(0, 200) as usize;
+        self.with_store(|store| {
+            // The subject: every declaration of the name, narrowed by the asked path,
+            // the first one the subject when the caller gave no path (the answer names
+            // the rest — the caller re-asks with `path` for another).
+            let mut defs = store.lookup(&name);
+            if let Some(wanted) = &asked_path {
+                defs.retain(|def| def.path == *wanted);
+            }
+            if defs.is_empty() {
+                return format!("No symbol named '{name}' is declared in the index.");
+            }
+            let subject = defs.swap_remove(0);
+            let mut out = format!(
+                "{kind} {name} — {path}:{line}, lines {start}-{end}",
+                kind = subject.kind,
+                name = subject.name,
+                path = subject.path,
+                line = subject.line + 1,
+                start = subject.line + 1,
+                end = subject.end_line + 1
+            );
+            if let Some(container) = &subject.container {
+                out.push_str(&format!("{n}container: {container}", n = '\n'));
+            }
+            if defs.len() > 1 {
+                out.push_str(&format!(
+                    "{n}also declared in {count} other file(s):{rest}",
+                    n = '\n',
+                    count = defs.len(),
+                    rest = defs
+                        .iter()
+                        .take(5)
+                        .map(|def| format!(
+                            "{n}  {p}:{l}",
+                            n = '\n',
+                            p = def.path,
+                            l = def.line + 1
+                        ))
+                        .collect::<String>()
+                ));
+            }
+            // The relations, each its own ring over the store's engine, capped and
+            // honest about truncation.
+            let ring = |kind: RelationKind| -> (Vec<RelationNode>, bool) {
+                match relation_children(&self.root, store, &name, &subject.path, subject.line, kind)
+                {
+                    Ok(answer) => (answer.nodes, answer.truncated),
+                    Err(_) => (Vec::new(), false),
+                }
+            };
+            let print_ring =
+                |out: &mut String, title: &str, nodes: &[RelationNode], cut: bool| {
+                    if nodes.is_empty() && !cut {
+                        return;
+                    }
+                    out.push_str(&format!(
+                        "{n}{title} ({count}{more}):",
+                        n = '\n',
+                        title = title,
+                        count = nodes.len(),
+                        more = if cut { "+ more" } else { "" }
+                    ));
+                    for node in nodes.iter().take(CONTEXT_RING) {
+                        let site = if node.edge_path == node.path {
+                            format!("line {}", node.edge_line + 1)
+                        } else {
+                            format!("{p}:{l}", p = node.edge_path, l = node.edge_line + 1)
+                        };
+                        out.push_str(&format!(
+                            "{n}  {kind} {container}{name} — {path}:{line}  (from {site}{count})",
+                            n = '\n',
+                            kind = node.kind,
+                            container = node
+                                .container
+                                .as_deref()
+                                .map(|c| format!("{c}."))
+                                .unwrap_or_default(),
+                            name = node.name,
+                            path = node.path,
+                            line = node.line + 1,
+                            site = site,
+                            count = if node.edge_count > 1 {
+                                format!(", {} site(s)", node.edge_count)
+                            } else {
+                                String::new()
+                            }
+                        ));
+                    }
+                };
+            let (callers, callers_cut) = ring(RelationKind::Callers);
+            print_ring(&mut out, "callers", &callers, callers_cut);
+            let (callees, callees_cut) = ring(RelationKind::Calls);
+            print_ring(&mut out, "callees", &callees, callees_cut);
+            // The type facts, when the kind carries them.
+            if matches!(
+                subject.kind.as_str(),
+                "class" | "struct" | "interface" | "enum" | "type"
+            ) {
+                let bases = store.bases_of(&name);
+                if !bases.is_empty() {
+                    out.push_str(&format!("{n}bases: {}", bases.join(", "), n = '\n'));
+                }
+                let derived = store.derived_of(&name, CONTEXT_RING);
+                if !derived.is_empty() {
+                    out.push_str(&format!(
+                        "{n}derived:{list}",
+                        n = '\n',
+                        list = derived
+                            .iter()
+                            .map(|(path, row)| format!(
+                                "{n}  {kind} {name} — {path}:{line}",
+                                n = '\n',
+                                kind = row.kind,
+                                name = row.name,
+                                path = path,
+                                line = row.line + 1
+                            ))
+                            .collect::<String>()
+                    ));
+                }
+                let members = store.members_of(&name, CONTEXT_RING, None);
+                if !members.is_empty() {
+                    out.push_str(&format!(
+                        "{n}members:{list}",
+                        n = '\n',
+                        list = members
+                            .iter()
+                            .map(|(_, row)| format!(
+                                "{n}  {kind} {name} — line {line}",
+                                n = '\n',
+                                kind = row.kind,
+                                name = row.name,
+                                line = row.line + 1
+                            ))
+                            .collect::<String>()
+                    ));
+                }
+            }
+            // The body: the declaration's own lines, capped (the caller asks for more
+            // with read_file; the answer names the window's bounds either way).
+            let span = subject.end_line.saturating_sub(subject.line) + 1;
+            if body_lines > 0 {
+                match std::fs::read_to_string(std::path::Path::new(&self.root).join(&subject.path))
+                {
+                    Ok(text) => {
+                        let lines: Vec<&str> = text.lines().collect();
+                        let shown = span.min(body_lines);
+                        out.push_str(&format!(
+                            "{n}body ({span} line(s), showing {shown}):",
+                            n = '\n'
+                        ));
+                        for line in lines
+                            .iter()
+                            .take(subject.end_line + 1)
+                            .skip(subject.line)
+                            .take(shown)
+                        {
+                            out.push_str(&format!("{n}    {line}", n = '\n'));
+                        }
+                        if shown < span {
+                            out.push_str(&format!(
+                                "{n}    … read_file(\"{path}\", {start}, {end}) for the rest",
+                                n = '\n',
+                                path = subject.path,
+                                start = subject.line + shown + 1,
+                                end = subject.end_line + 1
+                            ));
+                        }
+                    }
+                    Err(_) => out.push_str(&format!(
+                        "{n}body: the file no longer reads ({span} line(s) in the index)",
+                        n = '\n'
+                    )),
+                }
+            } else {
+                out.push_str(&format!(
+                    "{n}body: {span} line(s) — read_file(\"{path}\", {start}, {end})",
+                    n = '\n',
+                    span = span,
+                    path = subject.path,
+                    start = subject.line + 1,
+                    end = subject.end_line + 1
+                ));
+            }
+            out
+        })
+    }
+
+    /// `file_dependencies`: one file's import edges, resolved to the workspace files
+    /// they name — the import graph's read narrowed to the file the caller is looking
+    /// at. The spellings come from the masked line scanner over the volumes' file
+    /// table; an import that names nothing in the workspace is counted, not listed
+    /// beyond a sample (packages from outside).
+    fn tool_file_dependencies(&self, args: &Value) -> Result<String, (i64, String)> {
+        let path = args
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or((-32602, "missing argument: path".to_owned()))?
+            .replace('\\', "/");
+        let absolute = std::path::Path::new(&self.root).join(&path);
+        let bytes = std::fs::read(&absolute).map_err(|e| (-32602, format!("{path}: {e}")))?;
+        let text = String::from_utf8_lossy(&bytes);
+        let ext = path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+        let files = self.store_files()?;
+        let table: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
+        let mut resolved: Vec<(String, String)> = Vec::new();
+        let mut unresolved: Vec<String> = Vec::new();
+        for import in ggs_index::symbols::sites::import_spellings(ext, &text) {
+            match ggs_analysis::imports::resolve_import(&path, ext, &import, &table) {
+                Some(target) if target != path => resolved.push((import, target)),
+                _ => unresolved.push(import),
+            }
+        }
+        resolved.dedup();
+        let mut out = if resolved.is_empty() {
+            format!("{path} imports nothing this workspace names.")
+        } else {
+            format!("{path} imports {count} workspace file(s):", count = resolved.len())
+        };
+        for (import, target) in resolved.iter().take(FILES_DEPS_LIMIT) {
+            out.push_str(&format!("{n}  {target}  (from \"{import}\")", n = '\n'));
+        }
+        if resolved.len() > FILES_DEPS_LIMIT {
+            out.push_str(&format!(
+                "{n}  … {} more",
+                resolved.len() - FILES_DEPS_LIMIT,
+                n = '\n'
+            ));
+        }
+        if !unresolved.is_empty() {
+            out.push_str(&format!(
+                "{n}not workspace files ({count}): {sample}",
+                n = '\n',
+                count = unresolved.len(),
+                sample = unresolved
+                    .iter()
+                    .take(6)
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        out.push_str(&format!(
+            "{n}reverse edges (which files import this one): analysis_import_graph lists every edge.",
+            n = '\n'
+        ));
         Ok(out)
     }
 }
@@ -1627,6 +1932,22 @@ fn tool_catalogue() -> Value {
                 "limit": { "type": "number", "description": "Cycles per page (1-100, default 25)" },
                 "offset": { "type": "number", "description": "Skip this many cycles (paging)" }
             } }
+        },
+        {
+            "name": "symbol_context",
+            "description": "One symbol, understood in one call: the declaration's location and spelling, its container, its callers and callees (the relation engine's own rings), and — for class-like kinds — bases, derived classes and members, plus the body's first lines. The one tool to run before reading a symbol's file.",
+            "inputSchema": { "type": "object", "properties": {
+                "name": { "type": "string", "description": "The exact symbol name" },
+                "path": { "type": "string", "description": "Repo-relative file path, when several declarations share the name" },
+                "bodyLines": { "type": "number", "description": "Body lines to show (0-200, default 30)" }
+            }, "required": ["name"] }
+        },
+        {
+            "name": "file_dependencies",
+            "description": "One file's import edges, resolved to the workspace files they name — what this file depends on, with the unresolved (package) imports counted beside. The narrow read before analysis_import_graph's whole graph.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Repo-relative file path" }
+            }, "required": ["path"] }
         }
     ])
 }
@@ -1960,7 +2281,9 @@ mod tests {
                 "analysis_dead_code",
                 "analysis_security",
                 "analysis_import_graph",
-                "analysis_import_cycles"
+                "analysis_import_cycles",
+                "symbol_context",
+                "file_dependencies"
             ]
         );
     }
@@ -2308,6 +2631,78 @@ mod tests {
 
         let cycles = call(&server, "analysis_import_cycles", json!({}));
         assert!(cycles.contains("No import cycles"), "{cycles}");
+    }
+
+    #[test]
+    fn symbol_context_makes_one_symbol_understood_over_the_store() {
+        // The one-call picture needs a corpus whose call sites do NOT stand on their
+        // caller's own declaration line — the store's relation engine (like the app's
+        // relation window) reads a declaration line's hit as the declaration, not a
+        // use — so the fixture is multi-line on purpose, its own server, its own
+        // index (the tool never needs the analysis engine).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src").join("lib.rs"),
+            "fn worker() -> u32 {\n    helper(1)\n}\n\nfn helper(n: u32) -> u32 {\n    n + 1\n}\n",
+        )
+        .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let index = Arc::new(SymbolIndex::with_home(home.path().to_owned()));
+        let root = dir.path().display().to_string();
+        index.build_blocking(None, &root, None).unwrap();
+        let analysis = Arc::new(AnalysisIndex::new());
+        let log = tempfile::tempdir().unwrap();
+        let server = McpServer::with_parts(&root, index, analysis, log.path().join("mcp.log"));
+
+        let context = call(&server, "symbol_context", json!({ "name": "worker" }));
+        // The declaration: kind, location, span, and the body's own lines.
+        assert!(
+            context.contains("function worker — src/lib.rs:1, lines 1-3"),
+            "{context}"
+        );
+        assert!(context.contains("fn worker() -> u32 {"), "{context}");
+        assert!(context.contains("helper(1)"), "{context}");
+        // The relation rings over the store's engine: worker calls helper, and helper's
+        // callers name worker back; the absent ring prints nothing.
+        assert!(context.contains("callees (1):"), "{context}");
+        assert!(context.contains("function helper — src/lib.rs:5"), "{context}");
+        let helper = call(&server, "symbol_context", json!({ "name": "helper" }));
+        assert!(helper.contains("callers (1):"), "{helper}");
+        assert!(helper.contains("function worker — src/lib.rs:1"), "{helper}");
+        assert!(!helper.contains("callees ("), "{helper}");
+    }
+
+    #[test]
+    fn file_dependencies_resolves_one_files_imports_without_the_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("pkg")).unwrap();
+        std::fs::write(
+            dir.path().join("pkg").join("a.py"),
+            "import os\nfrom .helpers import tool\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("pkg").join("helpers.py"), "def tool(): pass\n").unwrap();
+        std::fs::write(dir.path().join("pkg").join("__init__.py"), "").unwrap();
+        // The index only: the tool's answer never needs the analysis engine.
+        let home = tempfile::tempdir().unwrap();
+        let index = Arc::new(SymbolIndex::with_home(home.path().to_owned()));
+        let root = dir.path().display().to_string();
+        index.build_blocking(None, &root, None).unwrap();
+        let analysis = Arc::new(AnalysisIndex::new());
+        let log = tempfile::tempdir().unwrap();
+        let server = McpServer::with_parts(&root, index, analysis, log.path().join("mcp.log"));
+
+        let deps = call(&server, "file_dependencies", json!({ "path": "pkg/a.py" }));
+        assert!(deps.contains("pkg/helpers.py"), "{deps}");
+        assert!(deps.contains("from \".helpers\""), "{deps}");
+        assert!(deps.contains("not workspace files (1): os"), "{deps}");
+        let none = call(
+            &server,
+            "file_dependencies",
+            json!({ "path": "pkg/helpers.py" }),
+        );
+        assert!(none.contains("imports nothing this workspace names."), "{none}");
     }
 
     /// Token economy: a read without a line range takes a look (400 lines), not the
