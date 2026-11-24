@@ -352,17 +352,16 @@ over the persistent workspace symbol index: interned names,
 per-file fingerprints and per-name occurrence lists in the analyzed folder's own hidden
 analysis database (2026-11-21, the owner's direction: add a hidden code-analysis folder
 inside the project — the program may delete it, it never enters the git index, and the same
-files regenerate — the project-local symbol database beside the code it describes): `symbols.bin` (the native store) plus `ggs.db` / `ggs.tix` (the six-table
-analysis database — modules, symbols, call edges, syllable fragments, type definitions,
-code positions — in a fixed flat-file layout external tooling that understands it loads
-back) under `<root>/.ggs/analysis/<hash>/`, hidden in Explorer (the `.git` attribute
+files regenerate — the project-local symbol database beside the code it describes): the
+nine `project.ggs_*` volumes (2026-11-23: the store's own payload, the symbol table, the
+three signature volumes, the parse-order map and the paged name indexes — the earlier
+`symbols.bin` / `ggs.db` / `ggs.tix` triad is removed, and a save deletes any legacy files
+an older version left behind) under `<root>/.ggs/analysis/<hash>/`, hidden in Explorer (the `.git` attribute
 treatment), excluded from the git index through `.git/info/exclude` (ascend to the
 repository, worktree `commondir` honoured) and from every walk (`SKIPPED_DIRS`) and the
 Explorer tree (`EXCLUDED`); a read-only folder falls back to `~/.ggs/index/<hash>/`, whose
 older copies still resume. The Rebuild command is the delete-and-regenerate surface: it
-wipes the store first, and the fresh build writes the same bytes whole. Reference-table
-collection rides the full build (parse call sites + mask-filtered positioned hits);
-incremental watcher updates keep the saved `ggs.db` standing until the next full build.
+wipes the store first, and the fresh build writes the same bytes whole.
 file-by-file by the watcher. **Nothing is indexed on open** (2026-10-22, the owner's
 direction: opening a big project drives memory use extremely high — do not analyze the
 project on open; start analyzing only when a feature needs it, and release the memory once
@@ -461,7 +460,7 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   navigation experience):
   the section head's picker lists the thirteen view names the relation window offers —
   Calls, Callers, Calls and Callers, Referenced by Functions/Files/Modules, Contains,
-  Container, Base/Derived Classes, Member Types/Classes, Types Used (SI_KINDS, the
+  Container, Base/Derived Classes, Member Types/Classes, Types Used (PICKER_KINDS, the
   active one checked) — and every ring drills by the graph's own type, the combined
   view's branches reading the node's edge coordinates for its side (a callee's edge
   site sits in the root's own file → Calls; anywhere else → Callers); the arrows point
@@ -575,13 +574,9 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   the table, never the texts; since 2026-11-21 the store lives in the analyzed folder's
   hidden `.ggs/analysis/<hash>/` — hidden attribute, `.git/info/exclude` line, home
   fallback for a read-only folder, the Rebuild command wiping it before the clean
-  regenerate), `symbols::anadb` (the analysis database, 2026-11-21: the six
-  tables — modules, symbols, call edges, syllable fragments, type definitions, code
-  positions — serialized in the fixed flat-file layout
-  (`ggs.db` + `ggs.tix` beside the store; external tooling that understands the layout
-  loads ggs's files back); collected on a full build from the parse's
-  call sites and the mask-filtered positioned hits — first-declaration-wins
-  names, exact-pair edge dedup, member access and self-references never recorded),
+  regenerate; 2026-11-23 the store's payload rides the nine `project.ggs_*` volumes
+  (the symbol table's spare slot area carries it, and a save removes any legacy
+  `symbols.bin` / `ggs.db` / `ggs.tix` an older version left)),
   `symbols::projvol` + `symbols::projvol_sig` + `symbols::projvol_indexgen` +
   `symbols::symgen` (the project-volume emitters,
   2026-11-21: the reference layout's fixed-record containers under `.ggs_*` names —
@@ -597,7 +592,23 @@ memory once idle — module 17's Code Analysis index follows the same lifetime.
   round-trip tests read the reference snapshot through `GGS_REF_SNAP_DIR` and skip when it
   is absent — research parity work, nothing in the app reads it yet),
   `symbols::index` (the per-root databases, the build / resume /
-  rebuild, the reference scan; `wipe_disk` is the delete-and-regenerate surface), `symbols::mask` (the code mask — the comment/string/char-
+  rebuild, the reference scan; `wipe_disk` is the delete-and-regenerate surface; the watcher
+  batch's persist (2026-11-24, the owner's direction: the save must never stall the queries)
+  releases the store's lock while the nine volumes write — the batch applies under the lock,
+  snapshots the write's inputs in milliseconds and drains the volume write lock-free, a
+  burst of batches folding into the in-flight drainer through a per-root save gate whose
+  passes sit at least 1.5 s apart, and the write keeps every file's split rows from its
+  single read under a 128 MiB budget, falling back to the cache-warm re-read past it; the
+  same-day dirty-aware save (still the owner's lag direction) stops the write from touching
+  the whole tree: the batch's re-extracted paths ride the snapshot as the dirty set, the
+  previous write's volumes come back as the cache for every other file — the state marker
+  `project.ggs_state` pins their identity (length + FNV-1a) and the slot mode the sym
+  records were built under, and a per-fid comparison against the previous trailer's file
+  table vetoes a stale slot — so one edited file re-derives exactly its own facts and the
+  merged bytes equal a full derivation's (the tests assert it); the batch's drift walk
+  stats the tree with the store's lock released, a refilled row keeps its id in place so a
+  pure content edit skips the whole-table renumber and the name re-sort, and the write's
+  rayon pool takes half the cores like the build's background budget), `symbols::mask` (the code mask — the comment/string/char-
   literal byte spans of one text plus its line-start table, the scanner discipline:
   loop-based, escape-aware, unclosed literals degrade to end-of-text; every relation scan
   filters its hits through it so a name inside a comment or a string is never a reference),
@@ -1748,10 +1759,20 @@ the flat listings never showed (it replaced the flat `symbol_tree`, whose 4000-l
 dump was the flood the redesign removed). The point tools stay — `symbol_lookup`,
 `symbol_references` (the occurrence-narrowed scan), `search_symbols`, `read_file` (a
 line-windowed file reader, path-confined to the repository), `search_text` (the
-workspace text search), `index_status` — plus module 17's analysis tools
-(`analysis_module_graph`, `analysis_call_graph`, `analysis_call_path`,
-`analysis_metrics`, `analysis_dead_code`, `analysis_security`, `analysis_import_graph`,
-`analysis_import_cycles`). Every list-shaped tool speaks one paging contract: `limit` +
+workspace text search), `index_status` — plus module 17's reports and the
+comprehension tools (2026-11-24, the owner's direction: the MCP must make the code
+easy for an AI to understand, on the nine volumes' own results): `symbol_context`
+(one symbol understood in one call — the declaration's location, span and spelling,
+its container, its callers and callees over the store's own relation engine, and for
+class-like kinds the bases, derived classes, members and the body's first lines —
+`bodyLines` caps the window, `path` disambiguates same-named declarations) and
+`file_dependencies` (one file's import edges resolved to the workspace files they
+name, the package imports counted beside); `analysis_dead_code`, `analysis_security`,
+`analysis_import_graph` and `analysis_import_cycles` read the volumes directly too —
+no engine build behind any of them — while `analysis_module_graph`,
+`analysis_call_graph`, `analysis_call_path` and `analysis_metrics` stay engine-backed
+(their cross-file resolution and measured complexity are tree-sitter's). Every
+list-shaped tool speaks one paging contract: `limit` +
 `offset`, the exact total in the header, a trailer naming the continuation; the filters
 (`path`, `kind`, `severity`, `pathPrefix`) narrow before totals are computed — and no
 tool answers a flood (2026-11-14, the owner's direction: MCP returns the top 100, never
@@ -1763,7 +1784,8 @@ scan), `search_text` collects the window from the streaming scan, `analysis_metr
 selects the ranked top-`limit` through a min-heap while the files stream (one file's
 rows plus the big-code-analysis columns in memory at a time), `analysis_dead_code` and
 `analysis_security` walk their filters once or twice counting everything and building
-only the page's window, and `analysis_module_graph` folds the bounded
+only the page's window, `symbol_context` caps each relation ring at 12 rows, and
+`analysis_module_graph` folds the bounded
 `module_edge_summary` (module edges and exact totals, no pair ranking). Every call
 is logged as one JSON line to `~/.ggs/logs/mcp.log` (rotated past 1 MB), which the
 in-app MCP Server page shows. stderr is logs; stdout is protocol only.
@@ -1835,13 +1857,19 @@ file's neighbourhood, and the tree matches call-site symbols too; the tree colla
 the same data into
 module dependencies → file pairs → call sites, children rendering only while expanded),
 Complexity & Hotspots, Dead Code, Security Scan (rule-based, no taint tracking) and the
-Import Graph (with cycles) — each opening a streamed result page in the editor area. The
-two per-file reports (metrics, security) stream WHILE a cold index builds — the build's
-per-batch hook (`ensure_with_batches`) hands every parsed batch's rows to the command, so
-the click's first answer lands one parse batch in, and every page names the build's live
-`done/total` (boot routes the `studio://analysis-index` pushes to the open pages) instead
-of a bare spinner; the cross-file reports (dead code, module, imports) wait the build out
-honestly — their answers need the whole workspace. The
+Import Graph (with cycles) — each opening a streamed result page in the editor area. Since 2026-11-24 the reports
+split by what their facts need: Dead Code, Security Scan and the Import Graph read the
+project volumes' store directly (module 5's `ggs-index` `symbols::sites` masked token
+scanner + the store's own catalogue and occurrence lists) and never build the engine —
+they answer on any indexed folder instantly, restart included, and each answers under a
+store-lock snapshot so the file reads never stall a symbol query; Complexity & Hotspots
+streams WHILE a cold engine build parses (the build's per-batch hook,
+`ensure_with_batches`, hands every parsed batch's rows to the command, the click's first
+answer landing one parse batch in) — the measured shape (complexity, params, nesting)
+is tree-sitter's, the volumes do not carry it; Module Analysis still waits the engine
+build out honestly — its cross-file resolution needs the parsed call sites. Every page
+names the engine build's live `done/total` (boot routes the `studio://analysis-index`
+pushes to the open pages) while one runs. The
 engine resolves calls by name with receiver hints (no type inference); its honest limits
 are stated on the pages themselves. The per-symbol call graph walk and the shortest call
 chain remain engine services served to the MCP server (module 16), not a page. The
@@ -1875,12 +1903,25 @@ viewport (pan, zoom, states) around it.
   released once idle, `release_idle`, through module 5's `index_lease.rs`) and the
   streaming report runners (each batch builds, enriches, sends and drops — a large
   tree's whole row set never sits in memory; `ensure_with_batches` rides the same
-  batches into a cold build, the per-file reports streaming while it parses;
+  batches into a cold build, the metrics report streaming while it parses;
   the hotspot column asks the symbol
   index per name — `ref_count`, one binary search into the trusted occurrence
   list — where `occurrence_counts` would hold every name and count of the
   workspace in a map for the report's whole run),
-  `metrics.rs`, `deadcode.rs`, `security.rs`, `modules.rs` the
+  `deadcode.rs` the store-backed dead-code rule (2026-11-24, the owner's direction:
+  the reports read the nine volumes instead of rebuilding a parallel analysis —
+  `dead_catalogue` snapshots the store's outlines and the candidate names'
+  occurrence lists under the store's lock in milliseconds, the confirmation pass
+  then reads the declaring files lock-free through `ggs-index`'s
+  `symbols::sites` masked token scanner: a name is a candidate when its every
+  mention sits in a file that also declares it, and dead when no unmasked `name(`
+  stands outside that name's own declaration lines; conservative where the engine's
+  tree-sitter call bitset was — a word use in another file keeps its declaration out),
+  `security.rs` the rule scan over raw text + the same masked call sites (the
+  `scan_file` signature is the file's text alone — no parse tree behind it),
+  `imports.rs` the import graph over the volumes' file table (`sites::import_spellings`
+  per language, the same per-language resolution and Tarjan SCC as before),
+  `metrics.rs`, `modules.rs` the
   Module Analysis aggregation (a bounded two-pass streaming fold: pass one counts file
   pairs and lifts them to module edges, past the `PAIR_TRACK_CAP` spillover the counts
   go to the exact totals only, pass two fills the capped site lists of the pairs the

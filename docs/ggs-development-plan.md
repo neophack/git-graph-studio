@@ -126,6 +126,55 @@ delete and regenerate is its surface. The reference implementation's own
 project-management containers are explicitly out of scope: nothing this app writes
 carries their names.
 
+2026-11-23: the store's disk shape becomes the nine `project.ggs_*` volumes themselves —
+`project.ggs_sym` (the 180-byte symbol records) now carries the store's own payload
+(interned names, per-file fingerprints, occurrence lists, the base table) packed into the
+volume's spare slot area past the live record count, so the analysis folder's files are
+exactly what the reference layout's emitters write, and the round-trip readers that verify
+the volumes read the store's own output back. The earlier `symbols.bin` / `ggs.db` /
+`ggs.tix` triad is gone: a save deletes any legacy files an older version left behind, a
+load verifies every sibling volume's header before trusting the set, and a Rebuild
+regenerates the same bytes whole. Languages outside symgen's scanners (Rust, Go,
+TypeScript, Java, C#) populate `.ggs_sym` from the store's own parsed symbols through the
+same record shape.
+
+2026-11-24: the watcher batch's save stops touching the whole tree and the whole CPU. A
+batch re-extracts only its own files and marks them dirty; the save loads the previous
+write's volumes back as the cache — the `project.ggs_state` marker pins each reusable
+volume's identity (length + FNV-1a) and the slot mode the sym records were built under,
+and a per-fid comparison against the previous trailer's file table vetoes a stale slot —
+so one edited file re-derives exactly its own facts, the merged slots equal a full
+derivation's bytes (the tests assert the equality in both slot modes, across a table
+shift and across a broken marker), and the drainer writes through a half-core rayon pool
+with its passes at least 1.5 s apart. The batch's drift walk stats the tree with the
+store's lock released, and a refilled row keeps its id in place, so a pure content edit
+skips the whole-table renumber and the name re-sort entirely.
+
+2026-11-24 (same day): the Code Analysis reports and the MCP bridge start reading the
+nine volumes' own results instead of rebuilding a parallel analysis (the owner's
+direction: the features that can ride the store should; the MCP must make the code easy
+for an AI to understand). ggs-index grows `symbols::sites`, the masked token scanner —
+call sites (`name(` with its receiver, declaration keywords suppressed), per-language
+import spellings, the line-text visibility reading — the relation scans' discipline, one
+read per file. Three reports move onto it and the store: Dead Code (the catalogue and
+the candidate names' occurrence lists snapshot under the store's lock in milliseconds,
+the declaring files' masked call confirmation walks lock-free; a name is a candidate
+when its every mention sits in a file that also declares it, and dead when no unmasked
+call spelling stands outside its own declaration spellings — (line, column) precise, so
+a one-liner's recursion still shields), Security (the pattern rules unchanged, the call
+rules over the scanner's sites — `scan_file` takes the text alone), and the Import Graph
+(the volumes' file table widened by the walk so a file the store's decoder refused — a
+GBK file — still reports, `sites::import_spellings` per language, the resolution and
+Tarjan SCC unchanged); none of the three builds the Code Analysis engine any more, and
+their command answers survive a restart on any indexed folder. Complexity & Hotspots and
+Module Analysis stay engine-backed — the measured shape and the resolved cross-file
+calls are tree-sitter's, and the volumes do not carry them. The MCP grows
+`symbol_context` (one symbol understood in one call: declaration, container, callers and
+callees over the store's own relation engine, bases/derived/members for class-like
+kinds, the body's first lines) and `file_dependencies` (one file's import edges
+resolved), and its dead-code / security / import tools read the volumes the same way —
+no engine build behind any of them.
+
 **Xcode-level polish (M7)**: the motion tokens (`--motion-fast/normal`, the easings, `prefers-reduced-motion` collapsing every transition) and the density setting (Compact / Comfortable — the row / tab / status / activity / panel-tab heights travel as CSS variables); the theme picker grows **Auto (System)** with a live `prefers-color-scheme` follow; delayed hover tooltips (activity bar, status items), the saved-tab flash, the busy cursor during a rebuild, F6 cycling focus through activity bar → side bar → editor → panel, and the tablists label their selected tab (`aria-selected`). A build-script fix came out of the round: the Windows test exes now carry the Common-Controls v6 side-by-side dependency as an external manifest (the lib test exe died at load with STATUS_ENTRYPOINT_NOT_FOUND without it).
 
 **2026-09-14, full-UI sweep round** (294 vitest):
