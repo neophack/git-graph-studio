@@ -710,7 +710,8 @@ export class RelationGraphView {
 	}
 
 	private paintControls(): void {
-		const current = PICKER_KINDS.find((entry) => entry.kind === this.kind) ?? PICKER_KINDS[0];
+		const displayKind = this.kind === 'refsTo' ? 'referencedByFunctions' : this.kind;
+		const current = PICKER_KINDS.find((entry) => entry.kind === displayKind) ?? PICKER_KINDS[0];
 		this.kindButton.textContent = '';
 		this.kindButton.append(el('span', 'rg-kind-label', [t(current.label)]), icon('chevron-down'));
 		this.kindButton.title = t('relations.kind.pick');
@@ -1625,6 +1626,8 @@ export class RelationGraphView {
 			this.moveHandle = null;
 		}
 		this.moves.clear();
+		this.settle?.();
+		this.settle = null;
 	}
 
 	/** A card's spot as the drawing holds it right now — the glide's interpolated one,

@@ -72,6 +72,7 @@ const OPTIONS_KEY = 'references.options';
 /** One accumulated lookup: its subject and the answer, rendered as its own section of
  *  the page. */
 interface ResultSection {
+	id: number;
 	subject: ReferencesSubject;
 	files: SymbolRefFile[];
 	filesCapped: boolean;
@@ -187,6 +188,7 @@ export class ReferencesView {
 	private generation = 0;
 	/** The accumulated lookups, oldest first — one section per lookup. */
 	private sections: ResultSection[] = [];
+	private nextSectionId = 1;
 	private readonly openGroups = new Set<string>();
 	private readonly openSites = new Set<string>();
 	/** The display options, persisted. */
@@ -293,6 +295,7 @@ export class ReferencesView {
 			const filesCapped = files.length > FILE_CAP;
 			const kept = filesCapped ? files.slice(0, FILE_CAP) : files;
 			const section: ResultSection = {
+				id: this.nextSectionId++,
 				subject,
 				files: kept,
 				filesCapped,
@@ -300,11 +303,15 @@ export class ReferencesView {
 				defLines
 			};
 			this.sections.push(section);
-			while (this.sections.length > SECTION_CAP) this.sections.shift();
+			while (this.sections.length > SECTION_CAP) {
+				const evicted = this.sections.shift()!;
+				const prefix = `${evicted.id}:`;
+				for (const key of this.openGroups) if (key.startsWith(prefix)) this.openGroups.delete(key);
+				for (const key of this.openSites) if (key.startsWith(prefix)) this.openSites.delete(key);
+			}
 			// The newest section's first group answers open, so the page opens showing
 			// sites, not a wall of headers.
-			const at = this.sections.indexOf(section);
-			if (section.files[0]) this.openGroups.add(groupKey(at, section.files[0].path));
+			if (section.files[0]) this.openGroups.add(groupKey(section.id, section.files[0].path));
 		} catch {
 			if (generation !== this.generation) return;
 			this.failed = true;
@@ -414,15 +421,15 @@ export class ReferencesView {
 			wrap.appendChild(el('div', 'refs-hint', [t('references.none')]));
 			return wrap;
 		}
-		for (const file of section.files) wrap.appendChild(this.buildGroup(section, index, file));
+		for (const file of section.files) wrap.appendChild(this.buildGroup(section, file));
 		if (section.filesCapped) wrap.appendChild(el('div', 'refs-cut', [t('references.filesCut')]));
 		return wrap;
 	}
 
 	/** One file group: the collapsible header with its count, the site rows, and the
 	 *  folded context under an expanded site. */
-	private buildGroup(section: ResultSection, index: number, file: SymbolRefFile): HTMLElement {
-		const key = groupKey(index, file.path);
+	private buildGroup(section: ResultSection, file: SymbolRefFile): HTMLElement {
+		const key = groupKey(section.id, file.path);
 		const open = this.openGroups.has(key);
 		const header = el('div', 'refs-file');
 		header.setAttribute('role', 'button');
@@ -447,10 +454,10 @@ export class ReferencesView {
 		const group = el('div', 'refs-group', [header]);
 		if (open) {
 			if (file.matches.length > SITE_CAP) {
-				this.paintGroup(section, index, group, file, file.matches.slice(0, SITE_CAP));
+				this.paintGroup(section, group, file, file.matches.slice(0, SITE_CAP));
 				group.appendChild(el('div', 'refs-cut', [t('references.sitesCut')]));
 			} else {
-				this.paintGroup(section, index, group, file, file.matches);
+				this.paintGroup(section, group, file, file.matches);
 			}
 		}
 		return group;
@@ -459,30 +466,30 @@ export class ReferencesView {
 	/** The group's site rows: the def marker, the context arrow, the row's own segments
 	 *  (the container prefix, the file name, the 1-based line number, the line's code
 	 *  colored), each present per its switch. */
-	private paintGroup(section: ResultSection, index: number, group: HTMLElement, file: SymbolRefFile, matches: SymbolRefFile['matches']): void {
+	private paintGroup(section: ResultSection, group: HTMLElement, file: SymbolRefFile, matches: SymbolRefFile['matches']): void {
 		const pending = el('div', 'refs-hint', [icon('sync', 'codicon-modifier-spin')]);
 		group.appendChild(pending);
 		void this.loadFile(file.path).then((data) => {
-			if (!this.openGroups.has(groupKey(index, file.path)) || !pending.isConnected) return;
+			if (!this.openGroups.has(groupKey(section.id, file.path)) || !pending.isConnected) return;
 			pending.remove();
 			const defs = section.defLines.get(file.path);
 			for (const match of matches) {
-				if (!this.openGroups.has(groupKey(index, file.path))) return;
-				group.appendChild(this.buildSite(index, file, match, data, defs?.get(match.line - 1)));
+				if (!this.openGroups.has(groupKey(section.id, file.path))) return;
+				group.appendChild(this.buildSite(section, file, match, data, defs?.get(match.line - 1)));
 			}
 			// An expanded site of a re-rendered group repaints its folded context from the cache.
 			for (const match of matches) {
-				if (this.openSites.has(siteKey(index, file.path, match.line))) {
-					const key = siteKey(index, file.path, match.line);
+				if (this.openSites.has(siteKey(section.id, file.path, match.line))) {
+					const key = siteKey(section.id, file.path, match.line);
 					group.querySelector(`.refs-site[data-key="${cssEscape(key)}"] .refs-ctx-toggle`)?.classList.add('open');
-					void this.expandSite(index, group, file, match.line, false);
+					void this.expandSite(section, group, file, match.line, false);
 				}
 			}
 		});
 	}
 
-	private buildSite(index: number, file: SymbolRefFile, match: { line: number; column: number }, data: FileData | null, defKind: string | undefined): HTMLElement {
-		const key = siteKey(index, file.path, match.line);
+	private buildSite(section: ResultSection, file: SymbolRefFile, match: { line: number; column: number }, data: FileData | null, defKind: string | undefined): HTMLElement {
+		const key = siteKey(section.id, file.path, match.line);
 		const row = el('div', 'refs-site');
 		row.dataset['key'] = key;
 		row.tabIndex = 0;
@@ -499,7 +506,7 @@ export class ReferencesView {
 		context.title = t('references.contextTitle');
 		context.addEventListener('click', (event) => {
 			event.stopPropagation();
-			void this.toggleSite(index, row, file, match.line, context);
+			void this.toggleSite(section, row, file, match.line, context);
 		});
 		row.appendChild(context);
 		// The row's segments, each per its switch: the enclosing container's name,
@@ -517,7 +524,7 @@ export class ReferencesView {
 		if (this.options.lineText) {
 			const lines = data?.lines ?? [];
 			const at = match.line - 1;
-			row.appendChild(this.paintLineText((lines[at] ?? '').trimEnd(), extOf(file.path)));
+			row.appendChild(this.paintLineText((lines[at] ?? '').trimEnd(), extOf(file.path), section.subject.name));
 		}
 		row.title = t('references.siteTitle');
 		row.addEventListener('click', () => this.onOpen?.(file.path, match.line, match.column));
@@ -537,10 +544,10 @@ export class ReferencesView {
 
 	/** One line's code, colored — the shared tokenizer's runs, the searched name riding
 	 *  the emphasis class over its word tokens. */
-	private paintLineText(text: string, ext: string, cap = TEXT_MAX): HTMLElement {
+	private paintLineText(text: string, ext: string, highlightName = this.subject?.name, cap = TEXT_MAX): HTMLElement {
 		const span = el('span', 'refs-site-text');
 		const shown = text.slice(0, cap);
-		for (const segment of highlightLine(shown, ext, this.subject?.name)) {
+		for (const segment of highlightLine(shown, ext, highlightName)) {
 			span.appendChild(segment.cls ? el('span', segment.cls, [segment.text]) : document.createTextNode(segment.text));
 		}
 		if (text.length > cap) span.appendChild(document.createTextNode('…'));
@@ -548,12 +555,12 @@ export class ReferencesView {
 	}
 
 	/** Open or close one site's folded context; the row's chevron flips with it. */
-	private async toggleSite(index: number, row: HTMLElement, file: SymbolRefFile, line: number, toggle?: HTMLElement): Promise<void> {
-		const key = siteKey(index, file.path, line);
+	private async toggleSite(section: ResultSection, row: HTMLElement, file: SymbolRefFile, line: number, toggle?: HTMLElement): Promise<void> {
+		const key = siteKey(section.id, file.path, line);
 		if (!this.openSites.delete(key)) {
 			this.openSites.add(key);
 			toggle?.classList.add('open');
-			await this.expandSite(index, row.parentElement ?? row, file, line, true);
+			await this.expandSite(section, row.parentElement ?? row, file, line, true);
 			return;
 		}
 		toggle?.classList.remove('open');
@@ -563,8 +570,8 @@ export class ReferencesView {
 	/** Build and mount one site's folded context after its row: the pure slice over the
 	 *  file's cached lines and outline, the fold rows wired to open in place. `line` is the
 	 *  index's 1-based site line. */
-	private async expandSite(index: number, host: HTMLElement, file: SymbolRefFile, line: number, scroll: boolean): Promise<void> {
-		const key = siteKey(index, file.path, line);
+	private async expandSite(section: ResultSection, host: HTMLElement, file: SymbolRefFile, line: number, scroll: boolean): Promise<void> {
+		const key = siteKey(section.id, file.path, line);
 		const data = await this.loadFile(file.path);
 		if (!this.openSites.has(key) || !host.isConnected) return;
 		host.querySelector(`.refs-ctx[data-for="${cssEscape(key)}"]`)?.remove();
@@ -576,10 +583,10 @@ export class ReferencesView {
 		const spans = data?.spans ?? [];
 		for (const entry of foldedContext(lines, spans, line - 1)) {
 			if (entry.kind === 'fold') {
-				ctx.appendChild(this.buildFold(entry.from ?? 0, entry.to ?? 0, lines, extOf(file.path)));
+				ctx.appendChild(this.buildFold(entry.from ?? 0, entry.to ?? 0, lines, extOf(file.path), section.subject.name));
 			} else {
 				const at = entry.line ?? 0;
-				const lineElt = this.buildContextLine(lines[at] ?? '', extOf(file.path));
+				const lineElt = this.buildContextLine(lines[at] ?? '', extOf(file.path), section.subject.name);
 				if (entry.kind === 'site') {
 					lineElt.classList.add('ref-ctx-site');
 					lineElt.title = t('references.openTitle');
@@ -594,15 +601,15 @@ export class ReferencesView {
 
 	/** A fold row: `… N lines …` — the click replaces it with the folded lines, capped,
 	 *  the remainder staying a fold row of its own. */
-	private buildFold(from: number, to: number, lines: string[], ext: string): HTMLElement {
+	private buildFold(from: number, to: number, lines: string[], ext: string, highlightName?: string): HTMLElement {
 		const fold = el('div', 'ref-ctx-fold', [tf('references.fold', to - from + 1)]);
 		fold.setAttribute('role', 'button');
 		fold.tabIndex = 0;
 		const open = (): void => {
 			const end = Math.min(to, from + FOLD_MAX - 1);
 			const frag = document.createDocumentFragment();
-			for (let at = from; at <= end; at++) frag.appendChild(this.buildContextLine(lines[at] ?? '', ext));
-			if (end < to) frag.appendChild(this.buildFold(end + 1, to, lines, ext));
+			for (let at = from; at <= end; at++) frag.appendChild(this.buildContextLine(lines[at] ?? '', ext, highlightName));
+			if (end < to) frag.appendChild(this.buildFold(end + 1, to, lines, ext, highlightName));
 			fold.replaceWith(frag);
 		};
 		fold.addEventListener('click', open);
@@ -616,8 +623,8 @@ export class ReferencesView {
 	}
 
 	/** One context code line, colored like the site rows. */
-	private buildContextLine(text: string, ext: string): HTMLElement {
-		return el('div', 'ref-ctx-line', [this.paintLineText(text.trimEnd(), ext)]);
+	private buildContextLine(text: string, ext: string, highlightName?: string): HTMLElement {
+		return el('div', 'ref-ctx-line', [this.paintLineText(text.trimEnd(), ext, highlightName)]);
 	}
 }
 

@@ -128,7 +128,7 @@ export function outlineRows(symbols: FileOutlineSymbol[], filter: string, collap
 
 /** The flat list the name and type sorts show — the tree folded away, the depth kept
  *  for the indentation. */
-export function flatRows(symbols: FileOutlineSymbol[], mode: Exclude<SymbolSortMode, 'line'>): OutlineRow[] {
+export function flatRows(symbols: FileOutlineSymbol[], mode: Exclude<SymbolSortMode, 'line'>, filter = ''): OutlineRow[] {
 	const sorted = symbols.slice();
 	if (mode === 'name') sorted.sort((a, b) => a.name.localeCompare(b.name) || a.line - b.line);
 	else
@@ -139,11 +139,15 @@ export function flatRows(symbols: FileOutlineSymbol[], mode: Exclude<SymbolSortM
 				a.line - b.line
 		);
 	const depthOf = new Map<string, number>();
-	return sorted.map((symbol) => {
+	const rows: OutlineRow[] = [];
+	for (const symbol of sorted) {
 		const depth = containerDepth(symbol, depthOf);
 		depthOf.set(symbol.name, depth);
-		return { symbol, depth, toggle: false, key: rowKey(symbol) };
-	});
+		if (filter === '' || symbol.name.toLowerCase().includes(filter)) {
+			rows.push({ symbol, depth, toggle: false, key: rowKey(symbol) });
+		}
+	}
+	return rows;
 }
 
 export class SymbolWindowView {
@@ -499,7 +503,7 @@ export class SymbolWindowView {
 		const query = this.filterText;
 		// The sort decides the shape: the line sort is the collapsible tree, the name and
 		// type sorts the flat lists.
-		const rows = this.sortMode === 'line' ? outlineRows(this.symbols, query, this.collapsed) : flatRows(this.symbols, this.sortMode);
+		const rows = this.sortMode === 'line' ? outlineRows(this.symbols, query, this.collapsed) : flatRows(this.symbols, this.sortMode, query);
 		for (const row of rows) this.body.appendChild(this.symbolRow(row));
 		this.updateHighlight();
 	}

@@ -227,7 +227,9 @@ export class DefinitionView {
 
 	private readonly onBodyClick = (event: MouseEvent): void => {
 		if (!this.fileLines) return;
+		if ((window.getSelection?.()?.toString().length ?? 0) > 0) return;
 		const target = event.target as HTMLElement;
+		if (target.closest('.hl-comment, .hl-string, .hl-keyword, .hl-number')) return;
 		const row = target.closest<HTMLElement>('.def-line');
 		if (!row?.dataset['line']) return;
 		const at = this.caretOffsetIn(row, event);
@@ -292,7 +294,9 @@ export class DefinitionView {
 			}
 			const defs = (await symbolLookup(word)) ?? [];
 			if (defs.length === 0) return;
-			const sameFile = this.subject ? defs.filter((entry) => entry.path === this.subject!.path) : [];
+			const norm = (p: string): string => (this.resolvePath?.(p) ?? p).replaceAll('\\', '/').toLowerCase();
+			const currentNorm = this.subject ? norm(this.subject.path) : '';
+			const sameFile = this.subject ? defs.filter((entry) => norm(entry.path) === currentNorm) : [];
 			const def = (sameFile.length > 0
 				? (sameFile.find((entry) => entry.line <= line0 && line0 <= (entry.endLine ?? entry.line))
 					?? sameFile.find((entry) => (entry.endLine ?? entry.line) > entry.line)

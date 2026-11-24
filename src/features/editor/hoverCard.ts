@@ -115,7 +115,7 @@ function membersDom(entry: SymbolQuickInfoEntry, open?: HoverCardActions['open']
 			el('span', 'ggs-symbol-hover-member-line', [String(member.line + 1)])
 		]);
 		if (open) {
-			row.addEventListener('click', () => open(entry.path, member.line + 1));
+			row.addEventListener('click', () => open(entry.path, member.line));
 		}
 		block.appendChild(row);
 	}

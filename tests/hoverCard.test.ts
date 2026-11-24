@@ -105,7 +105,7 @@ describe('hoverCard — the members block', () => {
 		const rows = dom.querySelectorAll('button.ggs-symbol-hover-member');
 		expect(rows).toHaveLength(2);
 		rows[0]!.click();
-		expect(opened).toEqual([{ path: 'src/point.h', line: 10 }]);
+		expect(opened).toEqual([{ path: 'src/point.h', line: 9 }]);
 	});
 
 	it('unwired rows render static and never fire', () => {
