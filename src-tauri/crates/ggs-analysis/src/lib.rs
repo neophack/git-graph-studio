@@ -1,11 +1,15 @@
 //! ggs-analysis (L1, module 17): the Code Analysis engine — the in-memory workspace
-//! model the five analysis tools read, plus the per-root `AnalysisIndex` (module `index`)
+//! model the measured reports read (Complexity & Hotspots, Module Analysis, the call
+//! graph), plus the per-root `AnalysisIndex` (module `index`)
 //! and the streaming report runners behind the app's command adapters. Where the symbol
 //! store (ggs-index's `symbols::store`) is the persistent name-and-occurrence database,
-//! this is the parsed-tree database — every source file's declarations, call sites and
-//! imports (via ggs-index's `symbols::parse`), resolved into a workspace-wide call graph.
+//! this is the parsed-tree database — every source file's declarations and call sites
+//! (via ggs-index's `symbols::parse`), resolved into a workspace-wide call graph.
 //! It lives only for the session (a restart rebuilds; parse speed makes persistence
 //! unnecessary), updated file-by-file from the same watcher batches the symbol index eats.
+//! The store-backed reports (Dead Code, Security, the Import Graph) never build this
+//! engine — they read the nine `project.ggs_*` volumes through `symbols::sites`' masked
+//! scanner and the store's own catalogue (2026-11-24, the owner's direction).
 //!
 //! The model is compact by construction (module `model`): every string interns to a
 //! `u32` over one shared table, each declaration and call site is one fixed-size
@@ -62,7 +66,6 @@ pub struct FileAnalysis {
     pub size: u64,
     pub symbols: Vec<Sym>,
     pub calls: Vec<Call>,
-    pub imports: Vec<u32>,
     pub owner_heads: Vec<u32>,
     pub owner_order: Vec<u32>,
 }
@@ -229,11 +232,6 @@ impl AnalysisData {
         self.decode_sym(&file.symbols[key.1 as usize])
     }
 
-    /// One raw record decoded with its file path already at hand.
-    pub(crate) fn symbol_of_raw(&self, sym: &Sym) -> SymView<'_> {
-        self.decode_sym(sym)
-    }
-
     fn decode_sym(&self, sym: &Sym) -> SymView<'_> {
         SymView {
             name: self.names.get(sym.name),
@@ -247,14 +245,6 @@ impl AnalysisData {
             end_line: sym.end_line,
             signature: self.signature_of(sym),
         }
-    }
-
-    /// Whether any call site in the workspace spells the interned `name` id.
-    pub(crate) fn called_id(&self, name: u32) -> bool {
-        let (word, bit) = (name / 64, name % 64);
-        self.called
-            .get(word as usize)
-            .is_some_and(|word| word & (1u64 << bit) != 0)
     }
 
     pub(crate) fn signature_of(&self, sym: &Sym) -> &str {
@@ -310,6 +300,23 @@ impl AnalysisData {
     }
 
     /* ---------- Building ---------- */
+
+    /// The store-backed reports' file list: the volumes' file table widened by the tree
+    /// walk. The reports that read raw text at report time (the security scan, the
+    /// import graph) decode lossily, so a file the store's decoder refused (a GBK
+    /// file's ASCII secret still reports — the test that pins this) belongs in their
+    /// list even though no index carries it.
+    pub fn report_files(root: &str, store_files: Vec<String>) -> Vec<String> {
+        let mut files: HashSet<String> = store_files.into_iter().collect();
+        for path in walk_files(root) {
+            if is_symbol_source(&path) {
+                files.insert(path);
+            }
+        }
+        let mut files: Vec<String> = files.into_iter().collect();
+        files.sort();
+        files
+    }
 
     /// The full build: parse every source file under `root` (parallel), intern into the
     /// compact records (per batch, serial), then derive the tables. `report` fires once
@@ -1023,18 +1030,12 @@ pub(crate) fn convert(names: &mut Names, sigs: &mut String, one: ParsedOne) -> F
             class: ResolveClass::Unique,
         })
         .collect();
-    let imports = parsed
-        .imports
-        .iter()
-        .map(|import| names.intern(import))
-        .collect();
     FileAnalysis {
         path,
         mtime_ms,
         size,
         symbols,
         calls,
-        imports,
         owner_heads: Vec::new(),
         owner_order: Vec::new(),
     }

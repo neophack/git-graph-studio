@@ -242,23 +242,31 @@ fn main() {
         println!("  {} batches, {} json bytes", sink.batches, sink.rows);
     });
 
-    // Phase 5: Dead Code.
+    // Phase 5: Dead Code — the volumes' snapshot, never the engine.
+    let store = ggs_index::symbols::store::SymbolStore::build(&root, 4, &|_, _| {}, &|| false)
+        .expect("the store builds");
+    let catalogue = ggs_analysis::deadcode::dead_catalogue(&store);
+    let files: Vec<String> = store
+        .files_with_counts()
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
     let mut sink = Dropping::new();
     phase("dead code", || {
-        run_dead_code(&index, &data, false, &mut sink);
+        run_dead_code(&index, &root, &catalogue, false, &mut sink);
         println!("  {} batches, {} json bytes", sink.batches, sink.rows);
     });
 
-    // Phase 6: the Security Scan.
+    // Phase 6: the Security Scan — the volumes' file table.
     let mut sink = Dropping::new();
     phase("security", || {
-        run_security(&index, &data, &root, &mut sink);
+        run_security(&index, &root, &files, &mut sink);
         println!("  {} batches, {} json bytes", sink.batches, sink.rows);
     });
 
-    // Phase 7: the Import Graph.
+    // Phase 7: the Import Graph — the volumes' file table.
     phase("import graph", || {
-        let graph = ggs_analysis::imports::import_graph(&data.lock().unwrap());
+        let graph = ggs_analysis::imports::import_graph(&root, &files);
         let json = serde_json::to_string(&graph).unwrap();
         println!("  import graph json {} bytes", json.len());
     });

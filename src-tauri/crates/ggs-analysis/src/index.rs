@@ -477,44 +477,36 @@ pub fn run_metrics(
     });
 }
 
-/// Declarations no call site in the workspace spells, streamed in batches. The rule
-/// filter walks the files under the lock and each batch crosses as it fills — no
-/// whole-report row list.
+/// Declarations no call site in the workspace spells, streamed in batches — the rule
+/// read straight off the project volumes' snapshot (`deadcode::dead_rows_streaming`):
+/// no Code Analysis engine behind the report, the volumes' own catalogue and
+/// occurrence lists answering, the masked token walk confirming. Each batch crosses
+/// as it fills.
 pub fn run_dead_code(
     index: &AnalysisIndex,
-    data: &Arc<Mutex<AnalysisData>>,
+    root: &str,
+    catalogue: &crate::deadcode::DeadCatalogue,
     include_exported: bool,
     sink: &mut dyn BatchSink<DeadCodeEvent>,
 ) {
     let run = index.begin_run();
-    let mut found = 0usize;
+    let is_current = || index.is_current_run(run);
     let mut batch: Vec<DeadRow> = Vec::with_capacity(REPORT_BATCH);
-    {
-        let data = data.lock().unwrap();
-        let filter = crate::deadcode::DeadFilter::new(&data, include_exported);
-        for file in data.files() {
-            for sym in &file.symbols {
-                if !filter.is_dead(sym) {
-                    continue;
-                }
-                if batch.len() >= REPORT_BATCH {
-                    if !index.is_current_run(run) {
-                        let _ = sink.send(DeadCodeEvent::Done {
-                            found: 0,
-                            cancelled: true,
-                        });
-                        return;
-                    }
-                    let _ = sink.send(DeadCodeEvent::Batch {
-                        rows: std::mem::take(&mut batch),
-                    });
-                }
-                found += 1;
-                batch.push(filter.row(&file.path, sym));
+    let found = crate::deadcode::dead_rows_streaming(
+        root,
+        catalogue,
+        include_exported,
+        &is_current,
+        |row| {
+            if batch.len() >= REPORT_BATCH {
+                let _ = sink.send(DeadCodeEvent::Batch {
+                    rows: std::mem::take(&mut batch),
+                });
             }
-        }
-    }
-    if !index.is_current_run(run) {
+            batch.push(row);
+        },
+    );
+    if !is_current() {
         let _ = sink.send(DeadCodeEvent::Done {
             found: 0,
             cancelled: true,
@@ -531,64 +523,56 @@ pub fn run_dead_code(
 }
 
 /// The rule-based security scan (secrets, dangerous and weak-crypto APIs), streamed in
-/// batches. Pattern rules need the raw text, so the files are re-read here — a report
-/// run, not the index's hot path.
+/// batches over the snapshot's file list. Pattern rules and call rules both read the
+/// file's text — one read per file, a report run, never the engine.
 pub fn run_security(
     index: &AnalysisIndex,
-    data: &Arc<Mutex<AnalysisData>>,
     root: &str,
+    files: &[String],
     sink: &mut dyn BatchSink<SecurityEvent>,
 ) {
     let run = index.begin_run();
-    let file_count = data.lock().unwrap().file_count();
-    let mut files = 0usize;
+    let mut scanned = 0usize;
     let mut total = 0usize;
-    {
-        let data = data.lock().unwrap();
-        for start in (0..file_count).step_by(REPORT_BATCH) {
-            if !index.is_current_run(run) {
-                let _ = sink.send(SecurityEvent::Done {
-                    files: 0,
-                    findings: 0,
-                    cancelled: true,
-                });
-                return;
-            }
-            let end = (start + REPORT_BATCH).min(file_count);
-            let (scanned, found) = security_scan_files(&data, root, &data.files()[start..end], sink);
-            files += scanned;
-            total += found;
+    for batch in files.chunks(REPORT_BATCH) {
+        if !index.is_current_run(run) {
+            let _ = sink.send(SecurityEvent::Done {
+                files: 0,
+                findings: 0,
+                cancelled: true,
+            });
+            return;
         }
+        let (done, found) = security_scan_files(root, batch, sink);
+        scanned += done;
+        total += found;
     }
     let _ = sink.send(SecurityEvent::Done {
-        files,
+        files: scanned,
         findings: total,
         cancelled: false,
     });
 }
 
-/// Scan a slice of files (each re-read — pattern rules need the raw text), sending every
-/// file's findings as its own batch; answers (files scanned, findings). The whole-report
-/// runner and the streaming build's per-batch hook share it, so what a streaming page
-/// shows mid-build is exactly what the resident run answers with. Secrets are usually
-/// ASCII: a non-UTF-8 file decodes lossily and stays scannable, instead of silently
-/// dropping out of the scan whole.
+/// Scan a slice of the store's files (each re-read — the rules need the raw text),
+/// sending every file's findings as its own batch; answers (files scanned, findings).
+/// Secrets are usually ASCII: a non-UTF-8 file decodes lossily and stays scannable,
+/// instead of silently dropping out of the scan whole.
 pub fn security_scan_files(
-    data: &AnalysisData,
     root: &str,
-    files: &[crate::FileAnalysis],
+    files: &[String],
     sink: &mut dyn BatchSink<SecurityEvent>,
 ) -> (usize, usize) {
     let mut scanned = 0usize;
     let mut found = 0usize;
-    for file in files {
-        let Ok(bytes) = std::fs::read(std::path::Path::new(root).join(&file.path)) else {
+    for path in files {
+        let Ok(bytes) = std::fs::read(std::path::Path::new(root).join(path)) else {
             continue;
         };
         scanned += 1;
         let text = String::from_utf8_lossy(&bytes);
-        let ext = file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-        let findings = security::scan_file(&file.path, ext, &text, &file.calls, data.names());
+        let ext = path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+        let findings = security::scan_file(path, ext, &text);
         found += findings.len();
         if !findings.is_empty() {
             let _ = sink.send(SecurityEvent::Batch { findings });
@@ -599,6 +583,7 @@ pub fn security_scan_files(
 
 #[cfg(test)]
 mod tests {
+    use ggs_index::symbols::store::SymbolStore;
     use super::*;
 
     fn write(root: &std::path::Path, path: &str, text: &str) {
@@ -723,21 +708,17 @@ mod tests {
             "a.rs",
             "pub fn start() -> u32 { helper() }\nfn helper() -> u32 { 7 }\n",
         );
-        write(
-            dir.path(),
-            "b.rs",
-            "API_KEY = 'super-secret-value-123'\nfn lonely() {}\n",
-        );
+        write(dir.path(), "b.rs", "fn lonely() -> u32 { 0 }\n");
         let index = Arc::new(AnalysisIndex::new());
         let root = dir.path().display().to_string();
         let refs = |_: &str| 3usize;
 
-        // The cold path: every batch's rows and findings stream through the hook.
+        // The cold path: every batch's rows stream through the hook. Metrics is the
+        // one report still riding the build — dead code and security read the project
+        // volumes' store instead (see the test below).
         let mut streamed_rows: Vec<MetricRow> = Vec::new();
         let mut streamed_functions = 0usize;
-        let mut streamed_findings = 0usize;
         let mut consumed = 0usize;
-        let mut security_stream = VecSink(Vec::new());
         {
             let mut hook = |data: &AnalysisData| {
                 let files = data.files();
@@ -745,16 +726,13 @@ mod tests {
                     let rows = crate::metrics::rows_for_files(data, &files[consumed..], &refs);
                     streamed_functions += rows.len();
                     streamed_rows.extend(rows);
-                    let (_, found) =
-                        security_scan_files(data, &root, &files[consumed..], &mut security_stream);
-                    streamed_findings += found;
                     consumed = files.len();
                 }
             };
             index.ensure_with_batches(None, &root, Some(&mut hook)).unwrap();
         }
 
-        // The resident path over the same corpus: the ordinary whole-report runs.
+        // The resident path over the same corpus: the ordinary whole-report run.
         let data = index.analysis(&root).unwrap();
         let mut whole = VecSink(Vec::new());
         run_metrics(&index, &data, &refs, &mut whole);
@@ -772,26 +750,70 @@ mod tests {
                 resident_functions = *functions;
             }
         }
-        let mut resident_security = VecSink(Vec::new());
-        run_security(&index, &data, &root, &mut resident_security);
-        let mut resident_findings = 0usize;
-        for event in &resident_security.0 {
-            if let SecurityEvent::Done { findings, .. } = event {
-                resident_findings = *findings;
-            }
-        }
 
         // The rows a streaming page showed mid-build are exactly the resident rows —
-        // path, name and line identify them; the counts the Done carries agree too.
+        // path, name and line identify them; the count the Done carries agrees too.
         let key = |row: &MetricRow| (row.path.clone(), row.name.clone(), row.line);
         streamed_rows.sort_by_key(|row| key(row));
         resident_rows.sort_by_key(|row| key(row));
         assert_eq!(streamed_rows, resident_rows);
         assert_eq!(streamed_functions, resident_functions);
-        assert_eq!(streamed_findings, resident_findings);
-        // The corpus carries both reports' material, so the equality is not vacuous.
         assert!(streamed_functions >= 3);
-        assert!(streamed_findings >= 1);
+    }
+
+    #[test]
+    fn the_store_reports_answer_without_the_engine() {
+        use ggs_base::sink::VecSink;
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "a.rs",
+            "pub fn start() -> u32 { helper() }\nfn helper() -> u32 { 7 }\nfn lonely() -> u32 { 0 }\n",
+        );
+        write(
+            dir.path(),
+            "b.py",
+            "API_KEY = 'super-secret-value-123'\ndef run(cmd):\n    import os\n    os.system(cmd)\n",
+        );
+        let index = AnalysisIndex::new();
+        let root = dir.path().display().to_string();
+        let store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+
+        // Dead code over the store: lonely is the only uncalled declaration, and no
+        // analysis engine ever had to build for the answer.
+        let catalogue = crate::deadcode::dead_catalogue(&store);
+        let mut dead = VecSink(Vec::new());
+        run_dead_code(&index, &root, &catalogue, false, &mut dead);
+        let mut rows = Vec::new();
+        let mut found = None;
+        for event in &dead.0 {
+            match event {
+                DeadCodeEvent::Batch { rows: batch } => rows.extend(batch.clone()),
+                DeadCodeEvent::Done { found: total, .. } => found = Some(*total),
+            }
+        }
+        assert_eq!(found, Some(1));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "lonely");
+
+        // Security over the store's file table: the secret pattern and the os.system
+        // call rule both land, the scanner reading the masked call sites.
+        let files: Vec<String> = store
+            .files_with_counts()
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+        let mut security = VecSink(Vec::new());
+        run_security(&index, &root, &files, &mut security);
+        let mut findings = Vec::new();
+        for event in &security.0 {
+            if let SecurityEvent::Batch { findings: batch } = event {
+                findings.extend(batch.clone());
+            }
+        }
+        let rules: Vec<&str> = findings.iter().map(|f| f.rule_id.as_str()).collect();
+        assert!(rules.contains(&"SEC-003"), "{rules:?}");
+        assert!(rules.contains(&"DANG-004"), "{rules:?}");
     }
 
     #[test]
@@ -911,15 +933,25 @@ mod tests {
             Some(MetricsEvent::Done { cancelled: false, .. })
         ));
 
+        // The dead code and security runners read the project volumes' snapshot: the
+        // catalogue under the store's lock, the file list beside it.
+        let store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        let catalogue = crate::deadcode::dead_catalogue(&store);
+        let files: Vec<String> = store
+            .files_with_counts()
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+
         let mut dead_sink = VecSink(Vec::new());
-        run_dead_code(&index, &data, false, &mut dead_sink);
+        run_dead_code(&index, &root, &catalogue, false, &mut dead_sink);
         assert!(matches!(
             dead_sink.0.last(),
             Some(DeadCodeEvent::Done { .. })
         ));
 
         let mut security_sink = VecSink(Vec::new());
-        run_security(&index, &data, &root, &mut security_sink);
+        run_security(&index, &root, &files, &mut security_sink);
         assert!(matches!(
             security_sink.0.last(),
             Some(SecurityEvent::Done { .. })
@@ -943,8 +975,19 @@ mod tests {
         let data = index.analysis(&root).unwrap();
         assert_eq!(data.lock().unwrap().files().len(), 1, "the file is counted");
 
+        // The scan reads the volumes' file table widened by the tree walk (the store's
+        // decoder refuses the GBK file; the scan reads it lossily and finds the secret).
+        let store = SymbolStore::build(&root, 4, &|_, _| {}, &|| false).unwrap();
+        let files = crate::AnalysisData::report_files(
+            &root,
+            store
+                .files_with_counts()
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect(),
+        );
         let mut sink = VecSink(Vec::new());
-        run_security(&index, &data, &root, &mut sink);
+        run_security(&index, &root, &files, &mut sink);
         let findings: Vec<_> = sink
             .0
             .iter()

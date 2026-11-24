@@ -17,7 +17,7 @@ use tauri::State;
 use ggs_analysis::diagram::ModuleDiagram;
 use ggs_analysis::imports::ImportGraph;
 use ggs_analysis::index::{
-    run_dead_code, run_metrics, run_security, security_scan_files, AnalysisIndexEvent,
+    run_dead_code, run_metrics, run_security, AnalysisIndexEvent,
     AnalysisStatus, DeadCodeEvent, MetricsEvent, SecurityEvent,
 };
 use ggs_analysis::modules::{self, ModuleGraph};
@@ -203,99 +203,95 @@ pub async fn analysis_metrics(
     .map_err(|e| e.to_string())?
 }
 
-/// Declarations no call site in the workspace spells, streamed in batches.
+/// Declarations no call site in the workspace spells, streamed in batches — the rule
+/// reads the project volumes' store (`analysis_dead_code` never builds the Code
+/// Analysis engine): the store resumes on demand (the same path every symbol query
+/// takes), the occurrence lists pre-filter, the masked token walk confirms.
 #[tauri::command]
 pub async fn analysis_dead_code(
     app: tauri::AppHandle,
     roots: State<'_, WorkspaceRoots>,
     analysis_index: State<'_, std::sync::Arc<ggs_analysis::index::AnalysisIndex>>,
+    symbol_index: State<'_, std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>,
     include_exported: Option<bool>,
     repo: Option<String>,
     on_event: Channel<DeadCodeEvent>,
 ) -> Result<(), String> {
     let root = resolve_root(roots.inner(), repo)?;
-    let data = analysis_of(&app, analysis_index.inner(), root).await?;
+    crate::cmd_symbols::ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
+    // The store's facts the rule reads, snapshotted under the store's lock — the file
+    // reads of the confirmation pass run lock-free.
+    let catalogue = symbol_index
+        .with_store(&root, ggs_analysis::deadcode::dead_catalogue)
+        .ok_or("The symbol index could not be built")?;
     let index = std::sync::Arc::clone(analysis_index.inner());
     let include_exported = include_exported.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
         let mut sink = crate::events::ChannelSink(on_event);
-        run_dead_code(&index, &data, include_exported, &mut sink);
+        run_dead_code(&index, &root, &catalogue, include_exported, &mut sink);
     })
     .await
     .map_err(|e| e.to_string())
 }
 
 /// The rule-based security scan (secrets, dangerous and weak-crypto APIs), streamed in
-/// batches. Pattern rules need the raw text, so the files are re-read here — a report
-/// run, not the index's hot path. On a cold index the scan streams DURING the build:
-/// every parsed batch's findings cross at once, the click's first answer being rows
-/// instead of a spinner (the metrics report's rhythm).
+/// batches over the project volumes' store file table — one read per file, a report
+/// run, no Code Analysis engine behind it.
 #[tauri::command]
 pub async fn analysis_security(
     app: tauri::AppHandle,
     roots: State<'_, WorkspaceRoots>,
     analysis_index: State<'_, std::sync::Arc<ggs_analysis::index::AnalysisIndex>>,
+    symbol_index: State<'_, std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>,
     repo: Option<String>,
     on_event: Channel<SecurityEvent>,
 ) -> Result<(), String> {
     let root = resolve_root(roots.inner(), repo)?;
+    crate::cmd_symbols::ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
+    let store_files = symbol_index
+        .with_store(&root, |store| {
+            store
+                .files_with_counts()
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>()
+        })
+        .ok_or("The symbol index could not be built")?;
+    // The scan reads raw text lossily — the walk adds the files the store's decoder
+    // refused, so their ASCII secrets still report.
+    let files = ggs_analysis::AnalysisData::report_files(&root, store_files);
     let index = std::sync::Arc::clone(analysis_index.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        let events = crate::events::TauriEvents(app.clone());
         let mut sink = crate::events::ChannelSink(on_event);
-        let mut streamed = 0usize;
-        let mut scanned = 0usize;
-        let mut findings = 0usize;
-        let mut hook = |data: &ggs_analysis::AnalysisData| {
-            let files = data.files();
-            if files.len() > streamed {
-                let (scan, found) = security_scan_files(data, &root, &files[streamed..], &mut sink);
-                scanned += scan;
-                findings += found;
-                streamed = files.len();
-            }
-        };
-        match index.ensure_with_batches(Some(&events), &root, Some(&mut hook)) {
-            Ok(data) => {
-                if streamed == 0 {
-                    // The analysis was already resident (the hook never ran): the
-                    // ordinary whole-report run.
-                    run_security(&index, &data, &root, &mut sink);
-                } else {
-                    let _ = sink.send(SecurityEvent::Done {
-                        files: scanned,
-                        findings,
-                        cancelled: false,
-                    });
-                }
-            }
-            // A cancelled build (a folder switch, a newer rebuild) retires the page the
-            // way a retired report does — no error banner, the newer run owns the view.
-            Err(message) if message == "cancelled" => {
-                let _ = sink.send(SecurityEvent::Done {
-                    files: 0,
-                    findings: 0,
-                    cancelled: true,
-                });
-            }
-            Err(message) => return Err(message),
-        }
-        Ok(())
+        run_security(&index, &root, &files, &mut sink);
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
 }
 
-/// The workspace's import graph with its cycles, in one answer.
+/// The workspace's import graph with its cycles, in one answer — read off the project
+/// volumes' store: the volumes' file table names every file, the masked line scanner
+/// reads each file's import spellings, and the resolution is the one the engine's own
+/// graph always applied. No Code Analysis engine behind it.
 #[tauri::command]
 pub async fn analysis_import_graph(
     app: tauri::AppHandle,
     roots: State<'_, WorkspaceRoots>,
-    analysis_index: State<'_, std::sync::Arc<ggs_analysis::index::AnalysisIndex>>,
+    symbol_index: State<'_, std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>,
     repo: Option<String>,
 ) -> Result<ImportGraph, String> {
     let root = resolve_root(roots.inner(), repo)?;
-    let data = analysis_of(&app, analysis_index.inner(), root).await?;
-    let data = data.lock().unwrap();
-    Ok(ggs_analysis::imports::import_graph(&data))
+    crate::cmd_symbols::ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
+    let files = symbol_index
+        .with_store(&root, |store| {
+            store
+                .files_with_counts()
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>()
+        })
+        .ok_or("The symbol index could not be built")?;
+    tauri::async_runtime::spawn_blocking(move || ggs_analysis::imports::import_graph(&root, &files))
+        .await
+        .map_err(|e| e.to_string())
 }

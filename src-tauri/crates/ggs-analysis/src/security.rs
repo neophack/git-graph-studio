@@ -1,15 +1,18 @@
 //! The Security report (module 17): rule-based static scanning, v1 without taint
 //! tracking. Two kinds of rule share one finding shape — patterns over the raw text
-//! (secrets, unsafe constructs) and call-site rules over the parsed calls (dangerous or
-//! weak-crypto APIs, resolved by name and receiver the way the call graph does). Every
-//! rule names its CWE; severities are error / warning / info.
+//! (secrets, unsafe constructs) and call-site rules over the masked token walk
+//! (`sites::call_sites`: the callee's spelling and its receiver, the relation scans'
+//! discipline) — dangerous or weak-crypto APIs, matched by name and receiver. Every
+//! rule names its CWE; severities are error / warning / info. The scan reads files at
+//! report time (one read per file) and never builds the Code Analysis engine.
 
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use regex::Regex;
 use serde::Serialize;
 
-use super::model::{Call, Names, NONE};
+use ggs_index::symbols::sites;
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -357,9 +360,10 @@ fn rules_for(ext: &str) -> Vec<&'static Rule> {
         .collect()
 }
 
-/// Scan one parsed file. `text` is the file as read; `calls` are its compact call
-/// records, decoded through `names` (the analysis's interned table).
-pub fn scan_file(path: &str, ext: &str, text: &str, calls: &[Call], names: &Names) -> Vec<Finding> {
+/// Scan one file's text. The pattern rules read the raw text; the call rules read the
+/// masked token walk (`sites::call_sites`) — the store-backed scan's input, one read
+/// per file, no parse tree behind it.
+pub fn scan_file(path: &str, ext: &str, text: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
     static PATTERNS: OnceLock<Vec<(&'static Rule, Regex)>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| {
@@ -391,32 +395,48 @@ pub fn scan_file(path: &str, ext: &str, text: &str, calls: &[Call], names: &Name
             });
         }
     }
-    for rule in rules_for(ext) {
-        let RuleKind::Calls { names: wanted, receivers } = rule.kind else {
-            continue;
-        };
-        for call in calls {
-            if findings.len() >= MAX_FINDINGS_PER_FILE {
-                return findings;
-            }
-            let spelled = names.get(call.name);
-            if !wanted.contains(&spelled) {
+    let call_rules: Vec<&Rule> = rules_for(ext)
+        .into_iter()
+        .filter(|rule| matches!(rule.kind, RuleKind::Calls { .. }))
+        .collect();
+    if !call_rules.is_empty() {
+        let wanted: HashSet<&str> = call_rules
+            .iter()
+            .filter_map(|rule| match &rule.kind {
+                RuleKind::Calls { names, .. } => Some(*names),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
+        let calls = sites::call_sites(ext, text, &|name| wanted.contains(name));
+        for rule in call_rules {
+            let RuleKind::Calls { names: wanted_names, receivers } = rule.kind else {
                 continue;
+            };
+            for call in &calls {
+                if findings.len() >= MAX_FINDINGS_PER_FILE {
+                    return findings;
+                }
+                if !wanted_names.contains(&call.name.as_str()) {
+                    continue;
+                }
+                if !receivers.is_empty()
+                    && (call.receiver.is_none()
+                        || !receivers.contains(&call.receiver.as_deref().unwrap_or_default()))
+                {
+                    continue;
+                }
+                findings.push(Finding {
+                    rule_id: rule.id.to_owned(),
+                    severity: rule.severity,
+                    message: rule.message.to_owned(),
+                    path: path.to_owned(),
+                    line: call.line,
+                    column: call.column,
+                    cwe: rule.cwe.to_owned(),
+                });
             }
-            if !receivers.is_empty()
-                && (call.receiver == NONE || !receivers.contains(&names.get(call.receiver)))
-            {
-                continue;
-            }
-            findings.push(Finding {
-                rule_id: rule.id.to_owned(),
-                severity: rule.severity,
-                message: rule.message.to_owned(),
-                path: path.to_owned(),
-                line: call.line as usize,
-                column: call.column as usize,
-                cwe: rule.cwe.to_owned(),
-            });
         }
     }
     findings.sort_by_key(|f| (f.line, f.column));
@@ -429,20 +449,7 @@ mod tests {
     use super::*;
 
     fn scan(path: &str, ext: &str, text: &str) -> Vec<Finding> {
-        let parsed = ggs_index::symbols::parse::parse_file(text, ext);
-        let mut names = Names::new();
-        let mut sigs = String::new();
-        let file = crate::convert(
-            &mut names,
-            &mut sigs,
-            crate::ParsedOne {
-                path: path.to_owned(),
-                mtime_ms: 0,
-                size: 0,
-                parsed,
-            },
-        );
-        scan_file(path, ext, text, &file.calls, &names)
+        scan_file(path, ext, text)
     }
 
     #[test]

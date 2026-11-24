@@ -1,15 +1,19 @@
 //! The Import Graph report (module 17): the workspace's file-to-file dependency edges —
 //! each import statement resolved to the workspace file it names, per language — plus
 //! the strongly-connected components (the import cycles) and fan-in/out material for the
-//! page. Import resolution is deliberately per-language and heuristic where the language
-//! itself is (JS extension guessing, Java/C# suffix matching); an import that names
-//! nothing in the workspace (a package from outside) contributes no edge.
+//! page. The graph reads the project volumes' store: the file table names every file,
+//! and each file's import spellings come from the masked line scanner
+//! (`sites::import_spellings`) — one read per file at report time, the security scan's
+//! rhythm, no Code Analysis engine behind it. Import resolution is deliberately
+//! per-language and heuristic where the language itself is (JS extension guessing,
+//! Java/C# suffix matching); an import that names nothing in the workspace (a package
+//! from outside) contributes no edge.
 
 use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
-use super::AnalysisData;
+use ggs_index::symbols::sites;
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -21,17 +25,25 @@ pub struct ImportGraph {
     pub cycles: Vec<Vec<String>>,
 }
 
-/// Build the import graph of an analysis.
-pub fn import_graph(data: &AnalysisData) -> ImportGraph {
-    let paths: HashSet<&str> = data.files().iter().map(|f| f.path.as_str()).collect();
+/// Build the import graph over the store's file table: every file the volumes carry,
+/// its import spellings scanned from the text on disk, each resolved the way the
+/// engine's own graph always resolved them. `files` is the snapshot of the volumes'
+/// file table, taken under the store's lock.
+pub fn import_graph(root: &str, files: &[String]) -> ImportGraph {
+    let paths: HashSet<&str> = files.iter().map(String::as_str).collect();
     let mut edges: Vec<(String, String)> = Vec::new();
-    for file in data.files() {
-        let ext = file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-        for &import_id in &file.imports {
-            let import = data.name(import_id);
-            if let Some(target) = resolve_import(&file.path, ext, import, &paths) {
-                if target != file.path {
-                    edges.push((file.path.clone(), target));
+    for file in files {
+        let Ok(bytes) = std::fs::read(std::path::Path::new(root).join(file)) else {
+            continue;
+        };
+        // A non-UTF-8 file decodes lossily and stays resolvable — the security scan's
+        // rule.
+        let text = String::from_utf8_lossy(&bytes);
+        let ext = file.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+        for import in sites::import_spellings(ext, &text) {
+            if let Some(target) = resolve_import(file, ext, &import, &paths) {
+                if target != *file {
+                    edges.push((file.clone(), target));
                 }
             }
         }
@@ -43,7 +55,7 @@ pub fn import_graph(data: &AnalysisData) -> ImportGraph {
 }
 
 /// Resolve one import spelling to a workspace file, per language.
-fn resolve_import(from: &str, ext: &str, import: &str, paths: &HashSet<&str>) -> Option<String> {
+pub fn resolve_import(from: &str, ext: &str, import: &str, paths: &HashSet<&str>) -> Option<String> {
     let dir = &from[..from.rfind('/').unwrap_or(0)];
     match ext {
         "js" | "jsx" | "ts" | "tsx" => {
@@ -281,6 +293,7 @@ fn cycles_of(edges: &[(String, String)]) -> Vec<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ggs_index::symbols::store::SymbolStore;
 
     fn write(root: &std::path::Path, path: &str, text: &str) {
         let file = root.join(path);
@@ -288,8 +301,8 @@ mod tests {
         std::fs::write(file, text).unwrap();
     }
 
-    fn built(root: &std::path::Path) -> AnalysisData {
-        AnalysisData::build(&root.display().to_string(), 4, &|_, _| {}, &|| false).unwrap()
+    fn built(root: &std::path::Path) -> SymbolStore {
+        SymbolStore::build(&root.display().to_string(), 4, &|_, _| {}, &|| false).unwrap()
     }
 
     #[test]
@@ -303,7 +316,9 @@ mod tests {
         write(dir.path(), "b.js", "import { a } from './a';\n");
         write(dir.path(), "c.ts", "import { b } from './b';\n");
         let data = built(dir.path());
-        let graph = import_graph(&data);
+        let root_str = dir.path().display().to_string();
+        let files: Vec<String> = data.files_with_counts().into_iter().map(|(p, _)| p).collect();
+        let graph = import_graph(&root_str, &files);
         assert_eq!(
             graph.edges,
             vec![
@@ -334,7 +349,9 @@ mod tests {
             "import { x } from './x';\nimport { w } from './w';\n",
         );
         let data = built(dir.path());
-        let graph = import_graph(&data);
+        let root_str = dir.path().display().to_string();
+        let files: Vec<String> = data.files_with_counts().into_iter().map(|(p, _)| p).collect();
+        let graph = import_graph(&root_str, &files);
         let mut cycles = graph.cycles.clone();
         for cycle in &mut cycles {
             cycle.sort();
@@ -365,7 +382,9 @@ mod tests {
         );
         write(dir.path(), "src/extra.rs", "pub fn helper() {}\n");
         let data = built(dir.path());
-        let graph = import_graph(&data);
+        let root_str = dir.path().display().to_string();
+        let files: Vec<String> = data.files_with_counts().into_iter().map(|(p, _)| p).collect();
+        let graph = import_graph(&root_str, &files);
         assert_eq!(
             graph.edges,
             vec![("src/util.rs".to_owned(), "src/extra.rs".to_owned())]
@@ -385,7 +404,9 @@ mod tests {
         write(dir.path(), "pkg/base.py", "x = 1\n");
         write(dir.path(), "pkg/other.py", "thing = 2\n");
         let data = built(dir.path());
-        let graph = import_graph(&data);
+        let root_str = dir.path().display().to_string();
+        let files: Vec<String> = data.files_with_counts().into_iter().map(|(p, _)| p).collect();
+        let graph = import_graph(&root_str, &files);
         let targets: Vec<&(String, String)> = graph
             .edges
             .iter()
@@ -411,7 +432,9 @@ mod tests {
         );
         write(dir.path(), "util.h", "int f(void);\n");
         let data = built(dir.path());
-        let graph = import_graph(&data);
+        let root_str = dir.path().display().to_string();
+        let files: Vec<String> = data.files_with_counts().into_iter().map(|(p, _)| p).collect();
+        let graph = import_graph(&root_str, &files);
         assert_eq!(
             graph.edges,
             vec![("main.c".to_owned(), "util.h".to_owned())]
