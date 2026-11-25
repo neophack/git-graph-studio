@@ -16,7 +16,7 @@
 import { readFile } from '../../platform/ipc/fs';
 import { symbolLookup, symbolScopeLookup } from '../../platform/ipc/symbols';
 
-import { t } from '../../platform/i18n';
+import { onLocaleChange, t, tf, type LocaleKey } from '../../platform/i18n';
 import { highlightLine, extOf, wordAt } from '../../platform/highlight';
 import { KIND_ICONS } from './contextView';
 import { actionButton, el, icon, showContextMenu, type MenuEntry } from '../../platform/ui/index';
@@ -53,9 +53,37 @@ function splitDirAndBase(path: string): { dir: string; file: string } {
 	return { dir: path.slice(0, cut), file: path.slice(cut + 1) };
 }
 
-/** Human-readable symbol kind label: e.g. `function` → `Function`, `enumMember` → `Enum Member`. */
+const KIND_KEYS: Record<string, LocaleKey> = {
+	function: 'symbol.kind.function',
+	method: 'symbol.kind.method',
+	class: 'symbol.kind.class',
+	struct: 'symbol.kind.struct',
+	union: 'symbol.kind.union',
+	file: 'symbol.kind.file',
+	interface: 'symbol.kind.interface',
+	enum: 'symbol.kind.enum',
+	enumMember: 'symbol.kind.enumMember',
+	constant: 'symbol.kind.constant',
+	member: 'symbol.kind.member',
+	property: 'symbol.kind.property',
+	field: 'symbol.kind.field',
+	namespace: 'symbol.kind.namespace',
+	module: 'symbol.kind.module',
+	package: 'symbol.kind.package',
+	type: 'symbol.kind.type',
+	typedef: 'symbol.kind.typedef',
+	typeParameter: 'symbol.kind.typeParameter',
+	macro: 'symbol.kind.macro',
+	label: 'symbol.kind.label',
+	parameter: 'symbol.kind.parameter',
+	variable: 'symbol.kind.variable'
+};
+
+/** Human-readable localized symbol kind label: e.g. `function` → `Function` / `函数`. */
 function formatKind(kind: string): string {
-	if (!kind) return 'Symbol';
+	if (!kind) return t('symbol.kind.symbol');
+	const key = KIND_KEYS[kind];
+	if (key) return t(key);
 	const spaced = kind.replace(/([a-z])([A-Z])/g, '$1 $2');
 	return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
@@ -65,9 +93,12 @@ function formatKind(kind: string): string {
 export function formatDefinitionLocation(subject: DefinitionSubject, lineCount: number): string {
 	const kind = formatKind(subject.kind);
 	const { dir, file } = splitDirAndBase(subject.path);
+	const location = dir ? `${file} (${dir})` : file;
 	const count = Math.max(1, lineCount);
-	const linesLabel = count === 1 ? '1 line' : `${count} lines`;
-	return `${kind} in location ${file}${dir ? ` (${dir})` : ''} at line ${subject.line + 1} (${linesLabel})`;
+	const linesLabel = count === 1
+		? t('definition.location.oneLine')
+		: tf('definition.location.lines', count);
+	return tf('definition.location', kind, location, subject.line + 1, linesLabel);
 }
 
 export class DefinitionView {
@@ -117,6 +148,11 @@ export class DefinitionView {
 		this.headerInfo.hidden = true;
 		this.headerInfo.addEventListener('click', () => {
 			if (this.subject) this.onOpenDefinition?.(this.subject.path, this.subject.line + 1);
+		});
+		onLocaleChange(() => {
+			this.pinButton.title = this.pinned ? t('definition.unpin') : t('definition.pin');
+			this.pinButton.setAttribute('aria-label', this.pinButton.title);
+			this.render();
 		});
 		this.render();
 	}

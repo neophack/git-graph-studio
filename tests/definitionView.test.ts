@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { DefinitionView, formatDefinitionLocation } from '../src/features/search';
 import { commands } from '../src/platform/commands';
+import { setLocale } from '../src/platform/i18n';
 import { updateSetting } from '../src/platform/settings';
 import { Workbench } from '../src/workbench';
 import { backend } from './tauriMock';
@@ -245,6 +246,26 @@ beforeEach(() => {
 		expect(view.headerInfo.hidden).toBe(true);
 		expect(view.headerInfo.textContent).toBe('');
 		view.element.remove();
+	});
+
+	it('localizes the panel header location summary in English and Chinese and updates on locale switch', async () => {
+		const view = mountView();
+		try {
+			view.setDefinition({ kind: 'method', name: 'parse', path: 'src/parser/mod.rs', line: 533, endLine: 1286 });
+			await flush();
+			expect(view.headerInfo.textContent).toBe('Method in location mod.rs (src/parser) at line 534 (754 lines)');
+
+			setLocale('zh-cn');
+			expect(view.headerInfo.textContent).toBe('方法，位于 mod.rs (src/parser) 第 534 行（754 行）');
+			expect(formatDefinitionLocation({ kind: 'variable', name: 'x', path: 'main.c', line: 0 }, 1))
+				.toBe('变量，位于 main.c 第 1 行（1 行）');
+
+			setLocale('en');
+			expect(view.headerInfo.textContent).toBe('Method in location mod.rs (src/parser) at line 534 (754 lines)');
+		} finally {
+			setLocale('en');
+			view.element.remove();
+		}
 	});
 });
 
