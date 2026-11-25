@@ -100,11 +100,14 @@ export function outlineRows(symbols: FileOutlineSymbol[], filter: string, collap
 	const depth: number[] = [];
 	const lastSeen = new Map<string, number>();
 	for (let index = 0; index < symbols.length; index++) {
-		const container = symbols[index]!.container;
+		const sym = symbols[index]!;
+		const container = sym.container;
 		const parent = container === null ? -1 : (lastSeen.get(container) ?? -1);
 		parentOf.push(parent);
 		depth.push(parent === -1 ? 0 : Math.min(depth[parent]! + 1, 3));
-		lastSeen.set(symbols[index]!.name, index);
+		// A constructor (`Foo::Foo`) shares its enclosing class's name; don't let it
+		// hijack parent lookup for subsequent sibling methods of the class.
+		if (sym.name !== container) lastSeen.set(sym.name, index);
 	}
 	const hasKids = new Set<number>();
 	for (let index = 0; index < symbols.length; index++) if (parentOf[index]! >= 0) hasKids.add(parentOf[index]!);
@@ -460,6 +463,7 @@ export class SymbolWindowView {
 		this.resetLocals();
 		const generation = ++this.generation;
 		this.loadingPath = path;
+		this.dirty = false;
 		this.failed = false;
 		try {
 			const outline = await symbolFileOutline(path);
@@ -474,10 +478,11 @@ export class SymbolWindowView {
 			this.failed = true;
 		}
 		this.loadingPath = null;
-		this.dirty = false;
 		this.loadedPath = this.failed ? null : path;
 		this.render();
 		this.updateHighlight();
+		// If a refresh() arrived while this load was in flight, re-run now so the latest save lands.
+		if (this.dirty && this.visible()) void this.load();
 	}
 
 	private render(): void {
@@ -524,7 +529,7 @@ export class SymbolWindowView {
 			notify('info', t('symbols.window.sortedNote'));
 			return;
 		}
-		for (const row of outlineRows(this.symbols, '', this.collapsed)) if (row.toggle) this.collapsed.add(row.key);
+		for (const row of outlineRows(this.symbols, '', new Set())) if (row.toggle) this.collapsed.add(row.key);
 		this.render();
 	}
 

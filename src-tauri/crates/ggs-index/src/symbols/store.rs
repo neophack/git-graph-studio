@@ -1965,9 +1965,24 @@ fn load_volume_cache(dir: &Path, snapshot: &SaveSnapshot) -> Option<VolumeCache>
     let xf = xslots(xf_bytes)?;
     let xr = xslots(xr_bytes)?;
     let xc = xslots(xc_bytes)?;
-    let parsed = projvol::parse_sym_volume(sym_bytes)?;
-    let live_end = projvol::HEADER_BLOCK_SIZE
-        + parsed.header.count as usize * SYM_REC_SIZE;
+    // Parse the live prefix of `.ggs_sym` directly: our store trailer occupies the spare
+    // slots past `header.count`, which `projvol::parse_sym_volume` rejects as non-zero.
+    let sym_header = VolumeHeader::parse_block(sym_bytes.get(..projvol::HEADER_BLOCK_SIZE)?)?;
+    (sym_header.magic == MAGIC_SYM && sym_header.rec_size as usize == SYM_REC_SIZE).then_some(())?;
+    let sym_count = sym_header.count as usize;
+    let live_end = projvol::HEADER_BLOCK_SIZE + sym_count * SYM_REC_SIZE;
+    if sym_bytes.len() < live_end {
+        return None;
+    }
+    let mut sym_records = Vec::with_capacity(sym_count);
+    for i in 0..sym_count {
+        let at = projvol::HEADER_BLOCK_SIZE + i * SYM_REC_SIZE;
+        let slot = &sym_bytes[at..at + SYM_REC_SIZE];
+        if !projvol::slot_is_live(slot) {
+            return None;
+        }
+        sym_records.push(SymSlot::decode(slot)?);
+    }
     let table = trailer_file_table(&sym_bytes[live_end..], &snapshot.root)?;
     Some(VolumeCache {
         symgen,
@@ -1975,7 +1990,7 @@ fn load_volume_cache(dir: &Path, snapshot: &SaveSnapshot) -> Option<VolumeCache>
         xr,
         xf,
         xc,
-        sym_records: parsed.records,
+        sym_records,
     })
 }
 
@@ -2204,7 +2219,11 @@ impl SymbolStore {
             // symgen (or just became it), else from the store's parsed-symbol
             // fallback. The previous write's mode decides which side the kept
             // records belong to: a fallback set and a symgen set never mix.
-            let current_symgen = prev_symgen || !fresh_sym.is_empty();
+            let current_symgen = if prev_symgen {
+                !sym_slots.is_empty() || !fresh_sym.is_empty()
+            } else {
+                !fresh_sym.is_empty()
+            };
             if current_symgen {
                 if !prev_symgen {
                     sym_slots.clear();
@@ -2214,10 +2233,13 @@ impl SymbolStore {
             } else if snapshot.has_parsed_symbols {
                 if prev_symgen {
                     sym_slots.clear();
+                    let all_fids = vec![true; count];
+                    sym_slots = fallback_slots(snapshot, &all_fids);
+                } else {
+                    let derived_fid: Vec<bool> = reuse_fid.iter().map(|reuse| !reuse).collect();
+                    let derived_fb = fallback_slots(snapshot, &derived_fid);
+                    sym_slots = merge_sym_slots(sym_slots, derived_fb);
                 }
-                let derived_fid: Vec<bool> = reuse_fid.iter().map(|reuse| !reuse).collect();
-                let derived_fb = fallback_slots(snapshot, &derived_fid);
-                sym_slots = merge_sym_slots(sym_slots, derived_fb);
                 symgen_mode = false;
             } else {
                 symgen_mode = prev_symgen;

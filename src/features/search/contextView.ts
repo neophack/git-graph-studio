@@ -282,18 +282,21 @@ export class ContextView {
 	/** The clicked word's definition re-roots the window — the same resolution the
 	 *  workbench feeds by, resolved here for the chain browsing. */
 	private async revealWord(word: string, line0: number): Promise<void> {
+		const generation = this.generation;
+		const currentPath = this.current?.path ?? null;
 		try {
-			if (this.current && this.wholeLines) {
-				const ext = extOf(this.current.path);
+			if (currentPath && this.wholeLines) {
+				const ext = extOf(currentPath);
 				if (ext) {
 					try {
 						const locals = (await symbolScopeLookup(word, line0, this.wholeLines.join('\n'), ext)) ?? [];
+						if (generation !== this.generation) return;
 						const local = locals[0];
 						if (local) {
 							this.show({
 								kind: local.kind,
 								name: local.name,
-								path: this.current.path,
+								path: currentPath,
 								line: local.line,
 								endLine: local.line,
 								fragment: ''
@@ -301,15 +304,16 @@ export class ContextView {
 							return;
 						}
 					} catch {
+						if (generation !== this.generation) return;
 						// Scope lookup is opportunistic; fall back to the workspace index.
 					}
 				}
 			}
 			const defs = (await symbolLookup(word)) ?? [];
-			if (defs.length === 0) return;
+			if (generation !== this.generation || defs.length === 0) return;
 			const norm = (p: string): string => (this.resolvePath?.(p) ?? p).replaceAll('\\', '/').toLowerCase();
-			const currentNorm = this.current ? norm(this.current.path) : '';
-			const sameFile = this.current ? defs.filter((entry) => norm(entry.path) === currentNorm) : [];
+			const currentNorm = currentPath ? norm(currentPath) : '';
+			const sameFile = currentPath ? defs.filter((entry) => norm(entry.path) === currentNorm) : [];
 			const def = (sameFile.length > 0
 				? (sameFile.find((entry) => entry.line <= line0 && line0 <= (entry.endLine ?? entry.line))
 					?? sameFile.find((entry) => (entry.endLine ?? entry.line) > entry.line)

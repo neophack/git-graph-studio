@@ -239,13 +239,15 @@ export const navigateMethods: ThisType<EditorGroup> = {
 		activePeek = null;
 		previous?.close();
 		const root = this.rootPath;
+		const resolveDefPath = (p: string): string =>
+			p.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(p) ? p : joinPath(root, p);
 		let handle: PeekHandle | null = null;
 		handle = mountPeek(view, word.from, name, defs, {
 			root: () => this.rootPath,
-			read: (path) => this.cachedRead(joinPath(root, path)),
+			read: (path) => this.cachedRead(resolveDefPath(path)),
 			open: (path, line) => {
 				handle?.close();
-				const absolute = joinPath(root, path);
+				const absolute = resolveDefPath(path);
 				if (currentPath && (absolute === currentPath || toPosix(absolute) === toPosix(currentPath))) {
 					this.revealPosition(view, line + 1, 1);
 					return;
@@ -269,7 +271,7 @@ export const navigateMethods: ThisType<EditorGroup> = {
 		const [path, line] = chosen.split('\u0000');
 		const isAbs = path!.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(path!);
 		const absolute = isAbs ? path! : joinPath(this.rootPath!, path!);
-		if (currentPath && absolute === currentPath) {
+		if (currentPath && (absolute === currentPath || toPosix(absolute) === toPosix(currentPath))) {
 			this.revealPosition(view, Number(line) + 1, 1);
 			return true;
 		}
@@ -280,7 +282,7 @@ export const navigateMethods: ThisType<EditorGroup> = {
 	async jumpToDefinition(target: WsSymbol, currentPath: string | null, view: EditorView): Promise<boolean> {
 		const isAbs = target.path.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(target.path);
 		const path = isAbs ? target.path : joinPath(this.rootPath!, target.path);
-		if (currentPath && path === currentPath) {
+		if (currentPath && (path === currentPath || toPosix(path) === toPosix(currentPath))) {
 			// Jump within this file only when it is a different line than the cursor's word.
 			this.revealPosition(view, target.line + 1, 1);
 			return true;

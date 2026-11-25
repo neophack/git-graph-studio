@@ -345,6 +345,16 @@ impl SymbolIndex {
         files
     }
 
+    /// True while a background volume save is running or queued for `root`, meaning the
+    /// on-disk `.ggs_xc` / `.ggs_xf` signature volumes may lag behind the in-memory store.
+    fn has_pending_save(&self, root: &str) -> bool {
+        let gate = self.save_gates.lock().unwrap().get(root).cloned();
+        gate.is_some_and(|g| {
+            let g = g.lock().unwrap();
+            g.running || g.pending
+        })
+    }
+
     /// Code-only candidate files for `name`, using the on-disk `.ggs_xc` Bloom signature
     /// volume (comment/string/conditional stripped) to prune prose-only files before disk
     /// reads. Intersects with the store's trusted occurrence list when both exist.
@@ -361,6 +371,9 @@ impl SymbolIndex {
                     .collect::<Vec<_>>(),
             )
         };
+        if self.has_pending_save(root) {
+            return trusted;
+        }
         let dir = SymbolStore::index_dir(root, &self.home);
         let xc = VolumeSigReader::new(dir).filter_files_xc(name, &all_files);
         match (trusted, xc) {
@@ -376,6 +389,9 @@ impl SymbolIndex {
 
     /// Fuzzy camel/snake word-part candidate files via `.ggs_xf` Bloom signatures.
     pub fn search_word_parts_xf(&self, root: &str, part: &str) -> Option<Vec<String>> {
+        if self.has_pending_save(root) {
+            return None;
+        }
         let store = self.store(root)?;
         let all_files: Vec<String> = store
             .lock()

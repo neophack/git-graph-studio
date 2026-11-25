@@ -346,6 +346,11 @@ impl AnalysisIndex {
                 } else {
                     self.note(root, AnalysisStatus::empty());
                 }
+                if let Some(sink) = sink {
+                    if let Ok(payload) = serde_json::to_value(self.status(root)) {
+                        sink.emit(ANALYSIS_INDEX_EVENT, payload);
+                    }
+                }
                 if let Some(channel) = &channel {
                     let _ = channel.lock().unwrap().send(AnalysisIndexEvent::Done {
                         files: 0,
@@ -449,9 +454,10 @@ pub fn run_metrics(
     sink: &mut dyn BatchSink<MetricsEvent>,
 ) {
     let run = index.begin_run();
-    let file_count = data.lock().unwrap().file_count();
+    let mut start = 0usize;
+    let mut processed = 0usize;
     let mut functions = 0usize;
-    for start in (0..file_count).step_by(REPORT_BATCH) {
+    loop {
         if !index.is_current_run(run) {
             let _ = sink.send(MetricsEvent::Done {
                 files: 0,
@@ -460,18 +466,34 @@ pub fn run_metrics(
             });
             return;
         }
-        let end = (start + REPORT_BATCH).min(file_count);
         // Rows for this batch of files under the lock (the index already measured the
         // shape); the enrichment parses outside it, so the analysis keeps serving queries.
-        let rows = {
+        // Re-check `data.files().len()` under the lock on every batch so a concurrent
+        // `apply_changes` deleting files never panics on an out-of-bounds slice.
+        let (rows, batch_len, done) = {
             let data = data.lock().unwrap();
-            crate::metrics::rows_for_files(&data, &data.files()[start..end], refs_of)
+            let files = data.files();
+            if start >= files.len() {
+                (Vec::new(), 0, true)
+            } else {
+                let end = (start + REPORT_BATCH).min(files.len());
+                let rows = crate::metrics::rows_for_files(&data, &files[start..end], refs_of);
+                (rows, end - start, end >= files.len())
+            }
         };
+        if batch_len == 0 {
+            break;
+        }
+        processed += batch_len;
         functions += rows.len();
         let _ = sink.send(MetricsEvent::Batch { rows });
+        start += batch_len;
+        if done {
+            break;
+        }
     }
     let _ = sink.send(MetricsEvent::Done {
-        files: file_count,
+        files: processed,
         functions,
         cancelled: false,
     });

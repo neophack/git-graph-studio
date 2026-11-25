@@ -642,6 +642,8 @@ class ModulePage implements AnalysisPageView {
 		this.error = null;
 		this.selected = null;
 		this.focusedNodeId = null;
+		this.edgeDetailToken++;
+		this.edgeDetailLoading = false;
 		this.edgeDetailCache.clear();
 		this.render();
 		try {
@@ -820,13 +822,19 @@ class ModulePage implements AnalysisPageView {
 		const edgeStates: Record<string, string[]> = {};
 		if (this.selected.kind === 'edge') {
 			const edge = edges.find((e) => e.id === this.selected!.id);
-			if (edge) {
-				edgeStates[edge.id] = ['selected'];
-				nodeStates[edge.from] = ['related', 'upstream'];
-				nodeStates[edge.to] = ['related', 'downstream'];
+			if (!edge) {
+				this.drawing.setStates({}, {});
+				return;
 			}
+			edgeStates[edge.id] = ['selected'];
+			nodeStates[edge.from] = ['related', 'upstream'];
+			nodeStates[edge.to] = ['related', 'downstream'];
 		} else {
 			const nid = this.selected.id;
+			if (!nodes.some((n) => n.id === nid)) {
+				this.drawing.setStates({}, {});
+				return;
+			}
 			nodeStates[nid] = ['selected'];
 			for (const e of edges) {
 				if (e.from === nid) {
@@ -1305,13 +1313,19 @@ class ImportsPage implements AnalysisPageView {
 		void this.load();
 	}
 
+	private loadToken = 0;
+
 	private async load(): Promise<void> {
+		const token = ++this.loadToken;
 		this.loading = true;
 		this.error = null;
 		this.render();
 		try {
-			this.graph = await analysisImportGraph();
+			const graph = await analysisImportGraph();
+			if (token !== this.loadToken) return;
+			this.graph = graph;
 		} catch (error) {
+			if (token !== this.loadToken) return;
 			this.graph = null;
 			this.error = String(error);
 		}

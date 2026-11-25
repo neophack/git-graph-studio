@@ -503,6 +503,8 @@ export class DiagramView {
 	} | null = null;
 	private minimapDragging = false;
 	private hoveredHit: { kind: 'node' | 'edge'; id: string } | null = null;
+	private lastNodeStates: Record<string, string[]> = {};
+	private lastEdgeStates: Record<string, string[]> = {};
 
 	private readonly pointers = new Map<number, { x: number; y: number }>();
 	private pinch: {
@@ -638,7 +640,11 @@ export class DiagramView {
 		}
 		this.dirBtn.title = direction === 'TB' ? t('analysis.modules.layoutLR') : t('analysis.modules.layoutTB');
 		if (this.currentNodes.length > 0) {
+			const hadSelection = this.hasSelection;
+			const nodeStates = this.lastNodeStates;
+			const edgeStates = this.lastEdgeStates;
 			this.setGraph(this.currentNodes, this.currentEdges);
+			if (hadSelection) this.setStates(nodeStates, edgeStates);
 		}
 	}
 
@@ -676,6 +682,9 @@ export class DiagramView {
 		this.viewportGroup = null;
 		this.hideTooltip();
 		this.hoveredHit = null;
+		this.hasSelection = false;
+		this.lastNodeStates = {};
+		this.lastEdgeStates = {};
 		this.userMoved = false;
 		this.hasCustomPositions = false;
 		this.resetBtn.hidden = true;
@@ -923,6 +932,8 @@ export class DiagramView {
 
 	/** Apply batched selection/dimming state classes onto nodes and edges. */
 	setStates(nodeStates: Record<string, string[]>, edgeStates: Record<string, string[]>): void {
+		this.lastNodeStates = nodeStates;
+		this.lastEdgeStates = edgeStates;
 		const svg = this.content.querySelector('svg');
 		if (!svg) return;
 		this.hasSelection = Object.keys(nodeStates).length > 0 || Object.keys(edgeStates).length > 0;
@@ -1476,6 +1487,12 @@ export class DiagramView {
 
 	private onPointerMove(event: PointerEvent): void {
 		if (!this.pointers.has(event.pointerId)) return;
+		// If the mouse button was released outside `this.host` before capture engaged,
+		// drop the stale pointer state instead of dragging with no button held.
+		if (event.pointerType === 'mouse' && event.buttons === 0) {
+			this.onPointerUp(event);
+			return;
+		}
 		this.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
 
 		if (this.pinch && this.pointers.size >= 2) {
@@ -1561,6 +1578,17 @@ export class DiagramView {
 		this.nodeDrag = null;
 		this.panDrag = null;
 		this.host.classList.remove('dragging', 'dragging-node');
+		// Clear `dragMoved` after the current event turn so a cancelled drag (or release
+		// outside the window that fires no `click`) never swallows the user's next click.
+		if (this.dragMoved) {
+			if (event.type === 'pointercancel') {
+				this.dragMoved = false;
+			} else {
+				setTimeout(() => {
+					this.dragMoved = false;
+				}, 0);
+			}
+		}
 	}
 
 	private onKeyDown(event: KeyboardEvent): void {

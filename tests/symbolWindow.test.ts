@@ -8,7 +8,7 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { SymbolWindowView } from '../src/features/search/symbolWindowView';
+import { outlineRows, SymbolWindowView } from '../src/features/search/symbolWindowView';
 import { commands } from '../src/platform/commands';
 import { trText } from '../src/platform/i18n';
 import { updateSetting } from '../src/platform/settings';
@@ -753,5 +753,18 @@ describe('the collapsible tree', () => {
 		await flush(4);
 		expect(names(host)).toHaveLength(8);
 		host.remove();
+	});
+
+	it('a constructor sharing its class name never hijacks parent lookup for sibling methods', () => {
+		const rows = outlineRows([
+			{ name: 'Foo', kind: 'class', line: 0, endLine: 20, container: null },
+			{ name: 'Foo', kind: 'method', line: 2, endLine: 4, container: 'Foo' },
+			{ name: 'bar', kind: 'method', line: 6, endLine: 8, container: 'Foo' }
+		], '', new Set());
+		expect(rows.map((r) => ({ name: r.symbol.name, depth: r.depth, toggle: r.toggle }))).toEqual([
+			{ name: 'Foo', depth: 0, toggle: true },
+			{ name: 'Foo', depth: 1, toggle: false },
+			{ name: 'bar', depth: 1, toggle: false }
+		]);
 	});
 });

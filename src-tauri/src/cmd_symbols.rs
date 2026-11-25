@@ -53,7 +53,8 @@ fn store_relative(root: &str, path: &str) -> String {
     let prefix = format!("{}/", root.replace('\\', "/").trim_end_matches('/'));
     let windowsish = root.contains('\\') || root.contains(':');
     let under = if windowsish {
-        forward.len() > prefix.len() && forward[..prefix.len()].eq_ignore_ascii_case(&prefix)
+        forward.len() > prefix.len()
+            && forward.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
     } else {
         forward.starts_with(&prefix)
     };

@@ -57,21 +57,27 @@ fn is_candidate_type(tok: &str) -> bool {
 /// `Vec<Item>` -> `Item`, `&mut Session` -> `Session`).
 pub fn normalize_type_name(raw: &str) -> Option<String> {
     let mut s = raw.trim();
-    for prefix in [
-        "const ",
-        "volatile ",
-        "static ",
-        "extern ",
-        "struct ",
-        "class ",
-        "enum ",
-        "union ",
-        "typename ",
-        "mut ",
-        "ref ",
-    ] {
-        while let Some(rest) = s.strip_prefix(prefix) {
-            s = rest.trim_start();
+    loop {
+        let before = s;
+        for prefix in [
+            "const ",
+            "volatile ",
+            "static ",
+            "extern ",
+            "struct ",
+            "class ",
+            "enum ",
+            "union ",
+            "typename ",
+            "mut ",
+            "ref ",
+        ] {
+            if let Some(rest) = s.strip_prefix(prefix) {
+                s = rest.trim_start();
+            }
+        }
+        if s == before {
+            break;
         }
     }
     s = s.trim_start_matches(['&', '*']).trim();
@@ -115,7 +121,10 @@ pub fn normalize_type_name(raw: &str) -> Option<String> {
 pub fn extract_var_types(text: &str, ext: &str, cursor_line: usize) -> HashMap<String, String> {
     let mut map: HashMap<String, String> = HashMap::new();
     let lines: Vec<&str> = text.lines().collect();
-    let end = cursor_line.min(lines.len().saturating_sub(1));
+    if lines.is_empty() {
+        return map;
+    }
+    let end = cursor_line.min(lines.len() - 1);
     let ext_lower = ext.to_ascii_lowercase();
     let colon_typed = matches!(ext_lower.as_str(), "rs" | "ts" | "tsx" | "py");
 
@@ -549,5 +558,12 @@ void drive(Motor *m, Sensor *s) {
         // `m->res` completes inherited Base::reset.
         let comps = member_completions(&store, cpp, "cpp", 15, 10, 20);
         assert!(comps.iter().any(|c| c.name == "reset" && c.inherited));
+    }
+
+    #[test]
+    fn empty_text_and_stacked_qualifiers_never_fail() {
+        assert!(extract_var_types("", "cpp", 0).is_empty());
+        assert_eq!(normalize_type_name("static const struct Foo *"), Some("Foo".to_owned()));
+        assert_eq!(normalize_type_name("extern volatile const Bar&"), Some("Bar".to_owned()));
     }
 }

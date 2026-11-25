@@ -276,27 +276,31 @@ export class DefinitionView {
 	 *  body, then the first — the same preference the declaration card reads by. A failed
 	 *  lookup leaves the page standing. */
 	private async revealWord(word: string, line0: number): Promise<void> {
+		const generation = this.generation;
+		const subjectPath = this.subject?.path ?? null;
 		try {
-			if (this.subject && this.fileLines) {
-				const ext = extOf(this.subject.path);
+			if (subjectPath && this.fileLines) {
+				const ext = extOf(subjectPath);
 				if (ext) {
 					try {
 						const locals = (await symbolScopeLookup(word, line0, this.fileLines.join('\n'), ext)) ?? [];
+						if (generation !== this.generation) return;
 						const local = locals[0];
 						if (local) {
-							this.setDefinition({ kind: local.kind, name: local.name, path: this.subject.path, line: local.line, endLine: local.line });
+							this.setDefinition({ kind: local.kind, name: local.name, path: subjectPath, line: local.line, endLine: local.line });
 							return;
 						}
 					} catch {
+						if (generation !== this.generation) return;
 						// Scope lookup is opportunistic; fall back to the workspace index.
 					}
 				}
 			}
 			const defs = (await symbolLookup(word)) ?? [];
-			if (defs.length === 0) return;
+			if (generation !== this.generation || defs.length === 0) return;
 			const norm = (p: string): string => (this.resolvePath?.(p) ?? p).replaceAll('\\', '/').toLowerCase();
-			const currentNorm = this.subject ? norm(this.subject.path) : '';
-			const sameFile = this.subject ? defs.filter((entry) => norm(entry.path) === currentNorm) : [];
+			const currentNorm = subjectPath ? norm(subjectPath) : '';
+			const sameFile = subjectPath ? defs.filter((entry) => norm(entry.path) === currentNorm) : [];
 			const def = (sameFile.length > 0
 				? (sameFile.find((entry) => entry.line <= line0 && line0 <= (entry.endLine ?? entry.line))
 					?? sameFile.find((entry) => (entry.endLine ?? entry.line) > entry.line)

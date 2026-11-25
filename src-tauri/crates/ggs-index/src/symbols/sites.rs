@@ -175,11 +175,12 @@ fn receiver_of(text: &str, start: usize) -> Option<String> {
     }
     let operator_len = if at >= 2
         && ((bytes[at - 2] == b'-' && bytes[at - 1] == b'>')
-            || (bytes[at - 2] == b':' && bytes[at - 1] == b':'))
+            || (bytes[at - 2] == b':' && bytes[at - 1] == b':')
+            || (bytes[at - 2] == b'?' && bytes[at - 1] == b'.'))
     {
-        2 // `->` and `::`
+        2 // `->`, `::`, and `?.`
     } else if at >= 1 && bytes[at - 1] == b'.' {
-        1 // `.` and `?.` alike — the optional mark rides the operator
+        1
     } else {
         return None;
     };
@@ -307,7 +308,17 @@ fn is_module_path(text: &str) -> bool {
 fn import_line(ext: &str, code: &str, raw: &str, out: &mut Vec<String>) {
     let code_trim = code.trim_start();
     let raw_trim = raw.trim();
-    let after = |word: &str| code_trim.strip_prefix(word).map(str::trim_start);
+    let after = |word: &str| {
+        code_trim
+            .strip_prefix(word)
+            .filter(|r| r.starts_with(char::is_whitespace))
+            .map(str::trim_start)
+    };
+    let starts_kw = |word: &str| {
+        code_trim
+            .strip_prefix(word)
+            .is_some_and(|r| r.is_empty() || r.starts_with(|c: char| !is_ident_char(c, false)))
+    };
     match ext {
         "py" => {
             if let Some(rest) = after("import") {
@@ -340,7 +351,7 @@ fn import_line(ext: &str, code: &str, raw: &str, out: &mut Vec<String>) {
             }
         }
         "js" | "jsx" | "ts" | "tsx" => {
-            if code_trim.starts_with("import") || code_trim.starts_with("export") {
+            if starts_kw("import") || starts_kw("export") {
                 if let Some((_, spec)) = quoted_spec_at(raw_trim) {
                     out.push(spec);
                 }
@@ -352,7 +363,7 @@ fn import_line(ext: &str, code: &str, raw: &str, out: &mut Vec<String>) {
             }
         }
         "go" => {
-            if code_trim.starts_with("import") {
+            if starts_kw("import") {
                 if let Some((_, spec)) = quoted_spec_at(raw_trim) {
                     out.push(spec);
                 }
@@ -608,5 +619,15 @@ mod tests {
                 ("after_punct".to_owned(), None, 4),
             ]
         );
+    }
+
+    #[test]
+    fn optional_chaining_receiver_and_import_word_boundaries() {
+        let calls = names_of("ts", "obj?.method();\n");
+        assert_eq!(calls, vec![("method".to_owned(), Some("obj".to_owned()), 0)]);
+        assert!(import_spellings("rs", "useful();\n").is_empty());
+        assert!(import_spellings("py", "import_foo = 1\n").is_empty());
+        assert!(import_spellings("ts", "imported = \"foo\";\n").is_empty());
+        assert!(import_spellings("cs", "using_x;\n").is_empty());
     }
 }

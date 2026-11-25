@@ -477,10 +477,9 @@ export class ReferencesView {
 		const group = el('div', 'refs-group', [header]);
 		if (open) {
 			if (file.matches.length > SITE_CAP) {
-				this.paintGroup(section, group, file, file.matches.slice(0, SITE_CAP));
-				group.appendChild(el('div', 'refs-cut', [t('references.sitesCut')]));
+				this.paintGroup(section, group, file, file.matches.slice(0, SITE_CAP), true);
 			} else {
-				this.paintGroup(section, group, file, file.matches);
+				this.paintGroup(section, group, file, file.matches, false);
 			}
 		}
 		return group;
@@ -489,7 +488,7 @@ export class ReferencesView {
 	/** The group's site rows: the def marker, the context arrow, the row's own segments
 	 *  (the container prefix, the file name, the 1-based line number, the line's code
 	 *  colored), each present per its switch. */
-	private paintGroup(section: ResultSection, group: HTMLElement, file: SymbolRefFile, matches: SymbolRefFile['matches']): void {
+	private paintGroup(section: ResultSection, group: HTMLElement, file: SymbolRefFile, matches: SymbolRefFile['matches'], truncated: boolean): void {
 		const pending = el('div', 'refs-hint', [icon('sync', 'codicon-modifier-spin')]);
 		group.appendChild(pending);
 		void this.loadFile(file.path).then((data) => {
@@ -500,6 +499,7 @@ export class ReferencesView {
 				if (!this.openGroups.has(groupKey(section.id, file.path))) return;
 				group.appendChild(this.buildSite(section, file, match, data, defs?.get(match.line - 1)));
 			}
+			if (truncated) group.appendChild(el('div', 'refs-cut', [t('references.sitesCut')]));
 			// An expanded site of a re-rendered group repaints its folded context from the cache.
 			for (const match of matches) {
 				if (this.openSites.has(siteKey(section.id, file.path, match.line))) {

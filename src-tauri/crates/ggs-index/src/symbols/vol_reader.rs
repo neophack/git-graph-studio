@@ -154,10 +154,22 @@ impl VolumeSigReader {
         if records.len() != files.len() {
             return None;
         }
+        let tables = super::projvol_sig::builtin_tables();
+        let is_xc = filename == XC_VOL_FILE;
+        let token_bytes = token.as_bytes();
         let mut hits = Vec::new();
         for (fid, rec) in records {
-            if sig_matches_pair(rec, pair) {
-                if let Some(path) = files.get(fid as usize) {
+            if let Some(path) = files.get(fid as usize) {
+                // Stop-words omitted by `build_xc_record` / `build_xr_record` never set
+                // bits in this file's bloom signature; conservatively keep the file so
+                // Find References never drops valid hits for identifiers like `print`/`get`.
+                let ext = super::projvol_sig::ext_key(path.as_bytes());
+                let excluded = if is_xc {
+                    tables.xc(&ext).contains(token_bytes)
+                } else {
+                    tables.xr_xf(&ext).contains(token_bytes)
+                };
+                if excluded || sig_matches_pair(rec, pair) {
                     hits.push(path.clone());
                 }
             }

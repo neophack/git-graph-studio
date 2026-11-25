@@ -580,9 +580,10 @@ export class RelationGraphView {
 
 	/** The picker: the thirteen relation views, the active one checked. */
 	private showKindPicker(event: MouseEvent): void {
+		const activeKind = this.kind === 'refsTo' ? 'referencedByFunctions' : this.kind;
 		const entries: MenuEntry[] = PICKER_KINDS.map((entry) => ({
 			label: t(entry.label),
-			checked: this.kind === entry.kind,
+			checked: activeKind === entry.kind,
 			run: () => this.setKind(entry.kind)
 		}));
 		showContextMenu(event.clientX, event.clientY, entries);
@@ -1004,6 +1005,11 @@ export class RelationGraphView {
 			});
 			const cx = (firstCx + lastCx) / 2;
 			this.layout.set(node.key, { x: cx - w / 2, y, w, h });
+			if (node.hasChildren) {
+				const spot = this.layout.get(node.key)!;
+				this.layoutExp.set(node.key, { x: spot.x + spot.w / 2, y: spot.y + spot.h + EXPANDER_OFF });
+			}
+			return Math.max(at - left, w + 2 * HGAP);
 		} else {
 			// The leaf's box is its width plus the folded breathing room on both faces;
 			// the card centers in it — the sibling pitch rides the same number.
@@ -1013,10 +1019,6 @@ export class RelationGraphView {
 		if (node.hasChildren) {
 			const spot = this.layout.get(node.key)!;
 			this.layoutExp.set(node.key, { x: spot.x + spot.w / 2, y: spot.y + spot.h + EXPANDER_OFF });
-		}
-		if (kids.length > 0) {
-			const last = this.layout.get(kids[kids.length - 1]!.key)!;
-			return last.x + last.w + HGAP - left;
 		}
 		return w + 2 * HGAP;
 	}
@@ -1043,6 +1045,11 @@ export class RelationGraphView {
 			});
 			const cy = (firstCy + lastCy) / 2;
 			this.layout.set(node.key, { x: left, y: cy - NODE_H / 2, w, h: this.nodeHeight(node) });
+			if (node.hasChildren) {
+				const spot = this.layout.get(node.key)!;
+				this.layoutExp.set(node.key, { x: spot.x + spot.w + EXPANDER_OFF, y: spot.y + NODE_H / 2 });
+			}
+			return Math.max(at - top, this.nodeHeight(node) + 2 * VGAP);
 		} else {
 			const cy = top + VGAP + NODE_H / 2;
 			this.layout.set(node.key, { x: left, y: cy - NODE_H / 2, w, h: this.nodeHeight(node) });
@@ -1050,10 +1057,6 @@ export class RelationGraphView {
 		if (node.hasChildren) {
 			const spot = this.layout.get(node.key)!;
 			this.layoutExp.set(node.key, { x: spot.x + spot.w + EXPANDER_OFF, y: spot.y + NODE_H / 2 });
-		}
-		if (kids.length > 0) {
-			const last = this.layout.get(kids[kids.length - 1]!.key)!;
-			return last.y + last.h + VGAP - top;
 		}
 		return this.nodeHeight(node) + 2 * VGAP;
 	}
@@ -1119,7 +1122,8 @@ export class RelationGraphView {
 	 *  (SPEC-ui-relation §1.3). The rows walk the same visible tree the board
 	 *  draws, so the rings' expansion state carries across the views untouched. */
 	private paintOutline(): void {
-		const current = PICKER_KINDS.find((entry) => entry.kind === this.kind) ?? PICKER_KINDS[0];
+		const activeKind = this.kind === 'refsTo' ? 'referencedByFunctions' : this.kind;
+		const current = PICKER_KINDS.find((entry) => entry.kind === activeKind) ?? PICKER_KINDS[0];
 		this.outlineHead.textContent = '';
 		this.outlineHead.append(
 			el('span', 'rg-ol-twistie'),
@@ -1745,8 +1749,8 @@ export class RelationGraphView {
 		const fullyVisible = box.minX >= left && box.minY >= top && box.maxX <= right && box.maxY <= bottom;
 		if (fullyVisible) return;
 		if (spanW <= right - left && spanH <= bottom - top) {
-			this.camX -= (box.minX + box.maxX) / 2 - (left + right) / 2;
-			this.camY -= (box.minY + box.maxY) / 2 - (top + bottom) / 2;
+			this.camX -= ((box.minX + box.maxX) / 2 - (left + right) / 2) * this.camScale;
+			this.camY -= ((box.minY + box.maxY) / 2 - (top + bottom) / 2) * this.camScale;
 		} else {
 			this.fit();
 			return;
@@ -1845,12 +1849,14 @@ export class RelationGraphView {
 	private readonly declCache = new Map<string, Promise<DeclFragment | null>>();
 
 	private declCard: HTMLElement | null = null;
+	private declToken = 0;
 
 	private scheduleDecl(node: GraphNode, x: number, y: number): void {
 		if (this.declTimer !== null) clearTimeout(this.declTimer);
+		const token = ++this.declToken;
 		this.declTimer = window.setTimeout(() => {
 			this.declTimer = null;
-			void this.showDecl(node, this.generation, x, y);
+			void this.showDecl(node, this.generation, token, x, y);
 		}, DECL_DELAY);
 	}
 
@@ -1889,10 +1895,11 @@ export class RelationGraphView {
 		return fetch;
 	}
 
-	private async showDecl(node: GraphNode, generation: number, x: number, y: number): Promise<void> {
+	private async showDecl(node: GraphNode, generation: number, token: number, x: number, y: number): Promise<void> {
 		const fragment = await this.declFragment(node.name, node.path);
-		if (!fragment || generation !== this.generation || this.disposed) return;
-		this.hideDecl();
+		if (!fragment || generation !== this.generation || token !== this.declToken || this.disposed) return;
+		this.declCard?.remove();
+		this.declCard = null;
 		const card = el('div', 'rg-decl');
 		// The declaration's own colors: the shared tokenizer's runs, one row per line —
 		// the hover reads like the editor's code, not like plain text.
@@ -1922,6 +1929,7 @@ export class RelationGraphView {
 	}
 
 	private hideDecl(): void {
+		this.declToken++;
 		if (this.declTimer !== null) {
 			clearTimeout(this.declTimer);
 			this.declTimer = null;

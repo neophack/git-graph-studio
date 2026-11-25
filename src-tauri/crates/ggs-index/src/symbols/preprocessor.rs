@@ -139,7 +139,10 @@ fn eval_expr(expr: &str, macros: &HashMap<String, Option<i64>>) -> Option<bool> 
         }
     }
     // `defined(NAME)` or `defined NAME`
-    if let Some(rest) = s.strip_prefix("defined") {
+    if let Some(rest) = s
+        .strip_prefix("defined")
+        .filter(|r| r.starts_with(|c: char| c.is_whitespace() || c == '('))
+    {
         let rest = rest.trim();
         let name = if let Some(inner) = rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
             inner.trim()
@@ -258,30 +261,30 @@ pub fn eval_inactive_ranges(
             match kw {
                 "ifdef" => {
                     let name = strip_line_comment(arg).split_whitespace().next().unwrap_or("");
-                    let cond = macros.get(name).map(|v| v.is_some()).unwrap_or(true);
-                    let take = active_now && cond;
+                    let cond = macros.get(name).map(|v| v.is_some());
+                    let take = active_now && cond.unwrap_or(true);
                     stack.push(BranchFrame {
                         parent_active: active_now,
-                        any_taken: take,
+                        any_taken: active_now && cond == Some(true),
                         currently_active: take,
                     });
                 }
                 "ifndef" => {
                     let name = strip_line_comment(arg).split_whitespace().next().unwrap_or("");
-                    let cond = macros.get(name).map(|v| v.is_none()).unwrap_or(true);
-                    let take = active_now && cond;
+                    let cond = macros.get(name).map(|v| v.is_none());
+                    let take = active_now && cond.unwrap_or(true);
                     stack.push(BranchFrame {
                         parent_active: active_now,
-                        any_taken: take,
+                        any_taken: active_now && cond == Some(true),
                         currently_active: take,
                     });
                 }
                 "if" => {
-                    let cond = eval_expr(arg, &macros).unwrap_or(true);
-                    let take = active_now && cond;
+                    let cond = eval_expr(arg, &macros);
+                    let take = active_now && cond.unwrap_or(true);
                     stack.push(BranchFrame {
                         parent_active: active_now,
-                        any_taken: take,
+                        any_taken: active_now && cond == Some(true),
                         currently_active: take,
                     });
                 }
@@ -290,9 +293,9 @@ pub fn eval_inactive_ranges(
                         if !frame.parent_active || frame.any_taken {
                             frame.currently_active = false;
                         } else {
-                            let cond = eval_expr(arg, &macros).unwrap_or(true);
-                            frame.currently_active = cond;
-                            if cond {
+                            let cond = eval_expr(arg, &macros);
+                            frame.currently_active = cond.unwrap_or(true);
+                            if cond == Some(true) {
                                 frame.any_taken = true;
                             }
                         }
@@ -531,5 +534,24 @@ int dead = 4;
         let exp = expand_macro_at(&store, "CLAMP", Some("int x = CLAMP(speed, 0, 100);")).unwrap();
         assert_eq!(exp.params, vec!["v", "lo", "hi"]);
         assert_eq!(exp.expanded, "((speed) < (0) ? (0) : ((speed) > (100) ? (100) : (speed)))");
+    }
+
+    #[test]
+    fn indeterminate_ifdef_never_dims_else_and_defined_requires_boundary() {
+        let src = "\
+#ifdef UNKNOWN_FLAG
+int a = 1;
+#else
+int b = 2;
+#endif
+#if defined_flag
+int c = 3;
+#endif
+";
+        let mut macros = HashMap::new();
+        macros.insert("defined_flag".to_owned(), Some(0));
+        let ranges = eval_inactive_ranges(src, &macros);
+        // UNKNOWN_FLAG is indeterminate: neither branch dims. `defined_flag == 0` dims line 6.
+        assert_eq!(ranges, vec![InactiveRange { start_line: 6, end_line: 6 }]);
     }
 }

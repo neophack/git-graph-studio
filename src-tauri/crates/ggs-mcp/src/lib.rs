@@ -682,9 +682,9 @@ impl McpServer {
             return Ok(format!("No symbol name contains '{query}'{kind_note}."));
         }
         let count = if fetched.len() == LIST_LIMIT_MAX as usize {
-            format!("{LIST_LIMIT_MAX}+")
+            format!("{}+", filtered.len())
         } else {
-            fetched.len().to_string()
+            filtered.len().to_string()
         };
         let mut out = format!("{count} symbol(s) matching '{query}':");
         for hit in &hits {
@@ -1040,6 +1040,8 @@ impl McpServer {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .replace('\\', "/");
+        let _ = self.index.ensure_blocking(None, &self.root);
+        let refs_of = |name: &str| self.index.ref_count(&self.root, name).unwrap_or(0);
         let data = self.analysis_data()?;
         // The answer is the ranked top `limit` — selected while the files stream, one
         // file's rows in memory at a time (enriched by the big-code-analysis engine as
@@ -1052,7 +1054,7 @@ impl McpServer {
                 if !prefix.is_empty() && !file.path.starts_with(&prefix) {
                     continue;
                 }
-                let mut rows = rows_for_file(&data, file, &|_| 0);
+                let mut rows = rows_for_file(&data, file, &refs_of);
                 let ext = file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
                 if let Ok(text) =
                     std::fs::read_to_string(std::path::Path::new(data.root()).join(&file.path))
@@ -1248,6 +1250,7 @@ impl McpServer {
                 }
             }
         }
+        findings.sort_by_key(|finding| class_of(finding.severity));
         let total = counts.iter().sum();
         if total == 0 {
             return Ok(format!("No security rule findings{scope}."));
@@ -1394,7 +1397,7 @@ impl McpServer {
             if let Some(container) = &subject.container {
                 out.push_str(&format!("{n}container: {container}", n = '\n'));
             }
-            if defs.len() > 1 {
+            if !defs.is_empty() {
                 out.push_str(&format!(
                     "{n}also declared in {count} other file(s):{rest}",
                     n = '\n',
@@ -1569,8 +1572,27 @@ impl McpServer {
             .and_then(Value::as_str)
             .ok_or((-32602, "missing argument: path".to_owned()))?
             .replace('\\', "/");
-        let absolute = std::path::Path::new(&self.root).join(&path);
-        let bytes = std::fs::read(&absolute).map_err(|e| (-32602, format!("{path}: {e}")))?;
+        let Ok(root) = std::path::Path::new(&self.root).canonicalize() else {
+            return Ok(format!(
+                "The served folder '{}' is not readable.",
+                self.root
+            ));
+        };
+        let Ok(canonical) = root.join(&path).canonicalize() else {
+            return Ok(format!("No readable file at '{path}'."));
+        };
+        if !canonical.starts_with(&root) {
+            return Ok("The path escapes the served repository.".to_owned());
+        }
+        let Ok(bytes) = std::fs::read(&canonical) else {
+            return Ok(format!("No readable file at '{path}'."));
+        };
+        if bytes.len() > MAX_READ_BYTES {
+            return Ok(format!(
+                "{path} is {} bytes; file_dependencies reads files up to {MAX_READ_BYTES}",
+                bytes.len()
+            ));
+        }
         let text = String::from_utf8_lossy(&bytes);
         let ext = path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
         let files = self.store_files()?;
@@ -1881,7 +1903,8 @@ fn tool_catalogue() -> Value {
             "description": "The workspace's cross-file calls as module dependencies, edges ranked by call count (the busiest routes first) with the file pairs that carry them. Optional `module` narrows to that module's edges; `limit`/`offset` page.",
             "inputSchema": { "type": "object", "properties": {
                 "module": { "type": "string", "description": "A module (directory) name to narrow to, e.g. \"src\"; the workspace root is \"\"" },
-                "limit": { "type": "number", "description": "Edges per page (1-400, default 25)" },
+                "depth": { "type": "number", "description": "Directory grouping depth (0 = auto, 1-3)" },
+                "limit": { "type": "number", "description": "Edges per page (1-100, default 25)" },
                 "offset": { "type": "number", "description": "Skip this many edges (paging)" }
             } }
         },

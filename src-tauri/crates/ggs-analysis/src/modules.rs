@@ -219,8 +219,11 @@ fn relative_to_scope<'a>(path: &'a str, scope: &str) -> &'a str {
 }
 
 /// Group an internal file into a module or file node at `depth` (`1`, `2`, or `>=3` for file).
+/// When `scope` is empty and `folders` restricts the graph to nested paths (e.g. `src/features`),
+/// never collapse above the matched folder's own depth so internal nodes stay disjoint from
+/// external sibling directories under the same top-level folder.
 /// Returns `(node_id, label, is_file)`.
-fn internal_group(path: &str, scope: &str, depth: u8) -> (String, String, bool) {
+fn internal_group(path: &str, scope: &str, depth: u8, folders: &[String]) -> (String, String, bool) {
     let rel = relative_to_scope(path, scope);
     if depth >= 3 {
         return (path.to_owned(), rel.to_owned(), true);
@@ -231,7 +234,17 @@ fn internal_group(path: &str, scope: &str, depth: u8) -> (String, String, bool) 
         return (path.to_owned(), rel.to_owned(), true);
     }
     let dir_segments = parts.len() - 1;
-    let take = (depth as usize).min(dir_segments);
+    let min_folder_depth = if scope.is_empty() {
+        folders
+            .iter()
+            .filter(|f| path == f.as_str() || path.starts_with(&format!("{f}/")))
+            .map(|f| f.split('/').count())
+            .max()
+            .unwrap_or(1)
+    } else {
+        1
+    };
+    let take = (depth as usize).max(min_folder_depth).min(dir_segments);
     let rel_dir = parts[..take].join("/");
     let id = if scope.is_empty() {
         rel_dir.clone()
@@ -243,18 +256,19 @@ fn internal_group(path: &str, scope: &str, depth: u8) -> (String, String, bool) 
 
 /// Group an external file (outside `scope` or `folders`) into a concise external context
 /// bucket: 1st segment by default, or 2nd segment if it shares the top-level directory
-/// with `scope` (so drilling into `src/features` sees `src/platform` instead of `src`).
-fn external_group(path: &str, scope: &str) -> (String, String) {
+/// with `scope` or a nested `folders` entry (so focusing `src/features` sees `src/platform`
+/// instead of colliding on `src`).
+fn external_group(path: &str, scope: &str, folders: &[String]) -> (String, String) {
     let scope_top = scope.split('/').next().unwrap_or("");
     let parts: Vec<&str> = path.split('/').collect();
     if parts.len() == 1 {
         return ("".to_owned(), "(root)".to_owned());
     }
-    let want = if !scope_top.is_empty() && parts[0] == scope_top && parts.len() >= 3 {
-        2
-    } else {
-        1
-    };
+    let shares_top = (!scope_top.is_empty() && parts[0] == scope_top)
+        || folders
+            .iter()
+            .any(|f| f.contains('/') && f.split('/').next() == Some(parts[0]));
+    let want = if shares_top && parts.len() >= 3 { 2 } else { 1 };
     let take = want.min(parts.len() - 1);
     let id = parts[..take].join("/");
     (id.clone(), id)
@@ -276,8 +290,8 @@ fn pick_effective_depth(facts: &StoreDependencyFacts, scope: &str, folders: &[St
         if rel.contains('/') {
             has_subdirs = true;
         }
-        d1.insert(internal_group(path, scope, 1).0);
-        d2.insert(internal_group(path, scope, 2).0);
+        d1.insert(internal_group(path, scope, 1, folders).0);
+        d2.insert(internal_group(path, scope, 2, folders).0);
     }
     if !has_subdirs {
         return 3;
@@ -334,7 +348,7 @@ pub fn module_overview(
         if internal {
             total_files += 1;
             total_symbols += sym_count;
-            let (id, label, is_file) = internal_group(path, &scope, effective_depth);
+            let (id, label, is_file) = internal_group(path, &scope, effective_depth, &folders);
             let entry = nodes_acc.entry(id.clone()).or_insert_with(|| NodeAcc {
                 label,
                 kind: if is_file { "file" } else { "module" },
@@ -355,7 +369,7 @@ pub fn module_overview(
             }
             file_node.push((id, true));
         } else {
-            let (id, label) = external_group(path, &scope);
+            let (id, label) = external_group(path, &scope, &folders);
             let entry = nodes_acc.entry(id.clone()).or_insert_with(|| NodeAcc {
                 label,
                 kind: "external",
@@ -658,9 +672,9 @@ pub fn module_edge_detail(
     for (fid, path) in facts.files.iter().enumerate() {
         let internal = in_folders(path, &folders) && in_scope(path, &scope);
         let gid = if internal {
-            internal_group(path, &scope, effective_depth).0
+            internal_group(path, &scope, effective_depth, &folders).0
         } else {
-            external_group(path, &scope).0
+            external_group(path, &scope, &folders).0
         };
         if gid == from_id {
             from_fids.push(fid as u32);
@@ -1106,5 +1120,25 @@ mod tests {
         assert_eq!(detail.file_pairs.len(), 1);
         assert_eq!(detail.file_pairs[0].sites[0].symbol, "formatTitle");
         assert_eq!(detail.file_pairs[0].sites[0].line, 1);
+    }
+
+    #[test]
+    fn nested_folder_filter_keeps_internal_and_external_nodes_disjoint() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "src/features/a.ts",
+            "import { helper } from '../platform/b';\nexport function runA() { return helper(); }\n",
+        );
+        write(
+            dir.path(),
+            "src/platform/b.ts",
+            "export function helper() { return 1; }\n",
+        );
+        let facts = facts_of(dir.path());
+        let ov = module_overview(&facts, None, 0, &["src/features".to_owned()]);
+        assert!(ov.nodes.iter().any(|n| n.id == "src/features" && n.kind == "module"));
+        assert!(ov.nodes.iter().any(|n| n.id == "src/platform" && n.kind == "external"));
+        assert!(ov.edges.iter().any(|e| e.from == "src/features" && e.to == "src/platform"));
     }
 }
