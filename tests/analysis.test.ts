@@ -648,4 +648,97 @@ describe('the graph pages', () => {
 		cycle.click();
 		expect(opened).toEqual(['src/a.js']);
 	});
+
+	it('routes item clicks in metrics, dead code, security and import graph to the definition panel', async () => {
+		await modules();
+
+		// 1. Complexity & Hotspots (metrics)
+		backend.on('analysis_metrics', ({ onEvent }) => {
+			const channel = onEvent as Channel;
+			channel.send({
+				kind: 'batch',
+				rows: [
+					{ path: 'src/a.rs', name: 'storm', kind: 'method', container: 'Srv', line: 9, lines: 30, params: 4, complexity: 9, nesting: 3, refs: 4, hotspot: 36 }
+				]
+			});
+			channel.send({ kind: 'done', files: 1, functions: 1, cancelled: false });
+			return null;
+		});
+		const metricsRoot = host();
+		const metricsPage = createAnalysisPage('metrics', metricsRoot);
+		const metricsOpened: string[] = [];
+		const metricsDefs: Array<{ kind: string; name: string; path: string; line: number; endLine?: number }> = [];
+		metricsPage.onOpen = (path, line) => metricsOpened.push(`${path}:${line}`);
+		metricsPage.onShowDefinition = (subject) => metricsDefs.push(subject);
+		await flush(8);
+		metricsRoot.querySelector<HTMLElement>('.an-row')!.click();
+		expect(metricsDefs).toEqual([{ kind: 'method', name: 'Srv.storm', path: 'src/a.rs', line: 9, endLine: 38 }]);
+		expect(metricsOpened).toEqual([]);
+
+		// 2. Dead Code (deadcode)
+		backend.on('analysis_dead_code', ({ onEvent }) => {
+			const channel = onEvent as Channel;
+			channel.send({
+				kind: 'batch',
+				rows: [
+					{ path: 'src/unused.ts', name: 'orphan', kind: 'function', container: null, line: 4, exported: false, lines: 6 }
+				]
+			});
+			channel.send({ kind: 'done', found: 1, cancelled: false });
+			return null;
+		});
+		const deadRoot = host();
+		const deadPage = createAnalysisPage('deadcode', deadRoot);
+		const deadOpened: string[] = [];
+		const deadDefs: Array<{ kind: string; name: string; path: string; line: number; endLine?: number }> = [];
+		deadPage.onOpen = (path, line) => deadOpened.push(`${path}:${line}`);
+		deadPage.onShowDefinition = (subject) => deadDefs.push(subject);
+		await flush(8);
+		deadRoot.querySelector<HTMLElement>('.an-row')!.click();
+		expect(deadDefs).toEqual([{ kind: 'function', name: 'orphan', path: 'src/unused.ts', line: 4, endLine: 9 }]);
+		expect(deadOpened).toEqual([]);
+
+		// 3. Security Scan (security)
+		backend.on('analysis_security', ({ onEvent }) => {
+			const channel = onEvent as Channel;
+			channel.send({
+				kind: 'batch',
+				findings: [{ ruleId: 'SEC-003', severity: 'error', message: 'hardcoded secret', path: 'cfg.py', line: 2, column: 0, cwe: 'CWE-798' }]
+			});
+			channel.send({ kind: 'done', files: 1, findings: 1, cancelled: false });
+			return null;
+		});
+		const secRoot = host();
+		const secPage = createAnalysisPage('security', secRoot);
+		const secOpened: string[] = [];
+		const secDefs: Array<{ kind: string; name: string; path: string; line: number }> = [];
+		secPage.onOpen = (path, line) => secOpened.push(`${path}:${line}`);
+		secPage.onShowDefinition = (subject) => secDefs.push(subject);
+		await flush(8);
+		secRoot.querySelector<HTMLElement>('.an-row')!.click();
+		expect(secDefs).toEqual([{ kind: 'file', name: 'SEC-003: hardcoded secret', path: 'cfg.py', line: 2 }]);
+		expect(secOpened).toEqual([]);
+
+		// 4. Import Dependency Graph (imports) — cycles, cycle steps, and dependency edges
+		backend.on('analysis_import_graph', () => ({
+			edges: [['src/c.ts', 'src/b.js']],
+			cycles: [['src/a.js', 'src/b.js']]
+		}));
+		const impRoot = host();
+		const impPage = createAnalysisPage('imports', impRoot);
+		const impOpened: string[] = [];
+		const impDefs: Array<{ kind: string; name: string; path: string; line: number }> = [];
+		impPage.onOpen = (path, line) => impOpened.push(`${path}:${line}`);
+		impPage.onShowDefinition = (subject) => impDefs.push(subject);
+		await flush(8);
+		impRoot.querySelector<HTMLElement>('.an-row.an-cycle')!.click();
+		impRoot.querySelector<HTMLElement>('.an-cycle-step')!.click();
+		impRoot.querySelectorAll<HTMLElement>('.an-row:not(.an-cycle)')[0]!.click();
+		expect(impDefs).toEqual([
+			{ kind: 'file', name: 'a.js', path: 'src/a.js', line: 0 },
+			{ kind: 'file', name: 'b.js', path: 'src/b.js', line: 0 },
+			{ kind: 'file', name: 'c.ts', path: 'src/c.ts', line: 0 }
+		]);
+		expect(impOpened).toEqual([]);
+	});
 });

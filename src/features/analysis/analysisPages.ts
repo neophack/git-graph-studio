@@ -141,7 +141,7 @@ abstract class ReportPage<T> implements AnalysisPageView {
 	/** The typed channel + invoke of the report command. */
 	protected abstract fetch(run: number): Promise<void>;
 
-	/** One result row; clicks call `this.open(path, line)`. */
+	/** One result row; clicks preview in the Definition panel via `this.showDefinition`. */
 	protected abstract renderRow(row: T): HTMLElement;
 
 	/** Whether a row survives the filter box. */
@@ -152,6 +152,16 @@ abstract class ReportPage<T> implements AnalysisPageView {
 
 	protected open(path: string, line: number): void {
 		this.onOpen?.(path, line);
+	}
+
+	/** Preview a symbol or location in the bottom panel's Definition page, falling back
+	 *  to opening the file in the editor when no Definition handler is wired. */
+	protected showDefinition(subject: DefinitionSubject): void {
+		if (this.onShowDefinition) {
+			this.onShowDefinition(subject);
+		} else {
+			this.open(subject.path, subject.line + 1);
+		}
 	}
 
 	protected async start(): Promise<void> {
@@ -301,9 +311,10 @@ class MetricsPage extends ReportPage<MetricRow> {
 		element.title = row.cognitive === undefined
 			? row.path
 			: `${row.path}\n${tf('analysis.metrics.rich', row.cognitive, row.lloc ?? 0, row.halstead ?? 0, row.mi ?? 0)}`;
+		const label = row.container ? `${row.container}.${row.name}` : row.name;
 		element.append(
 			icon(KIND_ICONS[row.kind] ?? 'symbol-method'),
-			el('span', 'label', [row.container ? `${row.container}.${row.name}` : row.name]),
+			el('span', 'label', [label]),
 			el('span', 'description', [row.path]),
 			el('span', 'an-metrics', [
 				el('span', 'an-hot', [`C ${row.complexity}`]),
@@ -316,7 +327,13 @@ class MetricsPage extends ReportPage<MetricRow> {
 			]),
 			el('span', 'tail', [`H ${row.hotspot}`])
 		);
-		element.addEventListener('click', () => this.open(row.path, row.line + 1));
+		element.addEventListener('click', () => this.showDefinition({
+			kind: row.kind,
+			name: label,
+			path: row.path,
+			line: row.line,
+			...(row.lines > 1 && { endLine: row.line + row.lines - 1 })
+		}));
 		return element;
 	}
 }
@@ -366,14 +383,21 @@ class DeadCodePage extends ReportPage<DeadRow> {
 	protected renderRow(row: DeadRow): HTMLElement {
 		const element = el('div', 'an-row');
 		element.title = row.exported ? t('analysis.deadcode.exported') : t('analysis.deadcode.private');
+		const label = row.container ? `${row.container}.${row.name}` : row.name;
 		element.append(
 			icon(KIND_ICONS[row.kind] ?? 'symbol-method'),
-			el('span', 'label', [row.container ? `${row.container}.${row.name}` : row.name]),
+			el('span', 'label', [label]),
 			el('span', 'description', [row.path]),
 			...(row.exported ? [el('span', 'an-chip', ['exported'])] : []),
 			el('span', 'tail', [`${row.lines} ln`])
 		);
-		element.addEventListener('click', () => this.open(row.path, row.line + 1));
+		element.addEventListener('click', () => this.showDefinition({
+			kind: row.kind,
+			name: label,
+			path: row.path,
+			line: row.line,
+			...(row.lines > 1 && { endLine: row.line + row.lines - 1 })
+		}));
 		return element;
 	}
 }
@@ -424,7 +448,12 @@ class SecurityPage extends ReportPage<Finding> {
 			el('span', 'an-chip', [row.ruleId]),
 			el('span', 'description', [`${row.path}:${row.line + 1}`])
 		);
-		element.addEventListener('click', () => this.open(row.path, row.line + 1));
+		element.addEventListener('click', () => this.showDefinition({
+			kind: 'file',
+			name: `${row.ruleId}: ${row.message}`,
+			path: row.path,
+			line: row.line
+		}));
 		return element;
 	}
 }
@@ -1354,6 +1383,14 @@ class ImportsPage implements AnalysisPageView {
 		if (this.loading) this.render();
 	}
 
+	private showDefinition(path: string, line = 0): void {
+		if (this.onShowDefinition) {
+			this.onShowDefinition({ kind: 'file', name: basename(path), path, line });
+		} else {
+			this.onOpen?.(path, line + 1);
+		}
+	}
+
 	render(): void {
 		this.body.textContent = '';
 		this.title.textContent = this.loading
@@ -1386,11 +1423,16 @@ class ImportsPage implements AnalysisPageView {
 				const row = el('div', 'an-row an-cycle');
 				const parts: Node[] = [icon('sync')];
 				cycle.forEach((file, index) => {
-					parts.push(el('span', index === 0 ? 'label' : 'an-cycle-step', [file]));
+					const step = el('span', index === 0 ? 'label' : 'an-cycle-step', [file]);
+					step.addEventListener('click', (event) => {
+						event.stopPropagation();
+						this.showDefinition(file);
+					});
+					parts.push(step);
 					if (index < cycle.length - 1) parts.push(el('span', 'an-arrow', ['→']));
 				});
 				row.append(...parts);
-				row.addEventListener('click', () => this.onOpen?.(cycle[0], 1));
+				row.addEventListener('click', () => this.showDefinition(cycle[0]));
 				this.body.appendChild(row);
 			}
 		}
@@ -1404,7 +1446,7 @@ class ImportsPage implements AnalysisPageView {
 				el('span', 'label', [from]),
 				el('span', 'description', [to])
 			);
-			row.addEventListener('click', () => this.onOpen?.(from, 1));
+			row.addEventListener('click', () => this.showDefinition(from));
 			this.body.appendChild(row);
 		}
 		if (edges.length > 2000) {
