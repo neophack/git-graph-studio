@@ -681,11 +681,19 @@ fn refs_from(
             if word == name || keywords.contains(&word) {
                 continue;
             }
-            let Some(target) = same_file
-                .iter()
-                .filter(|def| def.name == word)
-                .max_by_key(|def| def.end_line > def.line)
-                .map(|row| row_def(&subject.path, row))
+            let col_chars = line_text[..start].chars().count();
+            let member_hit = crate::symbols::type_resolve::resolve_member_symbol(
+                store, &text, ext, line_no, col_chars, word,
+            );
+            let Some(target) = pick_def(&member_hit)
+                .map(sym_def)
+                .or_else(|| {
+                    same_file
+                        .iter()
+                        .filter(|def| def.name == word)
+                        .max_by_key(|def| def.end_line > def.line)
+                        .map(|row| row_def(&subject.path, row))
+                })
                 .or_else(|| pick_def(&store.lookup(word)).map(sym_def))
             else {
                 continue;

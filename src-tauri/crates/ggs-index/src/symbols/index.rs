@@ -22,6 +22,10 @@ use ggs_base::sink::{BatchSink, EventSink};
 
 use crate::scan::{build_matcher, is_symbol_source, read_searchable, scan_text, FileMatches};
 use crate::symbols::store::{BuildStats, FileOutlineRow, SymbolStore};
+use crate::symbols::vol_reader::{
+    inspect_volume_stats, read_sym_slot_metrics, PagedIndexReader, SymSlotMetrics,
+    VolumeSigReader, VolumeStats,
+};
 use crate::symbols::WorkspaceSymbol;
 
 /// The event the status bar listens to; the payload is an [`IndexStatus`].
@@ -341,6 +345,109 @@ impl SymbolIndex {
         files
     }
 
+    /// Code-only candidate files for `name`, using the on-disk `.ggs_xc` Bloom signature
+    /// volume (comment/string/conditional stripped) to prune prose-only files before disk
+    /// reads. Intersects with the store's trusted occurrence list when both exist.
+    pub fn files_containing_code(&self, root: &str, name: &str) -> Option<Vec<String>> {
+        let store = self.store(root)?;
+        let (trusted, all_files) = {
+            let guard = store.lock().unwrap();
+            (
+                guard.files_containing(name),
+                guard
+                    .files_with_counts()
+                    .into_iter()
+                    .map(|(p, _)| p)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let dir = SymbolStore::index_dir(root, &self.home);
+        let xc = VolumeSigReader::new(dir).filter_files_xc(name, &all_files);
+        match (trusted, xc) {
+            (Some(t), Some(x)) => {
+                let set: std::collections::HashSet<&str> = x.iter().map(String::as_str).collect();
+                Some(t.into_iter().filter(|p| set.contains(p.as_str())).collect())
+            }
+            (Some(t), None) => Some(t),
+            (None, Some(x)) => Some(x),
+            (None, None) => None,
+        }
+    }
+
+    /// Fuzzy camel/snake word-part candidate files via `.ggs_xf` Bloom signatures.
+    pub fn search_word_parts_xf(&self, root: &str, part: &str) -> Option<Vec<String>> {
+        let store = self.store(root)?;
+        let all_files: Vec<String> = store
+            .lock()
+            .unwrap()
+            .files_with_counts()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        let dir = SymbolStore::index_dir(root, &self.home);
+        VolumeSigReader::new(dir).filter_files_xf(part, &all_files)
+    }
+
+    /// Paged 4 KiB B-tree prefix lookup over `.ggs_xab`/`.ggs_xad` (word parts) and
+    /// `.ggs_xsb`/`.ggs_xsd` (symbol names), returning matching `project.ggs_sym` slot ids.
+    pub fn search_paged_prefix(&self, root: &str, prefix: &str, limit: usize) -> Option<Vec<u16>> {
+        let dir = SymbolStore::index_dir(root, &self.home);
+        let reader = PagedIndexReader::new(dir);
+        let mut hits = reader.search_xab_prefix(prefix, limit)?;
+        if hits.len() < limit {
+            if let Some(xsb) = reader.search_xsb_prefix(prefix, limit - hits.len()) {
+                for slot in xsb {
+                    if !hits.contains(&slot) {
+                        hits.push(slot);
+                    }
+                }
+            }
+        }
+        Some(hits)
+    }
+
+    /// Read native `SymSlot` metrics (`raw108` + `name_tag`) from `project.ggs_sym`.
+    pub fn sym_slot_metrics(&self, root: &str) -> Option<HashMap<(u32, u32, String), SymSlotMetrics>> {
+        let dir = SymbolStore::index_dir(root, &self.home);
+        read_sym_slot_metrics(&dir)
+    }
+
+    /// Inspect on-disk 9-volume stats for `root`.
+    pub fn volume_stats(&self, root: &str) -> VolumeStats {
+        let dir = SymbolStore::index_dir(root, &self.home);
+        inspect_volume_stats(&dir)
+    }
+
+    /// Look up `name` in `root`, falling back to any configured read-only Base / SDK
+    /// projects (persisted in `<root>/.ggs/base-projects.json`). Base-project hits carry
+    /// absolute paths so the editor can open them directly as read-only SDK references.
+    pub fn lookup_with_base_projects(&self, root: &str, name: &str) -> Vec<WorkspaceSymbol> {
+        let primary = self.lookup(root, name).unwrap_or_default();
+        if !primary.is_empty() {
+            return primary;
+        }
+        let mut out = Vec::new();
+        for base_root in crate::symbols::preprocessor::load_base_projects(root) {
+            if base_root == root || !std::path::Path::new(&base_root).is_dir() {
+                continue;
+            }
+            if self.ensure_blocking(None, &base_root).is_err() {
+                continue;
+            }
+            if let Some(hits) = self.lookup(&base_root, name) {
+                for mut sym in hits {
+                    let abs = std::path::Path::new(&base_root)
+                        .join(&sym.path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    sym.path = abs;
+                    out.push(sym);
+                }
+            }
+        }
+        out
+    }
+
     /// Every indexed file with its declaration count, path-sorted — the MCP server's
     /// directory rollups, hub-file ranking and language mix read it. Cloned out (a query
     /// must not hold the build's lock).
@@ -658,16 +765,159 @@ fn ready_status(stats: &BuildStats) -> IndexStatus {
 
 /// Every whole-word occurrence of `name` in the workspace's code files — Find References'
 /// raw material, the `find_references` and `symbol_references` commands and the MCP
-/// server's `symbol_references` all served by this one implementation. The index's
-/// occurrence list narrows the scan to the files that contain the word at all; without one
-/// (or for a name the list does not trust), the whole tree is scanned.
+/// server's `symbol_references` all served by this one implementation. Uses `.ggs_xc`
+/// Bloom signatures alongside the store's occurrence list to prune comment-only files.
 pub fn references_for(
     index: &SymbolIndex,
     root: &str,
     name: &str,
 ) -> Result<Vec<FileMatches>, String> {
-    let narrow = index.files_containing(root, name);
+    let narrow = index.files_containing_code(root, name);
     scan_references(root, name, narrow)
+}
+
+/// One reference match enriched with Source-Insight-style access semantics:
+/// `decl` (declaration line), `call` (function/method invocation), `write` (assignment,
+/// compound assignment, increment/decrement, or `&mut`), or `read`.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassifiedRefMatch {
+    pub line: usize,
+    pub column: usize,
+    pub length: usize,
+    pub text: String,
+    pub access: &'static str,
+}
+
+/// One file's classified reference matches (`symbol_references` wire shape).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassifiedRefFile {
+    pub path: String,
+    pub matches: Vec<ClassifiedRefMatch>,
+}
+
+/// Classify a reference hit at 1-based `column` of `line_text` into `decl` / `call` /
+/// `write` / `read`. Handles C/C++/Rust/TS/JS/Go/Python/Java/C# assignment & mutation
+/// operators while excluding comparisons (`==`, `!=`, `<=`, `>=`, `=>`).
+pub fn classify_reference_access(
+    line_text: &str,
+    column_1based: usize,
+    length: usize,
+    is_decl_line: bool,
+) -> &'static str {
+    if is_decl_line {
+        return "decl";
+    }
+    let chars: Vec<char> = line_text.chars().collect();
+    let start = column_1based.saturating_sub(1).min(chars.len());
+    let end = (start + length).min(chars.len());
+
+    let mut after = end;
+    while after < chars.len() && chars[after].is_whitespace() {
+        after += 1;
+    }
+    if after < chars.len() && chars[after] == '(' {
+        return "call";
+    }
+    let mut lval_after = after;
+    while lval_after < chars.len() && chars[lval_after] == '[' {
+        let mut depth = 1usize;
+        lval_after += 1;
+        while lval_after < chars.len() && depth > 0 {
+            if chars[lval_after] == '[' {
+                depth += 1;
+            } else if chars[lval_after] == ']' {
+                depth -= 1;
+            }
+            lval_after += 1;
+        }
+        while lval_after < chars.len() && chars[lval_after].is_whitespace() {
+            lval_after += 1;
+        }
+    }
+    let tail: String = chars[lval_after..].iter().take(3).collect();
+    if tail.starts_with("++") || tail.starts_with("--") {
+        return "write";
+    }
+    if tail.starts_with(":=")
+        || tail.starts_with("+=")
+        || tail.starts_with("-=")
+        || tail.starts_with("*=")
+        || tail.starts_with("/=")
+        || tail.starts_with("%=")
+        || tail.starts_with("&=")
+        || tail.starts_with("|=")
+        || tail.starts_with("^=")
+        || tail.starts_with("<<=")
+        || tail.starts_with(">>=")
+    {
+        return "write";
+    }
+    if tail.starts_with('=') && !tail.starts_with("==") && !tail.starts_with("=>") {
+        return "write";
+    }
+
+    let mut before = start;
+    while before > 0 && chars[before - 1].is_whitespace() {
+        before -= 1;
+    }
+    if before >= 2 {
+        let prev2: String = chars[before - 2..before].iter().collect();
+        if prev2 == "++" || prev2 == "--" {
+            return "write";
+        }
+    }
+    if before >= 4 {
+        let prev_prefix: String = chars[..before].iter().collect();
+        if prev_prefix.ends_with("&mut") {
+            return "write";
+        }
+    }
+    "read"
+}
+
+/// Find References with `.ggs_xc` prefiltering + Read/Write/Call/Decl classification.
+pub fn classified_references_for(
+    index: &SymbolIndex,
+    root: &str,
+    name: &str,
+) -> Result<Vec<ClassifiedRefFile>, String> {
+    let raw = references_for(index, root, name)?;
+    let mut out = Vec::with_capacity(raw.len());
+    for file in raw {
+        let decl_lines: std::collections::HashSet<usize> = index
+            .file_symbols(root, &file.path)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.name == name)
+            .map(|s| s.line + 1)
+            .collect();
+        let matches = file
+            .matches
+            .into_iter()
+            .map(|m| {
+                let access = classify_reference_access(
+                    &m.text,
+                    m.column,
+                    m.length,
+                    decl_lines.contains(&m.line),
+                );
+                ClassifiedRefMatch {
+                    line: m.line,
+                    column: m.column,
+                    length: m.length,
+                    text: m.text,
+                    access,
+                }
+            })
+            .collect();
+        out.push(ClassifiedRefFile {
+            path: file.path,
+            matches,
+        });
+    }
+    Ok(out)
 }
 
 /// The scan behind every reference query: whole-word, case-sensitive matches over `narrow`

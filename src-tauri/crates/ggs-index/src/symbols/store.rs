@@ -318,6 +318,23 @@ pub struct FileOutlineRow {
     pub refs: usize,
 }
 
+/// Compact in-memory snapshot of the nine-volume store's file, declaration, occurrence,
+/// and inheritance tables for module-level architecture analysis (zero disk I/O).
+pub struct StoreDependencyFacts {
+    /// Indexed repo-relative forward-slash file paths, sorted (index = file_id).
+    pub files: Vec<String>,
+    /// Number of declared symbols per file (aligned with `files`).
+    pub symbol_counts: Vec<u32>,
+    /// Interned symbol, container, and base names (sorted, unique; index = name_id).
+    pub names: Vec<String>,
+    /// For each `name_id`: deduplicated ascending file ids that declare that name.
+    pub decl_files: Vec<Vec<u32>>,
+    /// For each `name_id`: trusted file ids mentioning that word (`None` if untrusted).
+    pub ref_files: Vec<Option<Vec<u32>>>,
+    /// Directed inheritance/implementation links as `(derived_file_id, base_name_id)`.
+    pub base_edges: Vec<(u32, u32)>,
+}
+
 /// What one file on disk currently is: its fingerprint, or nothing when it is gone.
 struct Stat {
     mtime_ms: u64,
@@ -697,6 +714,86 @@ impl SymbolStore {
                 })
                 .collect(),
         )
+    }
+
+    /// Snapshot the store's file, declaration, occurrence, and inheritance tables for
+    /// lock-free module-level architecture analysis (zero disk I/O).
+    pub fn dependency_facts(&self) -> StoreDependencyFacts {
+        let mut decl_files: Vec<Vec<u32>> = vec![Vec::new(); self.names.len()];
+        let mut base_edges: Vec<(u32, u32)> = Vec::new();
+        let mut files = Vec::with_capacity(self.files.len());
+        let mut symbol_counts = Vec::with_capacity(self.files.len());
+        for (fid, file) in self.files.iter().enumerate() {
+            let fid = fid as u32;
+            files.push(file.path.clone());
+            symbol_counts.push(file.symbols.len() as u32);
+            for symbol in &file.symbols {
+                let list = &mut decl_files[symbol.name_id as usize];
+                if list.last().copied() != Some(fid) {
+                    list.push(fid);
+                }
+            }
+            for record in &file.bases {
+                for &base in &record.bases {
+                    base_edges.push((fid, base));
+                }
+            }
+        }
+        base_edges.sort_unstable();
+        base_edges.dedup();
+        StoreDependencyFacts {
+            files,
+            symbol_counts,
+            names: self.names.clone(),
+            decl_files,
+            ref_files: self.refs.clone(),
+            base_edges,
+        }
+    }
+
+    /// Map a set of requested identifier names (typically the visible viewport's words)
+    /// to their primary semantic kind (`macro`, `class`, `struct`, `enum`, `interface`,
+    /// `type`, `function`, `method`, `field`, `constant`, `variable`, `module`) in one
+    /// zero-disk-I/O pass — powers editor semantic syntax coloring (Area 3).
+    pub fn semantic_kinds_for(&self, wanted: &[String]) -> HashMap<String, &'static str> {
+        let mut wanted_ids: HashMap<u32, &str> = HashMap::new();
+        for name in wanted {
+            if let Ok(id) = self.names.binary_search_by(|n| n.as_str().cmp(name.as_str())) {
+                wanted_ids.insert(id as u32, name.as_str());
+            }
+        }
+        if wanted_ids.is_empty() {
+            return HashMap::new();
+        }
+        let priority = |k: &str| -> u8 {
+            match k {
+                "macro" => 6,
+                "class" | "struct" | "interface" | "enum" | "type" | "module" => 5,
+                "constant" => 4,
+                "function" | "method" => 3,
+                "field" => 2,
+                _ => 1,
+            }
+        };
+        let mut best: HashMap<u32, &'static str> = HashMap::with_capacity(wanted_ids.len());
+        for file in &self.files {
+            for sym in &file.symbols {
+                if !wanted_ids.contains_key(&sym.name_id) {
+                    continue;
+                }
+                let kind = kind_name(sym.kind);
+                best.entry(sym.name_id)
+                    .and_modify(|cur| {
+                        if priority(kind) > priority(cur) {
+                            *cur = kind;
+                        }
+                    })
+                    .or_insert(kind);
+            }
+        }
+        best.into_iter()
+            .map(|(id, kind)| (self.names[id as usize].clone(), kind))
+            .collect()
     }
 
     /* ---------- Building ---------- */

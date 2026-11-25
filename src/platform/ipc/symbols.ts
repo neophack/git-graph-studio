@@ -20,12 +20,22 @@ export interface TreeFile {
 	symbols: TreeSymbol[];
 }
 
-/** `symbol_references`: the occurrence list the index keeps, narrowed to per-file lines.
- *  `line` is 1-based (the scan counts source lines from one); `column` is the 1-based
- *  character column of the hit. */
+export type RefAccess = 'read' | 'write' | 'call' | 'decl';
+
+/** `symbol_references`: the occurrence list the index keeps, narrowed to per-file lines
+ *  via `.ggs_xc` Bloom signatures and enriched with Read/Write/Call/Decl access semantics.
+ *  `line` is 1-based; `column` is the 1-based character column of the hit. */
+export interface SymbolRefMatch {
+	line: number;
+	column: number;
+	length?: number;
+	text?: string;
+	access?: RefAccess;
+}
+
 export interface SymbolRefFile {
 	path: string;
-	matches: { line: number; column: number }[];
+	matches: SymbolRefMatch[];
 }
 
 /** The index's status as `symbols_status` reports and `symbols_rebuild` answers with. */
@@ -211,3 +221,73 @@ export interface RenameOutcome {
 
 export const symbolRenameApply = (oldName: string, newName: string) =>
 	invoke<RenameOutcome>('symbol_rename_apply', { oldName, newName });
+
+/* ---------- Areas 1, 3, 4, 5: Type resolution, semantics, preprocessor, 9-volume stats ---------- */
+
+export interface MemberCompletion {
+	name: string;
+	kind: string;
+	container: string;
+	path: string;
+	line: number;
+	inherited: boolean;
+}
+
+export const symbolMemberLookup = (name: string, line: number, column: number, text: string, ext: string) =>
+	invoke<WsSymbol[]>('symbol_member_lookup', { name, line, column, text, ext });
+
+export const symbolMemberCompletions = (line: number, column: number, text: string, ext: string, limit = 64) =>
+	invoke<MemberCompletion[]>('symbol_member_completions', { line, column, text, ext, limit });
+
+export const symbolSemanticKinds = (names: string[]) =>
+	invoke<Record<string, string>>('symbol_semantic_kinds', { names });
+
+export interface InactiveRange {
+	startLine: number;
+	endLine: number;
+}
+
+export const symbolInactiveRanges = (text: string) =>
+	invoke<InactiveRange[]>('symbol_inactive_ranges', { text });
+
+export interface MacroExpansion {
+	name: string;
+	params: string[];
+	definition: string;
+	expanded: string;
+	path: string;
+	line: number;
+}
+
+export const symbolMacroExpand = (name: string, callLine?: string) =>
+	invoke<MacroExpansion | null>('symbol_macro_expand', { name, callLine: callLine ?? null });
+
+export interface ConditionsConfig {
+	macros: Record<string, number | null>;
+}
+
+export const symbolsConditionsGet = () =>
+	invoke<ConditionsConfig>('symbols_conditions_get');
+
+export const symbolsConditionsSet = (config: ConditionsConfig) =>
+	invoke<void>('symbols_conditions_set', { config });
+
+export const symbolsBaseProjectsGet = () =>
+	invoke<string[]>('symbols_base_projects_get');
+
+export const symbolsBaseProjectsSet = (paths: string[]) =>
+	invoke<void>('symbols_base_projects_set', { paths });
+
+export interface VolumeStats {
+	present: boolean;
+	totalBytes: number;
+	symRecords: number;
+	sigFiles: number;
+	xabPages: number;
+	xsbPages: number;
+	xmEntries: number;
+}
+
+export const symbolsVolumeStats = () =>
+	invoke<VolumeStats>('symbols_volume_stats');
+

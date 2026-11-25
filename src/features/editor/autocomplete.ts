@@ -7,6 +7,7 @@ import { autocompletion, closeBrackets, snippetCompletion, type Completion, type
 import { Facet, type Extension } from '@codemirror/state';
 import { listFiles } from '../../platform/ipc/fs';
 import { pathCompletions } from '../../platform/ipc/fuzzy';
+import { symbolMemberCompletions } from '../../platform/ipc/symbols';
 
 import { resolveVariables, snippetsFor } from './snippetRegistry';
 import { extensionCompletionsFor, hasExtensionCompletions, type ExtensionCompletion } from './editorCompletions';
@@ -196,6 +197,37 @@ function kindName(kind: number | undefined): string | undefined {
 	return kind === undefined ? undefined : KIND_NAMES[kind];
 }
 
+/** Receiver-aware member completion (Area 1): triggers after `.` / `->` / `::` and
+ *  resolves the receiver's type + inherited base classes from the persistent index. */
+export async function memberCompletionSource(context: CompletionContext): Promise<CompletionResult | null> {
+	const match = context.matchBefore(/(?:\.|->|::)\s*[\w$]*$/);
+	if (!match) return null;
+	const fileName = context.state.facet(fileNameFacet);
+	const dot = fileName.lastIndexOf('.');
+	const ext = dot === -1 ? '' : fileName.slice(dot + 1);
+	if (!ext) return null;
+	const line = context.state.doc.lineAt(context.pos);
+	const col = context.pos - line.from;
+	try {
+		const items = await symbolMemberCompletions(line.number - 1, col, context.state.doc.toString(), ext, 64);
+		if (!Array.isArray(items) || items.length === 0) return null;
+		const prefixMatch = context.matchBefore(/[\w$]*$/);
+		const from = prefixMatch ? prefixMatch.from : context.pos;
+		return {
+			from,
+			options: items.map((item) => ({
+				label: item.name,
+				type: item.kind === 'method' || item.kind === 'function' ? 'method' : item.kind === 'field' ? 'property' : 'variable',
+				detail: item.inherited ? `${item.container} (inherited)` : item.container,
+				boost: item.inherited ? 25 : 35
+			})),
+			validFor: /^[\w$]*$/
+		};
+	} catch {
+		return null;
+	}
+}
+
 /* ---------- The bundle ---------- */
 
 /** The completion bundle every editable editor gets. The completion keymaps (Ctrl+Space among
@@ -206,6 +238,6 @@ export function completionExtension(fileName: string): Extension[] {
 		closeBrackets(),
 		// Tab / Shift-Tab walk an active snippet's fields (the autocompletion bundle wires
 		// the snippet keymap; it defers to the base keymap when no snippet is active).
-		autocompletion({ override: [snippetCompletionSource, wordCompletion, pathCompletion, extensionCompletionSource] })
+		autocompletion({ override: [memberCompletionSource, snippetCompletionSource, wordCompletion, pathCompletion, extensionCompletionSource] })
 	];
 }

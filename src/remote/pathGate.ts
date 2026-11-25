@@ -148,6 +148,16 @@ export const PATH_GATED: Record<
 	hex_diff: { args: ['pathA', 'pathB'] },
 	workspace_symbols: { args: ['repo'] },
 	symbol_lookup: { args: ['repo'] },
+	symbol_member_lookup: REPO_ANCHORED,
+	symbol_member_completions: REPO_ANCHORED,
+	symbol_semantic_kinds: REPO_ANCHORED,
+	symbol_inactive_ranges: REPO_ANCHORED,
+	symbol_macro_expand: REPO_ANCHORED,
+	symbols_conditions_get: REPO_ANCHORED,
+	symbols_conditions_set: REPO_ANCHORED,
+	symbols_base_projects_get: REPO_ANCHORED,
+	symbols_base_projects_set: REPO_ANCHORED,
+	symbols_volume_stats: REPO_ANCHORED,
 	symbol_references: { args: ['repo'] },
 	symbol_tree: REPO_ANCHORED,
 	symbols_rebuild: REPO_ANCHORED,
@@ -158,8 +168,8 @@ export const PATH_GATED: Record<
 	analysis_dead_code: REPO_ANCHORED,
 	analysis_security: REPO_ANCHORED,
 	analysis_import_graph: REPO_ANCHORED,
-	analysis_module_graph: REPO_ANCHORED,
-	analysis_module_diagram: { args: ['repo', 'focus'], relativeAllowed: true },
+	analysis_module_overview: REPO_ANCHORED,
+	analysis_module_edge_detail: REPO_ANCHORED,
 	// The Explorer drop's copy-in (2026-10-16 audit of the command surface): the desktop
 	// drag-drop's `sources` may come from anywhere on the machine, but a REMOTE session
 	// reaching anywhere on the machine is the exfiltration chain the boundary exists to

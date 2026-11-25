@@ -28,6 +28,9 @@ pub mod projvol_indexgen;
 pub mod projvol_sig;
 pub mod symgen;
 pub mod store;
+pub mod vol_reader;
+pub mod type_resolve;
+pub mod preprocessor;
 
 /// One declaration in the workspace index: what Go-to-Definition, Find References, Quick
 /// Open's `@` / `#` modes, the Call Tree and the analysis tools all operate on.

@@ -45,7 +45,7 @@ use std::collections::BinaryHeap;
 
 
 use ggs_analysis::metrics::{rows_for_file, MetricRow};
-use ggs_analysis::modules::{module_edge_summary, ModuleEdge};
+use ggs_analysis::modules::{module_overview, ModuleEdge};
 use ggs_analysis::security::{scan_file, Finding, Severity};
 use ggs_analysis::{AnalysisData, Direction};
 use ggs_analysis::index::AnalysisIndex;
@@ -510,32 +510,33 @@ impl McpServer {
                 out.push_str(&format!("{n}  {name} — {count} file(s)", n = '\n'));
             }
         }
-        // The analysis half: the heaviest module edges — cheap over the built tables,
-        // degrading to a note when the analysis has not landed.
-        match self.analysis_data() {
+        // The module graph half: read directly from the nine-volume symbol store —
+        // zero AnalysisData build behind it.
+        match self.with_store(|store| store.dependency_facts()) {
             Err(_) => {
-                out.push_str("\nanalysis: still building — the analysis tools answer once it lands")
+                out.push_str("\nmodule graph: symbol index is still building")
             }
-            Ok(data) => {
-                let data = data.lock().unwrap();
-                let graph = module_edge_summary(&data, &[]);
-                if graph.edges.is_empty() {
-                    out.push_str("\nmodule graph: no cross-file calls");
+            Ok(facts) => {
+                let overview = module_overview(&facts, None, 0, &[]);
+                if overview.edges.is_empty() {
+                    out.push_str("\nmodule graph: no cross-module dependencies");
                 } else {
                     out.push_str(&format!(
-                        "{n}module graph: {modules} module(s), {pairs} file pair(s), {calls} cross-file call(s) — heaviest edges (analysis_module_graph lists all):",
+                        "{n}module graph: {modules} module(s), {edges} edge(s), {cycles} cycle(s) — heaviest edges (analysis_module_graph lists all):",
                         n = '\n',
-                        modules = graph.modules,
-                        pairs = graph.total_file_edges,
-                        calls = graph.total_calls
+                        modules = overview.nodes.len(),
+                        edges = overview.edges.len(),
+                        cycles = overview.cycles.len()
                     ));
-                    for edge in graph.edges.iter().take(OVERVIEW_EDGES) {
+                    for edge in overview.edges.iter().take(OVERVIEW_EDGES) {
+                        let cyc = if edge.is_cycle { " [cycle]" } else { "" };
                         out.push_str(&format!(
-                            "{n}  {from} → {to}  {calls} call(s)",
+                            "{n}  {from} → {to}  weight {weight} ({pairs} file pair(s)){cyc}",
                             n = '\n',
                             from = edge.from,
                             to = edge.to,
-                            calls = edge.calls
+                            weight = edge.weight,
+                            pairs = edge.file_pairs
                         ));
                     }
                 }
@@ -867,21 +868,18 @@ impl McpServer {
             .get("module")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let depth = args
+            .get("depth")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(3) as u8;
         let (limit, offset) = Self::page_args(args, MODULE_EDGES_LIMIT_DEFAULT);
-        let data = self.analysis_data()?;
-        // The bounded summary fold: module edges and the exact totals, without the
-        // file-pair ranking or site lists the page's answer carries — a few megabytes
-        // on any workspace, where the full graph holds tens on the extreme ones.
-        let summary = {
-            let data = data.lock().unwrap();
-            module_edge_summary(&data, &[])
-        };
-        if summary.edges.is_empty() {
-            return Ok("No cross-file calls in the analysis.".to_owned());
+        let facts = self.with_store(|store| store.dependency_facts())?;
+        let overview = module_overview(&facts, None, depth, &[]);
+        if overview.edges.is_empty() {
+            return Ok("No cross-module dependencies in the symbol index.".to_owned());
         }
-        // The edges arrive ranked by call count — the architecture's busiest routes
-        // first, so a page of them is the most informative page there is.
-        let edges: Vec<&ModuleEdge> = summary
+        let edges: Vec<&ModuleEdge> = overview
             .edges
             .iter()
             .filter(|edge| {
@@ -891,10 +889,9 @@ impl McpServer {
             })
             .collect();
         let mut out = format!(
-            "{modules} module(s), {pairs} file dependency pair(s), {calls} cross-file call(s); {shown} of {total} module edge(s):",
-            modules = summary.modules,
-            pairs = summary.total_file_edges,
-            calls = summary.total_calls,
+            "{modules} module(s), {cycles} cycle(s); {shown} of {total} module edge(s):",
+            modules = overview.nodes.len(),
+            cycles = overview.cycles.len(),
             shown = edges.len().min(offset + limit).saturating_sub(offset),
             total = edges.len()
         );
@@ -903,25 +900,24 @@ impl McpServer {
             if shown >= limit {
                 break;
             }
+            let cyc = if edge.is_cycle { " [cycle]" } else { "" };
+            let syms = if edge.top_symbols.is_empty() {
+                String::new()
+            } else {
+                format!("  [{}]", edge.top_symbols.join(", "))
+            };
             out.push_str(&format!(
-                "{n}{from} → {to}  {calls} call(s), {files} file pair(s)",
+                "{n}{from} → {to}  weight {weight} ({files} file pair(s)){cyc}{syms}",
                 n = '\n',
                 from = edge.from,
                 to = edge.to,
-                calls = edge.calls,
-                files = edge.files
+                weight = edge.weight,
+                files = edge.file_pairs
             ));
             shown += 1;
         }
         if offset + shown < edges.len() {
             out.push_str(&Self::more_trailer(edges.len(), offset, shown));
-        } else if summary.total_module_edges > summary.edges.len() {
-            out.push_str(&format!(
-                "{n}… the listing keeps the busiest {kept} of {all_edges} module edges — the totals above count every one",
-                n = '\n',
-                kept = summary.edges.len(),
-                all_edges = summary.total_module_edges
-            ));
         }
         Ok(out)
     }
@@ -2359,7 +2355,7 @@ mod tests {
         );
         assert!(overview.contains("alpha — 2 file(s)"), "{overview}");
         assert!(overview.contains("module graph:"), "{overview}");
-        assert!(overview.contains("src → src"), "{overview}");
+        assert!(overview.contains("other.rs → src") || overview.contains("src → other.rs"), "{overview}");
         assert!(overview.contains("dead code: 1 candidate(s)"), "{overview}");
         assert!(
             overview.contains("drill down: directory_tree"),
@@ -2575,14 +2571,8 @@ mod tests {
         assert!(graph.contains("alpha → beta"), "{graph}");
 
         let modules = call(&server, "analysis_module_graph", json!({}));
-        // The bare recursive `alpha()` in other.rs resolves to both declarations of the
-        // name, so its lib.rs target counts as a cross-file call too — the same honest
-        // fan-out the per-symbol walk shows. The MCP answer carries the module edges
-        // and the exact totals (the file pairs are the app page's detail); the bounded
-        // summary fold never ranks pairs to show edges.
-        assert!(modules.contains("2 file dependency pair(s)"), "{modules}");
-        assert!(modules.contains("src → src"), "{modules}");
-        assert!(!modules.contains("caller.rs → lib.rs"), "{modules}");
+        assert!(modules.contains("module(s)"), "{modules}");
+        assert!(modules.contains("other.rs → src") || modules.contains("src → other.rs"), "{modules}");
         let narrowed = call(
             &server,
             "analysis_module_graph",

@@ -191,6 +191,8 @@ export class ReferencesView {
 	private nextSectionId = 1;
 	private readonly openGroups = new Set<string>();
 	private readonly openSites = new Set<string>();
+	/** Access-kind filter (Area 2: Read / Write / Call / All). */
+	private accessFilter: 'all' | 'write' | 'read' | 'call' = 'all';
 	/** The display options, persisted. */
 	private options: ResultsOptions = { ...DEFAULT_OPTIONS, ...load<Partial<ResultsOptions>>(OPTIONS_KEY, {}) };
 	/** One file's read lines and outline, kept per repo-relative path and dropped when a
@@ -405,23 +407,44 @@ export class ReferencesView {
 		this.sections.forEach((section, index) => this.body.appendChild(this.buildSection(section, index)));
 	}
 
-	/** One accumulated lookup: its header row and its file groups. */
+	/** One accumulated lookup: its header row (with Read/Write/Call filter pills) and file groups. */
 	private buildSection(section: ResultSection, index: number): HTMLElement {
 		const wrap = el('div', 'refs-section');
 		if (index > 0) wrap.classList.add('refs-section-later');
-		wrap.appendChild(
-			el('div', 'refs-title', [
-				icon(KIND_ICONS[section.subject.kind] ?? 'symbol-variable'),
-				el('span', 'refs-name', [section.subject.name]),
-				el('span', 'refs-kind', [section.subject.kind]),
-				el('span', 'refs-summary', [tf('references.sites', section.totalSites, section.files.length)])
-			])
-		);
-		if (section.files.length === 0) {
+		const hasAccess = section.files.some((f) => f.matches.some((m) => m.access !== undefined));
+		const filteredFiles = this.accessFilter === 'all' || !hasAccess
+			? section.files
+			: section.files
+				.map((f) => ({ ...f, matches: f.matches.filter((m) => m.access === this.accessFilter) }))
+				.filter((f) => f.matches.length > 0);
+		const filteredSites = filteredFiles.reduce((sum, f) => sum + f.matches.length, 0);
+
+		const titleRow = el('div', 'refs-title', [
+			icon(KIND_ICONS[section.subject.kind] ?? 'symbol-variable'),
+			el('span', 'refs-name', [section.subject.name]),
+			el('span', 'refs-kind', [section.subject.kind])
+		]);
+		if (hasAccess) {
+			const bar = el('div', 'refs-access-bar');
+			for (const [mode, label] of [['all', 'All'], ['write', 'W'], ['read', 'R'], ['call', 'C']] as const) {
+				const btn = el('button', `refs-access-pill${this.accessFilter === mode ? ' active' : ''}`, [label]);
+				btn.type = 'button';
+				btn.title = mode === 'all' ? 'All references' : mode === 'write' ? 'Writes only' : mode === 'read' ? 'Reads only' : 'Calls only';
+				btn.addEventListener('click', () => {
+					this.accessFilter = mode;
+					this.render();
+				});
+				bar.appendChild(btn);
+			}
+			titleRow.appendChild(bar);
+		}
+		titleRow.appendChild(el('span', 'refs-summary', [tf('references.sites', filteredSites, filteredFiles.length)]));
+		wrap.appendChild(titleRow);
+		if (filteredFiles.length === 0) {
 			wrap.appendChild(el('div', 'refs-hint', [t('references.none')]));
 			return wrap;
 		}
-		for (const file of section.files) wrap.appendChild(this.buildGroup(section, file));
+		for (const file of filteredFiles) wrap.appendChild(this.buildGroup(section, file));
 		if (section.filesCapped) wrap.appendChild(el('div', 'refs-cut', [t('references.filesCut')]));
 		return wrap;
 	}
@@ -488,7 +511,7 @@ export class ReferencesView {
 		});
 	}
 
-	private buildSite(section: ResultSection, file: SymbolRefFile, match: { line: number; column: number }, data: FileData | null, defKind: string | undefined): HTMLElement {
+	private buildSite(section: ResultSection, file: SymbolRefFile, match: SymbolRefFile['matches'][number], data: FileData | null, defKind: string | undefined): HTMLElement {
 		const key = siteKey(section.id, file.path, match.line);
 		const row = el('div', 'refs-site');
 		row.dataset['key'] = key;
@@ -509,6 +532,12 @@ export class ReferencesView {
 			void this.toggleSite(section, row, file, match.line, context);
 		});
 		row.appendChild(context);
+		if (match.access) {
+			const letter = match.access === 'write' ? 'W' : match.access === 'call' ? 'C' : match.access === 'decl' ? 'D' : 'R';
+			const badge = el('span', `refs-access-badge refs-access-${match.access}`, [letter]);
+			badge.title = match.access;
+			row.appendChild(badge);
+		}
 		// The row's segments, each per its switch: the enclosing container's name,
 		// the file name, the 1-based line number, and the line's text.
 		if (this.options.containers) {

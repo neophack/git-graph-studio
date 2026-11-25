@@ -93,35 +93,32 @@ function richHandlers(): Map<string, Handler> {
 		channel.onmessage({ kind: 'done', files: 2, symbols: 4, calls: 2, cancelled: false });
 		return { state: 'ready', done: 2, total: 2, files: 2, symbols: 4, calls: 2 };
 	});
-	map.set('analysis_module_graph', () => ({
-		modules: [{ name: 'src', files: 1, symbols: 2 }, { name: '', files: 1, symbols: 1 }],
-		edges: [
-			{ from: 'src', to: '', calls: 2, files: 1 },
-			{ from: '', to: 'src', calls: 1, files: 1 }
-		],
-		fileEdges: [
-			{ from: 'src/main.rs', to: 'notes.txt', calls: 2, sites: [
-				{ from: 'alpha', to: 'beta', line: 0, column: 12 },
-				{ from: 'beta', to: 'gamma', line: 2, column: 8 }
-			] },
-			{ from: 'notes.txt', to: 'src/main.rs', calls: 1, sites: [{ from: 'gamma', to: 'alpha', line: 1, column: 4 }] }
-		],
-		totalCalls: 3,
-		totalFileEdges: 2
-	}));
-	map.set('analysis_module_diagram', () => ({
+	map.set('analysis_module_overview', () => ({
+		scope: null,
+		depth: 1,
+		autoDepth: 1,
+		maxDepth: 2,
+		totalFiles: 2,
+		totalSymbols: 3,
+		totalEdges: 2,
 		nodes: [
-			{ path: 'src/main.rs', label: 'main.rs', module: 'src', callsIn: 1, callsOut: 2, tone: 1, x: 20, y: 20, w: 100, h: 44 },
-			{ path: 'notes.txt', label: 'notes.txt', module: '', callsIn: 2, callsOut: 1, tone: 0, x: 220, y: 20, w: 100, h: 44 }
+			{ id: 'src', label: 'src', parent: null, isFile: false, isExternal: false, canDrillDown: true, files: 1, symbols: 2, fanIn: 1, fanOut: 1, refsIn: 1, refsOut: 2, instability: 0.5, layer: 0, inCycle: true, sccId: 0, topFiles: [{ path: 'src/main.rs', symbols: 2 }] },
+			{ id: '', label: '(root)', parent: null, isFile: false, isExternal: false, canDrillDown: true, files: 1, symbols: 1, fanIn: 1, fanOut: 1, refsIn: 2, refsOut: 1, instability: 0.5, layer: 0, inCycle: true, sccId: 0, topFiles: [{ path: 'notes.txt', symbols: 1 }] }
 		],
-		edges: [{ id: 'src/main.rs→notes.txt', from: 'src/main.rs', to: 'notes.txt', calls: 2, width: 2, dashed: false, path: 'M 70 64 L 270 64', head: '270,64 261,59.5 261,68.5', labelX: 170, labelY: 64 }],
-		groups: [
-			{ name: '', tone: 0, x: 206, y: 0, w: 128, h: 84 },
-			{ name: 'src', tone: 1, x: 6, y: 0, w: 128, h: 84 }
+		edges: [
+			{ id: 'src→', from: 'src', to: '', refs: 2, filePairs: 1, isCycle: true, isExternal: false },
+			{ id: '→src', from: '', to: 'src', refs: 1, filePairs: 1, isCycle: true, isExternal: false }
 		],
-		width: 340, height: 70,
-		droppedFiles: 0, droppedEdges: 0,
+		cycles: [['src', '']],
 		mermaid: 'flowchart LR\n'
+	}));
+	map.set('analysis_module_edge_detail', ({ from, to }) => ({
+		from: String(from ?? 'src'),
+		to: String(to ?? ''),
+		totalRefs: 2,
+		imports: [{ fromFile: 'src/main.rs', toFile: 'notes.txt', raw: './notes.txt', line: 0 }],
+		callSites: [{ fromFile: 'src/main.rs', toFile: 'notes.txt', line: 0, symbol: 'beta', excerpt: 'beta();' }],
+		filePairs: [{ fromFile: 'src/main.rs', toFile: 'notes.txt', refs: 2, symbols: ['beta'] }]
 	}));
 	map.set('analysis_metrics', ({ onEvent }) => {
 		const channel = onEvent as { onmessage: (e: unknown) => void };

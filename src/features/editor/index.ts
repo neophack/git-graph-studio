@@ -31,3 +31,4 @@ export * from './types';
 export * from './editorCompletions';
 export * from './editorDecorations';
 export * from './editorHovers';
+export * from './wordHighlightState';

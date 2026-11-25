@@ -44,52 +44,82 @@ export interface ImportGraphData {
 	cycles: string[][];
 }
 
-/** `analysis_module_graph`: the workspace's cross-file calls lifted to modules (the
- *  directories that group the files) — module edges, the file pairs under them and the
- *  call sites under those. */
-export interface ModuleInfo { name: string; files: number; symbols: number }
-export interface ModuleEdge { from: string; to: string; calls: number; files: number }
-export interface CallSiteRow { from: string; to: string; line: number; column: number }
-export interface FileDep { from: string; to: string; calls: number; sites: CallSiteRow[] }
-export interface ModuleGraphData {
-	modules: ModuleInfo[];
-	/** Capped at the backend's listing limit; `totalModuleEdges` counts them all. */
-	edges: ModuleEdge[];
-	fileEdges: FileDep[];
-	totalCalls: number;
-	totalFileEdges: number;
-	totalModuleEdges: number;
-}
-
-export interface DiagramNode {
+/** `analysis_module_overview`: nine-volume-backed layered module architecture overview
+ *  (zero `AnalysisData` build) with progressive drill-down (`scope` + `depth`), Tarjan
+ *  SCC cycle detection, coupling/instability metrics, and on-demand Mermaid export. */
+export interface ModuleFileSummary {
 	path: string;
-	label: string;
-	/** The area whose subgraph holds the block; "" is the root, null the unboxed
-	 *  overflow of a workspace with more areas than gitdiagram's group cap. */
-	module: string | null;
-	/** The area's pastel tone slot — the `t<n>` class in the mermaid source. */
-	tone: number;
-	callsIn: number;
-	callsOut: number;
+	symbols: number;
 }
 
-export interface DiagramEdge {
+export interface ModuleNode {
+	id: string;
+	label: string;
+	kind: 'module' | 'file' | 'external';
+	expandable: boolean;
+	files: number;
+	symbols: number;
+	fanIn: number;
+	fanOut: number;
+	instability: number;
+	inCycle: boolean;
+	layer: number;
+	topFiles: ModuleFileSummary[];
+}
+
+export interface ModuleEdge {
 	id: string;
 	from: string;
 	to: string;
-	calls: number;
-	/** A cycle's back edge — mermaid's dashed `-.->`. */
-	dashed: boolean;
+	weight: number;
+	symbolRefs: number;
+	baseRefs: number;
+	filePairs: number;
+	topSymbols: string[];
+	isCycle: boolean;
 }
 
-export interface ModuleDiagram {
-	nodes: DiagramNode[];
-	edges: DiagramEdge[];
-	droppedFiles: number;
-	droppedEdges: number;
-	/** The diagram as mermaid source — what the view renders and what the page's
-	 *  copy action exports. */
+export interface ModuleOverview {
+	scope: string;
+	depth: number;
+	breadcrumbs: string[];
+	nodes: ModuleNode[];
+	edges: ModuleEdge[];
+	cycles: string[][];
+	totalFiles: number;
+	totalSymbols: number;
+	totalEdges: number;
 	mermaid: string;
+}
+
+/** `analysis_module_edge_detail`: on-demand L2 evidence for a single dependency edge —
+ *  resolved imports and exact call sites read only from the edge's `from`-side files. */
+export interface EdgeImport {
+	fromFile: string;
+	toFile: string;
+	specifier: string;
+}
+
+export interface EdgeCallSite {
+	symbol: string;
+	receiver: string | null;
+	line: number;
+	column: number;
+}
+
+export interface EdgeFilePair {
+	fromFile: string;
+	toFile: string;
+	symbols: string[];
+	sites: EdgeCallSite[];
+}
+
+export interface ModuleEdgeDetail {
+	from: string;
+	to: string;
+	imports: EdgeImport[];
+	filePairs: EdgeFilePair[];
+	scannedFiles: number;
 }
 
 export const analysisStatus = () => invoke<AnalysisStatus>('analysis_status');
@@ -98,8 +128,24 @@ export const analysisMetrics = (onEvent: Channel<MetricsEvent>) => invoke<void>(
 export const analysisDeadCode = (includeExported: boolean, onEvent: Channel<DeadCodeEvent>) =>
 	invoke<void>('analysis_dead_code', { includeExported, onEvent });
 export const analysisSecurity = (onEvent: Channel<SecurityEvent>) => invoke<void>('analysis_security', { onEvent });
-export const analysisModuleGraph = (folders?: string[]) =>
-	invoke<ModuleGraphData>('analysis_module_graph', folders === undefined ? undefined : { folders });
-export const analysisModuleDiagram = (focus: string | null, filter: string, folders?: string[]) =>
-	invoke<ModuleDiagram>('analysis_module_diagram', { focus, filter, ...(folders !== undefined && { folders }) });
+export const analysisModuleOverview = (scope: string | null, depth: number, folders?: string[]) =>
+	invoke<ModuleOverview>('analysis_module_overview', {
+		scope: scope || null,
+		depth,
+		...(folders !== undefined && { folders })
+	});
+export const analysisModuleEdgeDetail = (
+	from: string,
+	to: string,
+	scope: string | null,
+	depth: number,
+	folders?: string[]
+) =>
+	invoke<ModuleEdgeDetail>('analysis_module_edge_detail', {
+		from,
+		to,
+		scope: scope || null,
+		depth,
+		...(folders !== undefined && { folders })
+	});
 export const analysisImportGraph = () => invoke<ImportGraphData>('analysis_import_graph');

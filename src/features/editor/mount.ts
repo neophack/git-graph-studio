@@ -493,7 +493,7 @@ export const mountMethods: ThisType<import('./group').EditorGroup> = {
 	},
 
 	async mountTextEditor(editor: Editor, contents: string, parent: HTMLElement = editor.pane): Promise<void> {
-		const { EditorView, EditorState, baseExtensions, completionExtension, bookmarkGutter, languageSlot, blameSlot, keymap, loadLanguage, editLockSlot, editLockedExtensions } = await textEditor();
+		const { EditorView, EditorState, baseExtensions, completionExtension, semanticHighlightExtension, bookmarkGutter, languageSlot, blameSlot, keymap, loadLanguage, editLockSlot, editLockedExtensions } = await textEditor();
 		const [{ diagnosticsExtension }, { extensionDecorationsExtension }, { extensionProviderExtensions, symbolHoverExtension }] = await loadEditorExtensions();
 		// The merge-conflict decorations ride every text editor: the extension stays inert
 		// (one substring check per edit) until the document actually carries conflict
@@ -504,6 +504,7 @@ export const mountMethods: ThisType<import('./group').EditorGroup> = {
 		// the edit grant (src/remote/editLock.ts). Everywhere else this is false and
 		// the editor is born editable as always.
 		const editLocked = hook('editLock').defaultLocked();
+		const activeFileName = editor.input.kind === 'file' ? editor.input.path : editor.label;
 		editor.languageName = 'Plain Text';
 		editor.view = new EditorView({
 			state: EditorState.create({
@@ -513,8 +514,9 @@ export const mountMethods: ThisType<import('./group').EditorGroup> = {
 					// first value, so baseExtensions' own `readOnly.of(false)` would otherwise
 					// swallow the locked `true` that follows it.
 					...(editLocked ? [editLockSlot.of(editLockedExtensions())] : []),
-					...baseExtensions(false, editor.input.kind === 'file' ? editor.input.path : editor.label),
-					...completionExtension(editor.input.kind === 'file' ? editor.input.path : editor.label),
+					...baseExtensions(false, activeFileName),
+					...completionExtension(activeFileName),
+					...semanticHighlightExtension(activeFileName),
 					...(editor.input.kind === 'file' ? [
 						diagnosticsExtension(editor.input.path),
 						extensionDecorationsExtension(editor.input.path),

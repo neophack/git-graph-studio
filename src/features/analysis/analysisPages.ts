@@ -12,7 +12,26 @@
 // here belongs to the first-paint bundle.
 
 import { Channel } from '../../platform/ipc/core';
-import { analysisDeadCode, analysisImportGraph, type AnalysisStatus, type DeadCodeEvent, type DeadRow, analysisMetrics, type FileDep, type MetricRow, type MetricsEvent, type ModuleEdge, type ModuleDiagram, type ModuleGraphData, analysisModuleDiagram, analysisModuleGraph, analysisSecurity, type Finding, type ImportGraphData, type SecurityEvent } from '../../platform/ipc/analysis';
+import {
+	analysisDeadCode,
+	analysisImportGraph,
+	analysisMetrics,
+	analysisModuleEdgeDetail,
+	analysisModuleOverview,
+	analysisSecurity,
+	type AnalysisStatus,
+	type DeadCodeEvent,
+	type DeadRow,
+	type Finding,
+	type ImportGraphData,
+	type MetricRow,
+	type MetricsEvent,
+	type ModuleEdge,
+	type ModuleEdgeDetail,
+	type ModuleNode,
+	type ModuleOverview,
+	type SecurityEvent
+} from '../../platform/ipc/analysis';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { t, tf } from '../../platform/i18n';
@@ -20,7 +39,7 @@ import { KIND_ICONS } from '../search';
 import { analysisTool, type AnalysisToolId } from './analysisTools';
 import type { AnalysisPageView } from './types';
 import { McpPage } from '../mcp';
-import { DiagramView, moduleLabel, moduleOf } from './moduleDiagram';
+import { DiagramView, moduleLabel } from './moduleDiagram';
 import { actionButton, basename, el, icon, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 
 /* ---------- The backend shapes ---------- */
@@ -409,63 +428,52 @@ class SecurityPage extends ReportPage<Finding> {
 	}
 }
 
-/* ---------- Module Analysis ---------- */
+/* ---------- Module Analysis (9-volume interactive explorer) ---------- */
 
-/** The idle window before the filter refetches the drawing — typing must stay smooth. */
-const FILTER_DEBOUNCE_MS = 250;
+const DEPTH_OPTIONS = [
+	{ value: 0, key: 'analysis.modules.depth.auto' },
+	{ value: 1, key: 'analysis.modules.depth.l1' },
+	{ value: 2, key: 'analysis.modules.depth.l2' },
+	{ value: 3, key: 'analysis.modules.depth.files' }
+] as const;
 
-/** The Module Analysis page: the workspace's cross-file calls as a gitdiagram-style
- *  architecture diagram — the busiest files as blocks inside their module's group box,
- *  every kept dependency an arrow labelled with its call count, the geometry, the caps
- *  and the mermaid source all the backend's (`analysis_module_diagram`) — drawn on the
- *  SVG viewport of moduleDiagram.ts (wheel zoom at the cursor, drag pan, a zoom toolbar
- *  with fit, a click highlighting a block's dependencies, the right-click menu jumping
- *  between the related files, double-click opening) beside a collapsible tree (module
- *  dependencies → file pairs → call sites). The drawing's filter narrows to the files
- *  whose path spells the query (it shrinks with every keystroke — a pair survives only
- *  between matching files), the focus isolates one file's neighbourhood, and the tree
- *  matches symbols too; the tree renders lazily, so the page stays responsive on
- *  any workspace. */
+/** The Module Analysis page: nine-volume-backed layered architecture explorer with
+ *  progressive breadcrumb drill-down, depth selector, cycles-only filter, native SVG
+ *  board + list view, and an on-demand right-hand Inspector drawer showing module
+ *  metrics, key files, and exact L2 edge imports & call sites. */
 class ModulePage implements AnalysisPageView {
-	private data: ModuleGraphData | null = null;
+	private overview: ModuleOverview | null = null;
 	private loading = true;
 	private error: string | null = null;
-	/** The index status push: while the page's load waits on a cold build, the
-	 *  status line names the build's live position instead of a bare "Analyzing". */
 	private buildStatus: AnalysisStatus | null = null;
-	/** The filter as typed (the tree follows it live); the drawing follows `graphFilter`. */
 	private filter = '';
-	private graphFilter = '';
-	private filterTimer: ReturnType<typeof setTimeout> | null = null;
-	private view: 'graph' | 'tree' = 'graph';
-	/** The block whose neighbourhood the drawing isolates, or null for everything. */
-	private focusNode: string | null = null;
-	/** The clicked block or arrow on the current diagram — states do not survive a refetch. */
-	private selectedId: string | null = null;
-	/** The current drawing — `analysis_module_diagram`'s answer — kept for the
-	 *  interactions: adjacency for the highlight, the mermaid source for the copy. */
-	private diagram: ModuleDiagram | null = null;
-	private readonly openModules = new Set<string>();
-	private readonly openFiles = new Set<string>();
-	/** Bumps on every load; part of the diagram refetch key. */
-	private loadId = 0;
-	private graphKey = '';
+	private view: 'graph' | 'list' = 'graph';
+	/** Active drill-down directory prefix (`null` = workspace root). */
+	private scope: string | null = null;
+	/** Grouping depth: 0=Auto, 1=L1, 2=L2, 3=Files. */
+	private depth = 0;
+	private cyclesOnly = false;
+	private selected: { kind: 'node' | 'edge'; id: string } | null = null;
+	private edgeDetailCache = new Map<string, ModuleEdgeDetail>();
+	private edgeDetailLoading = false;
+	private edgeDetailToken = 0;
+	private loadToken = 0;
+	private readonly folders: string[];
+
 	private readonly drawing: DiagramView;
 	private readonly title: HTMLElement;
+	private readonly breadcrumbsBar: HTMLElement;
 	private readonly statusHost: HTMLElement;
+	private readonly workspace: HTMLElement;
 	private readonly body: HTMLElement;
-	/** The selection / focus chips, overlays on the drawing. */
+	private readonly inspector: HTMLElement;
 	private readonly graphbar: HTMLElement;
 	private readonly filterInput: HTMLInputElement;
-	private readonly toggles: { graph: HTMLElement; tree: HTMLElement };
+	private readonly depthSelect: HTMLSelectElement;
+	private readonly cyclesBtn: HTMLButtonElement;
+	private readonly toggles: { graph: HTMLElement; list: HTMLElement };
 
 	onOpen: ((path: string, line: number) => void) | null = null;
-
-	/** The folders the page reports on, repo-relative — the Explorer pick's scope.
-	 *  Empty is the whole workspace. Both backend reads carry it; it rides the
-	 *  graphbar as a chip with no way out (the scope is the tab's identity — the
-	 *  whole-workspace page is its own tab). */
-	private readonly folders: string[];
 
 	constructor(container: HTMLElement, folders: string[]) {
 		this.folders = folders;
@@ -477,261 +485,482 @@ class ModulePage implements AnalysisPageView {
 		this.filterInput.setAttribute('aria-label', t('analysis.page.filter'));
 		this.filterInput.addEventListener('input', () => {
 			this.filter = this.filterInput.value.trim().toLowerCase();
-			// The tree re-renders at once; the drawing refetches only once typing settles
-			// — a refetch per keystroke is the jank this debounce avoids.
-			if (this.filterTimer) clearTimeout(this.filterTimer);
-			this.filterTimer = setTimeout(() => {
-				this.filterTimer = null;
-				this.graphFilter = this.filter;
-				this.render();
-			}, FILTER_DEBOUNCE_MS);
 			this.render();
 		});
+
+		this.depthSelect = el('select', 'an-sort an-depth') as HTMLSelectElement;
+		this.depthSelect.setAttribute('aria-label', t('analysis.modules.depth'));
+		for (const opt of DEPTH_OPTIONS) {
+			const o = el('option', undefined, [t(opt.key)]) as HTMLOptionElement;
+			o.value = String(opt.value);
+			this.depthSelect.appendChild(o);
+		}
+		this.depthSelect.value = '0';
+		this.depthSelect.addEventListener('change', () => {
+			this.depth = Number(this.depthSelect.value) || 0;
+			void this.load();
+		});
+
+		this.cyclesBtn = el('button', 'an-cycles-btn') as HTMLButtonElement;
+		this.cyclesBtn.hidden = true;
+		this.cyclesBtn.addEventListener('click', () => {
+			this.cyclesOnly = !this.cyclesOnly;
+			this.cyclesBtn.classList.toggle('on', this.cyclesOnly);
+			this.render();
+		});
+
 		const graphToggle = el('button', 'an-toggle on', [t('analysis.modules.view.graph')]);
-		const treeToggle = el('button', 'an-toggle', [t('analysis.modules.view.tree')]);
+		const listToggle = el('button', 'an-toggle', [t('analysis.modules.view.tree')]);
 		graphToggle.addEventListener('click', () => this.setView('graph'));
-		treeToggle.addEventListener('click', () => this.setView('tree'));
-		this.toggles = { graph: graphToggle, tree: treeToggle };
+		listToggle.addEventListener('click', () => this.setView('list'));
+		this.toggles = { graph: graphToggle, list: listToggle };
+
 		this.drawing = new DiagramView({
-			onOpenNode: (path) => this.onOpen?.(path, 1),
-			onSelect: (id) => {
-				if (id === null || id === this.selectedId) this.clearSelection();
-				else this.selectElement(id);
+			onActivateNode: (node) => {
+				if (node.kind === 'file') this.onOpen?.(node.id, 1);
+				else if (node.expandable) this.drillInto(node.id);
+			},
+			onSelect: (hit) => {
+				if (!hit || (this.selected && this.selected.kind === hit.kind && this.selected.id === hit.id)) {
+					this.clearSelection();
+				} else {
+					this.selectElement(hit);
+				}
 			},
 			onNodeContext: (x, y, id) => this.nodeMenu(x, y, id),
 			onEdgeContext: (x, y, id) => this.edgeMenu(x, y, id)
 		});
+
 		this.graphbar = el('div', 'an-graphbar');
 		this.drawing.host.append(this.graphbar);
+		this.breadcrumbsBar = el('div', 'an-breadcrumbs');
 		this.statusHost = el('div');
 		this.body = el('div', 'an-list');
+		this.inspector = el('aside', 'an-inspector');
+		this.inspector.hidden = true;
+		this.workspace = el('div', 'an-mod-workspace', [this.drawing.host, this.body, this.inspector]);
+
 		container.append(
 			el('div', 'an-header', [
 				icon('symbol-module'),
 				this.title,
 				this.filterInput,
-				el('div', 'an-toggles', [graphToggle, treeToggle]),
+				this.depthSelect,
+				this.cyclesBtn,
+				el('div', 'an-toggles', [graphToggle, listToggle]),
 				el('div', 'actions', [
 					actionButton('copy', t('analysis.modules.copyMermaid'), () => this.copyMermaid()),
 					actionButton('refresh', t('analysis.page.rerun'), () => void this.load())
 				])
 			]),
+			this.breadcrumbsBar,
 			this.statusHost,
-			this.body,
-			this.drawing.host
+			this.workspace
 		);
 		this.render();
 		void this.load();
 	}
 
-	private setView(view: 'graph' | 'tree'): void {
+	private setView(view: 'graph' | 'list'): void {
 		if (this.view === view) return;
 		this.view = view;
 		this.toggles.graph.classList.toggle('on', view === 'graph');
-		this.toggles.tree.classList.toggle('on', view === 'tree');
+		this.toggles.list.classList.toggle('on', view === 'list');
 		this.render();
 	}
 
+	private drillInto(scope: string | null): void {
+		const next = scope || null;
+		if (next === this.scope) return;
+		this.scope = next;
+		this.selected = null;
+		this.cyclesOnly = false;
+		this.cyclesBtn.classList.remove('on');
+		void this.load();
+	}
+
 	private async load(): Promise<void> {
+		const token = ++this.loadToken;
 		this.loading = true;
 		this.error = null;
-		this.loadId++;
+		this.selected = null;
+		this.edgeDetailCache.clear();
 		this.render();
 		try {
-			this.data = await analysisModuleGraph(this.folders);
+			const overview = await analysisModuleOverview(this.scope, this.depth, this.folders);
+			if (token !== this.loadToken) return;
+			this.overview = overview;
 		} catch (error) {
-			this.data = null;
+			if (token !== this.loadToken) return;
+			this.overview = null;
 			this.error = String(error);
 		}
 		this.loading = false;
 		this.render();
 	}
 
-	/** The index status pushes (the editor area routes them): the loading state names
-	 *  the build's live position. While the build runs nothing else is drawn, so the
-	 *  re-render costs nothing; after it the pushes are ignored. */
 	noteBuildStatus(status: AnalysisStatus | null): void {
 		this.buildStatus = status;
 		if (this.loading) this.render();
 	}
 
-	/** Whether a file pair survives the filter: its file names, or a symbol at one of
-	 *  its call sites, spelling part of the query. */
-	private fileMatches(dep: FileDep): boolean {
-		const filter = this.view === 'graph' ? this.graphFilter : this.filter;
-		if (!filter) return true;
-		return dep.from.toLowerCase().includes(filter)
-			|| dep.to.toLowerCase().includes(filter)
-			|| dep.sites.some((site) => site.from.toLowerCase().includes(filter)
-				|| site.to.toLowerCase().includes(filter));
-	}
-
-	/** Whether a module edge survives the filter: its own module names, or any file
-	 *  pair under it matching (files or call-site symbols). */
-	private moduleMatches(edge: ModuleEdge, children: FileDep[]): boolean {
-		if (!this.filter) return true;
-		return edge.from.toLowerCase().includes(this.filter)
-			|| edge.to.toLowerCase().includes(this.filter)
-			|| children.some((dep) => this.fileMatches(dep));
+	private visibleGraph(): { nodes: ModuleNode[]; edges: ModuleEdge[] } {
+		const ov = this.overview;
+		if (!ov) return { nodes: [], edges: [] };
+		let nodes = ov.nodes;
+		let edges = ov.edges;
+		if (this.cyclesOnly) {
+			const cycleIds = new Set(nodes.filter((n) => n.inCycle).map((n) => n.id));
+			nodes = nodes.filter((n) => cycleIds.has(n.id));
+			edges = edges.filter((e) => e.isCycle && cycleIds.has(e.from) && cycleIds.has(e.to));
+		}
+		if (this.filter) {
+			const q = this.filter;
+			const direct = new Set(nodes.filter((n) =>
+				n.id.toLowerCase().includes(q) || n.label.toLowerCase().includes(q)
+			).map((n) => n.id));
+			const keptEdges = edges.filter((e) =>
+				direct.has(e.from) || direct.has(e.to) || e.topSymbols.some((s) => s.toLowerCase().includes(q))
+			);
+			const keepNodes = new Set(direct);
+			for (const e of keptEdges) {
+				keepNodes.add(e.from);
+				keepNodes.add(e.to);
+			}
+			nodes = nodes.filter((n) => keepNodes.has(n.id));
+			edges = keptEdges;
+		}
+		return { nodes, edges };
 	}
 
 	render(): void {
+		const ov = this.overview;
 		this.title.textContent = this.loading
 			? `${t('analysis.page.loading')}…`
 			: this.error
 				? t('analysis.page.error')
-				: (this.data
-					? tf('analysis.modules.summary', this.data.modules.length, this.data.totalFileEdges, this.data.totalCalls)
-					: '');
+				: (ov ? tf('analysis.modules.summary', ov.nodes.length, ov.edges.length, ov.cycles.length) : '');
+
+		const cycleCount = ov?.cycles.length ?? 0;
+		this.cyclesBtn.hidden = cycleCount === 0;
+		this.cyclesBtn.textContent = tf('analysis.modules.cyclesOnly', cycleCount);
+		this.cyclesBtn.classList.toggle('on', this.cyclesOnly);
+
+		this.renderBreadcrumbs();
 		this.statusHost.textContent = '';
 		const status = (text: string, cls = 'an-empty') => this.statusHost.appendChild(el('div', cls, [text]));
+
 		if (this.loading) {
-			// A cold index's build names its live position — the wait is the parse, and
-			// the click's first answer is the counter moving.
 			status(this.buildStatus?.state === 'building'
 				? tf('analysis.page.building', this.buildStatus.done, this.buildStatus.total)
 				: `${t('analysis.page.loading')}…`);
+			this.drawing.setGraph([], []);
 			this.syncView();
 			return;
 		}
 		if (this.error) {
 			status(this.error);
+			this.drawing.setGraph([], []);
 			this.syncView();
 			return;
 		}
-		const data = this.data;
-		if (!data) return;
-		if (data.edges.length === 0) {
+		if (!ov || ov.nodes.length === 0) {
 			status(t('analysis.modules.empty'));
+			this.drawing.setGraph([], []);
 			this.syncView();
 			return;
 		}
-		if (this.view === 'graph') this.renderGraph(data, status);
-		else this.renderTree(data, status);
+
+		const { nodes, edges } = this.visibleGraph();
+		if (nodes.length === 0) {
+			status(t('analysis.page.empty'));
+		}
+
+		if (this.view === 'graph') {
+			this.drawing.setGraph(nodes, edges);
+			this.applySelectionStates(nodes, edges);
+		} else {
+			this.renderList(nodes, edges, status);
+		}
+		this.updateGraphbar();
+		this.renderInspector();
 		this.syncView();
 	}
 
-	/** Show / hide the two view hosts and mark the page (the zoom toolbar only
-	 *  speaks to the drawing; the CSS steps it aside in the tree view). */
+	private renderBreadcrumbs(): void {
+		this.breadcrumbsBar.textContent = '';
+		const crumbs = this.overview?.breadcrumbs ?? [];
+		if (crumbs.length === 0 && this.folders.length === 0) {
+			this.breadcrumbsBar.hidden = true;
+			return;
+		}
+		this.breadcrumbsBar.hidden = false;
+		const rootBtn = el('button', 'an-crumb', [t('analysis.modules.workspaceRoot')]);
+		rootBtn.addEventListener('click', () => this.drillInto(null));
+		this.breadcrumbsBar.append(rootBtn);
+		let acc = '';
+		crumbs.forEach((seg, idx) => {
+			acc = acc ? `${acc}/${seg}` : seg;
+			const target = acc;
+			this.breadcrumbsBar.append(icon('chevron-right'));
+			const btn = el('button', idx === crumbs.length - 1 ? 'an-crumb active' : 'an-crumb', [seg]);
+			btn.addEventListener('click', () => this.drillInto(target));
+			this.breadcrumbsBar.append(btn);
+		});
+		if (this.folders.length > 0) {
+			this.breadcrumbsBar.append(el('span', 'an-crumb-scope', [tf('analysis.modules.scopeChip', this.folders.join(', '))]));
+		}
+	}
+
 	private syncView(): void {
-		const tree = this.view === 'tree';
-		this.body.hidden = !tree;
-		this.drawing.host.hidden = tree;
-		this.drawing.host.parentElement?.classList.toggle('an-tree', tree);
-		if (!tree) this.drawing.onShown();
+		const list = this.view === 'list';
+		this.body.hidden = !list;
+		this.drawing.host.hidden = list;
+		this.drawing.host.parentElement?.parentElement?.classList.toggle('an-tree', list);
+		if (!list) this.drawing.onShown();
 	}
 
-	private renderGraph(data: ModuleGraphData, status: (text: string, cls?: string) => void): void {
-		const key = `${this.loadId}|${this.graphFilter}|${this.focusNode ?? ''}`;
-		if (key !== this.graphKey) {
-			this.graphKey = key;
-			void this.mountDiagram(key);
-		}
-		const dropped = this.diagram?.droppedFiles ?? 0;
-		if (dropped > 0) status(tf('analysis.modules.graphMore', dropped), 'an-more');
-		if (this.diagram && this.diagram.nodes.length === 0) status(t('analysis.page.empty'));
-	}
-
-	/** Fetch the drawing the backend lays out — the filter and the focus narrow the
-	 *  pairs at the source. A newer key (a rerun, the filter settling, a focus change)
-	 *  retires this fetch before it ever renders. */
-	private async mountDiagram(key: string): Promise<void> {
-		this.diagram = null;
-		this.selectedId = null;
-		this.drawing.setDiagram(null);
-		try {
-			const diagram = await analysisModuleDiagram(this.focusNode, this.graphFilter, this.folders);
-			if (key !== this.graphKey) return;
-			this.diagram = diagram;
-		} catch {
-			if (key !== this.graphKey) return;
-			this.diagram = null;
-		}
-		this.drawing.setDiagram(this.diagram);
+	private selectElement(hit: { kind: 'node' | 'edge'; id: string }): void {
+		this.selected = hit;
+		const { nodes, edges } = this.visibleGraph();
+		this.applySelectionStates(nodes, edges);
 		this.updateGraphbar();
-		this.render(); // the dropped / empty statuses follow the answer
+		this.renderInspector();
+		if (hit.kind === 'edge') {
+			const edge = this.overview?.edges.find((e) => e.id === hit.id);
+			if (edge) void this.loadEdgeDetail(edge);
+		}
 	}
 
-	/** Highlight one element and everything it touches: a clicked block with its
-	 *  dependencies and neighbours, or a clicked arrow with its two endpoints. The rest
-	 *  of the drawing fades back, so the highlight reads at any workspace size. */
-	private selectElement(id: string): void {
-		const diagram = this.diagram;
-		if (!diagram) return;
-		const states: Record<string, string[]> = {};
-		const edge = diagram.edges.find((candidate) => candidate.id === id);
-		if (edge) {
-			states[id] = ['selected'];
-			states[edge.from] = ['related'];
-			states[edge.to] = ['related'];
+	private clearSelection(): void {
+		if (!this.selected) return;
+		this.selected = null;
+		this.edgeDetailToken++;
+		this.edgeDetailLoading = false;
+		this.drawing.setStates({}, {});
+		this.updateGraphbar();
+		this.renderInspector();
+	}
+
+	private applySelectionStates(nodes: ModuleNode[], edges: ModuleEdge[]): void {
+		if (!this.selected) {
+			this.drawing.setStates({}, {});
+			return;
+		}
+		const nodeStates: Record<string, string[]> = {};
+		const edgeStates: Record<string, string[]> = {};
+		if (this.selected.kind === 'edge') {
+			const edge = edges.find((e) => e.id === this.selected!.id);
+			if (edge) {
+				edgeStates[edge.id] = ['selected'];
+				nodeStates[edge.from] = ['related'];
+				nodeStates[edge.to] = ['related'];
+			}
 		} else {
-			states[id] = ['selected'];
-			for (const candidate of diagram.edges) {
-				if (candidate.from === id) {
-					states[candidate.id] = ['selected'];
-					states[candidate.to] = ['related'];
-				} else if (candidate.to === id) {
-					states[candidate.id] = ['selected'];
-					states[candidate.from] = ['related'];
+			const nid = this.selected.id;
+			nodeStates[nid] = ['selected'];
+			for (const e of edges) {
+				if (e.from === nid) {
+					edgeStates[e.id] = ['selected'];
+					if (e.to !== nid) nodeStates[e.to] = ['related'];
+				} else if (e.to === nid) {
+					edgeStates[e.id] = ['selected'];
+					if (e.from !== nid) nodeStates[e.from] = ['related'];
 				}
 			}
 		}
-		for (const node of diagram.nodes) if (!states[node.path]) states[node.path] = ['dim'];
-		for (const candidate of diagram.edges) if (!states[candidate.id]) states[candidate.id] = ['dim'];
-		this.selectedId = id;
-		this.drawing.setStates(states);
-		this.updateGraphbar();
+		for (const n of nodes) if (!nodeStates[n.id]) nodeStates[n.id] = ['dim'];
+		for (const e of edges) if (!edgeStates[e.id]) edgeStates[e.id] = ['dim'];
+		this.drawing.setStates(nodeStates, edgeStates);
 	}
 
-	/** Back to the drawing's neutral state — a click on empty canvas, the chip's close,
-	 *  or a second click on the selected element. */
-	private clearSelection(): void {
-		if (!this.selectedId) return;
-		this.selectedId = null;
-		const diagram = this.diagram;
-		if (diagram) {
-			const states: Record<string, string[]> = {};
-			for (const node of diagram.nodes) states[node.path] = [];
-			for (const edge of diagram.edges) states[edge.id] = [];
-			this.drawing.setStates(states);
+	private async loadEdgeDetail(edge: ModuleEdge): Promise<void> {
+		if (this.edgeDetailCache.has(edge.id)) {
+			this.edgeDetailLoading = false;
+			this.renderInspector();
+			return;
 		}
-		this.updateGraphbar();
+		const token = ++this.edgeDetailToken;
+		this.edgeDetailLoading = true;
+		this.renderInspector();
+		try {
+			const detail = await analysisModuleEdgeDetail(edge.from, edge.to, this.scope, this.depth, this.folders);
+			if (token !== this.edgeDetailToken) return;
+			this.edgeDetailCache.set(edge.id, detail);
+		} catch {
+			if (token !== this.edgeDetailToken) return;
+		}
+		this.edgeDetailLoading = false;
+		this.renderInspector();
 	}
 
-	/** A menu jump to a related block: select it as if clicked and centre it in the
-	 *  viewport. */
+	private renderInspector(): void {
+		this.inspector.textContent = '';
+		if (!this.selected || !this.overview) {
+			this.inspector.hidden = true;
+			return;
+		}
+		this.inspector.hidden = false;
+		const ov = this.overview;
+
+		if (this.selected.kind === 'node') {
+			const node = ov.nodes.find((n) => n.id === this.selected!.id);
+			if (!node) {
+				this.inspector.hidden = true;
+				return;
+			}
+			const head = el('div', 'an-insp-head', [
+				icon(node.kind === 'file' ? 'file-code' : 'symbol-module'),
+				el('span', 'an-insp-title', [moduleLabel(node.id)]),
+				actionButton('close', t('analysis.modules.inspector.close'), () => this.clearSelection())
+			]);
+			const meta = el('div', 'an-insp-meta', [
+				tf('analysis.modules.inspector.metrics', node.files, node.symbols, node.fanIn, node.fanOut, node.instability.toFixed(2))
+			]);
+			const actions = el('div', 'an-insp-actions');
+			if (node.expandable) {
+				const drillBtn = el('button', 'button', [t('analysis.modules.drillIn')]);
+				drillBtn.addEventListener('click', () => this.drillInto(node.id));
+				actions.append(drillBtn);
+			} else if (node.kind === 'file') {
+				const openBtn = el('button', 'button', [t('analysis.modules.openFile')]);
+				openBtn.addEventListener('click', () => this.onOpen?.(node.id, 1));
+				actions.append(openBtn);
+			}
+			if (node.inCycle) {
+				actions.append(el('span', 'an-chip an-chip-cycle', [t('analysis.modules.inspector.cycleTag')]));
+			}
+
+			const outEdges = ov.edges.filter((e) => e.from === node.id);
+			const inEdges = ov.edges.filter((e) => e.to === node.id);
+			const body = el('div', 'an-insp-body', [meta, actions]);
+
+			if (outEdges.length > 0) {
+				body.append(el('div', 'an-insp-sec', [tf('analysis.modules.inspector.dependsOn', outEdges.length)]));
+				for (const e of outEdges) body.append(this.renderInspectorEdgeRow(e, e.to));
+			}
+			if (inEdges.length > 0) {
+				body.append(el('div', 'an-insp-sec', [tf('analysis.modules.inspector.usedBy', inEdges.length)]));
+				for (const e of inEdges) body.append(this.renderInspectorEdgeRow(e, e.from));
+			}
+			if (node.topFiles.length > 0) {
+				body.append(el('div', 'an-insp-sec', [tf('analysis.modules.inspector.keyFiles', node.topFiles.length)]));
+				for (const f of node.topFiles) {
+					const row = el('div', 'an-row an-insp-row', [
+						icon('file-code'),
+						el('span', 'label', [f.path]),
+						el('span', 'tail', [`${f.symbols}`])
+					]);
+					row.addEventListener('click', () => this.onOpen?.(f.path, 1));
+					body.append(row);
+				}
+			}
+			this.inspector.append(head, body);
+			return;
+		}
+
+		// Edge Inspector (L2 on-demand evidence).
+		const edge = ov.edges.find((e) => e.id === this.selected!.id);
+		if (!edge) {
+			this.inspector.hidden = true;
+			return;
+		}
+		const head = el('div', 'an-insp-head', [
+			icon('arrow-right'),
+			el('span', 'an-insp-title', [`${moduleLabel(edge.from)} → ${moduleLabel(edge.to)}`]),
+			actionButton('close', t('analysis.modules.inspector.close'), () => this.clearSelection())
+		]);
+		const body = el('div', 'an-insp-body');
+		body.append(el('div', 'an-insp-meta', [
+			`${tf('analysis.modules.calls', edge.weight)} · ${tf('analysis.modules.filePairs', edge.filePairs)}${edge.isCycle ? ` · ${t('analysis.modules.inspector.cycleTag')}` : ''}`
+		]));
+		if (edge.topSymbols.length > 0) {
+			body.append(
+				el('div', 'an-insp-sec', [t('analysis.modules.inspector.topSymbols')]),
+				el('div', 'an-insp-chips', edge.topSymbols.map((s) => el('span', 'an-chip', [s])))
+			);
+		}
+		const detail = this.edgeDetailCache.get(edge.id);
+		if (this.edgeDetailLoading && !detail) {
+			body.append(el('div', 'an-insp-note', [t('analysis.modules.inspector.loadingDetail')]));
+		} else if (detail) {
+			if (detail.imports.length > 0) {
+				body.append(el('div', 'an-insp-sec', [tf('analysis.modules.inspector.imports', detail.imports.length)]));
+				for (const imp of detail.imports.slice(0, 50)) {
+					const row = el('div', 'an-row an-insp-row', [
+						icon('references'),
+						el('span', 'label', [`${basename(imp.fromFile)} → ${basename(imp.toFile)}`]),
+						el('span', 'description', [imp.specifier])
+					]);
+					row.title = `${imp.fromFile} → ${imp.toFile}`;
+					row.addEventListener('click', () => this.onOpen?.(imp.fromFile, 1));
+					body.append(row);
+				}
+			}
+			const totalSites = detail.filePairs.reduce((sum, p) => sum + p.sites.length, 0);
+			if (totalSites > 0) {
+				body.append(el('div', 'an-insp-sec', [tf('analysis.modules.inspector.callSites', totalSites)]));
+				for (const pair of detail.filePairs.slice(0, 30)) {
+					for (const site of pair.sites.slice(0, 15)) {
+						const label = site.receiver ? `${site.receiver}.${site.symbol}` : site.symbol;
+						const row = el('div', 'an-row an-insp-row', [
+							icon('symbol-method'),
+							el('span', 'label', [label]),
+							el('span', 'description', [`${pair.fromFile}:${site.line + 1}`])
+						]);
+						row.title = `${pair.fromFile}:${site.line + 1} → ${pair.toFile}`;
+						row.addEventListener('click', () => this.onOpen?.(pair.fromFile, site.line + 1));
+						body.append(row);
+					}
+				}
+			}
+			if (detail.imports.length === 0 && totalSites === 0) {
+				body.append(el('div', 'an-insp-note', [t('analysis.modules.inspector.noDetail')]));
+			}
+		}
+		this.inspector.append(head, body);
+	}
+
+	private renderInspectorEdgeRow(edge: ModuleEdge, targetId: string): HTMLElement {
+		const row = el('div', `an-row an-insp-row${edge.isCycle ? ' an-cycle-row' : ''}`, [
+			icon(edge.isCycle ? 'sync' : 'arrow-right'),
+			el('span', 'label', [moduleLabel(targetId)]),
+			el('span', 'tail', [`${edge.weight}`])
+		]);
+		row.addEventListener('click', () => this.selectElement({ kind: 'edge', id: edge.id }));
+		return row;
+	}
+
+	private renderList(_nodes: ModuleNode[], edges: ModuleEdge[], status: (text: string, cls?: string) => void): void {
+		this.body.textContent = '';
+		if (edges.length === 0) {
+			status(t('analysis.page.empty'));
+			return;
+		}
+		this.body.appendChild(el('div', 'an-section', [tf('analysis.modules.dependencies', edges.length)]));
+		for (const edge of edges.slice(0, 1000)) {
+			const row = el('div', `an-row an-branch${edge.isCycle ? ' an-cycle-row' : ''}`, [
+				icon(edge.isCycle ? 'sync' : 'arrow-right'),
+				el('span', 'label', [moduleLabel(edge.from), el('span', 'an-arrow', ['→']), moduleLabel(edge.to)]),
+				el('span', 'description', [edge.topSymbols.slice(0, 3).join(', ')]),
+				el('span', 'tail', [`${tf('analysis.modules.calls', edge.weight)} · ${tf('analysis.modules.filePairs', edge.filePairs)}`])
+			]);
+			row.addEventListener('click', () => this.selectElement({ kind: 'edge', id: edge.id }));
+			this.body.appendChild(row);
+		}
+	}
+
 	private jumpTo(nodeId: string): void {
-		this.selectElement(nodeId);
+		this.selectElement({ kind: 'node', id: nodeId });
 		this.drawing.focusElement(nodeId);
 	}
 
-	/** Isolate the drawing to one block's neighbourhood, or back to everything. */
-	private focusOn(path: string): void {
-		if (this.focusNode === path) return;
-		this.focusNode = path;
-		this.render();
-	}
-
-	private clearFocus(): void {
-		if (!this.focusNode) return;
-		this.focusNode = null;
-		this.render();
-	}
-
-	/** The diagram as mermaid source — gitdiagram's copy-the-diagram export; a paste
-	 *  into any mermaid renderer redraws the same architecture. */
 	private copyMermaid(): void {
-		const diagram = this.diagram;
-		if (!diagram || diagram.nodes.length === 0) return;
-		void writeText(diagram.mermaid).then(
-			() => { /* the clipboard has it */ },
-			() => { /* the clipboard is unavailable — the button still closed */ }
-		);
+		const mermaid = this.overview?.mermaid;
+		if (!mermaid) return;
+		void writeText(mermaid).then(() => {}, () => {});
 	}
 
-	/** The chips over the drawing's bottom corner: the scope the tab reports on,
-	 *  what is selected, what the drawing is focused on — the scope has no way
-	 *  out (it is the tab's identity), the rest each with theirs. */
 	private updateGraphbar(): void {
 		this.graphbar.textContent = '';
 		if (this.folders.length > 0) {
@@ -739,23 +968,26 @@ class ModulePage implements AnalysisPageView {
 			chip.title = this.folders.join('\n');
 			this.graphbar.appendChild(chip);
 		}
-		if (this.focusNode) {
-			this.graphbar.appendChild(this.graphbarChip(
-				tf('analysis.modules.focusChip', this.focusNode), 'filter',
-				t('analysis.modules.clearFocus'), () => this.clearFocus()));
-		}
-		if (this.selectedId && this.diagram) {
-			const node = this.diagram.nodes.find((candidate) => candidate.path === this.selectedId);
-			if (node) {
-				this.graphbar.appendChild(this.graphbarChip(
-					tf('analysis.modules.selected', node.path, node.callsOut, node.callsIn), 'circle-filled',
-					t('analysis.modules.clearSelection'), () => this.clearSelection()));
+		if (this.selected && this.overview) {
+			if (this.selected.kind === 'node') {
+				const node = this.overview.nodes.find((n) => n.id === this.selected!.id);
+				if (node) {
+					this.graphbar.appendChild(this.graphbarChip(
+						tf('analysis.modules.selected', moduleLabel(node.id), node.fanOut, node.fanIn),
+						'circle-filled',
+						t('analysis.modules.clearSelection'),
+						() => this.clearSelection()
+					));
+				}
 			} else {
-				const edge = this.diagram.edges.find((candidate) => candidate.id === this.selectedId);
+				const edge = this.overview.edges.find((e) => e.id === this.selected!.id);
 				if (edge) {
 					this.graphbar.appendChild(this.graphbarChip(
-						tf('analysis.modules.selectedEdge', edge.from, edge.to, edge.calls), 'arrow-right',
-						t('analysis.modules.clearSelection'), () => this.clearSelection()));
+						tf('analysis.modules.selectedEdge', moduleLabel(edge.from), moduleLabel(edge.to), edge.weight),
+						'arrow-right',
+						t('analysis.modules.clearSelection'),
+						() => this.clearSelection()
+					));
 				}
 			}
 		}
@@ -767,181 +999,42 @@ class ModulePage implements AnalysisPageView {
 		return chip;
 	}
 
-	/** The block's right-click menu: open the file, jump to a related block through the
-	 *  Calls / Called By submenus, isolate the neighbourhood, copy the path. */
-	private nodeMenu(x: number, y: number, path: string): void {
-		const out = new Map<string, number>();
-		const inn = new Map<string, number>();
-		for (const edge of this.diagram?.edges ?? []) {
-			if (edge.from === path) out.set(edge.to, (out.get(edge.to) ?? 0) + edge.calls);
-			if (edge.to === path) inn.set(edge.from, (inn.get(edge.from) ?? 0) + edge.calls);
-		}
-		const neighbourItems = (list: Map<string, number>): MenuEntry[] => {
-			const ranked = [...list.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-			const items: MenuEntry[] = ranked.slice(0, 30).map(([file, calls]) => ({
-				label: `${file} (${tf('analysis.modules.calls', calls)})`,
-				run: () => this.jumpTo(file)
+	private nodeMenu(x: number, y: number, id: string): void {
+		const ov = this.overview;
+		const node = ov?.nodes.find((n) => n.id === id);
+		if (!ov || !node) return;
+		const out = ov.edges.filter((e) => e.from === id);
+		const inn = ov.edges.filter((e) => e.to === id);
+		const neighbourItems = (list: ModuleEdge[], pick: (e: ModuleEdge) => string): MenuEntry[] =>
+			list.slice(0, 30).map((e) => ({
+				label: `${moduleLabel(pick(e))} (${tf('analysis.modules.calls', e.weight)})`,
+				run: () => this.jumpTo(pick(e))
 			}));
-			if (ranked.length > 30) items.push({ label: tf('analysis.page.more', ranked.length - 30), disabled: true });
-			return items;
-		};
 		const entries: MenuEntry[] = [
-			{ label: t('analysis.modules.openFile'), run: () => this.onOpen?.(path, 1) },
+			...(node.expandable ? [{ label: t('analysis.modules.drillIn'), run: () => this.drillInto(node.id) }] : []),
+			...(node.kind === 'file' ? [{ label: t('analysis.modules.openFile'), run: () => this.onOpen?.(node.id, 1) }] : []),
 			'separator',
-			out.size > 0
-				? { label: tf('analysis.modules.callsOut', out.size), submenu: neighbourItems(out) }
+			out.length > 0
+				? { label: tf('analysis.modules.callsOut', out.length), submenu: neighbourItems(out, (e) => e.to) }
 				: { label: tf('analysis.modules.callsOut', 0), disabled: true },
-			inn.size > 0
-				? { label: tf('analysis.modules.callsIn', inn.size), submenu: neighbourItems(inn) }
+			inn.length > 0
+				? { label: tf('analysis.modules.callsIn', inn.length), submenu: neighbourItems(inn, (e) => e.from) }
 				: { label: tf('analysis.modules.callsIn', 0), disabled: true },
-			this.focusNode === path
-				? { label: t('analysis.modules.clearFocus'), run: () => this.clearFocus() }
-				: { label: t('analysis.modules.focus'), run: () => this.focusOn(path) },
 			'separator',
-			{ label: t('analysis.modules.copyPath'), run: () => {
-				void writeText(path).then(
-					() => { /* the clipboard has it */ },
-					() => { /* the clipboard is unavailable — the menu still closed */ }
-				);
-			} }
+			{ label: t('analysis.modules.copyPath'), run: () => { void writeText(node.id).then(() => {}, () => {}); } }
 		];
 		showContextMenu(x, y, entries);
 	}
 
-	/** The arrow's right-click menu: its call sites (each opening the caller's line),
-	 *  both files, the pair to copy. */
 	private edgeMenu(x: number, y: number, edgeId: string): void {
-		const edge = this.diagram?.edges.find((candidate) => candidate.id === edgeId);
+		const edge = this.overview?.edges.find((e) => e.id === edgeId);
 		if (!edge) return;
-		const dep = this.data?.fileEdges.find((candidate) => candidate.from === edge.from && candidate.to === edge.to);
-		if (!dep) return;
-		const sites: MenuEntry[] = dep.sites.slice(0, 25).map((site) => ({
-			label: `${site.from}→${site.to}  ${dep.from}:${site.line + 1}`,
-			run: () => this.onOpen?.(dep.from, site.line + 1)
-		}));
-		if (dep.calls > dep.sites.length) {
-			sites.push({ label: tf('analysis.modules.more', dep.calls - dep.sites.length), disabled: true });
-		}
 		const entries: MenuEntry[] = [
-			{ label: `${dep.from} → ${dep.to}`, disabled: true },
+			{ label: `${moduleLabel(edge.from)} → ${moduleLabel(edge.to)}`, disabled: true },
 			'separator',
-			sites.length > 0
-				? { label: tf('analysis.modules.edgeSites', dep.sites.length), submenu: sites }
-				: { label: tf('analysis.modules.edgeSites', 0), disabled: true },
-			'separator',
-			{ label: tf('analysis.modules.openNamed', basename(dep.from)), run: () => this.onOpen?.(dep.from, 1) },
-			{ label: tf('analysis.modules.openNamed', basename(dep.to)), run: () => this.onOpen?.(dep.to, 1) },
-			'separator',
-			{ label: t('analysis.modules.copyPair'), run: () => {
-				void writeText(`${dep.from} → ${dep.to}`).then(
-					() => { /* the clipboard has it */ },
-					() => { /* the clipboard is unavailable — the menu still closed */ }
-				);
-			} }
+			{ label: t('analysis.modules.copyPair'), run: () => { void writeText(`${edge.from} → ${edge.to}`).then(() => {}, () => {}); } }
 		];
 		showContextMenu(x, y, entries);
-	}
-
-	private renderTree(data: ModuleGraphData, status: (text: string, cls?: string) => void): void {
-		this.body.textContent = '';
-		// The file pairs grouped under their module edge, keeping the payload's
-		// calls-first order inside each group.
-		const groups = new Map<string, FileDep[]>();
-		for (const dep of data.fileEdges) {
-			const key = `${moduleOf(dep.from)}→${moduleOf(dep.to)}`;
-			const list = groups.get(key);
-			if (list) list.push(dep);
-			else groups.set(key, [dep]);
-		}
-		const visible = data.edges.filter((edge) => this.moduleMatches(edge, groups.get(`${edge.from}→${edge.to}`) ?? []));
-		if (visible.length === 0) {
-			status(t('analysis.page.empty'));
-			return;
-		}
-		this.body.appendChild(el('div', 'an-section', [tf('analysis.modules.dependencies', visible.length)]));
-		if (data.edges.length < data.totalModuleEdges) {
-			this.body.appendChild(el('div', 'an-more', [tf('analysis.modules.truncatedEdges', data.edges.length, data.totalModuleEdges)]));
-		}
-		if (data.fileEdges.length < data.totalFileEdges) {
-			this.body.appendChild(el('div', 'an-more', [tf('analysis.modules.truncated', data.fileEdges.length, data.totalFileEdges)]));
-		}
-		const cap = 1000;
-		for (const edge of visible.slice(0, cap)) {
-			this.body.appendChild(this.renderModuleEdge(edge, groups.get(`${edge.from}→${edge.to}`) ?? []));
-		}
-		if (visible.length > cap) {
-			this.body.appendChild(el('div', 'an-more', [tf('analysis.page.more', visible.length - cap)]));
-		}
-	}
-
-	/** One module dependency row, and — while expanded — the file pairs under it. */
-	private renderModuleEdge(edge: ModuleEdge, children: FileDep[]): HTMLElement {
-		const key = `${edge.from}→${edge.to}`;
-		const open = this.openModules.has(key);
-		const row = el('div', 'an-row an-branch');
-		row.setAttribute('role', 'button');
-		row.setAttribute('aria-expanded', String(open));
-		row.title = open ? t('analysis.modules.collapse') : t('analysis.modules.expand');
-		row.append(
-			icon(open ? 'chevron-down' : 'chevron-right'),
-			el('span', 'label', [moduleLabel(edge.from), el('span', 'an-arrow', ['→']), moduleLabel(edge.to)]),
-			el('span', 'tail', [`${tf('analysis.modules.calls', edge.calls)} · ${tf('analysis.modules.filePairs', edge.files)}`])
-		);
-		row.addEventListener('click', () => {
-			if (!this.openModules.delete(key)) this.openModules.add(key);
-			this.render();
-		});
-		const wrap = el('div', 'an-group');
-		wrap.append(row);
-		if (!open) return wrap;
-		// A module edge that matched the filter itself shows all of its files; one that
-		// matched only through a child shows just the matching children.
-		const direct = !this.filter
-			|| edge.from.toLowerCase().includes(this.filter)
-			|| edge.to.toLowerCase().includes(this.filter);
-		const pairs = direct ? children : children.filter((dep) => this.fileMatches(dep));
-		for (const dep of pairs.slice(0, 500)) wrap.appendChild(this.renderFileDep(dep));
-		if (pairs.length > 500) {
-			wrap.appendChild(el('div', 'an-more an-l1', [tf('analysis.page.more', pairs.length - 500)]));
-		}
-		return wrap;
-	}
-
-	/** One file-pair row, and — while expanded — the call sites under it. */
-	private renderFileDep(dep: FileDep): HTMLElement {
-		const key = `${dep.from}→${dep.to}`;
-		const open = this.openFiles.has(key);
-		const row = el('div', 'an-row an-l1');
-		row.setAttribute('role', 'button');
-		row.setAttribute('aria-expanded', String(open));
-		row.title = open ? t('analysis.modules.collapse') : t('analysis.modules.expand');
-		row.append(
-			icon(open ? 'chevron-down' : 'chevron-right'),
-			el('span', 'label', [dep.from, el('span', 'an-arrow', ['→']), dep.to]),
-			el('span', 'tail', [tf('analysis.modules.calls', dep.calls)])
-		);
-		row.addEventListener('click', () => {
-			if (!this.openFiles.delete(key)) this.openFiles.add(key);
-			this.render();
-		});
-		const wrap = el('div', 'an-group');
-		wrap.append(row);
-		if (!open) return wrap;
-		for (const site of dep.sites) {
-			const siteRow = el('div', 'an-row an-l2');
-			siteRow.title = `${site.from} → ${site.to}`;
-			siteRow.append(
-				icon('arrow-right'),
-					el('span', 'label', [site.from, el('span', 'an-arrow', ['→']), site.to]),
-					el('span', 'description', [`${dep.from}:${site.line + 1}`])
-			);
-			siteRow.addEventListener('click', () => this.onOpen?.(dep.from, site.line + 1));
-			wrap.appendChild(siteRow);
-		}
-		if (dep.calls > dep.sites.length) {
-			wrap.appendChild(el('div', 'an-more an-l2', [tf('analysis.modules.more', dep.calls - dep.sites.length)]));
-		}
-		return wrap;
 	}
 }
 

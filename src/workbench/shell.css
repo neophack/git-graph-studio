@@ -2300,32 +2300,108 @@ button.ggs-symbol-hover-relations:hover { text-decoration: underline; color: var
 	height: 24px; border-radius: 999px; padding: 0 10px;
 	background: var(--tb-bg); border: 1px solid var(--tb-line);
 }
-/* The diagram is gitdiagram's rendering, verbatim: mermaid draws it (ELK layout,
-   classic look) over the themed editor surface, so the tone cards and clusters carry
-   their styles inside the SVG itself (the classDefs ride the source — the drawing's
-   own light/dark variable set follows the theme kind, moduleDiagram.ts). What lives
-   here is everything around the SVG — the state classes the page's
-   selection computes over mermaid's own elements, and the label LOD. */
-.an-mermaid { position: absolute; }
-.an-mermaid svg { display: block; }
-.an-mermaid g.node, .an-mermaid g.edgeLabel, .an-mermaid [id^="L_N"] { cursor: pointer; }
-.an-mermaid g.node rect { transition: stroke-width 120ms; }
-/* gitdiagram's themeCSS, ported: the card under the pointer grows 5 % and dims a
-   touch, 160 ms on its cubic — and prefers-reduced-motion keeps it still. */
-.an-mermaid g.node rect {
-	transition: stroke-width 120ms, transform 160ms cubic-bezier(0.23, 1, 0.32, 1), filter 160ms cubic-bezier(0.23, 1, 0.32, 1);
-	transform-box: fill-box; transform-origin: center;
+/* Native SVG Module Architecture Board & Inspector (module 17) */
+.an-mod-workspace { flex: 1; min-height: 0; display: flex; position: relative; }
+.an-breadcrumbs {
+	display: flex; align-items: center; gap: 2px; padding: 4px 12px; flex: none;
+	border-bottom: 1px solid var(--vscode-panel-border);
+	background: var(--vscode-editorGroupHeader-tabsBackground, transparent);
+	font-size: 12px; overflow-x: auto;
 }
-.an-mermaid g.node:hover rect { transform: scale(1.05); filter: brightness(0.85); }
-@media (prefers-reduced-motion: reduce) {
-	.an-mermaid g.node rect { transition: none; }
-	.an-mermaid g.node:hover rect { transform: none; }
+.an-crumb {
+	background: transparent; border: none; border-radius: 3px; padding: 2px 6px;
+	color: var(--vscode-descriptionForeground); cursor: pointer; font-size: 12px;
 }
-.an-mermaid g.node.selected rect { stroke-width: 3px; }
-.an-mermaid g.node.related rect { stroke-width: 2.5px; }
-.an-mermaid g.node.dim, .an-mermaid g.edgeLabel.dim, .an-mermaid path.dim { opacity: 0.22; }
-.an-mermaid path.dim, .an-mermaid g.edgePaths path.dim { opacity: 0.22; }
-.an-mermaid path.selected, .an-mermaid g.edgePaths path.selected { stroke: var(--dg-accent) !important; }
+.an-crumb:hover { background: var(--vscode-toolbar-hoverBackground); color: var(--vscode-foreground); }
+.an-crumb.active { color: var(--vscode-foreground); font-weight: 600; }
+.an-crumb-scope { margin-left: auto; font-size: 11px; color: var(--vscode-descriptionForeground); }
+
+.an-cycles-btn {
+	height: 24px; padding: 0 9px; border-radius: 999px; font-size: 11px; cursor: pointer;
+	background: color-mix(in srgb, var(--vscode-editorError-foreground, #f14c4c) 12%, transparent);
+	color: var(--vscode-editorError-foreground, #f14c4c);
+	border: 1px solid color-mix(in srgb, var(--vscode-editorError-foreground, #f14c4c) 45%, transparent);
+}
+.an-cycles-btn.on {
+	background: var(--vscode-editorError-foreground, #f14c4c);
+	color: #ffffff;
+}
+
+.an-svg-stage { position: absolute; }
+.an-svg-canvas { display: block; overflow: visible; }
+
+.an-mod-node { cursor: pointer; transition: opacity 140ms ease; }
+.an-mod-node .an-node-card {
+	fill: var(--vscode-editorWidget-background, #252526);
+	stroke: var(--vscode-widget-border, rgba(128, 128, 128, 0.4));
+	stroke-width: 1.25;
+	transition: stroke 120ms ease, stroke-width 120ms ease, filter 120ms ease;
+}
+.an-mod-node.kind-external .an-node-card { stroke-dasharray: 5 3; opacity: 0.9; }
+.an-mod-node.cycle .an-node-card { stroke: var(--vscode-editorError-foreground, #f14c4c); }
+.an-mod-node .an-node-accent { fill: var(--vscode-charts-blue, #3794ff); }
+.an-mod-node.kind-file .an-node-accent { fill: var(--vscode-charts-green, #89d185); }
+.an-mod-node.kind-external .an-node-accent { fill: var(--vscode-descriptionForeground, #8c8c8c); }
+.an-mod-node.cycle .an-node-accent { fill: var(--vscode-editorError-foreground, #f14c4c); }
+.an-mod-node:hover .an-node-card { stroke: var(--dg-accent); stroke-width: 1.8; }
+.an-mod-node.selected .an-node-card { stroke: var(--dg-accent); stroke-width: 2.5; }
+.an-mod-node.related .an-node-card { stroke: var(--dg-accent); stroke-width: 1.8; }
+.an-mod-node.dim { opacity: 0.22; }
+.an-node-title { fill: var(--vscode-editor-foreground, #e0e0e0); font-size: 12.5px; font-weight: 600; }
+.an-node-drill { fill: var(--vscode-descriptionForeground, #999); font-size: 13px; }
+.an-node-ext-tag { fill: var(--vscode-descriptionForeground, #999); font-size: 9.5px; font-weight: 600; letter-spacing: 0.05em; }
+.an-node-sub { fill: var(--vscode-descriptionForeground, #999); font-size: 11px; }
+.an-node-meta { fill: var(--vscode-descriptionForeground, #999); font-size: 10.5px; font-family: var(--vscode-editor-font-family, monospace); }
+.an-node-inst { fill: var(--vscode-descriptionForeground, #999); font-size: 10.5px; font-family: var(--vscode-editor-font-family, monospace); }
+.an-node-inst.cycle { fill: var(--vscode-editorError-foreground, #f14c4c); font-weight: 600; }
+
+.an-mod-edge { cursor: pointer; transition: opacity 140ms ease; }
+.an-edge-hit { fill: none; stroke: transparent; stroke-width: 14; }
+.an-edge-path { fill: none; stroke: color-mix(in srgb, var(--vscode-editor-foreground, #aaa) 42%, transparent); transition: stroke 120ms ease; }
+.an-mod-edge.cycle .an-edge-path { stroke: var(--vscode-editorError-foreground, #f14c4c); stroke-dasharray: 5 4; }
+.an-mod-edge:hover .an-edge-path, .an-mod-edge.selected .an-edge-path { stroke: var(--dg-accent); }
+.an-mod-edge.dim { opacity: 0.14; }
+.an-marker-norm { fill: color-mix(in srgb, var(--vscode-editor-foreground, #aaa) 55%, transparent); }
+.an-marker-cycle { fill: var(--vscode-editorError-foreground, #f14c4c); }
+.an-marker-sel { fill: var(--dg-accent); }
+
+.an-edge-badge rect {
+	fill: var(--vscode-editorWidget-background, #252526);
+	stroke: var(--vscode-widget-border, rgba(128, 128, 128, 0.4));
+	stroke-width: 1;
+}
+.an-edge-badge text { fill: var(--vscode-editorWidget-foreground, #ccc); font-size: 10px; font-weight: 600; }
+.an-edge-badge.auto-hide { opacity: 0; transition: opacity 120ms ease; }
+.an-mod-edge:hover .an-edge-badge, .an-mod-edge.selected .an-edge-badge { opacity: 1; }
+.an-mod-edge.cycle .an-edge-badge rect { stroke: var(--vscode-editorError-foreground, #f14c4c); }
+.an-mod-edge.cycle .an-edge-badge text { fill: var(--vscode-editorError-foreground, #f14c4c); }
+
+/* Right-hand collapsible Inspector drawer */
+.an-inspector {
+	width: 320px; min-width: 260px; max-width: 42%; flex: none;
+	display: flex; flex-direction: column; min-height: 0;
+	border-left: 1px solid var(--vscode-panel-border);
+	background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+}
+.an-insp-head {
+	display: flex; align-items: center; gap: 6px; padding: 8px 10px; flex: none;
+	border-bottom: 1px solid var(--vscode-panel-border); font-weight: 600; font-size: 12px;
+}
+.an-insp-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.an-insp-body { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 0 14px; }
+.an-insp-meta { padding: 0 12px 8px; font-size: 11px; color: var(--vscode-descriptionForeground); }
+.an-insp-actions { display: flex; align-items: center; gap: 8px; padding: 0 12px 8px; }
+.an-insp-actions .button { height: 24px; padding: 0 10px; font-size: 11.5px; }
+.an-insp-sec {
+	padding: 10px 12px 4px; font-size: 10.5px; font-weight: 600; text-transform: uppercase;
+	letter-spacing: 0.04em; color: var(--vscode-descriptionForeground);
+}
+.an-insp-row { padding: 0 12px; }
+.an-insp-chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 12px 6px; }
+.an-insp-note { padding: 8px 12px; font-size: 11.5px; color: var(--vscode-descriptionForeground); font-style: italic; }
+.an-chip-cycle { background: var(--vscode-editorError-foreground, #f14c4c); color: #ffffff; }
+.an-cycle-row > .codicon { color: var(--vscode-editorError-foreground, #f14c4c); }
+
 .an-graphbar { position: absolute; left: 8px; bottom: 6px; z-index: 2; display: flex; gap: 6px; align-items: center; }
 .an-graphbar:empty { display: none; }
 .an-graphbar .chip {
@@ -3017,3 +3093,21 @@ body.zen .tabs-container {
 .dt-prop { display: flex; gap: 6px; padding: 1px 2px; color: var(--fg); }
 .dt-prop-name { color: var(--symbolProperty, var(--fg)); }
 .dt-prop-value { font-family: var(--monaco-monospace-font-family, monospace); color: var(--descriptionFg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Semantic syntax coloring, 6-color persistent word highlights, and inactive preprocessor dimming (Areas 3 & 4) */
+.cm-sem-macro { color: var(--vscode-symbolIcon-constantForeground, #c586c0); font-weight: 600; }
+.cm-sem-type { color: var(--vscode-symbolIcon-classForeground, #4ec9b0); }
+.cm-sem-const { color: var(--vscode-symbolIcon-enumeratorMemberForeground, #4fc1ff); }
+.cm-sem-fn { color: var(--vscode-symbolIcon-functionForeground, #dcdcaa); }
+.cm-sem-field { color: var(--vscode-symbolIcon-fieldForeground, #9cdcfe); }
+.cm-sem-var { text-decoration: none; }
+
+.cm-hl-slot { border-radius: 2px; padding: 0 1px; }
+.cm-hl-slot-0 { background: rgba(255, 213, 79, 0.28); outline: 1px solid rgba(255, 213, 79, 0.55); }
+.cm-hl-slot-1 { background: rgba(129, 212, 250, 0.28); outline: 1px solid rgba(129, 212, 250, 0.55); }
+.cm-hl-slot-2 { background: rgba(165, 214, 167, 0.28); outline: 1px solid rgba(165, 214, 167, 0.55); }
+.cm-hl-slot-3 { background: rgba(244, 143, 177, 0.28); outline: 1px solid rgba(244, 143, 177, 0.55); }
+.cm-hl-slot-4 { background: rgba(206, 147, 216, 0.28); outline: 1px solid rgba(206, 147, 216, 0.55); }
+.cm-hl-slot-5 { background: rgba(255, 171, 145, 0.28); outline: 1px solid rgba(255, 171, 145, 0.55); }
+
+.cm-inactive-branch { opacity: 0.45; }

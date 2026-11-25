@@ -5,7 +5,17 @@ import type { Workbench } from './workbench';
 import { listen } from '../platform/ipc/core';
 import { appNewInstance, bootContext, type BootContext, openDevtools, windowCloseAck } from '../platform/ipc/app';
 import { backupList, backupRead, type BackupEntry, type WatcherReport } from '../platform/ipc/fs';
-import { symbolLookup, type SymbolIndexStatus } from '../platform/ipc/symbols';
+import {
+	symbolLookup,
+	symbolMacroExpand,
+	symbolsBaseProjectsGet,
+	symbolsBaseProjectsSet,
+	symbolsConditionsGet,
+	symbolsConditionsSet,
+	symbolsVolumeStats,
+	type SymbolIndexStatus
+} from '../platform/ipc/symbols';
+import { clearWordHighlights, toggleWordHighlight } from '../features/editor';
 import { type RemoteHostStatus, remoteHostHideMain, remoteHostStatus } from '../platform/ipc/remote';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -354,6 +364,122 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'editor.formatDocument', title: 'Format Document', category: 'Editor', keybinding: 'Ctrl+Shift+I', enabled: () => this.editors.activeView !== null, run: () => void this.formatActiveDocument() });
 		register({ id: 'editor.toggleBookmark', title: 'Toggle Bookmark', category: 'Edit', keybinding: 'Ctrl+Alt+B', enabled: () => this.editors.activeInput?.kind === 'file', run: () => void this.toggleBookmark() });
 		register({ id: 'editor.listBookmarks', title: 'List Bookmarks', category: 'Edit', keybinding: 'Ctrl+Alt+K', run: () => void this.listBookmarks() });
+		register({
+			id: 'editor.toggleWordHighlight',
+			title: 'Toggle Highlight Word',
+			category: 'Edit',
+			keybinding: 'F8',
+			enabled: hasEditor,
+			run: () => {
+				const view = editorView();
+				if (!view) return;
+				const head = view.state.selection.main.head;
+				const sel = view.state.selection.main;
+				const word = !sel.empty
+					? view.state.sliceDoc(sel.from, sel.to)
+					: (() => {
+						const w = view.state.wordAt(head);
+						return w ? view.state.sliceDoc(w.from, w.to) : '';
+					})();
+				if (!word) return;
+				toggleWordHighlight(word);
+			}
+		});
+		register({
+			id: 'editor.clearWordHighlights',
+			title: 'Clear All Word Highlights',
+			category: 'Edit',
+			run: () => clearWordHighlights()
+		});
+		register({
+			id: 'editor.expandMacro',
+			title: 'Preview Macro Expansion',
+			category: 'Go',
+			enabled: () => hasRepo() && hasEditor(),
+			run: () => {
+				const view = editorView();
+				if (!view) return;
+				const head = view.state.selection.main.head;
+				const w = view.state.wordAt(head);
+				if (!w) return;
+				const name = view.state.sliceDoc(w.from, w.to);
+				const lineText = view.state.doc.lineAt(head).text;
+				void symbolMacroExpand(name, lineText)
+					.then((res) => {
+						if (!res) notify('info', `No macro definition found for '${name}'.`);
+						else notify('info', `${res.name} → ${res.expanded}`);
+					})
+					.catch((e) => notify('error', String(e)));
+			}
+		});
+		register({
+			id: 'symbols.configureConditions',
+			title: 'Configure Conditional Compilation Macros...',
+			category: 'Go',
+			enabled: hasRepo,
+			run: () => {
+				void (async () => {
+					const cur = await symbolsConditionsGet().catch(() => ({ macros: {} as Record<string, number | null> }));
+					const initial = Object.entries(cur.macros)
+						.map(([k, v]) => (v === null ? `!${k}` : `${k}=${v}`))
+						.join(', ');
+					const raw = window.prompt('Preprocessor macros (e.g. DEBUG=1, WIN32=0, !LEGACY):', initial);
+					if (raw === null) return;
+					const macros: Record<string, number | null> = {};
+					for (const part of raw.split(',').map((s) => s.trim()).filter(Boolean)) {
+						if (part.startsWith('!')) {
+							const k = part.slice(1).trim();
+							if (k) macros[k] = null;
+						} else if (part.includes('=')) {
+							const [k, v] = part.split('=');
+							if (k?.trim()) macros[k.trim()] = Number.parseInt(v?.trim() ?? '1', 10) || 0;
+						} else {
+							macros[part] = 1;
+						}
+					}
+					await symbolsConditionsSet({ macros });
+					notify('info', `Saved ${Object.keys(macros).length} conditional compilation macro(s).`);
+				})();
+			}
+		});
+		register({
+			id: 'symbols.configureBaseProjects',
+			title: 'Configure Read-Only Base / SDK Projects...',
+			category: 'Go',
+			enabled: hasRepo,
+			run: () => {
+				void (async () => {
+					const cur = await symbolsBaseProjectsGet().catch(() => [] as string[]);
+					const raw = window.prompt('Read-only Base / SDK project folders (comma-separated):', cur.join(', '));
+					if (raw === null) return;
+					const paths = raw.split(',').map((s) => s.trim()).filter(Boolean);
+					await symbolsBaseProjectsSet(paths);
+					notify('info', `Saved ${paths.length} read-only base project(s).`);
+				})();
+			}
+		});
+		register({
+			id: 'symbols.volumeStats',
+			title: 'Show 9-Volume Index Stats',
+			category: 'Go',
+			enabled: hasRepo,
+			run: () => {
+				void symbolsVolumeStats()
+					.then((s) => {
+						if (!s.present) notify('info', '9-volume index is not built yet.');
+						else notify('info', `9-volume index: ${s.symRecords} syms, ${s.sigFiles} sig files, ${s.xabPages} xab / ${s.xsbPages} xsb pages (${(s.totalBytes / 1024).toFixed(1)} KiB).`);
+					})
+					.catch((e) => notify('error', String(e)));
+			}
+		});
+		registerZhCnText({
+			'Toggle Highlight Word': '切换词高亮',
+			'Clear All Word Highlights': '清除所有词高亮',
+			'Preview Macro Expansion': '预览宏展开',
+			'Configure Conditional Compilation Macros...': '配置条件编译宏...',
+			'Configure Read-Only Base / SDK Projects...': '配置只读基础 / SDK 工程...',
+			'Show 9-Volume Index Stats': '查看 9 文件索引统计'
+		});
 		register({ id: 'extensions.installFromVsix', title: 'Install Extension from VSIX...', category: 'Extensions', run: () => { this.showView('extensions'); void this.extensions.installFromVsixCommand(); } });
 		register({ id: 'extensions.checkForUpdates', title: 'Check for Extension Updates', category: 'Extensions', run: () => { this.showView('extensions'); void this.extensions.checkForUpdates(); } });
 		register({ id: 'git.initRepository', title: 'Initialize Repository', category: 'Git', enabled: () => this.repoPath !== null && !this.isRepo, run: () => void this.initializeRepository() });

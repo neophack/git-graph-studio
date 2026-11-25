@@ -77,3 +77,25 @@
 	flex: none; color: var(--vscode-descriptionForeground); font-size: 11px;
 	white-space: nowrap;
 }
+
+/* Read / Write / Call / Decl access filter pills & site badges (Area 2) */
+.refs-access-bar { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
+.refs-access-pill {
+	font-size: 10px; line-height: 16px; padding: 0 6px; border-radius: 8px; cursor: pointer;
+	border: 1px solid var(--vscode-panel-border); background: transparent;
+	color: var(--vscode-descriptionForeground);
+}
+.refs-access-pill:hover { color: var(--vscode-sideBar-foreground); border-color: var(--vscode-focusBorder); }
+.refs-access-pill.active {
+	background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+	border-color: var(--vscode-button-background);
+}
+.refs-access-badge {
+	flex: none; font-size: 10px; font-weight: 700; width: 15px; height: 15px; line-height: 15px;
+	text-align: center; border-radius: 3px; user-select: none;
+}
+.refs-access-write { background: color-mix(in srgb, #e51400 22%, transparent); color: #f48771; }
+.refs-access-read { background: color-mix(in srgb, #3794ff 18%, transparent); color: #75beff; }
+.refs-access-call { background: color-mix(in srgb, #b180d7 22%, transparent); color: #c586c0; }
+.refs-access-decl { background: color-mix(in srgb, #4ec9b0 22%, transparent); color: #4ec9b0; }
+

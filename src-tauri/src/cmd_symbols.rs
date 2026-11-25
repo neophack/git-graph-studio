@@ -8,6 +8,7 @@
 //! and the `studio://symbol-index` event for the on-demand builds (both through the
 //! ggs-base push seams).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -16,14 +17,23 @@ use tauri::ipc::Channel;
 use tauri::State;
 
 use ggs_base::sink::BatchSink;
-use ggs_index::scan::{read_searchable, FileMatches};
+use ggs_index::scan::read_searchable;
 use ggs_index::symbols::index::{
-    references_for, tree_from, IndexStatus, SymbolIndex, SymbolIndexEvent, TreeFile,
+    classified_references_for, tree_from, ClassifiedRefFile, IndexStatus, SymbolIndex,
+    SymbolIndexEvent, TreeFile,
+};
+use ggs_index::symbols::preprocessor::{
+    eval_inactive_ranges, expand_macro_at, load_base_projects, load_conditions,
+    save_base_projects, save_conditions, ConditionsConfig, InactiveRange, MacroExpansion,
 };
 use ggs_index::symbols::relations::{
     relation_children, RelationAnswer, RelationKind, RelationNode,
 };
 use ggs_index::symbols::rename::{rename_apply, rename_plan, RenameOutcome, RenamePlan};
+use ggs_index::symbols::type_resolve::{
+    member_completions, resolve_member_symbol, MemberCompletion,
+};
+use ggs_index::symbols::vol_reader::VolumeStats;
 use ggs_index::symbols::WorkspaceSymbol;
 
 use ggs_base::workspace::WorkspaceRoots;
@@ -104,8 +114,8 @@ pub async fn symbols_rebuild(
     .map_err(|e| e.to_string())?
 }
 
-/// Every declaration of exactly `name` — Go-to-Definition's index answer. An empty list is
-/// a real answer (nothing declares it); the frontend falls back to its other heuristics.
+/// Every declaration of exactly `name` — Go-to-Definition's index answer, falling back
+/// to any configured read-only Base / SDK projects when not found in the primary root.
 #[tauri::command]
 pub async fn symbol_lookup(
     app: tauri::AppHandle,
@@ -116,7 +126,7 @@ pub async fn symbol_lookup(
 ) -> Result<Vec<WorkspaceSymbol>, String> {
     let root = resolve_root(roots.inner(), repo)?;
     ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
-    Ok(symbol_index.lookup(&root, &name).unwrap_or_default())
+    Ok(symbol_index.lookup_with_base_projects(&root, &name))
 }
 
 /// The whole index as a per-file outline — the Symbol Database page renders it as a
@@ -137,9 +147,8 @@ pub async fn symbol_tree(
 }
 
 /// Every whole-word occurrence of `name` in the workspace's code files — Find References'
-/// raw material. The index's occurrence list narrows the scan to the files that contain the
-/// word at all; for a name the list does not trust, the whole tree is scanned.
-/// `find_references` (cmd_search) and this command are both that one implementation.
+/// raw material, prefiltered via `.ggs_xc` Bloom signatures and enriched with
+/// Read/Write/Call/Decl access semantics.
 #[tauri::command]
 pub async fn symbol_references(
     app: tauri::AppHandle,
@@ -147,10 +156,165 @@ pub async fn symbol_references(
     symbol_index: State<'_, Arc<SymbolIndex>>,
     name: String,
     repo: Option<String>,
-) -> Result<Vec<FileMatches>, String> {
+) -> Result<Vec<ClassifiedRefFile>, String> {
     let root = resolve_root(roots.inner(), repo)?;
     ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
-    references_for(&symbol_index, &root, &name)
+    classified_references_for(&symbol_index, &root, &name)
+}
+
+/// Receiver-disambiguated Go-to-Definition for member access (`ptr->foo`, `obj.bar`,
+/// `Ns::Type::fn`). Falls back to empty when not a member expression.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn symbol_member_lookup(
+    app: tauri::AppHandle,
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, Arc<SymbolIndex>>,
+    name: String,
+    line: usize,
+    column: usize,
+    text: String,
+    ext: String,
+    repo: Option<String>,
+) -> Result<Vec<WorkspaceSymbol>, String> {
+    let root = resolve_root(roots.inner(), repo)?;
+    ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
+    Ok(symbol_index
+        .with_store(&root, |store| {
+            resolve_member_symbol(store, &text, &ext, line, column, &name)
+        })
+        .unwrap_or_default())
+}
+
+/// Member auto-completion candidates after `.` / `->` / `::` (including inherited bases).
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn symbol_member_completions(
+    app: tauri::AppHandle,
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, Arc<SymbolIndex>>,
+    line: usize,
+    column: usize,
+    text: String,
+    ext: String,
+    limit: Option<usize>,
+    repo: Option<String>,
+) -> Result<Vec<MemberCompletion>, String> {
+    let root = resolve_root(roots.inner(), repo)?;
+    ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
+    let cap = limit.unwrap_or(64).min(200);
+    Ok(symbol_index
+        .with_store(&root, |store| {
+            member_completions(store, &text, &ext, line, column, cap)
+        })
+        .unwrap_or_default())
+}
+
+/// Zero-disk-I/O semantic kind lookup for visible editor identifiers (Area 3).
+#[tauri::command]
+pub async fn symbol_semantic_kinds(
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, Arc<SymbolIndex>>,
+    names: Vec<String>,
+    repo: Option<String>,
+) -> Result<HashMap<String, String>, String> {
+    let root = match resolve_root(roots.inner(), repo) {
+        Ok(r) => r,
+        Err(_) => return Ok(HashMap::new()),
+    };
+    let map = symbol_index
+        .with_store(&root, |store| {
+            store
+                .semantic_kinds_for(&names)
+                .into_iter()
+                .map(|(k, v)| (k, v.to_owned()))
+                .collect::<HashMap<String, String>>()
+        })
+        .unwrap_or_default();
+    Ok(map)
+}
+
+/// Evaluate inactive C/C++ preprocessor branches (`#if/#ifdef/#elif/#else/#endif`)
+/// under the project's saved conditions (`<root>/.ggs/conditions.json`).
+#[tauri::command]
+pub async fn symbol_inactive_ranges(
+    roots: State<'_, WorkspaceRoots>,
+    text: String,
+    repo: Option<String>,
+) -> Result<Vec<InactiveRange>, String> {
+    let root = match resolve_root(roots.inner(), repo) {
+        Ok(r) => r,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let config = load_conditions(&root);
+    Ok(eval_inactive_ranges(&text, &config.macros))
+}
+
+/// Expand a `#define` macro (with optional call-site argument substitution).
+#[tauri::command]
+pub async fn symbol_macro_expand(
+    app: tauri::AppHandle,
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, Arc<SymbolIndex>>,
+    name: String,
+    call_line: Option<String>,
+    repo: Option<String>,
+) -> Result<Option<MacroExpansion>, String> {
+    let root = resolve_root(roots.inner(), repo)?;
+    ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
+    Ok(symbol_index
+        .with_store(&root, |store| {
+            expand_macro_at(store, &name, call_line.as_deref())
+        })
+        .flatten())
+}
+
+#[tauri::command]
+pub async fn symbols_conditions_get(
+    roots: State<'_, WorkspaceRoots>,
+    repo: Option<String>,
+) -> Result<ConditionsConfig, String> {
+    let root = resolve_root(roots.inner(), repo)?;
+    Ok(load_conditions(&root))
+}
+
+#[tauri::command]
+pub async fn symbols_conditions_set(
+    roots: State<'_, WorkspaceRoots>,
+    config: ConditionsConfig,
+    repo: Option<String>,
+) -> Result<(), String> {
+    let root = resolve_root(roots.inner(), repo)?;
+    save_conditions(&root, &config)
+}
+
+#[tauri::command]
+pub async fn symbols_base_projects_get(
+    roots: State<'_, WorkspaceRoots>,
+    repo: Option<String>,
+) -> Result<Vec<String>, String> {
+    let root = resolve_root(roots.inner(), repo)?;
+    Ok(load_base_projects(&root))
+}
+
+#[tauri::command]
+pub async fn symbols_base_projects_set(
+    roots: State<'_, WorkspaceRoots>,
+    paths: Vec<String>,
+    repo: Option<String>,
+) -> Result<(), String> {
+    let root = resolve_root(roots.inner(), repo)?;
+    save_base_projects(&root, &paths)
+}
+
+#[tauri::command]
+pub async fn symbols_volume_stats(
+    roots: State<'_, WorkspaceRoots>,
+    symbol_index: State<'_, Arc<SymbolIndex>>,
+    repo: Option<String>,
+) -> Result<VolumeStats, String> {
+    let root = resolve_root(roots.inner(), repo)?;
+    Ok(symbol_index.volume_stats(&root))
 }
 
 /// One row of `symbol_file_outline`'s answer: the file's own definition with its body's

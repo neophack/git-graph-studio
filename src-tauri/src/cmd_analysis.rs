@@ -14,13 +14,12 @@ use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
 use tauri::State;
 
-use ggs_analysis::diagram::ModuleDiagram;
 use ggs_analysis::imports::ImportGraph;
 use ggs_analysis::index::{
     run_dead_code, run_metrics, run_security, AnalysisIndexEvent,
     AnalysisStatus, DeadCodeEvent, MetricsEvent, SecurityEvent,
 };
-use ggs_analysis::modules::{self, ModuleGraph};
+use ggs_analysis::modules::{self, ModuleEdgeDetail, ModuleOverview};
 use ggs_analysis::AnalysisData;
 
 use ggs_base::sink::BatchSink;
@@ -79,53 +78,58 @@ pub async fn analysis_rebuild(
     .map_err(|e| e.to_string())?
 }
 
-/// The workspace's module graph: which module (directory) depends on which, the file
-/// pairs that carry the calls and the call sites under each — the Module Analysis
-/// page's whole model, in one answer (see `ggs_analysis::modules`). `folders` scopes the
-/// answer to a folder pick (empty or absent: the whole workspace).
+/// Scoped, layered module architecture overview read directly from the nine `project.ggs_*`
+/// volumes (`SymbolStore::dependency_facts`) — zero disk I/O, no `AnalysisData` build.
 #[tauri::command]
-pub async fn analysis_module_graph(
+pub async fn analysis_module_overview(
     app: tauri::AppHandle,
     roots: State<'_, WorkspaceRoots>,
-    analysis_index: State<'_, std::sync::Arc<ggs_analysis::index::AnalysisIndex>>,
+    symbol_index: State<'_, std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>,
     repo: Option<String>,
+    scope: Option<String>,
+    depth: Option<u8>,
     folders: Option<Vec<String>>,
-) -> Result<ModuleGraph, String> {
+) -> Result<ModuleOverview, String> {
     let root = resolve_root(roots.inner(), repo)?;
-    let data = analysis_of(&app, analysis_index.inner(), root).await?;
-    let data = data.lock().unwrap();
-    Ok(modules::module_graph(
-        &data,
-        &modules::normalize_scope(&folders.unwrap_or_default()),
-    ))
+    crate::cmd_symbols::ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
+    let facts = symbol_index
+        .with_store(&root, |store| store.dependency_facts())
+        .ok_or("The symbol index could not be built")?;
+    let folders = folders.unwrap_or_default();
+    let depth = depth.unwrap_or(0);
+    tauri::async_runtime::spawn_blocking(move || {
+        modules::module_overview(&facts, scope.as_deref(), depth, &folders)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
-/// The Module Analysis drawing (the gitdiagram-style architecture diagram): the
-/// module graph laid out in the backend — group boxes, blocks, arrows, the mermaid
-/// source and what the caps dropped — geometry ready to set (see `ggs_analysis::diagram`).
-/// The filter and the optional focus narrow the pairs the same way the page's tree
-/// does; the page refetches on either changing. `folders` scopes the whole drawing
-/// to a folder pick (empty or absent: the whole workspace).
+/// On-demand L2 evidence for a single module dependency edge `from → to`: reads only the
+/// relevant `from`-side files on disk and extracts exact resolved imports and call sites.
 #[tauri::command]
-pub async fn analysis_module_diagram(
+pub async fn analysis_module_edge_detail(
     app: tauri::AppHandle,
     roots: State<'_, WorkspaceRoots>,
-    analysis_index: State<'_, std::sync::Arc<ggs_analysis::index::AnalysisIndex>>,
+    symbol_index: State<'_, std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>,
     repo: Option<String>,
-    focus: Option<String>,
-    filter: Option<String>,
+    from: String,
+    to: String,
+    scope: Option<String>,
+    depth: Option<u8>,
     folders: Option<Vec<String>>,
-) -> Result<ModuleDiagram, String> {
+) -> Result<ModuleEdgeDetail, String> {
     let root = resolve_root(roots.inner(), repo)?;
-    let data = analysis_of(&app, analysis_index.inner(), root).await?;
-    let data = data.lock().unwrap();
-    let scope = modules::normalize_scope(&folders.unwrap_or_default());
-    Ok(ggs_analysis::diagram::module_diagram(
-        &modules::module_graph(&data, &scope),
-        focus.as_deref(),
-        filter.as_deref().unwrap_or(""),
-        &scope,
-    ))
+    crate::cmd_symbols::ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
+    let facts = symbol_index
+        .with_store(&root, |store| store.dependency_facts())
+        .ok_or("The symbol index could not be built")?;
+    let folders = folders.unwrap_or_default();
+    let depth = depth.unwrap_or(0);
+    tauri::async_runtime::spawn_blocking(move || {
+        modules::module_edge_detail(&root, &facts, &from, &to, scope.as_deref(), depth, &folders)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Every function and method with its measured shape, streamed in batches. The hotspot

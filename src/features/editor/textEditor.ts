@@ -13,6 +13,7 @@ import { bracketMatching, foldGutter, foldKeymap, indentOnInput, indentUnit } fr
 import { languages } from '@codemirror/language-data';
 
 import { completionExtension } from './autocomplete';
+import { semanticHighlightExtension } from './semanticHighlight';
 import { commentKeymapFor } from './comments';
 import { hasBookmark } from './bookmarks';
 import { expandSelection, shrinkSelection } from './expandSelection';
@@ -22,7 +23,7 @@ import { vscodeHighlighting } from './cmTheme';
 import { settings } from '../../platform/settings';
 import { icon } from '../../platform/ui/index';
 
-export { EditorState, EditorView, keymap, openSearchPanel, openReplacePanel, redo, selectAll, undo, completionExtension, expandSelection, shrinkSelection };
+export { EditorState, EditorView, keymap, openSearchPanel, openReplacePanel, redo, selectAll, undo, completionExtension, semanticHighlightExtension, expandSelection, shrinkSelection };
 export { addCursorAbove, addCursorBelow, copyLineDown, copyLineUp, cursorMatchingBracket, deleteLine, moveLineDown, moveLineUp };
 // The diff overview ruler rides the text-editor chunk: compare modules (merge toolbar,
 // folder compare) reach it through this module (lazy.ts), never across module files (R2).

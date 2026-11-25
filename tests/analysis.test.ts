@@ -6,15 +6,11 @@
 // cycles. Everything runs against the scripted `tauriMock` backend like every other
 // view suite.
 
-vi.mock('mermaid', () => import('./mermaidStub'));
-vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { setLocale } from '../src/platform/i18n';
 import { flush } from './helpers';
 
 import { backend, Channel } from './tauriMock';
-import { initializations, rendered } from './mermaidStub';
-
 
 let AnalysisView: typeof import('../src/features/analysis').AnalysisView;
 let createAnalysisPage: typeof import('../src/features/analysis').createAnalysisPage;
@@ -34,34 +30,6 @@ function host(): HTMLElement {
 
 function texts(selector: string, root: ParentNode = document): string[] {
 	return [...root.querySelectorAll<HTMLElement>(selector)].map((node) => node.textContent ?? '');
-}
-
-/** The module graph fixture the drawing and the tree share. */
-function moduleGraphAnswer(): Record<string, unknown> {
-	return {
-		modules: [
-			{ name: '', files: 1, symbols: 2 },
-			{ name: 'src', files: 3, symbols: 9 }
-		],
-		edges: [
-			{ from: 'src', to: 'src', calls: 6, files: 2 },
-			{ from: '', to: 'src', calls: 2, files: 1 }
-		],
-		fileEdges: [
-			{ from: 'src/a.ts', to: 'src/ui.ts', calls: 5, sites: [
-				{ from: 'main', to: 'render', line: 3, column: 2 },
-				{ from: 'boot', to: 'render', line: 9, column: 7 }
-			] },
-			{ from: 'src/b.ts', to: 'src/ui.ts', calls: 1, sites: [{ from: 'walk', to: 'render', line: 0, column: 4 }] },
-			{ from: 'top.rs', to: 'src/a.ts', calls: 2, sites: [
-				{ from: 'start', to: 'main', line: 1, column: 0 },
-				{ from: 'stop', to: 'main', line: 5, column: 1 }
-			] }
-		],
-		totalCalls: 8,
-		totalModuleEdges: 2,
-		totalFileEdges: 3
-	};
 }
 
 describe('the Analysis sidebar', () => {
@@ -310,428 +278,188 @@ describe('the report pages', () => {
 });
 
 describe('the graph pages', () => {
-	/** The module diagram fixture the drawing tests share — the model answer
-	 *  `analysis_module_diagram` returns for the module graph fixture above; the
-	 *  drawing itself is the mermaid source, which the stubbed renderer parses into
-	 *  the element shapes the assertions drive. */
-	const FIXTURE_MERMAID = 'flowchart TD\n  subgraph G0["src"]\n    N0["a.ts<br/>[src]"]\n    N1["ui.ts<br/>[src]"]\n    N3["b.ts<br/>[src]"]\n  end\n  N2["top.rs"]\n  N2 -->|"2 calls"| N0\n  N0 -->|"5 calls"| N1\n  N3 -->|"1 calls"| N1\n';
-
-	function diagramAnswer(): Record<string, unknown> {
+	function overviewAnswer(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 		return {
+			scope: '',
+			depth: 1,
+			breadcrumbs: [],
 			nodes: [
-				{ path: 'src/a.ts', label: 'a.ts', module: 'src', tone: 1, callsIn: 2, callsOut: 5 },
-				{ path: 'src/ui.ts', label: 'ui.ts', module: 'src', tone: 1, callsIn: 6, callsOut: 0 },
-				{ path: 'top.rs', label: 'top.rs', module: '', tone: 0, callsIn: 0, callsOut: 2 },
-				{ path: 'src/b.ts', label: 'b.ts', module: 'src', tone: 1, callsIn: 0, callsOut: 1 }
+				{ id: 'app', label: 'app', kind: 'module', expandable: true, files: 2, symbols: 6, fanIn: 0, fanOut: 1, instability: 1.0, inCycle: false, layer: 0, topFiles: [{ path: 'app/main.ts', symbols: 4 }] },
+				{ id: 'core', label: 'core', kind: 'module', expandable: true, files: 3, symbols: 10, fanIn: 2, fanOut: 1, instability: 0.33, inCycle: true, layer: 1, topFiles: [{ path: 'core/engine.ts', symbols: 7 }] },
+				{ id: 'db', label: 'db', kind: 'module', expandable: true, files: 1, symbols: 4, fanIn: 1, fanOut: 1, instability: 0.5, inCycle: true, layer: 1, topFiles: [{ path: 'db/store.ts', symbols: 4 }] }
 			],
 			edges: [
-				{ id: 'src/a.ts→src/ui.ts', from: 'src/a.ts', to: 'src/ui.ts', calls: 5, dashed: false },
-				{ id: 'src/b.ts→src/ui.ts', from: 'src/b.ts', to: 'src/ui.ts', calls: 1, dashed: false },
-				{ id: 'top.rs→src/a.ts', from: 'top.rs', to: 'src/a.ts', calls: 2, dashed: false }
+				{ id: 'app→core', from: 'app', to: 'core', weight: 5, symbolRefs: 5, baseRefs: 0, filePairs: 2, topSymbols: ['runCore', 'Engine'], isCycle: false },
+				{ id: 'core→db', from: 'core', to: 'db', weight: 4, symbolRefs: 4, baseRefs: 0, filePairs: 1, topSymbols: ['queryDb'], isCycle: true },
+				{ id: 'db→core', from: 'db', to: 'core', weight: 2, symbolRefs: 2, baseRefs: 0, filePairs: 1, topSymbols: ['Engine'], isCycle: true }
 			],
-			droppedFiles: 0, droppedEdges: 0,
-			mermaid: FIXTURE_MERMAID
+			cycles: [['core', 'db']],
+			totalFiles: 6,
+			totalSymbols: 20,
+			totalEdges: 3,
+			mermaid: 'flowchart TD\n  M0["app"]\n  M0 -->|"5 refs"| M1\n',
+			...overrides
 		};
 	}
 
-	function nodeEl(root: HTMLElement, path: string): HTMLElement {
-		return root.querySelector(`g.node[data-path="${path}"]`)!;
+	function edgeDetailAnswer(): Record<string, unknown> {
+		return {
+			from: 'app',
+			to: 'core',
+			imports: [{ fromFile: 'app/main.ts', toFile: 'core/engine.ts', specifier: '../core/engine' }],
+			filePairs: [{
+				fromFile: 'app/main.ts',
+				toFile: 'core/engine.ts',
+				symbols: ['runCore'],
+				sites: [{ symbol: 'runCore', receiver: null, line: 3, column: 2 }]
+			}],
+			scannedFiles: 1
+		};
 	}
 
-	/** The drawing lands asynchronously (mermaid's render, even stubbed): wait for
-	 *  the blocks to appear instead of betting on the flush count. */
-	async function untilDrawn(root: HTMLElement, count = 1): Promise<void> {
-		await vi.waitFor(() => {
-			if (root.querySelectorAll('[data-path]').length < count) throw new Error('the diagram has not rendered yet');
-		}, { timeout: 3000 });
+	function nodeEl(root: HTMLElement, id: string): SVGElement {
+		return root.querySelector(`g.an-mod-node[data-node-id="${id}"]`)!;
 	}
 
-	/** Wait for the drawing to hold exactly `count` marked blocks — a refetch's
-	 *  stale tree (its own marker count) must not satisfy the wait. */
-	async function untilCount(root: HTMLElement, count: number): Promise<void> {
-		await vi.waitFor(() => {
-			const marked = root.querySelectorAll('[data-path]').length;
-			if (marked !== count) throw new Error(`the drawing holds ${marked} blocks, not ${count} yet`);
-		}, { timeout: 3000 });
+	function edgeEl(root: HTMLElement, id: string): SVGElement {
+		return root.querySelector(`g.an-mod-edge[data-edge-id="${id}"]`)!;
 	}
 
-	it('renders through gitdiagram mermaid configuration, verbatim', async () => {
+	it('renders native SVG layered module cards, cycle markers, and opens node inspector on click', async () => {
 		await modules();
-		backend.on('analysis_module_graph', moduleGraphAnswer);
-		backend.on('analysis_module_diagram', () => diagramAnswer());
-		createAnalysisPage('modules', host());
-		await flush(8);
-		// The one initialize() the page made is gitdiagram's own baseConfig — the
-		// display is its pipeline by construction, not by approximation.
-		expect(initializations.length).toBeGreaterThanOrEqual(1);
-		const config = initializations.at(-1)!;
-		expect(config).toMatchObject({
-			startOnLoad: false,
-			securityLevel: 'strict',
-			theme: 'base',
-			htmlLabels: false,
-			layout: 'elk',
-			look: 'classic'
-		});
-		expect(config.flowchart).toEqual({
-			wrappingWidth: 200,
-			curve: 'linear',
-			nodeSpacing: 50,
-			rankSpacing: 50,
-			padding: 15
-		});
-		// The one ELK tweak past gitdiagram's config, on the owner's ask: simplex
-		// node placement, so cross-group arrows pull short instead of winding
-		// around distant boxes.
-		expect(config.elk).toEqual({ nodePlacementStrategy: 'NETWORK_SIMPLEX' });
-	});
-
-	it('renders gitdiagram’s dark palette under a dark theme, and re-renders when the theme flips', async () => {
-		await modules();
-		backend.on('analysis_module_graph', moduleGraphAnswer);
-		backend.on('analysis_module_diagram', () => diagramAnswer());
-		const root = host();
-		createAnalysisPage('modules', root);
-		await untilDrawn(root);
-		// jsdom's document carries no theme kind — the drawing opens in
-		// gitdiagram's light variable set.
-		const light = initializations.at(-1)!.themeVariables as Record<string, string>;
-		expect(light.lineColor).toBe('#334155');
-		expect(light.primaryTextColor).toBe('#171717');
-		// A dark theme flips the pick — settings marks the kind on <html> and
-		// dispatches THEME_EVENT once the stylesheet has loaded; the drawing
-		// re-renders through gitdiagram's dark variables.
-		document.documentElement.classList.add('vscode-dark');
-		const rendersBefore = rendered.length;
-		try {
-			document.dispatchEvent(new CustomEvent('app:theme-applied', { bubbles: true }));
-			await flush(8);
-			const dark = initializations.at(-1)!.themeVariables as Record<string, string>;
-			expect(dark.lineColor).toBe('#ffd486');
-			expect(dark.primaryTextColor).toBe('#e8edf5');
-			expect(dark.secondaryColor).toBe('#26303f');
-			expect(rendered.length).toBeGreaterThan(rendersBefore);
-			expect(initializations.at(-1)!.flowchart).toEqual({
-				wrappingWidth: 200,
-				curve: 'linear',
-				nodeSpacing: 50,
-				rankSpacing: 50,
-				padding: 15
-			});
-		} finally {
-			document.documentElement.classList.remove('vscode-dark');
-		}
-	});
-
-	it('module analysis renders the backend diagram and opens a file on block double-click', async () => {
-		await modules();
-		backend.on('analysis_module_graph', moduleGraphAnswer);
-		backend.on('analysis_module_diagram', () => diagramAnswer());
+		backend.on('analysis_module_overview', () => overviewAnswer());
 		const root = host();
 		const page = createAnalysisPage('modules', root);
 		const opened: string[] = [];
 		page.onOpen = (path, line) => opened.push(`${path}:${line}`);
-		await flush(8);
-		await untilDrawn(root);
-		// The drawing is one backend fetch: the laid-out diagram, filter and focus empty.
-		const diagramCalls = backend.callsTo('analysis_module_diagram');
-		expect(diagramCalls.length).toBe(1);
-		expect(diagramCalls[0]).toMatchObject({ focus: null, filter: '' });
-		// mermaid renders the source: the cards in the answer's order, the subgraph
-		// cluster, the arrows with their call counts (the stub parses the source into
-		// mermaid's own element shapes).
-		console.log('IDS', [...root.querySelectorAll('g.node')].map((n) => `${n.getAttribute('id')}=>${(n as SVGElement).dataset?.path ?? n.getAttribute('data-path')}`));
-		expect([...root.querySelectorAll<HTMLElement>('g.node')].map((node) => node.dataset.path))
-			.toEqual(['src/a.ts', 'src/ui.ts', 'src/b.ts', 'top.rs'], 'the subgraph cards precede the ungrouped');
-		expect(root.querySelectorAll('[data-id]').length).toBeGreaterThanOrEqual(3, 'every arrow is marked');
-		// gitdiagram's two-line card: the name over the bracketed directory.
-		expect(nodeEl(root, 'src/a.ts').textContent).toContain('a.ts');
-		expect(nodeEl(root, 'src/a.ts').textContent).toContain('[src]');
-		expect(nodeEl(root, 'top.rs').textContent).toBe('top.rs', 'a root file keeps one line');
-		// A double-clicked block opens the file.
-		nodeEl(root, 'src/a.ts').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
-		expect(opened).toEqual(['src/a.ts:1']);
+		await flush(6);
+
+		expect(texts('.an-title', root)[0]).toBe('3 modules · 3 edges · 1 cycles');
+		expect(root.querySelectorAll('g.an-mod-node').length).toBe(3);
+		expect(root.querySelectorAll('g.an-mod-edge').length).toBe(3);
+		expect(edgeEl(root, 'core→db').classList.contains('cycle')).toBe(true);
+		expect(nodeEl(root, 'core').classList.contains('cycle')).toBe(true);
+
+		// Clicking a module card highlights neighbours, dims unrelated nodes, and opens the Inspector.
+		nodeEl(root, 'app').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		expect(nodeEl(root, 'app').classList.contains('selected')).toBe(true);
+		expect(nodeEl(root, 'core').classList.contains('related')).toBe(true);
+		expect(nodeEl(root, 'db').classList.contains('dim')).toBe(true);
+		expect(root.querySelector<HTMLElement>('.an-inspector')!.hidden).toBe(false);
+		expect(texts('.an-insp-title', root)[0]).toBe('app');
+
+		// Clicking a key file inside the Inspector opens it in the editor.
+		const keyFileRow = [...root.querySelectorAll<HTMLElement>('.an-insp-row')]
+			.find((row) => row.textContent?.includes('app/main.ts'))!;
+		keyFileRow.click();
+		expect(opened).toEqual(['app/main.ts:1']);
 	});
 
-	it('module analysis says how many files the diagram cap dropped', async () => {
+	it('clicks an edge to fetch on-demand L2 imports and clickable call sites', async () => {
 		await modules();
-		backend.on('analysis_module_graph', moduleGraphAnswer);
-		backend.on('analysis_module_diagram', () => ({ ...diagramAnswer(), droppedFiles: 354 }));
-		const root = host();
-		createAnalysisPage('modules', root);
-		await flush(8);
-		expect(texts('.an-more', root)[0]).toContain('354 more files');
-	});
-
-	it('module analysis toggles to the tree and expands to files and call sites', async () => {
-		await modules();
-		backend.on('analysis_module_graph', moduleGraphAnswer);
-		backend.on('analysis_module_diagram', () => diagramAnswer());
+		backend.on('analysis_module_overview', () => overviewAnswer());
+		backend.on('analysis_module_edge_detail', () => edgeDetailAnswer());
 		const root = host();
 		const page = createAnalysisPage('modules', root);
 		const opened: string[] = [];
 		page.onOpen = (path, line) => opened.push(`${path}:${line}`);
-		await flush(8);
-		expect(texts('.an-title', root)[0]).toBe('2 modules · 3 file dependencies · 8 cross-file calls');
-		// The Tree toggle flips the view; the drawing's host steps aside.
+		await flush(6);
+
+		edgeEl(root, 'app→core').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush(6);
+		expect(backend.callsTo('analysis_module_edge_detail')).toHaveLength(1);
+		expect(backend.callsTo('analysis_module_edge_detail')[0]).toMatchObject({ from: 'app', to: 'core' });
+		expect(texts('.an-insp-title', root)[0]).toBe('app → core');
+		const siteRow = [...root.querySelectorAll<HTMLElement>('.an-insp-row')]
+			.find((row) => row.textContent?.includes('runCore'))!;
+		siteRow.click();
+		expect(opened).toEqual(['app/main.ts:4']);
+	});
+
+	it('drills into a module on double-click and navigates back via breadcrumbs', async () => {
+		await modules();
+		backend.on('analysis_module_overview', ({ scope }: { scope: string | null }) => (
+			scope === 'core'
+				? overviewAnswer({
+					scope: 'core',
+					breadcrumbs: ['core'],
+					nodes: [{ id: 'core/engine.ts', label: 'engine.ts', kind: 'file', expandable: false, files: 1, symbols: 7, fanIn: 0, fanOut: 0, instability: 0, inCycle: false, layer: 0, topFiles: [] }],
+					edges: [],
+					cycles: []
+				})
+				: overviewAnswer()
+		));
+		const root = host();
+		createAnalysisPage('modules', root);
+		await flush(6);
+
+		nodeEl(root, 'core').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+		await flush(6);
+		expect(backend.callsTo('analysis_module_overview').at(-1)).toMatchObject({ scope: 'core' });
+		expect(texts('.an-crumb', root)).toEqual(['Workspace', 'core']);
+		expect(root.querySelectorAll('g.an-mod-node').length).toBe(1);
+
+		// Click root breadcrumb to return to workspace overview.
+		root.querySelector<HTMLElement>('.an-crumb')!.click();
+		await flush(6);
+		expect(backend.callsTo('analysis_module_overview').at(-1)).toMatchObject({ scope: null });
+		expect(root.querySelectorAll('g.an-mod-node').length).toBe(3);
+	});
+
+	it('filters cycles-only, switches depth, toggles list view, and copies Mermaid', async () => {
+		await modules();
+		backend.on('analysis_module_overview', () => overviewAnswer());
+		const root = host();
+		createAnalysisPage('modules', root);
+		await flush(6);
+
+		// Cycles-only button narrows to cyclic nodes and edges.
+		const cyclesBtn = root.querySelector<HTMLButtonElement>('.an-cycles-btn')!;
+		expect(cyclesBtn.hidden).toBe(false);
+		cyclesBtn.click();
+		expect(root.querySelectorAll('g.an-mod-node').length).toBe(2);
+		expect(root.querySelectorAll('g.an-mod-edge').length).toBe(2);
+		cyclesBtn.click();
+		expect(root.querySelectorAll('g.an-mod-node').length).toBe(3);
+
+		// Depth selector refetches with the selected depth.
+		const depthSelect = root.querySelector<HTMLSelectElement>('.an-depth')!;
+		depthSelect.value = '3';
+		depthSelect.dispatchEvent(new Event('change', { bubbles: true }));
+		await flush(6);
+		expect(backend.callsTo('analysis_module_overview').at(-1)).toMatchObject({ depth: 3 });
+
+		// List toggle shows flat module dependency rows.
 		const toggles = [...root.querySelectorAll<HTMLElement>('.an-toggle')];
-		expect(toggles[0].classList.contains('on')).toBe(true);
 		toggles[1].click();
-		expect(root.classList.contains('an-tree')).toBe(true);
-		expect(root.querySelector<HTMLElement>('.an-branch')).toBeTruthy();
-		// The tree starts collapsed at the module edges.
-		const branches = [...root.querySelectorAll<HTMLElement>('.an-branch')];
-		expect(branches.length).toBe(2);
-		expect(branches[0].textContent).toContain('src→src');
-		expect(branches[0].textContent).toContain('6 calls');
-		expect(branches[0].textContent).toContain('2 file pairs');
-		expect(branches[1].textContent).toContain('(root)→src');
-		expect(root.querySelectorAll('.an-row.an-l1').length).toBe(0, 'the tree starts collapsed');
+		expect(root.querySelectorAll('.an-list .an-branch').length).toBe(3);
+		toggles[0].click();
 
-		// Expanding a module edge lists its file pairs in the payload's calls-first order.
-		branches[0].click();
-		await flush(2);
-		const files = [...root.querySelectorAll<HTMLElement>('.an-row.an-l1')];
-		expect(files.length).toBe(2);
-		expect(files[0].textContent).toContain('src/a.ts→src/ui.ts');
-		expect(files[1].textContent).toContain('src/b.ts→src/ui.ts');
-		expect(root.querySelectorAll('.an-row.an-l2').length).toBe(0);
-
-		// Expanding a file pair lists its call sites; a site click opens the caller's line.
-		files[0].click();
-		await flush(2);
-		const sites = [...root.querySelectorAll<HTMLElement>('.an-row.an-l2')];
-		expect(sites.length).toBe(2);
-		expect(sites[0].textContent).toContain('main→render');
-		expect(sites[0].textContent).toContain('src/a.ts:4');
-		// 5 calls but only 2 sites listed — the trailing count stays honest.
-		expect(texts('.an-more', root).some((text) => text.includes('3'))).toBe(true);
-		sites[0].click();
-		expect(opened).toEqual(['src/a.ts:4']);
-
-		// The filter narrows the whole tree — a symbol name reaches the pair that calls
-		// it, and an edge that matched only through a child shows just that child.
-		const filter = root.querySelector<HTMLInputElement>('.an-filter')!;
-		filter.value = 'boot';
-		filter.dispatchEvent(new Event('input', { bubbles: true }));
-		expect(root.querySelectorAll('.an-branch').length).toBe(1);
-		expect(root.querySelectorAll('.an-row.an-l1').length).toBe(1);
-		expect(texts('.an-row.an-l1', root)[0]).toContain('src/a.ts→src/ui.ts');
-	});
-
-	it('module analysis says how many file dependencies the cap hid', async () => {
-		await modules();
-		backend.on('analysis_module_graph', () => ({
-			modules: [{ name: 'src', files: 2, symbols: 4 }],
-			edges: [{ from: 'src', to: 'src', calls: 3, files: 2 }],
-			fileEdges: [{ from: 'src/a.ts', to: 'src/b.ts', calls: 3, sites: [] }],
-			totalCalls: 3,
-			totalModuleEdges: 1,
-			totalFileEdges: 2
-		}));
-		backend.on('analysis_module_diagram', () => diagramAnswer());
-		const root = host();
-		createAnalysisPage('modules', root);
-		await flush(8);
-		(root.querySelectorAll<HTMLElement>('.an-toggle')[1]).click();
-		expect(texts('.an-more', root)[0]).toBe('showing 1 of 2 file dependencies');
-	});
-
-	it('module analysis says how many module dependencies the cap hid', async () => {
-		await modules();
-		backend.on('analysis_module_graph', () => ({
-			modules: [{ name: 'src', files: 2, symbols: 4 }],
-			edges: [{ from: 'src', to: 'src', calls: 3, files: 2 }],
-			fileEdges: [],
-			totalCalls: 3,
-			totalModuleEdges: 5,
-			totalFileEdges: 0
-		}));
-		backend.on('analysis_module_diagram', () => diagramAnswer());
-		const root = host();
-		createAnalysisPage('modules', root);
-		await flush(8);
-		(root.querySelectorAll<HTMLElement>('.an-toggle')[1]).click();
-		expect(texts('.an-more', root)[0]).toBe('showing 1 of 5 module dependencies');
-	});
-
-	it('module analysis shows its empty state when no file calls another', async () => {
-		await modules();
-		backend.on('analysis_module_graph', () => ({
-			modules: [{ name: 'src', files: 2, symbols: 4 }],
-			edges: [],
-			fileEdges: [],
-			totalCalls: 0,
-			totalFileEdges: 0
-		}));
-		backend.on('analysis_module_diagram', () => ({ ...diagramAnswer(), nodes: [], edges: [], groups: [] }));
-		const root = host();
-		createAnalysisPage('modules', root);
-		await flush(8);
-		expect(texts('.an-empty', root)[0]).toContain('No cross-file calls');
-		expect(root.querySelectorAll('[data-path]').length).toBe(0, 'nothing to draw');
-	});
-
-	it('module analysis highlights the clicked block\'s dependencies and dims the rest', async () => {
-		await modules();
-		backend.on('analysis_module_graph', moduleGraphAnswer);
-		backend.on('analysis_module_diagram', () => diagramAnswer());
-		const root = host();
-		createAnalysisPage('modules', root);
-		await flush(8);
-		await untilDrawn(root);
-		nodeEl(root, 'src/a.ts').dispatchEvent(new MouseEvent('click', { bubbles: true }));
-		// The clicked block takes the selection, its neighbours thicken, every arrow it
-		// touches is selected too, and everything else fades back.
-		expect(nodeEl(root, 'src/a.ts').classList.contains('selected')).toBe(true);
-		expect(nodeEl(root, 'src/ui.ts').classList.contains('related')).toBe(true);
-		expect(nodeEl(root, 'top.rs').classList.contains('related')).toBe(true);
-		expect(nodeEl(root, 'src/b.ts').classList.contains('dim')).toBe(true);
-		expect(root.querySelector('[data-id="src/a.ts→src/ui.ts"]')!.classList.contains('selected')).toBe(true);
-		expect(root.querySelector('[data-id="top.rs→src/a.ts"]')!.classList.contains('selected')).toBe(true);
-		expect(root.querySelector('[data-id="src/b.ts→src/ui.ts"]')!.classList.contains('dim')).toBe(true);
-		// The chip over the drawing states what is selected.
-		expect(texts('.an-graphbar .chip', root)[0]).toContain('src/a.ts');
-		// A click on empty drawing returns it to neutral.
-		root.querySelector('.an-mermaid svg')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-		expect(nodeEl(root, 'src/a.ts').classList.contains('selected')).toBe(false);
-		expect(root.querySelector('[data-id="src/b.ts→src/ui.ts"]')!.classList.contains('dim')).toBe(false);
-		expect(root.querySelectorAll('.an-graphbar .chip').length).toBe(0);
-	});
-
-	it('module analysis right-clicks a block into a navigation menu', async () => {
-		await modules();
-		backend.on('analysis_module_graph', moduleGraphAnswer);
-		backend.on('analysis_module_diagram', () => diagramAnswer());
-		const root = host();
-		const page = createAnalysisPage('modules', root);
-		const opened: string[] = [];
-		page.onOpen = (path, line) => opened.push(`${path}:${line}`);
-		await flush(8);
-		await untilDrawn(root);
-		nodeEl(root, 'src/a.ts').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
-		await flush(2);
-		const items = () => [...document.querySelectorAll<HTMLElement>('.context-menu .item')];
-		expect(items().map((item) => item.textContent)).toContain('Open File');
-		// Open File is the double-click jump, from the menu.
-		items().find((item) => item.textContent === 'Open File')!.click();
-		expect(opened).toEqual(['src/a.ts:1']);
-		// The Calls submenu lists the related blocks; picking one selects and centres it.
-		nodeEl(root, 'src/a.ts').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
-		await flush(2);
-		items().find((item) => item.textContent === 'Calls (1)')!.dispatchEvent(new MouseEvent('mouseenter'));
-		await flush(2);
-		items().find((item) => item.textContent?.includes('src/ui.ts'))!.click();
-		expect(nodeEl(root, 'src/ui.ts').classList.contains('selected')).toBe(true);
-	});
-
-	it('module analysis right-clicks an arrow into its call sites', async () => {
-		await modules();
-		backend.on('analysis_module_graph', moduleGraphAnswer);
-		backend.on('analysis_module_diagram', () => diagramAnswer());
-		const root = host();
-		const page = createAnalysisPage('modules', root);
-		const opened: string[] = [];
-		page.onOpen = (path, line) => opened.push(`${path}:${line}`);
-		await flush(8);
-		await untilDrawn(root);
-		root.querySelector('[data-id="src/a.ts→src/ui.ts"]')!
-			.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
-		await flush(2);
-		const items = () => [...document.querySelectorAll<HTMLElement>('.context-menu .item')];
-		expect(items().some((item) => item.textContent === 'src/a.ts → src/ui.ts')).toBe(true);
-		items().find((item) => item.textContent === 'Call Sites (2)')!.dispatchEvent(new MouseEvent('mouseenter'));
-		await flush(2);
-		items().find((item) => item.textContent?.includes('main→render'))!.click();
-		expect(opened).toEqual(['src/a.ts:4']);
-	});
-
-	it('module analysis focuses a block\'s neighbourhood from the menu', async () => {
-		await modules();
-		backend.on('analysis_module_graph', moduleGraphAnswer);
-		const focusedAnswer = () => ({
-			...diagramAnswer(),
-			nodes: diagramAnswer().nodes.filter((node) => (node as { path: string }).path !== 'top.rs'),
-			edges: diagramAnswer().edges.filter((edge) => (edge as { from: string }).from !== 'top.rs'),
-			mermaid: 'flowchart TD\n  subgraph G0["src"]\n    N0["a.ts<br/>[src]"]\n    N1["ui.ts<br/>[src]"]\n    N2["b.ts<br/>[src]"]\n  end\n  N0 -->|"5 calls"| N1\n  N2 -->|"1 calls"| N1\n'
-		});
-		backend.on('analysis_module_diagram', ({ focus }: { focus: string | null }) => (focus ? focusedAnswer() : diagramAnswer()));
-		const root = host();
-		createAnalysisPage('modules', root);
-		await flush(8);
-		await untilDrawn(root);
-		nodeEl(root, 'src/ui.ts').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
-		await flush(2);
-		[...document.querySelectorAll<HTMLElement>('.context-menu .item')]
-			.find((item) => item.textContent === 'Show Only Related Files')!.click();
-		await flush(8);
-		await untilCount(root, 3);
-		// The drawing refetches around the block: itself and the files that call it.
-		const calls = () => backend.callsTo('analysis_module_diagram');
-		expect(calls()).toHaveLength(2);
-		expect(calls()[1]).toMatchObject({ focus: 'src/ui.ts' });
-		expect(root.querySelectorAll('[data-path]').length).toBe(3);
-		// The chip names the focus and clears it — back to every file.
-		expect(texts('.an-graphbar .chip', root)[0]).toContain('src/ui.ts');
-		(root.querySelector('.an-graphbar .chip .action-btn') as HTMLElement).click();
-		await flush(8);
-		await untilCount(root, 4);
-		expect(calls()).toHaveLength(3);
-		expect(calls()[2]).toMatchObject({ focus: null });
-		expect(root.querySelectorAll('[data-path]').length).toBe(4);
-	});
-
-	it('module analysis scopes to folders, and the scope rides both reads and the chip', async () => {
-		await modules();
-		backend.on('analysis_module_graph', moduleGraphAnswer);
-		backend.on('analysis_module_diagram', () => diagramAnswer());
-		const root = host();
-		createAnalysisPage('modules', root, ['src/editor', 'src/scroll']);
-		await flush(8);
-		await untilDrawn(root);
-		// Both backend reads carry the folder pick — the tree and the drawing
-		// report the same folders.
-		expect(backend.callsTo('analysis_module_graph')[0]).toEqual({ folders: ['src/editor', 'src/scroll'] });
-		expect(backend.callsTo('analysis_module_diagram')[0]).toMatchObject({ focus: null, filter: '', folders: ['src/editor', 'src/scroll'] });
-		// The graphbar names the scope with a chip that has no way out — the
-		// scope is the page's identity, not a view state.
-		const chip = root.querySelector('.an-graphbar .chip.scope')!;
-		expect(chip.textContent).toContain('src/editor, src/scroll');
-		expect(chip.querySelector('.action-btn')).toBeNull();
-
-		// The unscoped page keeps its whole-workspace reads (an empty scope).
-		const whole = host();
-		createAnalysisPage('modules', whole);
-		await flush(8);
-		await untilDrawn(whole);
-		expect(backend.callsTo('analysis_module_graph')[1]).toEqual({ folders: [] });
-		expect(whole.querySelector('.an-graphbar .chip.scope')).toBeNull();
-	});
-
-	it('module analysis copies the diagram as mermaid source', async () => {
-		await modules();
-		backend.on('analysis_module_graph', moduleGraphAnswer);
-		backend.on('analysis_module_diagram', () => diagramAnswer());
-		const root = host();
-		createAnalysisPage('modules', root);
-		await flush(8);
+		// Copy Mermaid copies overview.mermaid to clipboard.
 		const copy = [...root.querySelectorAll<HTMLElement>('.an-header .actions .action-btn')]
 			.find((button) => button.title === 'Copy Mermaid Source')!;
 		copy.click();
 		expect(backend.clipboard.at(-1)).toContain('flowchart TD');
-		expect(backend.clipboard.at(-1)).toContain('subgraph G0["src"]');
 	});
 
-	it('module analysis zooms from the toolbar, the wheel and the keyboard', async () => {
+	it('scopes to folders and shows empty state when no modules exist', async () => {
 		await modules();
-		backend.on('analysis_module_graph', moduleGraphAnswer);
-		backend.on('analysis_module_diagram', () => diagramAnswer());
+		backend.on('analysis_module_overview', () => overviewAnswer({ nodes: [], edges: [], cycles: [] }));
+		const root = host();
+		createAnalysisPage('modules', root, ['src/editor']);
+		await flush(6);
+		expect(backend.callsTo('analysis_module_overview')[0]).toMatchObject({ folders: ['src/editor'] });
+		expect(texts('.an-empty', root)[0]).toContain('No modules');
+	});
+
+	it('zooms from the toolbar, wheel and keyboard', async () => {
+		await modules();
+		backend.on('analysis_module_overview', () => overviewAnswer());
 		const root = host();
 		createAnalysisPage('modules', root);
-		await flush(8);
+		await flush(6);
 		const hostEl = root.querySelector<HTMLElement>('.an-diagram')!;
 		const level = () => texts('.an-zoom-level', root)[0];
-		// The toolbar's zoom and fit glide over 160 ms — the assertions wait it out.
 		const settle = () => new Promise((resolve) => setTimeout(resolve, 220));
 		expect(level()).toBe('100%');
 		const zoomButton = (title: string) =>
@@ -742,32 +470,7 @@ describe('the graph pages', () => {
 		zoomButton('Zoom out').click();
 		await settle();
 		expect(level()).toBe('100%');
-		// A mouse wheel (whole-line notches) zooms at the cursor; a trackpad's
-		// fractional pixel scroll pans instead; ctrl+wheel is always pinch-zoom.
-		// The zoom percentage reads against the fit level, so `0` fits to 100%.
-		const wheelAt = async (init: Record<number, unknown>) => {
-			const wheel = new Event('wheel', { bubbles: true, cancelable: true });
-			Object.assign(wheel, { clientX: 8, clientY: 8, ...init });
-			hostEl.dispatchEvent(wheel);
-			// The view state lands on the next animation frame.
-			await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
-		};
-		await wheelAt({ deltaY: -120 });
-		expect(Number(level().replace('%', ''))).toBeGreaterThan(118, 'the mouse wheel zoomed');
 		hostEl.dispatchEvent(new KeyboardEvent('keydown', { key: '0' }));
-		await settle();
-		expect(level()).toBe('100%');
-		// ctrl+wheel zooms regardless of the delta's shape (no animation — direct).
-		await wheelAt({ deltaY: -4, ctrlKey: true });
-		expect(Number(level().replace('%', ''))).toBeGreaterThan(100);
-		hostEl.dispatchEvent(new KeyboardEvent('keydown', { key: '0' }));
-		await settle();
-		// A fractional-Y pixel delta latches the trackpad mode: pan, not zoom.
-		wheelAt({ deltaY: 12.5, deltaX: 2 });
-		expect(level()).toBe('100%', 'the trackpad scroll panned, the zoom held');
-		// The arrow keys pan by 40 px; Home fits like `0`.
-		hostEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
-		hostEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home' }));
 		await settle();
 		expect(level()).toBe('100%');
 	});

@@ -2,7 +2,7 @@ import type { EditorView } from '@codemirror/view';
 import { listFiles } from '../../platform/ipc/fs';
 import { viewerClose, viewerOpen, type ViewerOutlineSymbol } from '../../platform/ipc/viewer';
 import { findReferences, workspaceSymbols } from '../../platform/ipc/search';
-import { symbolLookup, symbolReferences, symbolScopeLookup } from '../../platform/ipc/symbols';
+import { symbolLookup, symbolMemberLookup, symbolReferences, symbolScopeLookup } from '../../platform/ipc/symbols';
 import type { WsSymbol } from '../search/types';
 import { dirname, joinPath, notify, quickPick, relativeTo, toPosix } from '../../platform/ui/index';
 import { isCodeExtension } from '../../platform/fileIcons';
@@ -80,6 +80,30 @@ export const navigateMethods: ThisType<EditorGroup> = {
 		// function of the cursor is that parameter or local — the jump stays in this
 		// file and the global index is never asked, so a same-named global cannot win.
 		if (await this.goToScopeDefinition(name, currentPath, view, at)) return;
+		// Receiver-disambiguated member lookup (Area 1): `ptr->foo` / `obj.bar` resolves
+		// to the receiver's owning class/struct + base classes before global fallback.
+		if (this.rootPath && currentPath) {
+			try {
+				const lineObj = view.state.doc.lineAt(at);
+				const memberHits = await symbolMemberLookup(
+					name,
+					lineObj.number - 1,
+					at - lineObj.from,
+					view.state.doc.toString(),
+					currentPath.split('.').pop() ?? ''
+				);
+				if (memberHits.length === 1) {
+					await this.jumpToDefinition(memberHits[0]!, currentPath, view);
+					return;
+				}
+				if (memberHits.length > 1) {
+					await this.pickDefinition(memberHits, currentPath, view);
+					return;
+				}
+			} catch {
+				// Fall through to global index lookup.
+			}
+		}
 		if (this.rootPath && await this.goToIndexedDefinition(name, currentPath, view)) return;
 		const pattern = new RegExp(
 			'^(?:\\s*(?:export|declare|default|pub|public|private|protected|internal|static|async|abstract|unsafe|extern|virtual|override|final)\\s+)*'
@@ -243,7 +267,8 @@ export const navigateMethods: ThisType<EditorGroup> = {
 		);
 		if (chosen === null) return true; // dismissed - the gesture is consumed either way
 		const [path, line] = chosen.split('\u0000');
-		const absolute = joinPath(this.rootPath!, path!);
+		const isAbs = path!.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(path!);
+		const absolute = isAbs ? path! : joinPath(this.rootPath!, path!);
 		if (currentPath && absolute === currentPath) {
 			this.revealPosition(view, Number(line) + 1, 1);
 			return true;
@@ -253,7 +278,8 @@ export const navigateMethods: ThisType<EditorGroup> = {
 	},
 
 	async jumpToDefinition(target: WsSymbol, currentPath: string | null, view: EditorView): Promise<boolean> {
-		const path = joinPath(this.rootPath!, target.path);
+		const isAbs = target.path.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(target.path);
+		const path = isAbs ? target.path : joinPath(this.rootPath!, target.path);
 		if (currentPath && path === currentPath) {
 			// Jump within this file only when it is a different line than the cursor's word.
 			this.revealPosition(view, target.line + 1, 1);
