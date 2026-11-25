@@ -45,6 +45,9 @@ const ANIMATE_MS = 160;
 const DRAG_THRESHOLD = 4;
 const MINIMAP_W = 172;
 const MINIMAP_H = 114;
+const LARGE_GRAPH_NODES = 40;
+const LARGE_GRAPH_EDGES = 80;
+const HOVER_CLEAR_DELAY_MS = 48;
 
 function svgEl<K extends keyof SVGElementTagNameMap>(
 	tag: K,
@@ -108,6 +111,13 @@ interface RoutedEdge {
 	sy: number;
 	ex: number;
 	ey: number;
+}
+
+interface EdgeDomRef {
+	g: SVGGElement;
+	hit: SVGPathElement;
+	path: SVGPathElement;
+	badge: SVGGElement | null;
 }
 
 /** Order nodes within each layer using multi-pass barycenter heuristic to minimize edge crossings. */
@@ -479,12 +489,16 @@ export class DiagramView {
 	private currentEdges: ModuleEdge[] = [];
 	private graphWidth = 640;
 	private graphHeight = 360;
+	private svgElRef: SVGSVGElement | null = null;
 	private viewportGroup: SVGGElement | null = null;
 	private placed = new Map<string, PlacedNode>();
 	private nodesById = new Map<string, ModuleNode>();
 	private edgesById = new Map<string, ModuleEdge>();
+	private outEdgesByNode = new Map<string, ModuleEdge[]>();
+	private inEdgesByNode = new Map<string, ModuleEdge[]>();
 	private nodeElById = new Map<string, SVGGElement>();
-	private edgeElById = new Map<string, SVGGElement>();
+	private edgeDomById = new Map<string, EdgeDomRef>();
+	private pairSet = new Set<string>();
 	private edgeMidpoints = new Map<string, { x: number; y: number }>();
 
 	private userMoved = false;
@@ -498,9 +512,21 @@ export class DiagramView {
 		origX: number;
 		origY: number;
 		active: boolean;
+		pendingX: number;
+		pendingY: number;
 	} | null = null;
+	private nodeDragFrame: number | null = null;
 	private minimapDragging = false;
 	private hoveredHit: { kind: 'node' | 'edge'; id: string } | null = null;
+	private pendingHoverHit: { kind: 'node' | 'edge'; id: string } | null = null;
+	private pendingHoverPos: { x: number; y: number } | null = null;
+	private hoverFrame: number | null = null;
+	private hoverClearTimer: ReturnType<typeof setTimeout> | null = null;
+	private activeHoverEls: SVGElement[] = [];
+	private tooltipFrame: number | null = null;
+	private pendingTooltipPos: { x: number; y: number } | null = null;
+	private cachedHostRect: DOMRect | null = null;
+	private cachedTooltipSize: { w: number; h: number } | null = null;
 	private lastNodeStates: Record<string, string[]> = {};
 	private lastEdgeStates: Record<string, string[]> = {};
 
@@ -667,10 +693,14 @@ export class DiagramView {
 	}
 
 	exportSvg(): string {
-		const svg = this.content.querySelector('svg');
+		const svg = this.svgElRef ?? this.content.querySelector('svg');
 		if (!svg) return '';
 		const bounds = this.getContentBounds();
 		const clone = svg.cloneNode(true) as SVGSVGElement;
+		clone.classList.remove('has-hover');
+		for (const el of clone.querySelectorAll('.hover-self, .hover-in, .hover-out')) {
+			el.classList.remove('hover-self', 'hover-in', 'hover-out');
+		}
 		clone.setAttribute('xmlns', SVG_NS);
 		clone.setAttribute('viewBox', `${bounds.minX} ${bounds.minY} ${bounds.width} ${bounds.height}`);
 		clone.setAttribute('width', String(Math.round(bounds.width)));
@@ -682,8 +712,11 @@ export class DiagramView {
 
 	/** Synchronously build and mount the Netron-style pure-vector SVG architecture graph. */
 	setGraph(nodes: ModuleNode[], edges: ModuleEdge[]): void {
+		this.cancelPendingHover();
 		this.content.textContent = '';
+		this.svgElRef = null;
 		this.viewportGroup = null;
+		this.activeHoverEls = [];
 		this.hideTooltip();
 		this.hoveredHit = null;
 		this.hasSelection = false;
@@ -696,10 +729,26 @@ export class DiagramView {
 		this.currentEdges = edges;
 		this.nodesById = new Map(nodes.map((n) => [n.id, n]));
 		this.edgesById = new Map(edges.map((e) => [e.id, e]));
+		this.outEdgesByNode.clear();
+		this.inEdgesByNode.clear();
+		for (const e of edges) {
+			const out = this.outEdgesByNode.get(e.from);
+			if (out) out.push(e);
+			else this.outEdgesByNode.set(e.from, [e]);
+			const inn = this.inEdgesByNode.get(e.to);
+			if (inn) inn.push(e);
+			else this.inEdgesByNode.set(e.to, [e]);
+		}
+		if (this.nodeDragFrame !== null) {
+			cancelAnimationFrame(this.nodeDragFrame);
+			this.nodeDragFrame = null;
+		}
 		this.nodeElById.clear();
-		this.edgeElById.clear();
+		this.edgeDomById.clear();
+		this.pairSet = new Set(edges.map((e) => `${e.from}\0${e.to}`));
 		this.edgeMidpoints.clear();
 		this.host.classList.toggle('empty', nodes.length === 0);
+		this.host.classList.toggle('large-graph', nodes.length >= LARGE_GRAPH_NODES || edges.length >= LARGE_GRAPH_EDGES);
 		if (nodes.length === 0) {
 			this.placed.clear();
 			this.view = null;
@@ -753,16 +802,16 @@ export class DiagramView {
 			}
 		}
 
-		const pairSet = new Set(edges.map((e) => `${e.from}\0${e.to}`));
 		const { outOffset, inOffset } = computePortOffsets(edges, placed, this.direction);
 		const showAllLabels = edges.length <= 32;
+		const skipHiddenBadges = edges.length > 120;
 
 		const edgesLayer = svgEl('g', { class: 'an-edges-layer' });
 		for (const edge of edges) {
 			const from = placed.get(edge.from);
 			const to = placed.get(edge.to);
 			if (!from || !to) continue;
-			const bi = pairSet.has(`${edge.to}\0${edge.from}`);
+			const bi = this.pairSet.has(`${edge.to}\0${edge.from}`);
 			const routed = routeEdge(
 				from,
 				to,
@@ -778,26 +827,30 @@ export class DiagramView {
 				class: `an-mod-edge${edge.isCycle ? ' cycle' : ''}`,
 				'data-edge-id': edge.id
 			});
-			g.append(svgEl('path', { d: routed.d, class: 'an-edge-hit' }));
-			g.append(svgEl('path', {
+			const hit = svgEl('path', { d: routed.d, class: 'an-edge-hit' });
+			const path = svgEl('path', {
 				d: routed.d,
 				class: 'an-edge-path',
 				'stroke-width': strokeW,
 				'stroke-linecap': 'round',
 				'stroke-linejoin': 'round',
 				'marker-end': edge.isCycle ? 'url(#an-arrow-cycle)' : 'url(#an-arrow-norm)'
-			}));
-			const badgeText = edge.isCycle ? `⟳ ${edge.weight}` : String(edge.weight);
-			const pillW = Math.max(edge.isCycle ? 34 : 24, badgeText.length * 6.2 + 12);
-			const labelG = svgEl('g', {
-				class: `an-edge-badge${showAllLabels || edge.isCycle ? '' : ' auto-hide'}`,
-				transform: `translate(${routed.mx}, ${routed.my})`
-			}, [
-				svgEl('rect', { x: -pillW / 2, y: -9, width: pillW, height: 18, rx: 9 }),
-				svgEl('text', { x: 0, y: 3.5, 'text-anchor': 'middle' }, [badgeText])
-			]);
-			g.append(labelG);
-			this.edgeElById.set(edge.id, g);
+			});
+			g.append(hit, path);
+			let badge: SVGGElement | null = null;
+			if (!skipHiddenBadges || edge.isCycle) {
+				const badgeText = edge.isCycle ? `⟳ ${edge.weight}` : String(edge.weight);
+				const pillW = Math.max(edge.isCycle ? 34 : 24, badgeText.length * 6.2 + 12);
+				badge = svgEl('g', {
+					class: `an-edge-badge${showAllLabels || edge.isCycle ? '' : ' auto-hide'}`,
+					transform: `translate(${routed.mx}, ${routed.my})`
+				}, [
+					svgEl('rect', { x: -pillW / 2, y: -9, width: pillW, height: 18, rx: 9 }),
+					svgEl('text', { x: 0, y: 3.5, 'text-anchor': 'middle' }, [badgeText])
+				]);
+				g.append(badge);
+			}
+			this.edgeDomById.set(edge.id, { g, hit, path, badge });
 			edgesLayer.append(g);
 		}
 
@@ -896,6 +949,7 @@ export class DiagramView {
 			width: '100%',
 			height: '100%'
 		}, [defs, viewport]);
+		this.svgElRef = svg;
 		this.content.append(svg);
 
 		this.fit();
@@ -914,67 +968,76 @@ export class DiagramView {
 		}, [svgEl('path', { d: 'M 1 1.6 L 8.8 5 L 1 8.4 L 2.8 5 z', class: cls })]);
 	}
 
-	/** Recompute all edge paths & badges after a node drag or reset. */
+	/** Recompute only edges incident to a dragged node using cached DOM refs (O(degree)). */
+	private rerouteIncidentEdges(nodeId: string): void {
+		if (!this.svgElRef) return;
+		const outList = this.outEdgesByNode.get(nodeId) ?? [];
+		const inList = this.inEdgesByNode.get(nodeId) ?? [];
+		if (outList.length === 0 && inList.length === 0) return;
+		const incident: ModuleEdge[] = [];
+		const seen = new Set<string>();
+		for (const e of outList) {
+			if (!seen.has(e.id)) { seen.add(e.id); incident.push(e); }
+		}
+		for (const e of inList) {
+			if (!seen.has(e.id)) { seen.add(e.id); incident.push(e); }
+		}
+		const { outOffset, inOffset } = computePortOffsets(incident, this.placed, this.direction);
+		for (const edge of incident) {
+			this.updateEdgeDom(edge, outOffset.get(edge.id) ?? 0, inOffset.get(edge.id) ?? 0);
+		}
+	}
+
+	/** Recompute all edge paths & badges after a layout reset. */
 	private rerouteAllEdges(): void {
-		const svg = this.content.querySelector('svg');
-		if (!svg) return;
-		const pairSet = new Set(this.currentEdges.map((e) => `${e.from}\0${e.to}`));
+		if (!this.svgElRef) return;
 		const { outOffset, inOffset } = computePortOffsets(this.currentEdges, this.placed, this.direction);
 		for (const edge of this.currentEdges) {
-			const from = this.placed.get(edge.from);
-			const to = this.placed.get(edge.to);
-			if (!from || !to) continue;
-			const g = this.edgeElById.get(edge.id);
-			if (!g) continue;
-			const bi = pairSet.has(`${edge.to}\0${edge.from}`);
-			const routed = routeEdge(
-				from,
-				to,
-				this.direction,
-				outOffset.get(edge.id) ?? 0,
-				inOffset.get(edge.id) ?? 0,
-				bi,
-				edge.isCycle
-			);
-			this.edgeMidpoints.set(edge.id, { x: routed.mx, y: routed.my });
-			g.querySelector('.an-edge-hit')?.setAttribute('d', routed.d);
-			g.querySelector('.an-edge-path')?.setAttribute('d', routed.d);
-			g.querySelector('.an-edge-badge')?.setAttribute('transform', `translate(${routed.mx}, ${routed.my})`);
+			this.updateEdgeDom(edge, outOffset.get(edge.id) ?? 0, inOffset.get(edge.id) ?? 0);
 		}
+	}
+
+	private updateEdgeDom(edge: ModuleEdge, outOff: number, inOff: number): void {
+		const from = this.placed.get(edge.from);
+		const to = this.placed.get(edge.to);
+		if (!from || !to) return;
+		const ref = this.edgeDomById.get(edge.id);
+		if (!ref) return;
+		const bi = this.pairSet.has(`${edge.to}\0${edge.from}`);
+		const routed = routeEdge(from, to, this.direction, outOff, inOff, bi, edge.isCycle);
+		this.edgeMidpoints.set(edge.id, { x: routed.mx, y: routed.my });
+		ref.hit.setAttribute('d', routed.d);
+		ref.path.setAttribute('d', routed.d);
+		if (ref.badge) ref.badge.setAttribute('transform', `translate(${routed.mx}, ${routed.my})`);
 	}
 
 	/** Apply batched selection/dimming state classes onto nodes and edges. */
 	setStates(nodeStates: Record<string, string[]>, edgeStates: Record<string, string[]>): void {
 		this.lastNodeStates = nodeStates;
 		this.lastEdgeStates = edgeStates;
-		const svg = this.content.querySelector('svg');
-		if (!svg) return;
+		if (!this.svgElRef) return;
 		this.hasSelection = Object.keys(nodeStates).length > 0 || Object.keys(edgeStates).length > 0;
+		this.cancelPendingHover();
 		this.clearHoverHighlight();
-		for (const nodeEl of svg.querySelectorAll<SVGElement>('[data-node-id]')) {
-			const id = nodeEl.getAttribute('data-node-id')!;
+		for (const [id, nodeEl] of this.nodeElById) {
 			const list = nodeStates[id] ?? [];
 			for (const state of ['selected', 'related', 'dim', 'upstream', 'downstream']) {
 				nodeEl.classList.toggle(state, list.includes(state));
 			}
 		}
-		for (const edgeEl of svg.querySelectorAll<SVGElement>('[data-edge-id]')) {
-			const id = edgeEl.getAttribute('data-edge-id')!;
+		for (const [id, ref] of this.edgeDomById) {
 			const list = edgeStates[id] ?? [];
 			for (const state of ['selected', 'dim', 'upstream', 'downstream']) {
-				edgeEl.classList.toggle(state, list.includes(state));
+				ref.g.classList.toggle(state, list.includes(state));
 			}
-			const path = edgeEl.querySelector('.an-edge-path');
-			if (path) {
-				if (list.includes('selected')) {
-					if (list.includes('upstream')) path.setAttribute('marker-end', 'url(#an-arrow-in)');
-					else if (list.includes('downstream')) path.setAttribute('marker-end', 'url(#an-arrow-out)');
-					else path.setAttribute('marker-end', 'url(#an-arrow-sel)');
-				} else if (edgeEl.classList.contains('cycle')) {
-					path.setAttribute('marker-end', 'url(#an-arrow-cycle)');
-				} else {
-					path.setAttribute('marker-end', 'url(#an-arrow-norm)');
-				}
+			if (list.includes('selected')) {
+				if (list.includes('upstream')) ref.path.setAttribute('marker-end', 'url(#an-arrow-in)');
+				else if (list.includes('downstream')) ref.path.setAttribute('marker-end', 'url(#an-arrow-out)');
+				else ref.path.setAttribute('marker-end', 'url(#an-arrow-sel)');
+			} else if (ref.g.classList.contains('cycle')) {
+				ref.path.setAttribute('marker-end', 'url(#an-arrow-cycle)');
+			} else {
+				ref.path.setAttribute('marker-end', 'url(#an-arrow-norm)');
 			}
 		}
 		this.renderMinimap();
@@ -1071,102 +1134,156 @@ export class DiagramView {
 
 	destroy(): void {
 		this.cancelAnimation();
+		this.cancelPendingHover();
 		if (this.viewFrame !== null) cancelAnimationFrame(this.viewFrame);
+		if (this.nodeDragFrame !== null) cancelAnimationFrame(this.nodeDragFrame);
 		this.resizeObserver?.disconnect();
 		this.resizeObserver = null;
 	}
 
 	/* ---------- Hover Neighborhood Highlight & Floating Tooltip ---------- */
 
+	private cancelPendingHover(): void {
+		if (this.hoverClearTimer !== null) {
+			clearTimeout(this.hoverClearTimer);
+			this.hoverClearTimer = null;
+		}
+		if (this.hoverFrame !== null) {
+			cancelAnimationFrame(this.hoverFrame);
+			this.hoverFrame = null;
+		}
+		if (this.tooltipFrame !== null) {
+			cancelAnimationFrame(this.tooltipFrame);
+			this.tooltipFrame = null;
+		}
+		this.pendingHoverHit = null;
+		this.pendingHoverPos = null;
+		this.pendingTooltipPos = null;
+	}
+
+	private scheduleHoverClear(): void {
+		if (this.hoverClearTimer !== null) return;
+		this.hoverClearTimer = setTimeout(() => {
+			this.hoverClearTimer = null;
+			this.hoveredHit = null;
+			this.clearHoverHighlight();
+			this.hideTooltip();
+		}, HOVER_CLEAR_DELAY_MS);
+	}
+
 	private onHoverMove(event: PointerEvent): void {
 		if (this.nodeDrag?.active || this.panDrag) return;
 		const hit = DiagramView.hitOf(event);
 		if (!hit) {
-			if (this.hoveredHit) {
-				this.hoveredHit = null;
-				this.clearHoverHighlight();
-				this.hideTooltip();
+			if (this.hoveredHit || this.pendingHoverHit) {
+				this.pendingHoverHit = null;
+				this.scheduleHoverClear();
 			}
 			return;
 		}
+		if (this.hoverClearTimer !== null) {
+			clearTimeout(this.hoverClearTimer);
+			this.hoverClearTimer = null;
+		}
 		if (this.hoveredHit && this.hoveredHit.kind === hit.kind && this.hoveredHit.id === hit.id) return;
-		this.hoveredHit = hit;
-		if (!this.hasSelection) this.applyHoverHighlight(hit);
-		this.showTooltip(hit, event.clientX, event.clientY);
+		this.pendingHoverHit = hit;
+		this.pendingHoverPos = { x: event.clientX, y: event.clientY };
+		if (this.hoverFrame !== null) return;
+		this.hoverFrame = requestAnimationFrame(() => {
+			this.hoverFrame = null;
+			const nextHit = this.pendingHoverHit;
+			const nextPos = this.pendingHoverPos;
+			this.pendingHoverHit = null;
+			this.pendingHoverPos = null;
+			if (!nextHit || !nextPos || this.nodeDrag?.active || this.panDrag) return;
+			if (this.hoveredHit && this.hoveredHit.kind === nextHit.kind && this.hoveredHit.id === nextHit.id) return;
+			this.hoveredHit = nextHit;
+			if (!this.hasSelection) this.applyHoverHighlight(nextHit);
+			this.showTooltip(nextHit, nextPos.x, nextPos.y);
+		});
 	}
 
 	private onTooltipMove(event: PointerEvent): void {
+		if (this.pendingHoverHit) {
+			this.pendingHoverPos = { x: event.clientX, y: event.clientY };
+		}
 		if (!this.hoveredHit || this.tooltip.hidden) return;
-		this.positionTooltip(event.clientX, event.clientY);
+		this.pendingTooltipPos = { x: event.clientX, y: event.clientY };
+		if (this.tooltipFrame !== null) return;
+		this.tooltipFrame = requestAnimationFrame(() => {
+			this.tooltipFrame = null;
+			const pos = this.pendingTooltipPos;
+			this.pendingTooltipPos = null;
+			if (!pos || !this.hoveredHit || this.tooltip.hidden) return;
+			this.positionTooltip(pos.x, pos.y);
+		});
 	}
 
 	private onHoverOut(event: PointerEvent): void {
 		const related = event.relatedTarget;
 		if (related instanceof Node && this.content.contains(related)) {
 			const nextHit = DiagramView.hitOf({ target: related } as unknown as Event);
-			if (nextHit && this.hoveredHit && nextHit.kind === this.hoveredHit.kind && nextHit.id === this.hoveredHit.id) {
+			if (nextHit) {
+				// Pointer moved straight onto another node/edge (or stayed inside the same one);
+				// keep `has-hover` steady so background dimming never flashes between nodes.
 				return;
 			}
 		}
-		this.hoveredHit = null;
-		this.clearHoverHighlight();
-		this.hideTooltip();
+		this.pendingHoverHit = null;
+		this.scheduleHoverClear();
 	}
 
+	/** O(degree) hover highlight: keep `has-hover` on the SVG root and touch only incident nodes/edges. */
 	private applyHoverHighlight(hit: { kind: 'node' | 'edge'; id: string }): void {
-		const svg = this.content.querySelector('svg');
+		const svg = this.svgElRef;
 		if (!svg) return;
-		const keepNodes = new Set<string>();
-		const inNodes = new Set<string>();
-		const outNodes = new Set<string>();
-		const inEdges = new Set<string>();
-		const outEdges = new Set<string>();
+
+		for (const prev of this.activeHoverEls) {
+			prev.classList.remove('hover-self', 'hover-in', 'hover-out');
+		}
+		const nextActive: SVGElement[] = [];
+		const mark = (elRef: SVGElement | undefined, cls: 'hover-self' | 'hover-in' | 'hover-out') => {
+			if (!elRef) return;
+			elRef.classList.add(cls);
+			nextActive.push(elRef);
+		};
 
 		if (hit.kind === 'node') {
-			keepNodes.add(hit.id);
-			for (const e of this.currentEdges) {
-				if (e.from === hit.id) {
-					outEdges.add(e.id);
-					outNodes.add(e.to);
-					keepNodes.add(e.to);
-				} else if (e.to === hit.id) {
-					inEdges.add(e.id);
-					inNodes.add(e.from);
-					keepNodes.add(e.from);
+			mark(this.nodeElById.get(hit.id), 'hover-self');
+			const outEdges = this.outEdgesByNode.get(hit.id);
+			if (outEdges) {
+				for (const e of outEdges) {
+					mark(this.edgeDomById.get(e.id)?.g, 'hover-out');
+					if (e.to !== hit.id) mark(this.nodeElById.get(e.to), 'hover-out');
+				}
+			}
+			const inEdges = this.inEdgesByNode.get(hit.id);
+			if (inEdges) {
+				for (const e of inEdges) {
+					mark(this.edgeDomById.get(e.id)?.g, 'hover-in');
+					if (e.from !== hit.id) mark(this.nodeElById.get(e.from), 'hover-in');
 				}
 			}
 		} else {
 			const edge = this.edgesById.get(hit.id);
 			if (edge) {
-				outEdges.add(edge.id);
-				keepNodes.add(edge.from);
-				keepNodes.add(edge.to);
+				mark(this.edgeDomById.get(edge.id)?.g, 'hover-out');
+				mark(this.nodeElById.get(edge.from), 'hover-in');
+				mark(this.nodeElById.get(edge.to), 'hover-out');
 			}
 		}
 
-		for (const elNode of svg.querySelectorAll<SVGElement>('[data-node-id]')) {
-			const id = elNode.getAttribute('data-node-id')!;
-			elNode.classList.toggle('hover-self', hit.kind === 'node' && id === hit.id);
-			elNode.classList.toggle('hover-in', inNodes.has(id));
-			elNode.classList.toggle('hover-out', outNodes.has(id));
-			elNode.classList.toggle('hover-dim', !keepNodes.has(id));
-		}
-		for (const elEdge of svg.querySelectorAll<SVGElement>('[data-edge-id]')) {
-			const id = elEdge.getAttribute('data-edge-id')!;
-			const isIn = inEdges.has(id);
-			const isOut = outEdges.has(id);
-			elEdge.classList.toggle('hover-in', isIn);
-			elEdge.classList.toggle('hover-out', isOut);
-			elEdge.classList.toggle('hover-dim', !isIn && !isOut);
-		}
+		this.activeHoverEls = nextActive;
+		if (!svg.classList.contains('has-hover')) svg.classList.add('has-hover');
 	}
 
 	private clearHoverHighlight(): void {
-		const svg = this.content.querySelector('svg');
-		if (!svg) return;
-		for (const node of svg.querySelectorAll<SVGElement>('.hover-self, .hover-in, .hover-out, .hover-dim')) {
-			node.classList.remove('hover-self', 'hover-in', 'hover-out', 'hover-dim');
+		const svg = this.svgElRef;
+		if (svg) svg.classList.remove('has-hover');
+		for (const prev of this.activeHoverEls) {
+			prev.classList.remove('hover-self', 'hover-in', 'hover-out');
 		}
+		this.activeHoverEls = [];
 	}
 
 	private showTooltip(hit: { kind: 'node' | 'edge'; id: string }, clientX: number, clientY: number): void {
@@ -1191,12 +1308,18 @@ export class DiagramView {
 		} else {
 			const edge = this.edgesById.get(hit.id);
 			if (!edge) return;
+			const breakdown: string[] = [];
+			if ((edge.callRefs ?? 0) > 0) breakdown.push(`${t('analysis.modules.edgeType.calls')} ${edge.callRefs}`);
+			if ((edge.typeRefs ?? 0) > 0) breakdown.push(`${t('analysis.modules.edgeType.typeRefs')} ${edge.typeRefs}`);
+			if (edge.baseRefs > 0) breakdown.push(`${t('analysis.modules.edgeType.baseRefs')} ${edge.baseRefs}`);
+			if ((edge.importRefs ?? 0) > 0) breakdown.push(`${t('analysis.modules.edgeType.imports')} ${edge.importRefs}`);
 			this.tooltip.append(
 				el('div', 'an-tip-head', [
 					el('span', 'an-tip-title', [`${moduleLabel(edge.from)} → ${moduleLabel(edge.to)}`])
 				]),
 				el('div', 'an-tip-grid', [
-					el('span', undefined, [`${tf('analysis.modules.calls', edge.weight)} · ${tf('analysis.modules.filePairs', edge.filePairs)}`])
+					el('span', undefined, [`${tf('analysis.modules.calls', edge.weight)} · ${tf('analysis.modules.filePairs', edge.filePairs)}`]),
+					...(breakdown.length > 0 ? [el('span', undefined, [breakdown.join(' · ')])] : [])
 				])
 			);
 			if (edge.topSymbols.length > 0) {
@@ -1207,21 +1330,27 @@ export class DiagramView {
 			}
 		}
 		this.tooltip.hidden = false;
+		this.cachedHostRect = this.host.getBoundingClientRect();
+		this.cachedTooltipSize = { w: this.tooltip.offsetWidth, h: this.tooltip.offsetHeight };
 		this.positionTooltip(clientX, clientY);
 	}
 
 	private positionTooltip(clientX: number, clientY: number): void {
-		const rect = this.host.getBoundingClientRect();
+		const rect = this.cachedHostRect ?? this.host.getBoundingClientRect();
+		const tipW = this.cachedTooltipSize?.w ?? this.tooltip.offsetWidth;
+		const tipH = this.cachedTooltipSize?.h ?? this.tooltip.offsetHeight;
 		const x = clientX - rect.left + 14;
 		const y = clientY - rect.top + 14;
-		const maxX = Math.max(8, this.host.clientWidth - this.tooltip.offsetWidth - 10);
-		const maxY = Math.max(8, this.host.clientHeight - this.tooltip.offsetHeight - 10);
-		this.tooltip.style.left = `${Math.max(8, Math.min(x, maxX))}px`;
-		this.tooltip.style.top = `${Math.max(8, Math.min(y, maxY))}px`;
+		const maxX = Math.max(8, rect.width - tipW - 10);
+		const maxY = Math.max(8, rect.height - tipH - 10);
+		const tx = Math.round(Math.max(8, Math.min(x, maxX)));
+		const ty = Math.round(Math.max(8, Math.min(y, maxY)));
+		this.tooltip.style.transform = `translate3d(${tx}px, ${ty}px, 0)`;
 	}
 
 	private hideTooltip(): void {
 		this.tooltip.hidden = true;
+		this.cachedTooltipSize = null;
 	}
 
 	/* ---------- Interactive Minimap ---------- */
@@ -1455,6 +1584,7 @@ export class DiagramView {
 	}
 
 	private onHostResized(): void {
+		this.cachedHostRect = null;
 		const view = this.view;
 		if (!view || this.host.clientWidth <= 0) return;
 		if (this.userMoved) {
@@ -1519,7 +1649,9 @@ export class DiagramView {
 					startClientY: event.clientY,
 					origX: item.x,
 					origY: item.y,
-					active: false
+					active: false,
+					pendingX: item.x,
+					pendingY: item.y
 				};
 				return;
 			}
@@ -1572,6 +1704,9 @@ export class DiagramView {
 			if (!this.nodeDrag.active) {
 				this.nodeDrag.active = true;
 				this.dragMoved = true;
+				this.cancelPendingHover();
+				this.clearHoverHighlight();
+				this.hoveredHit = null;
 				this.hideTooltip();
 				this.host.classList.add('dragging-node');
 				try {
@@ -1580,16 +1715,25 @@ export class DiagramView {
 					// ignore
 				}
 			}
-			const item = this.placed.get(this.nodeDrag.id);
-			if (!item) return;
-			item.x = this.nodeDrag.origX + dx / this.view.scale;
-			item.y = this.nodeDrag.origY + dy / this.view.scale;
-			const nodeEl = this.nodeElById.get(item.node.id);
-			if (nodeEl) nodeEl.setAttribute('transform', `translate(${item.x}, ${item.y})`);
-			this.rerouteAllEdges();
-			if (!this.hasCustomPositions) {
-				this.hasCustomPositions = true;
-				this.resetBtn.hidden = false;
+			this.nodeDrag.pendingX = this.nodeDrag.origX + dx / this.view.scale;
+			this.nodeDrag.pendingY = this.nodeDrag.origY + dy / this.view.scale;
+			if (this.nodeDragFrame === null) {
+				this.nodeDragFrame = requestAnimationFrame(() => {
+					this.nodeDragFrame = null;
+					const drag = this.nodeDrag;
+					if (!drag || !drag.active) return;
+					const item = this.placed.get(drag.id);
+					if (!item) return;
+					item.x = drag.pendingX;
+					item.y = drag.pendingY;
+					const nodeEl = this.nodeElById.get(item.node.id);
+					if (nodeEl) nodeEl.setAttribute('transform', `translate(${item.x}, ${item.y})`);
+					this.rerouteIncidentEdges(item.node.id);
+					if (!this.hasCustomPositions) {
+						this.hasCustomPositions = true;
+						this.resetBtn.hidden = false;
+					}
+				});
 			}
 			return;
 		}
@@ -1601,6 +1745,9 @@ export class DiagramView {
 		if (!this.dragMoved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
 		this.dragMoved = true;
 		this.userMoved = true;
+		this.cancelPendingHover();
+		this.clearHoverHighlight();
+		this.hoveredHit = null;
 		this.hideTooltip();
 		this.host.classList.add('dragging');
 		try {
@@ -1615,7 +1762,19 @@ export class DiagramView {
 	private onPointerUp(event: PointerEvent): void {
 		this.pointers.delete(event.pointerId);
 		if (this.pointers.size < 2) this.pinch = null;
+		if (this.nodeDragFrame !== null) {
+			cancelAnimationFrame(this.nodeDragFrame);
+			this.nodeDragFrame = null;
+		}
 		if (this.nodeDrag?.active) {
+			const item = this.placed.get(this.nodeDrag.id);
+			if (item) {
+				item.x = this.nodeDrag.pendingX;
+				item.y = this.nodeDrag.pendingY;
+				const nodeEl = this.nodeElById.get(item.node.id);
+				if (nodeEl) nodeEl.setAttribute('transform', `translate(${item.x}, ${item.y})`);
+				this.rerouteIncidentEdges(item.node.id);
+			}
 			this.renderMinimap();
 		}
 		this.nodeDrag = null;

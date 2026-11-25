@@ -45,7 +45,7 @@ use std::collections::BinaryHeap;
 
 
 use ggs_analysis::metrics::{rows_for_file, MetricRow};
-use ggs_analysis::modules::{module_overview, ModuleEdge};
+use ggs_analysis::modules::{module_overview_from_store, ModuleEdge, ModuleEdgeTypes};
 use ggs_analysis::security::{scan_file, Finding, Severity};
 use ggs_analysis::{AnalysisData, Direction};
 use ggs_analysis::index::AnalysisIndex;
@@ -511,13 +511,14 @@ impl McpServer {
             }
         }
         // The module graph half: read directly from the nine-volume symbol store —
-        // zero AnalysisData build behind it.
-        match self.with_store(|store| store.dependency_facts()) {
+        // zero AnalysisData build and zero full-store cloning behind it.
+        match self.with_store(|store| {
+            module_overview_from_store(store, None, 0, &[], ModuleEdgeTypes::default(), None)
+        }) {
             Err(_) => {
                 out.push_str("\nmodule graph: symbol index is still building")
             }
-            Ok(facts) => {
-                let overview = module_overview(&facts, None, 0, &[]);
+            Ok(overview) => {
                 if overview.edges.is_empty() {
                     out.push_str("\nmodule graph: no cross-module dependencies");
                 } else {
@@ -874,8 +875,9 @@ impl McpServer {
             .unwrap_or(0)
             .min(3) as u8;
         let (limit, offset) = Self::page_args(args, MODULE_EDGES_LIMIT_DEFAULT);
-        let facts = self.with_store(|store| store.dependency_facts())?;
-        let overview = module_overview(&facts, None, depth, &[]);
+        let overview = self.with_store(|store| {
+            module_overview_from_store(store, None, depth, &[], ModuleEdgeTypes::default(), None)
+        })?;
         if overview.edges.is_empty() {
             return Ok("No cross-module dependencies in the symbol index.".to_owned());
         }

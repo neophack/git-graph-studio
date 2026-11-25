@@ -28,6 +28,7 @@ import {
 	type MetricsEvent,
 	type ModuleEdge,
 	type ModuleEdgeDetail,
+	type ModuleEdgeTypes,
 	type ModuleNode,
 	type ModuleOverview,
 	type SecurityEvent
@@ -467,6 +468,15 @@ const DEPTH_OPTIONS = [
 	{ value: 3, key: 'analysis.modules.depth.files' }
 ] as const;
 
+const EDGE_TYPE_OPTIONS: readonly { key: keyof ModuleEdgeTypes; labelKey: 'analysis.modules.edgeType.calls' | 'analysis.modules.edgeType.typeRefs' | 'analysis.modules.edgeType.baseRefs' | 'analysis.modules.edgeType.imports' }[] = [
+	{ key: 'calls', labelKey: 'analysis.modules.edgeType.calls' },
+	{ key: 'typeRefs', labelKey: 'analysis.modules.edgeType.typeRefs' },
+	{ key: 'baseRefs', labelKey: 'analysis.modules.edgeType.baseRefs' },
+	{ key: 'imports', labelKey: 'analysis.modules.edgeType.imports' }
+];
+
+const MAX_EDGE_DETAIL_CACHE = 50;
+
 /** The Module Analysis page: nine-volume-backed layered architecture explorer with
  *  Netron-inspired interactive SVG canvas, progressive breadcrumb drill-down, depth
  *  selector, cycles-only & neighborhood isolation filters, resizable right-hand
@@ -482,6 +492,8 @@ class ModulePage implements AnalysisPageView {
 	private scope: string | null = null;
 	/** Grouping depth: 0=Auto, 1=L1, 2=L2, 3=Files. */
 	private depth = 0;
+	/** Enabled edge types: only function calls are enabled by default. */
+	private edgeTypes: ModuleEdgeTypes = { calls: true, typeRefs: false, baseRefs: false, imports: false };
 	private cyclesOnly = false;
 	/** Optional neighborhood isolation target node id. */
 	private focusedNodeId: string | null = null;
@@ -495,6 +507,7 @@ class ModulePage implements AnalysisPageView {
 
 	private readonly drawing: DiagramView;
 	private readonly title: HTMLElement;
+	private readonly edgeFilterBar: HTMLElement;
 	private readonly breadcrumbsBar: HTMLElement;
 	private readonly statusHost: HTMLElement;
 	private readonly workspace: HTMLElement;
@@ -580,6 +593,7 @@ class ModulePage implements AnalysisPageView {
 			}
 		});
 
+		this.edgeFilterBar = this.buildEdgeFilterBar();
 		this.graphbar = el('div', 'an-graphbar');
 		this.drawing.host.append(this.graphbar);
 		this.breadcrumbsBar = el('div', 'an-breadcrumbs');
@@ -606,6 +620,7 @@ class ModulePage implements AnalysisPageView {
 					actionButton('refresh', t('analysis.page.rerun'), () => void this.load())
 				])
 			]),
+			this.edgeFilterBar,
 			this.breadcrumbsBar,
 			this.statusHost,
 			this.workspace
@@ -667,6 +682,29 @@ class ModulePage implements AnalysisPageView {
 		if (next) this.drawing.focusElement(next);
 	}
 
+	private buildEdgeFilterBar(): HTMLElement {
+		const bar = el('div', 'an-edge-filters', [
+			el('span', 'an-edge-filters-label', [t('analysis.modules.edgeTypes')])
+		]);
+		for (const opt of EDGE_TYPE_OPTIONS) {
+			const checked = this.edgeTypes[opt.key];
+			const cb = el('input') as HTMLInputElement;
+			cb.type = 'checkbox';
+			cb.checked = checked;
+			const label = el('label', `an-edge-check${checked ? ' on' : ''}`, [
+				cb,
+				el('span', undefined, [t(opt.labelKey)])
+			]);
+			cb.addEventListener('change', () => {
+				this.edgeTypes = { ...this.edgeTypes, [opt.key]: cb.checked };
+				label.classList.toggle('on', cb.checked);
+				void this.load();
+			});
+			bar.append(label);
+		}
+		return bar;
+	}
+
 	private async load(): Promise<void> {
 		const token = ++this.loadToken;
 		this.loading = true;
@@ -678,7 +716,7 @@ class ModulePage implements AnalysisPageView {
 		this.edgeDetailCache.clear();
 		this.render();
 		try {
-			const overview = await analysisModuleOverview(this.scope, this.depth, this.folders);
+			const overview = await analysisModuleOverview(this.scope, this.depth, this.folders, this.edgeTypes);
 			if (token !== this.loadToken) return;
 			this.overview = overview;
 		} catch (error) {
@@ -898,6 +936,10 @@ class ModulePage implements AnalysisPageView {
 		try {
 			const detail = await analysisModuleEdgeDetail(edge.from, edge.to, this.scope, this.depth, this.folders);
 			if (token !== this.edgeDetailToken) return;
+			if (this.edgeDetailCache.size >= MAX_EDGE_DETAIL_CACHE) {
+				const oldest = this.edgeDetailCache.keys().next().value;
+				if (oldest !== undefined) this.edgeDetailCache.delete(oldest);
+			}
 			this.edgeDetailCache.set(edge.id, detail);
 		} catch {
 			if (token !== this.edgeDetailToken) return;
@@ -1080,8 +1122,10 @@ class ModulePage implements AnalysisPageView {
 		]);
 
 		const edgeProps: HTMLElement[] = [
-			this.renderPropRow(t('analysis.modules.inspector.symbolRefs'), String(edge.symbolRefs)),
+			this.renderPropRow(t('analysis.modules.inspector.callRefs'), String(edge.callRefs ?? edge.symbolRefs)),
+			this.renderPropRow(t('analysis.modules.inspector.typeRefs'), String(edge.typeRefs ?? 0)),
 			this.renderPropRow(t('analysis.modules.inspector.baseRefs'), String(edge.baseRefs)),
+			this.renderPropRow(t('analysis.modules.inspector.importRefs'), String(edge.importRefs ?? 0)),
 			this.renderPropRow(t('analysis.modules.filePairs').replace('{0}', '').trim() || 'File Pairs', String(edge.filePairs))
 		];
 		if (edge.isCycle) {

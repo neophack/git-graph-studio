@@ -2280,6 +2280,7 @@ button.ggs-symbol-hover-relations:hover { text-decoration: underline; color: var
 .an-diagram {
 	flex: 1; min-height: 0; position: relative; overflow: hidden; cursor: grab;
 	touch-action: none; outline: none;
+	contain: layout style paint; isolation: isolate;
 	background-color: var(--vscode-editor-background);
 	background-image: radial-gradient(
 		circle,
@@ -2297,6 +2298,16 @@ button.ggs-symbol-hover-relations:hover { text-decoration: underline; color: var
 .an-diagram.dragging, .an-diagram.dragging-node,
 .an-diagram.dragging .an-mod-node { cursor: grabbing; }
 .an-diagram.empty .an-zoombar, .an-diagram.empty .an-minimap { display: none; }
+/* Large-graph mode: disable expensive backdrop blur readbacks & geometricPrecision over large SVGs to prevent WebKit tile tearing. */
+.an-diagram.large-graph .an-svg-canvas { shape-rendering: auto; text-rendering: optimizeSpeed; }
+.an-diagram.large-graph .an-zoombar .pill,
+.an-diagram.large-graph .an-zoombar > .action-btn,
+.an-diagram.large-graph .an-minimap,
+.an-diagram.large-graph .an-legend,
+.an-diagram.large-graph .an-graphbar .chip {
+	backdrop-filter: none; -webkit-backdrop-filter: none;
+	background: var(--vscode-editorWidget-background, #252526);
+}
 
 /* Floating glassmorphic toolbar pills (Apple / VS Code) */
 .an-zoombar {
@@ -2336,6 +2347,35 @@ button.ggs-symbol-hover-relations:hover { text-decoration: underline; color: var
 }
 
 .an-mod-workspace { flex: 1; min-height: 0; display: flex; position: relative; }
+.an-edge-filters {
+	display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 5px 12px; flex: none;
+	border-bottom: 1px solid var(--vscode-panel-border);
+	background: color-mix(in srgb, var(--vscode-editor-foreground, #888) 2%, transparent);
+	font-size: 11.5px;
+}
+.an-edge-filters-label {
+	color: var(--vscode-descriptionForeground); font-size: 11px; margin-right: 2px; white-space: nowrap;
+}
+.an-edge-check {
+	display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--vscode-editor-foreground, #888) 14%, transparent);
+	background: transparent; color: var(--vscode-descriptionForeground); cursor: pointer;
+	user-select: none; white-space: nowrap;
+	transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.an-edge-check:hover {
+	border-color: color-mix(in srgb, var(--vscode-focusBorder, #0078d4) 55%, transparent);
+	color: var(--vscode-foreground);
+}
+.an-edge-check.on {
+	background: color-mix(in srgb, var(--vscode-focusBorder, #0078d4) 14%, transparent);
+	border-color: color-mix(in srgb, var(--vscode-focusBorder, #0078d4) 46%, transparent);
+	color: var(--vscode-foreground);
+}
+.an-edge-check input[type="checkbox"] {
+	margin: 0; width: 13px; height: 13px; cursor: pointer;
+	accent-color: var(--vscode-focusBorder, #0078d4);
+}
 .an-breadcrumbs {
 	display: flex; align-items: center; gap: 2px; padding: 5px 12px; flex: none;
 	border-bottom: 1px solid var(--vscode-panel-border);
@@ -2366,9 +2406,9 @@ button.ggs-symbol-hover-relations:hover { text-decoration: underline; color: var
 	color: #ffffff;
 }
 
-.an-svg-stage { position: absolute; inset: 0; width: 100%; height: 100%; }
+.an-svg-stage { position: absolute; inset: 0; width: 100%; height: 100%; contain: layout style paint; }
 .an-svg-canvas {
-	display: block; width: 100%; height: 100%; overflow: visible;
+	display: block; width: 100%; height: 100%; overflow: hidden;
 	shape-rendering: geometricPrecision; text-rendering: geometricPrecision;
 }
 
@@ -2385,19 +2425,17 @@ button.ggs-symbol-hover-relations:hover { text-decoration: underline; color: var
 }
 
 /* Apple / Google Material 3 / Meta / VS Code inspired pure-vector node cards */
-.an-mod-node { cursor: grab; transition: opacity 160ms ease; }
+.an-mod-node { cursor: grab; }
 .an-diagram.dragging-node .an-mod-node { cursor: grabbing; }
 .an-mod-node .an-node-shadow-far { fill: color-mix(in srgb, #000 5%, transparent); }
 .an-mod-node .an-node-shadow-vec { fill: color-mix(in srgb, #000 10%, transparent); }
 .an-mod-node .an-node-halo {
 	fill: none; stroke: transparent; stroke-width: 3;
-	transition: stroke 140ms ease;
 }
 .an-mod-node .an-node-card {
 	fill: color-mix(in srgb, var(--vscode-editor-foreground, #fff) 3%, var(--vscode-editorWidget-background, #252526));
 	stroke: color-mix(in srgb, var(--vscode-editor-foreground, #888) 14%, transparent);
 	stroke-width: 1;
-	transition: stroke 140ms ease, stroke-width 140ms ease;
 }
 .an-mod-node .an-node-header {
 	fill: color-mix(in srgb, var(--dg-in) 8%, transparent);
@@ -2441,7 +2479,8 @@ button.ggs-symbol-hover-relations:hover { text-decoration: underline; color: var
 .an-mod-node.hover-out .an-node-card { stroke: var(--dg-out); stroke-width: 1.6; }
 .an-mod-node.downstream .an-node-halo,
 .an-mod-node.hover-out .an-node-halo { stroke: color-mix(in srgb, var(--dg-out) 16%, transparent); }
-.an-mod-node.dim, .an-mod-node.hover-dim { opacity: 0.22; }
+.an-mod-node.dim,
+.an-svg-canvas.has-hover .an-mod-node:not(.hover-self):not(.hover-in):not(.hover-out) { opacity: 0.22; }
 
 .an-node-title {
 	fill: var(--vscode-editor-foreground, #e0e0e0);
@@ -2488,19 +2527,17 @@ button.ggs-symbol-hover-relations:hover { text-decoration: underline; color: var
 	fill: color-mix(in srgb, var(--vscode-editor-foreground, #fff) 3%, var(--vscode-editorWidget-background, #252526));
 	stroke: color-mix(in srgb, var(--vscode-editor-foreground, #aaa) 34%, transparent);
 	stroke-width: 1.25;
-	transition: stroke 120ms ease, fill 120ms ease;
 }
 .an-mod-node:hover .an-node-port,
 .an-mod-node.selected .an-node-port { stroke: var(--dg-accent); fill: var(--dg-accent); }
 .an-mod-node.cycle .an-node-port { stroke: color-mix(in srgb, var(--dg-cycle) 70%, transparent); }
 
 /* Smooth Bezier connectors — crisp solid curves, refined warm amber-coral for cycles */
-.an-mod-edge { cursor: pointer; transition: opacity 150ms ease; }
+.an-mod-edge { cursor: pointer; }
 .an-edge-hit { fill: none; stroke: transparent; stroke-width: 14; }
 .an-edge-path {
 	fill: none;
 	stroke: color-mix(in srgb, var(--vscode-editor-foreground, #aaa) 28%, transparent);
-	transition: stroke 140ms ease, stroke-width 140ms ease;
 }
 .an-mod-edge.cycle .an-edge-path {
 	stroke: color-mix(in srgb, var(--dg-cycle) 62%, transparent);
@@ -2512,7 +2549,8 @@ button.ggs-symbol-hover-relations:hover { text-decoration: underline; color: var
 .an-mod-edge:hover .an-edge-path, .an-mod-edge.selected .an-edge-path { stroke: var(--dg-accent); }
 .an-mod-edge.upstream .an-edge-path, .an-mod-edge.hover-in .an-edge-path { stroke: var(--dg-in); }
 .an-mod-edge.downstream .an-edge-path, .an-mod-edge.hover-out .an-edge-path { stroke: var(--dg-out); }
-.an-mod-edge.dim, .an-mod-edge.hover-dim { opacity: 0.1; }
+.an-mod-edge.dim,
+.an-svg-canvas.has-hover .an-mod-edge:not(.hover-in):not(.hover-out) { opacity: 0.1; }
 .an-marker-norm { fill: color-mix(in srgb, var(--vscode-editor-foreground, #aaa) 46%, transparent); }
 .an-marker-cycle { fill: color-mix(in srgb, var(--dg-cycle) 82%, transparent); }
 .an-marker-sel { fill: var(--dg-accent); }
@@ -2528,7 +2566,7 @@ button.ggs-symbol-hover-relations:hover { text-decoration: underline; color: var
 	fill: var(--vscode-editorWidget-foreground, #ccc);
 	font-size: 9.5px; font-weight: 600; font-family: var(--vscode-editor-font-family, monospace);
 }
-.an-edge-badge.auto-hide { opacity: 0; transition: opacity 120ms ease; }
+.an-edge-badge.auto-hide { opacity: 0; }
 .an-mod-edge:hover .an-edge-badge,
 .an-mod-edge.selected .an-edge-badge,
 .an-mod-edge.hover-in .an-edge-badge,
@@ -2539,16 +2577,16 @@ button.ggs-symbol-hover-relations:hover { text-decoration: underline; color: var
 }
 .an-mod-edge.cycle .an-edge-badge text { fill: var(--dg-cycle); }
 
-/* Floating hover tooltip (Apple / VS Code popover) */
+/* Floating hover tooltip (GPU-composited transform, no backdrop-filter to avoid WKWebView tile tearing) */
 .an-hover-tip {
-	position: absolute; z-index: 6; pointer-events: none; max-width: 288px;
+	position: absolute; left: 0; top: 0; z-index: 6; pointer-events: none; max-width: 288px;
 	padding: 8px 11px; border-radius: 8px; font-size: 11.5px;
-	background: color-mix(in srgb, var(--vscode-editorHoverWidget-background, #252526) 94%, transparent);
+	background: var(--vscode-editorHoverWidget-background, #252526);
 	color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
-	border: 1px solid color-mix(in srgb, var(--vscode-editor-foreground, #888) 15%, transparent);
-	backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-	box-shadow: 0 8px 24px color-mix(in srgb, #000 24%, transparent), 0 2px 6px color-mix(in srgb, #000 12%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-editor-foreground, #888) 18%, transparent);
+	box-shadow: 0 8px 24px color-mix(in srgb, #000 28%, transparent), 0 2px 6px color-mix(in srgb, #000 14%, transparent);
 	display: flex; flex-direction: column; gap: 4px;
+	will-change: transform;
 }
 .an-tip-head { display: flex; align-items: center; gap: 6px; font-weight: 600; }
 .an-tip-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--dg-in); }

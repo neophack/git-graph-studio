@@ -585,6 +585,82 @@ describe('the graph pages', () => {
 		expect(cycleEdge.querySelector('.an-edge-badge text')?.textContent).toContain('⟳');
 	});
 
+	it('coalesces hover highlights via root has-hover class, translates tooltip on GPU, and enables large-graph mode', async () => {
+		await modules();
+		const bigNodes = Array.from({ length: 42 }, (_, i) => ({
+			id: `mod_${i}`,
+			label: `mod_${i}`,
+			kind: 'module',
+			expandable: true,
+			files: 2,
+			symbols: 10,
+			fanIn: i > 0 ? 1 : 0,
+			fanOut: i < 41 ? 1 : 0,
+			instability: 0.5,
+			inCycle: false,
+			layer: i % 4,
+			topFiles: []
+		}));
+		const bigEdges = Array.from({ length: 41 }, (_, i) => ({
+			id: `mod_${i}→mod_${i + 1}`,
+			from: `mod_${i}`,
+			to: `mod_${i + 1}`,
+			weight: 2,
+			symbolRefs: 2,
+			baseRefs: 0,
+			filePairs: 1,
+			topSymbols: ['fn'],
+			isCycle: false
+		}));
+		backend.on('analysis_module_overview', () => overviewAnswer({
+			nodes: bigNodes,
+			edges: bigEdges,
+			cycles: [],
+			totalEdges: bigEdges.length
+		}));
+		const root = host();
+		createAnalysisPage('modules', root);
+		await flush(6);
+
+		const diagram = root.querySelector<HTMLElement>('.an-diagram')!;
+		const svg = root.querySelector<SVGSVGElement>('svg.an-svg-canvas')!;
+		const tip = root.querySelector<HTMLElement>('.an-hover-tip')!;
+		expect(diagram.classList.contains('large-graph')).toBe(true);
+
+		const raf = () => new Promise((resolve) => setTimeout(resolve, 25));
+		const n0 = nodeEl(root, 'mod_0');
+		const n1 = nodeEl(root, 'mod_1');
+		const n2 = nodeEl(root, 'mod_2');
+
+		// Hover mod_0: root gets has-hover, only incident elements get hover classes (no O(N) .hover-dim).
+		n0.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, clientX: 80, clientY: 90 }));
+		await raf();
+		expect(svg.classList.contains('has-hover')).toBe(true);
+		expect(n0.classList.contains('hover-self')).toBe(true);
+		expect(n1.classList.contains('hover-out')).toBe(true);
+		expect(root.querySelectorAll('.hover-dim').length).toBe(0);
+		expect(tip.hidden).toBe(false);
+		expect(tip.style.transform).toContain('translate3d(');
+		expect(tip.style.left).toBe('');
+
+		// Moving directly from mod_0 to mod_1 keeps has-hover steady and updates only the neighborhood.
+		n0.dispatchEvent(new PointerEvent('pointerout', { bubbles: true, relatedTarget: n1 }));
+		expect(svg.classList.contains('has-hover')).toBe(true);
+		n1.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, clientX: 120, clientY: 130 }));
+		await raf();
+		expect(svg.classList.contains('has-hover')).toBe(true);
+		expect(n0.classList.contains('hover-self')).toBe(false);
+		expect(n0.classList.contains('hover-in')).toBe(true);
+		expect(n1.classList.contains('hover-self')).toBe(true);
+		expect(n2.classList.contains('hover-out')).toBe(true);
+
+		// Leaving the graph clears hover cleanly after the brief grace window.
+		n1.dispatchEvent(new PointerEvent('pointerout', { bubbles: true, relatedTarget: null }));
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		expect(svg.classList.contains('has-hover')).toBe(false);
+		expect(tip.hidden).toBe(true);
+	});
+
 	it('the MCP page lists setup, the catalogue and the call log', async () => {
 		await modules();
 		backend.on('mcp_tools', () => [

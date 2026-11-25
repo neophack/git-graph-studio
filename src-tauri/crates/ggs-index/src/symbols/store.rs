@@ -329,6 +329,8 @@ pub struct StoreDependencyFacts {
     pub names: Vec<String>,
     /// For each `name_id`: deduplicated ascending file ids that declare that name.
     pub decl_files: Vec<Vec<u32>>,
+    /// For each `name_id`: true when at least one declaration is a callable (`function` or `method`).
+    pub decl_is_callable: Vec<bool>,
     /// For each `name_id`: trusted file ids mentioning that word (`None` if untrusted).
     pub ref_files: Vec<Option<Vec<u32>>>,
     /// Directed inheritance/implementation links as `(derived_file_id, base_name_id)`.
@@ -716,10 +718,76 @@ impl SymbolStore {
         )
     }
 
+    /// Returns true when a stored symbol kind byte represents a callable (`function` or `method`).
+    #[inline]
+    pub fn is_callable_kind(kind: u8) -> bool {
+        kind <= 1
+    }
+
+    /// Number of indexed files in the store.
+    #[inline]
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Number of interned symbol/container/base names in the store.
+    #[inline]
+    pub fn name_count(&self) -> usize {
+        self.names.len()
+    }
+
+    /// Borrow the repo-relative path of `fid` without cloning.
+    #[inline]
+    pub fn file_path(&self, fid: usize) -> Option<&str> {
+        self.files.get(fid).map(|f| f.path.as_str())
+    }
+
+    /// Number of declared symbols in file `fid`.
+    #[inline]
+    pub fn file_symbol_count(&self, fid: usize) -> usize {
+        self.files.get(fid).map_or(0, |f| f.symbols.len())
+    }
+
+    /// Borrow the interned name string of `name_id` without cloning.
+    #[inline]
+    pub fn name_str(&self, name_id: usize) -> Option<&str> {
+        self.names.get(name_id).map(String::as_str)
+    }
+
+    /// Borrow the trusted occurrence file-id list for `name_id`, or `None` if untrusted.
+    #[inline]
+    pub fn ref_files_of(&self, name_id: usize) -> Option<&[u32]> {
+        self.refs.get(name_id)?.as_deref()
+    }
+
+    /// Visit every `(file_id, name_id, is_callable)` declaration in file order without
+    /// cloning strings or allocating intermediate tables.
+    pub fn for_each_file_decl(&self, mut f: impl FnMut(u32, u32, bool)) {
+        for (fid, file) in self.files.iter().enumerate() {
+            let fid = fid as u32;
+            for symbol in &file.symbols {
+                f(fid, symbol.name_id, Self::is_callable_kind(symbol.kind));
+            }
+        }
+    }
+
+    /// Visit every `(derived_file_id, base_name_id)` inheritance link without cloning.
+    pub fn for_each_base_edge(&self, mut f: impl FnMut(u32, u32)) {
+        for (fid, file) in self.files.iter().enumerate() {
+            let fid = fid as u32;
+            for record in &file.bases {
+                for &base in &record.bases {
+                    f(fid, base);
+                }
+            }
+        }
+    }
+
     /// Snapshot the store's file, declaration, occurrence, and inheritance tables for
     /// lock-free module-level architecture analysis (zero disk I/O).
     pub fn dependency_facts(&self) -> StoreDependencyFacts {
         let mut decl_files: Vec<Vec<u32>> = vec![Vec::new(); self.names.len()];
+        let mut decl_is_callable: Vec<bool> = vec![false; self.names.len()];
         let mut base_edges: Vec<(u32, u32)> = Vec::new();
         let mut files = Vec::with_capacity(self.files.len());
         let mut symbol_counts = Vec::with_capacity(self.files.len());
@@ -728,7 +796,11 @@ impl SymbolStore {
             files.push(file.path.clone());
             symbol_counts.push(file.symbols.len() as u32);
             for symbol in &file.symbols {
-                let list = &mut decl_files[symbol.name_id as usize];
+                let nid = symbol.name_id as usize;
+                if Self::is_callable_kind(symbol.kind) {
+                    decl_is_callable[nid] = true;
+                }
+                let list = &mut decl_files[nid];
                 if list.last().copied() != Some(fid) {
                     list.push(fid);
                 }
@@ -746,6 +818,7 @@ impl SymbolStore {
             symbol_counts,
             names: self.names.clone(),
             decl_files,
+            decl_is_callable,
             ref_files: self.refs.clone(),
             base_edges,
         }

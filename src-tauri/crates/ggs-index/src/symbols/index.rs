@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -104,7 +104,7 @@ const MIN_SAVE_INTERVAL: Duration = Duration::from_millis(1500);
 /// share one build.
 pub struct SymbolIndex {
     home: PathBuf,
-    stores: Mutex<HashMap<String, Arc<Mutex<SymbolStore>>>>,
+    stores: Mutex<HashMap<String, Arc<RwLock<SymbolStore>>>>,
     progress: Mutex<HashMap<String, IndexStatus>>,
     last_used: Mutex<HashMap<String, Instant>>,
     save_gates: Mutex<HashMap<String, Arc<Mutex<SaveGate>>>>,
@@ -157,7 +157,7 @@ impl SymbolIndex {
     }
 
     /// A query's way to the store: counts as a use for `release_idle`.
-    fn store(&self, root: &str) -> Option<Arc<Mutex<SymbolStore>>> {
+    fn store(&self, root: &str) -> Option<Arc<RwLock<SymbolStore>>> {
         let store = self.resident(root)?;
         self.touch(root);
         Some(store)
@@ -165,7 +165,7 @@ impl SymbolIndex {
 
     /// The store without marking a use — the watcher's updates are not a reason to keep a
     /// store resident.
-    fn resident(&self, root: &str) -> Option<Arc<Mutex<SymbolStore>>> {
+    fn resident(&self, root: &str) -> Option<Arc<RwLock<SymbolStore>>> {
         self.stores.lock().unwrap().get(root).cloned()
     }
 
@@ -182,7 +182,7 @@ impl SymbolIndex {
         self.stores
             .lock()
             .unwrap()
-            .insert(root.to_owned(), Arc::new(Mutex::new(store)));
+            .insert(root.to_owned(), Arc::new(RwLock::new(store)));
         self.note(root, ready_status(&stats));
         self.touch(root);
     }
@@ -274,7 +274,7 @@ impl SymbolIndex {
         root: &str,
     ) -> Option<(Vec<WorkspaceSymbol>, HashMap<String, usize>)> {
         let store = self.store(root)?;
-        let guard = store.lock().unwrap();
+        let guard = store.read().unwrap();
         let symbols = guard.all_symbols();
         let counts: HashMap<String, usize> = guard
             .occurrence_counts()
@@ -292,7 +292,7 @@ impl SymbolIndex {
     /// is untrusted — the caller reads 0, exactly what an empty map answered.
     pub fn ref_count(&self, root: &str, name: &str) -> Option<usize> {
         let store = self.store(root)?;
-        let count = store.lock().unwrap().ref_count(name);
+        let count = store.read().unwrap().ref_count(name);
         count
     }
 
@@ -300,7 +300,7 @@ impl SymbolIndex {
     /// has no use for the materialized symbols `symbols_with_refs` also copies out.
     pub fn occurrence_counts(&self, root: &str) -> Option<HashMap<String, usize>> {
         let store = self.store(root)?;
-        let guard = store.lock().unwrap();
+        let guard = store.read().unwrap();
         let counts = guard
             .occurrence_counts()
             .iter()
@@ -313,7 +313,7 @@ impl SymbolIndex {
     /// serves from. Cloned out (a query must not hold the build's lock).
     pub fn all_symbols(&self, root: &str) -> Option<Vec<WorkspaceSymbol>> {
         let store = self.store(root)?;
-        let symbols = store.lock().unwrap().all_symbols();
+        let symbols = store.read().unwrap().all_symbols();
         Some(symbols)
     }
 
@@ -326,14 +326,14 @@ impl SymbolIndex {
         limit: usize,
     ) -> Option<Vec<WorkspaceSymbol>> {
         let store = self.store(root)?;
-        let hits = store.lock().unwrap().matching(needle_lower, limit);
+        let hits = store.read().unwrap().matching(needle_lower, limit);
         Some(hits)
     }
 
     /// Every declaration of exactly `name`.
     pub fn lookup(&self, root: &str, name: &str) -> Option<Vec<WorkspaceSymbol>> {
         let store = self.store(root)?;
-        let hits = store.lock().unwrap().lookup(name);
+        let hits = store.read().unwrap().lookup(name);
         Some(hits)
     }
 
@@ -341,7 +341,7 @@ impl SymbolIndex {
     /// no index for the root or the name's list is untrusted — the caller then scans all.
     pub fn files_containing(&self, root: &str, name: &str) -> Option<Vec<String>> {
         let store = self.store(root)?;
-        let files = store.lock().unwrap().files_containing(name);
+        let files = store.read().unwrap().files_containing(name);
         files
     }
 
@@ -361,7 +361,7 @@ impl SymbolIndex {
     pub fn files_containing_code(&self, root: &str, name: &str) -> Option<Vec<String>> {
         let store = self.store(root)?;
         let (trusted, all_files) = {
-            let guard = store.lock().unwrap();
+            let guard = store.read().unwrap();
             (
                 guard.files_containing(name),
                 guard
@@ -394,7 +394,7 @@ impl SymbolIndex {
         }
         let store = self.store(root)?;
         let all_files: Vec<String> = store
-            .lock()
+            .read()
             .unwrap()
             .files_with_counts()
             .into_iter()
@@ -469,7 +469,7 @@ impl SymbolIndex {
     /// must not hold the build's lock).
     pub fn files_with_counts(&self, root: &str) -> Option<Vec<(String, usize)>> {
         let store = self.store(root)?;
-        let files = store.lock().unwrap().files_with_counts();
+        let files = store.read().unwrap().files_with_counts();
         Some(files)
     }
 
@@ -477,7 +477,7 @@ impl SymbolIndex {
     /// reads it.
     pub fn kind_counts(&self, root: &str) -> Option<Vec<(&'static str, usize)>> {
         let store = self.store(root)?;
-        let kinds = store.lock().unwrap().kind_counts();
+        let kinds = store.read().unwrap().kind_counts();
         Some(kinds)
     }
 
@@ -485,19 +485,16 @@ impl SymbolIndex {
     /// overview ranks the workspace's hub names with it.
     pub fn top_names_by_refs(&self, root: &str, n: usize) -> Option<Vec<(String, usize)>> {
         let store = self.store(root)?;
-        let names = store.lock().unwrap().top_names_by_refs(n);
+        let names = store.read().unwrap().top_names_by_refs(n);
         Some(names)
     }
 
-    /// Run one read-only query against the root's store under its short lock: the answer
-    /// is computed inside and only the result leaves — the same bargain
-    /// `symbols_with_refs` makes (its whole-index clone also runs under the lock). A
-    /// multi-step query (the relation window) keeps the lock for the computation's
-    /// length so its per-file reads stay consistent. `None` when nothing is indexed
-    /// for the root.
+    /// Run one read-only query against the root's store under its shared read lock: the
+    /// answer is computed inside and only the result leaves, without blocking concurrent
+    /// readers. `None` when nothing is indexed for the root.
     pub fn with_store<R>(&self, root: &str, query: impl FnOnce(&SymbolStore) -> R) -> Option<R> {
         let store = self.store(root)?;
-        let guard = store.lock().unwrap();
+        let guard = store.read().unwrap();
         Some(query(&guard))
     }
 
@@ -506,7 +503,7 @@ impl SymbolIndex {
     /// `path` — the MCP server's `file_outline` reads it.
     pub fn file_symbols(&self, root: &str, path: &str) -> Option<Vec<FileOutlineRow>> {
         let store = self.store(root)?;
-        let guard = store.lock().unwrap();
+        let guard = store.read().unwrap();
         guard.file_symbols(path)
     }
 
@@ -604,7 +601,7 @@ impl SymbolIndex {
                 // stands — the resident store's READY state, or nothing.
                 let standing = self
                     .resident(root)
-                    .map(|store| ready_status(&store.lock().unwrap().stats()))
+                    .map(|store| ready_status(&store.read().unwrap().stats()))
                     .unwrap_or_else(IndexStatus::empty);
                 self.note(root, standing);
                 if let Some(sink) = sink {
@@ -662,7 +659,7 @@ impl SymbolIndex {
                 return;
             };
             let changed = {
-                let guard = store.lock().unwrap();
+                let guard = store.read().unwrap();
                 let fingerprints = guard.fingerprints();
                 drop(guard);
                 // The drift walk stats every known file — O(files), a few hundred
@@ -670,7 +667,7 @@ impl SymbolIndex {
                 // RELEASED, so a symbol query never queues behind it. The batch's own
                 // paths re-extract regardless.
                 let drifted = SymbolStore::drift_of(&root, &fingerprints, &paths);
-                let mut store = store.lock().unwrap();
+                let mut store = store.write().unwrap();
                 // A batch naming nothing the store holds (a non-source write, another app's
                 // churn) ends here: saving unchanged bytes would only put new watcher events
                 // on the tree the watch reports, so the store's own persistence never feeds
@@ -750,7 +747,7 @@ impl SymbolIndex {
                 std::thread::sleep(wait);
             }
             let (snapshot, dirty_paths) = {
-                let store = store.lock().unwrap();
+                let store = store.read().unwrap();
                 let snapshot = store.save_snapshot();
                 let dirty_paths = snapshot.dirty_paths.clone();
                 (snapshot, dirty_paths)
@@ -761,7 +758,7 @@ impl SymbolIndex {
                 // The write holds exactly these paths' facts on disk; only they leave
                 // the dirty set. A batch that applied meanwhile re-marked its own
                 // paths, and the next drain covers them.
-                store.lock().unwrap().clear_dirty(&dirty_paths);
+                store.write().unwrap().clear_dirty(&dirty_paths);
             }
         }
     }

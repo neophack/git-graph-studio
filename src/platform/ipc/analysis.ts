@@ -67,13 +67,23 @@ export interface ModuleNode {
 	topFiles: ModuleFileSummary[];
 }
 
+export interface ModuleEdgeTypes {
+	calls: boolean;
+	typeRefs: boolean;
+	baseRefs: boolean;
+	imports: boolean;
+}
+
 export interface ModuleEdge {
 	id: string;
 	from: string;
 	to: string;
 	weight: number;
 	symbolRefs: number;
+	callRefs: number;
+	typeRefs: number;
 	baseRefs: number;
+	importRefs: number;
 	filePairs: number;
 	topSymbols: string[];
 	isCycle: boolean;
@@ -128,11 +138,17 @@ export const analysisMetrics = (onEvent: Channel<MetricsEvent>) => invoke<void>(
 export const analysisDeadCode = (includeExported: boolean, onEvent: Channel<DeadCodeEvent>) =>
 	invoke<void>('analysis_dead_code', { includeExported, onEvent });
 export const analysisSecurity = (onEvent: Channel<SecurityEvent>) => invoke<void>('analysis_security', { onEvent });
-export const analysisModuleOverview = (scope: string | null, depth: number, folders?: string[]) =>
+export const analysisModuleOverview = (
+	scope: string | null,
+	depth: number,
+	folders?: string[],
+	edgeTypes?: ModuleEdgeTypes
+) =>
 	invoke<ModuleOverview>('analysis_module_overview', {
 		scope: scope || null,
 		depth,
-		...(folders !== undefined && { folders })
+		...(folders !== undefined && { folders }),
+		...(edgeTypes !== undefined && { edgeTypes })
 	});
 export const analysisModuleEdgeDetail = (
 	from: string,

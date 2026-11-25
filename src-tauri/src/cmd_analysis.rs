@@ -17,7 +17,7 @@ use ggs_analysis::index::{
     run_dead_code, run_metrics, run_security, AnalysisIndexEvent,
     AnalysisStatus, DeadCodeEvent, MetricsEvent, SecurityEvent,
 };
-use ggs_analysis::modules::{self, ModuleEdgeDetail, ModuleOverview};
+use ggs_analysis::modules::{self, ModuleEdgeDetail, ModuleEdgeTypes, ModuleOverview};
 
 use ggs_base::sink::BatchSink;
 use ggs_base::workspace::WorkspaceRoots;
@@ -62,8 +62,9 @@ pub async fn analysis_rebuild(
 }
 
 /// Scoped, layered module architecture overview read directly from the nine `project.ggs_*`
-/// volumes (`SymbolStore::dependency_facts`) — zero disk I/O, no `AnalysisData` build.
+/// volumes via zero-clone `&SymbolStore` access — no `AnalysisData` build.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn analysis_module_overview(
     app: tauri::AppHandle,
     roots: State<'_, WorkspaceRoots>,
@@ -72,23 +73,44 @@ pub async fn analysis_module_overview(
     scope: Option<String>,
     depth: Option<u8>,
     folders: Option<Vec<String>>,
+    edge_types: Option<ModuleEdgeTypes>,
 ) -> Result<ModuleOverview, String> {
     let root = resolve_root(roots.inner(), repo)?;
     crate::cmd_symbols::ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
-    let facts = symbol_index
-        .with_store(&root, |store| store.dependency_facts())
-        .ok_or("The symbol index could not be built")?;
+    let index = std::sync::Arc::clone(symbol_index.inner());
     let folders = folders.unwrap_or_default();
     let depth = depth.unwrap_or(0);
+    let edge_types = edge_types.unwrap_or_default();
     tauri::async_runtime::spawn_blocking(move || {
-        modules::module_overview(&facts, scope.as_deref(), depth, &folders)
+        let scanned_imports = if edge_types.imports {
+            let plan = index
+                .with_store(&root, |store| {
+                    modules::prepare_import_scan_plan(store, scope.as_deref(), &folders)
+                })
+                .ok_or_else(|| "The symbol index could not be built".to_owned())?;
+            Some(modules::scan_import_edges(&root, &plan))
+        } else {
+            None
+        };
+        index
+            .with_store(&root, |store| {
+                modules::module_overview_from_store(
+                    store,
+                    scope.as_deref(),
+                    depth,
+                    &folders,
+                    edge_types,
+                    scanned_imports.as_deref(),
+                )
+            })
+            .ok_or_else(|| "The symbol index could not be built".to_owned())
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?
 }
 
-/// On-demand L2 evidence for a single module dependency edge `from → to`: reads only the
-/// relevant `from`-side files on disk and extracts exact resolved imports and call sites.
+/// On-demand L2 evidence for a single module dependency edge `from → to`: extracts a
+/// minimal plan under the store read lock and scans only relevant `from`-side files lock-free.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn analysis_module_edge_detail(
@@ -104,16 +126,23 @@ pub async fn analysis_module_edge_detail(
 ) -> Result<ModuleEdgeDetail, String> {
     let root = resolve_root(roots.inner(), repo)?;
     crate::cmd_symbols::ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
-    let facts = symbol_index
-        .with_store(&root, |store| store.dependency_facts())
-        .ok_or("The symbol index could not be built")?;
     let folders = folders.unwrap_or_default();
     let depth = depth.unwrap_or(0);
-    tauri::async_runtime::spawn_blocking(move || {
-        modules::module_edge_detail(&root, &facts, &from, &to, scope.as_deref(), depth, &folders)
-    })
-    .await
-    .map_err(|e| e.to_string())
+    let plan = symbol_index
+        .with_store(&root, |store| {
+            modules::prepare_edge_detail_from_store(
+                store,
+                &from,
+                &to,
+                scope.as_deref(),
+                depth,
+                &folders,
+            )
+        })
+        .ok_or("The symbol index could not be built")?;
+    tauri::async_runtime::spawn_blocking(move || modules::scan_edge_detail(&root, &plan))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Every function and method with its measured shape, streamed in batches. The hotspot

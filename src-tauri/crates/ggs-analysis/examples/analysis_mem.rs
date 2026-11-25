@@ -239,11 +239,16 @@ fn main() {
         println!("  {} batches, {} json bytes", sink.batches, sink.rows);
     });
 
-    // Phase 4: the Module Analysis overview — the store's dependency facts (the engine's
-    // module pass is gone; the pipeline reads the nine volumes directly, like the page).
-    let facts = store.dependency_facts();
+    // Phase 4: the Module Analysis overview — read directly from the store (zero-clone).
     phase("module overview", || {
-        let overview = ggs_analysis::modules::module_overview(&facts, None, 0, &[]);
+        let overview = ggs_analysis::modules::module_overview_from_store(
+            &store,
+            None,
+            0,
+            &[],
+            ggs_analysis::modules::ModuleEdgeTypes::default(),
+            None,
+        );
         let json = serde_json::to_string(&overview).unwrap();
         println!("  module overview json {} bytes", json.len());
     });
