@@ -46,9 +46,36 @@ function baseName(path: string): string {
 	return cut === -1 ? path : path.slice(cut + 1);
 }
 
+/** Split a path into its parent directory and basename over either separator. */
+function splitDirAndBase(path: string): { dir: string; file: string } {
+	const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+	if (cut === -1) return { dir: '', file: path };
+	return { dir: path.slice(0, cut), file: path.slice(cut + 1) };
+}
+
+/** Human-readable symbol kind label: e.g. `function` → `Function`, `enumMember` → `Enum Member`. */
+function formatKind(kind: string): string {
+	if (!kind) return 'Symbol';
+	const spaced = kind.replace(/([a-z])([A-Z])/g, '$1 $2');
+	return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+/** Format the panel header's location summary, e.g.
+ *  `Function in location buffer.c (PAS\pas odo) at line 99 (6 lines)`. */
+export function formatDefinitionLocation(subject: DefinitionSubject, lineCount: number): string {
+	const kind = formatKind(subject.kind);
+	const { dir, file } = splitDirAndBase(subject.path);
+	const count = Math.max(1, lineCount);
+	const linesLabel = count === 1 ? '1 line' : `${count} lines`;
+	return `${kind} in location ${file}${dir ? ` (${dir})` : ''} at line ${subject.line + 1} (${linesLabel})`;
+}
+
 export class DefinitionView {
 	readonly element: HTMLElement;
 	readonly actions: HTMLElement;
+	/** The panel header's location summary — mounted beside the panel tabs so the file,
+	 *  directory, line and span stay visible even after the code pane scrolls down. */
+	readonly headerInfo: HTMLButtonElement;
 
 	/** A location-button click — the line arrives 1-based. */
 	onOpenDefinition?: (path: string, line: number) => void;
@@ -85,6 +112,12 @@ export class DefinitionView {
 		this.element.hidden = true;
 		this.pinButton = actionButton('pin', t('definition.pin'), () => this.togglePin());
 		this.actions = el('div', 'actions', [this.pinButton]);
+		this.headerInfo = el('button', 'def-header-info') as HTMLButtonElement;
+		this.headerInfo.type = 'button';
+		this.headerInfo.hidden = true;
+		this.headerInfo.addEventListener('click', () => {
+			if (this.subject) this.onOpenDefinition?.(this.subject.path, this.subject.line + 1);
+		});
 		this.render();
 	}
 
@@ -187,9 +220,19 @@ export class DefinitionView {
 	private render(): void {
 		this.body.textContent = '';
 		if (!this.subject) {
+			this.headerInfo.textContent = '';
+			this.headerInfo.title = '';
+			this.headerInfo.hidden = true;
 			this.body.appendChild(el('div', 'def-hint', [this.note ?? t('definition.hint')]));
 			return;
 		}
+		const selEnd = this.fileLines !== null
+			? this.selectionEnd(this.subject, this.fileLines)
+			: Math.max(this.subject.endLine ?? this.subject.line, this.subject.line);
+		const summary = formatDefinitionLocation(this.subject, selEnd - this.subject.line + 1);
+		this.headerInfo.textContent = summary;
+		this.headerInfo.title = `${summary} — ${t('symbols.context.open')}`;
+		this.headerInfo.hidden = false;
 		this.body.appendChild(this.buildHeader(this.subject));
 		if (this.loading) {
 			this.body.appendChild(el('div', 'def-hint', [icon('sync', 'codicon-modifier-spin'), t('relations.loading')]));
@@ -204,7 +247,6 @@ export class DefinitionView {
 		// span marked as the selection, and the declaration scrolled into view: the
 		// page's opening frame.
 		const subject = this.subject;
-		const selEnd = this.selectionEnd(subject, this.fileLines);
 		const code = el('pre', 'def-code');
 		const ext = extOf(subject.path);
 		const lines = this.fileLines;

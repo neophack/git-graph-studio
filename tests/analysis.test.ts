@@ -355,14 +355,16 @@ describe('the graph pages', () => {
 		expect(opened).toEqual(['app/main.ts:1']);
 	});
 
-	it('clicks an edge to fetch on-demand L2 imports and clickable call sites', async () => {
+	it('clicks an edge to fetch on-demand L2 imports and routes call sites to the definition panel', async () => {
 		await modules();
 		backend.on('analysis_module_overview', () => overviewAnswer());
 		backend.on('analysis_module_edge_detail', () => edgeDetailAnswer());
 		const root = host();
 		const page = createAnalysisPage('modules', root);
 		const opened: string[] = [];
+		const shownDefs: Array<{ kind: string; name: string; path: string; line: number }> = [];
 		page.onOpen = (path, line) => opened.push(`${path}:${line}`);
+		page.onShowDefinition = (subject) => shownDefs.push(subject);
 		await flush(6);
 
 		edgeEl(root, 'app→core').dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -373,7 +375,8 @@ describe('the graph pages', () => {
 		const siteRow = [...root.querySelectorAll<HTMLElement>('.an-insp-row')]
 			.find((row) => row.textContent?.includes('runCore'))!;
 		siteRow.click();
-		expect(opened).toEqual(['app/main.ts:4']);
+		expect(shownDefs).toEqual([{ kind: 'function', name: 'runCore', path: 'app/main.ts', line: 3 }]);
+		expect(opened).toEqual([]);
 	});
 
 	it('drills into a module on double-click and navigates back via breadcrumbs', async () => {

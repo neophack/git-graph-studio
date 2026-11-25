@@ -5,7 +5,7 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { DefinitionView } from '../src/features/search';
+import { DefinitionView, formatDefinitionLocation } from '../src/features/search';
 import { commands } from '../src/platform/commands';
 import { updateSetting } from '../src/platform/settings';
 import { Workbench } from '../src/workbench';
@@ -222,6 +222,30 @@ beforeEach(() => {
 		expect(view.element.querySelector('.def-code')?.textContent).toContain('int total(int a, int b)');
 		view.element.remove();
 	});
+
+	it('formats and exposes the panel header location info and jumps on click', async () => {
+		expect(formatDefinitionLocation({ kind: 'function', name: 'fn', path: 'PAS\\pas odo\\buffer.c', line: 98, endLine: 103 }, 6))
+			.toBe('Function in location buffer.c (PAS\\pas odo) at line 99 (6 lines)');
+		expect(formatDefinitionLocation({ kind: 'variable', name: 'x', path: 'main.c', line: 0 }, 1))
+			.toBe('Variable in location main.c at line 1 (1 line)');
+
+		const view = mountView();
+		const opens: string[] = [];
+		view.onOpenDefinition = (path, line) => opens.push(`${path}:${line}`);
+		expect(view.headerInfo.hidden).toBe(true);
+
+		view.setDefinition({ kind: 'function', name: 'total', path: 'src/math.c', line: 0, endLine: 4 });
+		await flush();
+		expect(view.headerInfo.hidden).toBe(false);
+		expect(view.headerInfo.textContent).toBe('Function in location math.c (src) at line 1 (5 lines)');
+		click(view.headerInfo);
+		expect(opens).toEqual(['src/math.c:1']);
+
+		view.setDefinition(null);
+		expect(view.headerInfo.hidden).toBe(true);
+		expect(view.headerInfo.textContent).toBe('');
+		view.element.remove();
+	});
 });
 
 /* ---------- The workbench wiring ---------- */
@@ -304,10 +328,29 @@ describe('the workbench wiring', () => {
 		expect(workbench.panel.isVisible()).toBe(true);
 		expect(workbench.panel.activeView()).toBe('definition');
 		expect(page.element.querySelector('.def-name')?.textContent).toBe('total');
+		expect(document.querySelector('.panel-header-info .def-header-info')?.textContent)
+			.toBe('Function in location math.c (src) at line 1 (5 lines)');
+		// Switching away from the definition tab removes the location summary from the panel header.
+		workbench.panel.show('terminal');
+		expect(document.querySelector('.panel-header-info .def-header-info')).toBeNull();
+		workbench.panel.show('definition');
+		expect(document.querySelector('.panel-header-info .def-header-info')?.textContent)
+			.toBe('Function in location math.c (src) at line 1 (5 lines)');
 		// No active editor view: had the activation's follow fired past the gate, its
 		// resolver would have cleared the page after its debounce — the subject stays.
 		await new Promise((resolve) => setTimeout(resolve, 200));
 		expect(page.element.querySelector('.def-name')?.textContent).toBe('total');
+		workbench.dispose();
+	});
+
+	it('wires editor onShowDefinition to pin and show the definition panel', async () => {
+		workbench.editors.onShowDefinition!({ kind: 'function', name: 'total', path: 'src/math.c', line: 0, endLine: 4 });
+		await flush(5);
+		expect(workbench.panel.isVisible()).toBe(true);
+		expect(workbench.panel.activeView()).toBe('definition');
+		expect(workbench.panel.definition.isPinned()).toBe(true);
+		expect(document.querySelector('.panel-header-info .def-header-info')?.textContent)
+			.toBe('Function in location math.c (src) at line 1 (5 lines)');
 		workbench.dispose();
 	});
 });

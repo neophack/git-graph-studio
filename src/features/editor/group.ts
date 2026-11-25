@@ -5,6 +5,7 @@
 
 import type { EditorView } from '@codemirror/view';
 import { loadMergeEditor, loadSnippetRegistry } from '../../platform/lazy';
+import type { DefinitionSubject } from '../search';
 import type { WsSymbol } from '../search/types';
 import { SETTINGS_EVENT } from '../../platform/settings';
 import { el, type MenuEntry } from '../../platform/ui/index';
@@ -100,6 +101,8 @@ export class EditorGroup {
 	onOpenPreviewToSide: ((path: string) => void) | null = null;
 
 	onRunInTerminal: ((path: string) => void) | null = null;
+
+	onShowDefinition: ((subject: DefinitionSubject) => void) | null = null;
 
 	readonly onSettingsChange = (event: Event): void => {
 		this.refreshOutlines();

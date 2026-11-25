@@ -35,7 +35,7 @@ import {
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { t, tf } from '../../platform/i18n';
-import { KIND_ICONS } from '../search';
+import { KIND_ICONS, type DefinitionSubject } from '../search';
 import { analysisTool, type AnalysisToolId } from './analysisTools';
 import type { AnalysisPageView } from './types';
 import { McpPage } from '../mcp';
@@ -88,6 +88,7 @@ abstract class ReportPage<T> implements AnalysisPageView {
 	protected readonly list: HTMLElement;
 
 	onOpen: ((path: string, line: number) => void) | null = null;
+	onShowDefinition: ((subject: DefinitionSubject) => void) | null = null;
 
 	constructor(container: HTMLElement, toolId: AnalysisToolId, extraControls: (HTMLElement | null)[] = []) {
 		const tool = analysisTool(toolId);
@@ -478,6 +479,7 @@ class ModulePage implements AnalysisPageView {
 	private readonly toggles: { graph: HTMLElement; list: HTMLElement };
 
 	onOpen: ((path: string, line: number) => void) | null = null;
+	onShowDefinition: ((subject: DefinitionSubject) => void) | null = null;
 
 	constructor(container: HTMLElement, folders: string[]) {
 		this.folders = folders;
@@ -1106,7 +1108,18 @@ class ModulePage implements AnalysisPageView {
 							el('span', 'description', [`${pair.fromFile}:${site.line + 1}`])
 						]);
 						row.title = `${pair.fromFile}:${site.line + 1} → ${pair.toFile}`;
-						row.addEventListener('click', () => this.onOpen?.(pair.fromFile, site.line + 1));
+						row.addEventListener('click', () => {
+							if (this.onShowDefinition) {
+								this.onShowDefinition({
+									kind: site.receiver ? 'method' : 'function',
+									name: label,
+									path: pair.fromFile,
+									line: site.line
+								});
+							} else {
+								this.onOpen?.(pair.fromFile, site.line + 1);
+							}
+						});
 						siteRows.push(row);
 					}
 				}
@@ -1285,6 +1298,7 @@ class ImportsPage implements AnalysisPageView {
 	private readonly filterInput: HTMLInputElement;
 
 	onOpen: ((path: string, line: number) => void) | null = null;
+	onShowDefinition: ((subject: DefinitionSubject) => void) | null = null;
 
 	constructor(container: HTMLElement) {
 		container.classList.add('an-page');

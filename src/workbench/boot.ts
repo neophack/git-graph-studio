@@ -773,11 +773,13 @@ export const bootMethods: ThisType<Workbench> = {
 		// symbol through the debounced follow, whose gate the pin is — without it every
 		// activation would clobber the symbol the card named. The page's right-click
 		// carries the sync into the code page from there.
-		this.symbolWindow.onShowDefinition = (subject) => {
+		const showInDefinition = (subject: import('../features/search').DefinitionSubject) => {
 			this.panel.definition.setPinned(true);
 			this.panel.show('definition');
 			this.panel.definition.setDefinition(subject);
 		};
+		this.symbolWindow.onShowDefinition = showInDefinition;
+		this.editors.onShowDefinition = showInDefinition;
 		// The hover card's relations click: the card's symbol — the index's own
 		// { kind, name, path, line } vocabulary — becomes the Symbol Window's relation
 		// graph's pinned root, and the sidebar shows it.

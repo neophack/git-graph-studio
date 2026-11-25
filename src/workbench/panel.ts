@@ -152,6 +152,7 @@ export class Panel {
 	readonly references: ReferencesView;
 	private readonly element: HTMLElement;
 	private readonly tabs: HTMLElement;
+	private readonly infoHost: HTMLElement;
 	private readonly actionsHost: HTMLElement;
 	private readonly maximizeButton: HTMLButtonElement;
 	private active: PanelViewId = 'terminal';
@@ -186,10 +187,12 @@ export class Panel {
 		}
 		// A language switch relabels the tabs in place.
 		document.addEventListener(SETTINGS_EVENT, this.onSettingsChanged);
+		this.infoHost = el('div', 'panel-header-info');
 		this.actionsHost = el('div', 'panel-actions');
 		this.maximizeButton = actionButton('chevron-up', 'Maximize Panel Size', () => this.toggleMaximized());
 		const header = el('div', 'panel-header', [
 			this.tabs,
+			this.infoHost,
 			this.actionsHost,
 			el('div', 'actions', [this.maximizeButton, actionButton('close', 'Hide Panel (Ctrl+J)', () => this.hide())])
 		]);
@@ -287,6 +290,10 @@ export class Panel {
 		this.context.element.hidden = this.active !== 'context';
 		this.definition.element.hidden = this.active !== 'definition';
 		this.references.element.hidden = this.active !== 'references';
+		this.infoHost.innerHTML = '';
+		if (this.active === 'definition') {
+			this.infoHost.appendChild(this.definition.headerInfo);
+		}
 		this.actionsHost.innerHTML = '';
 		this.actionsHost.appendChild(
 			this.active === 'terminal' ? this.terminal.actions

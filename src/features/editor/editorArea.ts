@@ -17,6 +17,7 @@ import type { EditorGridCell } from '../../platform/state';
 import { el, notify } from '../../platform/ui/index';
 import { readText } from '@tauri-apps/plugin-clipboard-manager';
 import type { EditorView } from '@codemirror/view';
+import type { DefinitionSubject } from '../search';
 
 /** One editor group in the grid: its box element and its group. */
 interface GroupBox {
@@ -96,6 +97,9 @@ export class EditorArea {
 	/** A `.py` file's tab-strip run button was clicked: the workbench opens the terminal and
 	 *  runs the file there (the area reaches no panel). */
 	onRunInTerminal: ((path: string) => void) | null = null;
+	/** A hosted page (e.g. Module Analysis call site) asked to preview a location in the
+	 *  bottom panel's Definition page without leaving the current editor tab. */
+	onShowDefinition: ((subject: DefinitionSubject) => void) | null = null;
 	private welcomeRenderer: ((container: HTMLElement) => void) | null = null;
 	/** The welcome-page renderer, late-assigned by the workbench: setting it re-renders every
 	 *  group that is showing the welcome page, so a freshly-built shell does not sit blank. */
@@ -1076,6 +1080,7 @@ export class EditorArea {
 		group.onExternalFileChange = () => this.onExternalFileChange?.();
 		group.onOpenPreviewToSide = (path) => void this.openMarkdownPreviewToSide(path);
 		group.onRunInTerminal = (path) => this.onRunInTerminal?.(path);
+		group.onShowDefinition = (subject) => this.onShowDefinition?.(subject);
 		group.renderWelcome = (container) => this.renderWelcome?.(container);
 		group.renderHelp = (help, container) => this.renderHelp?.(help, container);
 		group.renderSelfTest = (container) => this.renderSelfTest?.(container);

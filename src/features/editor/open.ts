@@ -1718,6 +1718,7 @@ export const openMethods: ThisType<EditorGroup> = {
 		editor.pane.textContent = '';
 		editor.analysis = createAnalysisPage(tool, editor.pane, scope);
 		editor.analysis.onOpen = (path, line) => void this.openFile(joinPath(this.rootPath ?? '', path), { line });
+		editor.analysis.onShowDefinition = (subject) => this.onShowDefinition?.(subject);
 	},
 
 	async openCallTree(symbol: WsSymbol): Promise<void> {
