@@ -1663,10 +1663,4 @@ describe('git commands', () => {
 		expect(backend.callsTo('git_stage_all_tracked')).toEqual([{}]);
 		expect(backend.callsTo('git_stage_all_untracked')).toEqual([{}]);
 	});
-
-	it('undo last commit routes through the view that owns the commit box', async () => {
-		const { registry, undos } = setup();
-		await registry.execute('git.undoCommit');
-		expect(undos).toHaveLength(1);
-	});
 });

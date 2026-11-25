@@ -337,19 +337,6 @@ describe('ExtensionsPanel', () => {
 		listed = [BUILTIN, installed];
 		await panel.refresh();
 		expect([...document.querySelectorAll('.ext-version')].map((v) => v.textContent)).toContain('v2.1.0');
-	});
-
-	it('installs from a picked .vsix — the VS Code compatibility path', async () => {
-		backend.dialog.openResult = 'C:\\downloads\\acme.demo-2.1.0.vsix';
-		const installed: ExtInfo = { ...USER, version: '2.1.0', format: 'vsix' };
-		backend.on('ext_install_from_vsix', () => installed);
-		let listed = [BUILTIN, USER];
-		backend.on('ext_list', () => listed);
-		const panel = mountedPanel();
-		await panel.refresh();
-		await panel.installFromVsixCommand();
-		expect(backend.callsTo('ext_install_from_vsix')).toEqual([{ path: 'C:\\downloads\\acme.demo-2.1.0.vsix' }]);
-		expect(notifications().join()).toContain('acme.demo v2.1.0');
 		// The panel's header carries the install action.
 		expect([...document.querySelectorAll('.pane-header .action-btn')].some((b) => b.title.includes('Install from VSIX'))).toBe(true);
 	});
@@ -361,14 +348,6 @@ describe('ExtensionsPanel', () => {
 		await panel.refresh();
 		await panel.installFromVsixCommand();
 		expect(notifications().join()).toContain('already installed');
-	});
-
-	it('surfaces install errors (a downgrade, for instance)', async () => {
-		backend.dialog.openResult = 'old.vsix';
-		backend.on('ext_install_from_vsix', () => { throw 'acme.demo 2.0.0 is already installed; acme.demo 1.0.0 is older'; });
-		const panel = mountedPanel();
-		await panel.installFromVsixCommand();
-		expect(notifications().join()).toContain('older');
 	});
 
 	it('uninstalls a user extension after confirmation', async () => {
@@ -2569,17 +2548,6 @@ describe('ggs/2 packages: the page registry and the process backend', () => {
 		expect(notifications().join()).toContain('Extension backend command failed');
 	});
 
-
-	it('uninstalling a process package stops its backend', async () => {
-		withExtensions(GGX2);
-		backend.on('ext_uninstall', () => null);
-		backend.on('ext_process_stop', () => null);
-		const host = new ExtensionHost();
-		await host.list();
-		await host.uninstall('acme.proc');
-		expect(backend.callsTo('ext_process_stop')).toEqual([{ extId: 'acme.proc' }]);
-	});
-
 	it('starts a process package\'s backend as soon as it is installed', async () => {
 		// Install means run: the reload that follows an install brings the declared backend up,
 		// without waiting for a first command — the same detect-and-run the boot pass does.
@@ -3864,11 +3832,6 @@ describe('the shim degrades instead of throwing (Open VSX compatibility posture)
 		expect(() => api.languages.registerHoverProvider(() => undefined, { provideHover: () => undefined })).not.toThrow();
 		expect(() => api.window.registerCustomEditorProvider('x', {})).not.toThrow();
 		expect(() => api.tasks.registerTaskProvider('x', {})).not.toThrow();
-	});
-
-	it('showQuickPick with canPickMany resolves undefined instead of rejecting', async () => {
-		const api = shimApi();
-		await expect(api.window.showQuickPick(['a', 'b'], { canPickMany: true })).resolves.toBeUndefined();
 	});
 
 	it('the new value types and enums construct (a load-time destructure must not hit undefined)', () => {

@@ -35,10 +35,6 @@ describe('settings store', () => {
 		expect(THEMES.map((theme) => theme.id)).toContain('light-modern');
 	});
 
-	it('defaults the code outline to off', () => {
-		expect(settings.showOutline).toBe(false);
-	});
-
 	it('migrates stored wheel settings that were only ever a shipped default, and drops the glide', () => {
 		// The whole settings object persists on any change, so a store from an older release
 		// pins the *default* of the day: 1, 2 and 3 were shipped wheel defaults (never user

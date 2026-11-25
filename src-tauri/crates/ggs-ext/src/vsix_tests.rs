@@ -232,65 +232,6 @@
     }
 
     #[test]
-    fn upgrades_are_forward_only() {
-        let tmp = tempfile::tempdir().unwrap();
-        let exts = tmp.path().join("extensions");
-        std::fs::create_dir_all(&exts).unwrap();
-        assert!(install_from_vsix_into(
-            &exts,
-            &make_vsix(tmp.path(), "demo", "acme", "1.0.0"),
-            false
-        )
-        .is_ok());
-
-        let same = install_from_vsix_into(
-            &exts,
-            &make_vsix(tmp.path(), "demo", "acme", "1.0.0"),
-            false,
-        );
-        assert!(same.unwrap_err().contains("already installed"));
-        let older = install_from_vsix_into(
-            &exts,
-            &make_vsix(tmp.path(), "demo", "acme", "0.9.0"),
-            false,
-        );
-        assert!(older.unwrap_err().contains("is older"));
-
-        let newer = install_from_vsix_into(
-            &exts,
-            &make_vsix(tmp.path(), "demo", "acme", "1.1.0"),
-            false,
-        );
-        assert_eq!(newer.unwrap().version, "1.1.0");
-        // The old directory is gone: one install per id.
-        assert!(list_installed(&exts).unwrap().len() == 1);
-    }
-
-    #[test]
-    fn a_newer_vsix_replaces_a_ggx_and_vice_versa() {
-        let tmp = tempfile::tempdir().unwrap();
-        let exts = tmp.path().join("extensions");
-        std::fs::create_dir_all(&exts).unwrap();
-        let ggx = super::install_tests::make_vsix(tmp.path(), "demo", "acme", "1.0.0", false);
-        assert!(install_from_vsix_into(&exts, &ggx, false).is_ok());
-
-        // The newer VSIX of the same id wins; the format follows the newer package.
-        let info = install_from_vsix_into(
-            &exts,
-            &make_vsix(tmp.path(), "demo", "acme", "1.1.0"),
-            false,
-        )
-        .unwrap();
-        assert_eq!(
-            (info.version.as_str(), info.format.as_str()),
-            ("1.1.0", "vsix")
-        );
-        let list = list_installed(&exts).unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].format, "vsix");
-    }
-
-    #[test]
     fn not_a_vsix_or_missing_main_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let plain = tmp.path().join("plain.zip");

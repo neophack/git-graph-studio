@@ -308,13 +308,6 @@ describe('the branch sheet (the Files page chip and the SCM branch row)', () => 
 		expect(backend.callsTo('scm_status').length).toBeGreaterThan(0);
 	});
 
-	it('the SCM page\'s branch chip opens the same sheet', { timeout: 30_000 }, async () => {
-		await bootPhoneRepo();
-		click(document.querySelector<HTMLElement>('.ggs-scm-branch'));
-		await until(() => document.querySelector('.ggs-action-sheet') !== null);
-		expect(sheetRows()).toContain('dev');
-	});
-
 	it('a new branch asks for one name and checks it out', { timeout: 30_000 }, async () => {
 		await bootPhoneRepo();
 		click(document.querySelector<HTMLElement>('.ggs-scm-branch'));

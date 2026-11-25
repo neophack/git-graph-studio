@@ -38,36 +38,6 @@ describe('text file editing', () => {
 		await group.closeAll();
 	});
 
-	it('opens a large file in the windowed editable editor — no read-only detour', async () => {
-		fileBackend();
-		// 100 MB: past the windowed threshold, so the document lives in the backend rope and
-		// the webview holds a window of lines — editable all the same.
-		const LINES = Array.from({ length: 3_000 }, (_, i) => `line ${i}`);
-		backend.on('file_probe', () => ({ size: 100 * 1024 * 1024, binary: false, longLines: false }));
-		backend.on('viewer_open', () => ({ docId: 7, lineCount: LINES.length, language: 'log', syntaxName: 'Plain Text', symbols: [] }));
-		backend.on('viewer_text', ({ start, end }: { start: number; end: number }) => ({
-			startLine: start,
-			lineCount: LINES.length,
-			lines: LINES.slice(start, Math.min(end + 1, LINES.length))
-		}));
-		backend.on('viewer_edit', () => ({ lineCount: LINES.length, rehighlightFrom: 0 }));
-		backend.on('viewer_close', () => null);
-		const group = new EditorGroup(document.getElementById('editorGroup')!);
-		group.setRoot('C:\\repo');
-		await group.openFile('C:\\repo\\big.log');
-		await flush();
-		// The editable path never reads the file whole.
-		expect(backend.callsTo('read_file')).toHaveLength(0);
-		expect(backend.callsTo('viewer_open')).toHaveLength(1);
-		expect(document.querySelector('.fast-view')).toBeNull();
-		const editor = document.querySelector('.doc-edit');
-		expect(editor).not.toBeNull();
-		// The window asked for a bounded range of lines, not the document.
-		const window = backend.callsTo('viewer_text').at(-1)!;
-		expect((window['end'] as number) - (window['start'] as number)).toBeLessThan(500);
-		await group.closeAll();
-	});
-
 	it('edits a document past the engines\' scroll ceiling — the row model owns the position, no read-only detour', { timeout: 10_000 }, async () => {
 		fileBackend();
 		// 2,000,000 lines ≈ 38M px: past what the layout engines can natively scroll, where
@@ -101,32 +71,6 @@ describe('text file editing', () => {
 		await new Promise((resolve) => setTimeout(resolve, 500));
 		const asked = backend.callsTo('viewer_text').at(-1)!['start'] as number;
 		expect(asked).toBeGreaterThanOrEqual(LINES - 1200);
-		await group.closeAll();
-	});
-
-	it('opens an enormous file in the windowed editable editor — the read-only wall is gone', async () => {
-		fileBackend();
-		// 300 MB: past the 256 MB threshold that once routed the file to the read-only
-		// indexed viewer. Size no longer decides: the rope builds in parallel chunks and
-		// the windowed editor serves the file editable, end to end.
-		const LINES = Array.from({ length: 3_000 }, (_, i) => `line ${i}`);
-		backend.on('file_probe', () => ({ size: 300 * 1024 * 1024, binary: false, longLines: false }));
-		backend.on('viewer_open', () => ({ docId: 9, lineCount: LINES.length, language: 'log', syntaxName: 'Plain Text', symbols: [] }));
-		backend.on('viewer_text', ({ start, end }: { start: number; end: number }) => ({
-			startLine: start,
-			lineCount: LINES.length,
-			lines: LINES.slice(start, Math.min(end + 1, LINES.length))
-		}));
-		backend.on('viewer_edit', () => ({ lineCount: LINES.length, rehighlightFrom: 0 }));
-		backend.on('viewer_close', () => null);
-		const group = new EditorGroup(document.getElementById('editorGroup')!);
-		group.setRoot('C:\\repo');
-		await group.openFile('C:\\repo\\enormous.log');
-		await flush();
-		expect(backend.callsTo('viewer_open')).toHaveLength(1);
-		expect(backend.callsTo('indexed_open')).toHaveLength(0);
-		expect(document.querySelector('.doc-edit')).not.toBeNull();
-		expect(document.querySelector('.fast-view')).toBeNull();
 		await group.closeAll();
 	});
 
@@ -333,7 +277,9 @@ describe('text file editing', () => {
 		await flush();
 		expect(backend.callsTo('read_file')).toHaveLength(0);
 		expect(backend.callsTo('viewer_open')).toHaveLength(1);
+		expect(backend.callsTo('indexed_open')).toHaveLength(0);
 		expect(document.querySelector('.doc-edit')).not.toBeNull();
+		expect(document.querySelector('.fast-view')).toBeNull();
 		// The window asks for a bounded range of lines, never the whole document.
 		const windows = backend.callsTo('viewer_text');
 		expect(windows.length).toBeGreaterThan(0);
@@ -375,17 +321,5 @@ describe('text file editing', () => {
 		// The list keeps the full height so the scrollbar spans every symbol.
 		expect(document.querySelector<HTMLElement>('.fast-outline-list')!.style.height).toBe(`${20_000 * 22}px`);
 		view.dispose();
-	});
-
-	it('marks the tab dirty on edit and saves through write_file', async () => {
-		fileBackend();
-		const group = await openSample();
-		const view = group.activeView!;
-		view.dispatch({ changes: { from: 0, to: 0, insert: '// x\n' } });
-		expect(group.hasDirtyEditors()).toBe(true);
-		await group.save();
-		expect(backend.callsTo('write_file')[0]).toMatchObject({ path: 'C:\\repo\\src\\main.rs', contents: '// x\n' + SAMPLE });
-		expect(group.hasDirtyEditors()).toBe(false);
-		await group.closeAll();
 	});
 });

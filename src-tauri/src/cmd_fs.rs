@@ -1097,38 +1097,6 @@ mod head_info_tests {
     use super::*;
 
     #[test]
-    fn parses_branch_upstream_and_counts_from_porcelain_v2() {
-        let out = "# branch.oid 3b8b1f9e5b6cf01a03a3bf9b3f79be4b2c5c80d5\n\
-                   # branch.head main\n\
-                   # branch.upstream origin/main\n\
-                   # branch.ab +2 -1\n\
-                   1 .M N... 100644 100644 100644 abc def README.md\n";
-        let info = parse_status_branch(out);
-        assert_eq!(info.branch.as_deref(), Some("main"));
-        assert_eq!(info.short_hash, "3b8b1f9");
-        assert_eq!(info.upstream.as_deref(), Some("origin/main"));
-        assert_eq!((info.ahead, info.behind), (2, 1));
-    }
-
-    #[test]
-    fn detached_head_reports_the_hash_and_no_branch() {
-        let out = "# branch.oid deadbeef00000000\n# branch.head (detached)\n";
-        let info = parse_status_branch(out);
-        assert_eq!(info.branch, None);
-        assert_eq!(info.short_hash, "deadbee");
-        assert_eq!(info.upstream, None);
-        assert_eq!((info.ahead, info.behind), (0, 0));
-    }
-
-    #[test]
-    fn an_empty_repository_has_no_hash_to_show() {
-        let out = "# branch.oid (initial)\n# branch.head main\n";
-        let info = parse_status_branch(out);
-        assert_eq!(info.branch.as_deref(), Some("main"));
-        assert_eq!(info.short_hash, "");
-    }
-
-    #[test]
     fn the_repo_item_names_the_repositorys_folder() {
         // A backslash path is only a Windows path; on Unix it is one long component.
         #[cfg(windows)]

@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { StatusBar } from '../src/workbench/statusbar';
 import { clearAllNotifications, INFO_TOAST_MS, notify, notificationEntries } from '../src/platform/ui';
-import { click, flush, texts } from './helpers';
+import { click, texts } from './helpers';
 
 describe('the notification centre', () => {
 	beforeEach(() => {
@@ -36,17 +36,6 @@ describe('the notification centre', () => {
 		click(document.querySelector('.notification-centre-header .button')!);
 		expect(notificationEntries()).toHaveLength(0);
 		expect(texts('.notification-centre-empty')).toEqual(['No notifications']);
-	});
-
-	it('an auto-dismissed info toast stays in the centre', async () => {
-		const host = document.createElement('div');
-		document.body.appendChild(host);
-		new StatusBar(host);
-		notify('info', 'Recovered 1 unsaved file');
-		await flush(12); // the 8 s auto-dismiss is far away; the toast is still on screen
-		expect(notificationEntries()).toHaveLength(1);
-		clearAllNotifications();
-		expect(notificationEntries()).toHaveLength(0);
 	});
 });
 

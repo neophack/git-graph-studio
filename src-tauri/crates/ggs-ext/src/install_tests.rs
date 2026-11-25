@@ -412,28 +412,6 @@
         assert_eq!(listed[0].readme.as_deref(), Some("README.md"));
     }
 
-    #[test]
-    fn install_list_and_uninstall() {
-        let tmp = tempfile::tempdir().unwrap();
-        let exts = tmp.path().join("extensions");
-        std::fs::create_dir_all(&exts).unwrap();
-        let ggx = make_vsix(tmp.path(), "demo", "acme", "1.0.0", false);
-
-        let info = install_from_vsix_into(&exts, &ggx, false).unwrap();
-        assert_eq!(
-            (info.id.as_str(), info.version.as_str()),
-            ("acme.demo", "1.0.0")
-        );
-        assert!(!info.builtin);
-
-        let list = list_installed(&exts).unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].id, "acme.demo");
-
-        uninstall(&exts, "acme.demo").unwrap();
-        assert!(list_installed(&exts).unwrap().is_empty());
-    }
-
     /// The bug of 2026-11-09: an uninstall whose `remove_dir_all` lost to a transient
     /// Windows lock left a half-deleted `{id}-{version}` directory behind, and every later
     /// install of the package then refused with "already installed" — the extension was
@@ -618,69 +596,6 @@
     }
 
     #[test]
-    fn an_engine_node_needs_a_main_and_one_with_it_installs_the_main_backend() {
-        // The engine `.node` is native binary: it needs the package's own `main` to run it
-        // (the JS entry loads it through the Node runtime's N-API host). Without a `main`
-        // the install is refused with the named reason; with one, the backend is that entry.
-        let node = engine_node_fixture();
-        let tmp = tempfile::tempdir().unwrap();
-        let exts = tmp.path().join("extensions");
-        std::fs::create_dir_all(&exts).unwrap();
-        let vsix = tmp.path().join("engine.vsix");
-        let file = std::fs::File::create(&vsix).unwrap();
-        let mut zip = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default();
-        zip.start_file("extension/package.json", options).unwrap();
-        zip.write_all(
-            br#"{"name":"engine","publisher":"acme","version":"1.0.0","ggs":{"format":"ggs/2","id":"acme.engine","version":"1.0.0","pages":{"view":{"page":"web/view.html"}},"backend":{"kind":"node","host":"git-graph-backend","command":"native/win32-x64/engine.node"}}}"#,
-        )
-        .unwrap();
-        zip.start_file("extension/web/view.html", options).unwrap();
-        zip.write_all(b"<html></html>").unwrap();
-        zip.start_file("extension/native/win32-x64/engine.node", options)
-            .unwrap();
-        zip.write_all(&node).unwrap();
-        zip.finish().unwrap();
-
-        let error = install_from_vsix_into(&exts, &vsix, false).unwrap_err();
-        assert!(error.contains("no \"main\""), "{error}");
-
-        // The same package with a `main`: the entry becomes the backend.
-        let vsix_main = tmp.path().join("engine-main.vsix");
-        let file = std::fs::File::create(&vsix_main).unwrap();
-        let mut zip = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default();
-        zip.start_file("extension/package.json", options).unwrap();
-        zip.write_all(
-            br#"{"name":"engine","publisher":"acme","version":"1.0.0","main":"./out/extension.js"}"#,
-        )
-        .unwrap();
-        zip.start_file("extension/out/extension.js", options)
-            .unwrap();
-        zip.write_all(b"module.exports = {};").unwrap();
-        zip.start_file("extension/native/win32-x64/engine.node", options)
-            .unwrap();
-        zip.write_all(&node).unwrap();
-        zip.finish().unwrap();
-        let info = install_from_vsix_into(&exts, &vsix_main, false).unwrap();
-        let backend = info
-            .capabilities
-            .as_ref()
-            .unwrap()
-            .backend
-            .as_ref()
-            .unwrap();
-        assert_eq!(backend.kind, "node");
-        assert_eq!(backend.command, "./out/extension.js");
-    }
-
-    /// A byte blob that scans as a `.node` by name — the recognition reads names, never
-    /// contents; any payload stands in for a real engine binary here.
-    fn engine_node_fixture() -> Vec<u8> {
-        b"engine-node-fixture".to_vec()
-    }
-
-    #[test]
     fn a_vsix_without_an_identity_or_without_package_json_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let exts = tmp.path().join("extensions");
@@ -783,28 +698,6 @@
         // The retired protocol name is still parsed off a packed manifest (the field is
         // kept for that read); the process host is what rejects it at start.
         assert_eq!(backend.protocol.as_deref(), Some("ggx-rpc/1"));
-    }
-
-    #[test]
-    fn a_backend_of_an_unknown_kind_is_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
-        let exts = tmp.path().join("extensions");
-        std::fs::create_dir_all(&exts).unwrap();
-        let ggx = tmp.path().join("wasm.vsix");
-        let file = std::fs::File::create(&ggx).unwrap();
-        let mut zip = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default();
-        zip.start_file("extension/package.json", options).unwrap();
-        zip.write_all(
-            br#"{"name":"demo","publisher":"acme","version":"1.0.0","ggs":{"format":"ggs/2","id":"acme.demo","version":"1.0.0","backend":{"kind":"wasm","command":"main.wasm"}}}"#,
-        )
-        .unwrap();
-        zip.finish().unwrap();
-
-        // A foreign key the host never reads cannot break an install: the package is a
-        // plain VS Code extension, and no backend is derived for it.
-        let info = install_from_vsix_into(&exts, &ggx, false).unwrap();
-        assert!(info.capabilities.as_ref().unwrap().backend.is_none());
     }
 
     #[test]

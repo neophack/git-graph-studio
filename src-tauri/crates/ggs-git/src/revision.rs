@@ -127,6 +127,7 @@ mod tests {
         assert_eq!(info.short_hash, "3b8b1f9");
         assert_eq!(info.hash, "3b8b1f9e5b6cf01a03a3bf9b3f79be4b2c5c80d5");
         assert_eq!(info.branch.as_deref(), Some("main"));
+        assert_eq!(info.upstream.as_deref(), Some("origin/main"));
         assert_eq!(info.ahead, 2);
         assert_eq!(info.behind, 1);
 

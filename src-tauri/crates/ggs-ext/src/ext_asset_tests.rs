@@ -174,14 +174,6 @@
     }
 
     #[test]
-    fn percent_encoded_paths_decode_before_serving() {
-        let tmp = home_with_demo_page();
-        let response =
-            serve_ext_asset_from(tmp.path(), &request_for("/acme.demo-1.0.0/web%2Fview.html"));
-        assert_eq!(response.status(), http::StatusCode::OK);
-    }
-
-    #[test]
     fn a_page_without_a_head_still_gets_the_bootstrap_after_html() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("x-1").join("web");

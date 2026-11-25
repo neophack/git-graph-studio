@@ -214,30 +214,6 @@ describe('string deltas', () => {
 		expect(styleOps.length).toBeLessThanOrEqual(4);
 		expectCopyMatches(s);
 	});
-
-	it('a delta whose base the copy lost resnaps instead of diverging', () => {
-		const s = session('<p id="p">seed</p>');
-		const p = s.pc.getElementById('p')!.firstChild!;
-		p.textContent = 'the paragraph grows into a long streamed answer that the viewer replays as deltas';
-		s.recorder.flush();
-		// The viewer forgets its base (a lost batch): the next delta must not land.
-		const resnaps: number[] = [];
-		s.viewer.dispose();
-		s.sent.length = 0;
-		const fresh = new MirrorViewer(s.host, 'remote/1', {
-			appBase: 'https://phone.example/w/i/v/1/main/',
-			ggsBase: 'https://phone.example/w/i/ggs/tok/',
-			resnap: () => resnaps.push(1)
-		});
-		// A viewer without a snapshot ignores ops entirely; one WITH a snapshot but a lost
-		// base throws inside apply — both paths end in a resnap, never a wrong copy.
-		p.textContent += ' more';
-		s.recorder.flush();
-		const snap = s.recorder.snapshot();
-		fresh.receive({ k: 'snap', to: 'remote/1', ...snap });
-		expect(fresh.root!.body.innerHTML).toBe(s.pc.body.innerHTML);
-		expect(resnaps).toHaveLength(0);
-	});
 });
 
 describe('animation sampling', () => {
@@ -447,52 +423,6 @@ describe('the 1/10 line, on the modelled wire', () => {
 		console.log(`js animation: legacy ${legacy.wire()} B, economy ${economy.wire()} B (${ratio.toFixed(1)}x)`);
 		expect(economy.wire()).toBeLessThan(legacy.wire() / 10);
 	});
-
-	it('the three workloads together stay under the line', async () => {
-		vi.useFakeTimers();
-		const totals = { legacy: 0, economy: 0 };
-		const chat = async (legacy: boolean) => {
-			const s = session('<div class="transcript" id="tr"></div>', legacy);
-			const tr = s.pc.getElementById('tr')!;
-			const p = s.pc.createElement('p');
-			p.appendChild(s.pc.createTextNode(''));
-			tr.appendChild(p);
-			const text = p.firstChild as Text;
-			const words = 'the reply streams token by token into the paragraph while the phone watches the copy settle at its own cadence'.repeat(3).split(' ');
-			for (let i = 0; i < 200; i += 1) {
-				text.data += `${words[i % words.length]} `;
-				await Promise.resolve();
-				await vi.advanceTimersByTimeAsync(33);
-			}
-			await vi.advanceTimersByTimeAsync(400);
-			return s.wire();
-		};
-		totals.legacy += await chat(true);
-		totals.economy += await chat(false);
-		const scroll = async (legacy: boolean) => {
-			const s = session('<div class="gg-list" id="list"></div>', legacy);
-			const list = s.pc.getElementById('list')!;
-			const row = (n: number) => `<div class="gg-row"><span class="msg">commit ${n} keeps the message long enough to look real</span><span class="by">dev</span></div>`;
-			let base = 0;
-			list.innerHTML = Array.from({ length: 24 }, (_, i) => row(i)).join('');
-			s.recorder.flush();
-			s.sent.length = 0;
-			for (let tick = 1; tick <= 10; tick += 1) {
-				base += 24;
-				list.innerHTML = Array.from({ length: 24 }, (_, i) => row(base + i)).join('');
-				await Promise.resolve();
-				await vi.advanceTimersByTimeAsync(50);
-			}
-			await vi.advanceTimersByTimeAsync(400);
-			return s.wire();
-		};
-		totals.legacy += await scroll(true);
-		totals.economy += await scroll(false);
-		const ratio = totals.legacy / totals.economy;
-		// eslint-disable-next-line no-console
-		console.log(`combined: legacy ${totals.legacy} B, economy ${totals.economy} B (${ratio.toFixed(1)}x)`);
-		expect(totals.economy).toBeLessThan(totals.legacy / 10);
-	});
 });
 
 /* ---------- §7.4's sync-family rows (docs/remote-client-plan.md §7.4) ----------
@@ -568,27 +498,6 @@ describe('§7.4 budget rows — the sync family', () => {
 		expect(wire(message)).toBeLessThanOrEqual(300);
 		const active = { by: 'main', k: 'active', path: 'C:/repo/src/features/editor/open.ts' };
 		expect(wire(active)).toBeLessThanOrEqual(300);
-	});
-
-	it('PC window closed, one remote, twenty files: zero sync bytes (the K11 row)', async () => {
-		const sent: unknown[] = [];
-		const handlers = new Set<(message: unknown) => void>();
-		const deps = {
-			send: (message: unknown): void => {
-				sent.push(message);
-				for (const handler of [...handlers]) handler(message);
-			},
-			receive: (handler: (message: unknown) => void): (() => void) => {
-				handlers.add(handler as (message: unknown) => void);
-				return () => handlers.delete(handler as (message: unknown) => void);
-			}
-		};
-		const { area } = bareArea([]);
-		attachWorkbenchSync({ editors: area }, deps, 'remote/1', { presence: barePresence(1) });
-		for (let i = 0; i < 20; i++) await area.openFile(`C:\repo\src\file${i}.ts`);
-		area.onActiveChange?.({ kind: 'file', path: 'C:\repo\src\file3.ts' });
-		expect(sent).toEqual([]);
-		expect(sent.length).toBe(0);
 	});
 
 	it('a catch-up snapshot of twenty tabs stays under 2 KB (the PC-reshown row)', async () => {

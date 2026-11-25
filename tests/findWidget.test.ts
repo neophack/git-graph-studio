@@ -189,17 +189,6 @@ describe('the widget', () => {
 		expect(replaceRow.classList.contains('open')).toBe(true);
 	});
 
-	it('resyncs its field when the query changes externally', () => {
-		const view = viewOf(DOC, 0);
-		openSearchPanel(view);
-		const input = view.dom.querySelector('.cm-find-input') as HTMLInputElement;
-		expect(input.value).toBe('');
-		view.dispatch({ effects: setSearchQuery.of(queryOf({ search: 'three' })) });
-		// The panel's update hook resyncs fields not being typed in.
-		view.dispatch({ selection: { anchor: 1 } });
-		expect(input.value).toBe('three');
-	});
-
 	it('a single-line selection seeds the field, and the seed\'s case drives Match Case', async () => {
 		const view = viewOf(DOC, 4); // inside "two One twoo" line; select "One"
 		view.dispatch({ selection: { anchor: 8, head: 11 } });

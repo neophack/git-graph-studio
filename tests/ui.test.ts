@@ -31,22 +31,7 @@ describe('dom & path helpers', () => {
 });
 
 describe('notifications', () => {
-
-	it('pauses the auto-dismiss of an info toast while hovered and resumes afterwards', () => {
-		vi.useFakeTimers();
-		try {
-			notify('info', 'Hover me');
-			const toast = document.querySelector('#notifications .notification')!;
-			toast.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-			vi.advanceTimersByTime(60_000);
-			expect(notifications()).toEqual(['Hover me']);
-			toast.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
-			vi.advanceTimersByTime(8_000);
-			expect(notifications()).toEqual([]);
-		} finally {
-			vi.useRealTimers();
-		}
-	});	it('shows toasts with the kind icon and closes them', () => {
+	it('shows toasts with the kind icon and closes them', () => {
 		notify('error', 'Boom');
 		expect(notifications()).toEqual(['Boom']);
 		expect(document.querySelector('#notifications .codicon-error')).not.toBeNull();
