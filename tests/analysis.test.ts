@@ -527,6 +527,64 @@ describe('the graph pages', () => {
 		expect(root.querySelectorAll('g.an-mod-node').length).toBe(3);
 	});
 
+	it('allows free infinite-canvas panning at any zoom and after dragging a node below the initial layout', async () => {
+		await modules();
+		backend.on('analysis_module_overview', () => overviewAnswer());
+		const root = host();
+		createAnalysisPage('modules', root);
+		await flush(6);
+
+		const hostEl = root.querySelector<HTMLElement>('.an-diagram')!;
+		Object.defineProperty(hostEl, 'clientWidth', { configurable: true, value: 1200 });
+		Object.defineProperty(hostEl, 'clientHeight', { configurable: true, value: 800 });
+		const vp = root.querySelector<SVGGElement>('g.an-viewport')!;
+		const parseTranslate = () => {
+			const m = /translate\(([-\d.]+)\s+([-\d.]+)\)/.exec(vp.getAttribute('transform') ?? '');
+			return m ? { x: Number(m[1]), y: Number(m[2]) } : { x: 0, y: 0 };
+		};
+		const raf = () => new Promise((resolve) => setTimeout(resolve, 30));
+
+		// Fit first with explicit viewport size.
+		hostEl.dispatchEvent(new KeyboardEvent('keydown', { key: '0' }));
+		await new Promise((resolve) => setTimeout(resolve, 220));
+		const start = parseTranslate();
+
+		// Drag canvas freely at 100% zoom even though the graph fits inside the viewport.
+		hostEl.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', clientX: 200, clientY: 200 }));
+		hostEl.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', clientX: 350, clientY: 50 }));
+		hostEl.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, buttons: 0, pointerId: 1, pointerType: 'mouse', clientX: 350, clientY: 50 }));
+		await raf();
+		const afterFreePan = parseTranslate();
+		expect(afterFreePan.x).toBeGreaterThan(start.x + 100);
+		expect(afterFreePan.y).toBeLessThan(start.y - 100);
+
+		// Drag a node far downward, zoom in, then pan freely downward to inspect it.
+		const coreNode = nodeEl(root, 'core');
+		coreNode.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, buttons: 1, pointerId: 2, pointerType: 'mouse', clientX: 100, clientY: 100 }));
+		hostEl.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, button: 0, buttons: 1, pointerId: 2, pointerType: 'mouse', clientX: 100, clientY: 700 }));
+		hostEl.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, buttons: 0, pointerId: 2, pointerType: 'mouse', clientX: 100, clientY: 700 }));
+
+		// Zoom in twice via keyboard.
+		hostEl.dispatchEvent(new KeyboardEvent('keydown', { key: '+' }));
+		await new Promise((resolve) => setTimeout(resolve, 220));
+		hostEl.dispatchEvent(new KeyboardEvent('keydown', { key: '+' }));
+		await new Promise((resolve) => setTimeout(resolve, 220));
+		const beforeZoomedPan = parseTranslate();
+
+		// Drag canvas upward by 600px (scrolling view downward past original graph height).
+		hostEl.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, buttons: 1, pointerId: 3, pointerType: 'mouse', clientX: 300, clientY: 700 }));
+		hostEl.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, button: 0, buttons: 1, pointerId: 3, pointerType: 'mouse', clientX: 300, clientY: 100 }));
+		hostEl.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, buttons: 0, pointerId: 3, pointerType: 'mouse', clientX: 300, clientY: 100 }));
+		await raf();
+		const afterZoomedPan = parseTranslate();
+		expect(afterZoomedPan.y).toBeLessThan(beforeZoomedPan.y - 500);
+
+		// Cycle edge renders cleanly with a ⟳ badge and no stroke-dasharray attribute.
+		const cycleEdge = edgeEl(root, 'core→db');
+		expect(cycleEdge.querySelector('.an-edge-path')?.getAttribute('stroke-dasharray')).toBeNull();
+		expect(cycleEdge.querySelector('.an-edge-badge text')?.textContent).toContain('⟳');
+	});
+
 	it('the MCP page lists setup, the catalogue and the call log', async () => {
 		await modules();
 		backend.on('mcp_tools', () => [

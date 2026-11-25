@@ -22,32 +22,29 @@ export function moduleLabel(name: string): string {
 /* ---------- Viewport & Layout Constants ---------- */
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const CARD_W = 224;
-const CARD_H = 88;
-const HEADER_H = 28;
-const TB_COL_GAP = 32;
-const TB_ROW_GAP = 74;
-const TB_SUBROW_GAP = 26;
-const LR_COL_GAP = 92;
-const LR_ROW_GAP = 24;
-const LR_SUBCOL_GAP = 28;
+const CARD_W = 236;
+const CARD_H = 92;
+const CARD_RX = 12;
+const HEADER_H = 30;
+const TB_COL_GAP = 36;
+const TB_ROW_GAP = 80;
+const TB_SUBROW_GAP = 28;
+const LR_COL_GAP = 96;
+const LR_ROW_GAP = 28;
+const LR_SUBCOL_GAP = 30;
 const MAX_PER_BAND = 7;
-const PAD_X = 56;
-const PAD_Y = 48;
+const PAD_X = 60;
+const PAD_Y = 52;
 
 const ZOOM_STEP = 1.18;
-const FIT_PADDING = 32;
-const ZOOM_MIN_RELATIVE = 0.35;
+const FIT_PADDING = 36;
+const ZOOM_MIN_RELATIVE = 0.2;
 const ZOOM_MAX_RELATIVE = 8;
 const ARROW_PAN = 56;
 const ANIMATE_MS = 160;
 const DRAG_THRESHOLD = 4;
-const MINIMAP_W = 168;
-const MINIMAP_H = 112;
-
-function gutter(container: number): number {
-	return Math.max(40, Math.min(200, container * 0.16));
-}
+const MINIMAP_W = 172;
+const MINIMAP_H = 114;
 
 function svgEl<K extends keyof SVGElementTagNameMap>(
 	tag: K,
@@ -492,6 +489,7 @@ export class DiagramView {
 
 	private userMoved = false;
 	private dragMoved = false;
+	private spacePressed = false;
 	private panDrag: { x: number; y: number } | null = null;
 	private nodeDrag: {
 		id: string;
@@ -603,6 +601,11 @@ export class DiagramView {
 		this.host.addEventListener('pointerup', (event) => this.onPointerUp(event));
 		this.host.addEventListener('pointercancel', (event) => this.onPointerUp(event));
 		this.host.addEventListener('keydown', (event) => this.onKeyDown(event));
+		this.host.addEventListener('keyup', (event) => this.onKeyUp(event));
+		this.host.addEventListener('blur', () => {
+			this.spacePressed = false;
+			this.host.classList.remove('space-pan');
+		});
 		this.host.addEventListener('contextmenu', (event) => event.preventDefault());
 		this.host.addEventListener('click', (event) => {
 			if (!this.dragMoved) return;
@@ -666,11 +669,12 @@ export class DiagramView {
 	exportSvg(): string {
 		const svg = this.content.querySelector('svg');
 		if (!svg) return '';
+		const bounds = this.getContentBounds();
 		const clone = svg.cloneNode(true) as SVGSVGElement;
 		clone.setAttribute('xmlns', SVG_NS);
-		clone.setAttribute('viewBox', `0 0 ${this.graphWidth} ${this.graphHeight}`);
-		clone.setAttribute('width', String(this.graphWidth));
-		clone.setAttribute('height', String(this.graphHeight));
+		clone.setAttribute('viewBox', `${bounds.minX} ${bounds.minY} ${bounds.width} ${bounds.height}`);
+		clone.setAttribute('width', String(Math.round(bounds.width)));
+		clone.setAttribute('height', String(Math.round(bounds.height)));
 		const vp = clone.querySelector('.an-viewport');
 		if (vp) vp.removeAttribute('transform');
 		return new XMLSerializer().serializeToString(clone);
@@ -710,11 +714,11 @@ export class DiagramView {
 
 		// Pure vector <defs> (no raster feDropShadow filter so text & strokes stay razor-sharp at every zoom).
 		const defs = svgEl('defs', {}, [
-			this.makeArrowMarker('an-arrow-norm', 'an-marker-norm', 6.5),
-			this.makeArrowMarker('an-arrow-cycle', 'an-marker-cycle', 6.5),
-			this.makeArrowMarker('an-arrow-sel', 'an-marker-sel', 7),
-			this.makeArrowMarker('an-arrow-in', 'an-marker-in', 7),
-			this.makeArrowMarker('an-arrow-out', 'an-marker-out', 7)
+			this.makeArrowMarker('an-arrow-norm', 'an-marker-norm', 6),
+			this.makeArrowMarker('an-arrow-cycle', 'an-marker-cycle', 6),
+			this.makeArrowMarker('an-arrow-sel', 'an-marker-sel', 6.5),
+			this.makeArrowMarker('an-arrow-in', 'an-marker-in', 6.5),
+			this.makeArrowMarker('an-arrow-out', 'an-marker-out', 6.5)
 		]);
 
 		// Subtle architectural layer guide bands (L0, L1, L2...) behind edges & nodes.
@@ -729,9 +733,9 @@ export class DiagramView {
 							y: band.start,
 							width: Math.max(0, width - 32),
 							height: Math.max(0, band.end - band.start),
-							rx: 10
+							rx: 14
 						}),
-						svgEl('text', { class: 'an-layer-tag', x: 24, y: band.start + 15 }, [`L${band.layer}`])
+						svgEl('text', { class: 'an-layer-tag', x: 26, y: band.start + 16 }, [`L${band.layer}`])
 					);
 				} else {
 					bandsLayer.append(
@@ -741,9 +745,9 @@ export class DiagramView {
 							y: 16,
 							width: Math.max(0, band.end - band.start),
 							height: Math.max(0, height - 32),
-							rx: 10
+							rx: 14
 						}),
-						svgEl('text', { class: 'an-layer-tag', x: band.start + 10, y: 31 }, [`L${band.layer}`])
+						svgEl('text', { class: 'an-layer-tag', x: band.start + 12, y: 32 }, [`L${band.layer}`])
 					);
 				}
 			}
@@ -769,7 +773,7 @@ export class DiagramView {
 				edge.isCycle
 			);
 			this.edgeMidpoints.set(edge.id, { x: routed.mx, y: routed.my });
-			const strokeW = Math.min(3.4, 1.35 + Math.log2(edge.weight + 1) * 0.42).toFixed(2);
+			const strokeW = Math.min(2.35, 1.2 + Math.log2(edge.weight + 1) * 0.28).toFixed(2);
 			const g = svgEl('g', {
 				class: `an-mod-edge${edge.isCycle ? ' cycle' : ''}`,
 				'data-edge-id': edge.id
@@ -779,10 +783,12 @@ export class DiagramView {
 				d: routed.d,
 				class: 'an-edge-path',
 				'stroke-width': strokeW,
+				'stroke-linecap': 'round',
+				'stroke-linejoin': 'round',
 				'marker-end': edge.isCycle ? 'url(#an-arrow-cycle)' : 'url(#an-arrow-norm)'
 			}));
-			const badgeText = String(edge.weight);
-			const pillW = Math.max(22, badgeText.length * 6.5 + 11);
+			const badgeText = edge.isCycle ? `⟳ ${edge.weight}` : String(edge.weight);
+			const pillW = Math.max(edge.isCycle ? 34 : 24, badgeText.length * 6.2 + 12);
 			const labelG = svgEl('g', {
 				class: `an-edge-badge${showAllLabels || edge.isCycle ? '' : ' auto-hide'}`,
 				transform: `translate(${routed.mx}, ${routed.my})`
@@ -795,8 +801,8 @@ export class DiagramView {
 			edgesLayer.append(g);
 		}
 
-		// Netron-style structured two-compartment node cards with port terminals.
-		const headerPath = `M 8 0 H ${CARD_W - 8} A 8 8 0 0 1 ${CARD_W} 8 V ${HEADER_H} H 0 V 8 A 8 8 0 0 1 8 0 Z`;
+		// Clean Apple/Google/VS Code inspired vector cards with soft ambient depth and precision ports.
+		const headerPath = `M ${CARD_RX} 0 H ${CARD_W - CARD_RX} A ${CARD_RX} ${CARD_RX} 0 0 1 ${CARD_W} ${CARD_RX} V ${HEADER_H} H 0 V ${CARD_RX} A ${CARD_RX} ${CARD_RX} 0 0 1 ${CARD_RX} 0 Z`;
 		const nodesLayer = svgEl('g', { class: 'an-nodes-layer' });
 		for (const item of placed.values()) {
 			const { node, x, y, w, h } = item;
@@ -809,65 +815,72 @@ export class DiagramView {
 				transform: `translate(${x}, ${y})`
 			});
 
-			// Pure-vector subtle offset shadow + crisp card shell + Netron colored header band.
-			g.append(svgEl('rect', { class: 'an-node-shadow-vec', x: 0, y: 2.5, width: w, height: h, rx: 8 }));
-			g.append(svgEl('rect', { class: 'an-node-card', x: 0, y: 0, width: w, height: h, rx: 8 }));
+			// Pure-vector two-layer ambient shadow + focus halo + crisp rounded card shell.
+			g.append(svgEl('rect', { class: 'an-node-shadow-far', x: -0.5, y: 4.5, width: w + 1, height: h, rx: CARD_RX + 0.5 }));
+			g.append(svgEl('rect', { class: 'an-node-shadow-vec', x: 0, y: 1.5, width: w, height: h, rx: CARD_RX }));
+			g.append(svgEl('rect', { class: 'an-node-halo', x: -3, y: -3, width: w + 6, height: h + 6, rx: CARD_RX + 2.5 }));
+			g.append(svgEl('rect', { class: 'an-node-card', x: 0, y: 0, width: w, height: h, rx: CARD_RX }));
 			g.append(svgEl('path', { class: 'an-node-header', d: headerPath }));
 			g.append(svgEl('line', { class: 'an-node-divider', x1: 0, y1: HEADER_H, x2: w, y2: HEADER_H }));
 
-			// Header content: type indicator dot + title + drill/kind badge.
-			g.append(svgEl('circle', { class: 'an-node-kind-dot', cx: 13, cy: HEADER_H / 2, r: 3.5 }));
-			const titleLabel = truncate(node.label || t('analysis.modules.root'), node.expandable ? 21 : 23);
-			g.append(svgEl('text', { class: 'an-node-title', x: 23, y: 18 }, [titleLabel]));
+			// Header content: sleek semantic accent bar + title + drill/kind badge.
+			g.append(svgEl('rect', { class: 'an-node-kind-dot', x: 11, y: (HEADER_H - 14) / 2, width: 3.5, height: 14, rx: 1.75 }));
+			const titleLabel = truncate(node.label || t('analysis.modules.root'), node.expandable ? 22 : 24);
+			g.append(svgEl('text', { class: 'an-node-title', x: 21, y: 19.5 }, [titleLabel]));
 			if (node.expandable) {
-				g.append(svgEl('text', { class: 'an-node-drill', x: w - 11, y: 18.5, 'text-anchor': 'end' }, ['▸']));
-			} else if (node.kind === 'external') {
-				g.append(svgEl('text', { class: 'an-node-ext-tag', x: w - 11, y: 18, 'text-anchor': 'end' }, ['EXT']));
-			} else if (node.kind === 'file') {
-				g.append(svgEl('text', { class: 'an-node-ext-tag', x: w - 11, y: 18, 'text-anchor': 'end' }, ['FILE']));
+				g.append(svgEl('text', { class: 'an-node-drill', x: w - 12, y: 19.5, 'text-anchor': 'end' }, ['▸']));
+			} else if (node.kind === 'external' || node.kind === 'file') {
+				const tagText = node.kind === 'external' ? 'EXT' : 'FILE';
+				const tagW = node.kind === 'external' ? 28 : 30;
+				g.append(
+					svgEl('rect', { class: 'an-node-tag-bg', x: w - 10 - tagW, y: 7.5, width: tagW, height: 15, rx: 4.5 }),
+					svgEl('text', { class: 'an-node-ext-tag', x: w - 10 - tagW / 2, y: 18, 'text-anchor': 'middle' }, [tagText])
+				);
 			}
 
-			// Body row 1: files/symbols summary + layer pill.
+			// Body row 1: files/symbols summary + subtle layer pill.
 			const sub = node.kind === 'file'
 				? `${node.symbols} syms`
 				: `${node.files} files · ${node.symbols} syms`;
-			g.append(svgEl('text', { class: 'an-node-sub', x: 12, y: 47 }, [sub]));
-			g.append(svgEl('text', { class: 'an-node-layer', x: w - 12, y: 47, 'text-anchor': 'end' }, [`L${node.layer}`]));
-
-			// Subtle inner row divider.
-			g.append(svgEl('line', { class: 'an-node-row-sep', x1: 10, y1: 57, x2: w - 10, y2: 57 }));
+			g.append(svgEl('text', { class: 'an-node-sub', x: 13, y: 51 }, [sub]));
+			const layerLabel = `L${node.layer}`;
+			const layerW = Math.max(24, layerLabel.length * 6.5 + 10);
+			g.append(
+				svgEl('rect', { class: 'an-node-layer-bg', x: w - 12 - layerW, y: 39.5, width: layerW, height: 16, rx: 5 }),
+				svgEl('text', { class: 'an-node-layer', x: w - 12 - layerW / 2, y: 50.5, 'text-anchor': 'middle' }, [layerLabel])
+			);
 
 			// Body row 2: fan-in/fan-out + visual instability bar + value.
 			const coupling = `↓${node.fanIn}  ↑${node.fanOut}`;
-			g.append(svgEl('text', { class: 'an-node-meta', x: 12, y: 75 }, [coupling]));
+			g.append(svgEl('text', { class: 'an-node-meta', x: 13, y: 76 }, [coupling]));
 
-			const barW = 36;
-			const barX = w - 12 - barW - 44;
-			const barY = 69;
+			const barW = 38;
+			const barX = w - 13 - barW - 46;
+			const barY = 70.5;
 			const instClamped = Math.max(0, Math.min(1, node.instability));
 			const instTier = node.inCycle ? 'cycle' : instClamped >= 0.75 ? 'high' : instClamped >= 0.35 ? 'mid' : 'low';
 			g.append(
-				svgEl('rect', { class: 'an-inst-track', x: barX, y: barY, width: barW, height: 4, rx: 2 }),
-				svgEl('rect', { class: `an-inst-fill ${instTier}`, x: barX, y: barY, width: Math.max(2, barW * instClamped), height: 4, rx: 2 })
+				svgEl('rect', { class: 'an-inst-track', x: barX, y: barY, width: barW, height: 3.5, rx: 1.75 }),
+				svgEl('rect', { class: `an-inst-fill ${instTier}`, x: barX, y: barY, width: Math.max(3, barW * instClamped), height: 3.5, rx: 1.75 })
 			);
 			const instLabel = node.inCycle ? `⟳ ${node.instability.toFixed(2)}` : `I=${node.instability.toFixed(2)}`;
 			g.append(svgEl('text', {
 				class: `an-node-inst${node.inCycle ? ' cycle' : ''}`,
-				x: w - 12,
-				y: 75,
+				x: w - 13,
+				y: 76,
 				'text-anchor': 'end'
 			}, [instLabel]));
 
-			// Netron-style input/output port sockets on the card boundary.
+			// Precision input/output port sockets on the card boundary.
 			if (node.fanIn > 0) {
 				const px = this.direction === 'TB' ? w / 2 : 0;
 				const py = this.direction === 'TB' ? 0 : h / 2;
-				g.append(svgEl('circle', { class: 'an-node-port in', cx: px, cy: py, r: 3.2 }));
+				g.append(svgEl('circle', { class: 'an-node-port in', cx: px, cy: py, r: 2.8 }));
 			}
 			if (node.fanOut > 0) {
 				const px = this.direction === 'TB' ? w / 2 : w;
 				const py = this.direction === 'TB' ? h : h / 2;
-				g.append(svgEl('circle', { class: 'an-node-port out', cx: px, cy: py, r: 3.2 }));
+				g.append(svgEl('circle', { class: 'an-node-port out', cx: px, cy: py, r: 2.8 }));
 			}
 
 			this.nodeElById.set(node.id, g);
@@ -893,12 +906,12 @@ export class DiagramView {
 		return svgEl('marker', {
 			id,
 			viewBox: '0 0 10 10',
-			refX: 8.5,
+			refX: 8.2,
 			refY: 5,
 			markerWidth: size,
 			markerHeight: size,
 			orient: 'auto-start-reverse'
-		}, [svgEl('path', { d: 'M 0 1.5 L 9 5 L 0 8.5 z', class: cls })]);
+		}, [svgEl('path', { d: 'M 1 1.6 L 8.8 5 L 1 8.4 L 2.8 5 z', class: cls })]);
 	}
 
 	/** Recompute all edge paths & badges after a node drag or reset. */
@@ -967,6 +980,37 @@ export class DiagramView {
 		this.renderMinimap();
 	}
 
+	/** Compute the live bounding box of all placed nodes (including user-dragged positions). */
+	private getContentBounds(): { minX: number; minY: number; maxX: number; maxY: number; width: number; height: number } {
+		if (this.placed.size === 0) {
+			const width = this.graphWidth || 640;
+			const height = this.graphHeight || 360;
+			return { minX: 0, minY: 0, maxX: width, maxY: height, width, height };
+		}
+		let minX = Infinity;
+		let minY = Infinity;
+		let maxX = -Infinity;
+		let maxY = -Infinity;
+		for (const item of this.placed.values()) {
+			if (item.x < minX) minX = item.x;
+			if (item.y < minY) minY = item.y;
+			if (item.x + item.w > maxX) maxX = item.x + item.w;
+			if (item.y + item.h > maxY) maxY = item.y + item.h;
+		}
+		minX -= PAD_X;
+		minY -= PAD_Y;
+		maxX += PAD_X;
+		maxY += PAD_Y;
+		return {
+			minX,
+			minY,
+			maxX,
+			maxY,
+			width: Math.max(320, maxX - minX),
+			height: Math.max(240, maxY - minY)
+		};
+	}
+
 	/** Smoothly centre one node or edge in the viewport without changing zoom. */
 	focusElement(id: string): void {
 		const view = this.view;
@@ -991,18 +1035,19 @@ export class DiagramView {
 			x: this.host.clientWidth / 2 - cx * view.scale,
 			y: this.host.clientHeight / 2 - cy * view.scale
 		};
-		this.animateOrCommit({ ...next, ...this.clamp(next) }, true);
+		this.animateOrCommit(next, true);
 	}
 
-	/** Fit the whole architecture graph into the host viewport. */
+	/** Fit the whole architecture graph (including any moved nodes) into the host viewport. */
 	fit(animate = false): void {
-		const width = this.graphWidth || 640;
-		const height = this.graphHeight || 360;
+		const bounds = this.getContentBounds();
+		const width = bounds.width || 640;
+		const height = bounds.height || 360;
 		const cw = this.host.clientWidth;
 		const ch = this.host.clientHeight;
 		this.userMoved = false;
 		if (cw <= 0 || ch <= 0) {
-			this.commitView({ fitScale: 1, width, height, scale: 1, x: 0, y: 0 });
+			this.commitView({ fitScale: 1, width, height, scale: 1, x: -bounds.minX, y: -bounds.minY });
 			return;
 		}
 		const fitScale = Math.min(
@@ -1015,8 +1060,8 @@ export class DiagramView {
 			width,
 			height,
 			scale,
-			x: (cw - width * scale) / 2,
-			y: (ch - height * scale) / 2
+			x: (cw - width * scale) / 2 - bounds.minX * scale,
+			y: (ch - height * scale) / 2 - bounds.minY * scale
 		}, animate);
 	}
 
@@ -1194,9 +1239,10 @@ export class DiagramView {
 			return;
 		}
 		this.syncMinimapVisibility();
-		const scale = Math.min((MINIMAP_W - 12) / view.width, (MINIMAP_H - 12) / view.height);
-		const ox = (MINIMAP_W - view.width * scale) / 2;
-		const oy = (MINIMAP_H - view.height * scale) / 2;
+		const bounds = this.getContentBounds();
+		const scale = Math.min((MINIMAP_W - 14) / bounds.width, (MINIMAP_H - 14) / bounds.height);
+		const ox = (MINIMAP_W - bounds.width * scale) / 2 - bounds.minX * scale;
+		const oy = (MINIMAP_H - bounds.height * scale) / 2 - bounds.minY * scale;
 		const svg = svgEl('svg', { width: MINIMAP_W, height: MINIMAP_H, viewBox: `0 0 ${MINIMAP_W} ${MINIMAP_H}` });
 		for (const item of this.placed.values()) {
 			const nodeEl = this.nodeElById.get(item.node.id);
@@ -1211,7 +1257,7 @@ export class DiagramView {
 				rx: 1.5
 			}));
 		}
-		svg.append(svgEl('rect', { class: 'an-minimap-vp', x: 0, y: 0, width: 10, height: 10, rx: 2 }));
+		svg.append(svgEl('rect', { class: 'an-minimap-vp', x: 0, y: 0, width: 10, height: 10, rx: 2.5 }));
 		this.minimap.append(svg);
 		this.updateMinimapViewport();
 	}
@@ -1220,26 +1266,30 @@ export class DiagramView {
 		const view = this.view;
 		const vp = this.minimap.querySelector<SVGRectElement>('.an-minimap-vp');
 		if (!view || !vp || this.host.clientWidth <= 0 || this.host.clientHeight <= 0) return;
-		const scale = Math.min((MINIMAP_W - 12) / view.width, (MINIMAP_H - 12) / view.height);
-		const ox = (MINIMAP_W - view.width * scale) / 2;
-		const oy = (MINIMAP_H - view.height * scale) / 2;
+		const bounds = this.getContentBounds();
+		const scale = Math.min((MINIMAP_W - 14) / bounds.width, (MINIMAP_H - 14) / bounds.height);
+		const ox = (MINIMAP_W - bounds.width * scale) / 2 - bounds.minX * scale;
+		const oy = (MINIMAP_H - bounds.height * scale) / 2 - bounds.minY * scale;
 		const vx = (-view.x / view.scale) * scale + ox;
 		const vy = (-view.y / view.scale) * scale + oy;
 		const vw = (this.host.clientWidth / view.scale) * scale;
 		const vh = (this.host.clientHeight / view.scale) * scale;
-		vp.setAttribute('x', String(Math.max(1, Math.min(MINIMAP_W - 6, vx))));
-		vp.setAttribute('y', String(Math.max(1, Math.min(MINIMAP_H - 6, vy))));
-		vp.setAttribute('width', String(Math.max(10, Math.min(MINIMAP_W - 2, vw))));
-		vp.setAttribute('height', String(Math.max(8, Math.min(MINIMAP_H - 2, vh))));
+		const clampedW = Math.max(10, Math.min(MINIMAP_W - 2, vw));
+		const clampedH = Math.max(8, Math.min(MINIMAP_H - 2, vh));
+		vp.setAttribute('x', String(Math.max(1, Math.min(MINIMAP_W - clampedW - 1, vx))));
+		vp.setAttribute('y', String(Math.max(1, Math.min(MINIMAP_H - clampedH - 1, vy))));
+		vp.setAttribute('width', String(clampedW));
+		vp.setAttribute('height', String(clampedH));
 	}
 
 	private panToMinimapPoint(clientX: number, clientY: number): void {
 		const view = this.view;
 		if (!view) return;
 		const rect = this.minimap.getBoundingClientRect();
-		const scale = Math.min((MINIMAP_W - 12) / view.width, (MINIMAP_H - 12) / view.height);
-		const ox = (MINIMAP_W - view.width * scale) / 2;
-		const oy = (MINIMAP_H - view.height * scale) / 2;
+		const bounds = this.getContentBounds();
+		const scale = Math.min((MINIMAP_W - 14) / bounds.width, (MINIMAP_H - 14) / bounds.height);
+		const ox = (MINIMAP_W - bounds.width * scale) / 2 - bounds.minX * scale;
+		const oy = (MINIMAP_H - bounds.height * scale) / 2 - bounds.minY * scale;
 		const gx = (clientX - rect.left - ox) / scale;
 		const gy = (clientY - rect.top - oy) / scale;
 		const next: ViewState = {
@@ -1248,7 +1298,7 @@ export class DiagramView {
 			y: this.host.clientHeight / 2 - gy * view.scale
 		};
 		this.userMoved = true;
-		this.scheduleView({ ...next, ...this.clamp(next) });
+		this.scheduleView(next);
 	}
 
 	private onMinimapPointerDown(event: PointerEvent): void {
@@ -1270,19 +1320,6 @@ export class DiagramView {
 	}
 
 	/* ---------- Viewport Transform Core ---------- */
-
-	private clamp(view: ViewState): { x: number; y: number } {
-		const cw = this.host.clientWidth;
-		const ch = this.host.clientHeight;
-		const scaledWidth = view.width * view.scale;
-		const scaledHeight = view.height * view.scale;
-		const gx = gutter(cw);
-		const gy = gutter(ch);
-		return {
-			x: scaledWidth <= cw ? (cw - scaledWidth) / 2 : Math.max(cw - scaledWidth - gx, Math.min(gx, view.x)),
-			y: scaledHeight <= ch ? (ch - scaledHeight) / 2 : Math.max(ch - scaledHeight - gy, Math.min(gy, view.y))
-		};
-	}
 
 	private commitView(view: ViewState): void {
 		this.cancelAnimation();
@@ -1372,10 +1409,9 @@ export class DiagramView {
 			x: localX - contentX * nextScale,
 			y: localY - contentY * nextScale
 		};
-		const clamped = this.clamp(next);
 		this.userMoved = true;
-		if (animate) this.animateOrCommit({ ...next, ...clamped }, true);
-		else this.scheduleView({ ...next, ...clamped });
+		if (animate) this.animateOrCommit(next, true);
+		else this.scheduleView(next);
 	}
 
 	private stepZoom(factor: number): void {
@@ -1386,9 +1422,9 @@ export class DiagramView {
 	private panBy(deltaX: number, deltaY: number): void {
 		const current = this.view;
 		if (!current) return;
-		const clamped = this.clamp({ ...current, x: current.x + deltaX, y: current.y + deltaY });
+		this.cancelAnimation();
 		this.userMoved = true;
-		this.scheduleView({ ...current, ...clamped });
+		this.scheduleView({ ...current, x: current.x + deltaX, y: current.y + deltaY });
 	}
 
 	private onWheel(event: WheelEvent): void {
@@ -1441,14 +1477,14 @@ export class DiagramView {
 				x: this.host.clientWidth / 2 - centreX * next.scale,
 				y: this.host.clientHeight / 2 - centreY * next.scale
 			};
-			this.commitView({ ...recentered, ...this.clamp(recentered) });
+			this.commitView(recentered);
 			return;
 		}
 		this.fit();
 	}
 
 	private onPointerDown(event: PointerEvent): void {
-		if (event.button !== 0) return;
+		if (event.button !== 0 && event.button !== 1) return;
 		const target = event.target;
 		if (target instanceof Element && target.closest('.an-zoombar, .an-minimap, .an-graphbar')) return;
 
@@ -1462,6 +1498,13 @@ export class DiagramView {
 			};
 			this.panDrag = null;
 			this.nodeDrag = null;
+			return;
+		}
+
+		// Middle mouse button or Space+drag always pans the infinite canvas freely (even over nodes).
+		if (event.button === 1 || this.spacePressed) {
+			event.preventDefault();
+			this.panDrag = { x: event.clientX, y: event.clientY };
 			return;
 		}
 
@@ -1518,7 +1561,7 @@ export class DiagramView {
 				x: midpoint.x - rect.left - contentX * nextScale,
 				y: midpoint.y - rect.top - contentY * nextScale
 			};
-			this.scheduleView({ ...next, ...this.clamp(next) });
+			this.scheduleView(next);
 			return;
 		}
 
@@ -1593,6 +1636,12 @@ export class DiagramView {
 
 	private onKeyDown(event: KeyboardEvent): void {
 		if (event.ctrlKey || event.metaKey || event.altKey) return;
+		if (event.code === 'Space') {
+			this.spacePressed = true;
+			this.host.classList.add('space-pan');
+			event.preventDefault();
+			return;
+		}
 		if (event.key === '+' || event.key === '=') this.stepZoom(ZOOM_STEP);
 		else if (event.key === '-' || event.key === '_') this.stepZoom(1 / ZOOM_STEP);
 		else if (event.key === '0' || event.key === 'Home') this.fit(true);
@@ -1603,5 +1652,12 @@ export class DiagramView {
 		else if (event.key === 'ArrowDown') { this.cancelAnimation(); this.panBy(0, -ARROW_PAN); }
 		else return;
 		event.preventDefault();
+	}
+
+	private onKeyUp(event: KeyboardEvent): void {
+		if (event.code === 'Space') {
+			this.spacePressed = false;
+			this.host.classList.remove('space-pan');
+		}
 	}
 }
