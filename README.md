@@ -85,13 +85,14 @@ symbol carries its column, range, enclosing type and complexity.
 
 The **Code Analysis** view (`Ctrl+Shift+A`, module 17) turns that parsed model into five
 tools, each a streamed result page in the editor area: **Module Analysis** (the
-workspace's cross-file calls as a gitdiagram-style architecture diagram — the backend
-builds the model (gitdiagram's caps: 10 groups, 34 blocks, 48 arrows; the busiest
-files as two-line cards inside their area's subgraph, one pastel tone per area, the
-cycle's back edges dashed) and emits mermaid `flowchart TD` with its tone classDefs,
-which the page renders with mermaid + the same ELK layout gitdiagram runs — nodes
-cannot overlap — wrapped in a port of gitdiagram's viewer (wheel zoom, trackpad pan,
-a fit-relative zoom toolbar, arrow-key panning), beside a collapsible tree of module → file → call site), **Complexity & Hotspots** (cyclomatic
+workspace's cross-file calls as an architecture diagram — the backend builds the
+layered overview straight from the symbol store's dependency facts (module and file
+cards with file/symbol counts, fan-in/fan-out and instability, Tarjan SCC cycle
+edges dashed red, topological layers, drill-down scopes with breadcrumbs) and the
+page draws it on its own interactive SVG board — wheel zoom, drag pan, keyboard, a
+zoom toolbar, an inspector with an edge's resolved imports and call sites — beside a
+collapsible tree of module → file → call site; a Copy Mermaid action carries the
+ready-to-paste `flowchart TD` source), **Complexity & Hotspots** (cyclomatic
 complexity, size, nesting per function), **Dead Code** (declarations no call site in the
 workspace spells), a rule-based **Security Scan** (hardcoded secrets, dangerous and
 weak-crypto APIs, with CWE tags) and the **Import Graph** (file dependencies with import

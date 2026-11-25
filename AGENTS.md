@@ -1714,8 +1714,7 @@ the identical checks.
   (synthetic repository benchmark; `GGS_PERF_FILES` sets the size, CI runs 20 000)
 - Tooling: `scripts/measure.mjs` (sizes + probes + the boot-bench cold-start stages,
   folded into `metrics.json`'s `perf.boot` key; the size keys include `firstPaintJs`
-  from `dist/first-paint.json` and `diagramJs` from `dist/diagram-closure.json` — the
-  Module Analysis drawing's first-render closure, docs/mermaid-chunking-plan.md),
+  from `dist/first-paint.json`),
   `scripts/probes/boot-bench.mjs`
   (end-to-end startup latency of the release exe), `scripts/probes/cdp-console.mjs` /
   `cdp-probe.mjs` / `cdp-trace.mjs` (live inspection over WebView2's CDP port),
@@ -1768,9 +1767,11 @@ class-like kinds the bases, derived classes, members and the body's first lines 
 `bodyLines` caps the window, `path` disambiguates same-named declarations) and
 `file_dependencies` (one file's import edges resolved to the workspace files they
 name, the package imports counted beside); `analysis_dead_code`, `analysis_security`,
-`analysis_import_graph` and `analysis_import_cycles` read the volumes directly too —
-no engine build behind any of them — while `analysis_module_graph`,
-`analysis_call_graph`, `analysis_call_path` and `analysis_metrics` stay engine-backed
+`analysis_import_graph`, `analysis_import_cycles` and `analysis_module_graph` read
+the volumes directly too — no engine build behind any of them (the module graph folds
+the store's `dependency_facts` through the same `module_overview` the page rides,
+since 2026-11-25) — while `analysis_call_graph`, `analysis_call_path` and
+`analysis_metrics` stay engine-backed
 (their cross-file resolution and measured complexity are tree-sitter's). Every
 list-shaped tool speaks one paging contract: `limit` +
 `offset`, the exact total in the header, a trailer naming the continuation; the filters
@@ -1785,8 +1786,8 @@ selects the ranked top-`limit` through a min-heap while the files stream (one fi
 rows plus the big-code-analysis columns in memory at a time), `analysis_dead_code` and
 `analysis_security` walk their filters once or twice counting everything and building
 only the page's window, `symbol_context` caps each relation ring at 12 rows, and
-`analysis_module_graph` folds the bounded
-`module_edge_summary` (module edges and exact totals, no pair ranking). Every call
+`analysis_module_graph` pages the overview's module edges with exact totals (no pair
+ranking, the heaviest edges previewed in the header). Every call
 is logged as one JSON line to `~/.ggs/logs/mcp.log` (rotated past 1 MB), which the
 in-app MCP Server page shows. stderr is logs; stdout is protocol only.
 
@@ -1807,53 +1808,49 @@ in-app MCP Server page shows. stderr is logs; stdout is protocol only.
 
 The Code Analysis workbench: an activity bar entry (`Ctrl+Shift+A`) with a sidebar of
 five analysis tools plus module 16's MCP Server entry — Module Analysis (the
-workspace's cross-file calls as a gitdiagram-style architecture diagram and a tree:
+workspace's cross-file calls as an architecture diagram and a tree:
 opened workspace-wide from the sidebar or the palette, or folder-scoped from the
 File Explorer — a "Module Analysis" entry on every folder's context menu that
-analyzes the picked folder(s) (`analysis_module_graph` / `analysis_module_diagram`
-take `folders`; one tab per folder set, the scope riding the graphbar as a chip),
+analyzes the picked folder(s) (`analysis_module_overview` takes `scope` / `depth` /
+`folders`; one tab per folder set, the scope riding the graphbar as a chip),
 a multi-selection of folders unioned and its files passed over (2026-09-29); the
-backend decides WHAT the diagram is — `analysis_module_diagram` curates the
-architecture (vendored, test, example and bench trees stay off the drawing — they
-build or verify the project, they are not its components; a focus or a folder
-scope overrides the
-rule) and keeps the busiest remaining files
-as two-line cards (the name over the bracketed directory the box does not already
-name, gitdiagram's `Component<br/>[file.ts]` shape) inside their area's subgraph,
-each area one of
-gitdiagram's six pastel tones (root files and anything the caps leave without a
-box draw unboxed, its `groupId: null`), every kept dependency an arrow labelled by
-its call count (a cycle's back edges stay off — the Import Graph page owns cycles);
-the flow is mermaid
-`flowchart TD` with gitdiagram's tone classDefs verbatim under its own class names,
-its schema with the caps raised on the owner's ask (2026-09-29, "too few
-modules": gitdiagram's 10/34/48 became 16 groups — deeper areas still roll up to
-the depth that fits and an area too small to
-be a subsystem folds into its parent box — 54 blocks, 72 arrows, no block fanning
-past eight); the page renders that source with
-mermaid itself — the same renderer, the same ELK layered layout and spacing
-gitdiagram initializes, with one placement deviation on the owner's ask when the
-arrows wound far around distant boxes (2026-09-29: ELK node placement runs
-NETWORK_SIMPLEX instead of Brandes-Koepf, measured −24…−32 % total edge length) —
-so the blocks cannot overlap and the look is gitdiagram's by
-construction (`moduleDiagram.ts`), in its light or dark variable set by the workbench
-theme's kind (the canvas, the zoom toolbar and the chips read the theme's `--vscode-*`
-tokens; a theme switch re-renders the drawing in the other palette); the viewer around the SVG is a port of gitdiagram's
-own (its use-mermaid-viewport / use-diagram-wheel-gestures): the zoom bounds and the
-percentage read against the fit level (0.6×–12×, 100 % = fitted), the wheel always zooms
-at the cursor — mouse wheel and trackpad scroll alike (gitdiagram's per-burst
-trackpad/mouse latch misread real mice on WKWebView; panning is the drag and the arrow
-keys, ctrl/cmd and WKWebView gesture events pinch-zoom), panning clamps to the
-32–160 px gutter band, the toolbar's zoom and fit glide over 160 ms (skipped under
-prefers-reduced-motion), the keyboard pans by arrow and fits on 0/Home, and a click
-highlighting the clicked element with the
-dependencies it touches (the rest dims; a background click or the chip clears), the
-right-click menu opening the file, jumping to a related block through the
-Calls / Called-by submenus, isolating the neighbourhood or listing an arrow's call
-sites, double-click opening the file, the header action copying the mermaid source; the
-drawing's filter narrows to the files whose path spells the query (a pair survives only
-between matching files, so the drawing shrinks with the filter), the focus isolates one
-file's neighbourhood, and the tree matches call-site symbols too; the tree collapses
+backend decides WHAT the diagram is — since 2026-11-25 `analysis_module_overview`
+builds the layered overview purely in memory over the nine-volume store's
+`dependency_facts` (module 5's symbol store — no engine build, no disk I/O:
+high-specificity symbol references and base-type inheritance edges aggregated into a
+scoped, depth-controlled graph, the drill-down scope a directory prefix with
+breadcrumbs, iterative Tarjan SCC marking the dependency cycles — back edges kept,
+never dropped — Robert C. Martin's fan-in / fan-out and instability per node, and
+condensed-DAG topological layers; files outside the scope group into external
+context nodes, the connected survivors capped to the top 12 by weight), and
+`analysis_module_edge_detail` serves one edge's L2 evidence on demand — the
+from-side files' exact resolved imports and call sites (clickable `file:line`),
+read only when that edge is inspected; every node a card carrying its kind
+(module / file / external), file and symbol counts, ↓fan-in ↑fan-out, its
+instability `I=` and the ⟳ cycle marker, every kept dependency an arrow labelled
+by its call count (a cycle edge dashed red); the page draws that payload itself —
+`moduleDiagram.ts`'s zero-dependency interactive SVG board (2026-11-25, replacing
+the mermaid + ELK rendering and with it the last mermaid import): nodes grouped by
+the backend's topological layer, one layer a row (a wide layer wraps into balanced
+sub-rows), curved connectors with wide invisible hit paths, call-count badges that
+auto-hide past 28 edges, the wheel zooming at the cursor, drag panning, pinch via
+pointer and WKWebView gesture events, the keyboard panning and fitting, a zoom
+toolbar (−/level/+/fit) whose moves glide over 160 ms (skipped under
+prefers-reduced-motion), and the board reading the workbench theme's `--vscode-*`
+tokens (a theme switch recolors it); a click selects a node or edge and opens the
+inspector beside the board — the node's metrics, Depends On / Used By and key
+files, an edge's resolved imports and exact call sites (the L2 scan, cached per
+edge, "Scanning edge evidence…" while it runs); a background click or the graph
+bar's clear chip resets; the right-click menu drills an expandable module in,
+opens a file, jumps through the Depends On / Used By submenus (30 neighbours
+max, the call count on every row) or copies the path — an edge's menu copies its
+pair; double-click drills a module down or opens a file; the header action copies
+the backend's mermaid source (still shipped in the payload for exactly that); the
+drawing's filter keeps the nodes whose id or label spells the query plus their
+neighbours (an edge survives a shared-symbol match too, so the drawing shrinks
+with the filter), a cycles-only toggle draws the Tarjan SCCs alone, the focus
+("Show Only Related") isolates one node's neighbourhood, and the tree matches
+call-site symbols too; the tree collapses
 the same data into
 module dependencies → file pairs → call sites, children rendering only while expanded),
 Complexity & Hotspots, Dead Code, Security Scan (rule-based, no taint tracking) and the
@@ -1866,24 +1863,26 @@ store-lock snapshot so the file reads never stall a symbol query; Complexity & H
 streams WHILE a cold engine build parses (the build's per-batch hook,
 `ensure_with_batches`, hands every parsed batch's rows to the command, the click's first
 answer landing one parse batch in) — the measured shape (complexity, params, nesting)
-is tree-sitter's, the volumes do not carry it; Module Analysis still waits the engine
-build out honestly — its cross-file resolution needs the parsed call sites. Every page
+is tree-sitter's, the volumes do not carry it; Module Analysis reads the volumes'
+`dependency_facts` the same way since 2026-11-25 (its overview is store-only —
+only an edge's L2 evidence scan touches disk, the from-side files, on demand).
+Every page
 names the engine build's live `done/total` (boot routes the `studio://analysis-index`
 pushes to the open pages) while one runs. The
 engine resolves calls by name with receiver hints (no type inference); its honest limits
 are stated on the pages themselves. The per-symbol call graph walk and the shortest call
 chain remain engine services served to the MCP server (module 16), not a page. The
-Module Analysis drawing is mermaid's own output (ELK layout) over a backend-built
-model: the page never lays anything out, it renders the source and ports gitdiagram's
-viewport (pan, zoom, states) around it.
+Module Analysis drawing is the page's own SVG layout over the backend-built
+overview payload: the backend decides the layers and the facts, the board lays
+the cards out and answers every interaction locally.
 
 - Frontend: `src/features/analysis/analysisView.ts` (the sidebar), `src/features/analysis/analysisTools.ts` (the shared tool
   registry), `src/features/analysis/analysisPages.ts` (the lazy result pages: the streaming reports, the
-  Import Graph list, and the Module Analysis page — the backend-built mermaid source
-  on the mermaid viewport beside its tree), `src/features/analysis/moduleDiagram.ts` (the Module
-  Analysis drawing: mermaid + ELK rendering of `analysis_module_diagram`'s source,
-  gitdiagram's viewport around it — pan/zoom, the zoom toolbar, the delegated
-  selection states)
+  Import Graph list, and the Module Analysis page — the store-built overview on the
+  native SVG board, its inspector, filter, focus and tree beside it), `src/features/analysis/moduleDiagram.ts` (the Module
+  Analysis drawing: the zero-dependency interactive SVG board over
+  `analysis_module_overview`'s payload — layered layout, pan/zoom, the zoom
+  toolbar, the selection/related/dim states)
 - Backend: the `ggs-analysis` crate (`src-tauri/crates/ggs-analysis/`) — `model.rs` the
   compact vocabulary (`Names`, the interned string table; the fixed-size `Sym` and `Call`
   records; the per-site `ResolveClass`), `lib.rs` the engine and the per-symbol call
@@ -1922,15 +1921,16 @@ viewport (pan, zoom, states) around it.
   `imports.rs` the import graph over the volumes' file table (`sites::import_spellings`
   per language, the same per-language resolution and Tarjan SCC as before),
   `metrics.rs`, `modules.rs` the
-  Module Analysis aggregation (a bounded two-pass streaming fold: pass one counts file
-  pairs and lifts them to module edges, past the `PAIR_TRACK_CAP` spillover the counts
-  go to the exact totals only, pass two fills the capped site lists of the pairs the
-  listing keeps; the answer caps at `MAX_FILE_EDGES`/`MAX_MODULE_EDGES` with honest
-  totals),
-  `diagram.rs` the Module Analysis drawing — the
-  architecture-only curation, gitdiagram's caps, tone
-  palette, group roll-up and fold, and the mermaid source (classDefs included) behind
-  `analysis_module_diagram`,
+  Module Analysis pipeline (since 2026-11-25, replacing the deleted `diagram.rs`:
+  `module_overview` builds the scoped, layered architecture overview purely in memory
+  over the nine-volume store's `StoreDependencyFacts` — high-specificity symbol
+  references and base-type inheritance edges, Tarjan SCC cycles with the back edges
+  kept, Martin coupling/instability per node, condensed-DAG topological layers,
+  external context nodes grouped and capped to the connected top 12, depth
+  auto-picked for the scope — and `module_edge_detail` reads one edge's L2 evidence,
+  the from-side files' exact resolved imports and call sites, only when inspected;
+  `overview_to_mermaid` renders the ready-to-copy `flowchart TD` source the payload
+  carries for the page's Copy action),
   `imports.rs`, `bca.rs` the big-code-analysis
   bridge whose report-time columns — cognitive complexity, Halstead volume, logical SLOC,
   the maintainability index — enrich the Complexity & Hotspots rows; parsing comes from
@@ -1971,16 +1971,16 @@ Everything that turns the source tree into installers: asset assembly into
   direct prepare runs pass — sets the fetch TTL to 0 (2026-09-30, the owner's direction: an
   installer must carry open-vsx.org's latest extension builds); the re-check is a lookup, a
   same-version answer reuses the cached file, and a `tauri dev` iteration keeps the TTL and
-  never phones home), `vite.config.ts` (whose `manualChunks` leaves mermaid to its own
-  dynamic-import split — mermaid 12 ships one lazily imported chunk per diagram type, so a
-  Module Analysis flowchart fetches only core + flowchart + the ELK chunks (~2.6 MiB, down
-  from the 5.3 MiB monolith a blanket grouping forced, 2026-10-15, docs/mermaid-chunking-plan.md);
-  the named chunks there are `preload`, `cjs-helpers` (Rollup's CommonJS interop helpers, on
-  their own or every CJS consumer drags the xterm chunk in), `elk` (elkjs, stable for the
-  closure measurement) and the editor/terminal groups; `diagramClosurePlugin` walks the
-  drawing's first-render closure into `dist/diagram-closure.json` and fails the build if an
-  unrelated named chunk — xterm, codemirror, the tauri/msgpack shims — ever rides along
-  again; `vite.remote.config.ts` mirrors the same rules), and `src-tauri/Info.plist` (the macOS bundle's
+  never phones home), `vite.config.ts` (whose `manualChunks` names the shared groups —
+  `preload` (Vite's dynamic-import helper), `cjs-helpers` (Rollup's CommonJS interop
+  helpers, on their own or every CJS consumer drags the xterm chunk in), `xterm`,
+  `cm-merge`, `cm-language-data` and the codemirror/tauri groups; the Module Analysis
+  drawing is the page's own SVG since 2026-11-25 — mermaid and its ELK chunks, the
+  blanket-grouping monolith and the `diagramClosurePlugin` closure gate over them are
+  all gone (2026-10-15's docs/mermaid-chunking-plan.md remains as the history);
+  `firstPaintPlugin` walks the boot's static-import closure into
+  `dist/first-paint.json` for scripts/measure.mjs); `vite.remote.config.ts` mirrors the
+  same rules), and `src-tauri/Info.plist` (the macOS bundle's
   merged fragment — the `public.folder` declaration behind the Finder folder right-click's
   "Open With" entry plus the mirrored file associations; see module 2 and its drift test)
 - Seam checks: `scripts/check-seams.mjs` (TypeScript / CSS) and `src-tauri/build.rs` (Rust)

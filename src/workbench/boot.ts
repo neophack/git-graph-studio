@@ -419,12 +419,15 @@ export const bootMethods: ThisType<Workbench> = {
 			enabled: hasRepo,
 			run: () => {
 				void (async () => {
-					const cur = await symbolsConditionsGet().catch(() => ({ macros: {} as Record<string, number | null> }));
+					// `?? fallback` beside the `.catch`: an unscripted harness answer resolves null
+					// (DefaultingHandlers), and the real backend's Err rejects — both fall back.
+					const cur = (await symbolsConditionsGet().catch(() => null)) ?? { macros: {} as Record<string, number | null> };
 					const initial = Object.entries(cur.macros)
 						.map(([k, v]) => (v === null ? `!${k}` : `${k}=${v}`))
 						.join(', ');
 					const raw = window.prompt('Preprocessor macros (e.g. DEBUG=1, WIN32=0, !LEGACY):', initial);
-					if (raw === null) return;
+					// jsdom's unimplemented prompt answers undefined; only null/undefined cancel.
+					if (raw === null || raw === undefined) return;
 					const macros: Record<string, number | null> = {};
 					for (const part of raw.split(',').map((s) => s.trim()).filter(Boolean)) {
 						if (part.startsWith('!')) {
@@ -449,9 +452,9 @@ export const bootMethods: ThisType<Workbench> = {
 			enabled: hasRepo,
 			run: () => {
 				void (async () => {
-					const cur = await symbolsBaseProjectsGet().catch(() => [] as string[]);
+					const cur = (await symbolsBaseProjectsGet().catch(() => null)) ?? ([] as string[]);
 					const raw = window.prompt('Read-only Base / SDK project folders (comma-separated):', cur.join(', '));
-					if (raw === null) return;
+					if (raw === null || raw === undefined) return;
 					const paths = raw.split(',').map((s) => s.trim()).filter(Boolean);
 					await symbolsBaseProjectsSet(paths);
 					notify('info', `Saved ${paths.length} read-only base project(s).`);

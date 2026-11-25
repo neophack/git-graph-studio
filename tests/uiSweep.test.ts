@@ -14,8 +14,6 @@
 // lists what was driven, so a surface that silently lost its controls shows up as a shrinking
 // count.
 
-vi.mock('mermaid', () => import('./mermaidStub'));
-vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -94,20 +92,19 @@ function richHandlers(): Map<string, Handler> {
 		return { state: 'ready', done: 2, total: 2, files: 2, symbols: 4, calls: 2 };
 	});
 	map.set('analysis_module_overview', () => ({
-		scope: null,
+		scope: '',
 		depth: 1,
-		autoDepth: 1,
-		maxDepth: 2,
+		breadcrumbs: [],
 		totalFiles: 2,
 		totalSymbols: 3,
 		totalEdges: 2,
 		nodes: [
-			{ id: 'src', label: 'src', parent: null, isFile: false, isExternal: false, canDrillDown: true, files: 1, symbols: 2, fanIn: 1, fanOut: 1, refsIn: 1, refsOut: 2, instability: 0.5, layer: 0, inCycle: true, sccId: 0, topFiles: [{ path: 'src/main.rs', symbols: 2 }] },
-			{ id: '', label: '(root)', parent: null, isFile: false, isExternal: false, canDrillDown: true, files: 1, symbols: 1, fanIn: 1, fanOut: 1, refsIn: 2, refsOut: 1, instability: 0.5, layer: 0, inCycle: true, sccId: 0, topFiles: [{ path: 'notes.txt', symbols: 1 }] }
+			{ id: 'src', label: 'src', kind: 'module', expandable: true, files: 1, symbols: 2, fanIn: 1, fanOut: 1, instability: 0.5, layer: 0, inCycle: true, topFiles: [{ path: 'src/main.rs', symbols: 2 }] },
+			{ id: '', label: '(root)', kind: 'module', expandable: true, files: 1, symbols: 1, fanIn: 1, fanOut: 1, instability: 0.5, layer: 0, inCycle: true, topFiles: [{ path: 'notes.txt', symbols: 1 }] }
 		],
 		edges: [
-			{ id: 'src→', from: 'src', to: '', refs: 2, filePairs: 1, isCycle: true, isExternal: false },
-			{ id: '→src', from: '', to: 'src', refs: 1, filePairs: 1, isCycle: true, isExternal: false }
+			{ id: 'src→', from: 'src', to: '', weight: 2, symbolRefs: 2, baseRefs: 0, filePairs: 1, topSymbols: ['beta'], isCycle: true },
+			{ id: '→src', from: '', to: 'src', weight: 1, symbolRefs: 1, baseRefs: 0, filePairs: 1, topSymbols: ['alpha'], isCycle: true }
 		],
 		cycles: [['src', '']],
 		mermaid: 'flowchart LR\n'
@@ -115,10 +112,9 @@ function richHandlers(): Map<string, Handler> {
 	map.set('analysis_module_edge_detail', ({ from, to }) => ({
 		from: String(from ?? 'src'),
 		to: String(to ?? ''),
-		totalRefs: 2,
-		imports: [{ fromFile: 'src/main.rs', toFile: 'notes.txt', raw: './notes.txt', line: 0 }],
-		callSites: [{ fromFile: 'src/main.rs', toFile: 'notes.txt', line: 0, symbol: 'beta', excerpt: 'beta();' }],
-		filePairs: [{ fromFile: 'src/main.rs', toFile: 'notes.txt', refs: 2, symbols: ['beta'] }]
+		imports: [{ fromFile: 'src/main.rs', toFile: 'notes.txt', specifier: './notes.txt' }],
+		filePairs: [{ fromFile: 'src/main.rs', toFile: 'notes.txt', symbols: ['beta'], sites: [{ symbol: 'beta', receiver: null, line: 0, column: 0 }] }],
+		scannedFiles: 1
 	}));
 	map.set('analysis_metrics', ({ onEvent }) => {
 		const channel = onEvent as { onmessage: (e: unknown) => void };

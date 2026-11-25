@@ -204,7 +204,7 @@ fn parse_colon_bindings(line: &str, out: &mut HashMap<String, String>) {
             if is_candidate_type(var) {
                 let rhs = &line[i + 1..];
                 let end_ty = rhs
-                    .find(|c: char| matches!(c, '=' | ',' | ')' | ';' | '{'))
+                    .find(['=', ',', ')', ';', '{'])
                     .unwrap_or(rhs.len());
                 if let Some(ty) = normalize_type_name(&rhs[..end_ty]) {
                     out.insert(var.to_owned(), ty);

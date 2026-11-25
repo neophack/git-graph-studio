@@ -52,7 +52,7 @@ export function commonHandlers(): [string, Handler][] {
 		['webview_beat', () => null],
 		['window_close_ack', () => null],
 		['analysis_status', () => ({ state: 'ready', done: 3, total: 3, files: 3, symbols: 8, calls: 5 })],
-		['analysis_module_overview', () => ({ scope: null, depth: 1, autoDepth: 1, maxDepth: 1, totalFiles: 0, totalSymbols: 0, totalEdges: 0, nodes: [], edges: [], cycles: [], mermaid: 'flowchart LR\n' })],
+		['analysis_module_overview', () => ({ scope: '', depth: 1, breadcrumbs: [], totalFiles: 0, totalSymbols: 0, totalEdges: 0, nodes: [], edges: [], cycles: [], mermaid: 'flowchart LR\n' })],
 		['analysis_module_edge_detail', () => ({ from: '', to: '', totalRefs: 0, imports: [], callSites: [], filePairs: [] })],
 		['mcp_tools', () => [{ name: 'symbol_lookup', description: 'look up a symbol' }]],
 		['mcp_log', () => []],

@@ -784,29 +784,6 @@ impl AnalysisData {
         }
     }
 
-    /// Every resolved cross-file call, streamed to `visit` in caller order (file, then
-    /// declaration, then call position) — the Module Analysis report's material. The
-    /// report folds pairs as they stream instead of ever holding the whole set (the
-    /// ambiguity fan-out used to make that set the engine's largest allocation).
-    /// Calls from top-level code (no owning declaration) do not stream, exactly as the
-    /// caller table never carried them.
-    pub(crate) fn walk_resolved(
-        &self,
-        mut visit: impl FnMut(u32, u32, &Call, DefKey),
-    ) {
-        for (file_idx, file) in self.files.iter().enumerate() {
-            let file_idx = file_idx as u32;
-            for sym_idx in 0..file.symbols.len() as u32 {
-                for &call_idx in file.calls_of(sym_idx) {
-                    let call = &file.calls[call_idx as usize];
-                    for target in self.resolved_targets(call, file_idx).iter() {
-                        visit(file_idx, sym_idx, call, *target);
-                    }
-                }
-            }
-        }
-    }
-
     /// A shortest callee chain between any declaration of `from` and any declaration of
     /// `to` (a direct `from == to` identity is not a chain).
     pub fn call_path(&self, from: &str, to: &str) -> Option<Vec<GraphNode>> {

@@ -256,12 +256,13 @@ impl PagedIndexReader {
                 if ord == std::cmp::Ordering::Greater {
                     return Some(slots);
                 }
-                if ord == std::cmp::Ordering::Equal && folded_key_starts_with(&rec.key, &pref) {
-                    if seen.insert(rec.slot) {
-                        slots.push(rec.slot);
-                        if slots.len() >= limit {
-                            return Some(slots);
-                        }
+                if ord == std::cmp::Ordering::Equal
+                    && folded_key_starts_with(&rec.key, &pref)
+                    && seen.insert(rec.slot)
+                {
+                    slots.push(rec.slot);
+                    if slots.len() >= limit {
+                        return Some(slots);
                     }
                 }
             }
@@ -406,13 +407,15 @@ mod tests {
         let xsb_hits = paged.search_xsb_prefix("hand", 10).expect("xsb search");
         assert!(!xsb_hits.is_empty());
 
-        // SymSlot metrics decode effective_lines & control_flow from raw108.
+        // SymSlot metrics decode effective_lines & control_flow from raw108. Find the
+        // branching function by its count — a same-file slot without an `if` carries
+        // effective lines but zero control flow, and the map's order is hash order.
         let metrics = read_sym_slot_metrics(&vol_dir).expect("sym metrics");
         let m = metrics
             .values()
-            .find(|m| m.effective_lines > 0)
-            .expect("function slot carries raw108");
-        assert!(m.control_flow >= 1);
+            .find(|m| m.control_flow >= 1)
+            .expect("handleHttpServer carries raw108 counts");
+        assert!(m.effective_lines >= 1);
         assert_eq!(m.param_count, 1);
 
         let stats = inspect_volume_stats(&vol_dir);

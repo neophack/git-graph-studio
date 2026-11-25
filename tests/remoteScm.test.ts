@@ -21,8 +21,6 @@ import type { ScmChange } from '../src/platform/ipc/scm';
 import type { DiffRequest } from '../src/features/editor/types';
 import { t, tf } from '../src/platform/i18n';
 
-vi.mock('mermaid', () => import('./mermaidStub'));
-vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
 
 /** A change row of `scm_status`, in the backend's own shape. */
 const change = (path: string, over: Partial<ScmChange> = {}): ScmChange => ({

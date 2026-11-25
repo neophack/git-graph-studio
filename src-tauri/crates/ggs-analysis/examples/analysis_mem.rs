@@ -216,33 +216,15 @@ fn main() {
         return;
     }
 
-    // Phase 2: the Module Analysis graph, serialized like the command answers it.
-    phase("module graph", || {
-        let graph = ggs_analysis::modules::module_graph(&data.lock().unwrap(), &[]);
-        let json = serde_json::to_string(&graph).unwrap();
-        println!("  module graph json {} bytes", json.len());
-    });
-
-    // Phase 3: the architecture drawing (its own module graph pass inside).
-    phase("module diagram", || {
-        let diagram = ggs_analysis::diagram::module_diagram(
-            &ggs_analysis::modules::module_graph(&data.lock().unwrap(), &[]),
-            None,
-            "",
-            &[],
-        );
-        let json = serde_json::to_string(&diagram).unwrap();
-        println!("  diagram json {} bytes", json.len());
-    });
-
-    // Phase 4: the Complexity & Hotspots report, streamed batch by batch.
+    // Phase 2: the Complexity & Hotspots report, streamed batch by batch.
     let mut sink = Dropping::new();
     phase("metrics", || {
         run_metrics(&index, &data, &|_| 0, &mut sink);
         println!("  {} batches, {} json bytes", sink.batches, sink.rows);
     });
 
-    // Phase 5: Dead Code — the volumes' snapshot, never the engine.
+    // Phase 3: Dead Code — the volumes' snapshot, never the engine. The store build is
+    // measured outside the phase, so the report's own cost stays the row.
     let store = ggs_index::symbols::store::SymbolStore::build(&root, 4, &|_, _| {}, &|| false)
         .expect("the store builds");
     let catalogue = ggs_analysis::deadcode::dead_catalogue(&store);
@@ -257,21 +239,30 @@ fn main() {
         println!("  {} batches, {} json bytes", sink.batches, sink.rows);
     });
 
-    // Phase 6: the Security Scan — the volumes' file table.
+    // Phase 4: the Module Analysis overview — the store's dependency facts (the engine's
+    // module pass is gone; the pipeline reads the nine volumes directly, like the page).
+    let facts = store.dependency_facts();
+    phase("module overview", || {
+        let overview = ggs_analysis::modules::module_overview(&facts, None, 0, &[]);
+        let json = serde_json::to_string(&overview).unwrap();
+        println!("  module overview json {} bytes", json.len());
+    });
+
+    // Phase 5: the Security Scan — the volumes' file table.
     let mut sink = Dropping::new();
     phase("security", || {
         run_security(&index, &root, &files, &mut sink);
         println!("  {} batches, {} json bytes", sink.batches, sink.rows);
     });
 
-    // Phase 7: the Import Graph — the volumes' file table.
+    // Phase 6: the Import Graph — the volumes' file table.
     phase("import graph", || {
         let graph = ggs_analysis::imports::import_graph(&root, &files);
         let json = serde_json::to_string(&graph).unwrap();
         println!("  import graph json {} bytes", json.len());
     });
 
-    // Phase 8: the release — drop the analysis and confirm the heap comes back.
+    // Phase 7: the release — drop the analysis and confirm the heap comes back.
     phase("release", || {
         drop(data);
         let live = LIVE.load(Ordering::Relaxed).max(0) as usize;

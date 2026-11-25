@@ -9,8 +9,6 @@
 //! cold index their rows stream through the build's per-batch hook, the click's first
 //! batch landing one parse batch in instead of a whole tree in.
 
-use std::sync::{Arc, Mutex};
-
 use tauri::ipc::Channel;
 use tauri::State;
 
@@ -20,7 +18,6 @@ use ggs_analysis::index::{
     AnalysisStatus, DeadCodeEvent, MetricsEvent, SecurityEvent,
 };
 use ggs_analysis::modules::{self, ModuleEdgeDetail, ModuleOverview};
-use ggs_analysis::AnalysisData;
 
 use ggs_base::sink::BatchSink;
 use ggs_base::workspace::WorkspaceRoots;
@@ -30,20 +27,6 @@ use ggs_base::workspace::WorkspaceRoots;
 fn resolve_root(roots: &WorkspaceRoots, repo: Option<String>) -> Result<String, String> {
     repo.or_else(|| roots.first())
         .ok_or_else(|| "No folder is open".to_owned())
-}
-
-/// The root's analysis, built now when none is resident — off the async runtime, since a
-/// first build of a large tree takes a while.
-async fn analysis_of(
-    app: &tauri::AppHandle,
-    analysis_index: &Arc<ggs_analysis::index::AnalysisIndex>,
-    root: String,
-) -> Result<Arc<Mutex<AnalysisData>>, String> {
-    let index = Arc::clone(analysis_index);
-    let sink = crate::events::TauriEvents(app.clone());
-    tauri::async_runtime::spawn_blocking(move || index.ensure_blocking(Some(&sink), &root))
-        .await
-        .map_err(|e| e.to_string())?
 }
 
 /// The index state of the open folder: what the Analysis sidebar shows.
@@ -107,6 +90,7 @@ pub async fn analysis_module_overview(
 /// On-demand L2 evidence for a single module dependency edge `from → to`: reads only the
 /// relevant `from`-side files on disk and extracts exact resolved imports and call sites.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn analysis_module_edge_detail(
     app: tauri::AppHandle,
     roots: State<'_, WorkspaceRoots>,

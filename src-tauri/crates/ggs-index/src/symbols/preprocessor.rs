@@ -247,7 +247,7 @@ pub fn eval_inactive_ranges(
 
     for (line_no, line) in text.lines().enumerate() {
         let trimmed = line.trim_start();
-        let active_now = stack.last().map_or(true, |f| f.currently_active);
+        let active_now = stack.last().is_none_or(|f| f.currently_active);
 
         if let Some(after_hash) = trimmed.strip_prefix('#') {
             let rest = after_hash.trim_start();

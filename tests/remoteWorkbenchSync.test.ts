@@ -31,8 +31,6 @@ installRemoteSessionHooks();
 import { backend, emit as mockEmit, listen as mockListen } from './tauriMock';
 import { click, flush, until } from './helpers';
 
-vi.mock('mermaid', () => import('./mermaidStub'));
-vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
 
 /* ---------- The bus: what the Relay does with an app event ---------- */
 

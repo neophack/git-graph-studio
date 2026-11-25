@@ -68,20 +68,28 @@ struct Tok<'a> {
     end: usize,
 }
 
-/// Whether a byte runs an identifier: letters, digits, `_`, `$` and the non-ASCII
-/// letters (the parser layer's own identifiers may carry them).
-fn ident_byte(text: &str, at: usize, first: bool) -> bool {
+/// Whether a character runs an identifier: ASCII letters, digits, `_`, `$` and
+/// non-ASCII letters (the parser layer's own identifiers may carry them).
+fn is_ident_char(c: char, first: bool) -> bool {
+    if c.is_ascii() {
+        c.is_ascii_alphanumeric() || c == '_' || c == '$'
+    } else if first {
+        c.is_alphabetic()
+    } else {
+        c.is_alphanumeric()
+    }
+}
+
+/// Decode the character starting at UTF-8 boundary `at` along with its byte length.
+#[inline]
+fn char_at(text: &str, at: usize) -> (char, usize) {
     let b = text.as_bytes()[at];
-    if b.is_ascii_alphanumeric() || b == b'_' || b == b'$' {
-        return true;
-    }
     if b < 0x80 {
-        return false;
+        (b as char, 1)
+    } else {
+        let c = text[at..].chars().next().unwrap();
+        (c, c.len_utf8())
     }
-    text[at..]
-        .chars()
-        .next()
-        .is_some_and(|c| if first { c.is_alphabetic() } else { c.is_alphanumeric() })
 }
 
 /// The whole walk of one text: every identifier-ish token outside the mask, with the
@@ -90,31 +98,41 @@ fn ident_byte(text: &str, at: usize, first: bool) -> bool {
 fn walk_tokens(text: &str, mask: &CodeMask, mut visit: impl FnMut(Tok<'_>)) {
     let mut line = 0usize;
     let mut line_start = 0usize;
+    let mut char_col = 0usize;
     let bytes = text.as_bytes();
     let mut at = 0usize;
     while at < bytes.len() {
-        let b = bytes[at];
-        if b == b'\n' {
+        if bytes[at] == b'\n' {
             line += 1;
             line_start = at + 1;
+            char_col = 0;
             at += 1;
             continue;
         }
-        if !ident_byte(text, at, true) {
-            at += 1;
+        let (c, step) = char_at(text, at);
+        if !is_ident_char(c, true) {
+            at += step;
+            char_col += 1;
             continue;
         }
         let start = at;
-        at += 1;
-        while at < bytes.len() && ident_byte(text, at, false) {
-            at += 1;
+        let start_col = char_col;
+        at += step;
+        char_col += 1;
+        while at < bytes.len() {
+            let (nc, nstep) = char_at(text, at);
+            if !is_ident_char(nc, false) {
+                break;
+            }
+            at += nstep;
+            char_col += 1;
         }
         let span = &text[start..at];
         let column = start - line_start;
         // The mask answers in character columns; both ends checked so a token never
         // straddles a span edge unnoticed.
-        let chars = span.chars().count();
-        let masked = mask.is_masked(line, column) || mask.is_masked(line, column + chars - 1);
+        let end_col = char_col - 1;
+        let masked = mask.is_masked(line, start_col) || mask.is_masked(line, end_col);
         if !masked {
             visit(Tok {
                 text: span,
@@ -170,8 +188,12 @@ fn receiver_of(text: &str, start: usize) -> Option<String> {
         at -= 1;
     }
     let end = at;
-    while at > 0 && ident_byte(text, at - 1, false) {
-        at -= 1;
+    for (idx, c) in text[..end].char_indices().rev() {
+        if is_ident_char(c, false) {
+            at = idx;
+        } else {
+            break;
+        }
     }
     if at == end {
         return None; // nothing identifier-ish before the operator
@@ -324,7 +346,7 @@ fn import_line(ext: &str, code: &str, raw: &str, out: &mut Vec<String>) {
                 }
             } else if let Some(at) = code_trim.find("require") {
                 // `const c = require('./c.js')` — the spec after that keyword.
-                if let Some((_, spec)) = quoted_spec_at(&raw_trim[at..]) {
+                if let Some((_, spec)) = raw_trim.get(at..).and_then(quoted_spec_at) {
                     out.push(spec);
                 }
             }
@@ -564,5 +586,27 @@ mod tests {
         assert!(!exported_of_line("java", "", "private void c() {}", "c"));
         assert!(!exported_of_line("c", "", "static void d() {}", "d"));
         assert!(exported_of_line("c", "", "void e(void) {}", "e"));
+    }
+
+    #[test]
+    fn non_ascii_text_never_panics_and_keeps_mask_columns_aligned() {
+        // Multi-byte UTF-8 punctuation (em-dash, arrow), CJK comments/strings, and
+        // non-ASCII identifiers/receivers must step by whole chars without slicing
+        // mid-character, and keep character-column mask alignment on the same line.
+        let text = "// 中文注释 — 含符号 → 不应崩溃\n\
+                    let s = \"中文字符串\"; real_call(1); // 尾注释 ghost_call()\n\
+                    let x = 对象.method(2);\n\
+                    中文函数(3);\n\
+                    /* 块注释 */ —.after_punct();\n";
+        let sites = names_of("js", text);
+        assert_eq!(
+            sites,
+            vec![
+                ("real_call".to_owned(), None, 1),
+                ("method".to_owned(), Some("对象".to_owned()), 2),
+                ("中文函数".to_owned(), None, 3),
+                ("after_punct".to_owned(), None, 4),
+            ]
+        );
     }
 }

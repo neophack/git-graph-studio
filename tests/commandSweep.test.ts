@@ -4,8 +4,6 @@
 // must visibly do), then the sweep proper: every registered command executes without throwing
 // and leaves the shell usable (the next command still runs, no quick input or menu lingers).
 
-vi.mock('mermaid', () => import('./mermaidStub'));
-vi.mock('@mermaid-js/layout-elk', () => ({ default: {} }));
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Workbench } from '../src/workbench';
@@ -53,7 +51,7 @@ beforeEach(async () => {
 		['workspace_symbols', () => [{ kind: 'function', name: 'two', path: 'notes.txt', line: 1 }]],
 		['analysis_status', () => ({ state: 'ready', done: 2, total: 2, files: 2, symbols: 3, calls: 2 })],
 		['analysis_rebuild', () => ({ state: 'ready', done: 2, total: 2, files: 2, symbols: 3, calls: 2 })],
-		['analysis_module_overview', () => ({ scope: null, depth: 1, autoDepth: 1, maxDepth: 1, totalFiles: 0, totalSymbols: 0, totalEdges: 0, nodes: [], edges: [], cycles: [], mermaid: 'flowchart LR\n' })],
+		['analysis_module_overview', () => ({ scope: '', depth: 1, breadcrumbs: [], totalFiles: 0, totalSymbols: 0, totalEdges: 0, nodes: [], edges: [], cycles: [], mermaid: 'flowchart LR\n' })],
 		['analysis_module_edge_detail', () => ({ from: '', to: '', totalRefs: 0, imports: [], callSites: [], filePairs: [] })],
 		['mcp_tools', () => [{ name: 'symbol_lookup', description: 'look up a symbol' }]],
 		['mcp_log', () => []],

@@ -1,11 +1,11 @@
 // The Analysis result pages (module 17), one editor tab per tool: three streaming
 // reports (Complexity & Hotspots, Dead Code, Security Scan) over the shared
 // batch-then-done channel rhythm, the Import Graph list, and the Module Analysis page —
-// the workspace's cross-file calls as the gitdiagram-style architecture diagram the
-// backend lays out (`analysis_module_diagram`: the busiest files as blocks inside their
-// module's group box, every kept dependency a call-count-labelled arrow, the mermaid
-// source along for the export), rendered on the hand-written SVG viewport of
-// moduleDiagram.ts (wheel zoom, drag pan, a zoom toolbar, the selection highlight and
+// the workspace's cross-file calls as the layered architecture overview the backend
+// builds from the symbol store's dependency facts (`analysis_module_overview`: module
+// and file cards with coupling metrics, every kept dependency a call-count-labelled
+// arrow, the mermaid source along for the export), rendered on the native SVG board of
+// moduleDiagram.ts (wheel zoom, drag pan, a zoom toolbar, the selection states and
 // the right-click navigation) beside a collapsible tree of module dependencies → file
 // pairs → call sites. Both views cap what they draw and the tree renders lazily, so no
 // workspace size can stall the page. Loaded lazily behind the Analysis sidebar; nothing
@@ -438,9 +438,9 @@ const DEPTH_OPTIONS = [
 ] as const;
 
 /** The Module Analysis page: nine-volume-backed layered architecture explorer with
- *  progressive breadcrumb drill-down, depth selector, cycles-only filter, native SVG
- *  board + list view, and an on-demand right-hand Inspector drawer showing module
- *  metrics, key files, and exact L2 edge imports & call sites. */
+ *  Netron-inspired interactive SVG canvas, progressive breadcrumb drill-down, depth
+ *  selector, cycles-only & neighborhood isolation filters, resizable right-hand
+ *  Properties Inspector drawer, and synchronized list view. */
 class ModulePage implements AnalysisPageView {
 	private overview: ModuleOverview | null = null;
 	private loading = true;
@@ -453,11 +453,14 @@ class ModulePage implements AnalysisPageView {
 	/** Grouping depth: 0=Auto, 1=L1, 2=L2, 3=Files. */
 	private depth = 0;
 	private cyclesOnly = false;
+	/** Optional neighborhood isolation target node id. */
+	private focusedNodeId: string | null = null;
 	private selected: { kind: 'node' | 'edge'; id: string } | null = null;
 	private edgeDetailCache = new Map<string, ModuleEdgeDetail>();
 	private edgeDetailLoading = false;
 	private edgeDetailToken = 0;
 	private loadToken = 0;
+	private inspectorWidth = 340;
 	private readonly folders: string[];
 
 	private readonly drawing: DiagramView;
@@ -466,6 +469,7 @@ class ModulePage implements AnalysisPageView {
 	private readonly statusHost: HTMLElement;
 	private readonly workspace: HTMLElement;
 	private readonly body: HTMLElement;
+	private readonly inspectorSash: HTMLElement;
 	private readonly inspector: HTMLElement;
 	private readonly graphbar: HTMLElement;
 	private readonly filterInput: HTMLInputElement;
@@ -486,6 +490,16 @@ class ModulePage implements AnalysisPageView {
 		this.filterInput.addEventListener('input', () => {
 			this.filter = this.filterInput.value.trim().toLowerCase();
 			this.render();
+		});
+		this.filterInput.addEventListener('keydown', (event) => {
+			if (event.key !== 'Enter') return;
+			const { nodes } = this.visibleGraph();
+			if (nodes.length === 0) return;
+			const q = this.filter;
+			const exact = q
+				? nodes.find((n) => n.label.toLowerCase().includes(q) || n.id.toLowerCase().includes(q)) ?? nodes[0]
+				: nodes[0];
+			this.jumpTo(exact.id);
 		});
 
 		this.depthSelect = el('select', 'an-sort an-depth') as HTMLSelectElement;
@@ -528,7 +542,11 @@ class ModulePage implements AnalysisPageView {
 				}
 			},
 			onNodeContext: (x, y, id) => this.nodeMenu(x, y, id),
-			onEdgeContext: (x, y, id) => this.edgeMenu(x, y, id)
+			onEdgeContext: (x, y, id) => this.edgeMenu(x, y, id),
+			onEscape: () => {
+				if (this.selected) this.clearSelection();
+				else if (this.focusedNodeId) this.setFocusNode(null);
+			}
 		});
 
 		this.graphbar = el('div', 'an-graphbar');
@@ -536,9 +554,13 @@ class ModulePage implements AnalysisPageView {
 		this.breadcrumbsBar = el('div', 'an-breadcrumbs');
 		this.statusHost = el('div');
 		this.body = el('div', 'an-list');
+		this.inspectorSash = el('div', 'an-insp-sash');
+		this.inspectorSash.hidden = true;
+		this.wireInspectorSash();
 		this.inspector = el('aside', 'an-inspector');
 		this.inspector.hidden = true;
-		this.workspace = el('div', 'an-mod-workspace', [this.drawing.host, this.body, this.inspector]);
+		this.inspector.style.width = `${this.inspectorWidth}px`;
+		this.workspace = el('div', 'an-mod-workspace', [this.drawing.host, this.body, this.inspectorSash, this.inspector]);
 
 		container.append(
 			el('div', 'an-header', [
@@ -561,6 +583,32 @@ class ModulePage implements AnalysisPageView {
 		void this.load();
 	}
 
+	private wireInspectorSash(): void {
+		let startX = 0;
+		let startW = this.inspectorWidth;
+		const onMove = (event: PointerEvent) => {
+			const next = Math.max(260, Math.min(640, startW + (startX - event.clientX)));
+			this.inspectorWidth = next;
+			this.inspector.style.width = `${next}px`;
+		};
+		const onUp = () => {
+			this.inspectorSash.classList.remove('active');
+			window.removeEventListener('pointermove', onMove);
+			window.removeEventListener('pointerup', onUp);
+			window.removeEventListener('pointercancel', onUp);
+		};
+		this.inspectorSash.addEventListener('pointerdown', (event) => {
+			if (event.button !== 0) return;
+			event.preventDefault();
+			startX = event.clientX;
+			startW = this.inspector.offsetWidth || this.inspectorWidth;
+			this.inspectorSash.classList.add('active');
+			window.addEventListener('pointermove', onMove);
+			window.addEventListener('pointerup', onUp);
+			window.addEventListener('pointercancel', onUp);
+		});
+	}
+
 	private setView(view: 'graph' | 'list'): void {
 		if (this.view === view) return;
 		this.view = view;
@@ -574,9 +622,18 @@ class ModulePage implements AnalysisPageView {
 		if (next === this.scope) return;
 		this.scope = next;
 		this.selected = null;
+		this.focusedNodeId = null;
 		this.cyclesOnly = false;
 		this.cyclesBtn.classList.remove('on');
 		void this.load();
+	}
+
+	private setFocusNode(nodeId: string | null): void {
+		const next = nodeId === this.focusedNodeId ? null : nodeId;
+		this.focusedNodeId = next;
+		if (next) this.selected = { kind: 'node', id: next };
+		this.render();
+		if (next) this.drawing.focusElement(next);
 	}
 
 	private async load(): Promise<void> {
@@ -584,6 +641,7 @@ class ModulePage implements AnalysisPageView {
 		this.loading = true;
 		this.error = null;
 		this.selected = null;
+		this.focusedNodeId = null;
 		this.edgeDetailCache.clear();
 		this.render();
 		try {
@@ -613,6 +671,17 @@ class ModulePage implements AnalysisPageView {
 			const cycleIds = new Set(nodes.filter((n) => n.inCycle).map((n) => n.id));
 			nodes = nodes.filter((n) => cycleIds.has(n.id));
 			edges = edges.filter((e) => e.isCycle && cycleIds.has(e.from) && cycleIds.has(e.to));
+		}
+		if (this.focusedNodeId) {
+			const fid = this.focusedNodeId;
+			const relatedEdges = edges.filter((e) => e.from === fid || e.to === fid);
+			const keepIds = new Set<string>([fid]);
+			for (const e of relatedEdges) {
+				keepIds.add(e.from);
+				keepIds.add(e.to);
+			}
+			nodes = nodes.filter((n) => keepIds.has(n.id));
+			edges = relatedEdges;
 		}
 		if (this.filter) {
 			const q = this.filter;
@@ -753,19 +822,23 @@ class ModulePage implements AnalysisPageView {
 			const edge = edges.find((e) => e.id === this.selected!.id);
 			if (edge) {
 				edgeStates[edge.id] = ['selected'];
-				nodeStates[edge.from] = ['related'];
-				nodeStates[edge.to] = ['related'];
+				nodeStates[edge.from] = ['related', 'upstream'];
+				nodeStates[edge.to] = ['related', 'downstream'];
 			}
 		} else {
 			const nid = this.selected.id;
 			nodeStates[nid] = ['selected'];
 			for (const e of edges) {
 				if (e.from === nid) {
-					edgeStates[e.id] = ['selected'];
-					if (e.to !== nid) nodeStates[e.to] = ['related'];
+					edgeStates[e.id] = ['selected', 'downstream'];
+					if (e.to !== nid) {
+						nodeStates[e.to] = [...(nodeStates[e.to] ?? []), 'related', 'downstream'];
+					}
 				} else if (e.to === nid) {
-					edgeStates[e.id] = ['selected'];
-					if (e.from !== nid) nodeStates[e.from] = ['related'];
+					edgeStates[e.id] = ['selected', 'upstream'];
+					if (e.from !== nid) {
+						nodeStates[e.from] = [...(nodeStates[e.from] ?? []), 'related', 'upstream'];
+					}
 				}
 			}
 		}
@@ -794,99 +867,211 @@ class ModulePage implements AnalysisPageView {
 		this.renderInspector();
 	}
 
+	private renderInspectorSection(title: string, children: HTMLElement[], defaultOpen = true): HTMLElement {
+		const sec = el('div', `an-insp-group${defaultOpen ? '' : ' collapsed'}`);
+		const chevron = icon(defaultOpen ? 'chevron-down' : 'chevron-right');
+		const head = el('button', 'an-insp-sec', [chevron, el('span', undefined, [title])]);
+		const content = el('div', 'an-insp-group-body', children);
+		head.addEventListener('click', () => {
+			const isCollapsed = sec.classList.toggle('collapsed');
+			chevron.className = `codicon codicon-${isCollapsed ? 'chevron-right' : 'chevron-down'}`;
+		});
+		sec.append(head, content);
+		return sec;
+	}
+
+	private renderPropRow(label: string, value: string | HTMLElement): HTMLElement {
+		return el('div', 'an-prop-row', [
+			el('span', 'an-prop-key', [label]),
+			typeof value === 'string' ? el('span', 'an-prop-val', [value]) : value
+		]);
+	}
+
 	private renderInspector(): void {
 		this.inspector.textContent = '';
 		if (!this.selected || !this.overview) {
 			this.inspector.hidden = true;
+			this.inspectorSash.hidden = true;
 			return;
 		}
 		this.inspector.hidden = false;
+		this.inspectorSash.hidden = false;
 		const ov = this.overview;
 
 		if (this.selected.kind === 'node') {
 			const node = ov.nodes.find((n) => n.id === this.selected!.id);
 			if (!node) {
 				this.inspector.hidden = true;
+				this.inspectorSash.hidden = true;
 				return;
 			}
-			const head = el('div', 'an-insp-head', [
-				icon(node.kind === 'file' ? 'file-code' : 'symbol-module'),
+			const kindKey = node.kind === 'file'
+				? 'analysis.modules.inspector.kind.file'
+				: node.kind === 'external'
+					? 'analysis.modules.inspector.kind.external'
+					: 'analysis.modules.inspector.kind.module';
+
+			const head = el('div', `an-insp-head kind-${node.kind}${node.inCycle ? ' cycle' : ''}`, [
+				el('span', `an-insp-dot kind-${node.kind}${node.inCycle ? ' cycle' : ''}`),
 				el('span', 'an-insp-title', [moduleLabel(node.id)]),
+				actionButton('copy', t('analysis.modules.copyPath'), () => { void writeText(node.id).then(() => {}, () => {}); }),
 				actionButton('close', t('analysis.modules.inspector.close'), () => this.clearSelection())
 			]);
-			const meta = el('div', 'an-insp-meta', [
-				tf('analysis.modules.inspector.metrics', node.files, node.symbols, node.fanIn, node.fanOut, node.instability.toFixed(2))
-			]);
+
 			const actions = el('div', 'an-insp-actions');
 			if (node.expandable) {
-				const drillBtn = el('button', 'button', [t('analysis.modules.drillIn')]);
+				const drillBtn = el('button', 'button', [icon('folder-opened'), t('analysis.modules.drillIn')]);
 				drillBtn.addEventListener('click', () => this.drillInto(node.id));
 				actions.append(drillBtn);
 			} else if (node.kind === 'file') {
-				const openBtn = el('button', 'button', [t('analysis.modules.openFile')]);
+				const openBtn = el('button', 'button', [icon('go-to-file'), t('analysis.modules.openFile')]);
 				openBtn.addEventListener('click', () => this.onOpen?.(node.id, 1));
 				actions.append(openBtn);
 			}
-			if (node.inCycle) {
-				actions.append(el('span', 'an-chip an-chip-cycle', [t('analysis.modules.inspector.cycleTag')]));
+			const isFocused = this.focusedNodeId === node.id;
+			const focusBtn = el('button', `button secondary${isFocused ? ' active' : ''}`, [
+				icon('filter'),
+				isFocused ? t('analysis.modules.clearFocus') : t('analysis.modules.isolate')
+			]);
+			focusBtn.addEventListener('click', () => this.setFocusNode(node.id));
+			actions.append(focusBtn);
+			if (this.view === 'graph') {
+				const centerBtn = actionButton('target', t('analysis.modules.centerNode'), () => this.drawing.focusElement(node.id));
+				actions.append(centerBtn);
 			}
 
-			const outEdges = ov.edges.filter((e) => e.from === node.id);
-			const inEdges = ov.edges.filter((e) => e.to === node.id);
-			const body = el('div', 'an-insp-body', [meta, actions]);
+			// Netron-style structured Properties table with visual instability gauge.
+			const instClamped = Math.max(0, Math.min(1, node.instability));
+			const instTier = node.inCycle ? 'cycle' : instClamped >= 0.75 ? 'high' : instClamped >= 0.35 ? 'mid' : 'low';
+			const instDesc = instClamped >= 0.75
+				? t('analysis.modules.inspector.unstable')
+				: instClamped >= 0.35
+					? t('analysis.modules.inspector.balanced')
+					: t('analysis.modules.inspector.stable');
+			const instVal = el('span', 'an-prop-val an-prop-inst', [
+				el('span', 'an-inst-bar', [
+					el('i', `an-inst-bar-fill ${instTier}`)
+				]),
+				el('span', undefined, [`${node.instability.toFixed(2)} (${instDesc})`])
+			]);
+			(instVal.querySelector('.an-inst-bar-fill') as HTMLElement).style.width = `${Math.max(4, Math.round(instClamped * 100))}%`;
+
+			const propRows: HTMLElement[] = [
+				this.renderPropRow(t('analysis.modules.inspector.kind'), t(kindKey)),
+				this.renderPropRow(t('analysis.modules.inspector.layer'), `L${node.layer}`),
+				this.renderPropRow(t('analysis.modules.inspector.files'), String(node.files)),
+				this.renderPropRow(t('analysis.modules.inspector.symbols'), String(node.symbols)),
+				this.renderPropRow(t('analysis.modules.inspector.coupling'), `↓ ${node.fanIn}  /  ↑ ${node.fanOut}`),
+				this.renderPropRow(t('analysis.modules.inspector.instability'), instVal)
+			];
+			if (node.inCycle) {
+				propRows.push(this.renderPropRow(
+					t('analysis.modules.inspector.cycleTag'),
+					el('span', 'an-chip an-chip-cycle', [t('analysis.modules.inspector.cycleTag')])
+				));
+			}
+
+			const outEdges = ov.edges.filter((e) => e.from === node.id).sort((a, b) => b.weight - a.weight);
+			const inEdges = ov.edges.filter((e) => e.to === node.id).sort((a, b) => b.weight - a.weight);
+			const body = el('div', 'an-insp-body', [
+				actions,
+				this.renderInspectorSection(t('analysis.modules.inspector.properties'), [
+					el('div', 'an-prop-grid', propRows)
+				])
+			]);
 
 			if (outEdges.length > 0) {
-				body.append(el('div', 'an-insp-sec', [tf('analysis.modules.inspector.dependsOn', outEdges.length)]));
-				for (const e of outEdges) body.append(this.renderInspectorEdgeRow(e, e.to));
+				body.append(this.renderInspectorSection(
+					tf('analysis.modules.inspector.dependsOn', outEdges.length),
+					outEdges.map((e) => this.renderInspectorEdgeRow(e, e.to, 'out'))
+				));
 			}
 			if (inEdges.length > 0) {
-				body.append(el('div', 'an-insp-sec', [tf('analysis.modules.inspector.usedBy', inEdges.length)]));
-				for (const e of inEdges) body.append(this.renderInspectorEdgeRow(e, e.from));
+				body.append(this.renderInspectorSection(
+					tf('analysis.modules.inspector.usedBy', inEdges.length),
+					inEdges.map((e) => this.renderInspectorEdgeRow(e, e.from, 'in'))
+				));
 			}
 			if (node.topFiles.length > 0) {
-				body.append(el('div', 'an-insp-sec', [tf('analysis.modules.inspector.keyFiles', node.topFiles.length)]));
-				for (const f of node.topFiles) {
+				const maxSym = Math.max(1, ...node.topFiles.map((f) => f.symbols));
+				const fileRows = node.topFiles.map((f) => {
+					const bar = el('span', 'an-file-bar', [el('i')]);
+					(bar.firstElementChild as HTMLElement).style.width = `${Math.max(8, Math.round((f.symbols / maxSym) * 100))}%`;
 					const row = el('div', 'an-row an-insp-row', [
 						icon('file-code'),
 						el('span', 'label', [f.path]),
+						bar,
 						el('span', 'tail', [`${f.symbols}`])
 					]);
+					row.title = `${f.path} (${f.symbols} symbols)`;
 					row.addEventListener('click', () => this.onOpen?.(f.path, 1));
-					body.append(row);
-				}
+					return row;
+				});
+				body.append(this.renderInspectorSection(
+					tf('analysis.modules.inspector.keyFiles', node.topFiles.length),
+					fileRows
+				));
 			}
 			this.inspector.append(head, body);
 			return;
 		}
 
-		// Edge Inspector (L2 on-demand evidence).
+		// Edge Inspector (Netron tensor/connection style + L2 on-demand evidence).
 		const edge = ov.edges.find((e) => e.id === this.selected!.id);
 		if (!edge) {
 			this.inspector.hidden = true;
+			this.inspectorSash.hidden = true;
 			return;
 		}
-		const head = el('div', 'an-insp-head', [
-			icon('arrow-right'),
+		const head = el('div', `an-insp-head${edge.isCycle ? ' cycle' : ''}`, [
+			icon(edge.isCycle ? 'sync' : 'arrow-right'),
 			el('span', 'an-insp-title', [`${moduleLabel(edge.from)} → ${moduleLabel(edge.to)}`]),
+			actionButton('copy', t('analysis.modules.copyPair'), () => { void writeText(`${edge.from} → ${edge.to}`).then(() => {}, () => {}); }),
 			actionButton('close', t('analysis.modules.inspector.close'), () => this.clearSelection())
 		]);
-		const body = el('div', 'an-insp-body');
-		body.append(el('div', 'an-insp-meta', [
-			`${tf('analysis.modules.calls', edge.weight)} · ${tf('analysis.modules.filePairs', edge.filePairs)}${edge.isCycle ? ` · ${t('analysis.modules.inspector.cycleTag')}` : ''}`
-		]));
-		if (edge.topSymbols.length > 0) {
-			body.append(
-				el('div', 'an-insp-sec', [t('analysis.modules.inspector.topSymbols')]),
-				el('div', 'an-insp-chips', edge.topSymbols.map((s) => el('span', 'an-chip', [s])))
-			);
+
+		const fromJump = el('button', 'an-endpoint-pill', [icon('symbol-module'), el('span', undefined, [moduleLabel(edge.from)])]);
+		fromJump.addEventListener('click', () => this.jumpTo(edge.from));
+		const toJump = el('button', 'an-endpoint-pill', [icon('symbol-module'), el('span', undefined, [moduleLabel(edge.to)])]);
+		toJump.addEventListener('click', () => this.jumpTo(edge.to));
+		const endpointsBar = el('div', 'an-endpoints-bar', [
+			fromJump,
+			el('span', 'an-arrow', ['→']),
+			toJump
+		]);
+
+		const edgeProps: HTMLElement[] = [
+			this.renderPropRow(t('analysis.modules.inspector.symbolRefs'), String(edge.symbolRefs)),
+			this.renderPropRow(t('analysis.modules.inspector.baseRefs'), String(edge.baseRefs)),
+			this.renderPropRow(t('analysis.modules.filePairs').replace('{0}', '').trim() || 'File Pairs', String(edge.filePairs))
+		];
+		if (edge.isCycle) {
+			edgeProps.push(this.renderPropRow(
+				t('analysis.modules.inspector.cycleTag'),
+				el('span', 'an-chip an-chip-cycle', [t('analysis.modules.inspector.cycleTag')])
+			));
 		}
+
+		const body = el('div', 'an-insp-body', [
+			endpointsBar,
+			this.renderInspectorSection(t('analysis.modules.inspector.properties'), [
+				el('div', 'an-prop-grid', edgeProps)
+			])
+		]);
+
+		if (edge.topSymbols.length > 0) {
+			body.append(this.renderInspectorSection(
+				t('analysis.modules.inspector.topSymbols'),
+				[el('div', 'an-insp-chips', edge.topSymbols.map((s) => el('span', 'an-chip', [s])))]
+			));
+		}
+
 		const detail = this.edgeDetailCache.get(edge.id);
 		if (this.edgeDetailLoading && !detail) {
 			body.append(el('div', 'an-insp-note', [t('analysis.modules.inspector.loadingDetail')]));
 		} else if (detail) {
 			if (detail.imports.length > 0) {
-				body.append(el('div', 'an-insp-sec', [tf('analysis.modules.inspector.imports', detail.imports.length)]));
-				for (const imp of detail.imports.slice(0, 50)) {
+				const impRows = detail.imports.slice(0, 50).map((imp) => {
 					const row = el('div', 'an-row an-insp-row', [
 						icon('references'),
 						el('span', 'label', [`${basename(imp.fromFile)} → ${basename(imp.toFile)}`]),
@@ -894,12 +1079,16 @@ class ModulePage implements AnalysisPageView {
 					]);
 					row.title = `${imp.fromFile} → ${imp.toFile}`;
 					row.addEventListener('click', () => this.onOpen?.(imp.fromFile, 1));
-					body.append(row);
-				}
+					return row;
+				});
+				body.append(this.renderInspectorSection(
+					tf('analysis.modules.inspector.imports', detail.imports.length),
+					impRows
+				));
 			}
 			const totalSites = detail.filePairs.reduce((sum, p) => sum + p.sites.length, 0);
 			if (totalSites > 0) {
-				body.append(el('div', 'an-insp-sec', [tf('analysis.modules.inspector.callSites', totalSites)]));
+				const siteRows: HTMLElement[] = [];
 				for (const pair of detail.filePairs.slice(0, 30)) {
 					for (const site of pair.sites.slice(0, 15)) {
 						const label = site.receiver ? `${site.receiver}.${site.symbol}` : site.symbol;
@@ -910,9 +1099,13 @@ class ModulePage implements AnalysisPageView {
 						]);
 						row.title = `${pair.fromFile}:${site.line + 1} → ${pair.toFile}`;
 						row.addEventListener('click', () => this.onOpen?.(pair.fromFile, site.line + 1));
-						body.append(row);
+						siteRows.push(row);
 					}
 				}
+				body.append(this.renderInspectorSection(
+					tf('analysis.modules.inspector.callSites', totalSites),
+					siteRows
+				));
 			}
 			if (detail.imports.length === 0 && totalSites === 0) {
 				body.append(el('div', 'an-insp-note', [t('analysis.modules.inspector.noDetail')]));
@@ -921,11 +1114,14 @@ class ModulePage implements AnalysisPageView {
 		this.inspector.append(head, body);
 	}
 
-	private renderInspectorEdgeRow(edge: ModuleEdge, targetId: string): HTMLElement {
-		const row = el('div', `an-row an-insp-row${edge.isCycle ? ' an-cycle-row' : ''}`, [
-			icon(edge.isCycle ? 'sync' : 'arrow-right'),
+	private renderInspectorEdgeRow(edge: ModuleEdge, targetId: string, dir: 'in' | 'out'): HTMLElement {
+		const jumpBtn = actionButton('target', t('analysis.modules.centerNode'), () => this.jumpTo(targetId));
+		jumpBtn.addEventListener('click', (ev) => ev.stopPropagation());
+		const row = el('div', `an-row an-insp-row an-dir-${dir}${edge.isCycle ? ' an-cycle-row' : ''}`, [
+			icon(edge.isCycle ? 'sync' : dir === 'out' ? 'arrow-right' : 'arrow-left'),
 			el('span', 'label', [moduleLabel(targetId)]),
-			el('span', 'tail', [`${edge.weight}`])
+			el('span', 'an-weight-pill', [`${edge.weight}`]),
+			jumpBtn
 		]);
 		row.addEventListener('click', () => this.selectElement({ kind: 'edge', id: edge.id }));
 		return row;
@@ -939,11 +1135,18 @@ class ModulePage implements AnalysisPageView {
 		}
 		this.body.appendChild(el('div', 'an-section', [tf('analysis.modules.dependencies', edges.length)]));
 		for (const edge of edges.slice(0, 1000)) {
+			const locateBtn = actionButton('target', t('analysis.modules.locateInGraph'), () => {
+				this.setView('graph');
+				this.selectElement({ kind: 'edge', id: edge.id });
+				this.drawing.focusElement(edge.id);
+			});
+			locateBtn.addEventListener('click', (ev) => ev.stopPropagation());
 			const row = el('div', `an-row an-branch${edge.isCycle ? ' an-cycle-row' : ''}`, [
 				icon(edge.isCycle ? 'sync' : 'arrow-right'),
 				el('span', 'label', [moduleLabel(edge.from), el('span', 'an-arrow', ['→']), moduleLabel(edge.to)]),
 				el('span', 'description', [edge.topSymbols.slice(0, 3).join(', ')]),
-				el('span', 'tail', [`${tf('analysis.modules.calls', edge.weight)} · ${tf('analysis.modules.filePairs', edge.filePairs)}`])
+				el('span', 'tail', [`${tf('analysis.modules.calls', edge.weight)} · ${tf('analysis.modules.filePairs', edge.filePairs)}`]),
+				locateBtn
 			]);
 			row.addEventListener('click', () => this.selectElement({ kind: 'edge', id: edge.id }));
 			this.body.appendChild(row);
@@ -951,6 +1154,7 @@ class ModulePage implements AnalysisPageView {
 	}
 
 	private jumpTo(nodeId: string): void {
+		if (this.view !== 'graph') this.setView('graph');
 		this.selectElement({ kind: 'node', id: nodeId });
 		this.drawing.focusElement(nodeId);
 	}
@@ -963,10 +1167,26 @@ class ModulePage implements AnalysisPageView {
 
 	private updateGraphbar(): void {
 		this.graphbar.textContent = '';
+		const legend = el('div', 'an-legend', [
+			el('span', 'an-legend-item', [el('i', 'an-legend-dot kind-module'), t('analysis.modules.legend.module')]),
+			el('span', 'an-legend-item', [el('i', 'an-legend-dot kind-file'), t('analysis.modules.legend.file')]),
+			el('span', 'an-legend-item', [el('i', 'an-legend-dot kind-external'), t('analysis.modules.legend.external')]),
+			el('span', 'an-legend-item', [el('i', 'an-legend-dot cycle'), t('analysis.modules.legend.cycle')])
+		]);
+		this.graphbar.appendChild(legend);
+
 		if (this.folders.length > 0) {
 			const chip = el('span', 'chip scope', [icon('folder'), el('span', undefined, [tf('analysis.modules.scopeChip', this.folders.join(', '))])]);
 			chip.title = this.folders.join('\n');
 			this.graphbar.appendChild(chip);
+		}
+		if (this.focusedNodeId) {
+			this.graphbar.appendChild(this.graphbarChip(
+				tf('analysis.modules.focusChip', moduleLabel(this.focusedNodeId)),
+				'filter',
+				t('analysis.modules.clearFocus'),
+				() => this.setFocusNode(null)
+			));
 		}
 		if (this.selected && this.overview) {
 			if (this.selected.kind === 'node') {
@@ -1013,6 +1233,10 @@ class ModulePage implements AnalysisPageView {
 		const entries: MenuEntry[] = [
 			...(node.expandable ? [{ label: t('analysis.modules.drillIn'), run: () => this.drillInto(node.id) }] : []),
 			...(node.kind === 'file' ? [{ label: t('analysis.modules.openFile'), run: () => this.onOpen?.(node.id, 1) }] : []),
+			{
+				label: this.focusedNodeId === node.id ? t('analysis.modules.clearFocus') : t('analysis.modules.focus'),
+				run: () => this.setFocusNode(node.id)
+			},
 			'separator',
 			out.length > 0
 				? { label: tf('analysis.modules.callsOut', out.length), submenu: neighbourItems(out, (e) => e.to) }

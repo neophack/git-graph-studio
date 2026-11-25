@@ -623,10 +623,14 @@ mod tests {
             "{names:?}"
         );
 
-        // The whole seed sits in one file, so the module graph has no cross-file edge.
-        let modules = crate::modules::module_graph(&data.lock().unwrap(), &[]);
-        assert!(modules.edges.is_empty());
-        assert_eq!(modules.modules.len(), 1);
+        // The whole seed sits in one file, so the store-backed module overview has no
+        // cross-file edge — the pipeline reads the volumes, never the engine.
+        let store = ggs_index::symbols::store::SymbolStore::build(&root, 4, &|_, _| {}, &|| false)
+            .unwrap();
+        let facts = store.dependency_facts();
+        let overview = crate::modules::module_overview(&facts, None, 0, &[]);
+        assert!(overview.edges.is_empty());
+        assert!(!overview.nodes.is_empty());
 
         index.remove(&root);
         assert_eq!(index.status(&root).state, AnalysisState::Empty);

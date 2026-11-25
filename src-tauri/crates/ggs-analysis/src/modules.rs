@@ -515,10 +515,12 @@ pub fn module_overview(
         .map(|(id, _)| id.clone())
         .collect();
     let internal_set: HashSet<&str> = internal_ids.iter().map(String::as_str).collect();
-    let internal_edge_pairs: Vec<(&str, &str)> = raw_edges
+    // Owned endpoints: the pairs must not borrow `raw_edges` — the cycle pass below
+    // takes `&mut raw_edges` between the two computations that read these pairs.
+    let internal_edge_pairs: Vec<(String, String)> = raw_edges
         .iter()
         .filter(|e| internal_set.contains(e.from.as_str()) && internal_set.contains(e.to.as_str()))
-        .map(|e| (e.from.as_str(), e.to.as_str()))
+        .map(|e| (e.from.clone(), e.to.clone()))
         .collect();
 
     let (scc_of, cycles) = compute_sccs(&internal_ids, &internal_edge_pairs);
@@ -632,6 +634,9 @@ pub fn module_overview(
     }
 }
 
+/// One file pair's L2 evidence: the shared symbols and the capped call-site list.
+type PairEvidence = (BTreeMap<String, ()>, Vec<EdgeCallSite>);
+
 /// On-demand L2 evidence for a single dependency edge `from → to`: reads only the
 /// relevant `from`-side files on disk and extracts exact resolved imports and call sites
 /// targeting symbols declared in `to`.
@@ -731,8 +736,7 @@ pub fn module_edge_detail(
         .collect();
 
     let mut imports: Vec<EdgeImport> = Vec::new();
-    let mut pairs_map: BTreeMap<(String, String), (BTreeMap<String, ()>, Vec<EdgeCallSite>)> =
-        BTreeMap::new();
+    let mut pairs_map: BTreeMap<(String, String), PairEvidence> = BTreeMap::new();
     let mut scanned_files = 0usize;
 
     for fid in scan_fids {
@@ -759,7 +763,9 @@ pub fn module_edge_detail(
 
         // 2. Exact call sites in `from_path` targeting symbols declared in `to_id`.
         if !wanted_names.is_empty() {
-            for site in sites::call_sites(ext, &text, &wanted_names) {
+            for site in sites::call_sites(ext, &text, &|name: &str| {
+                wanted_names.contains(name)
+            }) {
                 let Some(targets) = to_sym_decls.get(site.name.as_str()) else {
                     continue;
                 };
@@ -824,11 +830,11 @@ pub fn module_edge_detail(
 /// `cycles` holds every strongly-connected component with >= 2 members.
 fn compute_sccs<'a>(
     nodes: &'a [String],
-    edges: &[(&'a str, &'a str)],
+    edges: &'a [(String, String)],
 ) -> (HashMap<&'a str, usize>, Vec<Vec<String>>) {
     let mut adj: HashMap<&'a str, Vec<&'a str>> = HashMap::new();
-    for &(u, v) in edges {
-        adj.entry(u).or_default().push(v);
+    for (u, v) in edges {
+        adj.entry(u.as_str()).or_default().push(v.as_str());
     }
     let mut index: HashMap<&'a str, usize> = HashMap::new();
     let mut lowlink: HashMap<&'a str, usize> = HashMap::new();
@@ -903,7 +909,7 @@ fn compute_sccs<'a>(
 /// Layer 0 = nodes with no incoming dependencies from other SCCs (top-level callers).
 fn compute_layers<'a>(
     nodes: &'a [String],
-    edges: &[(&'a str, &'a str)],
+    edges: &[(String, String)],
     scc_of: &HashMap<&'a str, usize>,
 ) -> HashMap<&'a str, u32> {
     let scc_count = scc_of.values().copied().max().map_or(0, |m| m + 1);
@@ -911,8 +917,8 @@ fn compute_layers<'a>(
     let mut indeg: Vec<usize> = vec![0; scc_count];
     let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
 
-    for &(u, v) in edges {
-        let (Some(&su), Some(&sv)) = (scc_of.get(u), scc_of.get(v)) else {
+    for (u, v) in edges {
+        let (Some(&su), Some(&sv)) = (scc_of.get(u.as_str()), scc_of.get(v.as_str())) else {
             continue;
         };
         if su != sv && seen_edges.insert((su, sv)) {

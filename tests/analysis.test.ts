@@ -473,6 +473,55 @@ describe('the graph pages', () => {
 		hostEl.dispatchEvent(new KeyboardEvent('keydown', { key: '0' }));
 		await settle();
 		expect(level()).toBe('100%');
+
+		// Pure-vector Netron zoom: transform lives on SVG <g class="an-viewport"> with no CSS scale on stage.
+		const stage = root.querySelector<HTMLElement>('.an-svg-stage')!;
+		const vp = root.querySelector<SVGGElement>('g.an-viewport')!;
+		expect(stage.style.transform).toBe('');
+		expect(vp.getAttribute('transform')).toContain('scale(');
+		expect(root.querySelector('feDropShadow')).toBeNull();
+	});
+
+	it('supports TB/LR layout toggle, minimap toggle, neighborhood isolation, Escape clear, and SVG export', async () => {
+		await modules();
+		backend.on('analysis_module_overview', () => overviewAnswer());
+		const root = host();
+		createAnalysisPage('modules', root);
+		await flush(6);
+
+		const toolBtn = (title: string) =>
+			[...root.querySelectorAll<HTMLElement>('.an-zoombar .action-btn')].find((button) => button.title === title)!;
+
+		// Minimap is rendered for multi-node graphs and can be toggled off/on.
+		const minimap = root.querySelector<HTMLElement>('.an-minimap')!;
+		expect(minimap.hidden).toBe(false);
+		toolBtn('Toggle minimap').click();
+		expect(minimap.hidden).toBe(true);
+		toolBtn('Toggle minimap').click();
+		expect(minimap.hidden).toBe(false);
+
+		// Layout direction switches between Vertical (TB) and Horizontal (LR).
+		toolBtn('Horizontal layout (Left to Right)').click();
+		expect(toolBtn('Vertical layout (Top to Bottom)')).toBeTruthy();
+		expect(root.querySelectorAll('g.an-mod-node').length).toBe(3);
+
+		// Copy SVG Diagram copies standalone SVG markup.
+		toolBtn('Copy SVG Diagram').click();
+		expect(backend.clipboard.at(-1)).toContain('<svg');
+
+		// Select 'app', then isolate its neighborhood (app + core only, db excluded).
+		nodeEl(root, 'app').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		const isolateBtn = [...root.querySelectorAll<HTMLButtonElement>('.an-insp-actions .button')]
+			.find((b) => b.textContent?.includes('Isolate Neighborhood'))!;
+		isolateBtn.click();
+		expect(root.querySelectorAll('g.an-mod-node').length).toBe(2);
+
+		// Pressing Escape clears selection, then pressing Escape again clears focus isolation.
+		const hostEl = root.querySelector<HTMLElement>('.an-diagram')!;
+		hostEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+		expect(root.querySelector<HTMLElement>('.an-inspector')!.hidden).toBe(true);
+		hostEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+		expect(root.querySelectorAll('g.an-mod-node').length).toBe(3);
 	});
 
 	it('the MCP page lists setup, the catalogue and the call log', async () => {

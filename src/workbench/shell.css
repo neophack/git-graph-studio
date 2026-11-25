@@ -2263,44 +2263,59 @@ button.ggs-symbol-hover-relations:hover { text-decoration: underline; color: var
 .an-toggle.on { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
 .an-sort { height: 24px; font-size: 11px; border-radius: 4px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent); }
 
-/* The Module Analysis drawing (module 17): the backend-curated mermaid source
-   rendered by mermaid itself (ELK layout, classic look) — the tone cards and
-   clusters carry their styles inside the SVG (the classDefs ride the source),
-   while everything around it reads the workbench theme's --vscode-* tokens: the
-   sheet is the editor surface, the toolbar and the chips are editor widgets, so
-   a theme switch recolours them with no re-render at all. */
-.an-diagram { flex: 1; min-height: 0; position: relative; overflow: hidden; cursor: grab; touch-action: none; outline: none; }
-.an-diagram.dragging { cursor: grabbing; }
-.an-diagram.empty .an-zoombar { display: none; }
+/* Netron-inspired Module Architecture Canvas & Properties Inspector (module 17) */
 .an-diagram {
-	background: var(--vscode-editor-background);
-	--dg-accent: var(--vscode-focusBorder, var(--vscode-editor-foreground));
+	flex: 1; min-height: 0; position: relative; overflow: hidden; cursor: grab;
+	touch-action: none; outline: none;
+	background-color: var(--vscode-editor-background);
+	background-image: radial-gradient(
+		circle,
+		color-mix(in srgb, var(--vscode-editor-foreground, #888) 13%, transparent) 1px,
+		transparent 1px
+	);
+	background-size: 20px 20px;
+	--dg-accent: var(--vscode-focusBorder, #3794ff);
+	--dg-in: var(--vscode-charts-blue, #3794ff);
+	--dg-out: var(--vscode-charts-green, #73c991);
+	--dg-cycle: var(--vscode-editorError-foreground, #f14c4c);
+	--dg-ext: var(--vscode-charts-purple, #b180d7);
 }
-/* The toolbar rides the canvas as gitdiagram's own pill, in the theme's
-   editor-widget colours. */
+.an-diagram.dragging, .an-diagram.dragging-node { cursor: grabbing; }
+.an-diagram.empty .an-zoombar, .an-diagram.empty .an-minimap { display: none; }
+
+/* Floating Netron-style toolbar pills */
 .an-zoombar {
-	position: absolute; top: 10px; right: 10px; z-index: 2; display: flex; gap: 6px; align-items: center;
-	--tb-bg: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.15));
+	position: absolute; top: 10px; right: 12px; z-index: 4; display: flex; gap: 6px; align-items: center;
+	--tb-bg: color-mix(in srgb, var(--vscode-editorWidget-background, #252526) 92%, transparent);
 	--tb-line: var(--vscode-widget-border, rgba(128, 128, 128, 0.35));
 	--tb-text: var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground));
 }
 .an-zoombar .pill {
 	display: flex; align-items: center; overflow: hidden; border-radius: 999px;
 	background: var(--tb-bg); border: 1px solid var(--tb-line);
+	backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+	box-shadow: 0 2px 8px color-mix(in srgb, #000 18%, transparent);
 }
-.an-zoombar .pill .action-btn { border-radius: 0; }
+.an-zoombar .pill .action-btn { border-radius: 0; width: 26px; height: 24px; }
 .an-zoombar .action-btn { color: var(--tb-text); }
 .an-zoombar .action-btn:hover { background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.2)); }
+.an-zoombar .action-btn.active {
+	background: color-mix(in srgb, var(--dg-accent) 22%, transparent);
+	color: var(--dg-accent);
+}
 .an-zoom-level {
-	min-width: 46px; text-align: center; font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
+	min-width: 46px; text-align: center; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+	font-variant-numeric: tabular-nums;
 	color: var(--tb-text); border-left: 1px solid var(--tb-line);
-	border-right: 1px solid var(--tb-line); padding: 0 8px; align-self: stretch; line-height: 22px;
+	border-right: 1px solid var(--tb-line); padding: 0 8px; align-self: stretch; line-height: 24px;
 }
 .an-zoombar > .action-btn {
-	height: 24px; border-radius: 999px; padding: 0 10px;
+	height: 26px; width: 28px; border-radius: 999px;
 	background: var(--tb-bg); border: 1px solid var(--tb-line);
+	backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+	box-shadow: 0 2px 8px color-mix(in srgb, #000 18%, transparent);
 }
-/* Native SVG Module Architecture Board & Inspector (module 17) */
+
 .an-mod-workspace { flex: 1; min-height: 0; display: flex; position: relative; }
 .an-breadcrumbs {
 	display: flex; align-items: center; gap: 2px; padding: 4px 12px; flex: none;
@@ -2327,89 +2342,325 @@ button.ggs-symbol-hover-relations:hover { text-decoration: underline; color: var
 	color: #ffffff;
 }
 
-.an-svg-stage { position: absolute; }
-.an-svg-canvas { display: block; overflow: visible; }
+.an-svg-stage { position: absolute; inset: 0; width: 100%; height: 100%; }
+.an-svg-canvas {
+	display: block; width: 100%; height: 100%; overflow: visible;
+	shape-rendering: geometricPrecision; text-rendering: geometricPrecision;
+}
 
-.an-mod-node { cursor: pointer; transition: opacity 140ms ease; }
+/* Architectural layer bands (L0, L1, L2...) */
+.an-layer-band {
+	fill: color-mix(in srgb, var(--vscode-editor-foreground, #888) 3%, transparent);
+	stroke: color-mix(in srgb, var(--vscode-editor-foreground, #888) 8%, transparent);
+	stroke-width: 1;
+	stroke-dasharray: 4 4;
+}
+.an-layer-tag {
+	fill: color-mix(in srgb, var(--vscode-descriptionForeground, #888) 65%, transparent);
+	font-size: 10px; font-weight: 600; letter-spacing: 0.06em;
+	font-family: var(--vscode-editor-font-family, monospace);
+}
+
+/* Netron-style two-compartment SVG node cards (100% pure vector, crisp at any zoom) */
+.an-mod-node { cursor: grab; transition: opacity 150ms ease; }
+.an-diagram.dragging-node .an-mod-node { cursor: grabbing; }
+.an-mod-node .an-node-shadow-vec { fill: color-mix(in srgb, #000 18%, transparent); }
 .an-mod-node .an-node-card {
 	fill: var(--vscode-editorWidget-background, #252526);
-	stroke: var(--vscode-widget-border, rgba(128, 128, 128, 0.4));
-	stroke-width: 1.25;
-	transition: stroke 120ms ease, stroke-width 120ms ease, filter 120ms ease;
+	stroke: color-mix(in srgb, var(--vscode-widget-border, #555) 75%, transparent);
+	stroke-width: 1.2;
+	transition: stroke 130ms ease, stroke-width 130ms ease;
 }
-.an-mod-node.kind-external .an-node-card { stroke-dasharray: 5 3; opacity: 0.9; }
-.an-mod-node.cycle .an-node-card { stroke: var(--vscode-editorError-foreground, #f14c4c); }
-.an-mod-node .an-node-accent { fill: var(--vscode-charts-blue, #3794ff); }
-.an-mod-node.kind-file .an-node-accent { fill: var(--vscode-charts-green, #89d185); }
-.an-mod-node.kind-external .an-node-accent { fill: var(--vscode-descriptionForeground, #8c8c8c); }
-.an-mod-node.cycle .an-node-accent { fill: var(--vscode-editorError-foreground, #f14c4c); }
-.an-mod-node:hover .an-node-card { stroke: var(--dg-accent); stroke-width: 1.8; }
+.an-mod-node .an-node-header {
+	fill: color-mix(in srgb, var(--dg-in) 18%, var(--vscode-editorWidget-background, #252526));
+}
+.an-mod-node.kind-file .an-node-header {
+	fill: color-mix(in srgb, var(--dg-out) 18%, var(--vscode-editorWidget-background, #252526));
+}
+.an-mod-node.kind-external .an-node-header {
+	fill: color-mix(in srgb, var(--dg-ext) 16%, var(--vscode-editorWidget-background, #252526));
+}
+.an-mod-node.cycle .an-node-header {
+	fill: color-mix(in srgb, var(--dg-cycle) 20%, var(--vscode-editorWidget-background, #252526));
+}
+.an-mod-node .an-node-divider {
+	stroke: color-mix(in srgb, var(--vscode-widget-border, #555) 60%, transparent);
+	stroke-width: 1;
+}
+.an-mod-node .an-node-row-sep {
+	stroke: color-mix(in srgb, var(--vscode-editor-foreground, #888) 10%, transparent);
+	stroke-width: 1;
+}
+.an-mod-node .an-node-kind-dot { fill: var(--dg-in); }
+.an-mod-node.kind-file .an-node-kind-dot { fill: var(--dg-out); }
+.an-mod-node.kind-external .an-node-kind-dot { fill: var(--dg-ext); }
+.an-mod-node.cycle .an-node-kind-dot { fill: var(--dg-cycle); }
+.an-mod-node.kind-external .an-node-card { stroke-dasharray: 5 3; }
+.an-mod-node.cycle .an-node-card { stroke: var(--dg-cycle); }
+
+.an-mod-node:hover .an-node-card,
+.an-mod-node.hover-self .an-node-card { stroke: var(--dg-accent); stroke-width: 2; }
 .an-mod-node.selected .an-node-card { stroke: var(--dg-accent); stroke-width: 2.5; }
 .an-mod-node.related .an-node-card { stroke: var(--dg-accent); stroke-width: 1.8; }
-.an-mod-node.dim { opacity: 0.22; }
-.an-node-title { fill: var(--vscode-editor-foreground, #e0e0e0); font-size: 12.5px; font-weight: 600; }
-.an-node-drill { fill: var(--vscode-descriptionForeground, #999); font-size: 13px; }
-.an-node-ext-tag { fill: var(--vscode-descriptionForeground, #999); font-size: 9.5px; font-weight: 600; letter-spacing: 0.05em; }
-.an-node-sub { fill: var(--vscode-descriptionForeground, #999); font-size: 11px; }
-.an-node-meta { fill: var(--vscode-descriptionForeground, #999); font-size: 10.5px; font-family: var(--vscode-editor-font-family, monospace); }
-.an-node-inst { fill: var(--vscode-descriptionForeground, #999); font-size: 10.5px; font-family: var(--vscode-editor-font-family, monospace); }
-.an-node-inst.cycle { fill: var(--vscode-editorError-foreground, #f14c4c); font-weight: 600; }
+.an-mod-node.upstream .an-node-card,
+.an-mod-node.hover-in .an-node-card { stroke: var(--dg-in); stroke-width: 2; }
+.an-mod-node.downstream .an-node-card,
+.an-mod-node.hover-out .an-node-card { stroke: var(--dg-out); stroke-width: 2; }
+.an-mod-node.dim, .an-mod-node.hover-dim { opacity: 0.2; }
 
-.an-mod-edge { cursor: pointer; transition: opacity 140ms ease; }
+.an-node-title { fill: var(--vscode-editor-foreground, #e0e0e0); font-size: 12px; font-weight: 600; }
+.an-node-drill { fill: var(--vscode-descriptionForeground, #999); font-size: 13px; }
+.an-node-ext-tag {
+	fill: var(--vscode-descriptionForeground, #999);
+	font-size: 9px; font-weight: 700; letter-spacing: 0.06em;
+}
+.an-node-sub { fill: var(--vscode-descriptionForeground, #999); font-size: 11px; }
+.an-node-layer {
+	fill: color-mix(in srgb, var(--vscode-descriptionForeground, #999) 85%, transparent);
+	font-size: 9.5px; font-weight: 600; font-family: var(--vscode-editor-font-family, monospace);
+}
+.an-node-meta {
+	fill: var(--vscode-descriptionForeground, #999);
+	font-size: 10.5px; font-family: var(--vscode-editor-font-family, monospace);
+}
+.an-node-inst {
+	fill: var(--vscode-descriptionForeground, #999);
+	font-size: 10px; font-family: var(--vscode-editor-font-family, monospace);
+}
+.an-node-inst.cycle { fill: var(--dg-cycle); font-weight: 600; }
+.an-inst-track { fill: color-mix(in srgb, var(--vscode-editor-foreground, #888) 14%, transparent); }
+.an-inst-fill.low { fill: var(--dg-out); }
+.an-inst-fill.mid { fill: var(--vscode-charts-yellow, #cca700); }
+.an-inst-fill.high { fill: var(--vscode-charts-orange, #d18616); }
+.an-inst-fill.cycle { fill: var(--dg-cycle); }
+
+/* Port socket terminals on card boundaries */
+.an-node-port {
+	fill: var(--vscode-editor-background, #1e1e1e);
+	stroke: color-mix(in srgb, var(--vscode-editor-foreground, #aaa) 48%, transparent);
+	stroke-width: 1.4;
+	transition: stroke 120ms ease, fill 120ms ease;
+}
+.an-mod-node:hover .an-node-port,
+.an-mod-node.selected .an-node-port { stroke: var(--dg-accent); fill: var(--dg-accent); }
+.an-mod-node.cycle .an-node-port { stroke: var(--dg-cycle); }
+
+/* Netron-style smooth Bezier connectors */
+.an-mod-edge { cursor: pointer; transition: opacity 150ms ease; }
 .an-edge-hit { fill: none; stroke: transparent; stroke-width: 14; }
-.an-edge-path { fill: none; stroke: color-mix(in srgb, var(--vscode-editor-foreground, #aaa) 42%, transparent); transition: stroke 120ms ease; }
-.an-mod-edge.cycle .an-edge-path { stroke: var(--vscode-editorError-foreground, #f14c4c); stroke-dasharray: 5 4; }
+.an-edge-path {
+	fill: none;
+	stroke: color-mix(in srgb, var(--vscode-editor-foreground, #aaa) 38%, transparent);
+	transition: stroke 130ms ease;
+}
+.an-mod-edge.cycle .an-edge-path { stroke: var(--dg-cycle); stroke-dasharray: 5 4; }
 .an-mod-edge:hover .an-edge-path, .an-mod-edge.selected .an-edge-path { stroke: var(--dg-accent); }
-.an-mod-edge.dim { opacity: 0.14; }
+.an-mod-edge.upstream .an-edge-path, .an-mod-edge.hover-in .an-edge-path { stroke: var(--dg-in); }
+.an-mod-edge.downstream .an-edge-path, .an-mod-edge.hover-out .an-edge-path { stroke: var(--dg-out); }
+.an-mod-edge.dim, .an-mod-edge.hover-dim { opacity: 0.12; }
 .an-marker-norm { fill: color-mix(in srgb, var(--vscode-editor-foreground, #aaa) 55%, transparent); }
-.an-marker-cycle { fill: var(--vscode-editorError-foreground, #f14c4c); }
+.an-marker-cycle { fill: var(--dg-cycle); }
 .an-marker-sel { fill: var(--dg-accent); }
+.an-marker-in { fill: var(--dg-in); }
+.an-marker-out { fill: var(--dg-out); }
 
 .an-edge-badge rect {
 	fill: var(--vscode-editorWidget-background, #252526);
-	stroke: var(--vscode-widget-border, rgba(128, 128, 128, 0.4));
+	stroke: var(--vscode-widget-border, rgba(128, 128, 128, 0.42));
 	stroke-width: 1;
 }
-.an-edge-badge text { fill: var(--vscode-editorWidget-foreground, #ccc); font-size: 10px; font-weight: 600; }
+.an-edge-badge text {
+	fill: var(--vscode-editorWidget-foreground, #ccc);
+	font-size: 9.5px; font-weight: 600; font-family: var(--vscode-editor-font-family, monospace);
+}
 .an-edge-badge.auto-hide { opacity: 0; transition: opacity 120ms ease; }
-.an-mod-edge:hover .an-edge-badge, .an-mod-edge.selected .an-edge-badge { opacity: 1; }
-.an-mod-edge.cycle .an-edge-badge rect { stroke: var(--vscode-editorError-foreground, #f14c4c); }
-.an-mod-edge.cycle .an-edge-badge text { fill: var(--vscode-editorError-foreground, #f14c4c); }
+.an-mod-edge:hover .an-edge-badge,
+.an-mod-edge.selected .an-edge-badge,
+.an-mod-edge.hover-in .an-edge-badge,
+.an-mod-edge.hover-out .an-edge-badge { opacity: 1; }
+.an-mod-edge.cycle .an-edge-badge rect { stroke: var(--dg-cycle); }
+.an-mod-edge.cycle .an-edge-badge text { fill: var(--dg-cycle); }
 
-/* Right-hand collapsible Inspector drawer */
+/* Floating hover tooltip */
+.an-hover-tip {
+	position: absolute; z-index: 6; pointer-events: none; max-width: 280px;
+	padding: 7px 10px; border-radius: 6px; font-size: 11.5px;
+	background: color-mix(in srgb, var(--vscode-editorHoverWidget-background, #252526) 96%, transparent);
+	color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+	border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-widget-border, #454545));
+	box-shadow: 0 4px 14px color-mix(in srgb, #000 32%, transparent);
+	display: flex; flex-direction: column; gap: 3px;
+}
+.an-tip-head { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.an-tip-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--dg-in); }
+.an-tip-dot.kind-file { background: var(--dg-out); }
+.an-tip-dot.kind-external { background: var(--dg-ext); }
+.an-tip-dot.cycle { background: var(--dg-cycle); }
+.an-tip-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.an-tip-badge {
+	margin-left: auto; font-size: 10px; padding: 0 5px; border-radius: 4px;
+	background: color-mix(in srgb, var(--vscode-editor-foreground, #888) 12%, transparent);
+	color: var(--vscode-descriptionForeground);
+	font-family: var(--vscode-editor-font-family, monospace);
+}
+.an-tip-grid { display: flex; flex-direction: column; gap: 1px; font-size: 11px; color: var(--vscode-descriptionForeground); }
+.an-tip-syms {
+	font-size: 10.5px; font-family: var(--vscode-editor-font-family, monospace);
+	color: var(--vscode-textLink-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.an-tip-warn { font-size: 10.5px; font-weight: 600; color: var(--dg-cycle); }
+
+/* Interactive overview minimap */
+.an-minimap {
+	position: absolute; right: 12px; bottom: 12px; z-index: 4;
+	border-radius: 8px; overflow: hidden; cursor: crosshair; touch-action: none;
+	background: color-mix(in srgb, var(--vscode-editorWidget-background, #252526) 90%, transparent);
+	border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.35));
+	backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+	box-shadow: 0 4px 12px color-mix(in srgb, #000 22%, transparent);
+}
+.an-minimap svg { display: block; }
+.an-mini-node { fill: color-mix(in srgb, var(--dg-in) 68%, transparent); }
+.an-mini-node.kind-file { fill: color-mix(in srgb, var(--dg-out) 68%, transparent); }
+.an-mini-node.kind-external { fill: color-mix(in srgb, var(--dg-ext) 68%, transparent); }
+.an-mini-node.cycle { fill: var(--dg-cycle); }
+.an-mini-node.selected { fill: var(--dg-accent); stroke: var(--vscode-editor-foreground, #fff); stroke-width: 1; }
+.an-minimap-vp {
+	fill: color-mix(in srgb, var(--dg-accent) 16%, transparent);
+	stroke: var(--dg-accent);
+	stroke-width: 1.25;
+}
+
+/* Resizable Netron Properties Inspector drawer */
+.an-insp-sash {
+	width: 4px; flex: none; cursor: ew-resize; position: relative; z-index: 5;
+	background: transparent; transition: background 120ms ease;
+}
+.an-insp-sash:hover, .an-insp-sash.active { background: var(--vscode-sash-hoverBorder, var(--vscode-focusBorder, #0078d4)); }
+
 .an-inspector {
-	width: 320px; min-width: 260px; max-width: 42%; flex: none;
+	width: 340px; min-width: 260px; max-width: 52%; flex: none;
 	display: flex; flex-direction: column; min-height: 0;
 	border-left: 1px solid var(--vscode-panel-border);
 	background: var(--vscode-sideBar-background, var(--vscode-editor-background));
 }
 .an-insp-head {
-	display: flex; align-items: center; gap: 6px; padding: 8px 10px; flex: none;
-	border-bottom: 1px solid var(--vscode-panel-border); font-weight: 600; font-size: 12px;
+	display: flex; align-items: center; gap: 7px; padding: 9px 10px 9px 12px; flex: none;
+	border-bottom: 1px solid var(--vscode-panel-border); font-weight: 600; font-size: 12.5px;
+	background: color-mix(in srgb, var(--vscode-editor-foreground, #888) 3%, transparent);
 }
+.an-insp-head.cycle { border-bottom-color: color-mix(in srgb, var(--vscode-editorError-foreground, #f14c4c) 45%, transparent); }
+.an-insp-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--vscode-charts-blue, #3794ff); }
+.an-insp-dot.kind-file { background: var(--vscode-charts-green, #73c991); }
+.an-insp-dot.kind-external { background: var(--vscode-charts-purple, #b180d7); }
+.an-insp-dot.cycle { background: var(--vscode-editorError-foreground, #f14c4c); }
 .an-insp-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.an-insp-body { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 0 14px; }
+.an-insp-body { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 0 16px; }
 .an-insp-meta { padding: 0 12px 8px; font-size: 11px; color: var(--vscode-descriptionForeground); }
-.an-insp-actions { display: flex; align-items: center; gap: 8px; padding: 0 12px 8px; }
-.an-insp-actions .button { height: 24px; padding: 0 10px; font-size: 11.5px; }
-.an-insp-sec {
-	padding: 10px 12px 4px; font-size: 10.5px; font-weight: 600; text-transform: uppercase;
-	letter-spacing: 0.04em; color: var(--vscode-descriptionForeground);
+.an-insp-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 2px 12px 10px; }
+.an-insp-actions .button { height: 24px; padding: 0 10px; font-size: 11.5px; border-radius: 4px; }
+.an-insp-actions .button.active {
+	outline: 1px solid var(--vscode-focusBorder, #3794ff);
+	background: color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 24%, transparent);
 }
-.an-insp-row { padding: 0 12px; }
-.an-insp-chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 12px 6px; }
+
+/* Collapsible Netron property groups */
+.an-insp-group { border-top: 1px solid color-mix(in srgb, var(--vscode-panel-border, #333) 70%, transparent); }
+.an-insp-group.collapsed > .an-insp-group-body { display: none; }
+.an-insp-sec {
+	display: flex; align-items: center; gap: 5px; width: 100%; border: none; background: transparent;
+	padding: 8px 12px 5px; font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+	letter-spacing: 0.05em; color: var(--vscode-descriptionForeground); text-align: left; cursor: pointer;
+}
+.an-insp-sec:hover { color: var(--vscode-foreground); }
+.an-insp-sec .codicon { font-size: 12px; }
+.an-insp-group-body { padding-bottom: 6px; }
+
+/* Key-value Properties Table */
+.an-prop-grid { display: flex; flex-direction: column; gap: 3px; padding: 2px 12px 4px; }
+.an-prop-row {
+	display: flex; align-items: center; justify-content: space-between; gap: 10px;
+	padding: 3px 6px; border-radius: 4px; font-size: 11.5px;
+	background: color-mix(in srgb, var(--vscode-editor-foreground, #888) 4%, transparent);
+}
+.an-prop-key { color: var(--vscode-descriptionForeground); flex: none; }
+.an-prop-val {
+	color: var(--vscode-foreground); font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 11px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.an-prop-inst { display: inline-flex; align-items: center; gap: 6px; }
+.an-inst-bar {
+	display: inline-block; width: 44px; height: 5px; border-radius: 3px; overflow: hidden;
+	background: color-mix(in srgb, var(--vscode-editor-foreground, #888) 16%, transparent);
+}
+.an-inst-bar-fill { display: block; height: 100%; border-radius: 3px; }
+.an-inst-bar-fill.low { background: var(--vscode-charts-green, #73c991); }
+.an-inst-bar-fill.mid { background: var(--vscode-charts-yellow, #cca700); }
+.an-inst-bar-fill.high { background: var(--vscode-charts-orange, #d18616); }
+.an-inst-bar-fill.cycle { background: var(--vscode-editorError-foreground, #f14c4c); }
+
+/* Edge endpoint jump pills */
+.an-endpoints-bar {
+	display: flex; align-items: center; gap: 6px; padding: 2px 12px 10px; flex-wrap: wrap;
+}
+.an-endpoint-pill {
+	display: inline-flex; align-items: center; gap: 5px; max-width: 132px;
+	height: 24px; padding: 0 8px; border-radius: 999px; font-size: 11.5px; cursor: pointer;
+	background: color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 14%, transparent);
+	color: var(--vscode-foreground);
+	border: 1px solid color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 40%, transparent);
+}
+.an-endpoint-pill:hover { background: color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 26%, transparent); }
+.an-endpoint-pill span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.an-insp-row { padding: 0 10px 0 14px; }
+.an-insp-row .action-btn { opacity: 0; transition: opacity 100ms ease; flex: none; }
+.an-insp-row:hover .action-btn, .an-insp-row:focus-within .action-btn { opacity: 1; }
+.an-weight-pill {
+	margin-left: auto; font-size: 10.5px; padding: 0 6px; border-radius: 999px; flex: none;
+	font-family: var(--vscode-editor-font-family, monospace);
+	background: color-mix(in srgb, var(--vscode-editor-foreground, #888) 12%, transparent);
+	color: var(--vscode-descriptionForeground);
+}
+.an-file-bar {
+	margin-left: auto; width: 34px; height: 4px; border-radius: 2px; overflow: hidden; flex: none;
+	background: color-mix(in srgb, var(--vscode-editor-foreground, #888) 12%, transparent);
+}
+.an-file-bar > i { display: block; height: 100%; background: var(--vscode-charts-blue, #3794ff); border-radius: 2px; }
+.an-insp-row .an-file-bar + .tail { margin-left: 6px; min-width: 22px; text-align: right; }
+
+.an-insp-chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 12px 6px; }
 .an-insp-note { padding: 8px 12px; font-size: 11.5px; color: var(--vscode-descriptionForeground); font-style: italic; }
 .an-chip-cycle { background: var(--vscode-editorError-foreground, #f14c4c); color: #ffffff; }
 .an-cycle-row > .codicon { color: var(--vscode-editorError-foreground, #f14c4c); }
 
-.an-graphbar { position: absolute; left: 8px; bottom: 6px; z-index: 2; display: flex; gap: 6px; align-items: center; }
+/* Bottom-left Legend & Selection Chips */
+.an-graphbar {
+	position: absolute; left: 10px; bottom: 10px; z-index: 4;
+	display: flex; flex-wrap: wrap; gap: 6px; align-items: center; max-width: calc(100% - 200px);
+}
 .an-graphbar:empty { display: none; }
+.an-legend {
+	display: inline-flex; align-items: center; gap: 10px;
+	padding: 3px 10px; border-radius: 999px; font-size: 10.5px;
+	background: color-mix(in srgb, var(--vscode-editorWidget-background, #252526) 88%, transparent);
+	border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.35));
+	color: var(--vscode-descriptionForeground);
+	backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+}
+.an-legend-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.an-legend-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.an-legend-dot.kind-module { background: var(--dg-in); }
+.an-legend-dot.kind-file { background: var(--dg-out); }
+.an-legend-dot.kind-external { background: var(--dg-ext); }
+.an-legend-dot.cycle { background: var(--dg-cycle); }
 .an-graphbar .chip {
-	display: inline-flex; align-items: center; gap: 4px; max-width: 60vw;
+	display: inline-flex; align-items: center; gap: 4px; max-width: 52vw;
 	padding: 2px 4px 2px 8px; border-radius: 999px;
-	background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.15));
+	background: color-mix(in srgb, var(--vscode-editorWidget-background, #252526) 92%, transparent);
 	border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.35));
 	font-size: 11px; color: var(--vscode-editorWidget-foreground, var(--vscode-editor-foreground));
+	backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
 }
 .an-graphbar .chip > span:not(.codicon) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
