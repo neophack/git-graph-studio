@@ -127,57 +127,30 @@ jobs:
       bundle-git-graph: ${{ github.event_name == 'push' && true || inputs.bundle-git-graph }}
       bundle-claude-code: ${{ github.event_name == 'push' && true || inputs.bundle-claude-code }}
 
-  # The Hub's container image (ggs-remote-plan.md §20.9 / M9.9): the same Dockerfile
-  # hub/deploy/ serves locally, pushed to GHCR for both server architectures under the
-  # release version. Gated on the tests like every other release artifact — the called
-  # studio.yml runs remote-hub-test — and it never enters the installers (the Hub is a
-  # server-side deploy, not an app component).
-  hub-image:
-    name: Publish the Hub image
-    needs: [resolve-tag, build-and-test]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v6
-
-      # GHCR image names are lowercase-only; the owner's display case may not be.
-      - id: owner
-        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/build-push-action@v6
-        with:
-          context: extensions-src/ggs-remote/hub
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/${{ steps.owner.outputs.owner }}/ggs-remote-hub:v${{ needs.resolve-tag.outputs.version }}
-            ghcr.io/${{ steps.owner.outputs.owner }}/ggs-remote-hub:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
   # The Hub's standalone packages (docs/ggs-remote-plan.md §20.9): a Windows zip you unzip
-  # and run beside its example config, and a deb around the static musl binary — zero
-  # glibc dependency — whose example config lands at /etc/ggs-hub/hub.toml as a conffile,
-  # so dpkg -i plus systemctl enable --now runs out of the box. A plain tarball rides
-  # along for every Linux that is not a Debian. Gated on the tests like every other
-  # release artifact (build-and-test runs remote-hub-test).
+  # and run beside its example config, and debs + tarballs around the static musl binaries
+  # (amd64 + arm64, each compiled natively on its own runner — no QEMU) — zero glibc
+  # dependency — whose example config lands at /etc/ggs-hub/hub.toml as a conffile, so
+  # dpkg -i plus systemctl enable --now runs out of the box. The two static Linux binaries
+  # are also uploaded for `hub-image` below so the multi-arch container image repackages
+  # them directly into FROM scratch without compiling twice or paying QEMU emulation.
+  # Gated on the tests like every other release artifact (build-and-test runs remote-hub-test).
   hub-packages:
-    name: Hub standalone packages (${{ matrix.os }})
+    name: Hub standalone packages (${{ matrix.arch }})
     needs: [resolve-tag, build-and-test]
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            arch: windows-x64
+            rust_target: ''
+          - os: ubuntu-latest
+            arch: amd64
+            rust_target: x86_64-unknown-linux-musl
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            rust_target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -188,7 +161,13 @@ jobs:
       # The pinned toolchain (rust-toolchain.toml); keep ref and file in sync on a bump.
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: extensions-src/ggs-remote/hub -> ../../../target/studio/ggs-remote-hub
+          key: ggs-remote-hub-release-${{ matrix.arch }}
+          save-if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
 
       - name: Install musl tools
         if: runner.os == 'Linux'
@@ -199,7 +178,7 @@ jobs:
         # bash *.sh, never the bare script — the repo's convention (2026-10-14, the
         # owner's direction): a .sh committed from Windows carries no executable bit,
         # and a direct invocation dies with Permission denied (exit 126).
-        run: VERSION=${{ needs.resolve-tag.outputs.version }} bash deploy/build-deb.sh
+        run: TARGET=${{ matrix.rust_target }} VERSION=${{ needs.resolve-tag.outputs.version }} bash deploy/build-deb.sh
 
       - name: Build the windows zip
         if: runner.os == 'Windows'
@@ -221,16 +200,77 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: hub-package-${{ matrix.os }}
+          name: hub-package-${{ matrix.arch }}
           path: extensions-src/ggs-remote/hub/target/packages/*.deb
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v7
         with:
-          name: hub-package-${{ matrix.os }}-misc
+          name: hub-package-${{ matrix.arch }}-misc
           path: |
             extensions-src/ggs-remote/hub/target/packages/*.tar.gz
             extensions-src/ggs-remote/hub/target/packages/*.zip
           if-no-files-found: ignore
+      # Static musl binary for hub-image (named hub-bin-*, outside hub-package-* so the
+      # GitHub Release job below never attaches the bare binary).
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Linux'
+        with:
+          name: hub-bin-${{ matrix.arch }}
+          path: target/studio/ggs-remote-hub/${{ matrix.rust_target }}/release/ggs-remote-hub
+          if-no-files-found: error
+
+  # The Hub's container image (ggs-remote-plan.md §20.9 / M9.9): pushed to GHCR for both
+  # server architectures under the release version. Repackages the statically linked musl
+  # binaries that `hub-packages` already compiled natively on amd64 and arm64 runners —
+  # zero QEMU emulation, zero duplicate Rust release build, and no buildx GHA cache bloat.
+  hub-image:
+    name: Publish the Hub image
+    needs: [resolve-tag, hub-packages]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download the prebuilt amd64 binary
+        uses: actions/download-artifact@v8
+        with:
+          name: hub-bin-amd64
+          path: hub-context/linux-amd64
+
+      - name: Download the prebuilt arm64 binary
+        uses: actions/download-artifact@v8
+        with:
+          name: hub-bin-arm64
+          path: hub-context/linux-arm64
+
+      - name: Verify the prebuilt binaries
+        run: |
+          chmod +x hub-context/linux-amd64/ggs-remote-hub hub-context/linux-arm64/ggs-remote-hub
+          file hub-context/linux-amd64/ggs-remote-hub hub-context/linux-arm64/ggs-remote-hub
+
+      # GHCR image names are lowercase-only; the owner's display case may not be.
+      - id: owner
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: hub-context
+          file: extensions-src/ggs-remote/hub/deploy/Dockerfile.prebuilt
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ steps.owner.outputs.owner }}/ggs-remote-hub:v${{ needs.resolve-tag.outputs.version }}
+            ghcr.io/${{ steps.owner.outputs.owner }}/ggs-remote-hub:latest
 
   release:
     name: Publish the GitHub Release

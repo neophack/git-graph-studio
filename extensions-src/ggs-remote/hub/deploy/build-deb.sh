@@ -17,7 +17,12 @@ set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 crate=$(dirname "$here")
-target=x86_64-unknown-linux-musl
+target=${TARGET:-x86_64-unknown-linux-musl}
+case "$target" in
+	x86_64-unknown-linux-musl)  deb_arch=amd64; tar_arch=x86_64-musl ;;
+	aarch64-unknown-linux-musl) deb_arch=arm64; tar_arch=aarch64-musl ;;
+	*) echo "unsupported TARGET: $target" >&2; exit 1 ;;
+esac
 # The crate's .cargo/config.toml pins [build] target-dir to the repository's
 # target/studio/ggs-remote-hub (one target dir per remote crate, 2026-11-18) — the binary
 # lands there, never in a shadow target/ of this crate's own. CARGO_TARGET_DIR overrides
@@ -32,12 +37,18 @@ binary="$target_dir/$target/release/ggs-remote-hub"
 if [ -n "${PREBUILT:-}" ]; then
 	binary=$PREBUILT
 else
+	# Pin the target's C compiler (ring's C/asm) to musl-gcc when available so C objects
+	# compile against musl headers rather than the host glibc headers.
+	if command -v musl-gcc >/dev/null 2>&1; then
+		cc_var="CC_$(printf '%s' "$target" | tr '-' '_')"
+		eval "export $cc_var=\${$cc_var:-musl-gcc}"
+	fi
 	cargo build --release --target "$target" --target-dir "$target_dir" --manifest-path "$crate/Cargo.toml"
 fi
 [ -x "$binary" ] || { echo "no binary at $binary" >&2; exit 1; }
 
 # ---- the deb: /usr/bin + the systemd unit + the example config + a short README ----
-deb_root="$crate/target/deb/ggs-remote-hub_${version}_amd64"
+deb_root="$crate/target/deb/ggs-remote-hub_${version}_${deb_arch}"
 rm -rf "$deb_root"
 install -D -m 755 "$binary" "$deb_root/usr/bin/ggs-remote-hub"
 install -D -m 644 "$here/ggs-remote-hub.service" "$deb_root/lib/systemd/system/ggs-remote-hub.service"
@@ -49,7 +60,7 @@ Package: ggs-remote-hub
 Version: $version
 Section: net
 Priority: optional
-Architecture: amd64
+Architecture: $deb_arch
 Maintainer: Git Graph Studio <neophack@users.noreply.github.com>
 Description: The GGS Remote Hub — the self-hosted, account-free relay
  Each PC's tray daemon keeps an outbound tunnel to this relay, and a phone's or another
@@ -61,7 +72,7 @@ EOF
 # so dpkg -i plus systemctl start runs out of the box and upgrades keep local edits.
 install -D -m 644 "$here/hub.example.toml" "$deb_root/etc/ggs-hub/hub.toml"
 printf '/etc/ggs-hub/hub.toml\n' > "$deb_root/DEBIAN/conffiles"
-dpkg-deb --build --root-owner-group "$deb_root" "$out/ggs-remote-hub_${version}_amd64.deb"
+dpkg-deb --build --root-owner-group "$deb_root" "$out/ggs-remote-hub_${version}_${deb_arch}.deb"
 
 # ---- the tarball: the same pieces, for every Linux that is not a Debian ----
 stage=$(mktemp -d)
@@ -70,7 +81,7 @@ install -D -m 755 "$binary" "$stage/ggs-remote-hub-${version}/ggs-remote-hub"
 install -m 644 "$here/hub.example.toml" "$stage/ggs-remote-hub-${version}/hub.toml.example"
 install -m 644 "$here/ggs-remote-hub.service" "$stage/ggs-remote-hub-${version}/ggs-remote-hub.service"
 install -m 644 "$crate/README.md" "$stage/ggs-remote-hub-${version}/README.md"
-tar -C "$stage" -czf "$out/ggs-remote-hub-${version}-x86_64-musl.tar.gz" "ggs-remote-hub-${version}"
+tar -C "$stage" -czf "$out/ggs-remote-hub-${version}-${tar_arch}.tar.gz" "ggs-remote-hub-${version}"
 
 echo "packages in $out:"
 ls -l "$out"
