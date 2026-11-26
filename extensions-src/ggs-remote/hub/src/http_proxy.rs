@@ -313,6 +313,7 @@ pub(crate) fn apply_proxied_headers(
             let allowed = if trimmed.starts_with(base_path)
                 && !trimmed.contains("..")
                 && !trimmed.contains('\\')
+                && !trimmed.contains('%')
             {
                 trimmed
             } else {
@@ -332,10 +333,9 @@ pub(crate) fn apply_proxied_headers(
             HeaderName::from_bytes(name.as_bytes()),
             HeaderValue::from_str(value),
         ) {
-            if name != header::SET_COOKIE
-                && builder
-                    .headers_ref()
-                    .is_some_and(|set| set.contains_key(&name))
+            if builder
+                .headers_ref()
+                .is_some_and(|set| set.contains_key(&name))
             {
                 continue;
             }

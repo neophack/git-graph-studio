@@ -206,6 +206,9 @@ pub fn normalize_ip(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V4(v4) => IpAddr::V4(v4),
         IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return IpAddr::V4(v4);
+            }
             let masked = u128::from(v6) & 0xffff_ffff_ffff_ffff_0000_0000_0000_0000;
             IpAddr::V6(std::net::Ipv6Addr::from(masked))
         }
@@ -392,15 +395,18 @@ impl Hub {
             if budgets.len() > 1024 {
                 budgets.retain(|_, b| b.lock().unwrap().day == today);
             }
-            budgets
-                .entry(uuid.clone())
-                .or_insert_with(|| {
-                    Arc::new(Mutex::new(DayBudget {
-                        day: today,
-                        left: self.config.bytes_per_day_per_tunnel,
-                    }))
-                })
-                .clone()
+            if let Some(existing) = budgets.get(&uuid) {
+                existing.clone()
+            } else {
+                let fresh = Arc::new(Mutex::new(DayBudget {
+                    day: today,
+                    left: self.config.bytes_per_day_per_tunnel,
+                }));
+                if budgets.len() < MAX_WINDOW_ENTRIES {
+                    budgets.insert(uuid.clone(), fresh.clone());
+                }
+                fresh
+            }
         });
         Tunnel {
             uuid,
