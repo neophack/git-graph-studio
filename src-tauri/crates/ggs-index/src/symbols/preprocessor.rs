@@ -314,7 +314,7 @@ pub fn eval_inactive_ranges(
                     let parts: Vec<&str> = strip_line_comment(arg).split_whitespace().collect();
                     if let Some(&name) = parts.first() {
                         if !name.contains('(') {
-                            let val = parts.get(1).and_then(|v| v.parse::<i64>().ok()).unwrap_or(1);
+                            let val = parts.get(1).and_then(|v| eval_int(v, &macros)).unwrap_or(1);
                             macros.insert(name.to_owned(), Some(val));
                         }
                     }
@@ -431,9 +431,23 @@ pub fn expand_macro_at(
 }
 
 fn extract_call_args(line: &str, name: &str) -> Option<Vec<String>> {
-    let at = line.find(name)?;
-    let after = line[at + name.len()..].trim_start();
-    let inner = after.strip_prefix('(')?;
+    let bytes = line.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut offset = 0usize;
+    let inner = loop {
+        let rel = line[offset..].find(name)?;
+        let at = offset + rel;
+        let end = at + name.len();
+        let left_ok = at == 0 || !is_ident(bytes[at - 1]);
+        let right_ok = end == bytes.len() || !is_ident(bytes[end]);
+        if left_ok && right_ok {
+            let after = line[end..].trim_start();
+            if let Some(rest) = after.strip_prefix('(') {
+                break rest;
+            }
+        }
+        offset = end;
+    };
     let mut args = Vec::new();
     let mut cur = String::new();
     let mut depth = 1usize;
