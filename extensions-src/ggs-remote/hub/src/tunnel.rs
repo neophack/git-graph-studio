@@ -360,10 +360,14 @@ fn join_key_ok(config: &Config, given: &str) -> bool {
 /// inside; a PHC string missing any of the three is not one the daemon writes.
 fn credential_plausible(hash: &str, lang: &str) -> bool {
     /// m in KiB, at most 64 MiB — the daemon ships 19 MiB (19456).
+    const MIN_M_KIB: u64 = 8;
     const MAX_M_KIB: u64 = 65_536;
     const MAX_T: u64 = 8;
     const MAX_P: u64 = 4;
     if !(hash.starts_with("$argon2") && hash.len() <= 512 && lang.len() <= 16) {
+        return false;
+    }
+    if argon2::password_hash::PasswordHash::new(hash).is_err() {
         return false;
     }
     // `$argon2id$v=19$m=19456,t=2,p=1$salt$digest` — the parameters are the third `$`
@@ -386,9 +390,9 @@ fn credential_plausible(hash: &str, lang: &str) -> bool {
             _ => {}
         }
     }
-    m.is_some_and(|m| m <= MAX_M_KIB)
-        && t.is_some_and(|t| t <= MAX_T)
-        && p.is_some_and(|p| p <= MAX_P)
+    m.is_some_and(|m| (MIN_M_KIB..=MAX_M_KIB).contains(&m))
+        && t.is_some_and(|t| (1..=MAX_T).contains(&t))
+        && p.is_some_and(|p| (1..=MAX_P).contains(&p))
 }
 
 fn configured_host(config: &Config) -> Option<String> {

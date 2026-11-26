@@ -111,6 +111,10 @@ pub fn device_from_ua(ua: &str) -> String {
     }
 }
 
+/// Cap stored sessions to match the Hub's per-link cap so repeated logins cannot grow
+/// `sessions.json` without bound.
+pub const MAX_SESSIONS: usize = 64;
+
 impl Sessions {
     pub fn load(paths: &Paths) -> Sessions {
         let list = std::fs::read(paths.sessions())
@@ -143,6 +147,19 @@ impl Sessions {
         let raw = random_bytes::<32>();
         let token = b64(&raw);
         let now = now_secs();
+        self.list.retain(|s| s.valid_at(epoch, now));
+        while self.list.len() >= MAX_SESSIONS {
+            if let Some((idx, _)) = self
+                .list
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, s)| s.last_seen)
+            {
+                self.list.remove(idx);
+            } else {
+                break;
+            }
+        }
         let session = Session {
             token_hash: hex(&sha256(&raw)),
             epoch,

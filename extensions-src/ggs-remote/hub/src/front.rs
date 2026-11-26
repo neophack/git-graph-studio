@@ -138,6 +138,9 @@ pub fn offline_page() -> Response {
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-store")
+        .header("x-content-type-options", "nosniff")
+        .header("referrer-policy", "no-referrer")
+        .header("x-frame-options", "DENY")
         .body(Body::from(html))
         .expect("a static page")
 }

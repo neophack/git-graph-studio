@@ -89,13 +89,17 @@ pub async fn throttled_verify(
 /// mode. Unconditional `Secure` once made a plain-HTTP Hub's login return success while
 /// the browser silently dropped every cookie (§7.6; forging the header only strips
 /// `Secure` from the forger's own cookie, never anyone else's).
-fn cookie_secure(daemon: &Daemon, headers: &HeaderMap) -> bool {
-    if let Some(proto) = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty())
-    {
-        return proto.eq_ignore_ascii_case("https");
+fn cookie_secure(daemon: &Daemon, peer: SocketAddr, headers: &HeaderMap) -> bool {
+    let trusted = peer.ip() == crate::http::TUNNEL_BUCKET
+        || (peer.ip().is_loopback() && daemon.config().trust_proxy);
+    if trusted {
+        if let Some(proto) = headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| !v.is_empty())
+        {
+            return proto.eq_ignore_ascii_case("https");
+        }
     }
     daemon.config().tls.mode != crate::config::TlsMode::None
 }
@@ -140,7 +144,7 @@ pub async fn login(
     } else {
         String::new()
     };
-    let secure = if cookie_secure(&daemon, &headers) {
+    let secure = if cookie_secure(&daemon, peer, &headers) {
         "; Secure"
     } else {
         ""
@@ -158,7 +162,11 @@ pub async fn login(
         .into_response()
 }
 
-pub async fn logout(State(daemon): State<Arc<Daemon>>, headers: HeaderMap) -> Response {
+pub async fn logout(
+    State(daemon): State<Arc<Daemon>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
     if !json_request_ok(&headers) {
         return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "json-required");
     }
@@ -166,7 +174,7 @@ pub async fn logout(State(daemon): State<Arc<Daemon>>, headers: HeaderMap) -> Re
         daemon.revoke(&hash);
     }
     let base = base_path(&headers);
-    let secure = if cookie_secure(&daemon, &headers) {
+    let secure = if cookie_secure(&daemon, peer, &headers) {
         "; Secure"
     } else {
         ""
@@ -278,7 +286,7 @@ pub async fn remove_device(
     if headers
         .get("sec-fetch-site")
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v == "cross-site")
+        .is_some_and(|v| v != "same-origin" && v != "none")
     {
         return error(StatusCode::FORBIDDEN, "cross-site");
     }
@@ -612,18 +620,22 @@ mod cookie_secure_tests {
 
     #[test]
     fn secure_follows_the_scheme_the_browser_spoke() {
+        let lan: std::net::SocketAddr = "192.168.1.5:44123".parse().unwrap();
+        let tunneled = std::net::SocketAddr::new(crate::http::TUNNEL_BUCKET, 0);
         // Direct against a plain-HTTP listener: no Secure, or the browser drops the cookie.
         let (_dir, plain) = daemon_with(TlsMode::None);
-        assert!(!cookie_secure(&plain, &HeaderMap::new()));
+        assert!(!cookie_secure(&plain, lan, &HeaderMap::new()));
         // Direct against TLS: Secure, the hardening holds.
         let (_dir, tls) = daemon_with(TlsMode::SelfSigned);
-        assert!(cookie_secure(&tls, &HeaderMap::new()));
+        assert!(cookie_secure(&tls, lan, &HeaderMap::new()));
         let (_dir, tls) = daemon_with(TlsMode::Custom);
-        assert!(cookie_secure(&tls, &HeaderMap::new()));
+        assert!(cookie_secure(&tls, lan, &HeaderMap::new()));
+        // A direct LAN peer cannot forge x-forwarded-proto to strip Secure.
+        assert!(cookie_secure(&tls, lan, &proto("http")));
         // A Hub's stamp decides for tunneled requests, whatever the local listener is.
-        assert!(!cookie_secure(&plain, &proto("http")));
-        assert!(cookie_secure(&plain, &proto("https")));
-        assert!(cookie_secure(&tls, &proto("HTTPS")));
-        assert!(!cookie_secure(&tls, &proto("http")));
+        assert!(!cookie_secure(&plain, tunneled, &proto("http")));
+        assert!(cookie_secure(&plain, tunneled, &proto("https")));
+        assert!(cookie_secure(&tls, tunneled, &proto("HTTPS")));
+        assert!(!cookie_secure(&tls, tunneled, &proto("http")));
     }
 }

@@ -148,6 +148,9 @@ pub fn not_presenting(tunnel: &Arc<Tunnel>) -> Response {
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-store")
+        .header("x-content-type-options", "nosniff")
+        .header("referrer-policy", "no-referrer")
+        .header("x-frame-options", "DENY")
         .body(Body::from(html))
         .expect("a static page")
 }
@@ -230,7 +233,7 @@ fn wants_document(headers: &HeaderMap) -> bool {
         .is_some_and(|v| v.trim_start().starts_with("text/html"))
 }
 
-fn cookie_token(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn cookie_token(headers: &HeaderMap) -> Option<String> {
     for value in headers.get_all(header::COOKIE) {
         let Ok(text) = value.to_str() else { continue };
         for part in text.split(';') {
@@ -372,32 +375,10 @@ pub async fn submit(
                     ],
                 );
             }
-            let mut builder = Response::builder()
+            let builder = Response::builder()
                 .status(StatusCode::from_u16(head.status).unwrap_or(StatusCode::BAD_GATEWAY));
-            for (name, value) in &head.headers {
-                if name.eq_ignore_ascii_case("transfer-encoding")
-                    || name.eq_ignore_ascii_case("connection")
-                    || name.eq_ignore_ascii_case("keep-alive")
-                    || name.eq_ignore_ascii_case("content-length")
-                {
-                    continue;
-                }
-                if let (Ok(name), Ok(value)) = (
-                    axum::http::HeaderName::from_bytes(name.as_bytes()),
-                    HeaderValue::from_str(value),
-                ) {
-                    // Repeatable headers (`set-cookie`) cross in full; singletons keep
-                    // the first spelling.
-                    if name != header::SET_COOKIE
-                        && builder
-                            .headers_ref()
-                            .is_some_and(|set| set.contains_key(&name))
-                    {
-                        continue;
-                    }
-                    builder = builder.header(name, value);
-                }
-            }
+            let mut builder =
+                crate::http_proxy::apply_proxied_headers(builder, &head.headers, &base_path);
             if ok {
                 let (token, max_age) =
                     hub.issue_link_session(&tunnel.uuid, credential.epoch, login.remember, ip);

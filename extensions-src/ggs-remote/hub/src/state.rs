@@ -42,7 +42,7 @@ pub struct Tunnel {
     /// The day boundary is tracked (`DayBudget::day`): a new UTC day refills the allowance
     /// — before it was, "per day" was really per-connection, and a PC that spent day one's
     /// budget was refused for the whole life of the tunnel.
-    budget: Option<Mutex<DayBudget>>,
+    budget: Option<Arc<Mutex<DayBudget>>>,
     /// The configured allowance each new day refills to.
     budget_cap: u64,
     /// The operator's kill switch lands here (`blocklist`): one stored permit wakes the run
@@ -165,14 +165,8 @@ impl Tunnel {
         self.spend_on_day(today_number(), bytes)
     }
 
-    /// The link's remaining allowance as (day, left) — what a replacement tunnel for the
-    /// same uuid inherits. Yesterday's pair crosses too: the day-rollover refill stays
-    /// `spend_on_day`'s own rule, so the first spend of a new day still refills to cap.
-    fn carried_budget(&self) -> Option<(u64, u64)> {
-        let budget = self.budget.as_ref()?;
-        let budget = budget.lock().unwrap();
-        Some((budget.day, budget.left))
-    }
+    // Daily byte budgets are owned by `Hub.budgets` keyed by uuid so disconnecting and
+    // reconnecting cannot reset a spent day's allowance.
 
     fn spend_on_day(&self, day: u64, bytes: u64) -> bool {
         let Some(budget) = &self.budget else {
@@ -199,14 +193,47 @@ impl Tunnel {
     }
 }
 
+/// Hard ceiling on tracked keys per rate-limit window so distributed IP scans cannot
+/// exhaust Hub memory.
+const MAX_WINDOW_ENTRIES: usize = 16_384;
+/// Minimum interval between routine table compactions when active keys exceed 1024.
+const PRUNE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Normalize an IP address for rate-limiting and visitor caps: IPv4 stays /32, IPv6 is
+/// masked to its /64 prefix so rotating host addresses inside one subnet cannot bypass
+/// limits.
+pub fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => {
+            let masked = u128::from(v6) & 0xffff_ffff_ffff_ffff_0000_0000_0000_0000;
+            IpAddr::V6(std::net::Ipv6Addr::from(masked))
+        }
+    }
+}
+
+pub struct WindowTable<K> {
+    map: HashMap<K, (u32, Instant)>,
+    last_prune: Option<Instant>,
+}
+
+impl<K> Default for WindowTable<K> {
+    fn default() -> Self {
+        WindowTable {
+            map: HashMap::new(),
+            last_prune: None,
+        }
+    }
+}
+
 /// The per-IP counters that guard the front door (§20.6): tunnel handshakes, login entries,
 /// proxied requests and offline-link probes, each with its own window.
 #[derive(Default)]
 pub struct IpWindows {
-    pub hellos: Mutex<HashMap<IpAddr, (u32, Instant)>>,
-    pub logins: Mutex<HashMap<(IpAddr, String), (u32, Instant)>>,
-    pub requests: Mutex<HashMap<IpAddr, (u32, Instant)>>,
-    pub offline: Mutex<HashMap<IpAddr, (u32, Instant)>>,
+    pub hellos: Mutex<WindowTable<IpAddr>>,
+    pub logins: Mutex<WindowTable<(IpAddr, String)>>,
+    pub requests: Mutex<WindowTable<IpAddr>>,
+    pub offline: Mutex<WindowTable<IpAddr>>,
     pub banned: Mutex<HashMap<IpAddr, Instant>>,
 }
 
@@ -273,6 +300,9 @@ pub struct Hub {
     /// not reset it: a personal remote-workbench link has a handful of viewers, a link
     /// shared like a public site hundreds, and cycling the tunnel must not launder the count.
     pub visitors: Mutex<HashMap<String, VisitorBucket>>,
+    /// Per-link daily byte budgets keyed by uuid (survives disconnect + reconnect so a PC
+    /// cannot launder a spent daily allowance by dropping and reconnecting).
+    budgets: Mutex<HashMap<String, Arc<Mutex<DayBudget>>>>,
     /// The joint login's Hub-side sessions (§20.14): uuid → token hash → session. Nothing
     /// persisted — a Hub restart asks every browser for the password once more, which is
     /// the whole of what it costs.
@@ -324,6 +354,7 @@ impl Hub {
                 bytes_down: AtomicU64::new(0),
             },
             visitors: Mutex::new(HashMap::new()),
+            budgets: Mutex::new(HashMap::new()),
             link_sessions: Mutex::new(HashMap::new()),
             audit,
             blocklist,
@@ -353,33 +384,31 @@ impl Hub {
 
     /// Build a tunnel handle bound to this Hub's writer and registration sequence.
     pub fn new_tunnel(&self, uuid: String, tx: mpsc::UnboundedSender<Vec<u8>>) -> Tunnel {
-        // The day's remaining allowance crosses the reconnect: the replacement tunnel
-        // inherits the link's spent budget — the uuid-keyed reasoning of the visitor
-        // table, applied to bytes. Without it `bytes_per_day_per_tunnel` was really per
-        // connection: a daemon that reconnected after spending it drew a fresh
-        // allowance, repeatedly. (The old tunnel is still registered at this point —
-        // `register_within_limit` swaps it out just after.)
-        let carried = self
-            .tunnels
-            .lock()
-            .unwrap()
-            .get(&uuid)
-            .and_then(|old| old.carried_budget());
+        // The day's remaining allowance is keyed by uuid on `Hub.budgets`, so BOTH a live
+        // replacement AND a disconnect-then-reconnect keep the exact same daily budget.
+        let budget = (self.config.bytes_per_day_per_tunnel > 0).then(|| {
+            let today = today_number();
+            let mut budgets = self.budgets.lock().unwrap();
+            if budgets.len() > 1024 {
+                budgets.retain(|_, b| b.lock().unwrap().day == today);
+            }
+            budgets
+                .entry(uuid.clone())
+                .or_insert_with(|| {
+                    Arc::new(Mutex::new(DayBudget {
+                        day: today,
+                        left: self.config.bytes_per_day_per_tunnel,
+                    }))
+                })
+                .clone()
+        });
         Tunnel {
             uuid,
             id: self.next_tunnel.fetch_add(1, Ordering::Relaxed),
             tx,
             conns: Mutex::new(HashMap::new()),
             since: Instant::now(),
-            budget: (self.config.bytes_per_day_per_tunnel > 0).then(|| {
-                Mutex::new(match carried {
-                    Some((day, left)) => DayBudget { day, left },
-                    None => DayBudget {
-                        day: today_number(),
-                        left: self.config.bytes_per_day_per_tunnel,
-                    },
-                })
-            }),
+            budget,
             budget_cap: self.config.bytes_per_day_per_tunnel,
             killed: Notify::new(),
             credential: Mutex::new(None),
@@ -479,20 +508,30 @@ impl Hub {
 
 /// Count one event in a window; answers the (kept) count — the caller rejects past the max.
 fn count<K: std::hash::Hash + Eq + Clone>(
-    window: &Mutex<HashMap<K, (u32, Instant)>>,
+    window: &Mutex<WindowTable<K>>,
     key: K,
     span: Duration,
 ) -> u32 {
     let now = Instant::now();
-    let mut map = window.lock().unwrap();
-    // Compact only once the table has grown — a per-event `retain` made every counted
-    // event O(table), and a many-IP scan turned the front door itself into the cost center.
-    // Below the threshold stale entries merely sit until the next compaction; the count of
-    // any touched key is exact either way (its own window resets it).
-    if map.len() > 1024 {
-        map.retain(|_, (_, at)| now.duration_since(*at) < span);
+    let mut table = window.lock().unwrap();
+    let due = table
+        .last_prune
+        .is_none_or(|at| now.duration_since(at) >= PRUNE_INTERVAL);
+    if (table.map.len() > 1024 && due) || table.map.len() >= MAX_WINDOW_ENTRIES {
+        table.map.retain(|_, (_, at)| now.duration_since(*at) < span);
+        table.last_prune = Some(now);
     }
-    let entry = map.entry(key).or_insert((0, now));
+    if !table.map.contains_key(&key) && table.map.len() >= MAX_WINDOW_ENTRIES {
+        if let Some(oldest) = table
+            .map
+            .iter()
+            .min_by_key(|(_, (_, at))| *at)
+            .map(|(k, _)| k.clone())
+        {
+            table.map.remove(&oldest);
+        }
+    }
+    let entry = table.map.entry(key).or_insert((0, now));
     entry.0 += 1;
     if now.duration_since(entry.1) >= span {
         entry.0 = 1;
@@ -506,7 +545,7 @@ impl Hub {
         if self.config.handshake_rate == 0 {
             return true;
         }
-        count(&self.ips.hellos, ip, HELLO_WINDOW) <= self.config.handshake_rate
+        count(&self.ips.hellos, normalize_ip(ip), HELLO_WINDOW) <= self.config.handshake_rate
     }
 
     /// Issue the Hub-side half of a joint login (§20.14): a fresh 256-bit cookie token for
@@ -586,6 +625,14 @@ impl Hub {
             sessions.clear();
         }
     }
+
+    /// Sign out one Hub-side session immediately on `POST api/logout`.
+    pub fn revoke_link_session(&self, uuid: &str, token: &str) {
+        let hash = token_hash(token);
+        if let Some(sessions) = self.link_sessions.lock().unwrap().get_mut(uuid) {
+            sessions.remove(&hash);
+        }
+    }
 }
 
 /// hex(SHA-256(token)) — the stored form of a link-session cookie, so a Hub memory dump
@@ -598,7 +645,11 @@ fn token_hash(token: &str) -> String {
 
 impl Hub {
     pub fn login_entry(&self, ip: IpAddr, uuid: &str) -> bool {
-        count(&self.ips.logins, (ip, uuid.to_owned()), LOGIN_WINDOW) <= LOGIN_MAX
+        count(
+            &self.ips.logins,
+            (normalize_ip(ip), uuid.to_owned()),
+            LOGIN_WINDOW,
+        ) <= LOGIN_MAX
     }
 
     /// Every proxied request toward an online link one IP may make per minute (§20.6
@@ -608,7 +659,7 @@ impl Hub {
         if self.config.http_rate == 0 {
             return true;
         }
-        count(&self.ips.requests, ip, REQUEST_WINDOW) <= self.config.http_rate
+        count(&self.ips.requests, normalize_ip(ip), REQUEST_WINDOW) <= self.config.http_rate
     }
 
     /// Count one browser IP against a link's daily distinct-viewer ceiling (§20.6
@@ -619,6 +670,7 @@ impl Hub {
         if cap == 0 {
             return true;
         }
+        let ip = normalize_ip(ip);
         let now = Instant::now();
         let mut visitors = self.visitors.lock().unwrap();
         let bucket = visitors
@@ -672,11 +724,22 @@ impl Hub {
     /// uuid is malformed, unknown or merely gone — but probing them too fast gets an IP held
     /// off for ten minutes.
     pub fn offline_probe(&self, ip: IpAddr) -> bool {
-        if self.is_banned(ip) {
+        let key = normalize_ip(ip);
+        if self.is_banned(key) {
             return false;
         }
-        if count(&self.ips.offline, ip, OFFLINE_WINDOW) > OFFLINE_MAX {
-            self.ips.banned.lock().unwrap().insert(ip, Instant::now());
+        if count(&self.ips.offline, key, OFFLINE_WINDOW) > OFFLINE_MAX {
+            let now = Instant::now();
+            let mut banned = self.ips.banned.lock().unwrap();
+            if banned.len() >= MAX_WINDOW_ENTRIES {
+                banned.retain(|_, until| now.duration_since(*until) < BAN);
+                if banned.len() >= MAX_WINDOW_ENTRIES {
+                    if let Some(oldest) = banned.iter().min_by_key(|(_, at)| **at).map(|(k, _)| *k) {
+                        banned.remove(&oldest);
+                    }
+                }
+            }
+            banned.insert(key, now);
             crate::warn!("{ip} probed too many offline links: held off for 10 minutes");
             return false;
         }
@@ -684,10 +747,16 @@ impl Hub {
     }
 
     pub fn is_banned(&self, ip: IpAddr) -> bool {
+        let key = normalize_ip(ip);
         let now = Instant::now();
         let mut banned = self.ips.banned.lock().unwrap();
-        banned.retain(|_, until| now.duration_since(*until) < BAN);
-        banned.contains_key(&ip)
+        if let Some(&since) = banned.get(&key) {
+            if now.duration_since(since) < BAN {
+                return true;
+            }
+            banned.remove(&key);
+        }
+        false
     }
 }
 
@@ -755,6 +824,51 @@ mod tests {
         let (tx_c, _rx_c) = mpsc::unbounded_channel();
         let c = hub.new_tunnel("fresh".into(), tx_c);
         assert!(c.spend_on_day(20_000, 100));
+    }
+
+    #[test]
+    fn disconnect_then_reconnect_cannot_reset_daily_budget() {
+        let hub = Hub::new(Config {
+            bytes_per_day_per_tunnel: 100,
+            ..Config::default()
+        });
+        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        let a = Arc::new(hub.new_tunnel("u".into(), tx_a));
+        hub.register("u".into(), a.clone());
+        assert!(a.spend_on_day(20_000, 100));
+        // Clean disconnect removes the tunnel from `tunnels` before reconnect.
+        hub.unregister("u", a.id);
+        assert!(hub.tunnel("u").is_none());
+        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        let b = hub.new_tunnel("u".into(), tx_b);
+        assert!(
+            !b.spend_on_day(20_000, 1),
+            "disconnecting and reconnecting must not reset a spent daily budget"
+        );
+    }
+
+    #[test]
+    fn revoke_link_session_invalidates_cookie_server_side() {
+        let hub = hub();
+        let ip: IpAddr = "203.0.113.5".parse().unwrap();
+        let (token, _) = hub.issue_link_session("u", 1, true, ip);
+        assert!(hub.link_session_valid("u", &token, 1));
+        hub.revoke_link_session("u", &token);
+        assert!(!hub.link_session_valid("u", &token, 1));
+    }
+
+    #[test]
+    fn ipv6_addresses_in_same_slash_64_share_rate_limits() {
+        let hub = Hub::new(Config {
+            handshake_rate: 2,
+            ..Config::default()
+        });
+        let a: IpAddr = "2001:db8:1:2::1".parse().unwrap();
+        let b: IpAddr = "2001:db8:1:2::2".parse().unwrap();
+        let c: IpAddr = "2001:db8:1:2::3".parse().unwrap();
+        assert!(hub.hello_allowed(a));
+        assert!(hub.hello_allowed(b));
+        assert!(!hub.hello_allowed(c));
     }
 
     #[test]

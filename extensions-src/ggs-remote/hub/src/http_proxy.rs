@@ -226,39 +226,15 @@ pub async fn proxy(
             ],
         );
     }
-    let mut builder = Response::builder().status(status);
-    for (name, value) in &http.headers {
-        // Reframing is ours: the framing headers would clash with the streamed body —
-        // hyper writes content-length itself (audit L-1, 2026-10-13). content-encoding
-        // STAYS: the daemon's brotli-marked answers cross byte-identical, and without
-        // the header the browser cannot decode them.
-        if name.eq_ignore_ascii_case("transfer-encoding")
-            || name.eq_ignore_ascii_case("connection")
-            || name.eq_ignore_ascii_case("keep-alive")
-            || name.eq_ignore_ascii_case("content-length")
-        {
-            continue;
-        }
-        if let (Ok(name), Ok(value)) = (
-            HeaderName::from_bytes(name.as_bytes()),
-            HeaderValue::from_str(value),
-        ) {
-            // Singleton headers keep the first spelling; `set-cookie` is repeatable by
-            // design and every instance must cross — a sign-in that sets two cookies
-            // used to deliver one.
-            if name != header::SET_COOKIE
-                && builder
-                    .headers_ref()
-                    .is_some_and(|set| set.contains_key(&name))
-            {
-                continue;
-            }
-            builder = builder.header(name, value);
-        }
-    }
+    let builder = Response::builder().status(status);
+    let mut builder = apply_proxied_headers(builder, &http.headers, &base_path);
     // The sign-out ends the Hub-side login with the daemon's own (§20.14): one password
-    // signed in on both halves, one sign-out leaves both.
+    // signed in on both halves, one sign-out leaves both — revoke server-side too so a
+    // previously copied `ggsrh` cookie cannot keep working after logout.
     if method == Method::POST && rest == "api/logout" && status.is_success() {
+        if let Some(token) = crate::login::cookie_token(&headers) {
+            hub.revoke_link_session(&uuid, &token);
+        }
         let secure = cookie_secure(&hub, peer, &headers);
         let cookie = format!(
             "{}=; HttpOnly; SameSite=Strict; Path={base_path}; Max-Age=0{}",
@@ -301,6 +277,97 @@ pub async fn proxy(
     builder
         .body(Body::from_stream(body))
         .unwrap_or_else(|_| bad_gateway())
+}
+
+/// Copy proxied response headers from a daemon onto a Hub response builder while enforcing
+/// same-origin tenant isolation across `/u/<uuid>/` links:
+/// - hop-by-hop headers, `content-length`, and `clear-site-data` are stripped;
+/// - `set-cookie` cannot forge/overwrite the Hub's own `ggsrh` cookie, cannot set `Domain`,
+///   and always has its `Path` forced to `base_path` (prevents cross-link cookie tossing);
+/// - `service-worker-allowed` is constrained to `base_path` (prevents a hostile daemon from
+///   claiming origin-wide `/` Service Worker scope over other users' links).
+pub(crate) fn apply_proxied_headers(
+    mut builder: axum::http::response::Builder,
+    headers: &[(String, String)],
+    base_path: &str,
+) -> axum::http::response::Builder {
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("transfer-encoding")
+            || name.eq_ignore_ascii_case("connection")
+            || name.eq_ignore_ascii_case("keep-alive")
+            || name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("clear-site-data")
+        {
+            continue;
+        }
+        if name.eq_ignore_ascii_case("set-cookie") {
+            if let Some(clean) = sanitize_set_cookie(value, base_path) {
+                if let Ok(hv) = HeaderValue::from_str(&clean) {
+                    builder = builder.header(header::SET_COOKIE, hv);
+                }
+            }
+            continue;
+        }
+        if name.eq_ignore_ascii_case("service-worker-allowed") {
+            let trimmed = value.trim();
+            let allowed = if trimmed.starts_with(base_path)
+                && !trimmed.contains("..")
+                && !trimmed.contains('\\')
+            {
+                trimmed
+            } else {
+                base_path
+            };
+            if !builder
+                .headers_ref()
+                .is_some_and(|set| set.contains_key("service-worker-allowed"))
+            {
+                if let Ok(hv) = HeaderValue::from_str(allowed) {
+                    builder = builder.header("service-worker-allowed", hv);
+                }
+            }
+            continue;
+        }
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            if name != header::SET_COOKIE
+                && builder
+                    .headers_ref()
+                    .is_some_and(|set| set.contains_key(&name))
+            {
+                continue;
+            }
+            builder = builder.header(name, value);
+        }
+    }
+    builder
+}
+
+/// Confine a daemon-supplied `Set-Cookie` to `base_path` and block attempts to overwrite
+/// the Hub's own `ggsrh` cookie.
+fn sanitize_set_cookie(raw: &str, base_path: &str) -> Option<String> {
+    let mut parts = raw.split(';');
+    let first = parts.next()?.trim();
+    let (cookie_name, _) = first.split_once('=')?;
+    if cookie_name.trim().eq_ignore_ascii_case(crate::login::COOKIE) {
+        return None;
+    }
+    let mut kept = vec![first.to_owned()];
+    for attr in parts {
+        let trimmed = attr.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let attr_name = trimmed.split_once('=').map_or(trimmed, |(k, _)| k).trim();
+        if attr_name.eq_ignore_ascii_case("path") || attr_name.eq_ignore_ascii_case("domain") {
+            continue;
+        }
+        kept.push(trimmed.to_owned());
+    }
+    kept.push(format!("Path={base_path}"));
+    Some(kept.join("; "))
 }
 
 /// One case-insensitive header out of a `HttpRes` head.
@@ -539,6 +606,9 @@ impl IntoResponse for crate::cache::Entry {
                 || name.eq_ignore_ascii_case("connection")
                 || name.eq_ignore_ascii_case("keep-alive")
                 || name.eq_ignore_ascii_case("content-length")
+                || name.eq_ignore_ascii_case("set-cookie")
+                || name.eq_ignore_ascii_case("service-worker-allowed")
+                || name.eq_ignore_ascii_case("clear-site-data")
             {
                 continue;
             }
@@ -546,9 +616,7 @@ impl IntoResponse for crate::cache::Entry {
                 HeaderName::from_bytes(name.as_bytes()),
                 HeaderValue::from_str(value),
             ) {
-                // Repeatable headers (`set-cookie`) cross in full; singletons keep the
-                // first spelling.
-                if name != header::SET_COOKIE && !seen.insert(name.clone()) {
+                if !seen.insert(name.clone()) {
                     continue;
                 }
                 builder = builder.header(name, value);
@@ -660,5 +728,42 @@ mod tests {
         assert!(cache_key_of(&Method::GET, "u1", "w/g/v/1/a.js", "x=1", false).is_none());
         assert!(cache_key_of(&Method::GET, "u1", "w/g/v/1/a.js", "", true).is_none());
         assert!(cache_key_of(&Method::POST, "u1", "w/g/v/1/a.js", "", false).is_none());
+    }
+
+    #[test]
+    fn proxied_headers_confine_cookies_and_service_worker_scope() {
+        let base = "/u/3f9c2a6e-8b1d-8c7a-9e45-2d6f0b8a71c3/";
+        let raw = vec![
+            (
+                "set-cookie".into(),
+                "ggsr=ok; HttpOnly; Domain=evil.com; Path=/u/victim/".into(),
+            ),
+            (
+                "set-cookie".into(),
+                "ggsrh=forged; HttpOnly; Path=/".into(),
+            ),
+            ("service-worker-allowed".into(), "/".into()),
+            ("clear-site-data".into(), "\"*\"".into()),
+        ];
+        let resp = apply_proxied_headers(Response::builder().status(StatusCode::OK), &raw, base)
+            .body(Body::empty())
+            .unwrap();
+        let cookies: Vec<&str> = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect();
+        assert_eq!(cookies.len(), 1);
+        assert!(cookies[0].starts_with("ggsr=ok;"));
+        assert!(cookies[0].ends_with(&format!("Path={base}")));
+        assert!(!cookies[0].to_ascii_lowercase().contains("domain="));
+        assert_eq!(
+            resp.headers()
+                .get("service-worker-allowed")
+                .and_then(|v| v.to_str().ok()),
+            Some(base)
+        );
+        assert!(resp.headers().get("clear-site-data").is_none());
     }
 }

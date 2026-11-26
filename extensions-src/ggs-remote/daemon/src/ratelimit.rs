@@ -12,6 +12,20 @@ const MAX_LOCK: Duration = Duration::from_secs(3600);
 const GLOBAL_WINDOW: Duration = Duration::from_secs(60);
 const GLOBAL_LIMIT: usize = 30;
 pub const GLOBAL_DELAY: Duration = Duration::from_secs(2);
+const MAX_TRACKED_IPS: usize = 16_384;
+const MAX_RECENT: usize = 1024;
+
+/// Normalize an IP address for rate-limiting: IPv4 stays /32, IPv6 is masked to its /64
+/// prefix so rotating host addresses inside one subnet cannot bypass per-IP lockouts.
+fn bucket_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => {
+            let masked = u128::from(v6) & 0xffff_ffff_ffff_ffff_0000_0000_0000_0000;
+            IpAddr::V6(std::net::Ipv6Addr::from(masked))
+        }
+    }
+}
 
 struct Entry {
     failures: u32,
@@ -36,13 +50,14 @@ pub enum Verdict {
 
 impl RateLimiter {
     pub fn check(&mut self, ip: IpAddr, now: Instant) -> Verdict {
-        if let Some(until) = self.by_ip.get(&ip).and_then(|e| e.locked_until) {
+        let key = bucket_ip(ip);
+        self.recent
+            .retain(|t| now.duration_since(*t) < GLOBAL_WINDOW);
+        if let Some(until) = self.by_ip.get(&key).and_then(|e| e.locked_until) {
             if until > now {
                 return Verdict::Locked(until - now);
             }
         }
-        self.recent
-            .retain(|t| now.duration_since(*t) < GLOBAL_WINDOW);
         if self.recent.len() >= GLOBAL_LIMIT {
             return Verdict::Delay(GLOBAL_DELAY);
         }
@@ -50,8 +65,26 @@ impl RateLimiter {
     }
 
     pub fn failure(&mut self, ip: IpAddr, now: Instant) -> Option<Duration> {
-        self.recent.push(now);
-        let entry = self.by_ip.entry(ip).or_insert(Entry {
+        let key = bucket_ip(ip);
+        self.recent
+            .retain(|t| now.duration_since(*t) < GLOBAL_WINDOW);
+        if self.recent.len() < MAX_RECENT {
+            self.recent.push(now);
+        }
+        if !self.by_ip.contains_key(&key) && self.by_ip.len() >= MAX_TRACKED_IPS {
+            self.prune(now);
+            if self.by_ip.len() >= MAX_TRACKED_IPS {
+                if let Some(oldest) = self
+                    .by_ip
+                    .iter()
+                    .min_by_key(|(_, e)| e.last)
+                    .map(|(k, _)| *k)
+                {
+                    self.by_ip.remove(&oldest);
+                }
+            }
+        }
+        let entry = self.by_ip.entry(key).or_insert(Entry {
             failures: 0,
             locked_until: None,
             last: now,
@@ -68,11 +101,13 @@ impl RateLimiter {
     }
 
     pub fn success(&mut self, ip: IpAddr) {
-        self.by_ip.remove(&ip);
+        self.by_ip.remove(&bucket_ip(ip));
     }
 
     /// Forget entries whose lock expired long ago (called from the housekeeping tick).
     pub fn prune(&mut self, now: Instant) {
+        self.recent
+            .retain(|t| now.duration_since(*t) < GLOBAL_WINDOW);
         self.by_ip.retain(|_, e| {
             e.locked_until.is_some_and(|until| until > now) || now.duration_since(e.last) < MAX_LOCK
         });
