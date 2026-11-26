@@ -1035,7 +1035,7 @@ export class Workbench {
 		// any view's search box): the key is claimed but nobody re-opens the widget from here,
 		// so it must still be suppressed — a keydown left unprevented reaches the webview's
 		// own find bar, which pops over the widget (the white Edge box).
-		if (command.id === 'editor.find' || command.id === 'editor.replace') {
+		if (inEditor && (command.id === 'editor.find' || command.id === 'editor.replace')) {
 			event.preventDefault();
 			return;
 		}

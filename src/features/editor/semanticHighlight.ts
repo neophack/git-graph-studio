@@ -16,13 +16,6 @@ import {
 	wordHighlightSlot
 } from './wordHighlightState';
 
-export {
-	activeWordHighlights,
-	clearWordHighlights,
-	HIGHLIGHT_SLOT_COUNT,
-	toggleWordHighlight
-} from './wordHighlightState';
-
 /* ---------- Effects & Decoration StateFields ---------- */
 
 const setSemanticKindsEffect = StateEffect.define<Record<string, string>>();

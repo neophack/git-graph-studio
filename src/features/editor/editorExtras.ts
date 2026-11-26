@@ -548,6 +548,7 @@ export function rulerDragScrollTop(y: number, track: number, scrollHeight: numbe
 	if (track <= 0 || maxScroll <= 0 || viewHeight <= 0) return 0;
 	const thumb = Math.min(track, Math.max(MIN_THUMB_PX, track * (viewHeight / scrollHeight)));
 	const pxPerPx = (track - thumb) / maxScroll;
+	if (pxPerPx <= 0) return 0;
 	return Math.max(0, Math.min((y - thumb / 2) / pxPerPx, maxScroll));
 }
 
@@ -637,7 +638,7 @@ export function attachOverviewRuler(
 		if (typeof ruler.hasPointerCapture === 'function' && ruler.hasPointerCapture(event.pointerId)) {
 			ruler.releasePointerCapture(event.pointerId);
 		}
-		if (!moved) centre(event);
+		if (!moved && event.type !== 'pointercancel') centre(event);
 	};
 	const interactive = options.clickable !== false;
 	if (interactive) {
