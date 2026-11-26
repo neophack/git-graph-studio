@@ -472,8 +472,10 @@ export class Workbench {
 	workspaceSymbolsCache: { at: number; symbols: { name: string; kind: string; path: string; line: number }[] } | null = null;
 
 	headHashFor(repo?: string): string | null {
-		if (repo && this.repoPath && repo.replace(/[\\/]+$/, '').toLowerCase() !== this.repoPath.replace(/[\\/]+$/, '').toLowerCase()) {
-			const sub = this.scm.subRepos.find((s) => s.repoPath.replace(/[\\/]+$/, '').toLowerCase() === repo.replace(/[\\/]+$/, '').toLowerCase());
+		const norm = (p: string) => p.replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase();
+		if (repo && this.repoPath && norm(repo) !== norm(this.repoPath)) {
+			const target = norm(repo);
+			const sub = this.scm.subRepos.find((s) => norm(s.repoPath) === target);
 			return sub?.hash || null;
 		}
 		return this.headHash;
