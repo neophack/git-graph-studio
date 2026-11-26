@@ -36,10 +36,11 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::scan::read_searchable;
-use crate::symbols::index::scan_references_bounded;
+use crate::symbols::index::{classify_reference_access, scan_references_bounded};
 use crate::symbols::mask::{mask_for_ext, CodeMask};
 use crate::symbols::sites::{lang_family, same_lang_family};
 use crate::symbols::store::{FileOutlineRow, SymbolStore};
+use crate::symbols::vol_reader::{read_single_sym_slot_metrics, SymSlotMetrics, XcBloomCache};
 use crate::symbols::WorkspaceSymbol;
 
 /// The children one direction returns at most: the window expands ring by ring, and a
@@ -92,6 +93,10 @@ pub struct RelationNode {
     /// Every kept site's 0-based line, ascending, at most [`MAX_EDGE_LINES`] — the
     /// numbered rows the graph card draws for a multi-site edge (ShowGraphDetails).
     pub edge_lines: Vec<usize>,
+    /// Semantic access classification for reference edges (`call`, `read`, `write`, or
+    /// `readWrite` when a caller both reads and writes a variable across multiple sites).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access: Option<String>,
     /// In a combined `CallsAndCallers` ring, whether this node came from the caller side
     /// (`Some(true)`) or the callee side (`Some(false)`) — same-file callers included.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,13 +106,91 @@ pub struct RelationNode {
     pub has_children: bool,
 }
 
-/// One ring's answer: the children and whether the ring was cut short — the node cap or
-/// the time budget ran out with unshown nodes left.
+/// One ring's answer: the children, whether the ring was cut short (the node cap or
+/// the time budget ran out with unshown nodes left), and optional native 9-volume
+/// `SymSlotMetrics` for the root symbol from `project.ggs_sym`.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RelationAnswer {
     pub nodes: Vec<RelationNode>,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_metrics: Option<SymSlotMetrics>,
+}
+
+/// Optional 9-volume runtime context loaded once per relation query: holds the `.ggs_xc`
+/// code-only Bloom signature cache so `refs_to`, `refs_by_files`, and all `has_children`
+/// peeks prune comment/string-only files in memory without repeated disk reads.
+struct VolContext<'a> {
+    vol_dir: &'a Path,
+    all_files: Vec<String>,
+    xc: Option<XcBloomCache>,
+}
+
+impl<'a> VolContext<'a> {
+    fn load(vol_dir: &'a Path, store: &SymbolStore) -> Self {
+        let all_files: Vec<String> = store
+            .files_with_counts()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        let xc = XcBloomCache::load(vol_dir, all_files.len());
+        Self {
+            vol_dir,
+            all_files,
+            xc,
+        }
+    }
+
+    fn filter_xc(&self, name: &str) -> Option<Vec<String>> {
+        self.xc.as_ref()?.filter_files(name, &self.all_files)
+    }
+}
+
+/// Combine two access tags on the same `(caller, subject)` edge: mixing `read` and
+/// `write` upgrades to `readWrite`; `call` stays `call` unless mixed with a write.
+fn merge_access(existing: &mut Option<String>, incoming: &str) {
+    match existing.as_deref() {
+        None => *existing = Some(incoming.to_owned()),
+        Some(cur) if cur == incoming || cur == "readWrite" => {}
+        Some("read") if incoming == "write" => *existing = Some("readWrite".to_owned()),
+        Some("write") if incoming == "read" => *existing = Some("readWrite".to_owned()),
+        Some("read") if incoming == "call" => *existing = Some("call".to_owned()),
+        _ => {}
+    }
+}
+
+/// Narrow candidate files for a reference scan using the 9-volume index:
+/// - File-private symbols scan only `subject_path`.
+/// - Call-only rings (`Callers`) prefer Format 9's AST `call_refs` (`store.files_calling`).
+/// - When `.ggs_xc` is available, intersect with the code-only Bloom signature filter so
+///   files mentioning `name` only in comments/strings are pruned before any disk reads.
+fn narrow_candidate_files(
+    store: &SymbolStore,
+    vol: Option<&VolContext<'_>>,
+    name: &str,
+    subject_path: &str,
+    subject_is_private: bool,
+    calls_only: bool,
+) -> Option<Vec<String>> {
+    if subject_is_private {
+        return Some(vec![subject_path.to_owned()]);
+    }
+    let base = if calls_only {
+        store.files_calling(name).or_else(|| store.files_containing(name))
+    } else {
+        store.files_containing(name)
+    };
+    let xc = vol.and_then(|v| v.filter_xc(name));
+    match (base, xc) {
+        (Some(b), Some(x)) => {
+            let set: HashSet<&str> = x.iter().map(String::as_str).collect();
+            Some(b.into_iter().filter(|p| set.contains(p.as_str())).collect())
+        }
+        (Some(b), None) => Some(b),
+        (None, Some(x)) => Some(x),
+        (None, None) => None,
+    }
 }
 
 /// The one call's wall-clock budget, borrowed by the direction and its peeks alike — a
@@ -289,7 +372,21 @@ pub fn relation_children(
     line: usize,
     kind: RelationKind,
 ) -> Result<RelationAnswer, String> {
-    relation_children_budgeted(root, store, name, path, line, kind, RELATION_BUDGET_MS)
+    relation_children_budgeted_with_vols(root, store, None, name, path, line, kind, RELATION_BUDGET_MS)
+}
+
+/// Relation query backed by the on-disk 9-volume index (`.ggs_xc` Bloom prefiltering,
+/// Format 9 AST `call_refs`, and native `project.ggs_sym` `SymSlotMetrics`).
+pub fn relation_children_with_vols(
+    root: &str,
+    store: &SymbolStore,
+    vol_dir: Option<&Path>,
+    name: &str,
+    path: &str,
+    line: usize,
+    kind: RelationKind,
+) -> Result<RelationAnswer, String> {
+    relation_children_budgeted_with_vols(root, store, vol_dir, name, path, line, kind, RELATION_BUDGET_MS)
 }
 
 /// The same query under an explicit budget in milliseconds — the tests' dial; 0 means
@@ -303,9 +400,24 @@ pub fn relation_children_budgeted(
     kind: RelationKind,
     budget_ms: u64,
 ) -> Result<RelationAnswer, String> {
+    relation_children_budgeted_with_vols(root, store, None, name, path, line, kind, budget_ms)
+}
+
+pub fn relation_children_budgeted_with_vols(
+    root: &str,
+    store: &SymbolStore,
+    vol_dir: Option<&Path>,
+    name: &str,
+    path: &str,
+    line: usize,
+    kind: RelationKind,
+    budget_ms: u64,
+) -> Result<RelationAnswer, String> {
     let budget = Budget::after(budget_ms);
-    match kind {
-        RelationKind::RefsTo => refs_to(root, store, name, path, Some(line), RingOpts::new(MAX_NODES, true, EdgeFilter::All), &budget),
+    let vol_ctx = vol_dir.map(|dir| VolContext::load(dir, store));
+    let vol = vol_ctx.as_ref();
+    let mut answer = match kind {
+        RelationKind::RefsTo => refs_to(root, store, vol, name, path, Some(line), RingOpts::new(MAX_NODES, true, EdgeFilter::All), &budget),
         RelationKind::RefsFrom => refs_from(store, name, path, line, RingOpts::new(MAX_NODES, true, EdgeFilter::All), &budget),
         // A pure store query: no file read, no wall-clock budget to respect.
         RelationKind::Contains => contains_members(store, name, MAX_NODES, true, MemberFilter::All),
@@ -313,17 +425,17 @@ pub fn relation_children_budgeted(
         // the peeks ask the same filtered question, so a node's ring marker never promises
         // a drill the kind answers empty.
         RelationKind::Calls => refs_from(store, name, path, line, RingOpts::new(MAX_NODES, true, EdgeFilter::CallsOnly), &budget),
-        RelationKind::Callers => refs_to(root, store, name, path, Some(line), RingOpts::new(MAX_NODES, true, EdgeFilter::CallsOnly), &budget),
+        RelationKind::Callers => refs_to(root, store, vol, name, path, Some(line), RingOpts::new(MAX_NODES, true, EdgeFilter::CallsOnly), &budget),
         // The combined view: the caller ring first, the callee ring merged in — a
         // counterpart met on both sides keeps one node whose count is the pair's total.
         // Caller branches drill as Callers, callee branches as Calls (the node's edge
         // coordinates tell the frontend which side it stands on: a caller's edge lives in
         // its own file, a callee's in the subject's).
-        RelationKind::CallsAndCallers => calls_and_callers(root, store, name, path, line, &budget),
+        RelationKind::CallsAndCallers => calls_and_callers(root, store, vol, name, path, line, &budget),
         // Referenced by Files / Modules: the same attributed sites keyed
         // by their file; the files are leaves.
         RelationKind::RefByFiles | RelationKind::RefByModules => {
-            refs_by_files(root, store, name, path, Some(line), MAX_NODES, &budget)
+            refs_by_files(root, store, vol, name, path, Some(line), MAX_NODES, &budget)
         }
         // The enclosing type, one ring per drill — the walk upward.
         RelationKind::Container => container_chain(store, name, path, line),
@@ -332,7 +444,18 @@ pub fn relation_children_budgeted(
         RelationKind::TypesUsed => refs_from(store, name, path, line, RingOpts::new(MAX_NODES, true, EdgeFilter::TypesOnly), &budget),
         RelationKind::BaseClasses => base_classes(store, name, path, line, MAX_NODES, &budget),
         RelationKind::DerivedClasses => derived_classes(store, name, path, line, MAX_NODES, &budget),
+    }?;
+    if let Some(v) = vol {
+        let target = resolve_def(store, name, path, line);
+        let (m_path, m_line) = target
+            .as_ref()
+            .map(|d| (d.path.as_str(), d.line))
+            .unwrap_or((path, line));
+        if let Some(fid) = store.file_id_of(m_path) {
+            answer.root_metrics = read_single_sym_slot_metrics(v.vol_dir, fid, m_line as u32, name);
+        }
     }
+    Ok(answer)
 }
 
 /* ---------- refsTo ---------- */
@@ -363,6 +486,7 @@ fn finish_ring(mut nodes: Vec<RelationNode>) -> Vec<RelationNode> {
 fn refs_to(
     root: &str,
     store: &SymbolStore,
+    vol: Option<&VolContext<'_>>,
     name: &str,
     subject_path: &str,
     subject_line: Option<usize>,
@@ -374,19 +498,35 @@ fn refs_to(
         with_flags,
         filter,
     } = opts;
-    let subject_is_private =
-        !subject_path.is_empty() && store.is_symbol_private(subject_path, name, subject_line);
-    let narrow = if subject_is_private {
-        Some(vec![subject_path.to_owned()])
+    let mut locals_by_file: HashMap<String, Vec<crate::symbols::parse::ParsedSymbol>> =
+        HashMap::new();
+    // Detect whether the subject itself is a scope-local variable or parameter declared at
+    // `(subject_path, subject_line)`: if so, scan only its enclosing scope in `subject_path`
+    // so hovering/selecting a local variable displays its real read/write references.
+    let subject_local_scope: Option<(usize, usize, usize)> = if !subject_path.is_empty() {
+        subject_line.and_then(|sline| {
+            file_locals(root, &mut locals_by_file, subject_path)
+                .iter()
+                .find(|local| local.name == name && local.line == sline)
+                .and_then(|local| local.scope.map(|(from, to)| (local.line, from, to)))
+        })
     } else {
-        store.files_containing(name)
+        None
     };
+    let subject_is_private = subject_local_scope.is_some()
+        || (!subject_path.is_empty() && store.is_symbol_private(subject_path, name, subject_line));
+    let narrow = narrow_candidate_files(
+        store,
+        vol,
+        name,
+        subject_path,
+        subject_is_private,
+        filter == EdgeFilter::CallsOnly,
+    );
     let (files, _) = scan_references_bounded(root, name, narrow, SCAN_KEEP, "")?;
     let mut nodes: Vec<RelationNode> = Vec::new();
     let mut index_of: HashMap<(String, String, String, usize), usize> = HashMap::new();
     let mut masks: HashMap<String, Option<CodeMask>> = HashMap::new();
-    let mut locals_by_file: HashMap<String, Vec<crate::symbols::parse::ParsedSymbol>> =
-        HashMap::new();
     let mut truncated = false;
     let mut files_seen = 0usize;
     let mut hits_seen = 0usize;
@@ -415,6 +555,11 @@ fn refs_to(
                 break 'files;
             }
             let site = hit.line.saturating_sub(1); // the scan counts 1-based; defs 0-based
+            if let Some((decl_line, from, to)) = subject_local_scope {
+                if site < from || site > to || site == decl_line {
+                    continue;
+                }
+            }
             let Some(def) = owning_def(&defs, site) else {
                 continue;
             };
@@ -433,19 +578,22 @@ fn refs_to(
                 continue;
             }
             // A parameter or local variable declared in the enclosing function shadows any
-            // same-named global symbol in the workspace index.
-            if file_locals(root, &mut locals_by_file, &file.path)
-                .iter()
-                .any(|local| {
-                    local.name == name
-                        && local
-                            .scope
-                            .is_some_and(|(from, to)| from <= site && site <= to)
-                })
+            // same-named global symbol in the workspace index (unless the subject itself IS
+            // that local variable).
+            if subject_local_scope.is_none()
+                && file_locals(root, &mut locals_by_file, &file.path)
+                    .iter()
+                    .any(|local| {
+                        local.name == name
+                            && local
+                                .scope
+                                .is_some_and(|(from, to)| from <= site && site <= to)
+                    })
             {
                 continue;
             }
-            let edge_kind = if is_call_site(&hit.text, hit.column, hit.length) {
+            let access = classify_reference_access(&hit.text, hit.column, hit.length, false);
+            let edge_kind = if access == "call" || is_call_site(&hit.text, hit.column, hit.length) {
                 "call"
             } else {
                 "use"
@@ -466,6 +614,7 @@ fn refs_to(
                 nodes[at].edge_count += 1;
                 nodes[at].edge_line = nodes[at].edge_line.min(site);
                 nodes[at].edge_lines.push(site);
+                merge_access(&mut nodes[at].access, access);
                 continue;
             }
             index_of.insert(key, nodes.len());
@@ -480,6 +629,7 @@ fn refs_to(
                 edge_kind: edge_kind.to_owned(),
                 edge_count: 1,
                 edge_lines: vec![site],
+                access: Some(access.to_owned()),
                 caller_side: None,
                 // The peek turns its own flags off: a flag computed inside a peek would
                 // chase the whole ring depth-first, one scan per level. The filtered
@@ -488,6 +638,7 @@ fn refs_to(
                     && has_refs_to_children(
                         root,
                         store,
+                        vol,
                         &def.name,
                         &file.path,
                         Some(def.line),
@@ -504,6 +655,7 @@ fn refs_to(
     Ok(RelationAnswer {
         nodes: finish_ring(nodes),
         truncated,
+        root_metrics: None,
     })
 }
 
@@ -552,16 +704,26 @@ fn file_mask<'a>(
 fn has_refs_to_children(
     root: &str,
     store: &SymbolStore,
+    vol: Option<&VolContext<'_>>,
     name: &str,
     subject_path: &str,
     subject_line: Option<usize>,
     peek: RingOpts,
     budget: &Budget,
 ) -> bool {
-    match store.files_containing(name) {
+    let candidates = narrow_candidate_files(
+        store,
+        vol,
+        name,
+        subject_path,
+        false,
+        peek.filter == EdgeFilter::CallsOnly,
+    );
+    match candidates {
         None => true,
         Some(files) if files.len() > PEEK_FILE_CAP => true,
-        Some(_) => refs_to(root, store, name, subject_path, subject_line, peek, budget)
+        Some(files) if files.is_empty() => false,
+        Some(_) => refs_to(root, store, vol, name, subject_path, subject_line, peek, budget)
             .is_ok_and(|answer| !answer.nodes.is_empty()),
     }
 }
@@ -614,6 +776,7 @@ fn refs_from(
         return Ok(RelationAnswer {
             nodes: Vec::new(),
             truncated: false,
+            root_metrics: None,
         });
     };
     let abs = Path::new(store.root()).join(&subject.path);
@@ -621,6 +784,7 @@ fn refs_from(
         return Ok(RelationAnswer {
             nodes: Vec::new(),
             truncated: false,
+            root_metrics: None,
         });
     };
     let text = String::from_utf8_lossy(&bytes);
@@ -668,6 +832,7 @@ fn refs_from(
                 return Ok(RelationAnswer {
                     nodes: finish_ring(nodes),
                     truncated,
+                    root_metrics: None,
                 });
             }
             // A parameter or local variable declared in the enclosing function shadows any
@@ -764,6 +929,7 @@ fn refs_from(
                 edge_kind: edge_kind.to_owned(),
                 edge_count: 1,
                 edge_lines: vec![line_no],
+                access: None,
                 caller_side: None,
                 has_children: with_flags
                     && has_refs_from_children(store, &target, opts.bare(), budget),
@@ -773,6 +939,7 @@ fn refs_from(
                 return Ok(RelationAnswer {
                     nodes: finish_ring(nodes),
                     truncated,
+                    root_metrics: None,
                 });
             }
         }
@@ -783,6 +950,7 @@ fn refs_from(
     Ok(RelationAnswer {
         nodes: finish_ring(nodes),
         truncated,
+        root_metrics: None,
     })
 }
 
@@ -856,6 +1024,7 @@ fn contains_members(
             edge_kind: "member".to_owned(),
             edge_line: row.line,
             edge_path: path.clone(),
+            access: None,
             caller_side: None,
             has_children: with_flags && drillable.contains(&row.name),
             line: row.line,
@@ -863,7 +1032,11 @@ fn contains_members(
             path,
         })
         .collect();
-    Ok(RelationAnswer { nodes, truncated })
+    Ok(RelationAnswer {
+        nodes,
+        truncated,
+        root_metrics: None,
+    })
 }
 
 /* ---------- Calls and Callers ---------- */
@@ -877,13 +1050,14 @@ fn contains_members(
 fn calls_and_callers(
     root: &str,
     store: &SymbolStore,
+    vol: Option<&VolContext<'_>>,
     name: &str,
     path: &str,
     line: usize,
     budget: &Budget,
 ) -> Result<RelationAnswer, String> {
     let bare = RingOpts::new(MAX_NODES, false, EdgeFilter::All);
-    let callers = refs_to(root, store, name, path, Some(line), bare, budget)?;
+    let callers = refs_to(root, store, vol, name, path, Some(line), bare, budget)?;
     let callees = refs_from(store, name, path, line, bare, budget)?;
     let mut truncated = callers.truncated || callees.truncated;
     let caller_count = callers.nodes.len();
@@ -915,6 +1089,7 @@ fn calls_and_callers(
             has_refs_to_children(
                 root,
                 store,
+                vol,
                 &node.name,
                 &node.path,
                 Some(node.line),
@@ -939,6 +1114,7 @@ fn calls_and_callers(
     Ok(RelationAnswer {
         nodes: finish_ring(nodes),
         truncated,
+        root_metrics: None,
     })
 }
 
@@ -952,25 +1128,32 @@ fn calls_and_callers(
 fn refs_by_files(
     root: &str,
     store: &SymbolStore,
+    vol: Option<&VolContext<'_>>,
     name: &str,
     subject_path: &str,
     subject_line: Option<usize>,
     limit: usize,
     budget: &Budget,
 ) -> Result<RelationAnswer, String> {
-    let subject_is_private =
-        !subject_path.is_empty() && store.is_symbol_private(subject_path, name, subject_line);
-    let narrow = if subject_is_private {
-        Some(vec![subject_path.to_owned()])
+    let mut locals_by_file: HashMap<String, Vec<crate::symbols::parse::ParsedSymbol>> =
+        HashMap::new();
+    let subject_local_scope: Option<(usize, usize, usize)> = if !subject_path.is_empty() {
+        subject_line.and_then(|sline| {
+            file_locals(root, &mut locals_by_file, subject_path)
+                .iter()
+                .find(|local| local.name == name && local.line == sline)
+                .and_then(|local| local.scope.map(|(from, to)| (local.line, from, to)))
+        })
     } else {
-        store.files_containing(name)
+        None
     };
+    let subject_is_private = subject_local_scope.is_some()
+        || (!subject_path.is_empty() && store.is_symbol_private(subject_path, name, subject_line));
+    let narrow = narrow_candidate_files(store, vol, name, subject_path, subject_is_private, false);
     let (files, _) = scan_references_bounded(root, name, narrow, SCAN_KEEP, "")?;
     let mut nodes: Vec<RelationNode> = Vec::new();
     let mut index_of: HashMap<String, usize> = HashMap::new();
     let mut masks: HashMap<String, Option<CodeMask>> = HashMap::new();
-    let mut locals_by_file: HashMap<String, Vec<crate::symbols::parse::ParsedSymbol>> =
-        HashMap::new();
     let mut truncated = false;
     let mut files_seen = 0usize;
     let mut hits_seen = 0usize;
@@ -998,6 +1181,11 @@ fn refs_by_files(
                 break 'files;
             }
             let site = hit.line.saturating_sub(1);
+            if let Some((decl_line, from, to)) = subject_local_scope {
+                if site < from || site > to || site == decl_line {
+                    continue;
+                }
+            }
             let Some(def) = owning_def(&defs, site) else {
                 continue;
             };
@@ -1009,22 +1197,25 @@ fn refs_by_files(
             {
                 continue;
             }
-            if file_locals(root, &mut locals_by_file, &file.path)
-                .iter()
-                .any(|local| {
-                    local.name == name
-                        && local
-                            .scope
-                            .is_some_and(|(from, to)| from <= site && site <= to)
-                })
+            if subject_local_scope.is_none()
+                && file_locals(root, &mut locals_by_file, &file.path)
+                    .iter()
+                    .any(|local| {
+                        local.name == name
+                            && local
+                                .scope
+                                .is_some_and(|(from, to)| from <= site && site <= to)
+                    })
             {
                 continue;
             }
+            let access = classify_reference_access(&hit.text, hit.column, hit.length, false);
             if let Some(&at) = index_of.get(&file.path) {
                 nodes[at].edge_count += 1;
                 nodes[at].edge_line = nodes[at].edge_line.min(site);
                 nodes[at].edge_lines.push(site);
                 nodes[at].line = nodes[at].line.min(site);
+                merge_access(&mut nodes[at].access, access);
                 continue;
             }
             index_of.insert(file.path.clone(), nodes.len());
@@ -1039,6 +1230,7 @@ fn refs_by_files(
                 edge_kind: "use".to_owned(),
                 edge_count: 1,
                 edge_lines: vec![site],
+                access: Some(access.to_owned()),
                 caller_side: None,
                 has_children: false,
             });
@@ -1051,6 +1243,7 @@ fn refs_by_files(
     Ok(RelationAnswer {
         nodes: finish_ring(nodes),
         truncated,
+        root_metrics: None,
     })
 }
 
@@ -1070,12 +1263,14 @@ fn container_chain(
         return Ok(RelationAnswer {
             nodes: Vec::new(),
             truncated: false,
+            root_metrics: None,
         });
     };
     let Some(container) = subject.container else {
         return Ok(RelationAnswer {
             nodes: Vec::new(),
             truncated: false,
+            root_metrics: None,
         });
     };
     // The container's own definition: its file's outline first (the same file usually),
@@ -1091,6 +1286,7 @@ fn container_chain(
         return Ok(RelationAnswer {
             nodes: Vec::new(),
             truncated: false,
+            root_metrics: None,
         });
     };
     Ok(RelationAnswer {
@@ -1105,10 +1301,12 @@ fn container_chain(
             edge_kind: "member".to_owned(),
             edge_count: 1,
             edge_lines: vec![subject.line],
+            access: None,
             caller_side: None,
             has_children: def.container.is_some(),
         }],
         truncated: false,
+        root_metrics: None,
     })
 }
 
@@ -1154,6 +1352,7 @@ fn base_classes(
                     })
                 })?;
             Some(RelationNode {
+                access: None,
                 caller_side: None,
                 has_children: !budget.expired() && !store.bases_of(base).is_empty(),
                 kind: def.kind.clone(),
@@ -1172,7 +1371,11 @@ fn base_classes(
     if !truncated && nodes.len() >= limit && bases.len() > nodes.len() {
         truncated = true;
     }
-    Ok(RelationAnswer { nodes, truncated })
+    Ok(RelationAnswer {
+        nodes,
+        truncated,
+        root_metrics: None,
+    })
 }
 
 /// The declarations that derive from the subject — the Derived Classes view:
@@ -1196,6 +1399,7 @@ fn derived_classes(
         .into_iter()
         .take(limit)
         .map(|(child_path, row)| RelationNode {
+            access: None,
             caller_side: None,
             has_children: !store.derived_of(&row.name, 1).is_empty(),
             kind: row.kind.to_owned(),
@@ -1210,7 +1414,11 @@ fn derived_classes(
             edge_lines: vec![row.line],
         })
         .collect();
-    Ok(RelationAnswer { nodes, truncated })
+    Ok(RelationAnswer {
+        nodes,
+        truncated,
+        root_metrics: None,
+    })
 }
 
 /// The subject's definition row: the exact `(path, line, name)` hit in that file's
@@ -2529,5 +2737,75 @@ mod tests {
             callers.iter().map(|n| (n.name.as_str(), n.path.as_str(), n.line)).collect::<Vec<_>>(),
             vec![("work", "src/a.c", 0), ("work", "src/b.c", 0)]
         );
+    }
+
+    /// Global variable references classify read / write / readWrite access per caller,
+    /// and scope-local variables / parameters attribute references to their enclosing
+    /// function instead of being dropped as shadowed.
+    #[test]
+    fn variable_access_and_local_scope_references_are_attributed() {
+        let (_dir, store) = seeded(&[(
+            "src/var.c",
+            "int g_count = 0;\nint reader(void)\n{\n    return g_count + 1;\n}\nvoid writer(int v)\n{\n    g_count = v;\n}\nvoid updater(int delta)\n{\n    int acc = g_count;\n    acc += delta;\n    g_count = acc;\n}\n",
+        )]);
+        let root = store.root().to_owned();
+
+        // Global variable `g_count`: reader -> read, writer -> write, updater -> readWrite.
+        let refs = children(&store, &root, "g_count", "src/var.c", 0, RelationKind::RefsTo);
+        let by_name: HashMap<&str, Option<&str>> = refs
+            .iter()
+            .map(|n| (n.name.as_str(), n.access.as_deref()))
+            .collect();
+        assert_eq!(by_name.get("reader"), Some(&Some("read")));
+        assert_eq!(by_name.get("writer"), Some(&Some("write")));
+        assert_eq!(by_name.get("updater"), Some(&Some("readWrite")));
+
+        // Local variable `acc` declared on line 11 inside `updater` (line 9):
+        // its usages on lines 12 (write `+=`) and 13 (read) attribute to `updater` as `readWrite`.
+        let local_refs = children(&store, &root, "acc", "src/var.c", 11, RelationKind::RefsTo);
+        assert_eq!(local_refs.len(), 1);
+        assert_eq!(local_refs[0].name, "updater");
+        assert_eq!(local_refs[0].edge_count, 2);
+        assert_eq!(local_refs[0].access.as_deref(), Some("readWrite"));
+    }
+
+    /// 9-volume integration: saving the 9-volume bundle and querying via
+    /// `relation_children_with_vols` prunes comment-only files with `.ggs_xc` and returns
+    /// native `root_metrics` from `project.ggs_sym`.
+    #[test]
+    fn relation_children_with_vols_returns_root_metrics_and_uses_xc() {
+        let (_dir, store) = seeded(&[
+            (
+                "src/core.c",
+                "int compute(int a, int b)\n{\n    if (a > b) {\n        return a - b;\n    }\n    return b - a;\n}\n",
+            ),
+            (
+                "src/caller.c",
+                "int run(void)\n{\n    return compute(3, 1);\n}\n",
+            ),
+            (
+                "src/notes.c",
+                "int unrelated(void)\n{\n    // compute(1, 2) only in a comment\n    return 0;\n}\n",
+            ),
+        ]);
+        let home = tempfile::tempdir().unwrap();
+        let vol_dir = SymbolStore::index_dir(store.root(), home.path());
+        store.save(home.path()).unwrap();
+
+        let ans = relation_children_with_vols(
+            store.root(),
+            &store,
+            Some(&vol_dir),
+            "compute",
+            "src/core.c",
+            0,
+            RelationKind::Callers,
+        )
+        .unwrap();
+        assert_eq!(ans.nodes.len(), 1);
+        assert_eq!(ans.nodes[0].name, "run");
+        let metrics = ans.root_metrics.expect("root_metrics should be decoded from project.ggs_sym");
+        assert!(metrics.effective_lines >= 4, "metrics={metrics:?}");
+        assert!(metrics.control_flow >= 1, "metrics={metrics:?}");
     }
 }

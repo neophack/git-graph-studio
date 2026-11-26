@@ -49,8 +49,9 @@ export class StatusBar {
 	/** VS Code's "N conflicts" item, shown while a merge / rebase has unmerged paths. */
 	private readonly conflictsItem: HTMLElement;
 	/** The symbol index state (M4 4.11): "Indexing symbols 12/300" while a build runs, the
-	 *  symbol count when it is ready; a click rebuilds. */
+	 *  symbol count when it is ready, and a plain symbol icon while idle; a click rebuilds. */
 	private readonly symbolsItem: HTMLElement;
+	private symbolsTooltip = '';
 	/** The save progress: "Saving… 42%" over a thin bar that fills as the backend streams
 	 *  the rope out. The whole point is the multi-hundred-megabyte Ctrl+S that takes
 	 *  seconds; `total` 0 (the save has not reported yet) shows the indeterminate pulse. */
@@ -130,6 +131,8 @@ export class StatusBar {
 		this.conflictsItem.addEventListener('click', () => this.onConflictsClick?.());
 		this.symbolsItem = el('div', 'status-item');
 		this.symbolsItem.hidden = true;
+		this.renderSymbolsIdle();
+		tooltip(this.symbolsItem, () => this.symbolsTooltip);
 		this.symbolsItem.addEventListener('click', () => this.onSymbolsClick?.());
 		this.saveItem = el('div', 'status-item status-save');
 		this.saveItem.hidden = true;
@@ -263,20 +266,38 @@ export class StatusBar {
 		}
 	}
 
-	/** Show (or, with null, hide) the symbol index state. */
+	/** Idle symbol-index indicator: always renders an icon so the slot is never a blank
+	 *  transparent area when no indexing update is in flight. */
+	private renderSymbolsIdle(): void {
+		this.symbolsItem.innerHTML = '';
+		this.symbolsItem.append(icon('symbol-method'));
+		this.symbolsTooltip = t('symbols.rebuild');
+		this.symbolsItem.setAttribute('aria-label', this.symbolsTooltip);
+	}
+
+	/** Show (or, with null, reset to idle/hide) the symbol index state. */
 	setSymbols(status: { state: string; done: number; total: number; files: number; symbols: number } | null): void {
-		this.symbolsItem.hidden = status === null;
-		if (status === null) return;
+		if (status === null) {
+			if (this.hasRepo) {
+				this.symbolsItem.hidden = false;
+				this.renderSymbolsIdle();
+			} else {
+				this.symbolsItem.hidden = true;
+			}
+			return;
+		}
+		this.symbolsItem.hidden = false;
 		this.symbolsItem.innerHTML = '';
 		if (status.state === 'building') {
 			this.symbolsItem.append(icon('sync', 'codicon-modifier-spin'), ` ${t('symbols.indexing')} ${status.done}/${status.total}`);
-			tooltip(this.symbolsItem, () => `${t('symbols.indexing')} ${status.done}/${status.total}`);
+			this.symbolsTooltip = `${t('symbols.indexing')} ${status.done}/${status.total}`;
+			this.symbolsItem.setAttribute('aria-label', this.symbolsTooltip);
 		} else if (status.state === 'ready') {
 			this.symbolsItem.append(icon('symbol-method'), ` ${status.symbols} ${t('symbols.ready')}`);
-			tooltip(this.symbolsItem, () => `${status.symbols} ${t('symbols.ready')} - ${status.files}`);
+			this.symbolsTooltip = `${status.symbols} ${t('symbols.ready')} - ${status.files}`;
+			this.symbolsItem.setAttribute('aria-label', this.symbolsTooltip);
 		} else {
-			this.symbolsItem.append(icon('symbol-method'), ` ${t('symbols.ready')}`);
-			tooltip(this.symbolsItem, () => t('symbols.rebuild'));
+			this.renderSymbolsIdle();
 		}
 	}
 
@@ -332,6 +353,7 @@ export class StatusBar {
 		this.branchItem.hidden = !hasRepo;
 		this.syncItem.hidden = true;
 		this.symbolsItem.hidden = !hasRepo;
+		if (hasRepo) this.renderSymbolsIdle();
 		document.body.classList.toggle('no-folder', !hasRepo);
 		this.setConflicts(0);
 		// No repo_head here: the Source Control view's refresh fetches it and feeds this bar

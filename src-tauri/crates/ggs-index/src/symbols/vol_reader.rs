@@ -180,6 +180,97 @@ impl VolumeSigReader {
     }
 }
 
+/// Reusable in-memory `.ggs_xc` Bloom signature cache for a single multi-peek relation
+/// query: reads `project.ggs_xc` from disk once so `refs_to`, `refs_by_files`, and all
+/// `has_refs_to_children` peeks share the loaded bitfield without repeated disk reads.
+pub struct XcBloomCache {
+    bytes: Vec<u8>,
+    file_count: usize,
+}
+
+impl XcBloomCache {
+    /// Load `project.ggs_xc` if present, valid, and matching `expected_files`.
+    pub fn load(dir: &Path, expected_files: usize) -> Option<Self> {
+        let bytes = fs::read(dir.join(XC_VOL_FILE)).ok()?;
+        let records = xvol_records(&bytes)?;
+        if records.len() != expected_files {
+            return None;
+        }
+        Some(Self {
+            bytes,
+            file_count: expected_files,
+        })
+    }
+
+    /// Filter `files` (indexed by `file_id`) to those whose `.ggs_xc` code-only Bloom
+    /// signature matches `word` (conservatively keeping files where `word` is an `.ggs_xc`
+    /// stop-word for that file's extension). Returns `None` if `word` cannot be hashed.
+    pub fn filter_files(&self, word: &str, files: &[String]) -> Option<Vec<String>> {
+        if files.len() != self.file_count {
+            return None;
+        }
+        let pair = sig_pair(word.as_bytes())?;
+        let records = xvol_records(&self.bytes)?;
+        let tables = super::projvol_sig::builtin_tables();
+        let token_bytes = word.as_bytes();
+        let mut hits = Vec::new();
+        for (fid, rec) in records {
+            if let Some(path) = files.get(fid as usize) {
+                let ext = super::projvol_sig::ext_key(path.as_bytes());
+                let excluded = tables.xc(&ext).contains(token_bytes);
+                if excluded || sig_matches_pair(rec, pair) {
+                    hits.push(path.clone());
+                }
+            }
+        }
+        hits.sort();
+        hits.dedup();
+        Some(hits)
+    }
+}
+
+/// Look up a single symbol's native `SymSlotMetrics` directly from `project.ggs_sym`
+/// without allocating a map for the entire workspace.
+pub fn read_single_sym_slot_metrics(
+    dir: &Path,
+    file_id: u32,
+    line0: u32,
+    name: &str,
+) -> Option<SymSlotMetrics> {
+    let bytes = fs::read(dir.join(SYM_VOL_FILE)).ok()?;
+    let header = VolumeHeader::parse_block(bytes.get(..HEADER_BLOCK_SIZE)?)?;
+    if header.magic != MAGIC_SYM || header.rec_size as usize != SYM_REC_SIZE {
+        return None;
+    }
+    let count = header.count as usize;
+    let body = bytes.get(HEADER_BLOCK_SIZE..)?;
+    if body.len() < count.checked_mul(SYM_REC_SIZE)? {
+        return None;
+    }
+    let name_bytes = name.as_bytes();
+    let mut fallback: Option<SymSlotMetrics> = None;
+    for i in 0..count {
+        let slot_bytes = &body[i * SYM_REC_SIZE..(i + 1) * SYM_REC_SIZE];
+        let Some(slot) = SymSlot::decode(slot_bytes) else {
+            continue;
+        };
+        if slot.file_id != file_id || slot.name.as_slice() != name_bytes {
+            continue;
+        }
+        if slot.raw108 == 0 && slot.name_tag == 0 {
+            continue;
+        }
+        let metrics = SymSlotMetrics::from_slot(&slot);
+        if slot.line0 == line0 {
+            return Some(metrics);
+        }
+        if fallback.is_none() {
+            fallback = Some(metrics);
+        }
+    }
+    fallback
+}
+
 /// Compare a 4-byte folded key lexicographically against a folded prefix (length <= 4).
 fn cmp_key_to_prefix(key: &[u8; 4], prefix_folded: &[u8]) -> std::cmp::Ordering {
     let n = prefix_folded.len().min(4);

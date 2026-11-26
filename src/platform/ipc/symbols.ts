@@ -141,6 +141,8 @@ export interface RelationNode {
 	/** Every kept site's 0-based line, ascending, at most 16 — the numbered rows the
 	 *  relation graph draws under a multi-site card (`1. line 113`). */
 	edgeLines: number[];
+	/** Semantic access classification for reference edges (`call`, `read`, `write`, `readWrite`). */
+	access?: 'read' | 'write' | 'call' | 'readWrite';
 	/** Whether the node belongs to the caller side in a combined `callsAndCallers` ring
 	 *  (true for callers, false for callees — same-file callers included). */
 	callerSide?: boolean;
@@ -148,11 +150,21 @@ export interface RelationNode {
 	hasChildren: boolean;
 }
 
+/** Native 9-volume `project.ggs_sym` metrics decoded from a symbol's 180-byte slot. */
+export interface SymSlotMetrics {
+	effectiveLines: number;
+	controlFlow: number;
+	gotoCount: number;
+	langId: number;
+	paramCount: number;
+}
+
 /** What `symbol_relation_children` answers: the children of one relation node and
  *  whether the ring was cut short (the time budget or the node cap ran out). */
 export interface RelationAnswer {
 	nodes: RelationNode[];
 	truncated: boolean;
+	rootMetrics?: SymSlotMetrics;
 }
 
 /** The relation kinds the window drills — the full relation-type set (added

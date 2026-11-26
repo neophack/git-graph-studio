@@ -132,6 +132,8 @@ export interface MacroHoverSource {
 	 *  parses it per call. Optional: a source without it (a diff tab holds no file of
 	 *  its own; the tests' fakes) answers only the global index. */
 	scopeLookup?(name: string, line: number, text: string): Promise<ScopeDefinition[]>;
+	/** Receiver-disambiguated member lookup (`ptr->field`, `obj.method`, `Ns::Type::sym`). */
+	memberLookup?(name: string, line: number, column: number, text: string): Promise<WsSymbol[]>;
 }
 
 /** How many directive lines and characters one hover entry shows. */
@@ -608,6 +610,7 @@ const SYMBOL_HOVER_SHOW_MS = 1000;
  *  the hovered file's own symbol lead the list; each location opens the definition on
  *  click when `open` is wired. The keep-alive guard rides along, so the tooltip is
  *  reachable and stays while it is worked. */
+
 export function symbolHoverExtension(source: MacroHoverSource): Extension[] {
 	const open = source.open
 		? (path: string, line: number): void => {

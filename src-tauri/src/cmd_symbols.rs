@@ -27,13 +27,13 @@ use ggs_index::symbols::preprocessor::{
     save_base_projects, save_conditions, ConditionsConfig, InactiveRange, MacroExpansion,
 };
 use ggs_index::symbols::relations::{
-    relation_children, RelationAnswer, RelationKind, RelationNode,
+    relation_children_with_vols, RelationAnswer, RelationKind, RelationNode,
 };
 use ggs_index::symbols::rename::{rename_apply, rename_plan, RenameOutcome, RenamePlan};
 use ggs_index::symbols::type_resolve::{
     member_completions, resolve_member_symbol, MemberCompletion,
 };
-use ggs_index::symbols::vol_reader::VolumeStats;
+use ggs_index::symbols::vol_reader::{SymSlotMetrics, VolumeStats};
 use ggs_index::symbols::WorkspaceSymbol;
 
 use ggs_base::workspace::WorkspaceRoots;
@@ -432,6 +432,8 @@ pub async fn symbol_file_outline(
 pub struct RelationAnswerDto {
     pub nodes: Vec<RelationNode>,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_metrics: Option<SymSlotMetrics>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -452,21 +454,24 @@ pub async fn symbol_relation_children(
     let path = store_relative(&root, &path);
     ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
     let kind = RelationKind::parse(&direction)?;
+    let vol_dir = symbol_index.volume_dir_if_fresh(&root);
     // A root without a resident index answers the empty ring; the relation query itself
     // ran inside the store's short lock and its result alone leaves it.
     let answer = symbol_index
         .with_store(&root, |store| {
-            relation_children(&root, store, &name, &path, line, kind)
+            relation_children_with_vols(&root, store, vol_dir.as_deref(), &name, &path, line, kind)
         })
         .unwrap_or_else(|| {
             Ok(RelationAnswer {
                 nodes: Vec::new(),
                 truncated: false,
+                root_metrics: None,
             })
         })?;
     Ok(RelationAnswerDto {
         nodes: answer.nodes,
         truncated: answer.truncated,
+        root_metrics: answer.root_metrics,
     })
 }
 

@@ -3,7 +3,7 @@
 // orchestration (open.ts), split out so neither file outgrows the other.
 
 import { type FileContents, type FileProbe, fileProbe } from '../../platform/ipc/fs';
-import { symbolLookup, symbolScopeLookup } from '../../platform/ipc/symbols';
+import { symbolLookup, symbolMemberLookup, symbolScopeLookup } from '../../platform/ipc/symbols';
 import { declaredLanguageName } from '../extensions';
 import { loadDataViews, loadCanViews, loadDbcView, loadDevTreeView, loadEditorExtensions, loadFastView, loadHexView, loadImageView, loadMediaView, loadMergeEditor } from '../../platform/lazy';
 import { t } from '../../platform/i18n';
@@ -534,6 +534,9 @@ export const mountMethods: ThisType<import('./group').EditorGroup> = {
 							// function answers that parameter or local, over the live buffer.
 							scopeLookup: (name, line, text) => editor.input.kind === 'file'
 								? symbolScopeLookup(name, line, text, editor.input.path.split('.').pop() ?? '')
+								: Promise.resolve([]),
+							memberLookup: (name, line, column, text) => editor.input.kind === 'file'
+								? symbolMemberLookup(name, line, column, text, editor.input.path.split('.').pop() ?? '')
 								: Promise.resolve([]),
 							open: (path, line) => {
 								const currentPath = editor.input.kind === 'file' ? editor.input.path : null;

@@ -12,15 +12,14 @@
 //   numbered detail rows ("1. line N"), +/− branch expanders, O(degree) hover
 //   neighborhood tracing, dot-grid parallax canvas, keyboard shortcuts, and rAF glide.
 
-import { readFile } from '../../platform/ipc/fs';
-import { symbolLookup, symbolRelationChildren, type RelationKind, type RelationNode } from '../../platform/ipc/symbols';
+import { symbolRelationChildren, type RelationKind, type RelationNode, type SymSlotMetrics } from '../../platform/ipc/symbols';
 
-import { t, tf, type LocaleKey } from '../../platform/i18n';
+import { t, type LocaleKey } from '../../platform/i18n';
 import { load, save } from '../../platform/state';
-import { extOf, highlightLine } from '../../platform/highlight';
 import { el, icon, quickInput, showContextMenu, type MenuEntry } from '../../platform/ui/index';
 
 import type { DefinitionSubject } from './definitionView';
+import { KIND_ICONS } from './contextView';
 
 import './relationGraph.css';
 
@@ -56,9 +55,6 @@ const MAX_DEPTH = 4;
 const EXPANDER_R = 8;
 const EXPANDER_OFF = 13;
 const MOVE_MS = 220;
-const DECL_DELAY = 300;
-const DECL_MAX_LINES = 6;
-const DECL_MAX_CHARS = 400;
 const ARROW_PAN = 48;
 
 const PICKER_KINDS: { kind: RelationKind; label: LocaleKey }[] = [
@@ -107,20 +103,42 @@ const VIEW_LABELS: Record<RelationViewMode, LocaleKey> = {
 
 const VIEW_KEY = 'relation.viewMode';
 
-function ruleKindFor(symbolKind: string): RelationKind | null {
+function ruleCategoryFor(symbolKind: string): string {
 	switch (symbolKind) {
 		case 'function':
 		case 'method':
+		case 'constructor':
+			return 'function';
 		case 'variable':
+		case 'local':
 		case 'constant':
+		case 'field':
 		case 'member':
-			return 'referencedByFunctions';
+		case 'property':
+		case 'parameter':
+		case 'macro':
+			return 'variable';
 		case 'struct':
 		case 'enum':
 		case 'union':
 		case 'typedef':
 		case 'type':
 		case 'interface':
+			return 'type';
+		case 'class':
+			return 'class';
+		default:
+			return symbolKind;
+	}
+}
+
+function ruleKindFor(symbolKind: string): RelationKind | null {
+	switch (ruleCategoryFor(symbolKind)) {
+		case 'function':
+			return 'callsAndCallers';
+		case 'variable':
+			return 'referencedByFunctions';
+		case 'type':
 			return 'contains';
 		case 'class':
 			return 'derivedClasses';
@@ -142,6 +160,8 @@ interface GraphNode {
 	edgeKind: string;
 	edgeCount: number;
 	edgeLines: number[];
+	access?: 'read' | 'write' | 'call' | 'readWrite';
+	callerSide?: boolean;
 	hasChildren: boolean;
 	expanded: boolean;
 	loaded: boolean;
@@ -154,6 +174,7 @@ interface GraphEdge {
 	from: string;
 	to: string;
 	kind: string;
+	access?: 'read' | 'write' | 'call' | 'readWrite';
 	count: number;
 	hideCount: boolean;
 }
@@ -203,12 +224,6 @@ interface Scene {
 	canvasH: number;
 }
 
-interface DeclFragment {
-	kind: string;
-	path: string;
-	line: number;
-	text: string;
-}
 
 function nodeKey(name: string, path: string, line: number): string {
 	return `${name}\u0000${path}\u0000${line}`;
@@ -228,6 +243,8 @@ function fromRelation(node: RelationNode, parentKey: string | null): GraphNode {
 		edgeKind: node.edgeKind,
 		edgeCount: node.edgeCount,
 		edgeLines: node.edgeLines ?? [],
+		access: node.access,
+		callerSide: node.callerSide,
 		hasChildren: node.hasChildren,
 		expanded: false,
 		loaded: false,
@@ -581,6 +598,7 @@ export class RelationGraphView {
 	onOpen?: (path: string, line: number) => void;
 	onShowDefinition?: (subject: DefinitionSubject) => void;
 	onPinChange?: (pinned: boolean) => void;
+	onRootChange?: (root: RelationRoot | null) => void;
 	resolvePath?: (path: string) => string;
 
 	private readonly stage: HTMLElement;
@@ -602,6 +620,7 @@ export class RelationGraphView {
 	private rootLoading = false;
 	private rootFailed = false;
 	private rootNote: string | undefined;
+	private rootMetrics: SymSlotMetrics | undefined;
 	private pinned = false;
 	private selectedKey: string | null = null;
 
@@ -634,7 +653,7 @@ export class RelationGraphView {
 	private readonly backButton: HTMLButtonElement;
 	private readonly forwardButton: HTMLButtonElement;
 
-	private disposed = false;
+
 	private viewMode: RelationViewMode = load<RelationViewMode>(VIEW_KEY, 'graphVertical');
 	private readonly outline: HTMLElement;
 	private readonly outlineHead: HTMLElement;
@@ -689,16 +708,10 @@ export class RelationGraphView {
 		this.controls = el('div', 'rg-controls', [this.kindButton, this.backButton, this.forwardButton, this.viewButton, this.pinButton, fit]);
 		this.paintControls();
 
-		document.addEventListener('mousedown', this.onDocMouseDown);
-		document.addEventListener('keydown', this.onDocKeyDown);
 		this.render();
 	}
 
 	dispose(): void {
-		this.disposed = true;
-		this.hideDecl();
-		document.removeEventListener('mousedown', this.onDocMouseDown);
-		document.removeEventListener('keydown', this.onDocKeyDown);
 		this.stopMoves();
 	}
 
@@ -727,13 +740,15 @@ export class RelationGraphView {
 		if (same && !note) return;
 		this.root = root ? { kind: root.kind, name: root.name, path: root.path, line: root.line } : null;
 		this.rootNote = note;
+		this.onRootChange?.(this.root);
 		if (root && !this.historying) {
+			const category = ruleCategoryFor(root.kind);
 			const rule = ruleKindFor(root.kind);
-			if (rule !== null && root.kind !== this.lastCategory) {
+			if (rule !== null && category !== this.lastCategory) {
 				this.kind = rule;
 				this.paintControls();
 			}
-			this.lastCategory = root.kind;
+			this.lastCategory = category;
 			this.pushHistory();
 		}
 		this.historying = false;
@@ -764,6 +779,7 @@ export class RelationGraphView {
 	}
 
 	private callsSide(node: GraphNode): boolean {
+		if (node.callerSide !== undefined) return !node.callerSide;
 		return node.edgePath === (this.root?.path ?? '');
 	}
 
@@ -787,9 +803,9 @@ export class RelationGraphView {
 	private async loadRoot(): Promise<void> {
 		const generation = ++this.generation;
 		const root = this.root;
-		this.hideDecl();
 		this.clearHoverHighlight();
 		this.selectedKey = null;
+		this.rootMetrics = undefined;
 		this.nodes.clear();
 		this.layout.clear();
 		this.layoutExp.clear();
@@ -814,6 +830,7 @@ export class RelationGraphView {
 		try {
 			const answer = await symbolRelationChildren(root.name, root.path, root.line, this.kind);
 			if (generation !== this.generation) return;
+			this.rootMetrics = answer?.rootMetrics;
 			const node = this.nodes.get(this.rootKey);
 			if (node) {
 				node.hasChildren = (answer?.nodes.length ?? 0) > 0;
@@ -839,13 +856,15 @@ export class RelationGraphView {
 		for (const entry of ring) {
 			const key = nodeKey(entry.name, entry.path, entry.line);
 			if (this.nodes.has(key)) {
-				const up = this.kind === 'callsAndCallers' ? entry.edgePath !== (this.root?.path ?? '') : this.pointsUp(node);
+				const up = this.kind === 'callsAndCallers'
+					? (entry.callerSide !== undefined ? entry.callerSide : entry.edgePath !== (this.root?.path ?? ''))
+					: this.pointsUp(node);
 				const from = up ? key : node.key;
 				const to = up ? node.key : key;
 				const seen = `${from}\u0000${to}`;
 				if (!this.crossSeen.has(seen)) {
 					this.crossSeen.add(seen);
-					this.crossEdges.push({ id: seen, from, to, kind: entry.edgeKind || 'member', count: entry.edgeCount, hideCount: false });
+					this.crossEdges.push({ id: seen, from, to, kind: entry.edgeKind || 'member', access: entry.access, count: entry.edgeCount, hideCount: false });
 				}
 				continue;
 			}
@@ -1029,6 +1048,19 @@ export class RelationGraphView {
 		return depth;
 	}
 
+	private layerOf(key: string, splitCallers: boolean): number {
+		let depth = 0;
+		let at = this.nodes.get(key);
+		let branchRoot: GraphNode | undefined;
+		while (at && at.parentKey !== null) {
+			depth++;
+			if (at.parentKey === this.rootKey) branchRoot = at;
+			at = this.nodes.get(at.parentKey);
+		}
+		if (splitCallers && depth > 0 && branchRoot && !this.callsSide(branchRoot)) return -depth;
+		return depth;
+	}
+
 	/* ---------- Module-Style Layered Layout with Crossing Minimization ---------- */
 
 	private visibleEdgeList(): GraphEdge[] {
@@ -1047,6 +1079,7 @@ export class RelationGraphView {
 					from,
 					to,
 					kind: child.edgeKind,
+					access: child.access,
 					count: child.edgeCount,
 					hideCount: detailRows(child).length > 0
 				});
@@ -1060,8 +1093,8 @@ export class RelationGraphView {
 
 	private cardWidth(node: GraphNode): number {
 		const titleW = estimateLabelWidth(relationLabel(node)) + 34;
-		const subW = estimateLabelWidth(cardSubtitle(node)) * 0.88 + 26;
-		return Math.max(132, Math.min(300, Math.ceil(Math.max(titleW, subW))));
+		const subW = estimateLabelWidth(cardSubtitle(node, node.parentKey === null ? this.rootMetrics : undefined)) * 0.88 + 26;
+		return Math.max(132, Math.min(320, Math.ceil(Math.max(titleW, subW))));
 	}
 
 	private nodeHeight(node: GraphNode): number {
@@ -1080,11 +1113,29 @@ export class RelationGraphView {
 		let canvasH = 240;
 
 		if (visible.length > 0) {
-			const { layerKeys, byLayer } = orderRelationLayers(visible, edges, (k) => this.depthOf(k));
+			// Bi-directional Calls & Callers layout (Source Insight style): when a function
+			// has BOTH callers and callees, callers sit upstream (layers -1, -2, ...) and
+			// callees sit downstream (layers +1, +2, ...) with the root centered at layer 0.
+			let splitCallers = false;
+			if (this.kind === 'callsAndCallers') {
+				const rootNode = this.nodes.get(this.rootKey);
+				if (rootNode?.expanded) {
+					let hasCaller = false;
+					let hasCallee = false;
+					for (const childKey of rootNode.children) {
+						const child = this.nodes.get(childKey);
+						if (!child) continue;
+						if (this.callsSide(child)) hasCallee = true;
+						else hasCaller = true;
+					}
+					splitCallers = hasCaller && hasCallee;
+				}
+			}
+			const { layerKeys, byLayer } = orderRelationLayers(visible, edges, (k) => this.layerOf(k, splitCallers));
 			const horizontal = this.viewMode === 'graphHorizontal';
 
 			if (!horizontal) {
-				// Top-to-Bottom layered bands (L0, L1, L2...).
+				// Top-to-Bottom layered bands.
 				const rows: {
 					layer: number;
 					items: GraphNode[];
@@ -1136,7 +1187,8 @@ export class RelationGraphView {
 						const h = this.nodeHeight(node);
 						this.layout.set(node.key, { x: cursorX, y: cursorY, w, h, layer: row.layer });
 						if (node.hasChildren) {
-							this.layoutExp.set(node.key, { x: cursorX + w / 2, y: cursorY + h + EXPANDER_OFF });
+							const expY = row.layer < 0 ? cursorY - EXPANDER_OFF : cursorY + h + EXPANDER_OFF;
+							this.layoutExp.set(node.key, { x: cursorX + w / 2, y: expY });
 						}
 						cursorX += w + TB_COL_GAP;
 					});
@@ -1145,7 +1197,7 @@ export class RelationGraphView {
 				if (activeBand) bands.push(activeBand);
 				canvasH = Math.max(240, cursorY + PAD_Y + 14);
 			} else {
-				// Left-to-Right layered columns (L0, L1, L2...).
+				// Left-to-Right layered columns.
 				const cols: {
 					layer: number;
 					items: GraphNode[];
@@ -1197,7 +1249,8 @@ export class RelationGraphView {
 						const h = col.heights[idx]!;
 						this.layout.set(node.key, { x: cursorX, y: cursorY, w, h, layer: col.layer });
 						if (node.hasChildren) {
-							this.layoutExp.set(node.key, { x: cursorX + w + EXPANDER_OFF, y: cursorY + NODE_H / 2 });
+							const expX = col.layer < 0 ? cursorX - EXPANDER_OFF : cursorX + w + EXPANDER_OFF;
+							this.layoutExp.set(node.key, { x: expX, y: cursorY + NODE_H / 2 });
 						}
 						cursorY += h + LR_ROW_GAP;
 					});
@@ -1217,7 +1270,7 @@ export class RelationGraphView {
 			nodes.push({
 				id: node.key,
 				label: relationLabel(node),
-				subtitle: cardSubtitle(node),
+				subtitle: cardSubtitle(node, node.parentKey === null ? this.rootMetrics : undefined),
 				kind: node.kind,
 				x: spot.x,
 				y: spot.y,
@@ -1304,15 +1357,24 @@ export class RelationGraphView {
 				void this.toggleExpand(node.key);
 			});
 		}
-		const name = el('span', 'rg-ol-name', [relationLabel(node)]);
+		const name = el('span', 'rg-ol-name', [
+			icon(KIND_ICONS[node.kind] ?? 'symbol-misc'),
+			el('span', 'rg-ol-label', [relationLabel(node)])
+		]);
+		if (node.access === 'write' || node.access === 'readWrite') {
+			const cls = node.access === 'write' ? 'rg-access-badge rg-access-w' : 'rg-access-badge rg-access-rw';
+			const tag = node.access === 'write' ? '[W]' : '[R/W]';
+			name.appendChild(el('span', cls, [tag]));
+		}
 		const suffix = this.branchSuffix(node);
-		if (suffix) name.appendChild(document.createTextNode(suffix));
+		if (suffix) name.appendChild(el('span', 'rg-ol-suffix', [suffix]));
 		const count = el('span', 'rg-ol-count', [node.edgeCount > 1 ? String(node.edgeCount) : '']);
 		const file = el('span', 'rg-ol-file', [baseName(node.path)]);
 		const line = el('span', 'rg-ol-line', [String(node.line + 1)]);
 		row.append(twist, name, count, file, line);
 		row.title = `${node.path}:${node.line + 1}`;
 		row.addEventListener('click', () => this.showInDefinition(node, node.path, node.line));
+		row.addEventListener('dblclick', () => this.onOpen?.(node.path, node.line + 1));
 		row.addEventListener('contextmenu', (event) => {
 			event.preventDefault();
 			this.showCardMenu(event.clientX, event.clientY, node.key);
@@ -1444,18 +1506,21 @@ export class RelationGraphView {
 		if (this.moves.size > 0) this.beginMoves();
 	}
 
-	/** Subtle L0, L1, L2... architectural layer guide bands matching moduleDiagram.ts. */
+	/** Subtle layer guide bands: in Calls & Callers shows Callers / Calls labels. */
 	private paintBands(scene: Scene): void {
 		while (this.bandLayer.firstChild) this.bandLayer.firstChild.remove();
 		if (scene.bands.length < 2) return;
 		const horizontal = this.viewMode === 'graphHorizontal';
+		const hasNegative = scene.bands.some((b) => b.layer < 0);
 		for (const band of scene.bands) {
 			const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
 			rect.classList.add('rg-layer-band');
 			rect.setAttribute('rx', '12');
 			const tag = document.createElementNS('http://www.w3.org/2000/svg', 'text');
 			tag.classList.add('rg-layer-tag');
-			tag.textContent = `L${band.layer}`;
+			tag.textContent = hasNegative
+				? (band.layer < 0 ? `${t('relations.kind.callers')}${band.layer < -1 ? ` (${-band.layer})` : ''}` : band.layer > 0 ? `${t('relations.kind.calls')}${band.layer > 1 ? ` (${band.layer})` : ''}` : '')
+				: `L${band.layer}`;
 			if (!horizontal) {
 				rect.setAttribute('x', '12');
 				rect.setAttribute('y', String(band.start));
@@ -1572,17 +1637,10 @@ export class RelationGraphView {
 		});
 		g.addEventListener('pointerenter', (event) => {
 			if ((event.target as Element).closest('.rg-expander')) return;
-			const id = nodeIdOf(g);
-			this.applyHoverHighlight(id);
-			const live = this.nodes.get(id);
-			if (live) this.scheduleDecl(live, event.clientX, event.clientY);
+			this.applyHoverHighlight(nodeIdOf(g));
 		});
 		g.addEventListener('pointerleave', () => {
 			this.clearHoverHighlight();
-			if (this.declTimer !== null) {
-				clearTimeout(this.declTimer);
-				this.declTimer = null;
-			}
 		});
 		return g;
 	}
@@ -1734,13 +1792,16 @@ export class RelationGraphView {
 		const bi = this.lastPairSet.has(`${edge.to}\u0000${edge.from}`);
 		const routed = routeRelationEdge(from, to, horizontal, outOff, inOff, bi, edge.from, edge.to);
 		path.setAttribute('d', routed.d);
-		path.setAttribute('stroke', palette.link);
-		path.setAttribute('stroke-width', edge.count > 1 ? '1.85' : '1.35');
+		const isWrite = edge.access === 'write' || edge.access === 'readWrite';
+		path.setAttribute('stroke', isWrite ? palette.accentWrite : palette.link);
+		path.setAttribute('stroke-width', edge.count > 1 || isWrite ? '1.85' : '1.35');
 		if (edge.kind === 'use') path.setAttribute('stroke-dasharray', '4 3');
 		else path.removeAttribute('stroke-dasharray');
 		path.setAttribute('marker-end', 'url(#rg-arr)');
 
-		const text = !edge.hideCount && edge.count > 1 ? `×${edge.count}` : '';
+		const accessTag = edge.access === 'write' ? 'W' : edge.access === 'readWrite' ? 'R/W' : '';
+		const countPart = !edge.hideCount && edge.count > 1 ? `×${edge.count}` : '';
+		const text = accessTag && countPart ? `${accessTag} ${countPart}` : countPart || accessTag;
 		label.textContent = text;
 		if (text) {
 			const pillW = Math.max(24, text.length * 6.5 + 10);
@@ -1925,7 +1986,6 @@ export class RelationGraphView {
 		else if (event.key === 'ArrowUp') { this.camY += ARROW_PAN; this.applyCamera(); }
 		else if (event.key === 'ArrowDown') { this.camY -= ARROW_PAN; this.applyCamera(); }
 		else if (event.key === 'Escape') {
-			this.hideDecl();
 			if (this.selectedKey) {
 				this.cardEls.get(this.selectedKey)?.classList.remove('rg-selected');
 				this.selectedKey = null;
@@ -2085,108 +2145,21 @@ export class RelationGraphView {
 		this.render();
 	}
 
-	/* ---------- Declaration Hover Card ---------- */
-
-	private readonly onDocMouseDown = (event: MouseEvent): void => {
-		if (this.declCard && !this.declCard.contains(event.target as Node)) this.hideDecl();
-	};
-
-	private readonly onDocKeyDown = (event: KeyboardEvent): void => {
-		if (event.key === 'Escape' && this.declCard) this.hideDecl();
-	};
-
-	private declTimer: number | null = null;
-	private readonly declCache = new Map<string, Promise<DeclFragment | null>>();
-	private declCard: HTMLElement | null = null;
-	private declToken = 0;
-
-	private scheduleDecl(node: GraphNode, x: number, y: number): void {
-		if (this.declTimer !== null) clearTimeout(this.declTimer);
-		const token = ++this.declToken;
-		this.declTimer = window.setTimeout(() => {
-			this.declTimer = null;
-			void this.showDecl(node, this.generation, token, x, y);
-		}, DECL_DELAY);
-	}
-
-	private declFragment(name: string, path: string): Promise<DeclFragment | null> {
-		const key = `${name}|${path}`;
-		const cached = this.declCache.get(key);
-		if (cached) return cached;
-		const fetch = (async (): Promise<DeclFragment | null> => {
-			try {
-				const defs = (await symbolLookup(name)) ?? [];
-				const def = defs.find((d) => d.path === path) ?? defs.find((d) => (d.endLine ?? d.line) > d.line) ?? defs[0];
-				if (!def) return null;
-				const file = await readFile(this.resolvePath?.(def.path) ?? def.path);
-				const contents = file?.contents;
-				if (contents == null) return null;
-				const lines = contents.split('\n');
-				const last = Math.min(def.line + DECL_MAX_LINES, Math.max(def.endLine ?? def.line, def.line) + 1);
-				let text = lines.slice(def.line, last).join('\n').slice(0, DECL_MAX_CHARS);
-				if (text.length === 0) return null;
-				if (text.length === DECL_MAX_CHARS) text += '…';
-				return { kind: def.kind, path: def.path, line: def.line, text };
-			} catch {
-				return null;
-			}
-		})();
-		this.declCache.set(key, fetch);
-		void fetch.then((fragment) => {
-			if (fragment === null) this.declCache.delete(key);
-		});
-		return fetch;
-	}
-
-	private async showDecl(node: GraphNode, generation: number, token: number, x: number, y: number): Promise<void> {
-		const fragment = await this.declFragment(node.name, node.path);
-		if (!fragment || generation !== this.generation || token !== this.declToken || this.disposed) return;
-		this.declCard?.remove();
-		this.declCard = null;
-		const card = el('div', 'rg-decl');
-		const code = el('pre', 'rg-decl-code');
-		const ext = extOf(fragment.path);
-		for (const line of fragment.text.split('\n')) {
-			const row = el('div', 'rg-decl-line');
-			for (const segment of highlightLine(line, ext)) {
-				row.appendChild(segment.cls ? el('span', segment.cls, [segment.text]) : document.createTextNode(segment.text));
-			}
-			code.appendChild(row);
-		}
-		card.append(
-			code,
-			el('div', 'rg-decl-meta', [tf('relations.declAt', fragment.kind, baseName(fragment.path), fragment.line + 1)])
-		);
-		card.addEventListener('mouseleave', () => this.hideDecl());
-		this.declCard = card;
-		(document.getElementById('overlays') ?? document.body).appendChild(card);
-		const rect = card.getBoundingClientRect();
-		let left = x + 12;
-		if (left + rect.width > window.innerWidth - 4) left = Math.max(4, window.innerWidth - rect.width - 4);
-		let top = y + 14;
-		if (top + rect.height > window.innerHeight - 4) top = Math.max(4, y - rect.height - 8);
-		card.style.left = `${left}px`;
-		card.style.top = `${top}px`;
-	}
-
-	private hideDecl(): void {
-		this.declToken++;
-		if (this.declTimer !== null) {
-			clearTimeout(this.declTimer);
-			this.declTimer = null;
-		}
-		this.declCard?.remove();
-		this.declCard = null;
-	}
 }
 
 function nodeIdOf(g: SVGElement): string {
 	return g.dataset.id ?? '';
 }
 
-function cardSubtitle(node: GraphNode): string {
+function cardSubtitle(node: GraphNode, metrics?: SymSlotMetrics): string {
 	const file = baseName(node.path);
-	return file ? `${file}:${node.line + 1}` : node.kind;
+	const loc = file ? `${file}:${node.line + 1}` : node.kind;
+	if (!metrics) return loc;
+	const parts: string[] = [];
+	if (metrics.effectiveLines > 0) parts.push(`${metrics.effectiveLines}L`);
+	if (metrics.controlFlow > 0) parts.push(`${metrics.controlFlow}br`);
+	if (metrics.paramCount > 0) parts.push(metrics.paramCount === 255 ? '…p' : `${metrics.paramCount}p`);
+	return parts.length > 0 ? `${loc} · ${parts.join(' ')}` : loc;
 }
 
 function estimateLabelWidth(text: string): number {
@@ -2199,16 +2172,24 @@ function kindAccent(kind: string, palette: ReturnType<typeof themePalette>): str
 	switch (kind) {
 		case 'function':
 		case 'method':
+		case 'constructor':
 			return palette.accentFn;
 		case 'class':
 		case 'struct':
 		case 'interface':
 		case 'enum':
+		case 'union':
 		case 'type':
+		case 'typedef':
 			return palette.accentType;
 		case 'macro':
 		case 'constant':
 			return palette.accentMacro;
+		case 'variable':
+		case 'field':
+		case 'member':
+		case 'parameter':
+			return palette.accentVar;
 		case 'file':
 		case 'module':
 			return palette.accentFile;
@@ -2232,7 +2213,9 @@ function themePalette(): {
 	accentFn: string;
 	accentType: string;
 	accentMacro: string;
+	accentVar: string;
 	accentFile: string;
+	accentWrite: string;
 } {
 	const dark = document.documentElement.classList.contains('vscode-dark');
 	return dark
@@ -2251,7 +2234,9 @@ function themePalette(): {
 			accentFn: '#569cd6',
 			accentType: '#4ec9b0',
 			accentMacro: '#dcdcaa',
-			accentFile: '#c586c0'
+			accentVar: '#9cdcfe',
+			accentFile: '#c586c0',
+			accentWrite: '#e59956'
 		}
 		: {
 			card: '#ffffff',
@@ -2268,7 +2253,9 @@ function themePalette(): {
 			accentFn: '#0066b8',
 			accentType: '#0d9488',
 			accentMacro: '#b45309',
-			accentFile: '#7c3aed'
+			accentVar: '#0284c7',
+			accentFile: '#7c3aed',
+			accentWrite: '#d97706'
 		};
 }
 

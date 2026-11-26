@@ -61,7 +61,15 @@
 }
 .sw-graph-head:hover { background: var(--vscode-list-hoverBackground); }
 .sw-graph-head .twistie { width: 16px; flex: none; font-size: 14px; display: inline-flex; justify-content: center; }
-.sw-graph-label { font-weight: 600; }
+.sw-graph-label { font-weight: 600; flex-shrink: 0; }
+.sw-graph-subject {
+	color: var(--vscode-descriptionForeground);
+	font-weight: 500;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	min-width: 0;
+}
 .sw-graph-head .rg-controls { margin-left: auto; padding-right: 8px; }
 .sw-graph.collapsed .sw-graph-head { border-bottom: none; }
 

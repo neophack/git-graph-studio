@@ -241,9 +241,16 @@ export class SymbolWindowView {
 
 	private readonly graphHead: HTMLElement;
 
+	private readonly graphSubjectEl: HTMLElement;
+
 	private readonly sash: HTMLElement;
 
 	private graphCollapsed = false;
+
+	/** True while the Relation Window is tracking a specific identifier at the cursor or
+	 *  clicked in the outline, so same-file `setFile` updates don't clobber it back to the
+	 *  enclosing function. */
+	private liveRootActive = false;
 
 	/** The drag the sash is running — its window listeners end it. */
 	private sashDrag: { startY: number; baseHeight: number; viewHeight: number } | null = null;
@@ -255,6 +262,10 @@ export class SymbolWindowView {
 	 *  (2026-11-23, the owner's direction: a relation click shows the jump in the
 	 *  Definition page, the code page never jumps). */
 	onShowDefinition?: (subject: DefinitionSubject) => void;
+
+	/** Ask the workbench to re-resolve the relation graph root from the active editor's
+	 *  current cursor position (used when unpinning, expanding, or revealing the view). */
+	onNeedRelationRoot?: () => void;
 
 	constructor(private readonly container: HTMLElement) {
 		container.classList.add('symbol-window');
@@ -286,8 +297,17 @@ export class SymbolWindowView {
 			const separator = repo.includes('\\') ? '\\' : '/';
 			return repo.replace(/[\\/]+$/, '') + separator + path.replaceAll('/', separator);
 		};
+		this.graphSubjectEl = el('span', 'sw-graph-subject');
+		this.graph.onRootChange = (root) => {
+			this.graphSubjectEl.textContent = root ? `· ${root.name}` : '';
+			this.graphSubjectEl.title = root ? `${root.name} (${root.kind})` : '';
+		};
 		this.graph.onPinChange = (pinned) => {
-			if (!pinned) this.feedGraph();
+			if (!pinned) {
+				this.liveRootActive = false;
+				if (this.onNeedRelationRoot) this.onNeedRelationRoot();
+				else this.feedGraph();
+			}
 		};
 		this.graphSection = el('div', 'sw-graph');
 		// The head keeps its own classes — `.sw-section` stays the outline's collapsible
@@ -313,6 +333,7 @@ export class SymbolWindowView {
 		this.graphHead.append(
 			el('span', 'twistie', [icon(this.graphCollapsed ? 'chevron-right' : 'chevron-down')]),
 			el('span', 'sw-graph-label', [t('symbols.graph.title')]),
+			this.graphSubjectEl,
 			this.graph.controls
 		);
 	}
@@ -322,7 +343,8 @@ export class SymbolWindowView {
 		this.graphSection.classList.toggle('collapsed', this.graphCollapsed);
 		this.paintGraphHead();
 		if (!this.graphCollapsed) {
-			this.feedGraph();
+			if (this.onNeedRelationRoot && !this.graph.isPinned()) this.onNeedRelationRoot();
+			else this.feedGraph();
 			// A re-shown section has a real viewport again — frame what stands.
 			window.requestAnimationFrame(() => this.graph.fit());
 		}
@@ -365,7 +387,7 @@ export class SymbolWindowView {
 		this.localsOwner = symbol;
 		this.localsOwnerKnown = true;
 		void this.fetchLocals();
-		this.feedGraph();
+		if (!this.liveRootActive) this.feedGraph();
 	}
 
 	/** The hover card's jump: root the graph on the hovered symbol, pinned so the
@@ -373,7 +395,30 @@ export class SymbolWindowView {
 	 *  caller shows the view. */
 	openGraphRoot(sym: { kind: string; name: string; path: string; line: number }): void {
 		if (this.graphCollapsed) this.toggleGraph();
+		this.liveRootActive = false;
 		this.graph.pinRoot(sym);
+	}
+
+	/** Whether the Relation Window is actively following the editor cursor position
+	 *  (the sidebar view is visible, the graph section is expanded, and it is not pinned). */
+	isRelationLive(): boolean {
+		return this.visible() && !this.graphCollapsed && !this.graph.isPinned();
+	}
+
+	/** Cursor-driven live follow: root the graph on the exact symbol at the editor cursor
+	 *  position or clicked in the outline (variable, function, field, type, macro) without
+	 *  pinning. Passing `null` falls back to the enclosing covering symbol. */
+	setLiveRoot(sym: { kind: string; name: string; path: string; line: number } | null): void {
+		if (this.graph.isPinned() || this.graphCollapsed) return;
+		if (sym) {
+			this.liveRootActive = true;
+			const repo = this.provideRepo?.() ?? null;
+			const relPath = repo && /^([a-zA-Z]:[\\/]|\\|\/)/.test(sym.path) ? relativeTo(repo, sym.path) : sym.path;
+			this.graph.setRoot({ kind: sym.kind, name: sym.name, path: relPath, line: sym.line });
+			return;
+		}
+		this.liveRootActive = false;
+		this.feedGraph();
 	}
 
 	/** Root the graph on the covering symbol: the index speaks repo-relative paths, so the
@@ -399,6 +444,7 @@ export class SymbolWindowView {
 		this.targetPath = path;
 		if (cursorLine !== undefined) this.cursorLine = cursorLine;
 		if (path === null) {
+			this.liveRootActive = false;
 			this.generation++;
 			this.loadedPath = null;
 			this.loadingPath = null;
@@ -418,6 +464,7 @@ export class SymbolWindowView {
 		// A new file: drop the previous file's rows at once (they name another path) and
 		// load, unless the page is hidden — its showView() refresh pulls then. The fold
 		// state starts over: the keys name another file's symbols.
+		this.liveRootActive = false;
 		this.collapsed.clear();
 		this.generation++;
 		this.loadedPath = null;
@@ -441,7 +488,10 @@ export class SymbolWindowView {
 			this.dirty = true;
 			return;
 		}
-		if (!this.graphCollapsed) window.requestAnimationFrame(() => this.graph.frame());
+		if (!this.graphCollapsed) {
+			if (!this.graph.isPinned()) this.onNeedRelationRoot?.();
+			window.requestAnimationFrame(() => this.graph.frame());
+		}
 		void this.load();
 	}
 
@@ -619,7 +669,10 @@ export class SymbolWindowView {
 				el('span', 'sw-name', [def.name]),
 				el('span', 'sw-line', [String(def.line + 1)])
 			]);
-			row.addEventListener('click', () => this.onOpen?.(path, def.line + 1));
+			row.addEventListener('click', () => {
+				this.setLiveRoot({ kind: def.kind, name: def.name, path, line: def.line });
+				this.onOpen?.(path, def.line + 1);
+			});
 			section.appendChild(row);
 		}
 		return section;
@@ -650,7 +703,10 @@ export class SymbolWindowView {
 		row.appendChild(el('span', 'sw-line', [String(symbol.line + 1)]));
 		// The container chain's depth as padding — the row structure stays untouched.
 		if (entry.depth > 0) row.style.paddingLeft = `${8 + entry.depth * 14}px`;
-		row.addEventListener('click', () => this.onOpen?.(path, symbol.line + 1));
+		row.addEventListener('click', () => {
+			this.setLiveRoot({ kind: symbol.kind, name: symbol.name, path, line: symbol.line });
+			this.onOpen?.(path, symbol.line + 1);
+		});
 		this.renderedRows.push(row);
 		this.renderedSymbols.push(symbol);
 		return row;

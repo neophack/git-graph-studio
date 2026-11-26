@@ -435,6 +435,19 @@ impl SymbolIndex {
         inspect_volume_stats(&dir)
     }
 
+    /// Return the root's 9-volume directory when the on-disk volumes are in sync with the
+    /// resident store (no dirty paths and no background save in flight).
+    pub fn volume_dir_if_fresh(&self, root: &str) -> Option<PathBuf> {
+        if self.has_pending_save(root) {
+            return None;
+        }
+        let store = self.store(root)?;
+        if store.read().unwrap().has_dirty() {
+            return None;
+        }
+        Some(SymbolStore::index_dir(root, &self.home))
+    }
+
     /// Look up `name` in `root`, falling back to any configured read-only Base / SDK
     /// projects (persisted in `<root>/.ggs/base-projects.json`). Base-project hits carry
     /// absolute paths so the editor can open them directly as read-only SDK references.

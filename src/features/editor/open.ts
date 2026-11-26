@@ -6,7 +6,7 @@ import type { TextDiffView } from './diffView';
 import { type FileContents, type FileProbe, fileProbe, readFileBase64 } from '../../platform/ipc/fs';
 import { materializeRevisionFile, readFileAt } from '../../platform/ipc/revision';
 import { scmBlame, scmDiff, type DiffHunkData, type LineDiffData } from '../../platform/ipc/scm';
-import { symbolLookup } from '../../platform/ipc/symbols';
+import { symbolLookup, symbolMemberLookup, symbolScopeLookup } from '../../platform/ipc/symbols';
 import { hasBookmark } from './bookmarks';
 import { samePath, contextUri, menuSection, resourceContext } from '../extensions';
 import { loadAnalysisPages, loadCanViews, loadCallTree, loadDataViews, loadDbcView, loadDevTreeView, loadDumpViews, loadElfView, loadFileHistory, loadFolderCompare, loadHexCompare, loadDiffView, loadSymbolDbView, loadTextEditor } from '../../platform/lazy';
@@ -876,9 +876,13 @@ export const openMethods: ThisType<EditorGroup> = {
 		// root or unindexed name answers nothing, so the mount is unconditional. A clicked
 		// location always opens a tab: a diff tab holds no file of its own.
 		const [{ EditorView, baseExtensions, keymap, languageSlot, loadLanguage }, { mountTextDiffView }, { symbolHoverExtension }] = await Promise.all([textEditor(), loadDiffView(), import('./editorProviderViews')]);
+		const diffPath = input.right.path || input.left.path;
+		const diffExt = diffPath.split('.').pop() ?? '';
 		const symbolHover = symbolHoverExtension({
 			root: () => this.rootPath,
 			lookup: (name) => symbolLookup(name),
+			scopeLookup: diffExt ? (name, line, text) => symbolScopeLookup(name, line, text, diffExt) : undefined,
+			memberLookup: diffExt ? (name, line, column, text) => symbolMemberLookup(name, line, column, text, diffExt) : undefined,
 			read: (path) => this.cachedRead(path),
 			open: (path, line) => void this.openFile(path, { line: line + 1, column: 1 })
 		});

@@ -164,25 +164,19 @@ describe('drawing the ring', () => {
 		view.dispose();
 	});
 
-	it("the declaration card's read resolves through the joined path", async () => {
-		backend.on('symbol_lookup', ({ name }) =>
-			name === 'beta' ? [{ kind: 'function', name: 'beta', path: 'src/b.c', line: 2, endLine: 5 }] : []
-		);
-		const reads: string[] = [];
-		backend.on('read_file', ({ path }) => {
-			reads.push(String(path));
-			return String(path) === 'C:\\repo\\src\\b.c'
-				? { contents: 'int other;\nint more;\nint beta(void)\n{\n    return 2;\n}', binary: false, size: 45 }
-				: undefined;
-		});
+	it('hovering a card does not raise a floating declaration popup; clicking shows it in Definition', async () => {
 		const view = mountView();
-		view.resolvePath = (path) => `C:\\repo\\${path.replaceAll('/', '\\')}`;
+		const shows: { name: string; path: string; line: number }[] = [];
+		view.onShowDefinition = (subject) => shows.push({ name: subject.name, path: subject.path, line: subject.line });
 		view.setRoot({ ...ROOT });
 		await untilCards(4);
 		cardOf('beta').dispatchEvent(new MouseEvent('pointerenter', { clientX: 10, clientY: 10, bubbles: true }));
-		await until(() => document.querySelector('.rg-decl') !== null);
-		expect(reads).toContain('C:\\repo\\src\\b.c');
-		expect(document.querySelector('.rg-decl')?.textContent).toContain('int beta(void)');
+		await flush();
+		expect(document.querySelector('.rg-decl')).toBeNull();
+		expect(shows).toEqual([]);
+		cardOf('beta').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		await flush();
+		expect(shows).toEqual([{ name: 'beta', path: 'src/b.c', line: 2 }]);
 		view.dispose();
 	});
 });
@@ -452,10 +446,12 @@ describe("the pointer (the graph's own vocabulary)", () => {
 	});
 
 	it('an empty root ring answers the verdict the relation window prints', async () => {
-		backend.on('symbol_relation_children', ({ name, direction }) => (name === 'alpha' && direction === 'refsTo' ? answer([]) : answer([])));
+		backend.on('symbol_relation_children', () => answer([]));
 		const view = mountView();
 		view.setRoot({ ...ROOT });
 		await untilCards(1);
+		await until(() => view.element.textContent!.includes('No callers or callees.'));
+		view.setRoot({ kind: 'variable', name: 'g_state', path: 'src/a.c', line: 1 });
 		await until(() => view.element.textContent!.includes('No referencing functions.'));
 		view.dispose();
 	});
@@ -751,13 +747,13 @@ describe("the three views, history and rules", () => {
 		const head = [...view.element.querySelectorAll<HTMLElement>('.rg-ol-head > span')]
 			.map((span) => span.textContent)
 			.filter((text) => text !== '');
-		expect(head).toEqual(['Referenced by Functions', 'Count', 'File', 'Line']);
-		// The rows: the root with its suffix, then the ring — name, count, file, 1-based line.
+		expect(head).toEqual(['Calls and Callers', 'Count', 'File', 'Line']);
+		// The rows: the root, then the ring — name, count, file, 1-based line.
 		const rows = [...view.element.querySelectorAll<HTMLElement>('.rg-ol-row')];
-		// The cut-short root keeps its ⋯ in the list too, and every row of a
-		// referenced-by view reads as a caller — the caller suffix on each.
+		// The cut-short root keeps its ⋯ in the list too; children outside alpha's file
+		// carry the Callers suffix.
 		expect(rows.map((row) => row.querySelector('.rg-ol-name')?.textContent)).toEqual([
-			'alpha ⋯ Callers',
+			'alpha ⋯',
 			'beta Callers',
 			'gamma Callers',
 			'Config Callers'
@@ -880,8 +876,12 @@ describe("the visited roots' history and the category rules", () => {
 
 	it('the root category names the opening type, and a manual pick rides within the category', async () => {
 		const view = mountView();
-		// A function root opens under the rules' own default, References.
+		// A function root opens under Calls and Callers (Source Insight-style).
 		view.setRoot({ ...ROOT });
+		await flush();
+		expect(backend.callsTo('symbol_relation_children').at(-1)!['direction']).toBe('callsAndCallers');
+		// Crossing to a variable opens under Referenced by Functions.
+		view.setRoot({ kind: 'variable', name: 'g_counter', path: 'src/a.c', line: 1 });
 		await flush();
 		expect(backend.callsTo('symbol_relation_children').at(-1)!['direction']).toBe('referencedByFunctions');
 		// Crossing to a struct re-opens under Contains.
@@ -892,11 +892,61 @@ describe("the visited roots' history and the category rules", () => {
 		view.setRoot({ kind: 'struct', name: 'Other', path: 'src/o.c', line: 0 });
 		await flush();
 		expect(backend.callsTo('symbol_relation_children').at(-1)!['direction']).toBe('contains');
-		// And back to a function restores its own.
+		// And back to a function restores Calls and Callers.
 		view.setRoot({ kind: 'function', name: 'beta', path: 'src/b.c', line: 2 });
 		await flush();
-		expect(backend.callsTo('symbol_relation_children').at(-1)!['direction']).toBe('referencedByFunctions');
+		expect(backend.callsTo('symbol_relation_children').at(-1)!['direction']).toBe('callsAndCallers');
 		view.dispose();
+	});
+
+	it('renders variable read/write access badges and 9-volume root metrics', async () => {
+		backend.on('symbol_relation_children', ({ name }) => {
+			if (name === 'g_counter') {
+				return {
+					nodes: [
+						{ kind: 'function', name: 'reset_counter', container: null, path: 'src/a.c', line: 10, edgePath: 'src/a.c', edgeLine: 12, edgeKind: 'use', edgeCount: 1, edgeLines: [12], access: 'write', hasChildren: false },
+						{ kind: 'function', name: 'bump_counter', container: null, path: 'src/a.c', line: 20, edgePath: 'src/a.c', edgeLine: 22, edgeKind: 'use', edgeCount: 2, edgeLines: [22], access: 'readWrite', hasChildren: false }
+					],
+					truncated: false,
+					rootMetrics: { langId: 1, paramCount: 2, effectiveLines: 42, controlFlow: 5, gotoCount: 0 }
+				};
+			}
+			return answer([]);
+		});
+		const view = mountView();
+		view.setRoot({ kind: 'variable', name: 'g_counter', path: 'src/a.c', line: 1 });
+		await untilCards(3);
+		const badges = [...view.element.querySelectorAll<SVGTextElement>('.rg-edge text')].map((n) => n.textContent);
+		expect(badges).toContain('W');
+		expect(badges).toContain('R/W ×2');
+		expect(cardOf('g_counter').querySelector('.rg-card-sub')?.textContent).toContain('42L 5br 2p');
+		view.setViewMode('outline');
+		await flush();
+		const names = [...view.element.querySelectorAll<HTMLElement>('.rg-ol-row .rg-ol-name')].map((n) => n.textContent);
+		expect(names.some((n) => n?.includes('[W]'))).toBe(true);
+		expect(names.some((n) => n?.includes('[R/W]'))).toBe(true);
+		view.dispose();
+	});
+
+	it('SymbolWindowView.setLiveRoot tracks hover without pinning and respects pin', async () => {
+		scriptWindow();
+		const { host, view } = mountWindow();
+		view.setFile(FILE, 8);
+		await flush();
+		expect(view.isRelationLive()).toBe(true);
+		view.setLiveRoot({ kind: 'variable', name: 'g_counter', path: 'src/a.c', line: 1 });
+		await flush();
+		const last = backend.callsTo('symbol_relation_children').at(-1)!;
+		expect(last['name']).toBe('g_counter');
+		expect(last['direction']).toBe('referencedByFunctions');
+		// Pinning disables live hover tracking.
+		click(host.querySelector('.sw-graph-head .rg-controls .rg-pin')!);
+		expect(view.isRelationLive()).toBe(false);
+		const asked = backend.callsTo('symbol_relation_children').length;
+		view.setLiveRoot({ kind: 'function', name: 'other', path: 'src/b.c', line: 3 });
+		await flush();
+		expect(backend.callsTo('symbol_relation_children').length).toBe(asked);
+		host.remove();
 	});
 
 	it('Expand Special expands the subtree an asked number of levels, and the menu names it', async () => {

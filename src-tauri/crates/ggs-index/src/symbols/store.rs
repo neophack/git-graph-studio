@@ -660,6 +660,27 @@ impl SymbolStore {
         )
     }
 
+    /// The files containing an actual AST call site `name(...)` (persisted in Format 9
+    /// `project.ggs_sym` trailer), or `None` when absent or untrusted.
+    pub fn files_calling(&self, name: &str) -> Option<Vec<String>> {
+        let id = self.names.binary_search_by(|n| n.as_str().cmp(name)).ok()?;
+        let files = self.call_refs.get(id)?.as_ref()?;
+        Some(
+            files
+                .iter()
+                .map(|&file| self.files[file as usize].path.clone())
+                .collect(),
+        )
+    }
+
+    /// Binary-search the 0-based file id for `path` (matches `project.ggs_sym` `file_id`).
+    pub fn file_id_of(&self, path: &str) -> Option<u32> {
+        self.files
+            .binary_search_by(|f| f.path.as_str().cmp(path))
+            .ok()
+            .map(|id| id as u32)
+    }
+
     /// How many files contain `name` — the trusted occurrence list's length, read in
     /// place: the metrics report asks this per function name, and a query that
     /// materializes every file list (as `occurrence_counts` does for the whole table)

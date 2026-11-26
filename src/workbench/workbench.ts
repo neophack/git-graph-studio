@@ -7,7 +7,7 @@ import { Channel } from '../platform/ipc/core';
 import { bootStage } from '../platform/ipc/app';
 import { encodings, listFiles, readFile, type WatcherReport } from '../platform/ipc/fs';
 import { workspaceSymbols } from '../platform/ipc/search';
-import { symbolLookup, symbolScopeLookup, symbolsRebuild, type SymbolIndexEvent } from '../platform/ipc/symbols';
+import { symbolLookup, symbolMemberLookup, symbolScopeLookup, symbolsRebuild, type SymbolIndexEvent } from '../platform/ipc/symbols';
 import { viewerClose, viewerOpen } from '../platform/ipc/viewer';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
@@ -761,11 +761,18 @@ export class Workbench {
 	 *  Window keeps, over its own subject (never the context view's). */
 	definitionTimer: number | null = null;
 
+	/** Source Insight-style Relation Window cursor follow: resolves the identifier under
+	 *  the cursor (member, local variable, global variable, function, struct, macro) when
+	 *  the Relation pane is visible and unpinned, falling back to the covering symbol. */
+	relationTimer: number | null = null;
+
 	readonly onThemeChangedBound = () => this.extensionHost.noteThemeChanged();
 
 	contextGeneration = 0;
 
 	definitionGeneration = 0;
+
+	relationGeneration = 0;
 
 	followContextSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): void {
 		// The view only follows while it is the one being looked at and not pinned;
@@ -915,6 +922,103 @@ export class Workbench {
 		const def = pickDefinition(defs, (path) => joinRepo(this.repoPath!, path).replaceAll('\\', '/').toLowerCase() === wanted, line0)!;
 		if (page === 'references') this.panel.references.setSubject({ kind: def.kind, name: def.name, path: def.path, line: def.line });
 		else this.panel.definition.setDefinition({ kind: def.kind, name: def.name, path: def.path, line: def.line, endLine: def.endLine });
+	}
+
+	followRelationSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): void {
+		if (!this.symbolWindow.isRelationLive()) return;
+		if (this.relationTimer !== null) window.clearTimeout(this.relationTimer);
+		const generation = ++this.relationGeneration;
+		this.relationTimer = window.setTimeout(() => {
+			this.relationTimer = null;
+			if (generation !== this.relationGeneration) return;
+			void this.resolveRelationSymbol(editor, generation);
+		}, 60);
+	}
+
+	async resolveRelationSymbol(editor: { kind: string; path?: string; line: number; column: number } | null, generation: number): Promise<void> {
+		if (!this.symbolWindow.isRelationLive()) return;
+		const view = this.editors.activeView;
+		if (!editor || (editor.kind !== 'file' && editor.kind !== 'diff') || !editor.path || !view || !this.repoPath) {
+			this.symbolWindow.setLiveRoot(null);
+			return;
+		}
+		const line = view.state.doc.line(Math.min(Math.max(1, editor.line), view.state.doc.lines));
+		const at = Math.min(Math.max(line.from, line.from + editor.column - 1), line.to);
+		const word = view.state.wordAt(at);
+		if (!word) {
+			this.symbolWindow.setLiveRoot(null);
+			return;
+		}
+		const name = view.state.sliceDoc(word.from, word.to);
+		if (!name || /^\d/.test(name) || RELATION_KEYWORDS.has(name)) {
+			this.symbolWindow.setLiveRoot(null);
+			return;
+		}
+		const line0 = Math.max(0, editor.line - 1);
+		const col0 = Math.max(0, word.from - line.from);
+		const before = line.text.slice(0, col0).trimEnd();
+		const isMember = before.endsWith('.') || before.endsWith('->') || before.endsWith('::');
+		const ext = editor.path.split('.').pop() ?? '';
+		const text = view.state.doc.toString();
+		const relPath = relativeTo(this.repoPath, editor.path).replaceAll('\\', '/');
+		if (ext && isMember) {
+			try {
+				const members = (await symbolMemberLookup(name, line0, col0, text, ext)) ?? [];
+				if (generation !== this.relationGeneration || !this.symbolWindow.isRelationLive()) return;
+				const member = members[0];
+				if (member) {
+					this.symbolWindow.setLiveRoot({ kind: member.kind, name: member.name, path: member.path, line: member.line });
+					return;
+				}
+			} catch {
+				// Member lookup is opportunistic; continue to scope / global lookup.
+			}
+		}
+		if (ext && !isMember) {
+			try {
+				const locals = (await symbolScopeLookup(name, line0, text, ext)) ?? [];
+				if (generation !== this.relationGeneration || !this.symbolWindow.isRelationLive()) return;
+				const local = locals[0];
+				if (local) {
+					this.symbolWindow.setLiveRoot({ kind: local.kind, name: local.name, path: relPath, line: local.line });
+					return;
+				}
+			} catch {
+				// Scope lookup is opportunistic; fall back to the workspace index.
+			}
+		}
+		let defs: { kind: string; name: string; path: string; line: number; endLine?: number }[] = [];
+		try {
+			defs = (await symbolLookup(name)) ?? [];
+		} catch {
+			defs = [];
+		}
+		if (generation !== this.relationGeneration || !this.symbolWindow.isRelationLive()) return;
+		if (defs.length === 0) {
+			// Source Insight behavior: even if a variable, field, or external macro is not
+			// in the declaration table, still query its referencing functions by name.
+			this.symbolWindow.setLiveRoot({ kind: 'variable', name, path: relPath, line: line0 });
+			return;
+		}
+		const after = line.text.slice(word.to - line.from);
+		const callLike = /^\s*\(/.test(after);
+		const valueLike = !callLike && /^\s*([+\-*/%&|^=<>!?:;,)\].])/.test(after);
+		const wanted = editor.path.replaceAll('\\', '/').toLowerCase();
+		const ranked = defs.slice().sort((a, b) => {
+			const score = (d: { kind: string; path: string; line: number; endLine?: number }): number => {
+				let s = 0;
+				const inFile = joinRepo(this.repoPath!, d.path).replaceAll('\\', '/').toLowerCase() === wanted;
+				if (inFile) s += 2;
+				if (inFile && d.line <= line0 && line0 <= (d.endLine ?? d.line)) s += 4;
+				if (callLike && (d.kind === 'function' || d.kind === 'method' || d.kind === 'constructor')) s += 4;
+				if (valueLike && (d.kind === 'variable' || d.kind === 'constant' || d.kind === 'field' || d.kind === 'property' || d.kind === 'macro')) s += 4;
+				if ((d.endLine ?? d.line) > d.line) s += 1;
+				return s;
+			};
+			return score(b) - score(a);
+		});
+		const def = ranked[0]!;
+		this.symbolWindow.setLiveRoot({ kind: def.kind, name: def.name, path: def.path, line: def.line });
 	}
 
 	/** F6 (M7 7.4): cycle the keyboard through the workbench's parts - activity bar, side
@@ -1204,6 +1308,18 @@ export class Workbench {
 	declare recoverBackups: () => Promise<void> ;
 
 }
+
+const RELATION_KEYWORDS = new Set([
+	'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default', 'break', 'continue', 'return', 'goto',
+	'int', 'long', 'short', 'char', 'float', 'double', 'void', 'bool', 'signed', 'unsigned', 'const', 'static',
+	'extern', 'volatile', 'register', 'inline', 'struct', 'union', 'enum', 'typedef', 'sizeof', 'auto',
+	'class', 'public', 'private', 'protected', 'virtual', 'override', 'template', 'typename', 'namespace',
+	'using', 'new', 'delete', 'this', 'nullptr', 'true', 'false', 'try', 'catch', 'throw',
+	'fn', 'let', 'mut', 'pub', 'impl', 'trait', 'match', 'loop', 'mod', 'use', 'crate', 'self', 'Self', 'async', 'await',
+	'function', 'var', 'import', 'export', 'from', 'as', 'interface', 'type', 'extends', 'implements', 'null', 'undefined',
+	'def', 'elif', 'pass', 'None', 'True', 'False', 'and', 'or', 'not', 'in', 'is', 'with', 'yield', 'lambda',
+	'func', 'package', 'range', 'defer', 'go', 'chan', 'select', 'map', 'nil'
+]);
 
 export function whenIdle(work: () => void, timeoutMs = 2000): void {
 	if (typeof requestIdleCallback === 'function') requestIdleCallback(() => work(), { timeout: timeoutMs });

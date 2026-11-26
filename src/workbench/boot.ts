@@ -676,6 +676,7 @@ export const bootMethods: ThisType<Workbench> = {
 			// `doc.line` reads), and the view's contract is 0-based.
 			if (symbolPath && editor) this.symbolWindow.setFile(symbolPath, editor.line - 1);
 			else this.symbolWindow.setFile(null);
+			this.followRelationSymbol(symbolEditor);
 			if (editor?.kind === 'file' && editor.path) {
 				// explorer.autoReveal: the active file reveals in the tree when the Explorer is
 				// watching; opened elsewhere, the reveal is owed the moment the view returns
@@ -804,6 +805,18 @@ export const bootMethods: ThisType<Workbench> = {
 			this.showView('symbolWindow');
 			this.symbolWindow.openGraphRoot(sym);
 		});
+		this.symbolWindow.onNeedRelationRoot = () => {
+			const view = this.editors.activeView;
+			const input = this.editors.activeInput;
+			const path = this.symbolFilePathForInput(input);
+			if (!input || !path || !view) {
+				this.followRelationSymbol(null);
+				return;
+			}
+			const position = view.state.selection.main.head;
+			const line = view.state.doc.lineAt(position);
+			this.followRelationSymbol({ kind: input.kind, path, line: line.number, column: position - line.from + 1 });
+		};
 		// The page's own activation re-resolves the cursor symbol right away (the debounced
 		// follow only rides editor changes): the live selection is the payload.
 		this.panel.definition.onNeedRoot = () => {

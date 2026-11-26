@@ -310,6 +310,48 @@
 }
 
 .rg-ol-toggle:hover { color: var(--vscode-sideBar-foreground); }
-.rg-ol-name { overflow: hidden; text-overflow: ellipsis; }
+.rg-ol-name {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.rg-ol-name > .codicon {
+	font-size: 13px;
+	flex-shrink: 0;
+	opacity: 0.85;
+}
+.rg-ol-label {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.rg-ol-suffix {
+	color: var(--vscode-descriptionForeground);
+	font-size: 10.5px;
+	flex-shrink: 0;
+}
+.rg-access-badge {
+	display: inline-flex;
+	align-items: center;
+	padding: 0 4px;
+	border-radius: 3px;
+	font-size: 9.5px;
+	font-weight: 600;
+	line-height: 14px;
+	flex-shrink: 0;
+}
+.rg-access-w {
+	background: rgba(229, 153, 86, 0.22);
+	color: #e59956;
+}
+.rg-access-rw {
+	background: rgba(229, 153, 86, 0.28);
+	color: #f0a868;
+}
+.rg-access-r {
+	background: rgba(156, 220, 254, 0.14);
+	color: var(--vscode-descriptionForeground);
+}
 .rg-ol-count, .rg-ol-line { text-align: right; color: var(--vscode-descriptionForeground); font-size: 11px; }
 .rg-ol-file { overflow: hidden; text-overflow: ellipsis; color: var(--vscode-descriptionForeground); font-size: 11px; }

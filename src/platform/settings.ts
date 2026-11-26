@@ -142,7 +142,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	theme: 'dark-modern', locale: 'en', showOutline: false, autoSave: 'off', autoSaveDelay: 1000,
 	minimap: true, stickyScroll: false, bracketColors: true,
 	mouseWheelScrollSensitivity: 1, fastScrollSensitivity: 4,
-	fontSize: 14, tabSize: 4, wordWrap: false, snippetSuggestions: true, pathCompletion: true, symbolHover: true,
+	fontSize: 14, tabSize: 4, wordWrap: false, snippetSuggestions: true, pathCompletion: true, symbolHover: false,
 	// dmp/mdmp joined the default 2026-11-18 and dbc joined 2026-11-26 (the owner's
 	// direction: dmp and dbc files should open with ggs by default) — formats which
 	// usually have no other handler; an install that predates this keeps its stored list
@@ -171,7 +171,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
  *  scroll of 5 and GGS Bash are all selectable), so they may run only over a payload that
  *  predates them: one without this stamp. A stamped store skips the pass, which is what
  *  keeps a re-selected old default from being wiped again at every boot. */
-export const SETTINGS_VERSION = 1;
+export const SETTINGS_VERSION = 2;
 
 /** A persisted payload's shape: the settings of its release plus the migration stamp. */
 export type StoredSettings = Partial<AppSettings> & { settingsVersion?: number };
@@ -186,19 +186,26 @@ export type StoredSettings = Partial<AppSettings> & { settingsVersion?: number }
  *  glide setting is gone — nothing eases any more — and a stored one is dropped. The
  *  Terminal Shell default moved from GGS Bash to Git Bash (2026-10-13, the owner's
  *  direction — GGS Bash stands in where no Git Bash is installed): a stored `ggsBash`
- *  equal to the old shipped default follows, the same rule.
+ *  equal to the old shipped default follows, the same rule. Symbol hover shipped defaulting
+ *  to on and now defaults to off (2026-11-26): a stored `true` from version < 2 follows.
  *
- *  The pass is one-shot per payload (SETTINGS_VERSION above): a stamped payload — anything
- *  this release wrote — has already been through it and skips it; only an unstamped store
- *  from an older release goes through the one pass. */
+ *  The pass is one-shot per version (SETTINGS_VERSION above): a stamped payload — anything
+ *  this release wrote — has already been through it and skips it; only a store from an
+ *  older version goes through the corresponding pass. */
 export function migrateStoredSettings(stored: StoredSettings): Partial<AppSettings> {
 	const { smoothScrolling: _glide, settingsVersion: _stamp, ...rest } = stored as StoredSettings & { smoothScrolling?: boolean };
-	if (_stamp === SETTINGS_VERSION) return rest;
+	const version = _stamp ?? 0;
+	if (version >= SETTINGS_VERSION) return rest;
 	const next: Partial<AppSettings> = { ...rest };
-	if ([1, 2, 3].includes(next.mouseWheelScrollSensitivity as number)) next.mouseWheelScrollSensitivity = DEFAULT_SETTINGS.mouseWheelScrollSensitivity;
-	if (next.fastScrollSensitivity === 5) next.fastScrollSensitivity = DEFAULT_SETTINGS.fastScrollSensitivity;
-	if (next.stickyScroll === true) next.stickyScroll = DEFAULT_SETTINGS.stickyScroll;
-	if (next.terminalShell === 'ggsBash') next.terminalShell = DEFAULT_SETTINGS.terminalShell;
+	if (version < 1) {
+		if ([1, 2, 3].includes(next.mouseWheelScrollSensitivity as number)) next.mouseWheelScrollSensitivity = DEFAULT_SETTINGS.mouseWheelScrollSensitivity;
+		if (next.fastScrollSensitivity === 5) next.fastScrollSensitivity = DEFAULT_SETTINGS.fastScrollSensitivity;
+		if (next.stickyScroll === true) next.stickyScroll = DEFAULT_SETTINGS.stickyScroll;
+		if (next.terminalShell === 'ggsBash') next.terminalShell = DEFAULT_SETTINGS.terminalShell;
+	}
+	if (version < 2) {
+		if (next.symbolHover === true) next.symbolHover = DEFAULT_SETTINGS.symbolHover;
+	}
 	return next;
 }
 
