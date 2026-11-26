@@ -518,7 +518,9 @@ fn count<K: std::hash::Hash + Eq + Clone>(
         .last_prune
         .is_none_or(|at| now.duration_since(at) >= PRUNE_INTERVAL);
     if (table.map.len() > 1024 && due) || table.map.len() >= MAX_WINDOW_ENTRIES {
-        table.map.retain(|_, (_, at)| now.duration_since(*at) < span);
+        table
+            .map
+            .retain(|_, (_, at)| now.duration_since(*at) < span);
         table.last_prune = Some(now);
     }
     if !table.map.contains_key(&key) && table.map.len() >= MAX_WINDOW_ENTRIES {
@@ -734,7 +736,8 @@ impl Hub {
             if banned.len() >= MAX_WINDOW_ENTRIES {
                 banned.retain(|_, until| now.duration_since(*until) < BAN);
                 if banned.len() >= MAX_WINDOW_ENTRIES {
-                    if let Some(oldest) = banned.iter().min_by_key(|(_, at)| **at).map(|(k, _)| *k) {
+                    if let Some(oldest) = banned.iter().min_by_key(|(_, at)| **at).map(|(k, _)| *k)
+                    {
                         banned.remove(&oldest);
                     }
                 }

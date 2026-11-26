@@ -114,10 +114,11 @@ describe('the report pages', () => {
 		expect(labels[1]).toContain('calm');
 		(document.querySelectorAll('.an-row')[0] as HTMLElement).click();
 		expect(opened).toEqual(['src/a.rs:10']);
-		// The filter narrows to what it matches.
+		// The filter narrows to what it matches (debounced 100 ms).
 		const filter = document.querySelector<HTMLInputElement>('.an-filter')!;
 		filter.value = 'calm';
 		filter.dispatchEvent(new Event('input', { bubbles: true }));
+		await new Promise((resolve) => setTimeout(resolve, 130));
 		expect(texts('.an-row .label').length).toBe(1);
 	});
 
@@ -188,6 +189,7 @@ describe('the report pages', () => {
 		const filter = document.querySelector<HTMLInputElement>('.an-filter')!;
 		filter.value = 'big';
 		filter.dispatchEvent(new Event('input', { bubbles: true }));
+		await new Promise((resolve) => setTimeout(resolve, 130));
 		expect(labels()).toEqual(['two', 'one']);
 	});
 

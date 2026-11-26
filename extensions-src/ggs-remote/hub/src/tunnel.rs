@@ -427,32 +427,34 @@ mod tests {
 
     #[test]
     fn credential_plausibility_bounds_the_phc_parameters() {
+        const SALT: &str = "c2FsdHNhbHRzYWx0c2FsdA";
+        const DIGEST: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         // The daemon's own shape passes.
         assert!(credential_plausible(
-            "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$ZGlnZXN0",
+            &format!("$argon2id$v=19$m=19456,t=2,p=1${SALT}${DIGEST}"),
             "zh-cn"
         ));
         // Memory is the attack: 1 GiB (and anything past 64 MiB) is refused outright.
         assert!(!credential_plausible(
-            "$argon2id$v=19$m=1048576,t=1,p=1$c2FsdA$ZGlnZXN0",
+            &format!("$argon2id$v=19$m=1048576,t=1,p=1${SALT}${DIGEST}"),
             "en"
         ));
         assert!(!credential_plausible(
-            "$argon2id$v=19$m=19456,t=99,p=1$c2FsdA$ZGlnZXN0",
+            &format!("$argon2id$v=19$m=19456,t=99,p=1${SALT}${DIGEST}"),
             "en"
         ));
         assert!(!credential_plausible(
-            "$argon2id$v=19$m=19456,t=2,p=9$c2FsdA$ZGlnZXN0",
+            &format!("$argon2id$v=19$m=19456,t=2,p=9${SALT}${DIGEST}"),
             "en"
         ));
         // A missing parameter, a non-PHC string, an over-long language: all refused.
         assert!(!credential_plausible(
-            "$argon2id$v=19$m=19456,t=2$c2FsdA$ZGlnZXN0",
+            &format!("$argon2id$v=19$m=19456,t=2${SALT}${DIGEST}"),
             "en"
         ));
         assert!(!credential_plausible("not-a-hash", "en"));
         assert!(!credential_plausible(
-            "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$ZGlnZXN0",
+            &format!("$argon2id$v=19$m=19456,t=2,p=1${SALT}${DIGEST}"),
             "an-over-long-language-tag"
         ));
     }

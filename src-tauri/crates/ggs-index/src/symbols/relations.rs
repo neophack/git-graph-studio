@@ -629,7 +629,7 @@ fn refs_from(
         .unwrap_or("");
     let locals = crate::symbols::parse::parse_file(&text, ext).locals;
     let body_mask = mask_for_ext(ext, &text);
-    let is_c_cpp = lang_family(ext) == Some("c_cpp");
+    let is_c_cpp = lang_family(ext) == "c_cpp";
     let mut seen: HashSet<&str> = HashSet::new();
     let mut node_of: HashMap<&str, usize> = HashMap::new();
     let mut nodes: Vec<RelationNode> = Vec::new();

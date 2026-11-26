@@ -1186,6 +1186,7 @@ fn finalize_overview(
             if !is_kept(from_idx) || !is_kept(to_idx) {
                 return None;
             }
+            let weight = acc.weight();
             let mut syms: Vec<(u32, u32)> = acc.sym_counts.into_iter().collect();
             syms.sort_by(|a, b| {
                 b.1.cmp(&a.1)
@@ -1196,7 +1197,6 @@ fn finalize_overview(
                 .take(TOP_SYMBOLS_PER_EDGE)
                 .map(|(nid, _)| name_of(nid))
                 .collect();
-            let weight = acc.weight();
             let symbol_refs = acc.call_refs + acc.type_refs;
             let from = nodes_acc[from_idx as usize].id.clone();
             let to = nodes_acc[to_idx as usize].id.clone();

@@ -662,7 +662,9 @@ export const bootMethods: ThisType<Workbench> = {
 			// A focus move between groups changes `tabGroups`' active group without a tab change.
 			this.extensionHost.noteTabsChanged();
 			this.statusBar.setEditor(editor);
-			const symbolPath = this.symbolFilePathForInput(this.editors.activeInput);
+			const symbolPath = this.editors.activeInput
+				? this.symbolFilePathForInput(this.editors.activeInput)
+				: (editor?.kind === 'file' ? editor.path ?? null : null);
 			const symbolEditor = editor ? { ...editor, path: symbolPath ?? undefined } : null;
 			this.followContextSymbol(symbolEditor);
 			// The Relations page follows the same payload; its own gate (the page being the

@@ -821,13 +821,15 @@ describe("the three views, history and rules", () => {
 		const rootW = Number(cardOf('alpha').querySelector('rect')!.getAttribute('width'));
 		const betaSpot = spot(cardOf('beta'));
 		const gammaSpot = spot(cardOf('gamma'));
-		const configSpot = spot(cardOf('Config'));
 		// The children sit one column right of the root, stacked without overlap.
 		expect(betaSpot.x).toBeGreaterThan(rootSpot.x + rootW);
 		expect(betaSpot.y).not.toBe(gammaSpot.y);
-		// The root centers on its children's run — the outermost two, beta and Config.
-		const midY = (betaSpot.y + configSpot.y) / 2;
-		expect(Math.abs(rootSpot.y - midY)).toBeLessThan(20); // half a card
+		// The root sits centered over the layer-1 column band.
+		const rootCy = rootSpot.y + Number(cardOf('alpha').querySelector('rect')!.getAttribute('height')) / 2;
+		const l1Cards = [cardOf('beta'), cardOf('gamma'), cardOf('Config')];
+		const minY = Math.min(...l1Cards.map((c) => spot(c).y));
+		const maxY = Math.max(...l1Cards.map((c) => spot(c).y + Number(c.querySelector('rect')!.getAttribute('height'))));
+		expect(Math.abs(rootCy - (minY + maxY) / 2)).toBeLessThan(1);
 		// The expander stands on the card's right face now.
 		const exp = expanders().find((box) => box.dataset.for === cardOf('alpha').dataset.id)!;
 		const expSpot = spot(exp);

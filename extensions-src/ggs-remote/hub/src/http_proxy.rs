@@ -351,7 +351,10 @@ fn sanitize_set_cookie(raw: &str, base_path: &str) -> Option<String> {
     let mut parts = raw.split(';');
     let first = parts.next()?.trim();
     let (cookie_name, _) = first.split_once('=')?;
-    if cookie_name.trim().eq_ignore_ascii_case(crate::login::COOKIE) {
+    if cookie_name
+        .trim()
+        .eq_ignore_ascii_case(crate::login::COOKIE)
+    {
         return None;
     }
     let mut kept = vec![first.to_owned()];
@@ -738,10 +741,7 @@ mod tests {
                 "set-cookie".into(),
                 "ggsr=ok; HttpOnly; Domain=evil.com; Path=/u/victim/".into(),
             ),
-            (
-                "set-cookie".into(),
-                "ggsrh=forged; HttpOnly; Path=/".into(),
-            ),
+            ("set-cookie".into(), "ggsrh=forged; HttpOnly; Path=/".into()),
             ("service-worker-allowed".into(), "/".into()),
             ("clear-site-data".into(), "\"*\"".into()),
         ];
