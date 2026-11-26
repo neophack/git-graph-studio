@@ -92,10 +92,12 @@ pub async fn analysis_module_overview(
         } else {
             None
         };
+        let vol_dir = index.volume_dir_if_fresh(&root);
         index
             .with_store(&root, |store| {
-                modules::module_overview_from_store(
+                modules::module_overview_from_store_with_vols(
                     store,
+                    vol_dir.as_deref(),
                     scope.as_deref(),
                     depth,
                     &folders,
@@ -128,10 +130,12 @@ pub async fn analysis_module_edge_detail(
     crate::cmd_symbols::ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
     let folders = folders.unwrap_or_default();
     let depth = depth.unwrap_or(0);
+    let vol_dir = symbol_index.volume_dir_if_fresh(&root);
     let plan = symbol_index
         .with_store(&root, |store| {
-            modules::prepare_edge_detail_from_store(
+            modules::prepare_edge_detail_from_store_with_vols(
                 store,
+                vol_dir.as_deref(),
                 &from,
                 &to,
                 scope.as_deref(),
@@ -238,8 +242,11 @@ pub async fn analysis_dead_code(
     crate::cmd_symbols::ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
     // The store's facts the rule reads, snapshotted under the store's lock — the file
     // reads of the confirmation pass run lock-free.
+    let vol_dir = symbol_index.volume_dir_if_fresh(&root);
     let catalogue = symbol_index
-        .with_store(&root, ggs_analysis::deadcode::dead_catalogue)
+        .with_store(&root, |store| {
+            ggs_analysis::deadcode::dead_catalogue_with_vols(store, vol_dir.as_deref())
+        })
         .ok_or("The symbol index could not be built")?;
     let index = std::sync::Arc::clone(analysis_index.inner());
     let include_exported = include_exported.unwrap_or(false);

@@ -27,6 +27,7 @@ use serde::Serialize;
 
 use ggs_index::symbols::sites;
 use ggs_index::symbols::store::SymbolStore;
+use ggs_index::symbols::vol_reader::XcBloomCache;
 use ggs_index::symbols::WorkspaceSymbol;
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -59,6 +60,16 @@ pub struct DeadCatalogue {
 /// The snapshot: the store walked once under its lock (every declaration, every
 /// interface name), the function/method names' occurrence lists looked up beside them.
 pub fn dead_catalogue(store: &SymbolStore) -> DeadCatalogue {
+    dead_catalogue_with_vols(store, None)
+}
+
+/// Volume-accelerated dead-code catalogue: when the 9-volume directory is fresh, loads
+/// `.ggs_xc` (code-only Bloom signature) once and intersects each candidate's occurrence
+/// list so comment/string-only mentions in other files do not falsely shield dead code.
+pub fn dead_catalogue_with_vols(
+    store: &SymbolStore,
+    vol_dir: Option<&std::path::Path>,
+) -> DeadCatalogue {
     let symbols = store.all_symbols();
     let mut candidate_names: HashSet<String> = HashSet::new();
     for symbol in &symbols {
@@ -66,10 +77,33 @@ pub fn dead_catalogue(store: &SymbolStore) -> DeadCatalogue {
             candidate_names.insert(symbol.name.clone());
         }
     }
+    let all_files: Vec<String> = if vol_dir.is_some() {
+        store
+            .files_with_counts()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let xc = vol_dir.and_then(|dir| XcBloomCache::load(dir, all_files.len()));
     let mut refs = HashMap::new();
     for name in candidate_names {
         if let Some(containing) = store.files_containing(&name) {
-            refs.insert(name, containing);
+            let narrowed = if let Some(ref bloom) = xc {
+                if let Some(code_files) = bloom.filter_files(&name, &all_files) {
+                    let set: HashSet<&str> = code_files.iter().map(String::as_str).collect();
+                    containing
+                        .into_iter()
+                        .filter(|p| set.contains(p.as_str()))
+                        .collect()
+                } else {
+                    containing
+                }
+            } else {
+                containing
+            };
+            refs.insert(name, narrowed);
         }
     }
     DeadCatalogue { symbols, refs }

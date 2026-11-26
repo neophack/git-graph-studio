@@ -1,22 +1,14 @@
-// The Symbol Window sidebar page (module 5) — an outline window over the
-// active editor's file: its includes/imports, the "current function" locals section, and
-// the persistent index's per-file outline as one flat list. The workbench feeds it the
-// active editor's path and cursor line (editorProviderViews' symbols, 0-based); a row
-// click jumps to the declaration, and the row whose [line, endLine] span holds the
-// cursor carries the highlight. The outline is one query per file change — the cursor
-// only repaints a class. The locals ride the same discipline one level down: the
-// enclosing symbol's identity (name + line) is the query key, and only its change asks
-// the backend to parse the live buffer the host hands over through `provideText`.
-// Below the outline, split by a draggable sash, sits the relation graph: the covering
-// symbol's ring drawn as an interactive box-and-arrow canvas over `relationGraph.ts` —
-// re-rooted on every covering-symbol identity change unless pinned, the same discipline
-// the locals run on.
-// The outline folds too (2026-11-23, the owner's direction: the windows read as one
-// coherent set): a container row carries its own +/- twistie whose
-// click folds and opens its members in place, Expand All / Collapse All / Expand Special
-// are the tree commands (the special one asking its number of levels), and the sort
-// speaks three states — By Line (the tree, the only state that folds), By Name and By
-// Type as the flat lists.
+// The Symbol Window sidebar page (module 5) — redesigned for zero-jump stability:
+// - Three independent persistent DOM slots inside `.sw-list`: `importsSlot`, `localsSlot`,
+//   and `outlineSlot`. Updating locals or imports NEVER tears down or rebuilds the outline.
+// - Stale-while-revalidate locals: moving between functions keeps the prior locals visible
+//   until the new `symbol_locals` IPC resolves, diffs against the previous list, and applies
+//   scrollTop height-delta compensation so outline rows below never shift a single pixel.
+// - Outline fingerprint diffing: background refreshes / saves that don't change the outline
+//   perform zero DOM mutations and preserve exact scroll position.
+// - Container-local safe scrolling: replaces `scrollIntoView()` with local `scrollTop` math
+//   guarded by a user-interaction cooldown so manual scrolling or clicking never fights the
+//   cursor follower.
 
 import { symbolFileOutline, symbolLocals } from '../../platform/ipc/symbols';
 
@@ -49,12 +41,67 @@ function sameIdentity(a: FileOutlineSymbol | null, b: FileOutlineSymbol | null):
 	return a === b || (a !== null && b !== null && a.name === b.name && a.line === b.line);
 }
 
+/** Structural equality check for two locals arrays so identical refreshes skip DOM work. */
+function sameLocals(a: ScopeDefinition[] | null, b: ScopeDefinition[] | null): boolean {
+	if (a === b) return true;
+	if (!a || !b || a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		const x = a[i]!;
+		const y = b[i]!;
+		if (x.name !== y.name || x.kind !== y.kind || x.line !== y.line) return false;
+	}
+	return true;
+}
+
+/** Lightweight structural fingerprint for the outline rows so unchanged refreshes skip DOM work. */
+function outlineFingerprint(
+	path: string | null,
+	loaded: boolean,
+	failed: boolean,
+	sortMode: SymbolSortMode,
+	filter: string,
+	collapsed: Set<string>,
+	symbols: FileOutlineSymbol[]
+): string {
+	const head = `${path ?? ''}\u0001${loaded ? 1 : 0}\u0001${failed ? 1 : 0}\u0001${sortMode}\u0001${filter}\u0001${[...collapsed].sort().join(',')}`;
+	const body = symbols.map((s) => `${s.kind}|${s.container ?? ''}|${s.name}|${s.line}|${s.endLine}`).join('\u0002');
+	return `${head}\u0000${body}`;
+}
+
+/** Lightweight structural fingerprint for imports. */
+function importsFingerprint(path: string | null, collapsed: boolean, imports: FileOutlineImport[]): string {
+	return `${path ?? ''}\u0001${collapsed ? 1 : 0}\u0001${imports.map((i) => `${i.name}:${i.line}`).join('\u0002')}`;
+}
+
 /** One listed row's container-chain depth: one past the most recent earlier listed row
  *  carrying the container's name; no container, or a container never listed above, is
  *  the top level. Three levels is the deepest the indentation goes. */
 function containerDepth(symbol: FileOutlineSymbol, depths: Map<string, number>): number {
 	if (symbol.container === null) return 0;
 	return Math.min((depths.get(symbol.container) ?? -1) + 1, 3);
+}
+
+/** Container-local scroll-into-view: only adjusts `container.scrollTop` when `row` is
+ *  actually outside the visible viewport, never scrolling ancestor workbench containers. */
+function scrollRowIntoContainer(container: HTMLElement, row: HTMLElement): void {
+	const viewH = container.clientHeight;
+	const cRect = container.getBoundingClientRect();
+	if (viewH <= 0 || cRect.height <= 0) {
+		// Headless/jsdom environment without layout geometry: preserve scrollIntoView contract.
+		row.scrollIntoView({ block: 'nearest' });
+		return;
+	}
+	const rowH = row.offsetHeight;
+	if (rowH <= 0) return;
+	const rRect = row.getBoundingClientRect();
+	const relTop = rRect.top - cRect.top;
+	const relBot = rRect.bottom - cRect.top;
+	const pad = 4;
+	if (relTop < pad) {
+		container.scrollTop = Math.max(0, container.scrollTop + relTop - pad);
+	} else if (relBot > viewH - pad) {
+		container.scrollTop = Math.max(0, container.scrollTop + (relBot - viewH + pad));
+	}
 }
 
 /* ---------- The collapsible tree ---------- */
@@ -153,12 +200,26 @@ export function flatRows(symbols: FileOutlineSymbol[], mode: Exclude<SymbolSortM
 	return rows;
 }
 
+/** Cooldown (ms) after user pointer/wheel interaction inside the Symbol Window during
+ *  which cursor-following auto-scroll will not hijack the user's scroll position. */
+const USER_SCROLL_COOLDOWN_MS = 650;
+
 export class SymbolWindowView {
 	private readonly title: HTMLElement;
 
 	private readonly filterInput: HTMLInputElement;
 
 	private readonly body: HTMLElement;
+
+	/** Three independent persistent DOM slots inside `body` so locals/imports updates
+	 *  never tear down or shift the outline list. */
+	private readonly importsSlot: HTMLElement;
+	private readonly localsSlot: HTMLElement;
+	private readonly outlineSlot: HTMLElement;
+
+	private lastImportsSig = '';
+	private lastOutlineSig = '';
+	private lastUserInteractAt = 0;
 
 	/** The file the view is asked to follow; null when no editor is active. */
 	private targetPath: string | null = null;
@@ -219,8 +280,7 @@ export class SymbolWindowView {
 	provideRepo?: () => string | null;
 
 	/** The current function's locals as `symbol_locals` answered, null while the section
-	 *  is hidden — no covering symbol, no text to parse, the request still in flight,
-	 *  failed, or superseded. */
+	 *  is hidden — no covering symbol, no text to parse, failed, or cleared. */
 	private locals: ScopeDefinition[] | null = null;
 
 	/** The covering symbol the locals belong to, and whether the field reflects the
@@ -276,21 +336,25 @@ export class SymbolWindowView {
 		this.filterInput.setAttribute('aria-label', t('symbols.window.filter'));
 		this.filterInput.addEventListener('input', () => {
 			this.filterText = this.filterInput.value.trim().toLowerCase();
-			this.render();
+			this.patchOutline();
+			this.updateHighlight();
 		});
 		this.sortButton = el('button', 'sw-sort');
 		this.sortButton.addEventListener('click', () => this.cycleSort());
 		const header = el('div', 'sw-header', [icon('symbol-class'), this.title, this.filterInput, this.sortButton]);
 		this.paintSort();
-		this.body = el('div', 'sw-list');
+
+		this.importsSlot = el('div', 'sw-slot-imports');
+		this.localsSlot = el('div', 'sw-slot-locals');
+		this.outlineSlot = el('div', 'sw-slot-outline');
+		this.body = el('div', 'sw-list', [this.importsSlot, this.localsSlot, this.outlineSlot]);
+		const noteInteract = () => { this.lastUserInteractAt = Date.now(); };
+		this.body.addEventListener('wheel', noteInteract, { passive: true });
+		this.body.addEventListener('pointerdown', noteInteract, { passive: true });
+
 		this.graph = new RelationGraphView();
 		this.graph.onOpen = (path, line) => this.onOpen?.(path, line);
-		// The plain click's jump lands in the Definition page — the host's wiring pins,
-		// shows and feeds it (the code page never jumps for a graph click).
 		this.graph.onShowDefinition = (subject) => this.onShowDefinition?.(subject);
-		// The declaration card's file read: the index speaks repo-relative paths and the
-		// backend's read_file needs the absolute spelling, so the graph resolves through
-		// the host's root (an absolute path passes through).
 		this.graph.resolvePath = (path) => {
 			const repo = this.provideRepo?.() ?? null;
 			if (repo === null || /^([a-zA-Z]:[\\/]|\\|\/)/.test(path)) return path;
@@ -310,12 +374,8 @@ export class SymbolWindowView {
 			}
 		};
 		this.graphSection = el('div', 'sw-graph');
-		// The head keeps its own classes — `.sw-section` stays the outline's collapsible
-		// sections' vocabulary, which the tests and the collapse reads ride on.
 		this.graphHead = el('div', 'sw-graph-head');
 		this.graphHead.setAttribute('role', 'button');
-		// The head's click is the section's collapse; the graph's own controls riding in it
-		// must keep their clicks for themselves.
 		this.graph.controls.addEventListener('click', (event) => event.stopPropagation());
 		this.paintGraphHead();
 		this.graphHead.addEventListener('click', () => this.toggleGraph());
@@ -345,7 +405,6 @@ export class SymbolWindowView {
 		if (!this.graphCollapsed) {
 			if (this.onNeedRelationRoot && !this.graph.isPinned()) this.onNeedRelationRoot();
 			else this.feedGraph();
-			// A re-shown section has a real viewport again — frame what stands.
 			window.requestAnimationFrame(() => this.graph.fit());
 		}
 	}
@@ -369,8 +428,6 @@ export class SymbolWindowView {
 			this.sashDrag = null;
 			window.removeEventListener('pointermove', move);
 			window.removeEventListener('pointerup', up);
-			// The split moved: the graph re-frames over its new viewport (only when the
-			// bounds no longer fit — the user's pan and zoom stay otherwise).
 			if (!this.graphCollapsed) window.requestAnimationFrame(() => this.graph.frame());
 		};
 		window.addEventListener('pointermove', move);
@@ -378,10 +435,7 @@ export class SymbolWindowView {
 	}
 
 	/** The covering symbol moved: remember it and refresh the locals — once per identity
-	 *  change, never per keystroke. Runs after the highlight swap so a synchronous
-	 *  hide-render below always lands on the settled DOM. The graph rides the same
-	 *  identity discipline: only an identity change re-roots it (and a collapsed section
-	 *  is asked nothing — its re-show feeds it). */
+	 *  change, never per keystroke. */
 	private noteCurrentSymbol(symbol: FileOutlineSymbol | null): void {
 		if (this.localsOwnerKnown && sameIdentity(this.localsOwner, symbol)) return;
 		this.localsOwner = symbol;
@@ -391,23 +445,20 @@ export class SymbolWindowView {
 	}
 
 	/** The hover card's jump: root the graph on the hovered symbol, pinned so the
-	 *  cursor-follow never clobbers it, and make sure the section stands open. The
-	 *  caller shows the view. */
+	 *  cursor-follow never clobbers it, and make sure the section stands open. */
 	openGraphRoot(sym: { kind: string; name: string; path: string; line: number }): void {
 		if (this.graphCollapsed) this.toggleGraph();
 		this.liveRootActive = false;
 		this.graph.pinRoot(sym);
 	}
 
-	/** Whether the Relation Window is actively following the editor cursor position
-	 *  (the sidebar view is visible, the graph section is expanded, and it is not pinned). */
+	/** Whether the Relation Window is actively following the editor cursor position. */
 	isRelationLive(): boolean {
 		return this.visible() && !this.graphCollapsed && !this.graph.isPinned();
 	}
 
 	/** Cursor-driven live follow: root the graph on the exact symbol at the editor cursor
-	 *  position or clicked in the outline (variable, function, field, type, macro) without
-	 *  pinning. Passing `null` falls back to the enclosing covering symbol. */
+	 *  position or clicked in the outline without pinning. */
 	setLiveRoot(sym: { kind: string; name: string; path: string; line: number } | null): void {
 		if (this.graph.isPinned() || this.graphCollapsed) return;
 		if (sym) {
@@ -421,9 +472,7 @@ export class SymbolWindowView {
 		this.feedGraph();
 	}
 
-	/** Root the graph on the covering symbol: the index speaks repo-relative paths, so the
-	 *  editor's absolute path crosses through the host's root first. A pin freezes the
-	 *  graph; no covering symbol (or no root to relativize against) empties it. */
+	/** Root the graph on the covering symbol. */
 	private feedGraph(): void {
 		if (this.graph.isPinned() || this.graphCollapsed) return;
 		const symbol = this.localsOwner;
@@ -436,10 +485,8 @@ export class SymbolWindowView {
 		this.graph.setRoot({ kind: symbol.kind, name: symbol.name, path: repo ? relativeTo(repo, path) : path, line: symbol.line });
 	}
 
-	/** The active editor moved: remember the file, load it when the sidebar shows this
-	 *  page (a hidden page marks dirty and waits for its refresh hook), and for the same
-	 *  file move only the cursor highlight — the cursor advances on every keystroke and
-	 *  must never re-query the index. */
+	/** The active editor moved: remember the file, load it when visible, and for the same
+	 *  file move only the cursor highlight — never re-querying or rebuilding the outline. */
 	setFile(path: string | null, cursorLine?: number): void {
 		this.targetPath = path;
 		if (cursorLine !== undefined) this.cursorLine = cursorLine;
@@ -461,9 +508,7 @@ export class SymbolWindowView {
 			this.updateHighlight();
 			return;
 		}
-		// A new file: drop the previous file's rows at once (they name another path) and
-		// load, unless the page is hidden — its showView() refresh pulls then. The fold
-		// state starts over: the keys name another file's symbols.
+		// Switching to a different file: reset per-file fold & scroll state cleanly.
 		this.liveRootActive = false;
 		this.collapsed.clear();
 		this.generation++;
@@ -474,14 +519,13 @@ export class SymbolWindowView {
 		this.symbols = [];
 		this.imports = [];
 		this.resetLocals();
+		this.body.scrollTop = 0;
 		this.render();
-		if (!this.dirty) void this.load();
+		if (!this.dirty) void this.load(false);
 	}
 
-	/** Re-pull the followed file's outline: a save or an external write may have moved it.
-	 *  A hidden view records the debt; the showView hook re-asks with the view displayed.
-	 *  The shown page's graph re-frames too — a feed that landed while the page was hidden
-	 *  never saw a viewport, so its fit bailed and the graph would sit unframed. */
+	/** Re-pull the followed file's outline (e.g., after a save): keeps the current outline
+	 *  and locals visible while loading (zero blank flash) and skips DOM work if unchanged. */
 	refresh(): void {
 		if (this.targetPath === null) return;
 		if (!this.visible() || this.loadingPath !== null) {
@@ -492,32 +536,35 @@ export class SymbolWindowView {
 			if (!this.graph.isPinned()) this.onNeedRelationRoot?.();
 			window.requestAnimationFrame(() => this.graph.frame());
 		}
-		void this.load();
+		const sameFile = this.loadedPath === this.targetPath;
+		void this.load(sameFile);
 	}
 
 	focusFilter(): void {
 		this.filterInput.focus();
 	}
 
-	/** The sidebar page's on-screen state: the workbench hides every view with
-	 *  `display: none`, so the inline style is the fact (jsdom answers it too). */
 	private visible(): boolean {
 		return this.container.style.display !== 'none';
 	}
 
-	private async load(): Promise<void> {
+	private async load(preserveWhileLoading: boolean): Promise<void> {
 		const path = this.targetPath;
 		if (path === null) return;
-		// The outline is being re-read: the locals section drops (an edit may have moved
-		// the enclosing function), and the highlight below re-derives the owner once.
-		this.resetLocals();
+		// On a same-file refresh, keep the current locals & outline painted while fetching
+		// so saving a file never causes a blank-then-refill jump.
+		if (!preserveWhileLoading) {
+			this.resetLocals();
+		} else {
+			this.localsOwnerKnown = false;
+		}
 		const generation = ++this.generation;
 		this.loadingPath = path;
 		this.dirty = false;
 		this.failed = false;
 		try {
 			const outline = await symbolFileOutline(path);
-			if (generation !== this.generation || this.targetPath !== path) return; // a newer ask superseded this one
+			if (generation !== this.generation || this.targetPath !== path) return;
 			this.symbols = (outline?.symbols ?? []).slice().sort((a, b) => a.line - b.line || a.name.localeCompare(b.name));
 			this.imports = outline?.imports ?? [];
 			this.failed = outline === null;
@@ -531,36 +578,85 @@ export class SymbolWindowView {
 		this.loadedPath = this.failed ? null : path;
 		this.render();
 		this.updateHighlight();
-		// If a refresh() arrived while this load was in flight, re-run now so the latest save lands.
-		if (this.dirty && this.visible()) void this.load();
+		if (this.dirty && this.visible()) void this.load(true);
 	}
 
+	/** Reconcile header + all three independent DOM slots without wiping untouched slots. */
 	private render(): void {
 		this.title.textContent = this.targetPath === null ? '' : baseName(this.targetPath);
 		this.title.title = this.targetPath ?? '';
-		this.body.textContent = '';
+		this.patchImports();
+		this.patchLocals();
+		this.patchOutline();
+		this.updateHighlight();
+	}
+
+	/** Patch ONLY `importsSlot` when imports or collapse state changed, compensating
+	 *  `body.scrollTop` so outline rows below stay anchored. */
+	private patchImports(): void {
+		const sig = importsFingerprint(this.targetPath, this.importsCollapsed, this.imports);
+		if (sig === this.lastImportsSig) return;
+		this.lastImportsSig = sig;
+		const beforeH = this.importsSlot.offsetHeight;
+		const prevScroll = this.body.scrollTop;
+		this.importsSlot.textContent = '';
+		if (this.targetPath !== null && this.imports.length > 0) {
+			this.importsSlot.appendChild(this.importsSection());
+		}
+		if (prevScroll > 0) {
+			const delta = this.importsSlot.offsetHeight - beforeH;
+			if (delta !== 0) this.body.scrollTop = Math.max(0, prevScroll + delta);
+		}
+	}
+
+	/** Patch ONLY `localsSlot`, preserving `outlineSlot` untouched and compensating
+	 *  `body.scrollTop` for any height change so the outline below never jumps. */
+	private patchLocals(): void {
+		const beforeH = this.localsSlot.offsetHeight;
+		const prevScroll = this.body.scrollTop;
+		this.localsSlot.textContent = '';
+		const section = this.localsSection();
+		if (section !== null) this.localsSlot.appendChild(section);
+		if (prevScroll > 0) {
+			const delta = this.localsSlot.offsetHeight - beforeH;
+			if (delta !== 0) this.body.scrollTop = Math.max(0, prevScroll + delta);
+		}
+	}
+
+	/** Patch ONLY `outlineSlot` when the outline fingerprint actually changed, preserving
+	 *  `body.scrollTop` across the update. */
+	private patchOutline(): void {
+		const sig = outlineFingerprint(
+			this.targetPath,
+			this.loadedPath !== null,
+			this.failed,
+			this.sortMode,
+			this.filterText,
+			this.collapsed,
+			this.symbols
+		);
+		if (sig === this.lastOutlineSig) return;
+		this.lastOutlineSig = sig;
+		const prevScroll = this.body.scrollTop;
+		this.outlineSlot.textContent = '';
 		this.renderedRows = [];
 		this.renderedSymbols = [];
 		this.currentRow = null;
 		if (this.targetPath === null) {
-			this.body.appendChild(el('div', 'sw-empty', [t('symbols.window.empty')]));
+			this.outlineSlot.appendChild(el('div', 'sw-empty', [t('symbols.window.empty')]));
 			return;
 		}
-		if (this.imports.length > 0) this.body.appendChild(this.importsSection());
-		const locals = this.localsSection();
-		if (locals !== null) this.body.appendChild(locals);
-		if (this.loadedPath === null && !this.failed) return; // a load still owed (hidden page) — the list stays empty
+		if (this.loadedPath === null && !this.failed) return;
 		if (this.symbols.length === 0) {
-			// No outline the index serves: null, failed, or a file it holds nothing for.
-			this.body.appendChild(el('div', 'sw-empty', [t('symbols.window.noIndex')]));
+			this.outlineSlot.appendChild(el('div', 'sw-empty', [t('symbols.window.noIndex')]));
 			return;
 		}
 		const query = this.filterText;
-		// The sort decides the shape: the line sort is the collapsible tree, the name and
-		// type sorts the flat lists.
 		const rows = this.sortMode === 'line' ? outlineRows(this.symbols, query, this.collapsed) : flatRows(this.symbols, this.sortMode, query);
-		for (const row of rows) this.body.appendChild(this.symbolRow(row));
-		this.updateHighlight();
+		const frag = document.createDocumentFragment();
+		for (const row of rows) frag.appendChild(this.symbolRow(row));
+		this.outlineSlot.appendChild(frag);
+		if (prevScroll > 0) this.body.scrollTop = prevScroll;
 	}
 
 	/* ---------- The collapsible tree and the sort ---------- */
@@ -568,24 +664,24 @@ export class SymbolWindowView {
 	private toggleCollapse(key: string): void {
 		if (this.collapsed.has(key)) this.collapsed.delete(key);
 		else this.collapsed.add(key);
-		this.render();
+		this.patchOutline();
+		this.updateHighlight();
 	}
 
-	/** The tree commands: fold every container (line sort only — the fold constraint
-	 *  answers the note otherwise), open everything, or open an asked number of tree
-	 *  levels. */
 	collapseAll(): void {
 		if (this.sortMode !== 'line') {
 			notify('info', t('symbols.window.sortedNote'));
 			return;
 		}
 		for (const row of outlineRows(this.symbols, '', new Set())) if (row.toggle) this.collapsed.add(row.key);
-		this.render();
+		this.patchOutline();
+		this.updateHighlight();
 	}
 
 	expandAll(): void {
 		this.collapsed.clear();
-		this.render();
+		this.patchOutline();
+		this.updateHighlight();
 	}
 
 	async expandSpecial(): Promise<void> {
@@ -597,14 +693,13 @@ export class SymbolWindowView {
 		if (raw === null) return;
 		const levels = Number(raw.trim());
 		if (!Number.isFinite(levels) || levels < 1) return;
-		// N passes open the first N container levels: each pass re-lists what the
-		// previous pass unfolded, so the newly visible depth answers the next.
 		for (let level = 0; level < Math.min(8, Math.round(levels)); level++) {
 			for (const row of outlineRows(this.symbols, '', this.collapsed)) {
 				if (row.toggle && this.collapsed.has(row.key) && row.depth <= level) this.collapsed.delete(row.key);
 			}
 		}
-		this.render();
+		this.patchOutline();
+		this.updateHighlight();
 	}
 
 	/** The sort cycle: By Line → By Name → By Type → By Line. */
@@ -613,7 +708,8 @@ export class SymbolWindowView {
 		this.sortMode = SORT_ORDER[(at + 1) % SORT_ORDER.length]!;
 		save('symbolWindow.sort', this.sortMode);
 		this.paintSort();
-		this.render();
+		this.patchOutline();
+		this.updateHighlight();
 	}
 
 	private paintSort(): void {
@@ -623,8 +719,6 @@ export class SymbolWindowView {
 		this.sortButton.setAttribute('aria-label', this.sortButton.title);
 	}
 
-	/** The palette's relation-window command: the three-view cycle, riding the graph
-	 *  below whether its section stands open or not. */
 	cycleRelationView(): void {
 		this.graph.cycleView();
 	}
@@ -639,14 +733,12 @@ export class SymbolWindowView {
 		head.setAttribute('role', 'button');
 		head.addEventListener('click', () => {
 			this.importsCollapsed = !this.importsCollapsed;
-			this.render();
+			this.patchImports();
 		});
 		section.appendChild(head);
 		if (this.importsCollapsed) return section;
 		for (const entry of this.imports) {
 			const row = el('div', 'sw-import-row', [icon('file-code'), el('span', 'sw-name', [entry.name])]);
-			// An include row is itself a jump — the click lands the
-			// editor on the include's own line (a 0 or missing line is the file's first).
 			const line = (entry.line ?? 0) + 1;
 			row.title = `${path}:${line}`;
 			row.addEventListener('click', () => this.onOpen?.(path, line));
@@ -655,9 +747,7 @@ export class SymbolWindowView {
 		return section;
 	}
 
-	/** The "current function" section: the enclosing symbol's parameters and locals,
-	 *  shown between the imports and the outline rows. Hidden whenever there is nothing
-	 *  served for the cursor's position — no covering symbol, no text, no answer. */
+	/** The "current function" section: the enclosing symbol's parameters and locals. */
 	private localsSection(): HTMLElement | null {
 		const path = this.targetPath;
 		if (this.locals === null || path === null) return null;
@@ -670,6 +760,7 @@ export class SymbolWindowView {
 				el('span', 'sw-line', [String(def.line + 1)])
 			]);
 			row.addEventListener('click', () => {
+				this.lastUserInteractAt = Date.now();
 				this.setLiveRoot({ kind: def.kind, name: def.name, path, line: def.line });
 				this.onOpen?.(path, def.line + 1);
 			});
@@ -684,8 +775,6 @@ export class SymbolWindowView {
 		const row = el('div', 'sw-row');
 		row.dataset['path'] = path;
 		row.dataset['line'] = String(symbol.line);
-		// The fold gutter: every row carries the slot — the container rows their +/-, the
-		// leaves the empty one, so the indents line up.
 		if (entry.toggle) {
 			const twist = el('span', 'twistie sw-fold', [icon(this.collapsed.has(entry.key) ? 'chevron-right' : 'chevron-down')]);
 			twist.title = this.collapsed.has(entry.key) ? t('symbols.window.expand') : t('symbols.window.collapse');
@@ -701,9 +790,9 @@ export class SymbolWindowView {
 		if (symbol.container) row.appendChild(el('span', 'sw-container', [`${symbol.container}·`]));
 		row.appendChild(el('span', 'sw-name', [symbol.name]));
 		row.appendChild(el('span', 'sw-line', [String(symbol.line + 1)]));
-		// The container chain's depth as padding — the row structure stays untouched.
 		if (entry.depth > 0) row.style.paddingLeft = `${8 + entry.depth * 14}px`;
 		row.addEventListener('click', () => {
+			this.lastUserInteractAt = Date.now();
 			this.setLiveRoot({ kind: symbol.kind, name: symbol.name, path, line: symbol.line });
 			this.onOpen?.(path, symbol.line + 1);
 		});
@@ -712,20 +801,14 @@ export class SymbolWindowView {
 		return row;
 	}
 
-	/** The innermost symbol whose [line, endLine] holds the cursor's line carries the
-	 *  `current` class — exactly one row, and only a change to which row that is
-	 *  touches the DOM. A change also keeps the row on screen (the cursor follow:
-	 *  the current function stays visible as the caret roams) — never on every
-	 *  keystroke, which would jitter, and never on a hidden page, which has no layout.
-	 *  The same pass re-derives the locals' owner over the whole outline (the filter
-	 *  hides rows, never the cursor's own function); only an identity change asks. */
+	/** Update the `current` highlight class in place without rebuilding any DOM. Uses safe
+	 *  container-local scrolling guarded by the user-interaction cooldown. */
 	private updateHighlight(): void {
 		let next: HTMLElement | null = null;
 		let start = -1;
 		for (let index = 0; index < this.renderedSymbols.length; index++) {
 			const symbol = this.renderedSymbols[index]!;
 			if (this.cursorLine < symbol.line || this.cursorLine > symbol.endLine) continue;
-			// The greatest declaration start among the covers is the innermost scope.
 			if (symbol.line >= start) {
 				start = symbol.line;
 				next = this.renderedRows[index] ?? null;
@@ -735,17 +818,13 @@ export class SymbolWindowView {
 			this.currentRow?.classList.remove('current');
 			next?.classList.add('current');
 			this.currentRow = next;
-			if (next !== null && this.visible()) next.scrollIntoView({ block: 'nearest' });
+			if (next !== null && this.visible() && Date.now() - this.lastUserInteractAt > USER_SCROLL_COOLDOWN_MS) {
+				scrollRowIntoContainer(this.body, next);
+			}
 		}
 		this.noteCurrentSymbol(this.coveringSymbol());
 	}
 
-	/** The symbol the cursor's line belongs to — the locals' owner and the relation
-	 *  graph's root, over the full outline (not the filtered rows). A span reaching past
-	 *  its own first line is an enclosing scope (the function whose body holds the
-	 *  cursor), and the innermost of those wins: a one-line entry declaring a name on
-	 *  the very line sits inside that scope, and its own bare ring is never the root.
-	 *  Only when nothing encloses the line does the line's own entry answer. */
 	private coveringSymbol(): FileOutlineSymbol | null {
 		let enclosing: FileOutlineSymbol | null = null;
 		let enclosingStart = -1;
@@ -766,38 +845,43 @@ export class SymbolWindowView {
 		return enclosing ?? onLine;
 	}
 
-	/** Ask for the owner's locals. The host's text decides everything: no callback, a
-	 *  null answer, or no covering symbol keeps the section hidden; a failure hides it
-	 *  silently (the owner stays remembered, so roaming inside the function never
-	 *  retries); a superseded answer is dropped by its generation. */
+	/** Stale-while-revalidate locals fetch: keeps the previous locals painted while IPC
+	 *  runs, patches ONLY `localsSlot` on resolution, and skips DOM work when unchanged. */
 	private async fetchLocals(): Promise<void> {
 		const symbol = this.localsOwner;
 		const path = this.targetPath;
 		const provide = this.provideText;
 		const generation = ++this.localsGen;
-		const had = this.locals !== null;
-		this.locals = null;
 		if (symbol === null || path === null || provide === undefined) {
-			if (had) this.render();
+			if (this.locals !== null) {
+				this.locals = null;
+				this.patchLocals();
+			}
 			return;
 		}
 		const text = provide();
 		if (text === null) {
-			if (had) this.render();
+			if (this.locals !== null) {
+				this.locals = null;
+				this.patchLocals();
+			}
 			return;
 		}
 		try {
-			const defs = await symbolLocals(text, extOf(path), this.cursorLine);
+			const defs = (await symbolLocals(text, extOf(path), this.cursorLine)) ?? [];
 			if (generation !== this.localsGen) return;
-			this.locals = defs ?? [];
+			if (sameLocals(this.locals, defs)) return;
+			this.locals = defs;
+			this.patchLocals();
 		} catch {
-			return; // the parse failed — the section stays hidden
+			if (generation !== this.localsGen) return;
+			if (this.locals !== null) {
+				this.locals = null;
+				this.patchLocals();
+			}
 		}
-		this.render();
 	}
 
-	/** Drop the locals and forget their owner: every outline reload (and every file
-	 *  switch) starts the section over, and the in-flight answers die with the bump. */
 	private resetLocals(): void {
 		this.localsOwner = null;
 		this.localsOwnerKnown = false;

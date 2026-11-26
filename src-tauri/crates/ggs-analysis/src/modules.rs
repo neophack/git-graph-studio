@@ -23,6 +23,9 @@ use serde::{Deserialize, Serialize};
 
 use ggs_index::symbols::sites;
 use ggs_index::symbols::store::{StoreDependencyFacts, SymbolStore};
+use ggs_index::symbols::vol_reader::{
+    read_file_volume_metrics, read_xm_order, read_xr_event_counts, FileVolumeMetrics, XcBloomCache,
+};
 
 use crate::imports::resolve_import;
 
@@ -121,6 +124,18 @@ pub struct ModuleNode {
     pub layer: u32,
     /// Busiest files inside this module (by declaration count), for instant Inspector view.
     pub top_files: Vec<ModuleFileSummary>,
+    /// Native 9-volume `project.ggs_sym` effective body lines summed across module files.
+    #[serde(default)]
+    pub effective_lines: usize,
+    /// Native 9-volume `project.ggs_sym` control-flow complexity summed across module files.
+    #[serde(default)]
+    pub complexity: usize,
+    /// Native 9-volume `project.ggs_sym` goto count summed across module files.
+    #[serde(default)]
+    pub goto_count: usize,
+    /// Native 9-volume `project.ggs_xr` lexical event density summed across module files.
+    #[serde(default)]
+    pub token_events: u64,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -428,6 +443,10 @@ struct NodeAcc {
     top_files: Vec<(u32, u32)>,
     symbols: usize,
     has_child_dirs: bool,
+    effective_lines: usize,
+    complexity: usize,
+    goto_count: usize,
+    token_events: u64,
 }
 
 impl NodeAcc {
@@ -571,9 +590,39 @@ pub fn module_overview_from_store(
     edge_types: ModuleEdgeTypes,
     import_edges: Option<&[(u32, u32)]>,
 ) -> ModuleOverview {
+    module_overview_from_store_with_vols(store, None, scope, depth, folders, edge_types, import_edges)
+}
+
+/// Build the scoped, layered module architecture overview directly from `&SymbolStore`
+/// enriched with native 9-volume metrics (`.ggs_sym` complexity/lines/goto, `.ggs_xr`
+/// token event density, and `.ggs_xm` parse-order validation) when `vol_dir` is fresh.
+#[allow(clippy::too_many_arguments)]
+pub fn module_overview_from_store_with_vols(
+    store: &SymbolStore,
+    vol_dir: Option<&Path>,
+    scope: Option<&str>,
+    depth: u8,
+    folders: &[String],
+    edge_types: ModuleEdgeTypes,
+    import_edges: Option<&[(u32, u32)]>,
+) -> ModuleOverview {
     let folders = normalize_scope(folders);
     let scope = normalize_single_scope(scope);
     let file_count = store.file_count();
+    // Load native 9-volume per-file metrics when volumes match the live file table.
+    let xm_valid = vol_dir
+        .and_then(read_xm_order)
+        .is_some_and(|xm| xm.len() == file_count);
+    let sym_vol_metrics: HashMap<u32, FileVolumeMetrics> = if xm_valid {
+        vol_dir.and_then(read_file_volume_metrics).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let xr_events: HashMap<u32, u32> = if xm_valid {
+        vol_dir.and_then(read_xr_event_counts).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
     let effective_depth = pick_effective_depth_iter(
         (0..file_count).filter_map(|fid| store.file_path(fid)),
         &scope,
@@ -599,6 +648,9 @@ pub fn module_overview_from_store(
             continue;
         };
         let sym_count = store.file_symbol_count(fid) as u32;
+        let fid_u32 = fid as u32;
+        let fmetrics = sym_vol_metrics.get(&fid_u32).copied().unwrap_or_default();
+        let fevents = xr_events.get(&fid_u32).copied().unwrap_or(0) as u64;
         let internal = in_folders(path, &folders) && in_scope(path, &scope);
         if internal {
             total_files += 1;
@@ -617,11 +669,19 @@ pub fn module_overview_from_store(
                     top_files: Vec::new(),
                     symbols: 0,
                     has_child_dirs: false,
+                    effective_lines: 0,
+                    complexity: 0,
+                    goto_count: 0,
+                    token_events: 0,
                 });
                 idx
             };
             let entry = &mut nodes_acc[idx as usize];
-            entry.record_file(fid as u32, sym_count);
+            entry.record_file(fid_u32, sym_count);
+            entry.effective_lines += fmetrics.effective_lines as usize;
+            entry.complexity += fmetrics.control_flow as usize;
+            entry.goto_count += fmetrics.goto_count as usize;
+            entry.token_events = entry.token_events.saturating_add(fevents);
             if !is_file && !entry.has_child_dirs {
                 if let Some(rest) = path.strip_prefix(&entry.id).and_then(|r| r.strip_prefix('/')) {
                     if rest.contains('/') {
@@ -645,10 +705,19 @@ pub fn module_overview_from_store(
                     top_files: Vec::new(),
                     symbols: 0,
                     has_child_dirs: false,
+                    effective_lines: 0,
+                    complexity: 0,
+                    goto_count: 0,
+                    token_events: 0,
                 });
                 idx
             };
-            nodes_acc[idx as usize].record_file(fid as u32, sym_count);
+            let entry = &mut nodes_acc[idx as usize];
+            entry.record_file(fid_u32, sym_count);
+            entry.effective_lines += fmetrics.effective_lines as usize;
+            entry.complexity += fmetrics.control_flow as usize;
+            entry.goto_count += fmetrics.goto_count as usize;
+            entry.token_events = entry.token_events.saturating_add(fevents);
             file_node.push((idx, false));
         }
     }
@@ -957,6 +1026,10 @@ pub fn module_overview_with_types(
                     top_files: Vec::new(),
                     symbols: 0,
                     has_child_dirs: false,
+                    effective_lines: 0,
+                    complexity: 0,
+                    goto_count: 0,
+                    token_events: 0,
                 });
                 idx
             };
@@ -985,6 +1058,10 @@ pub fn module_overview_with_types(
                     top_files: Vec::new(),
                     symbols: 0,
                     has_child_dirs: false,
+                    effective_lines: 0,
+                    complexity: 0,
+                    goto_count: 0,
+                    token_events: 0,
                 });
                 idx
             };
@@ -1329,6 +1406,10 @@ fn finalize_overview(
             in_cycle,
             layer,
             top_files,
+            effective_lines: acc.effective_lines,
+            complexity: acc.complexity,
+            goto_count: acc.goto_count,
+            token_events: acc.token_events,
         });
     }
     nodes.sort_by(|a, b| {
@@ -1361,6 +1442,20 @@ type PairEvidence = (BTreeMap<String, ()>, Vec<EdgeCallSite>);
 /// avoiding any full-store cloning. Execute the disk scan lock-free via [`scan_edge_detail`].
 pub fn prepare_edge_detail_from_store(
     store: &SymbolStore,
+    from_id: &str,
+    to_id: &str,
+    scope: Option<&str>,
+    depth: u8,
+    folders: &[String],
+) -> EdgeDetailPlan {
+    prepare_edge_detail_from_store_with_vols(store, None, from_id, to_id, scope, depth, folders)
+}
+
+/// Volume-accelerated L2 edge detail planner: uses `.ggs_xc` (code-only Bloom signature)
+/// when fresh to prune `from`-side files that only mention target symbols in comments.
+pub fn prepare_edge_detail_from_store_with_vols(
+    store: &SymbolStore,
+    vol_dir: Option<&Path>,
     from_id: &str,
     to_id: &str,
     scope: Option<&str>,
@@ -1431,6 +1526,14 @@ pub fn prepare_edge_detail_from_store(
         }
     });
 
+    let all_file_list: Vec<String> = if vol_dir.is_some() {
+        (0..file_count)
+            .map(|fid| store.file_path(fid).unwrap_or("").to_owned())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let xc_bloom = vol_dir.and_then(|dir| XcBloomCache::load(dir, all_file_list.len()));
     let from_fid_set: HashSet<u32> = from_fids.iter().copied().collect();
     let mut candidate_from_fids: HashSet<u32> = HashSet::new();
     let mut to_sym_decls: HashMap<String, Vec<String>> = HashMap::new();
@@ -1448,9 +1551,21 @@ pub fn prepare_edge_detail_from_store(
         let Some(refs) = store.ref_files_of(name_id as usize) else {
             continue;
         };
+        let xc_code_paths: Option<HashSet<String>> = xc_bloom
+            .as_ref()
+            .and_then(|b| b.filter_files(name, &all_file_list))
+            .map(|v| v.into_iter().collect());
         let mut matched = false;
         for &rfid in refs {
             if from_fid_set.contains(&rfid) {
+                if let Some(ref code_set) = xc_code_paths {
+                    if store
+                        .file_path(rfid as usize)
+                        .is_some_and(|p| !code_set.contains(p))
+                    {
+                        continue;
+                    }
+                }
                 candidate_from_fids.insert(rfid);
                 matched = true;
             }

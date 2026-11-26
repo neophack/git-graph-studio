@@ -761,6 +761,14 @@ export const bootMethods: ThisType<Workbench> = {
 		this.panel.definition.onOpenDefinition = (path, line) => {
 			void this.editors.openFile(/^([a-zA-Z]:[\\/]|\\|\/)/.test(path) || !this.repoPath ? path : joinRepo(this.repoPath, path), { line });
 		};
+		this.panel.definition.onShowRelations = (subject) => {
+			this.showView('symbolWindow');
+			this.symbolWindow.openGraphRoot({ kind: subject.kind, name: subject.name, path: subject.path, line: subject.line });
+		};
+		this.panel.definition.onFindReferences = (subject) => {
+			this.panel.show('references');
+			this.panel.references.setSubject({ kind: subject.kind, name: subject.name, path: subject.path, line: subject.line });
+		};
 		// The References page's jump: a highlighted site line — or the row's double click —
 		// opens the site at the 1-based line and column; the index speaks repo-relative
 		// paths, so an open joins the workspace root.

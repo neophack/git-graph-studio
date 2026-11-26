@@ -2,19 +2,25 @@
 // whole declaring file as the page (2026-11-23, the owner's direction: the windows read
 // as one coherent set): the file stands as a live read-only view — scrolled
 // to the declaration, the symbol's own line span marked as the selection — not a slice.
-// Files over the 1 MiB+1 ceiling refuse with the same "file too big" note. The body's
-// one click relocates the page — chain browsing: the word under the caret resolves
-// against the index and the view re-roots on its definition, until the next cursor feed
-// replaces it. The workbench feeds it with the same gate and debounce discipline the
-// relation page ran on (the panel up, this page active, the pin off); the pin freezes
-// the content, and the location button jumps to the definition. The relation window's
-// clicks land here too (2026-11-23, the owner's direction: a relation click shows the
-// jump in the Definition page, the code page never jumps, and the Definition page's
-// right-click syncs its position onto the code page) — and the page's own right-click carries
-// the sync, pushing its current position into the code editor when asked.
+// Enriched with:
+// - Back/Forward navigation history for chain-browsing identifiers inside the pane
+// - Multi-definition switcher (declaration vs. implementation / overloads)
+// - Native 9-volume metadata bar (`.ggs_sym` effective lines, control-flow complexity,
+//   goto count, parameter count; `.ggs_xc`/`.ggs_xr` code vs. comment reference counts)
+// - Inline `#define` macro expansion preview for macro subjects
+// - CSS line-number gutter (preserving verbatim `textContent`), copy actions, and
+//   enriched context menu (Sync to Editor, Relation Graph, Find References, Copy)
 
 import { readFile } from '../../platform/ipc/fs';
-import { symbolLookup, symbolScopeLookup } from '../../platform/ipc/symbols';
+import {
+	symbolLookup,
+	symbolMacroExpand,
+	symbolRefStats,
+	symbolScopeLookup,
+	type MacroExpansion,
+	type RefStats
+} from '../../platform/ipc/symbols';
+import type { WsSymbol } from '../../platform/ipc/search';
 
 import { onLocaleChange, t, tf, type LocaleKey } from '../../platform/i18n';
 import { highlightLine, extOf, wordAt } from '../../platform/highlight';
@@ -39,6 +45,7 @@ export interface DefinitionSubject {
 /** The file-level ceiling (SPEC §2.2: `FUN_004174d0(file) < 0x100001` — one byte over a
  *  mebibite refuses with "file too big"). */
 const FILE_MAX = 1024 * 1024 + 1;
+const HISTORY_CAP = 50;
 
 /** Split a path into its parent directory and basename over either separator. */
 function splitDirAndBase(path: string): { dir: string; file: string } {
@@ -95,6 +102,14 @@ export function formatDefinitionLocation(subject: DefinitionSubject, lineCount: 
 	return tf('definition.location', kind, location, subject.line + 1, linesLabel);
 }
 
+function copyText(text: string): void {
+	try {
+		void navigator.clipboard?.writeText(text);
+	} catch {
+		// Clipboard may be unavailable in headless tests.
+	}
+}
+
 export class DefinitionView {
 	readonly element: HTMLElement;
 	readonly actions: HTMLElement;
@@ -105,6 +120,12 @@ export class DefinitionView {
 	/** A location-button click — the line arrives 1-based. */
 	onOpenDefinition?: (path: string, line: number) => void;
 
+	/** Optional hook to jump directly to the Relation Graph rooted on this symbol. */
+	onShowRelations?: (subject: DefinitionSubject) => void;
+
+	/** Optional hook to open Find References for this symbol. */
+	onFindReferences?: (subject: DefinitionSubject) => void;
+
 	/** The panel page's shown() asks the workbench to re-resolve the cursor symbol. */
 	onNeedRoot?: () => void;
 
@@ -114,6 +135,8 @@ export class DefinitionView {
 	resolvePath?: (path: string) => string;
 
 	private readonly body: HTMLElement;
+	private readonly backButton: HTMLButtonElement;
+	private readonly forwardButton: HTMLButtonElement;
 	private readonly pinButton: HTMLButtonElement;
 
 	private pinned = false;
@@ -129,26 +152,68 @@ export class DefinitionView {
 	/** The fetch's staleness counter: every setDefinition drops the answers before it. */
 	private generation = 0;
 
+	/** Chain-browsing navigation history stack. */
+	private readonly history: DefinitionSubject[] = [];
+	private historyAt = -1;
+	private navigatingHistory = false;
+
+	/** Async 9-volume metadata, sibling definitions, and macro expansion for the active subject. */
+	private refStats: RefStats | null = null;
+	private siblingDefs: WsSymbol[] = [];
+	private macroExpansion: MacroExpansion | null = null;
+	private metaHost: HTMLElement | null = null;
+
 	constructor() {
 		this.body = el('div', 'def-body');
 		this.body.addEventListener('click', this.onBodyClick);
 		this.body.addEventListener('contextmenu', this.onBodyContextMenu);
 		this.element = el('div', 'panel-body def-panel', [this.body]);
 		this.element.hidden = true;
+		this.backButton = actionButton('arrow-left', t('relations.back'), () => this.goHistory(-1));
+		this.forwardButton = actionButton('arrow-right', t('relations.forward'), () => this.goHistory(1));
 		this.pinButton = actionButton('pin', t('definition.pin'), () => this.togglePin());
-		this.actions = el('div', 'actions', [this.pinButton]);
+		this.actions = el('div', 'actions', [this.backButton, this.forwardButton, this.pinButton]);
 		this.headerInfo = el('button', 'def-header-info') as HTMLButtonElement;
 		this.headerInfo.type = 'button';
 		this.headerInfo.hidden = true;
 		this.headerInfo.addEventListener('click', () => {
 			if (this.subject) this.onOpenDefinition?.(this.subject.path, this.subject.line + 1);
 		});
+		this.paintHistoryButtons();
 		onLocaleChange(() => {
 			this.pinButton.title = this.pinned ? t('definition.unpin') : t('definition.pin');
 			this.pinButton.setAttribute('aria-label', this.pinButton.title);
+			this.paintHistoryButtons();
 			this.render();
 		});
 		this.render();
+	}
+
+	private paintHistoryButtons(): void {
+		this.backButton.disabled = this.historyAt <= 0;
+		this.forwardButton.disabled = this.historyAt >= this.history.length - 1;
+		this.backButton.title = t('relations.back');
+		this.forwardButton.title = t('relations.forward');
+	}
+
+	private pushHistory(subject: DefinitionSubject): void {
+		const top = this.history[this.historyAt];
+		if (top && top.name === subject.name && top.path === subject.path && top.line === subject.line) return;
+		this.history.length = this.historyAt + 1;
+		this.history.push({ ...subject });
+		if (this.history.length > HISTORY_CAP) this.history.shift();
+		this.historyAt = this.history.length - 1;
+		this.paintHistoryButtons();
+	}
+
+	private goHistory(delta: number): void {
+		const next = this.historyAt + delta;
+		const entry = this.history[next];
+		if (!entry) return;
+		this.historyAt = next;
+		this.paintHistoryButtons();
+		this.navigatingHistory = true;
+		this.setDefinition(entry);
 	}
 
 	private togglePin(): void {
@@ -179,9 +244,14 @@ export class DefinitionView {
 			this.subject.name === subject.name &&
 			this.subject.path === subject.path &&
 			this.subject.line === subject.line;
-		if (same) return;
+		if (same) {
+			this.navigatingHistory = false;
+			return;
+		}
 		this.subject = subject ? { ...subject } : null;
 		this.note = note;
+		if (subject && !this.navigatingHistory) this.pushHistory(subject);
+		this.navigatingHistory = false;
 		void this.load();
 	}
 
@@ -192,8 +262,14 @@ export class DefinitionView {
 		this.failed = false;
 		this.tooBig = false;
 		this.fileLines = null;
+		this.refStats = null;
+		this.siblingDefs = [];
+		this.macroExpansion = null;
 		this.render();
 		if (!subject) return;
+		// Opportunistically fetch 9-volume metadata, sibling definitions, and macro expansion
+		// in parallel without blocking or failing the primary file render.
+		void this.loadMetadata(subject, generation);
 		try {
 			const file = await readFile(this.resolvePath?.(subject.path) ?? subject.path);
 			// A newer setDefinition owns the page now; this answer paints nothing.
@@ -214,6 +290,20 @@ export class DefinitionView {
 		this.render();
 	}
 
+	private async loadMetadata(subject: DefinitionSubject, generation: number): Promise<void> {
+		if (!subject.name || subject.kind === 'file') return;
+		const [stats, defs, macro] = await Promise.all([
+			symbolRefStats(subject.name, subject.path, subject.line).catch(() => null),
+			symbolLookup(subject.name).catch(() => null),
+			subject.kind === 'macro' ? symbolMacroExpand(subject.name).catch(() => null) : Promise.resolve(null)
+		]);
+		if (generation !== this.generation) return;
+		this.refStats = stats ?? null;
+		this.siblingDefs = Array.isArray(defs) ? defs : [];
+		this.macroExpansion = macro ?? null;
+		this.paintMetaBar();
+	}
+
 	/** The selection's last line: the index's end span, a macro whose end never reached
 	 *  the index extending over its `\` continuations. */
 	private selectionEnd(subject: DefinitionSubject, lines: string[]): number {
@@ -228,9 +318,15 @@ export class DefinitionView {
 		return Math.min(end, lines.length - 1);
 	}
 
-	/** The header row: the kind's icon and caption, the name, and the file:line button. */
+	/** The header row: the kind's icon and caption, the name, copy action, and the file:line button. */
 	private buildHeader(subject: DefinitionSubject): HTMLElement {
-		const location = el('button', 'def-location');
+		const copyBtn = el('button', 'def-copy-btn', [icon('copy')]) as HTMLButtonElement;
+		copyBtn.type = 'button';
+		copyBtn.title = t('analysis.modules.copyPath');
+		copyBtn.addEventListener('click', () => copyText(`${subject.path}:${subject.line + 1}`));
+
+		const location = el('button', 'def-location') as HTMLButtonElement;
+		location.type = 'button';
 		location.textContent = `${splitDirAndBase(subject.path).file}:${subject.line + 1}`;
 		location.title = t('symbols.context.open');
 		location.addEventListener('click', () => this.onOpenDefinition?.(subject.path, subject.line + 1));
@@ -238,8 +334,98 @@ export class DefinitionView {
 			icon(KIND_ICONS[subject.kind] ?? 'symbol-variable'),
 			el('span', 'def-name', [subject.name]),
 			el('span', 'def-kind', [subject.kind]),
-			location
+			location,
+			copyBtn
 		]);
+	}
+
+	/** Patch the rich metadata strip (`.ggs_sym` metrics, `.ggs_xc`/`.ggs_xr` ref counts,
+	 *  multi-definition switcher, and macro expansion) in place without disturbing code scroll. */
+	private paintMetaBar(): void {
+		const host = this.metaHost;
+		const subject = this.subject;
+		if (!host || !subject) return;
+		host.textContent = '';
+
+		const pills: HTMLElement[] = [];
+
+		// Multi-definition switcher (declaration vs. implementation / overloads).
+		if (this.siblingDefs.length > 1) {
+			const norm = (p: string) => p.replaceAll('\\', '/').toLowerCase();
+			const curIdx = Math.max(
+				0,
+				this.siblingDefs.findIndex((d) => norm(d.path) === norm(subject.path) && d.line === subject.line)
+			);
+			const btn = el('button', 'def-meta-pill def-meta-action', [
+				icon('references'),
+				el('span', undefined, [`${curIdx + 1}/${this.siblingDefs.length} defs`]),
+				icon('chevron-down')
+			]) as HTMLButtonElement;
+			btn.type = 'button';
+			btn.title = 'Switch between definitions / declarations';
+			btn.addEventListener('click', (event) => {
+				const entries: MenuEntry[] = this.siblingDefs.map((d) => ({
+					label: `${d.kind} · ${splitDirAndBase(d.path).file}:${d.line + 1}`,
+					checked: norm(d.path) === norm(subject.path) && d.line === subject.line,
+					run: () => this.setDefinition({
+						kind: d.kind,
+						name: d.name,
+						path: d.path,
+						line: d.line,
+						endLine: d.endLine
+					})
+				}));
+				showContextMenu(event.clientX, event.clientY, entries);
+			});
+			pills.push(btn);
+		}
+
+		// Native 9-volume `.ggs_sym` metrics.
+		const m = this.refStats?.metrics;
+		if (m) {
+			if (m.effectiveLines > 0) pills.push(el('span', 'def-meta-pill', [`${m.effectiveLines}L`]));
+			if (m.controlFlow > 0) pills.push(el('span', 'def-meta-pill def-meta-cx', [`${m.controlFlow} br`]));
+			if (m.paramCount > 0) pills.push(el('span', 'def-meta-pill', [m.paramCount === 255 ? '… params' : `${m.paramCount}p`]));
+			if (m.gotoCount > 0) pills.push(el('span', 'def-meta-pill def-meta-warn', [`${m.gotoCount} goto`]));
+		}
+
+		// Reference count (`.ggs_xc` code files + `.ggs_xr` \ `.ggs_xc` comment/doc files).
+		if (this.refStats && (this.refStats.files > 0 || (this.refStats.commentFiles ?? 0) > 0)) {
+			const commentPart = (this.refStats.commentFiles ?? 0) > 0 ? ` (+${this.refStats.commentFiles} docs)` : '';
+			const refEl = el(this.onFindReferences ? 'button' : 'span', `def-meta-pill${this.onFindReferences ? ' def-meta-action' : ''}`, [
+				icon('search'),
+				el('span', undefined, [`${this.refStats.files} files${commentPart}`])
+			]);
+			if (this.onFindReferences) {
+				(refEl as HTMLButtonElement).type = 'button';
+				refEl.addEventListener('click', () => this.onFindReferences?.(subject));
+			}
+			pills.push(refEl);
+		}
+
+		if (this.onShowRelations) {
+			const relBtn = el('button', 'def-meta-pill def-meta-action', [
+				icon('type-hierarchy'),
+				el('span', undefined, [t('symbols.graph.title')])
+			]) as HTMLButtonElement;
+			relBtn.type = 'button';
+			relBtn.addEventListener('click', () => this.onShowRelations?.(subject));
+			pills.push(relBtn);
+		}
+
+		if (pills.length > 0) {
+			host.appendChild(el('div', 'def-meta-bar', pills));
+		}
+
+		// Inline macro expansion banner for `#define` macros.
+		if (this.macroExpansion && this.macroExpansion.expanded) {
+			const box = el('div', 'def-macro-box', [
+				el('span', 'def-macro-tag', ['Macro']),
+				el('code', 'def-macro-val', [this.macroExpansion.expanded])
+			]);
+			host.appendChild(box);
+		}
+		host.hidden = host.childElementCount === 0;
 	}
 
 	/** The panel page's activation: the workbench's hook re-resolves the cursor symbol. */
@@ -249,6 +435,7 @@ export class DefinitionView {
 
 	private render(): void {
 		this.body.textContent = '';
+		this.metaHost = null;
 		if (!this.subject) {
 			this.headerInfo.textContent = '';
 			this.headerInfo.title = '';
@@ -264,6 +451,10 @@ export class DefinitionView {
 		this.headerInfo.title = `${summary} — ${t('symbols.context.open')}`;
 		this.headerInfo.hidden = false;
 		this.body.appendChild(this.buildHeader(this.subject));
+		this.metaHost = el('div', 'def-meta-host');
+		this.metaHost.hidden = true;
+		this.body.appendChild(this.metaHost);
+		this.paintMetaBar();
 		if (this.loading) {
 			this.body.appendChild(el('div', 'def-hint', [icon('sync', 'codicon-modifier-spin'), t('relations.loading')]));
 			return;
@@ -283,6 +474,7 @@ export class DefinitionView {
 		lines.forEach((line, index) => {
 			const row = el('span', 'def-line');
 			row.dataset['line'] = String(index);
+			row.dataset['ln'] = String(index + 1);
 			if (index >= subject.line && index <= selEnd) row.classList.add('def-sel');
 			for (const segment of highlightLine(line, ext)) {
 				row.appendChild(segment.cls ? el('span', segment.cls, [segment.text]) : document.createTextNode(segment.text));
@@ -389,8 +581,7 @@ export class DefinitionView {
 
 	/* ---------- The right-click sync (the page's own push into the code page) ---------- */
 
-	/** The page's right-click: "sync the current position to the code page" — the jump
-	 *  the location button makes, offered in place. Nothing stands without a subject. */
+	/** The page's right-click: sync position to editor, open in relation graph, find references, or copy. */
 	private readonly onBodyContextMenu = (event: MouseEvent): void => {
 		if (!this.subject) return;
 		event.preventDefault();
@@ -401,6 +592,29 @@ export class DefinitionView {
 				run: () => this.onOpenDefinition?.(subject.path, subject.line + 1)
 			}
 		];
+		if (this.onShowRelations) {
+			entries.push({
+				label: t('symbols.graph.title'),
+				run: () => this.onShowRelations?.(subject)
+			});
+		}
+		if (this.onFindReferences) {
+			entries.push({
+				label: t('panel.references'),
+				run: () => this.onFindReferences?.(subject)
+			});
+		}
+		if (this.fileLines) {
+			const selEnd = this.selectionEnd(subject, this.fileLines);
+			const snippet = this.fileLines.slice(subject.line, selEnd + 1).join('\n');
+			entries.push('separator', {
+				label: t('analysis.modules.copyPath'),
+				run: () => copyText(`${subject.path}:${subject.line + 1}`)
+			}, {
+				label: 'Copy Definition Code',
+				run: () => copyText(snippet)
+			});
+		}
 		showContextMenu(event.clientX, event.clientY, entries);
 	};
 }

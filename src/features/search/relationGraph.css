@@ -355,3 +355,50 @@
 }
 .rg-ol-count, .rg-ol-line { text-align: right; color: var(--vscode-descriptionForeground); font-size: 11px; }
 .rg-ol-file { overflow: hidden; text-overflow: ellipsis; color: var(--vscode-descriptionForeground); font-size: 11px; }
+
+/* Intuitive floating summary, legend & quick-filter ribbon on the graph stage */
+.rg-summary-bar {
+	position: absolute;
+	top: 8px;
+	left: 10px;
+	right: 10px;
+	z-index: 3;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	padding: 4px 9px;
+	border-radius: 7px;
+	font-size: 11px;
+	color: var(--vscode-sideBar-foreground);
+	background: color-mix(in srgb, var(--vscode-sideBar-background, #1e1e1e) 86%, transparent);
+	backdrop-filter: blur(6px);
+	border: 1px solid color-mix(in srgb, var(--vscode-panel-border, #3e4a5c) 75%, transparent);
+	pointer-events: auto;
+}
+.rg-summary-bar[hidden] { display: none; }
+.rg-sum-stat { font-weight: 600; white-space: nowrap; }
+.rg-sum-legend { display: inline-flex; align-items: center; gap: 8px; color: var(--vscode-descriptionForeground); }
+.rg-sum-leg { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.rg-sum-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.rg-sum-dot.caller { background: #4ec9b0; }
+.rg-sum-dot.callee { background: #569cd6; }
+.rg-sum-dot.write { background: #e59956; }
+.rg-sum-filters { display: inline-flex; align-items: center; gap: 3px; margin-left: auto; }
+.rg-sum-pill {
+	font-size: 10px;
+	line-height: 16px;
+	padding: 0 7px;
+	border-radius: 8px;
+	cursor: pointer;
+	border: 1px solid var(--vscode-panel-border, #3e4a5c);
+	background: transparent;
+	color: var(--vscode-descriptionForeground);
+}
+.rg-sum-pill:hover { color: var(--vscode-sideBar-foreground); border-color: var(--vscode-focusBorder); }
+.rg-sum-pill.active {
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	border-color: var(--vscode-button-background);
+}
+.rg-card-badge-text { user-select: none; pointer-events: none; font-weight: 600; }

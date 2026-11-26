@@ -1068,6 +1068,15 @@ class ModulePage implements AnalysisPageView {
 				this.renderPropRow(t('analysis.modules.inspector.coupling'), `↓ ${node.fanIn}  /  ↑ ${node.fanOut}`),
 				this.renderPropRow(t('analysis.modules.inspector.instability'), instVal)
 			];
+			if (node.effectiveLines) {
+				propRows.push(this.renderPropRow('Effective Lines (.ggs_sym)', `${node.effectiveLines} L`));
+			}
+			if (node.complexity) {
+				propRows.push(this.renderPropRow('Control Flow (.ggs_sym)', `${node.complexity} br${node.gotoCount ? ` · ${node.gotoCount} goto` : ''}`));
+			}
+			if (node.tokenEvents) {
+				propRows.push(this.renderPropRow('Token Density (.ggs_xr)', node.tokenEvents.toLocaleString()));
+			}
 			if (node.inCycle) {
 				propRows.push(this.renderPropRow(
 					t('analysis.modules.inspector.cycleTag'),

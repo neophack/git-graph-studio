@@ -78,7 +78,7 @@
 	white-space: nowrap;
 }
 
-/* Read / Write / Call / Decl access filter pills & site badges (Area 2) */
+/* Read / Write / Call / Decl access filter pills, distribution bar & mini file badges */
 .refs-access-bar { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
 .refs-access-pill {
 	font-size: 10px; line-height: 16px; padding: 0 6px; border-radius: 8px; cursor: pointer;
@@ -90,6 +90,43 @@
 	background: var(--vscode-button-background); color: var(--vscode-button-foreground);
 	border-color: var(--vscode-button-background);
 }
+.refs-pill-write:not(.active) { color: #f48771; }
+.refs-pill-read:not(.active) { color: #75beff; }
+.refs-pill-call:not(.active) { color: #c586c0; }
+.refs-pill-decl:not(.active) { color: #4ec9b0; }
+
+.refs-comment-chip {
+	font-size: 10px; line-height: 16px; padding: 0 6px; border-radius: 8px;
+	background: color-mix(in srgb, var(--vscode-descriptionForeground) 14%, transparent);
+	color: var(--vscode-descriptionForeground); flex: none;
+}
+
+.refs-dist-bar {
+	display: flex; height: 3px; border-radius: 2px; overflow: hidden;
+	margin: 0 0 6px; background: color-mix(in srgb, var(--vscode-panel-border) 40%, transparent);
+}
+.refs-dist-seg { height: 100%; }
+.refs-dist-decl { background: #4ec9b0; }
+.refs-dist-call { background: #c586c0; }
+.refs-dist-write { background: #f48771; }
+.refs-dist-read { background: #75beff; }
+
+.refs-file-mini { display: inline-flex; align-items: center; gap: 3px; margin-left: auto; flex: none; }
+.refs-mini-tag {
+	font-size: 9.5px; font-weight: 600; padding: 0 4px; line-height: 14px; border-radius: 3px;
+}
+.refs-file-density {
+	width: 36px; height: 4px; border-radius: 2px; flex: none; overflow: hidden;
+	background: color-mix(in srgb, var(--vscode-panel-border) 50%, transparent);
+}
+.refs-file-density > i {
+	display: block; height: 100%; border-radius: 2px;
+	background: var(--vscode-textLink-foreground, #3794ff);
+}
+.refs-file-mini + .refs-file-density + .refs-file-count,
+.refs-file-mini + .refs-file-count,
+.refs-file-density + .refs-file-count { margin-left: 4px; }
+
 .refs-access-badge {
 	flex: none; font-size: 10px; font-weight: 700; width: 15px; height: 15px; line-height: 15px;
 	text-align: center; border-radius: 3px; user-select: none;

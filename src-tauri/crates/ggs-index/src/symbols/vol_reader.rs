@@ -388,6 +388,105 @@ pub fn read_sym_slot_metrics(dir: &Path) -> Option<HashMap<(u32, u32, String), S
     Some(map)
 }
 
+/// Per-file aggregated metrics decoded directly from `project.ggs_sym` (`raw108`) in one
+/// pass without parsing any source files on disk.
+#[derive(Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileVolumeMetrics {
+    pub effective_lines: u32,
+    pub control_flow: u32,
+    pub goto_count: u32,
+    pub function_count: u32,
+}
+
+/// Aggregate per-file complexity, effective body lines, goto count, and function count
+/// directly from `project.ggs_sym` live slots.
+pub fn read_file_volume_metrics(dir: &Path) -> Option<HashMap<u32, FileVolumeMetrics>> {
+    let bytes = fs::read(dir.join(SYM_VOL_FILE)).ok()?;
+    let header = VolumeHeader::parse_block(bytes.get(..HEADER_BLOCK_SIZE)?)?;
+    if header.magic != MAGIC_SYM || header.rec_size as usize != SYM_REC_SIZE {
+        return None;
+    }
+    let count = header.count as usize;
+    let body = bytes.get(HEADER_BLOCK_SIZE..)?;
+    if body.len() < count.checked_mul(SYM_REC_SIZE)? {
+        return None;
+    }
+    let mut map: HashMap<u32, FileVolumeMetrics> = HashMap::new();
+    for i in 0..count {
+        let slot_bytes = &body[i * SYM_REC_SIZE..(i + 1) * SYM_REC_SIZE];
+        let Some(slot) = SymSlot::decode(slot_bytes) else {
+            continue;
+        };
+        if slot.raw108 == 0 {
+            continue;
+        }
+        let m = SymSlotMetrics::from_slot(&slot);
+        let entry = map.entry(slot.file_id).or_default();
+        entry.effective_lines = entry.effective_lines.saturating_add(m.effective_lines);
+        entry.control_flow = entry.control_flow.saturating_add(m.control_flow);
+        entry.goto_count = entry.goto_count.saturating_add(m.goto_count);
+        entry.function_count = entry.function_count.saturating_add(1);
+    }
+    Some(map)
+}
+
+/// Read per-file lexical event counts from `project.ggs_xr` (`XVolSlot::event_count`),
+/// capturing full-text token activity density per file without reading source files.
+pub fn read_xr_event_counts(dir: &Path) -> Option<HashMap<u32, u32>> {
+    let bytes = fs::read(dir.join(XR_VOL_FILE)).ok()?;
+    let records = xvol_records(&bytes)?;
+    let mut map = HashMap::with_capacity(records.len());
+    for (fid, rec) in records {
+        let ev = u32::from_le_bytes(rec[4..8].try_into().ok()?);
+        map.insert(fid, ev);
+    }
+    Some(map)
+}
+
+/// Read the parse-order file-id map from `project.ggs_xm`.
+pub fn read_xm_order(dir: &Path) -> Option<Vec<u32>> {
+    let bytes = fs::read(dir.join(XM_VOL_FILE)).ok()?;
+    projvol::parse_xm(&bytes)
+}
+
+/// Resolve specific `project.ggs_sym` slot indices (returned by `PagedIndexReader` over
+/// `.ggs_xab`/`.ggs_xad` or `.ggs_xsb`/`.ggs_xsd`) directly via targeted seeks without
+/// loading the whole symbol volume into memory.
+pub fn read_sym_slots_by_indices(
+    dir: &Path,
+    slot_ids: &[u16],
+) -> Option<Vec<(u32, u32, String)>> {
+    if slot_ids.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut file = File::open(dir.join(SYM_VOL_FILE)).ok()?;
+    let mut hdr = [0u8; HEADER_BLOCK_SIZE];
+    file.read_exact(&mut hdr).ok()?;
+    let header = VolumeHeader::parse_block(&hdr)?;
+    if header.magic != MAGIC_SYM || header.rec_size as usize != SYM_REC_SIZE {
+        return None;
+    }
+    let count = header.count as usize;
+    let mut slot_buf = [0u8; SYM_REC_SIZE];
+    let mut out = Vec::with_capacity(slot_ids.len());
+    for &slot_id in slot_ids {
+        let idx = slot_id as usize;
+        if idx >= count {
+            continue;
+        }
+        let offset = HEADER_BLOCK_SIZE as u64 + (idx as u64) * (SYM_REC_SIZE as u64);
+        if file.seek(SeekFrom::Start(offset)).is_err() || file.read_exact(&mut slot_buf).is_err() {
+            continue;
+        }
+        if let Some(slot) = SymSlot::decode(&slot_buf) {
+            let name = String::from_utf8_lossy(&slot.name).into_owned();
+            out.push((slot.file_id, slot.line0, name));
+        }
+    }
+    Some(out)
+}
+
 /// Inspect the 9 `project.ggs_*` volume files on disk for diagnostics and status reporting.
 pub fn inspect_volume_stats(dir: &Path) -> VolumeStats {
     if !PROJECT_VOL_FILES.iter().all(|name| dir.join(name).is_file()) {

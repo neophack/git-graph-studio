@@ -33,6 +33,7 @@ pub async fn search_workspace(
     roots: State<'_, WorkspaceRoots>,
     search: State<'_, std::sync::Arc<ggs_index::search::SearchState>>,
     cache: State<'_, std::sync::Arc<ggs_fs::FileListCache>>,
+    symbol_index: State<'_, std::sync::Arc<ggs_index::symbols::index::SymbolIndex>>,
     query: String,
     is_regex: bool,
     case_sensitive: bool,
@@ -54,12 +55,31 @@ pub async fn search_workspace(
     let root = repo
         .or_else(|| roots.inner().first())
         .ok_or_else(|| "No folder is open".to_string())?;
-    let matcher = build_matcher(&query, is_regex, case_sensitive, word_only.unwrap_or(false))?;
-    let files = select_paths(
+    let whole_word = word_only.unwrap_or(false);
+    let matcher = build_matcher(&query, is_regex, case_sensitive, whole_word)?;
+    let mut files = select_paths(
         &cached_file_list(cache.inner(), &root, FILE_LIST_TTL, walk_files),
         include.as_deref().unwrap_or(""),
         exclude.as_deref().unwrap_or(""),
     );
+    // When doing a whole-word literal ASCII identifier search and the 9-volume index is
+    // already resident & fresh, prefilter indexed source files with `.ggs_xr` (full-text
+    // Bloom signature including comments & strings) so non-matching files skip disk I/O.
+    if !is_regex
+        && whole_word
+        && query.len() >= 2
+        && query.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        if let Some(xr_hits) = symbol_index.inner().filter_files_xr_for(&root, &query) {
+            let xr_set: std::collections::HashSet<&str> = xr_hits.iter().map(String::as_str).collect();
+            if let Some(indexed_files) = symbol_index.inner().files_with_counts(&root) {
+                let indexed_set: std::collections::HashSet<String> =
+                    indexed_files.into_iter().map(|(p, _)| p).collect();
+                // Keep any file not in the symbol store (e.g. .md/.json) plus `.ggs_xr` hits.
+                files.retain(|p| !indexed_set.contains(p) || xr_set.contains(p.as_str()));
+            }
+        }
+    }
     let search = std::sync::Arc::clone(search.inner());
     // The scan is CPU- and IO-bound rayon work: it runs on a blocking thread so the async
     // runtime (and every other command) stays responsive while a big tree is searched.
@@ -253,10 +273,11 @@ pub async fn workspace_symbols(
         .or_else(|| roots.inner().first())
         .ok_or_else(|| "No folder is open".to_string())?;
     crate::cmd_symbols::ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
-    // Filtered inside the store: only the hits are copied out, never the whole index.
+    // Volume-accelerated lookup (`.ggs_xsb`/`.ggs_xsd` + `.ggs_xab`/`.ggs_xad` + `.ggs_xf`)
+    // merged with in-memory `store.matching` for 100% completeness.
     Ok(symbol_index
         .inner()
-        .matching(&root, &query.to_lowercase(), limit.unwrap_or(usize::MAX))
+        .matching_with_vols(&root, &query.to_lowercase(), limit.unwrap_or(usize::MAX))
         .unwrap_or_default())
 }
 

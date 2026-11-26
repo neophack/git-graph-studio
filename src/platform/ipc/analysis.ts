@@ -65,6 +65,10 @@ export interface ModuleNode {
 	inCycle: boolean;
 	layer: number;
 	topFiles: ModuleFileSummary[];
+	effectiveLines?: number;
+	complexity?: number;
+	gotoCount?: number;
+	tokenEvents?: number;
 }
 
 export interface ModuleEdgeTypes {

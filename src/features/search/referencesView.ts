@@ -1,20 +1,23 @@
 // The References panel page (module 5) — the lookup-references page: the clicked
-// symbol's every whole-word site, grouped by file with per-file counts, each site
-// answered not raw but specially processed before it shows — the click opens a folded
-// context slice: the innermost enclosing definition's declaration line, a window of lines
-// around the site, and the body's middle folded into `… N lines …` rows that click open
-// (capped), so a reference's context reads structural instead of a wall of code. The
-// workbench feeds it with the same gate and debounce discipline the definition page
-// keeps (the panel up, this page active, the pin off); the highlighted site line — or
-// the row's double click — jumps into the editor.
-// The search-results options land too (2026-11-23, the owner's direction: the windows
-// read as one coherent set): each site row carries the four display
-// switches — the container function or class's name, the file name, the line number, the
-// line text — and repeated lookups follow the output policy, appending to, replacing, or
-// asking about the old results, the page accumulating the lookups as sections.
+// symbol's every whole-word site, grouped by file with per-file counts and visual
+// Read/Write/Call/Decl access breakdown, each site offering a folded structural context
+// slice (`… N lines …`) and one-click navigation.
+// Enhanced with:
+// - Counted semantic access filter pills (`All (N)`, `Decl`, `Call`, `Write`, `Read`)
+//   plus a proportional stacked distribution bar
+// - Expand All / Collapse All & Sort by Count / Path controls
+// - 9-volume `.ggs_xr` \ `.ggs_xc` comment/doc-only file badge
+// - Per-file mini access breakdown pills & relative density bars
 
 import { readFile } from '../../platform/ipc/fs';
-import { symbolFileOutline, symbolLookup, symbolReferences, type SymbolRefFile } from '../../platform/ipc/symbols';
+import {
+	symbolFileOutline,
+	symbolLookup,
+	symbolRefStats,
+	symbolReferences,
+	type RefAccess,
+	type SymbolRefFile
+} from '../../platform/ipc/symbols';
 
 import { t, tf } from '../../platform/i18n';
 import { load, save } from '../../platform/state';
@@ -76,6 +79,8 @@ interface ResultSection {
 	subject: ReferencesSubject;
 	files: SymbolRefFile[];
 	filesCapped: boolean;
+	/** Extra files that mention the symbol only in comments/strings (`.ggs_xr` \ `.ggs_xc`). */
+	commentFiles: number;
 	/** 0-based definition lines per repo-relative path — the def rows' marker. */
 	defLines: Map<string, Map<number, string>>;
 }
@@ -158,6 +163,28 @@ function baseName(path: string): string {
 	return cut === -1 ? path : path.slice(cut + 1);
 }
 
+interface AccessCounts {
+	total: number;
+	decl: number;
+	call: number;
+	write: number;
+	read: number;
+}
+
+function countAccess(files: SymbolRefFile[]): AccessCounts {
+	const counts: AccessCounts = { total: 0, decl: 0, call: 0, write: 0, read: 0 };
+	for (const file of files) {
+		for (const m of file.matches) {
+			counts.total++;
+			if (m.access === 'decl') counts.decl++;
+			else if (m.access === 'call') counts.call++;
+			else if (m.access === 'write') counts.write++;
+			else if (m.access === 'read') counts.read++;
+		}
+	}
+	return counts;
+}
+
 export class ReferencesView {
 	readonly element: HTMLElement;
 	readonly actions: HTMLElement;
@@ -176,6 +203,8 @@ export class ReferencesView {
 	private readonly body: HTMLElement;
 	private readonly pinButton: HTMLButtonElement;
 	private readonly optionsButton: HTMLButtonElement;
+	private readonly sortButton: HTMLButtonElement;
+	private readonly expandAllButton: HTMLButtonElement;
 
 	private pinned = false;
 	private subject: ReferencesSubject | null = null;
@@ -190,8 +219,10 @@ export class ReferencesView {
 	private nextSectionId = 1;
 	private readonly openGroups = new Set<string>();
 	private readonly openSites = new Set<string>();
-	/** Access-kind filter (Area 2: Read / Write / Call / All). */
-	private accessFilter: 'all' | 'write' | 'read' | 'call' = 'all';
+	/** Access-kind filter (Area 2: All / Decl / Call / Write / Read). */
+	private accessFilter: 'all' | RefAccess = 'all';
+	/** Sort file groups by path (default, deterministic) or hit count descending. */
+	private sortByCount = false;
 	/** The display options, persisted. */
 	private options: ResultsOptions = { ...DEFAULT_OPTIONS, ...load<Partial<ResultsOptions>>(OPTIONS_KEY, {}) };
 	/** One file's read lines and outline, kept per repo-relative path and dropped when a
@@ -202,9 +233,30 @@ export class ReferencesView {
 		this.body = el('div', 'refs-body');
 		this.element = el('div', 'panel-body refs-panel', [this.body]);
 		this.element.hidden = true;
+		this.sortButton = actionButton('list-ordered', 'Sort files by reference count', () => this.toggleSort());
+		this.expandAllButton = actionButton('expand-all', 'Expand / Collapse all files', () => this.toggleExpandAll());
 		this.pinButton = actionButton('pin', t('references.pin'), () => this.togglePin());
 		this.optionsButton = actionButton('settings-gear', t('references.options'), (event) => this.showOptionsMenu(event));
-		this.actions = el('div', 'actions', [this.optionsButton, this.pinButton]);
+		this.actions = el('div', 'actions', [this.optionsButton, this.expandAllButton, this.sortButton, this.pinButton]);
+		this.render();
+	}
+
+	private toggleSort(): void {
+		this.sortByCount = !this.sortByCount;
+		this.sortButton.classList.toggle('active', this.sortByCount);
+		this.sortButton.title = this.sortByCount ? 'Sorted by reference count (click for path order)' : 'Sort files by reference count';
+		this.render();
+	}
+
+	private toggleExpandAll(): void {
+		const latest = this.sections[this.sections.length - 1];
+		if (!latest || latest.files.length === 0) return;
+		const allOpen = latest.files.every((f) => this.openGroups.has(groupKey(latest.id, f.path)));
+		for (const f of latest.files) {
+			const key = groupKey(latest.id, f.path);
+			if (allOpen) this.openGroups.delete(key);
+			else this.openGroups.add(key);
+		}
 		this.render();
 	}
 
@@ -269,7 +321,11 @@ export class ReferencesView {
 		}
 		this.render();
 		try {
-			const [refs, defs] = await Promise.all([symbolReferences(subject.name), symbolLookup(subject.name)]);
+			const [refs, defs, stats] = await Promise.all([
+				symbolReferences(subject.name),
+				symbolLookup(subject.name),
+				symbolRefStats(subject.name).catch(() => null)
+			]);
 			// A newer setSubject owns the page now; this answer paints nothing.
 			if (generation !== this.generation) return;
 			const defLines = new Map<string, Map<number, string>>();
@@ -300,6 +356,7 @@ export class ReferencesView {
 				subject,
 				files: kept,
 				filesCapped,
+				commentFiles: stats?.commentFiles ?? 0,
 				defLines
 			};
 			this.sections.push(section);
@@ -385,6 +442,7 @@ export class ReferencesView {
 	/* ---------- Rendering ---------- */
 
 	private render(): void {
+		if (typeof document === 'undefined') return;
 		this.body.textContent = '';
 		if (!this.subject && this.sections.length === 0) {
 			this.body.appendChild(el('div', 'refs-hint', [this.note ?? t('references.hint')]));
@@ -405,16 +463,21 @@ export class ReferencesView {
 		this.sections.forEach((section, index) => this.body.appendChild(this.buildSection(section, index)));
 	}
 
-	/** One accumulated lookup: its header row (with Read/Write/Call filter pills) and file groups. */
+	/** One accumulated lookup: its header row (with counted Read/Write/Call/Decl filter pills,
+	 *  proportional distribution bar, and `.ggs_xr` \ `.ggs_xc` comment badge) and file groups. */
 	private buildSection(section: ResultSection, index: number): HTMLElement {
 		const wrap = el('div', 'refs-section');
 		if (index > 0) wrap.classList.add('refs-section-later');
 		const hasAccess = section.files.some((f) => f.matches.some((m) => m.access !== undefined));
-		const filteredFiles = this.accessFilter === 'all' || !hasAccess
+		const counts = countAccess(section.files);
+		let filteredFiles = this.accessFilter === 'all' || !hasAccess
 			? section.files
 			: section.files
 				.map((f) => ({ ...f, matches: f.matches.filter((m) => m.access === this.accessFilter) }))
 				.filter((f) => f.matches.length > 0);
+		if (this.sortByCount) {
+			filteredFiles = [...filteredFiles].sort((a, b) => b.matches.length - a.matches.length || a.path.localeCompare(b.path));
+		}
 		const filteredSites = filteredFiles.reduce((sum, f) => sum + f.matches.length, 0);
 
 		const titleRow = el('div', 'refs-title', [
@@ -424,32 +487,61 @@ export class ReferencesView {
 		]);
 		if (hasAccess) {
 			const bar = el('div', 'refs-access-bar');
-			for (const [mode, label] of [['all', 'All'], ['write', 'W'], ['read', 'R'], ['call', 'C']] as const) {
-				const btn = el('button', `refs-access-pill${this.accessFilter === mode ? ' active' : ''}`, [label]);
+			const modes: { mode: 'all' | RefAccess; label: string; count: number; title: string }[] = [
+				{ mode: 'all', label: 'All', count: counts.total, title: 'All references' },
+				{ mode: 'write', label: 'W', count: counts.write, title: 'Writes only' },
+				{ mode: 'read', label: 'R', count: counts.read, title: 'Reads only' },
+				{ mode: 'call', label: 'C', count: counts.call, title: 'Calls only' },
+				{ mode: 'decl', label: 'D', count: counts.decl, title: 'Declarations only' }
+			];
+			for (const entry of modes) {
+				if (entry.mode !== 'all' && entry.count === 0 && this.accessFilter !== entry.mode) continue;
+				const cls = `refs-access-pill${entry.mode !== 'all' ? ` refs-pill-${entry.mode}` : ''}${this.accessFilter === entry.mode ? ' active' : ''}`;
+				const btn = el('button', cls, [entry.mode === 'all' ? `${entry.label} ${entry.count}` : `${entry.label} ${entry.count}`]);
 				btn.type = 'button';
-				btn.title = mode === 'all' ? 'All references' : mode === 'write' ? 'Writes only' : mode === 'read' ? 'Reads only' : 'Calls only';
+				btn.title = entry.title;
 				btn.addEventListener('click', () => {
-					this.accessFilter = mode;
+					this.accessFilter = entry.mode;
 					this.render();
 				});
 				bar.appendChild(btn);
 			}
 			titleRow.appendChild(bar);
 		}
+		if (section.commentFiles > 0) {
+			const commentChip = el('span', 'refs-comment-chip', [`+${section.commentFiles} docs`]);
+			commentChip.title = `${section.commentFiles} additional file(s) mention '${section.subject.name}' only in comments/strings (pruned by .ggs_xc)`;
+			titleRow.appendChild(commentChip);
+		}
 		titleRow.appendChild(el('span', 'refs-summary', [tf('references.sites', filteredSites, filteredFiles.length)]));
 		wrap.appendChild(titleRow);
+
+		// Proportional visual distribution bar across Decl / Call / Write / Read.
+		if (hasAccess && counts.total > 0) {
+			const dist = el('div', 'refs-dist-bar');
+			dist.title = `Decl ${counts.decl} · Call ${counts.call} · Write ${counts.write} · Read ${counts.read}`;
+			for (const [kind, n] of [['decl', counts.decl], ['call', counts.call], ['write', counts.write], ['read', counts.read]] as const) {
+				if (n <= 0) continue;
+				const seg = el('span', `refs-dist-seg refs-dist-${kind}`);
+				seg.style.width = `${(n / counts.total) * 100}%`;
+				dist.appendChild(seg);
+			}
+			wrap.appendChild(dist);
+		}
+
 		if (filteredFiles.length === 0) {
 			wrap.appendChild(el('div', 'refs-hint', [t('references.none')]));
 			return wrap;
 		}
-		for (const file of filteredFiles) wrap.appendChild(this.buildGroup(section, file));
+		const maxFileHits = Math.max(1, ...filteredFiles.map((f) => f.matches.length));
+		for (const file of filteredFiles) wrap.appendChild(this.buildGroup(section, file, maxFileHits));
 		if (section.filesCapped) wrap.appendChild(el('div', 'refs-cut', [t('references.filesCut')]));
 		return wrap;
 	}
 
-	/** One file group: the collapsible header with its count, the site rows, and the
-	 *  folded context under an expanded site. */
-	private buildGroup(section: ResultSection, file: SymbolRefFile): HTMLElement {
+	/** One file group: the collapsible header with its mini access breakdown, density bar
+	 *  and count, the site rows, and the folded context under an expanded site. */
+	private buildGroup(section: ResultSection, file: SymbolRefFile, maxFileHits: number): HTMLElement {
 		const key = groupKey(section.id, file.path);
 		const open = this.openGroups.has(key);
 		const header = el('div', 'refs-file');
@@ -458,6 +550,28 @@ export class ReferencesView {
 		header.appendChild(icon(open ? 'chevron-down' : 'chevron-right', 'twistie'));
 		header.appendChild(el('span', 'refs-file-name', [baseName(file.path)]));
 		header.appendChild(el('span', 'refs-file-path', [file.path]));
+
+		// Per-file mini access breakdown chips (e.g. W2 C1 R3).
+		let w = 0, c = 0, r = 0, d = 0;
+		for (const m of file.matches) {
+			if (m.access === 'write') w++;
+			else if (m.access === 'call') c++;
+			else if (m.access === 'read') r++;
+			else if (m.access === 'decl') d++;
+		}
+		if (w + c + r + d > 0) {
+			const mini = el('span', 'refs-file-mini');
+			if (d > 0) mini.appendChild(el('span', 'refs-mini-tag refs-access-decl', [`D${d}`]));
+			if (c > 0) mini.appendChild(el('span', 'refs-mini-tag refs-access-call', [`C${c}`]));
+			if (w > 0) mini.appendChild(el('span', 'refs-mini-tag refs-access-write', [`W${w}`]));
+			if (r > 0) mini.appendChild(el('span', 'refs-mini-tag refs-access-read', [`R${r}`]));
+			header.appendChild(mini);
+		}
+		if (maxFileHits > 1) {
+			const bar = el('span', 'refs-file-density', [el('i')]);
+			(bar.firstElementChild as HTMLElement).style.width = `${Math.max(12, Math.round((file.matches.length / maxFileHits) * 100))}%`;
+			header.appendChild(bar);
+		}
 		header.appendChild(el('span', 'refs-file-count', [String(file.matches.length)]));
 		header.title = file.path;
 		const toggle = (): void => {

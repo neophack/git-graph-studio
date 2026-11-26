@@ -86,10 +86,18 @@ export const symbolReferences = (name: string) => invoke<SymbolRefFile[]>('symbo
  *  Symbol Database tree's refs badges show). */
 export interface RefStats {
 	files: number;
+	commentFiles?: number;
+	metrics?: SymSlotMetrics;
 }
 
-/** The hover card's reference-files count over the persistent index. */
-export const symbolRefStats = (name: string) => invoke<RefStats>('symbol_ref_stats', { name });
+/** The hover card & Definition panel's reference-files count, `.ggs_xr` \ `.ggs_xc` comment-only
+ *  file count, and optional native `.ggs_sym` metrics over the persistent 9-volume index. */
+export const symbolRefStats = (name: string, path?: string, line?: number) =>
+	invoke<RefStats>('symbol_ref_stats', {
+		name,
+		...(path !== undefined && { path }),
+		...(line !== undefined && { line })
+	});
 export const symbolsRebuild = (onEvent: Channel<SymbolIndexEvent>) => invoke<SymbolIndexStatus | null>('symbols_rebuild', { onEvent });
 
 /** One definition `symbol_file_outline` answers: the file's own symbol from the index. */
@@ -148,6 +156,8 @@ export interface RelationNode {
 	callerSide?: boolean;
 	/** Whether expanding this node again yields children (best effort). */
 	hasChildren: boolean;
+	/** Native 9-volume `project.ggs_sym` metrics decoded from the symbol's 180-byte slot. */
+	metrics?: SymSlotMetrics;
 }
 
 /** Native 9-volume `project.ggs_sym` metrics decoded from a symbol's 180-byte slot. */

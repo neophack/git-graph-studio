@@ -23,8 +23,8 @@ use ggs_base::sink::{BatchSink, EventSink};
 use crate::scan::{build_matcher, is_symbol_source, read_searchable, scan_text, FileMatches};
 use crate::symbols::store::{BuildStats, FileOutlineRow, SymbolStore};
 use crate::symbols::vol_reader::{
-    inspect_volume_stats, read_sym_slot_metrics, PagedIndexReader, SymSlotMetrics,
-    VolumeSigReader, VolumeStats,
+    inspect_volume_stats, read_single_sym_slot_metrics, read_sym_slot_metrics,
+    read_sym_slots_by_indices, PagedIndexReader, SymSlotMetrics, VolumeSigReader, VolumeStats,
 };
 use crate::symbols::WorkspaceSymbol;
 
@@ -386,6 +386,157 @@ impl SymbolIndex {
             (None, Some(x)) => Some(x),
             (None, None) => None,
         }
+    }
+
+    /// Full-text candidate files via `.ggs_xr` Bloom signatures (includes comments and
+    /// string literals — safe prefilter for whole-word literal workspace search).
+    pub fn filter_files_xr_for(&self, root: &str, word: &str) -> Option<Vec<String>> {
+        let dir = self.volume_dir_if_fresh(root)?;
+        let store = self.store(root)?;
+        let all_files: Vec<String> = store
+            .read()
+            .unwrap()
+            .files_with_counts()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        VolumeSigReader::new(dir).filter_files_xr(word, &all_files)
+    }
+
+    /// Files that mention `name` ONLY in comments, strings, or inactive preprocessor blocks:
+    /// computed directly from the 9-volume Bloom difference `.ggs_xr` \ `.ggs_xc` without
+    /// reading any source files from disk.
+    pub fn comment_only_files_for(&self, root: &str, name: &str) -> Option<Vec<String>> {
+        let dir = self.volume_dir_if_fresh(root)?;
+        let store = self.store(root)?;
+        let all_files: Vec<String> = store
+            .read()
+            .unwrap()
+            .files_with_counts()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        let reader = VolumeSigReader::new(dir);
+        let xr = reader.filter_files_xr(name, &all_files)?;
+        let xc = reader.filter_files_xc(name, &all_files)?;
+        let xc_set: std::collections::HashSet<&str> = xc.iter().map(String::as_str).collect();
+        Some(
+            xr.into_iter()
+                .filter(|p| !xc_set.contains(p.as_str()))
+                .collect(),
+        )
+    }
+
+    /// Look up one symbol's native `SymSlotMetrics` from `project.ggs_sym`.
+    pub fn single_sym_slot_metrics(
+        &self,
+        root: &str,
+        path: &str,
+        line0: usize,
+        name: &str,
+    ) -> Option<SymSlotMetrics> {
+        let dir = self.volume_dir_if_fresh(root)?;
+        let fid = self.with_store(root, |s| s.file_id_of(path)).flatten()?;
+        read_single_sym_slot_metrics(&dir, fid, line0 as u32, name)
+    }
+
+    /// Volume-accelerated workspace symbol search: uses `.ggs_xsb`/`.ggs_xsd` (symbol-name
+    /// B-tree), `.ggs_xab`/`.ggs_xad` (camel/snake word-part B-tree), and `.ggs_xf`
+    /// (word-part Bloom prefilter) to surface prefix and camel-part matches first, then
+    /// merges with `store.matching` so substring completeness is 100% preserved.
+    pub fn matching_with_vols(
+        &self,
+        root: &str,
+        needle_lower: &str,
+        limit: usize,
+    ) -> Option<Vec<WorkspaceSymbol>> {
+        if needle_lower.len() < 2
+            || !needle_lower
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return self.matching(root, needle_lower, limit);
+        }
+        let Some(dir) = self.volume_dir_if_fresh(root) else {
+            return self.matching(root, needle_lower, limit);
+        };
+        let mut boosted: Vec<WorkspaceSymbol> = Vec::new();
+        let mut seen: std::collections::HashSet<(String, String, usize)> =
+            std::collections::HashSet::new();
+        let paged_cap = limit.min(256);
+        let reader = PagedIndexReader::new(dir.clone());
+        let mut slot_ids = reader
+            .search_xsb_prefix(needle_lower, paged_cap)
+            .unwrap_or_default();
+        if slot_ids.len() < paged_cap {
+            if let Some(xab) = reader.search_xab_prefix(needle_lower, paged_cap - slot_ids.len()) {
+                for s in xab {
+                    if !slot_ids.contains(&s) {
+                        slot_ids.push(s);
+                    }
+                }
+            }
+        }
+        if !slot_ids.is_empty() {
+            if let Some(resolved) = read_sym_slots_by_indices(&dir, &slot_ids) {
+                let xf_files: Option<std::collections::HashSet<String>> = if needle_lower.len() >= 3
+                {
+                    self.search_word_parts_xf(root, needle_lower)
+                        .map(|v| v.into_iter().collect())
+                } else {
+                    None
+                };
+                if let Some(store) = self.store(root) {
+                    let guard = store.read().unwrap();
+                    for (fid, line0, sym_name) in resolved {
+                        let lower = sym_name.to_ascii_lowercase();
+                        if !lower.contains(needle_lower) {
+                            continue;
+                        }
+                        let Some(path) = guard.file_path(fid as usize) else {
+                            continue;
+                        };
+                        if let Some(ref xf) = xf_files {
+                            if !xf.contains(path) && !lower.starts_with(needle_lower) {
+                                continue;
+                            }
+                        }
+                        let key = (path.to_owned(), sym_name.clone(), line0 as usize);
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                        if let Some(row) = guard.file_symbols(path).and_then(|rows| {
+                            rows.into_iter()
+                                .find(|r| r.line == line0 as usize && r.name == sym_name)
+                        }) {
+                            boosted.push(WorkspaceSymbol {
+                                path: path.to_owned(),
+                                kind: row.kind.to_owned(),
+                                name: row.name,
+                                container: row.container,
+                                line: row.line,
+                                column: row.column,
+                                end_line: row.end_line,
+                            });
+                            if boosted.len() >= limit {
+                                return Some(boosted);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let fallback = self.matching(root, needle_lower, limit)?;
+        for sym in fallback {
+            let key = (sym.path.clone(), sym.name.clone(), sym.line);
+            if seen.insert(key) {
+                boosted.push(sym);
+                if boosted.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Some(boosted)
     }
 
     /// Fuzzy camel/snake word-part candidate files via `.ggs_xf` Bloom signatures.

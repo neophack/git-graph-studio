@@ -475,42 +475,69 @@ pub async fn symbol_relation_children(
     })
 }
 
-/// What `symbol_ref_stats` answers: how many files contain the name.
+/// What `symbol_ref_stats` answers: how many files contain the name in code (`.ggs_xc` /
+/// occurrence list), how many extra files mention it only in comments/strings/docs
+/// (`.ggs_xr` \ `.ggs_xc`), and optional native 9-volume `SymSlotMetrics` from `.ggs_sym`.
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct RefStatsDto {
     pub files: u32,
+    pub comment_files: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<SymSlotMetrics>,
 }
 
-/// The hover card's reference-files count: how many files of the workspace contain
-/// `name` at all. The store's `ref_count` answers — its trusted occurrence list's file
-/// length, the same number the Symbol Database tree's refs badges show — and the
-/// declaration's own file is included (its text carries the name too). A name the
-/// store never heard of answers 0 files rather than an error: the badge is
-/// informational and nothing keys a decision on the number.
+/// The hover card & Definition panel's reference-files count and 9-volume metrics:
+/// how many files of the workspace contain `name`, how many extra files mention it only
+/// in comments/strings (`.ggs_xr` minus `.ggs_xc`), and (when `path` + `line` are supplied)
+/// the symbol's native `SymSlotMetrics` from `project.ggs_sym`.
 #[tauri::command]
 pub async fn symbol_ref_stats(
     app: tauri::AppHandle,
     roots: State<'_, WorkspaceRoots>,
     symbol_index: State<'_, Arc<SymbolIndex>>,
     name: String,
+    path: Option<String>,
+    line: Option<usize>,
     repo: Option<String>,
 ) -> Result<RefStatsDto, String> {
     let root = resolve_root(roots.inner(), repo)?;
     ensure_symbols(&app, symbol_index.inner(), root.clone()).await?;
-    Ok(ref_stats_of(symbol_index.inner(), &root, &name))
+    let rel_path = path.map(|p| store_relative(&root, &p));
+    Ok(ref_stats_of(
+        symbol_index.inner(),
+        &root,
+        &name,
+        rel_path.as_deref(),
+        line,
+    ))
 }
 
-/// The count inside `with_store`'s short lock, the read discipline
-/// `symbol_relation_children` keeps. `ref_count`'s `None` — a name unknown to the
-/// store — answers 0; so does a store not resident for the root (the sweeper's narrow
-/// race window between `ensure_symbols` and this query), same floor.
-fn ref_stats_of(index: &SymbolIndex, root: &str, name: &str) -> RefStatsDto {
+/// The count inside `with_store`'s short lock, enriched with `.ggs_xr` \ `.ggs_xc`
+/// comment-only file count and native `.ggs_sym` metrics when the 9-volume index is fresh.
+fn ref_stats_of(
+    index: &SymbolIndex,
+    root: &str,
+    name: &str,
+    path: Option<&str>,
+    line: Option<usize>,
+) -> RefStatsDto {
+    let files = index
+        .with_store(root, |store| store.ref_count(name))
+        .flatten()
+        .unwrap_or(0) as u32;
+    let comment_files = index
+        .comment_only_files_for(root, name)
+        .map(|v| v.len() as u32)
+        .unwrap_or(0);
+    let metrics = match (path, line) {
+        (Some(p), Some(l)) => index.single_sym_slot_metrics(root, p, l, name),
+        _ => None,
+    };
     RefStatsDto {
-        files: index
-            .with_store(root, |store| store.ref_count(name))
-            .flatten()
-            .unwrap_or(0) as u32,
+        files,
+        comment_files,
+        metrics,
     }
 }
 
@@ -750,9 +777,9 @@ mod tests {
         let index = Arc::new(SymbolIndex::with_home(home.path().to_owned()));
         let root = dir.path().display().to_string();
         index.build_blocking(None, &root, None).unwrap();
-        assert_eq!(ref_stats_of(&index, &root, "alpha").files, 1);
-        assert_eq!(ref_stats_of(&index, &root, "beta").files, 2);
-        assert_eq!(ref_stats_of(&index, &root, "nowhere").files, 0);
+        assert_eq!(ref_stats_of(&index, &root, "alpha", None, None).files, 1);
+        assert_eq!(ref_stats_of(&index, &root, "beta", None, None).files, 2);
+        assert_eq!(ref_stats_of(&index, &root, "nowhere", None, None).files, 0);
     }
 
     /// A pathological giant function is cut at the cap after the sort, so the earliest

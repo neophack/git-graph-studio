@@ -163,6 +163,7 @@ interface GraphNode {
 	access?: 'read' | 'write' | 'call' | 'readWrite';
 	callerSide?: boolean;
 	hasChildren: boolean;
+	metrics?: SymSlotMetrics;
 	expanded: boolean;
 	loaded: boolean;
 	loading: boolean;
@@ -209,6 +210,8 @@ interface Scene {
 		id: string;
 		label: string;
 		subtitle: string;
+		badge: string;
+		badgeTone: 'caller' | 'callee' | 'write' | 'kind';
 		kind: string;
 		x: number;
 		y: number;
@@ -246,6 +249,7 @@ function fromRelation(node: RelationNode, parentKey: string | null): GraphNode {
 		access: node.access,
 		callerSide: node.callerSide,
 		hasChildren: node.hasChildren,
+		metrics: node.metrics,
 		expanded: false,
 		loaded: false,
 		loading: false,
@@ -602,12 +606,14 @@ export class RelationGraphView {
 	resolvePath?: (path: string) => string;
 
 	private readonly stage: HTMLElement;
+	private readonly summaryBar: HTMLElement;
 	private readonly board: SVGSVGElement;
 	private readonly world: SVGGElement;
 	private readonly bandLayer: SVGGElement;
 	private readonly edgeLayer: SVGGElement;
 	private readonly cardLayer: SVGGElement;
 	private readonly hint: HTMLElement;
+	private sideFilter: 'all' | 'callers' | 'calls' = 'all';
 
 	private root: RelationRoot | null = null;
 	private kind: RelationKind = 'refsTo';
@@ -666,6 +672,8 @@ export class RelationGraphView {
 
 	constructor() {
 		this.stage = el('div', 'rg-stage');
+		this.summaryBar = el('div', 'rg-summary-bar');
+		this.summaryBar.hidden = true;
 		this.outlineHead = el('div', 'rg-ol-head');
 		this.outlineList = el('div', 'rg-ol-list');
 		this.outline = el('div', 'rg-outline', [this.outlineHead, this.outlineList]);
@@ -681,7 +689,7 @@ export class RelationGraphView {
 		this.board.appendChild(this.world);
 		this.hint = el('div', 'rg-hint rg-hint-overlay');
 		this.element = el('div', 'rg-root', [this.stage, this.outline, this.hint]);
-		this.stage.appendChild(this.board);
+		this.stage.append(this.board, this.summaryBar);
 		this.applyViewSurface();
 
 		this.board.addEventListener('wheel', this.onWheel, { passive: false });
@@ -805,6 +813,7 @@ export class RelationGraphView {
 		const root = this.root;
 		this.clearHoverHighlight();
 		this.selectedKey = null;
+		this.sideFilter = 'all';
 		this.rootMetrics = undefined;
 		this.nodes.clear();
 		this.layout.clear();
@@ -1032,7 +1041,19 @@ export class RelationGraphView {
 			const node = this.nodes.get(key);
 			if (!node) return;
 			list.push(node);
-			if (node.expanded) for (const child of node.children) collect(child);
+			if (node.expanded) {
+				for (const childKey of node.children) {
+					if (key === this.rootKey && this.kind === 'callsAndCallers' && this.sideFilter !== 'all') {
+						const child = this.nodes.get(childKey);
+						if (child) {
+							const isCall = this.callsSide(child);
+							if (this.sideFilter === 'calls' && !isCall) continue;
+							if (this.sideFilter === 'callers' && isCall) continue;
+						}
+					}
+					collect(childKey);
+				}
+			}
 		};
 		collect(this.rootKey);
 		return list;
@@ -1091,10 +1112,24 @@ export class RelationGraphView {
 		return edges;
 	}
 
+	private cardBadge(node: GraphNode): { text: string; tone: 'caller' | 'callee' | 'write' | 'kind' } {
+		if (node.parentKey !== null) {
+			if (node.access === 'write') return { text: 'W', tone: 'write' };
+			if (node.access === 'readWrite') return { text: 'R/W', tone: 'write' };
+			if (this.kind === 'callsAndCallers') {
+				return this.callsSide(node) ? { text: '↓ Call', tone: 'callee' } : { text: '↑ Caller', tone: 'caller' };
+			}
+		}
+		return { text: shortKindTag(node.kind), tone: 'kind' };
+	}
+
 	private cardWidth(node: GraphNode): number {
-		const titleW = estimateLabelWidth(relationLabel(node)) + 34;
-		const subW = estimateLabelWidth(cardSubtitle(node, node.parentKey === null ? this.rootMetrics : undefined)) * 0.88 + 26;
-		return Math.max(132, Math.min(320, Math.ceil(Math.max(titleW, subW))));
+		const badge = this.cardBadge(node);
+		const badgeW = badge.text ? badge.text.length * 5.8 + 16 : 0;
+		const titleW = estimateLabelWidth(relationLabel(node)) + 34 + badgeW;
+		const metrics = node.parentKey === null ? (this.rootMetrics ?? node.metrics) : node.metrics;
+		const subW = estimateLabelWidth(cardSubtitle(node, metrics)) * 0.88 + 26;
+		return Math.max(140, Math.min(340, Math.ceil(Math.max(titleW, subW))));
 	}
 
 	private nodeHeight(node: GraphNode): number {
@@ -1267,10 +1302,14 @@ export class RelationGraphView {
 		for (const node of visible) {
 			const spot = this.layout.get(node.key);
 			if (!spot) continue;
+			const badge = this.cardBadge(node);
+			const metrics = node.parentKey === null ? (this.rootMetrics ?? node.metrics) : node.metrics;
 			nodes.push({
 				id: node.key,
 				label: relationLabel(node),
-				subtitle: cardSubtitle(node, node.parentKey === null ? this.rootMetrics : undefined),
+				subtitle: cardSubtitle(node, metrics),
+				badge: badge.text,
+				badgeTone: badge.tone,
 				kind: node.kind,
 				x: spot.x,
 				y: spot.y,
@@ -1293,29 +1332,94 @@ export class RelationGraphView {
 		this.hint.textContent = '';
 		this.hint.hidden = true;
 		if (!this.root) {
+			this.summaryBar.hidden = true;
 			this.hint.appendChild(el('span', undefined, [this.rootNote ?? t('symbols.graph.hint')]));
 			this.hint.hidden = false;
 			this.clearBoard();
 			return;
 		}
 		if (this.rootLoading) {
+			this.summaryBar.hidden = true;
 			this.hint.append(icon('sync', 'codicon-modifier-spin'), el('span', undefined, [t('relations.loading')]));
 			this.hint.hidden = false;
 			this.clearBoard();
 			return;
 		}
 		if (this.rootFailed) {
+			this.summaryBar.hidden = true;
 			this.hint.appendChild(el('span', undefined, [t('relations.failed')]));
 			this.hint.hidden = false;
 			this.clearBoard();
 			return;
 		}
 		if (this.emptyVerdict) {
+			this.summaryBar.hidden = true;
 			this.hint.appendChild(el('span', undefined, [t(EMPTY_VERDICTS[this.kind] ?? 'relations.empty.refsFrom')]));
 			this.hint.hidden = false;
 		}
-		if (this.viewMode === 'outline') this.paintOutline();
-		else this.paintBoard(this.buildScene());
+		if (this.viewMode === 'outline') {
+			this.summaryBar.hidden = true;
+			this.paintOutline();
+		} else {
+			const scene = this.buildScene();
+			this.paintBoard(scene);
+			this.paintSummaryBar(scene);
+		}
+	}
+
+	private paintSummaryBar(scene: Scene): void {
+		this.summaryBar.textContent = '';
+		if (this.emptyVerdict || scene.nodes.length <= 1) {
+			this.summaryBar.hidden = true;
+			return;
+		}
+		this.summaryBar.hidden = false;
+		const rootNode = this.nodes.get(this.rootKey);
+		let callerCount = 0;
+		let calleeCount = 0;
+		let hasWrite = false;
+		if (rootNode) {
+			for (const childKey of rootNode.children) {
+				const child = this.nodes.get(childKey);
+				if (!child) continue;
+				if (child.access === 'write' || child.access === 'readWrite') hasWrite = true;
+				if (this.kind === 'callsAndCallers') {
+					if (this.callsSide(child)) calleeCount++;
+					else callerCount++;
+				}
+			}
+		}
+		const statText = this.kind === 'callsAndCallers'
+			? `${callerCount} ↑ · ${calleeCount} ↓`
+			: `${scene.nodes.length - 1} nodes · ${scene.edges.length} edges`;
+		this.summaryBar.appendChild(el('span', 'rg-sum-stat', [statText]));
+
+		const legend = el('span', 'rg-sum-legend');
+		if (this.kind === 'callsAndCallers' || this.kind === 'callers') {
+			legend.appendChild(el('span', 'rg-sum-leg', [el('i', 'rg-sum-dot caller'), t('relations.kind.callers')]));
+		}
+		if (this.kind === 'callsAndCallers' || this.kind === 'calls') {
+			legend.appendChild(el('span', 'rg-sum-leg', [el('i', 'rg-sum-dot callee'), t('relations.kind.calls')]));
+		}
+		if (hasWrite) {
+			legend.appendChild(el('span', 'rg-sum-leg', [el('i', 'rg-sum-dot write'), 'Write']));
+		}
+		if (legend.childElementCount > 0) this.summaryBar.appendChild(legend);
+
+		if (this.kind === 'callsAndCallers' && callerCount > 0 && calleeCount > 0) {
+			const filters = el('span', 'rg-sum-filters');
+			for (const [mode, label] of [['all', 'All'], ['callers', `↑ ${callerCount}`], ['calls', `↓ ${calleeCount}`]] as const) {
+				const btn = el('button', `rg-sum-pill${this.sideFilter === mode ? ' active' : ''}`, [label]) as HTMLButtonElement;
+				btn.type = 'button';
+				btn.addEventListener('click', () => {
+					this.sideFilter = mode;
+					this.render();
+					this.fit();
+				});
+				filters.appendChild(btn);
+			}
+			this.summaryBar.appendChild(filters);
+		}
 	}
 
 	/* ---------- Outline View ---------- */
@@ -1559,8 +1663,10 @@ export class RelationGraphView {
 			marker.appendChild(head);
 			return marker;
 		};
+		// Use SVG2 `context-stroke` on `#rg-arr` so a single shared arrow marker automatically
+		// matches each edge's semantic stroke color (caller teal, callee blue, write orange, base purple).
 		defs.append(
-			makeMarker('rg-arr', palette.link),
+			makeMarker('rg-arr', 'context-stroke'),
 			makeMarker('rg-arr-in', '#4ec9b0'),
 			makeMarker('rg-arr-out', '#569cd6')
 		);
@@ -1618,10 +1724,24 @@ export class RelationGraphView {
 		sub.setAttribute('font-family', uiFontFamily());
 		sub.textContent = node.subtitle;
 
+		// Semantic role / kind badge pill on the right of the header.
+		const badgeBg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+		badgeBg.classList.add('rg-card-badge-bg');
+		badgeBg.setAttribute('y', '5');
+		badgeBg.setAttribute('height', '14');
+		badgeBg.setAttribute('rx', '4');
+		const badgeText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+		badgeText.classList.add('rg-card-badge-text');
+		badgeText.setAttribute('y', String(HEADER_H / 2 + 0.5));
+		badgeText.setAttribute('dominant-baseline', 'central');
+		badgeText.setAttribute('text-anchor', 'middle');
+		badgeText.setAttribute('font-size', '9');
+		badgeText.setAttribute('font-family', uiFontFamily());
+
 		const details = document.createElementNS('http://www.w3.org/2000/svg', 'g');
 		details.classList.add('rg-details');
 
-		g.append(rect, header, accent, label, sub, details);
+		g.append(rect, header, accent, label, sub, badgeBg, badgeText, details);
 
 		g.addEventListener('click', (event) => {
 			if ((event.target as Element).closest('.rg-expander, .rg-detail-row')) return;
@@ -1651,6 +1771,8 @@ export class RelationGraphView {
 		const accent = g.querySelector('rect.rg-card-accent')!;
 		const label = g.querySelector('text.rg-card-title')!;
 		const sub = g.querySelector('text.rg-card-sub')!;
+		const badgeBg = g.querySelector('rect.rg-card-badge-bg') as SVGRectElement | null;
+		const badgeText = g.querySelector('text.rg-card-badge-text') as SVGTextElement | null;
 
 		if (label.textContent !== node.label) label.textContent = node.label;
 		if (sub.textContent !== node.subtitle) sub.textContent = node.subtitle;
@@ -1662,6 +1784,24 @@ export class RelationGraphView {
 		);
 		header.setAttribute('fill', node.root ? palette.rootHeader : palette.cardHeader);
 		accent.setAttribute('fill', node.root ? palette.rootStroke : kindAccent(node.kind, palette));
+		if (badgeBg && badgeText) {
+			if (node.badge) {
+				const bw = Math.max(22, Math.ceil(node.badge.length * 5.6 + 10));
+				const bx = node.w - bw - 7;
+				badgeBg.setAttribute('x', String(bx));
+				badgeBg.setAttribute('width', String(bw));
+				badgeText.setAttribute('x', String(bx + bw / 2));
+				badgeText.textContent = node.badge;
+				const tone = badgeColors(node.badgeTone, palette);
+				badgeBg.setAttribute('fill', tone.bg);
+				badgeText.setAttribute('fill', tone.fg);
+				badgeBg.style.display = '';
+				badgeText.style.display = '';
+			} else {
+				badgeBg.style.display = 'none';
+				badgeText.style.display = 'none';
+			}
+		}
 
 		if (node.root) {
 			rect.setAttribute('stroke', palette.rootStroke);
@@ -1793,8 +1933,20 @@ export class RelationGraphView {
 		const routed = routeRelationEdge(from, to, horizontal, outOff, inOff, bi, edge.from, edge.to);
 		path.setAttribute('d', routed.d);
 		const isWrite = edge.access === 'write' || edge.access === 'readWrite';
-		path.setAttribute('stroke', isWrite ? palette.accentWrite : palette.link);
-		path.setAttribute('stroke-width', edge.count > 1 || isWrite ? '1.85' : '1.35');
+		const isBase = edge.kind === 'base';
+		const isCallerEdge = (this.kind === 'callsAndCallers' || this.kind === 'callers') && edge.to === this.rootKey;
+		const isCalleeEdge = (this.kind === 'callsAndCallers' || this.kind === 'calls') && edge.from === this.rootKey;
+		const stroke = isWrite
+			? palette.accentWrite
+			: isBase
+				? palette.accentFile
+				: isCallerEdge
+					? '#4ec9b0'
+					: isCalleeEdge
+						? '#569cd6'
+						: palette.link;
+		path.setAttribute('stroke', stroke);
+		path.setAttribute('stroke-width', edge.count > 1 || isWrite ? '1.85' : '1.4');
 		if (edge.kind === 'use') path.setAttribute('stroke-dasharray', '4 3');
 		else path.removeAttribute('stroke-dasharray');
 		path.setAttribute('marker-end', 'url(#rg-arr)');
@@ -2149,6 +2301,43 @@ export class RelationGraphView {
 
 function nodeIdOf(g: SVGElement): string {
 	return g.dataset.id ?? '';
+}
+
+function shortKindTag(kind: string): string {
+	switch (kind) {
+		case 'function': return 'FN';
+		case 'method': return 'MTD';
+		case 'constructor': return 'CTOR';
+		case 'class': return 'CLS';
+		case 'struct': return 'STR';
+		case 'interface': return 'IF';
+		case 'enum': return 'ENUM';
+		case 'type':
+		case 'typedef': return 'TYPE';
+		case 'macro': return 'MAC';
+		case 'variable':
+		case 'local': return 'VAR';
+		case 'field':
+		case 'member':
+		case 'property': return 'FLD';
+		case 'constant': return 'CONST';
+		case 'file': return 'FILE';
+		case 'module':
+		case 'namespace': return 'MOD';
+		default: return '';
+	}
+}
+
+function badgeColors(
+	tone: 'caller' | 'callee' | 'write' | 'kind',
+	palette: ReturnType<typeof themePalette>
+): { bg: string; fg: string } {
+	switch (tone) {
+		case 'caller': return { bg: 'rgba(78, 201, 176, 0.18)', fg: '#4ec9b0' };
+		case 'callee': return { bg: 'rgba(86, 156, 214, 0.18)', fg: '#569cd6' };
+		case 'write': return { bg: 'rgba(229, 153, 86, 0.22)', fg: palette.accentWrite };
+		default: return { bg: palette.badgeBg, fg: palette.subText };
+	}
 }
 
 function cardSubtitle(node: GraphNode, metrics?: SymSlotMetrics): string {

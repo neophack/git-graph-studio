@@ -40,7 +40,9 @@ use crate::symbols::index::{classify_reference_access, scan_references_bounded};
 use crate::symbols::mask::{mask_for_ext, CodeMask};
 use crate::symbols::sites::{lang_family, same_lang_family};
 use crate::symbols::store::{FileOutlineRow, SymbolStore};
-use crate::symbols::vol_reader::{read_single_sym_slot_metrics, SymSlotMetrics, XcBloomCache};
+use crate::symbols::vol_reader::{
+    read_single_sym_slot_metrics, read_sym_slot_metrics, SymSlotMetrics, XcBloomCache,
+};
 use crate::symbols::WorkspaceSymbol;
 
 /// The children one direction returns at most: the window expands ring by ring, and a
@@ -104,6 +106,9 @@ pub struct RelationNode {
     /// Whether expanding this node again yields children — best effort (the peek
     /// helpers below document which side answers precisely and which heuristically).
     pub has_children: bool,
+    /// Optional native 9-volume `SymSlotMetrics` decoded from `project.ggs_sym`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<SymSlotMetrics>,
 }
 
 /// One ring's answer: the children, whether the ring was cut short (the node cap or
@@ -451,7 +456,32 @@ pub fn relation_children_budgeted_with_vols(
             .as_ref()
             .map(|d| (d.path.as_str(), d.line))
             .unwrap_or((path, line));
-        if let Some(fid) = store.file_id_of(m_path) {
+        if let Some(metrics_map) = read_sym_slot_metrics(v.vol_dir) {
+            if let Some(fid) = store.file_id_of(m_path) {
+                answer.root_metrics = metrics_map
+                    .get(&(fid, m_line as u32, name.to_owned()))
+                    .copied()
+                    .or_else(|| {
+                        metrics_map
+                            .iter()
+                            .find(|((f, _, n), _)| *f == fid && n == name)
+                            .map(|(_, m)| *m)
+                    });
+            }
+            for node in &mut answer.nodes {
+                if let Some(fid) = store.file_id_of(&node.path) {
+                    node.metrics = metrics_map
+                        .get(&(fid, node.line as u32, node.name.clone()))
+                        .copied()
+                        .or_else(|| {
+                            metrics_map
+                                .iter()
+                                .find(|((f, _, n), _)| *f == fid && n == &node.name)
+                                .map(|(_, m)| *m)
+                        });
+                }
+            }
+        } else if let Some(fid) = store.file_id_of(m_path) {
             answer.root_metrics = read_single_sym_slot_metrics(v.vol_dir, fid, m_line as u32, name);
         }
     }
@@ -645,6 +675,7 @@ fn refs_to(
                         opts.bare(),
                         budget,
                     ),
+                metrics: None,
             });
             if nodes.len() >= limit {
                 truncated = true;
@@ -933,6 +964,7 @@ fn refs_from(
                 caller_side: None,
                 has_children: with_flags
                     && has_refs_from_children(store, &target, opts.bare(), budget),
+                metrics: None,
             });
             if nodes.len() >= limit {
                 truncated = true;
@@ -1030,6 +1062,7 @@ fn contains_members(
             line: row.line,
             name: row.name,
             path,
+            metrics: None,
         })
         .collect();
     Ok(RelationAnswer {
@@ -1233,6 +1266,7 @@ fn refs_by_files(
                 access: Some(access.to_owned()),
                 caller_side: None,
                 has_children: false,
+                metrics: None,
             });
             if nodes.len() >= limit {
                 truncated = true;
@@ -1304,6 +1338,7 @@ fn container_chain(
             access: None,
             caller_side: None,
             has_children: def.container.is_some(),
+            metrics: None,
         }],
         truncated: false,
         root_metrics: None,
@@ -1365,6 +1400,7 @@ fn base_classes(
                 edge_kind: "base".to_owned(),
                 edge_count: 1,
                 edge_lines: vec![subject.as_ref().map_or(line, |s| s.line)],
+                metrics: None,
             })
         })
         .collect();
@@ -1412,6 +1448,7 @@ fn derived_classes(
             edge_kind: "base".to_owned(),
             edge_count: 1,
             edge_lines: vec![row.line],
+            metrics: None,
         })
         .collect();
     Ok(RelationAnswer {
