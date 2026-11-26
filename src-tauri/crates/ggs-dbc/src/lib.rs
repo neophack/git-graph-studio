@@ -28,7 +28,8 @@ pub struct DbcSignal {
     /// signal, the MSB position for a big-endian one.
     pub start_bit: u32,
     pub length: u32,
-    /// `@0` in the file: Intel byte order, bits flowing up from the LSB.
+    /// `@1` in the file: Intel (little-endian) byte order, bits flowing up from the LSB.
+    /// `@0` in the file: Motorola (big-endian) byte order, bits descending from the MSB.
     pub little_endian: bool,
     /// `@…-` in the file: two's-complement raw value.
     pub signed: bool,
@@ -195,36 +196,50 @@ fn is_mux_mark(tok: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// One `SG_` line's body: `Name [mN|M] : start|len@order+sign (scale,offset)
-/// [min|max] "unit" receivers…` — the multiplexer mark rides between the name and the
-/// colon (the Vector spelling), or glued to the name (`Name_m0`) as some writers do.
-fn parse_signal_line(rest: &str) -> Option<DbcSignal> {
-    let mut toks = tokens(rest);
-    let mut multiplex: Option<String> = None;
-    let mut name = toks.first()?.to_string();
-    // The colon separator may share the next token or stand alone.
-    let colon_at = toks.iter().position(|t| *t == ":")?;
-    if colon_at == 2 && toks.get(1).is_some_and(|s| is_mux_mark(s)) {
-        multiplex = Some(toks[1].to_string());
+/// One `BO_` line's body: `<id> <name> : <dlc> [transmitter]` — the colon may be
+/// attached to the name (`EngineData: 8 Engine`, Vector) or separated by whitespace
+/// (`BLE_A2A_Event : 64 UWB`, Mentor Graphics).
+fn parse_message_line(rest: &str) -> Option<DbcMessage> {
+    let (left, right) = rest.split_once(':')?;
+    let left_toks = tokens(left);
+    if left_toks.len() < 2 {
+        return None;
     }
-    if multiplex.is_none() {
-        // Glued marks (`Voltage_m0`): the `mN`/`M` suffix strips off the name.
-        if let Some(at) = name.rfind(['m', 'M']) {
-            let mark = &name[at..];
-            let head = &name[..at];
-            if (mark == "M" || (mark.len() > 1 && mark.starts_with('m') && mark[1..].bytes().all(|b| b.is_ascii_digit())))
-                && !head.is_empty()
-                && head.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-            {
-                multiplex = Some(mark.to_string());
-                name.truncate(at);
-            }
-        }
-    }
+    let raw_id = parse_int(left_toks[0])? as u64;
+    let (extended, id) = canonical_id(raw_id);
+    let name = left_toks[1].to_string();
     if name.is_empty() {
         return None;
     }
-    toks.drain(..=colon_at);
+    let right_toks = tokens(right);
+    let dlc = parse_int(right_toks.first()?)?.max(0) as u32;
+    let transmitter = right_toks.get(1).map(|t| (*t).to_string()).unwrap_or_default();
+    Some(DbcMessage {
+        id,
+        name,
+        dlc,
+        transmitter,
+        extended,
+        comment: None,
+        signals: Vec::new(),
+    })
+}
+
+/// One `SG_` line's body: `Name [mN|M] : start|len@order+sign (scale,offset)
+/// [min|max] "unit" receivers…` — the colon may be standalone or attached.
+fn parse_signal_line(rest: &str) -> Option<DbcSignal> {
+    let (left, right) = rest.split_once(':')?;
+    let left_toks = tokens(left);
+    let name = (*left_toks.first()?).to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let multiplex = if left_toks.len() >= 2 && is_mux_mark(left_toks[1]) {
+        Some(left_toks[1].to_string())
+    } else {
+        None
+    };
+    let mut toks = tokens(right);
     if toks.len() < 2 {
         return None;
     }
@@ -235,7 +250,8 @@ fn parse_signal_line(rest: &str) -> Option<DbcSignal> {
     let start: u32 = start.trim().parse().ok()?;
     let length: u32 = len.trim().parse().ok()?;
     let (order, sign) = order.split_at(order.len().saturating_sub(1));
-    let little_endian = order == "0";
+    // DBC spec: `@1` = Intel (little-endian), `@0` = Motorola (big-endian).
+    let little_endian = order == "1";
     let signed = sign == "-";
     // `(scale,offset)`
     let scale_tok = toks.remove(0);
@@ -267,11 +283,13 @@ fn parse_signal_line(rest: &str) -> Option<DbcSignal> {
     }
     let receivers = toks
         .into_iter()
+        .flat_map(|r| r.split(','))
+        .map(str::trim)
         .filter(|r| !r.is_empty())
-        .map(|r| r.to_string())
+        .map(str::to_string)
         .collect();
     Some(DbcSignal {
-        name: name.to_string(),
+        name,
         start_bit: start,
         length,
         little_endian,
@@ -288,6 +306,43 @@ fn parse_signal_line(rest: &str) -> Option<DbcSignal> {
     })
 }
 
+/// Whether `kw` is a known semicolon-terminated DBC directive whose body may span
+/// multiple lines (attributes, value tables, environment variables, signal groups).
+/// Unknown lines (such as comments or foreign headers) must NOT be treated as
+/// semicolon-terminated, or a single comment without `;` would swallow the file.
+fn is_semicolon_directive(kw: &str) -> bool {
+    matches!(
+        kw,
+        "BA_DEF_"
+            | "BA_DEF_DEF_"
+            | "BA_"
+            | "BA_DEF_REL_"
+            | "BA_REL_"
+            | "BA_DEF_DEF_REL_"
+            | "BA_DEF_SGTYPE_"
+            | "BA_SGTYPE_"
+            | "VAL_TABLE_"
+            | "EV_"
+            | "EV_DATA_"
+            | "ENVVAR_DATA_"
+            | "SIG_GROUP_"
+            | "SIG_VALTYPE_"
+            | "SIG_TYPE_REF_"
+            | "SIGTYPE_VALTYPE_"
+            | "SGTYPE_"
+            | "SGTYPE_VAL_"
+            | "BO_TX_BU_"
+            | "BU_SG_REL_"
+            | "BU_EV_REL_"
+            | "BU_BO_REL_"
+            | "SG_MUL_VAL_"
+            | "CAT_DEF_"
+            | "CAT_"
+            | "FILTER"
+            | "NS_DESC_"
+    )
+}
+
 /// The document's parse. Comments (`CM_`, multi-line) and value tables (`VAL_`) fold
 /// into the messages after the main walk; anything unrecognised is skipped, not fatal —
 /// a real database mixes dialects.
@@ -295,6 +350,7 @@ pub fn parse(text: &str) -> Result<DbcDocument, String> {
     if text.len() > 64 * 1024 * 1024 {
         return Err("the file is past the 64 MiB this parser accepts".to_string());
     }
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     let mut version = String::new();
     let mut nodes: Vec<String> = Vec::new();
     let mut messages: Vec<DbcMessage> = Vec::new();
@@ -306,7 +362,16 @@ pub fn parse(text: &str) -> Result<DbcDocument, String> {
     while i < lines.len() {
         let line = lines[i].trim();
         i += 1;
-        if line.is_empty() {
+        if line.is_empty() || line.starts_with("//") || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("/*") {
+            if !line.contains("*/") {
+                while i < lines.len() && !lines[i].contains("*/") {
+                    i += 1;
+                }
+                i += 1;
+            }
             continue;
         }
         let kw = keyword(line);
@@ -338,24 +403,9 @@ pub fn parse(text: &str) -> Result<DbcDocument, String> {
                 }
             }
             "BO_" => {
-                let toks = tokens(rest);
-                if toks.len() >= 3 {
-                    let raw_id = parse_int(toks[0]).unwrap_or(0) as u64;
-                    let (extended, id) = canonical_id(raw_id);
-                    let head = toks[1];
-                    let name = head.strip_suffix(':').unwrap_or(head).to_string();
-                    let dlc = parse_int(toks[2]).unwrap_or(0).max(0) as u32;
-                    let transmitter = toks.get(3).map(|t| t.to_string()).unwrap_or_default();
-                    by_id.insert(id, messages.len());
-                    messages.push(DbcMessage {
-                        id,
-                        name,
-                        dlc,
-                        transmitter,
-                        extended,
-                        comment: None,
-                        signals: Vec::new(),
-                    });
+                if let Some(msg) = parse_message_line(rest) {
+                    by_id.insert(msg.id, messages.len());
+                    messages.push(msg);
                 }
             }
             "SG_" => {
@@ -366,7 +416,8 @@ pub fn parse(text: &str) -> Result<DbcDocument, String> {
                 }
             }
             "VAL_" => {
-                let toks = tokens(rest);
+                let body = rest.trim_end().trim_end_matches(';');
+                let toks = tokens(body);
                 if toks.len() >= 3 {
                     if let Some(id) = parse_int(toks[0]).map(|v| v as u64) {
                         let (_, id) = canonical_id(id);
@@ -374,7 +425,8 @@ pub fn parse(text: &str) -> Result<DbcDocument, String> {
                         let mut k = 2;
                         while k + 1 < toks.len() {
                             if let (Some(v), Some(label)) = (parse_num(toks[k]), toks.get(k + 1)) {
-                                values.push(((id, sig.clone()), (v, unescape(label.trim_matches('"')))));
+                                let clean = label.trim_end_matches(';').trim_matches('"');
+                                values.push(((id, sig.clone()), (v, unescape(clean))));
                             }
                             k += 2;
                         }
@@ -399,11 +451,12 @@ pub fn parse(text: &str) -> Result<DbcDocument, String> {
                 continue;
             }
             _ => {
-                // BA_DEF_ / BA_ / VAL_TABLE_ / EV_ / SIG_GROUP_ … — a keyword this
-                // parser does not consume. If the line lacks its terminating `;`
-                // (multi-line attribute lists), swallow the following lines until one
-                // carries it.
-                if !line.contains(';') {
+                // BA_DEF_ / BA_ / VAL_TABLE_ / EV_ / SIG_GROUP_ … — known semicolon-
+                // terminated directives this parser does not consume. If the line lacks
+                // its terminating `;` (multi-line attribute lists), swallow the following
+                // lines until one carries it. Any other unknown line is ignored alone so
+                // it can never swallow subsequent `BO_`/`SG_` definitions.
+                if is_semicolon_directive(kw) && !line.contains(';') {
                     while i < lines.len() && !lines[i].contains(';') {
                         i += 1;
                     }
@@ -544,13 +597,8 @@ fn signal_raw(sig: &DbcSignal, data: &[u8]) -> Option<i64> {
         extract_be(data, start, sig.length)?
     };
     if sig.signed {
-        let bits = sig.length;
-        let sign_bit = 1u64 << (bits - 1);
-        Some(if raw & sign_bit != 0 {
-            (raw as i64) - (1i64 << bits)
-        } else {
-            raw as i64
-        })
+        let shift = 64 - sig.length;
+        Some(((raw << shift) as i64) >> shift)
     } else {
         Some(raw as i64)
     }
@@ -638,13 +686,39 @@ impl DbcState {
     }
 }
 
+/// Decodes raw DBC bytes to UTF-8 text: honours a BOM, accepts valid UTF-8 directly,
+/// then falls back through GB18030 / Shift-JIS / EUC-KR / Big5 / Windows-1252 so
+/// regional comments and `VAL_` descriptions (e.g. GBK CANdb++ exports) stay readable.
+fn decode_dbc_bytes(bytes: &[u8]) -> String {
+    if let Some((encoding, bom_len)) = encoding_rs::Encoding::for_bom(bytes) {
+        let (text, _) = encoding.decode_without_bom_handling(&bytes[bom_len..]);
+        return text.into_owned();
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_owned();
+    }
+    for candidate in [
+        encoding_rs::GB18030,
+        encoding_rs::SHIFT_JIS,
+        encoding_rs::EUC_KR,
+        encoding_rs::BIG5,
+    ] {
+        let (text, had_errors) = candidate.decode_without_bom_handling(bytes);
+        if !had_errors {
+            return text.into_owned();
+        }
+    }
+    let (text, _) = encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes);
+    text.into_owned()
+}
+
 /// Parses the file at `path` (whole file; a database is small).
 pub fn open_doc(path: &Path) -> Result<Arc<DbcDocument>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {}", path.display(), e))?;
     if bytes.len() > 64 * 1024 * 1024 {
         return Err(format!("{}: past the 64 MiB this parser accepts", path.display()));
     }
-    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let text = decode_dbc_bytes(&bytes);
     parse(&text).map(Arc::new)
 }
 
@@ -669,21 +743,21 @@ BS_:
 BU_: Engine Gateway Diagnostics
 
 BO_ 256 EngineData: 8 Engine
- SG_ VehicleSpeed : 24|16@0+ (0.01,0) [0|655.35] "km/h" Gateway
- SG_ EngineSpeed : 0|16@0+ (0.25,0) [0|16383.75] "rpm" Gateway
- SG_ Temperature : 40|8@0- (1,-40) [-40|215] "degC" Gateway,Diag
+ SG_ VehicleSpeed : 24|16@1+ (0.01,0) [0|655.35] "km/h" Gateway
+ SG_ EngineSpeed : 0|16@1+ (0.25,0) [0|16383.75] "rpm" Gateway
+ SG_ Temperature : 40|8@1- (1,-40) [-40|215] "degC" Gateway,Diag
 
 BO_ 123 DiagRequest: 3 Diagnostics
- SG_ ReqId : 0|8@0+ (1,0) [0|255] "" Engine
+ SG_ ReqId : 0|8@1+ (1,0) [0|255] "" Engine
 
 BO_ 2147487745 Status: 8 Engine
- SG_ FaultCode : 7|16@1+ (1,0) [0|65535] "" Gateway
- SG_ Running : 0|1@0+ (1,0) [0|1] "" Gateway
+ SG_ FaultCode : 7|16@0+ (1,0) [0|65535] "" Gateway
+ SG_ Running : 0|1@1+ (1,0) [0|1] "" Gateway
 
 BO_ 512 MuxFrame: 8 Engine
- SG_ MuxSwitch M : 0|8@0+ (1,0) [0|255] "" Vector__XXX
- SG_ Voltage m0 : 8|16@0+ (0.001,0) [0|65.535] "V" Gateway
- SG_ Current m1 : 8|16@0+ (0.01,0) [0|655.35] "A" Gateway
+ SG_ MuxSwitch M : 0|8@1+ (1,0) [0|255] "" Vector__XXX
+ SG_ Voltage m0 : 8|16@1+ (0.001,0) [0|65.535] "V" Gateway
+ SG_ Current m1 : 8|16@1+ (0.01,0) [0|655.35] "A" Gateway
 
 CM_ BO_ 256 "The engine data frame;
 its periodic rate is 10 ms.";
@@ -773,11 +847,12 @@ VAL_ 256 VehicleSpeed 0 "Stopped" 65535 "Invalid" ;
 
     #[test]
     fn decodes_big_endian_across_the_byte_boundary() {
-        // FaultCode: 16 bits big-endian starting at bit 7 (byte 0's MSB) — the classic
-        // Motorola 16-bit signal spanning bytes 0-1. The sawtooth walk reads byte 0's
-        // bit 7 first, then byte 1's bit 7 once the boundary crossed.
-        let text = "BO_ 100 Big: 8 Node\n SG_ FaultCode : 7|16@1+ (1,0) [0|65535] \"\" GW\n";
+        // FaultCode: 16 bits big-endian (`@0`, Motorola) starting at bit 7 (byte 0's MSB)
+        // — the classic Motorola 16-bit signal spanning bytes 0-1. The sawtooth walk
+        // reads byte 0's bit 7 first, then byte 1's bit 7 once the boundary crossed.
+        let text = "BO_ 100 Big: 8 Node\n SG_ FaultCode : 7|16@0+ (1,0) [0|65535] \"\" GW\n";
         let doc = parse(text).unwrap();
+        assert!(!doc.messages[0].signals[0].little_endian);
         let out = decode_message(&doc, 100, &[0x12, 0x34, 0, 0, 0, 0, 0, 0]).unwrap();
         assert_eq!(out[0].name, "FaultCode");
         assert_eq!(out[0].raw, 0x1234);
@@ -786,7 +861,7 @@ VAL_ 256 VehicleSpeed 0 "Stopped" 65535 "Invalid" ;
         let out = decode_message(&doc, 100, &[0x00, 0x01, 0, 0, 0, 0, 0, 0]).unwrap();
         assert_eq!(out[0].raw, 1);
         // A big-endian nibble wholly inside byte 0: start 4, length 4 → bits 4..1.
-        let text = "BO_ 101 Nib: 8 Node\n SG_ Nibble : 4|4@1+ (1,0) [0|15] \"\" GW\n";
+        let text = "BO_ 101 Nib: 8 Node\n SG_ Nibble : 4|4@0+ (1,0) [0|15] \"\" GW\n";
         let doc = parse(text).unwrap();
         let out = decode_message(&doc, 101, &[0b0000_1100, 0, 0, 0, 0, 0, 0, 0]).unwrap();
         assert_eq!(out[0].raw, 0b0110);
@@ -861,5 +936,83 @@ VAL_ 256 VehicleSpeed 0 "Stopped" 65535 "Invalid" ;
     fn junk_is_an_error_not_a_panic() {
         assert!(parse("this is not a database at all").is_err());
         assert!(parse("").is_err());
+    }
+
+    #[test]
+    fn parses_mentor_graphics_dialect_with_comments_and_spaced_colon() {
+        let text = r#"// ***************************************************************************
+// * Mentor Graphics Corporation
+// ***************************************************************************
+
+VERSION "UWB"
+
+NS_ :
+	NS_DESC_
+	CM_
+
+BS_ :
+
+BU_ : UWB
+
+BO_ 431 BLE_A2A_Event : 64 UWB
+ SG_ BLE_A2A_Event : 7|512@0+ (1.0,0.0) [0.0|0.0] "" Vector_XXX
+
+BO_ 655 BLE_BKeyMntr_Event : 64 UWB
+ SG_ BKeyMntrCnctReqChM : 103|40@0+ (1.0,0.0) [0.0|1099510000000.0] "" Vector_XXX
+ SG_ BKeyMntrCnctReqHop : 7|16@0+ (1.0,0.0) [0.0|65535.0] "" Vector_XXX
+
+// Frame Comments
+CM_ BO_ 431 "Handover frame";
+
+// Signal Comments
+CM_ SG_ 655 BKeyMntrCnctReqChM "Channel map";
+
+VAL_ 655 BKeyMntrCnctReqHop 0 "Idle" 65535 "Invalid";
+"#;
+        let doc = parse(text).unwrap();
+        assert_eq!(doc.version, "UWB");
+        assert_eq!(doc.nodes, vec!["UWB"]);
+        assert_eq!(doc.messages.len(), 2);
+
+        let a2a = &doc.messages[0];
+        assert_eq!(a2a.id, 431);
+        assert_eq!(a2a.name, "BLE_A2A_Event");
+        assert_eq!(a2a.dlc, 64);
+        assert_eq!(a2a.transmitter, "UWB");
+        assert_eq!(a2a.comment.as_deref(), Some("Handover frame"));
+
+        let mntr = &doc.messages[1];
+        assert_eq!(mntr.id, 655);
+        assert_eq!(mntr.dlc, 64);
+        assert_eq!(mntr.transmitter, "UWB");
+        // Signal name ending in `M` must NOT be misclassified as a multiplexer switch.
+        let chm = &mntr.signals[0];
+        assert_eq!(chm.name, "BKeyMntrCnctReqChM");
+        assert_eq!(chm.multiplex, None);
+        assert!(!chm.little_endian);
+        assert_eq!(chm.comment.as_deref(), Some("Channel map"));
+
+        // `VAL_` with `;` attached to the closing quote must not leak `;` into the label.
+        let hop = &mntr.signals[1];
+        assert_eq!(
+            hop.values,
+            vec![(0.0, "Idle".to_string()), (65535.0, "Invalid".to_string())]
+        );
+    }
+
+    #[test]
+    fn open_doc_decodes_gb18030_dbc() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gbk.dbc");
+        let utf8 = "VERSION \"\"\nBO_ 541 RLA : 8 UWB\n SG_ Dist : 7|16@0+ (1,0) [0|65535] \"\" Vector_XXX\nCM_ BO_ 541 \"有PAS时PAS发\";\nVAL_ 541 Dist 65535 \"无效值\";\n";
+        let (encoded, _, had_errors) = encoding_rs::GB18030.encode(utf8);
+        assert!(!had_errors);
+        std::fs::write(&path, encoded.as_ref()).unwrap();
+        let doc = open_doc(&path).unwrap();
+        assert_eq!(doc.messages[0].comment.as_deref(), Some("有PAS时PAS发"));
+        assert_eq!(
+            doc.messages[0].signals[0].values,
+            vec![(65535.0, "无效值".to_string())]
+        );
     }
 }

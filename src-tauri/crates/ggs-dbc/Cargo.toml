@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+encoding_rs.workspace = true
 serde.workspace = true
 
 [dev-dependencies]

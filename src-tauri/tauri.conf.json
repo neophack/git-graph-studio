@@ -55,6 +55,7 @@
         "ext": [
           "blf",
           "asc",
+          "dbc",
           "bin",
           "hex",
           "dmp",

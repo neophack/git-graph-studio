@@ -143,12 +143,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	minimap: true, stickyScroll: false, bracketColors: true,
 	mouseWheelScrollSensitivity: 1, fastScrollSensitivity: 4,
 	fontSize: 14, tabSize: 4, wordWrap: false, snippetSuggestions: true, pathCompletion: true, symbolHover: true,
-	// dmp/mdmp joined the default 2026-11-18 (the owner's direction: dmp files should open
-	// with ggs by default) — the Memory Dump Viewer's formats, which usually have no other
-	// handler; an
-	// install that predates this keeps its stored list and picks them up through the
-	// row's reset button.
-	fileAssociations: ['blf', 'asc', 'bin', 'hex', 'dmp', 'mdmp'],
+	// dmp/mdmp joined the default 2026-11-18 and dbc joined 2026-11-26 (the owner's
+	// direction: dmp and dbc files should open with ggs by default) — formats which
+	// usually have no other handler; an install that predates this keeps its stored list
+	// and picks them up through the row's reset button.
+	fileAssociations: ['blf', 'asc', 'dbc', 'bin', 'hex', 'dmp', 'mdmp'],
 	explorerContextMenu: true,
 	linuxDmabuf: 'auto',
 	terminalShell: 'gitBash',

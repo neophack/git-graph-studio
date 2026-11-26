@@ -43,6 +43,7 @@
 			<array>
 				<string>blf</string>
 				<string>asc</string>
+				<string>dbc</string>
 				<string>bin</string>
 				<string>hex</string>
 				<string>dmp</string>

@@ -34,6 +34,7 @@ pub struct AssocExt {
 const CATALOG: &[(&str, &str, bool)] = &[
     ("blf", "application/x-vector-blf", true),
     ("asc", "application/x-vector-asc", true),
+    ("dbc", "application/x-vector-dbc", true),
     ("bin", "application/octet-stream", true),
     ("hex", "application/x-hex", true),
     ("dmp", "application/x-minidump", true),
@@ -841,7 +842,7 @@ mod tests {
             .filter(|e| e.recommended)
             .map(|e| e.ext.as_str())
             .collect();
-        assert_eq!(recommended, ["blf", "asc", "bin", "hex", "dmp", "mdmp"]);
+        assert_eq!(recommended, ["blf", "asc", "dbc", "bin", "hex", "dmp", "mdmp"]);
         assert!(catalog.iter().any(|e| e.ext == "json" && !e.recommended));
     }
 
