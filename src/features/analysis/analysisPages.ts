@@ -743,6 +743,10 @@ class ModulePage implements AnalysisPageView {
 		if (this.loading) this.render();
 	}
 
+	destroy(): void {
+		this.drawing.destroy();
+	}
+
 	private visibleGraph(): { nodes: ModuleNode[]; edges: ModuleEdge[] } {
 		const ov = this.overview;
 		if (!ov) return { nodes: [], edges: [] };
@@ -792,6 +796,9 @@ class ModulePage implements AnalysisPageView {
 				: (ov ? tf('analysis.modules.summary', ov.nodes.length, ov.edges.length, ov.cycles.length) : '');
 
 		const cycleCount = ov?.cycles.length ?? 0;
+		if (cycleCount === 0 && this.cyclesOnly) {
+			this.cyclesOnly = false;
+		}
 		this.cyclesBtn.hidden = cycleCount === 0;
 		this.cyclesBtn.textContent = tf('analysis.modules.cyclesOnly', cycleCount);
 		this.cyclesBtn.classList.toggle('on', this.cyclesOnly);
@@ -805,18 +812,24 @@ class ModulePage implements AnalysisPageView {
 				? tf('analysis.page.building', this.buildStatus.done, this.buildStatus.total)
 				: `${t('analysis.page.loading')}…`);
 			this.drawing.setGraph([], []);
+			this.updateGraphbar();
+			this.renderInspector();
 			this.syncView();
 			return;
 		}
 		if (this.error) {
 			status(this.error);
 			this.drawing.setGraph([], []);
+			this.updateGraphbar();
+			this.renderInspector();
 			this.syncView();
 			return;
 		}
 		if (!ov || ov.nodes.length === 0) {
 			status(t('analysis.modules.empty'));
 			this.drawing.setGraph([], []);
+			this.updateGraphbar();
+			this.renderInspector();
 			this.syncView();
 			return;
 		}

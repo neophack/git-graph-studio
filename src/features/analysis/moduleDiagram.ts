@@ -669,10 +669,6 @@ export class DiagramView {
 		return edgeId !== null ? { kind: 'edge', id: edgeId } : null;
 	}
 
-	getDirection(): DiagramDirection {
-		return this.direction;
-	}
-
 	setDirection(direction: DiagramDirection): void {
 		if (this.direction === direction) return;
 		this.direction = direction;
@@ -981,22 +977,30 @@ export class DiagramView {
 		}, [svgEl('path', { d: 'M 1 1.6 L 8.8 5 L 1 8.4 L 2.8 5 z', class: cls })]);
 	}
 
-	/** Recompute only edges incident to a dragged node using cached DOM refs (O(degree)). */
+	/** Recompute edges incident to a dragged node (and preserve neighbor port distribution). */
 	private rerouteIncidentEdges(nodeId: string): void {
 		if (!this.svgElRef) return;
 		const outList = this.outEdgesByNode.get(nodeId) ?? [];
 		const inList = this.inEdgesByNode.get(nodeId) ?? [];
 		if (outList.length === 0 && inList.length === 0) return;
-		const incident: ModuleEdge[] = [];
+		const portScope: ModuleEdge[] = [];
 		const seen = new Set<string>();
+		const addEdge = (e: ModuleEdge) => {
+			if (!seen.has(e.id)) {
+				seen.add(e.id);
+				portScope.push(e);
+			}
+		};
 		for (const e of outList) {
-			if (!seen.has(e.id)) { seen.add(e.id); incident.push(e); }
+			addEdge(e);
+			for (const peer of this.inEdgesByNode.get(e.to) ?? []) addEdge(peer);
 		}
 		for (const e of inList) {
-			if (!seen.has(e.id)) { seen.add(e.id); incident.push(e); }
+			addEdge(e);
+			for (const peer of this.outEdgesByNode.get(e.from) ?? []) addEdge(peer);
 		}
-		const { outOffset, inOffset } = computePortOffsets(incident, this.placed, this.direction);
-		for (const edge of incident) {
+		const { outOffset, inOffset } = computePortOffsets(portScope, this.placed, this.direction);
+		for (const edge of portScope) {
 			this.updateEdgeDom(edge, outOffset.get(edge.id) ?? 0, inOffset.get(edge.id) ?? 0);
 		}
 	}
@@ -1784,6 +1788,10 @@ export class DiagramView {
 			if (item) {
 				item.x = this.nodeDrag.pendingX;
 				item.y = this.nodeDrag.pendingY;
+				if (!this.hasCustomPositions) {
+					this.hasCustomPositions = true;
+					this.resetBtn.hidden = false;
+				}
 				const nodeEl = this.nodeElById.get(item.node.id);
 				if (nodeEl) nodeEl.setAttribute('transform', `translate(${item.x}, ${item.y})`);
 				this.rerouteIncidentEdges(item.node.id);

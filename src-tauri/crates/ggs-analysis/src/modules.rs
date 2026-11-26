@@ -89,12 +89,6 @@ impl Default for ModuleEdgeTypes {
     }
 }
 
-impl ModuleEdgeTypes {
-    pub fn any_enabled(&self) -> bool {
-        self.calls || self.type_refs || self.base_refs || self.imports
-    }
-}
-
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModuleFileSummary {
@@ -1418,7 +1412,10 @@ pub fn prepare_edge_detail_from_store(
     let mut decl_counts = vec![0u8; name_count];
     let mut to_decls_by_name: HashMap<u32, Vec<u32>> = HashMap::new();
     let max_decls = (MAX_DECL_FILES_FOR_SIGNAL + 2) as u8;
-    store.for_each_file_decl(|fid, name_id, _is_callable| {
+    store.for_each_file_decl_vis(|fid, name_id, _is_callable, is_private| {
+        if is_private {
+            return;
+        }
         let nid = name_id as usize;
         if let Some(c) = decl_counts.get_mut(nid) {
             if *c <= max_decls {
@@ -1547,7 +1544,7 @@ pub fn scan_edge_detail(root: &str, plan: &EdgeDetailPlan) -> ModuleEdgeDetail {
                     continue;
                 };
                 for to_path in targets {
-                    if to_path == from_path {
+                    if to_path == from_path || !sites::same_lang_family(from_path, to_path) {
                         continue;
                     }
                     let entry = pairs_map
@@ -1600,119 +1597,6 @@ pub fn scan_edge_detail(root: &str, plan: &EdgeDetailPlan) -> ModuleEdgeDetail {
         file_pairs,
         scanned_files,
     }
-}
-
-/// On-demand L2 evidence for a single dependency edge `from → to` over a `StoreDependencyFacts`
-/// snapshot (retained for compatibility and tests).
-pub fn module_edge_detail(
-    root: &str,
-    facts: &StoreDependencyFacts,
-    from_id: &str,
-    to_id: &str,
-    scope: Option<&str>,
-    depth: u8,
-    folders: &[String],
-) -> ModuleEdgeDetail {
-    let folders = normalize_scope(folders);
-    let scope = normalize_single_scope(scope);
-    let effective_depth = pick_effective_depth_iter(
-        facts.files.iter().map(String::as_str),
-        &scope,
-        &folders,
-        depth,
-    );
-
-    let mut from_fids: Vec<u32> = Vec::new();
-    let mut to_fids: HashSet<u32> = HashSet::new();
-    for (fid, path) in facts.files.iter().enumerate() {
-        let internal = in_folders(path, &folders) && in_scope(path, &scope);
-        let gid = if internal {
-            internal_group(path, &scope, effective_depth, &folders).0
-        } else {
-            external_group(path, &scope, &folders).0
-        };
-        if gid == from_id {
-            from_fids.push(fid as u32);
-        }
-        if gid == to_id {
-            to_fids.insert(fid as u32);
-        }
-    }
-
-    if from_fids.is_empty() || to_fids.is_empty() {
-        return ModuleEdgeDetail {
-            from: from_id.to_owned(),
-            to: to_id.to_owned(),
-            imports: Vec::new(),
-            file_pairs: Vec::new(),
-            scanned_files: 0,
-        };
-    }
-
-    let from_fid_set: HashSet<u32> = from_fids.iter().copied().collect();
-    let mut to_sym_decls: HashMap<String, Vec<String>> = HashMap::new();
-    let mut candidate_from_fids: HashSet<u32> = HashSet::new();
-
-    for (name_id, decls) in facts.decl_files.iter().enumerate() {
-        if decls.is_empty() || decls.len() > MAX_DECL_FILES_FOR_SIGNAL + 2 {
-            continue;
-        }
-        let in_to: Vec<u32> = decls
-            .iter()
-            .copied()
-            .filter(|fid| to_fids.contains(fid))
-            .collect();
-        if in_to.is_empty() {
-            continue;
-        }
-        let name = facts.names[name_id].as_str();
-        if name.len() < 2 {
-            continue;
-        }
-        if let Some(Some(refs)) = facts.ref_files.get(name_id) {
-            let mut matched = false;
-            for &rfid in refs {
-                if from_fid_set.contains(&rfid) {
-                    candidate_from_fids.insert(rfid);
-                    matched = true;
-                }
-            }
-            if matched {
-                to_sym_decls.insert(
-                    name.to_owned(),
-                    in_to
-                        .into_iter()
-                        .map(|fid| facts.files[fid as usize].clone())
-                        .collect(),
-                );
-            }
-        }
-    }
-
-    let mut scan_fids: Vec<u32> = if from_fids.len() <= 40 {
-        from_fids
-    } else {
-        let mut list: Vec<u32> = candidate_from_fids.into_iter().collect();
-        list.sort_unstable();
-        list
-    };
-    scan_fids.truncate(MAX_DETAIL_SCAN_FILES);
-
-    let plan = EdgeDetailPlan {
-        from: from_id.to_owned(),
-        to: to_id.to_owned(),
-        scan_files: scan_fids
-            .into_iter()
-            .map(|fid| facts.files[fid as usize].clone())
-            .collect(),
-        all_paths: facts.files.iter().cloned().collect(),
-        to_paths: to_fids
-            .into_iter()
-            .map(|fid| facts.files[fid as usize].clone())
-            .collect(),
-        to_sym_decls,
-    };
-    scan_edge_detail(root, &plan)
 }
 
 /// Iterative Tarjan SCC over integer node indices; returns `(node_idx -> scc_id, cycles)`

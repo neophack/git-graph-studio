@@ -15,4 +15,6 @@ export interface AnalysisPageView {
 	/** The `studio://analysis-index` payload, routed by the editor area; null after a
 	 *  release. Optional: pages with no build to show ignore it. */
 	noteBuildStatus?(status: AnalysisStatus | null): void;
+	/** Optional cleanup invoked when the hosting analysis tab closes. */
+	destroy?(): void;
 }
