@@ -40,12 +40,6 @@ export interface DefinitionSubject {
  *  mebibite refuses with "file too big"). */
 const FILE_MAX = 1024 * 1024 + 1;
 
-/** A path's basename over either separator. */
-function baseName(path: string): string {
-	const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
-	return cut === -1 ? path : path.slice(cut + 1);
-}
-
 /** Split a path into its parent directory and basename over either separator. */
 function splitDirAndBase(path: string): { dir: string; file: string } {
 	const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
@@ -237,7 +231,7 @@ export class DefinitionView {
 	/** The header row: the kind's icon and caption, the name, and the file:line button. */
 	private buildHeader(subject: DefinitionSubject): HTMLElement {
 		const location = el('button', 'def-location');
-		location.textContent = `${baseName(subject.path)}:${subject.line + 1}`;
+		location.textContent = `${splitDirAndBase(subject.path).file}:${subject.line + 1}`;
 		location.title = t('symbols.context.open');
 		location.addEventListener('click', () => this.onOpenDefinition?.(subject.path, subject.line + 1));
 		return el('div', 'def-title', [

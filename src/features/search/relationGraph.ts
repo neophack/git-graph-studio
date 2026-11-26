@@ -1340,6 +1340,7 @@ export class RelationGraphView {
 	}
 
 	private paintBoard(scene: Scene): void {
+		this.clearHoverHighlight();
 		const palette = themePalette();
 		this.paintMarkers(palette);
 		this.paintBands(scene);

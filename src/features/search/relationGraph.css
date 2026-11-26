@@ -158,11 +158,6 @@
 	opacity: 0.72;
 }
 
-.rg-card-kind-tag {
-	user-select: none;
-	opacity: 0.78;
-}
-
 /* Hover neighborhood tracing (O(degree) dim/highlight) */
 .rg-board.has-hover .rg-card {
 	opacity: 0.28;

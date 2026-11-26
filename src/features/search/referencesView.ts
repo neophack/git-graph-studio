@@ -76,7 +76,6 @@ interface ResultSection {
 	subject: ReferencesSubject;
 	files: SymbolRefFile[];
 	filesCapped: boolean;
-	totalSites: number;
 	/** 0-based definition lines per repo-relative path — the def rows' marker. */
 	defLines: Map<string, Map<number, string>>;
 }
@@ -301,7 +300,6 @@ export class ReferencesView {
 				subject,
 				files: kept,
 				filesCapped,
-				totalSites: kept.reduce((sum, file) => sum + file.matches.length, 0),
 				defLines
 			};
 			this.sections.push(section);
