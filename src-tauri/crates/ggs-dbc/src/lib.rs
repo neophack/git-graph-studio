@@ -249,10 +249,13 @@ fn parse_signal_line(rest: &str) -> Option<DbcSignal> {
     let (start, len) = bits.split_once('|')?;
     let start: u32 = start.trim().parse().ok()?;
     let length: u32 = len.trim().parse().ok()?;
-    let (order, sign) = order.split_at(order.len().saturating_sub(1));
+    let (order, signed) = if let Some(o) = order.strip_suffix('-') {
+        (o, true)
+    } else {
+        (order.strip_suffix('+')?, false)
+    };
     // DBC spec: `@1` = Intel (little-endian), `@0` = Motorola (big-endian).
     let little_endian = order == "1";
-    let signed = sign == "-";
     // `(scale,offset)`
     let scale_tok = toks.remove(0);
     let scale_tok = scale_tok.trim_start_matches('(');
