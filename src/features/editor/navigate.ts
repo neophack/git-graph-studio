@@ -293,8 +293,8 @@ export const navigateMethods: ThisType<EditorGroup> = {
 
 	async findReferences(editor?: Editor | null, pos?: number | null): Promise<void> {
 		if (editor === undefined) editor = this.active;
-		if (!editor?.view) return;
-		const view = editor.view;
+		const view = editor?.view ?? editor?.merge?.b ?? null;
+		if (!view) return;
 		const at = pos ?? view.state.selection.main.head;
 		const word = view.state.wordAt(at) ?? view.state.wordAt(view.state.selection.main.head);
 		if (!word) return;
@@ -331,8 +331,9 @@ export const navigateMethods: ThisType<EditorGroup> = {
 
 	async openCallTreeAtCursor(editor?: Editor | null, pos?: number | null): Promise<void> {
 		if (editor === undefined) editor = this.active;
-		if (!editor?.view || !this.rootPath) return;
-		const view = editor.view;
+		if (!editor || !this.rootPath) return;
+		const view = editor.view ?? editor.merge?.b ?? null;
+		if (!view) return;
 		const at = pos ?? view.state.selection.main.head;
 		const word = view.state.wordAt(at) ?? view.state.wordAt(view.state.selection.main.head);
 		if (!word) {

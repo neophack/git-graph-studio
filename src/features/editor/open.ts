@@ -1185,8 +1185,7 @@ export const openMethods: ThisType<EditorGroup> = {
 					updateCounter();
 					refreshOverviews();
 					scheduleRevertArrows();
-					if (!editable) return;
-					if (update.docChanged) {
+					if (editable && update.docChanged) {
 						const dirty = !this.bufferAtSavedState(editor);
 						if (dirty !== editor.dirty) {
 							editor.dirty = dirty;
@@ -1383,6 +1382,7 @@ export const openMethods: ThisType<EditorGroup> = {
 				this.renderTabs();
 			}
 			refreshChangeInfo();
+			if (this.active === editor) this.emitActive();
 		};
 		rebuild = render;
 		// The diff follows its file, the way VS Code's diff editor does: a watcher batch

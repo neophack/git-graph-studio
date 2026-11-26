@@ -481,13 +481,14 @@ export class EditorGroup {
 			return;
 		}
 		let line = 1, column = 1, selected = 0, selections = 0;
+		const view = this.active.view ?? this.active.merge?.b ?? null;
 		if (this.active.doc) {
 			// A windowed editor: the line number is offset by the window's first line.
 			({ line, column, selected, selections } = this.active.doc.status());
-		} else if (this.active.view) {
-			const selection = this.active.view.state.selection;
+		} else if (view) {
+			const selection = view.state.selection;
 			const head = selection.main.head;
-			const lineInfo = this.active.view.state.doc.lineAt(head);
+			const lineInfo = view.state.doc.lineAt(head);
 			line = lineInfo.number;
 			column = head - lineInfo.from + 1;
 			// The status bar's "(N selected)" / "N selections", as VS Code reports them.

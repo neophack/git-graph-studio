@@ -142,6 +142,7 @@ export const lifecycleMethods: ThisType<Workbench> = {
 		this.repoPaths = [];
 		this.workspaceFile = null;
 		this.isRepo = false;
+		this.headHash = null;
 		this.filePicks = null;
 		ExtensionHost.workspaceFolders = []; // no folder: extensions see no workspace either
 		// No folder: every repository view stands down (the editors too, or their breadcrumbs
@@ -195,6 +196,7 @@ export const lifecycleMethods: ThisType<Workbench> = {
 		this.workspaceFile = workspaceFile;
 		this.repoPath = roots[0]!;
 		this.isRepo = anyRepo;
+		this.headHash = null;
 		this.filePicks = null;
 		const root = this.repoPath;
 		state.rememberFolder(workspaceFile ?? root);
@@ -276,6 +278,7 @@ export const lifecycleMethods: ThisType<Workbench> = {
 		this.workspaceFile = null;
 		this.singleFile = null;
 		this.isRepo = false;
+		this.headHash = null;
 		state.rememberFolder(null);
 		document.title = 'Git Graph Studio';
 		this.titleBar.setFolderName(null);

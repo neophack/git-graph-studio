@@ -196,6 +196,11 @@ export class Workbench {
 
 	isRepo = false;
 
+	/** The open repository's current HEAD commit hash (full 40-char oid), kept in sync
+	 *  with Source Control's `repo_head` so a Git diff whose right side is HEAD can be
+	 *  recognised as latest code for the symbol/relation/reference/definition windows. */
+	headHash: string | null = null;
+
 	singleFile: string | null = null;
 
 	folderShownStamped = false;
@@ -466,11 +471,29 @@ export class Workbench {
 
 	workspaceSymbolsCache: { at: number; symbols: { name: string; kind: string; path: string; line: number }[] } | null = null;
 
+	headHashFor(repo?: string): string | null {
+		if (repo && this.repoPath && repo.replace(/[\\/]+$/, '').toLowerCase() !== this.repoPath.replace(/[\\/]+$/, '').toLowerCase()) {
+			const sub = this.scm.subRepos.find((s) => s.repoPath.replace(/[\\/]+$/, '').toLowerCase() === repo.replace(/[\\/]+$/, '').toLowerCase());
+			return sub?.hash || null;
+		}
+		return this.headHash;
+	}
+
+	/** The file path the Symbol/Relation/Reference/Definition/Context windows follow for
+	 *  an editor input: plain files always, Git diffs only when the right side is the
+	 *  latest code (`*`, `:index`, `HEAD`, or the current HEAD commit hash), and never
+	 *  for local file-to-file compares or historical commits. */
+	symbolFilePathForInput(input: import('../features/editor/inputs').EditorInput | null): string | null {
+		if (!input) return null;
+		if (input.kind === 'file') return input.path;
+		if (input.kind === 'diff') return resolveLatestGitDiffPath(input, this.repoPath, this.headHashFor(input.repo));
+		return null;
+	}
+
 	symbolSources() {
 		return {
 			fileSymbols: async () => {
-				const input = this.editors.activeInput;
-				const path = input?.kind === 'file' ? input.path : null;
+				const path = this.symbolFilePathForInput(this.editors.activeInput);
 				if (!path) return [];
 				if (this.fileSymbolsCache && this.fileSymbolsCache.path === path && Date.now() - this.fileSymbolsCache.at < 5000) {
 					return this.fileSymbolsCache.symbols;
@@ -757,7 +780,7 @@ export class Workbench {
 
 	async resolveContextSymbol(editor: { kind: string; path?: string; line: number; column: number } | null): Promise<void> {
 		const view = this.editors.activeView;
-		if (!editor || editor.kind !== 'file' || !view || !this.repoPath) {
+		if (!editor || (editor.kind !== 'file' && editor.kind !== 'diff') || !editor.path || !view || !this.repoPath) {
 			this.panel.context.show(null);
 			return;
 		}
@@ -845,7 +868,7 @@ export class Workbench {
 			if (page === 'references') this.panel.references.setSubject(null);
 			else this.panel.definition.setDefinition(null);
 		};
-		if (!editor || editor.kind !== 'file' || !view || !this.repoPath) {
+		if (!editor || (editor.kind !== 'file' && editor.kind !== 'diff') || !editor.path || !view || !this.repoPath) {
 			clears();
 			return;
 		}
@@ -1188,6 +1211,33 @@ export function whenIdle(work: () => void, timeoutMs = 2000): void {
 export function joinRepo(root: string, relative: string): string {
 	const separator = root.includes('\\') ? '\\' : '/';
 	return root.replace(/[\\/]+$/, '') + separator + relative.replaceAll('/', separator);
+}
+
+/** Whether a diff tab's right side is the repository's latest code and therefore eligible
+ *  for the Symbol, Relation, References, Definition and Context windows. File-to-file
+ *  compares (`local`), in-memory content compares (`content`), binary placeholders,
+ *  deleted right sides and historical commits return null; Working Tree (`*`), Staged
+ *  (`:index`), `HEAD`, or a commit hash matching the repository's current `HEAD` resolve
+ *  to the right-side file's absolute path. */
+export function resolveLatestGitDiffPath(
+	input: Extract<import('../features/editor/inputs').EditorInput, { kind: 'diff' }>,
+	repoPath: string | null,
+	headHash: string | null
+): string | null {
+	if (input.binaryNotice === true) return null;
+	if (input.left.local === true || input.right.local === true) return null;
+	if (input.left.content !== undefined || input.right.content !== undefined) return null;
+	if (!input.right.exists || !input.right.path) return null;
+	const rev = input.right.revision.trim();
+	const isLatest =
+		rev === '*' ||
+		rev === ':index' ||
+		rev === 'HEAD' ||
+		(headHash !== null && headHash.length >= 7 && /^[0-9a-f]{7,40}$/i.test(rev) && headHash.toLowerCase().startsWith(rev.toLowerCase()));
+	if (!isLatest) return null;
+	const root = input.repo ?? repoPath;
+	if (!root) return null;
+	return /^([a-zA-Z]:[\\/]|\\|\/)/.test(input.right.path) ? input.right.path : joinRepo(root, input.right.path);
 }
 
 /** The one definition preference every symbol surface shares: a same-file entry covering

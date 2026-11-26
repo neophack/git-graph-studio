@@ -57,6 +57,8 @@ export interface SubRepoState {
 	/** The checked-out commit - empty on an unborn branch. A submodule typically checks out
 	 *  its recorded commit detached: `branch` null, `shortHash` set, and nothing to publish. */
 	shortHash: string;
+	/** The checked-out commit's full hash - empty on an unborn branch. */
+	hash: string;
 	ahead: number;
 	behind: number;
 	upstream: string | null;
@@ -470,6 +472,7 @@ export class SourceControlView {
 			changes: [],
 			branch: null,
 			shortHash: '',
+			hash: '',
 			ahead: 0,
 			behind: 0,
 			upstream: null,
@@ -487,6 +490,7 @@ export class SourceControlView {
 				sub.changes = changes;
 				sub.branch = head.branch;
 				sub.shortHash = head.shortHash;
+				sub.hash = head.hash;
 				sub.ahead = head.ahead;
 				sub.behind = head.behind;
 				sub.upstream = head.upstream;

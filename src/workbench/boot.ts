@@ -647,8 +647,14 @@ export const bootMethods: ThisType<Workbench> = {
 		// The refresh's own repo_head feeds the bar (one subprocess serves both views); a failed
 		// fetch falls back to the bar fetching the head itself.
 		this.scm.onHead = (head) => {
+			const nextHash = head?.hash || null;
+			const changed = nextHash !== this.headHash;
+			this.headHash = nextHash;
 			if (head) this.statusBar.applyHead(head);
 			else void this.statusBar.refreshHead();
+			// A Git diff whose right side names a commit hash can gain/lose latest-code status
+			// when HEAD settles or advances; re-emitting keeps the symbol windows in sync.
+			if (changed && this.editors.activeInput?.kind === 'diff') this.editors.activeGroup.emitActive();
 		};
 
 		this.editors.onActiveChange = (editor) => {
@@ -656,14 +662,17 @@ export const bootMethods: ThisType<Workbench> = {
 			// A focus move between groups changes `tabGroups`' active group without a tab change.
 			this.extensionHost.noteTabsChanged();
 			this.statusBar.setEditor(editor);
-			this.followContextSymbol(editor);
+			const symbolPath = this.symbolFilePathForInput(this.editors.activeInput);
+			const symbolEditor = editor ? { ...editor, path: symbolPath ?? undefined } : null;
+			this.followContextSymbol(symbolEditor);
 			// The Relations page follows the same payload; its own gate (the page being the
 			// active one, the content not pinned) lives inside followDefinitionSymbol.
-			this.followDefinitionSymbol(editor);
-			// The Symbol Window follows the active editor's file and cursor line; no editor
-			// clears it. The payload's line is the status bar's Ln (1-based — the base the
-			// context window's `doc.line` reads), and the view's contract is 0-based.
-			if (editor?.kind === 'file' && editor.path) this.symbolWindow.setFile(editor.path, editor.line - 1);
+			this.followDefinitionSymbol(symbolEditor);
+			// The Symbol Window follows the active editor's file and cursor line (or a Git
+			// diff whose right side is the latest code); anything else clears it. The
+			// payload's line is the status bar's Ln (1-based — the base the context window's
+			// `doc.line` reads), and the view's contract is 0-based.
+			if (symbolPath && editor) this.symbolWindow.setFile(symbolPath, editor.line - 1);
 			else this.symbolWindow.setFile(null);
 			if (editor?.kind === 'file' && editor.path) {
 				// explorer.autoReveal: the active file reveals in the tree when the Explorer is
@@ -680,10 +689,16 @@ export const bootMethods: ThisType<Workbench> = {
 			this.extensionHost.noteActiveEditor(editor);
 		};
 		// The Symbol Window's "current function" locals read the active text editor's live
-		// buffer through this hook — null whenever the cursor is not in a text editor. The
-		// relation graph under the outline relativizes the editor's path through the open
-		// repo, so its root reaches the index in the repo-relative vocabulary it speaks.
-		this.symbolWindow.provideText = () => { const editor = this.editors.activeGroup.activeEditor; return editor && editor.input.kind === 'file' && editor.view ? editor.view.state.doc.toString() : null; };
+		// buffer (or a latest-code Git diff's right pane) through this hook — null whenever
+		// the active editor is not eligible. The relation graph under the outline relativizes
+		// the editor's path through the open repo, so its root reaches the index in the
+		// repo-relative vocabulary it speaks.
+		this.symbolWindow.provideText = () => {
+			const editor = this.editors.activeGroup.activeEditor;
+			if (!editor || !this.symbolFilePathForInput(editor.input)) return null;
+			const view = editor.view ?? editor.merge?.b ?? null;
+			return view ? view.state.doc.toString() : null;
+		};
 		this.symbolWindow.provideRepo = () => this.repoPath;
 		this.editors.onNavigationChange = () => this.titleBar.setNavigation(this.editors.canGoBack(), this.editors.canGoForward());
 		// The session snapshot (tabs, active tab, expanded folders) follows every change, coalesced.
@@ -792,10 +807,14 @@ export const bootMethods: ThisType<Workbench> = {
 		this.panel.definition.onNeedRoot = () => {
 			const view = this.editors.activeView;
 			const input = this.editors.activeInput;
-			if (input?.kind !== 'file' || !view) return;
+			const path = this.symbolFilePathForInput(input);
+			if (!input || !path || !view) {
+				this.followDefinitionSymbol(null);
+				return;
+			}
 			const position = view.state.selection.main.head;
 			const line = view.state.doc.lineAt(position);
-			this.followDefinitionSymbol({ kind: 'file', path: input.path, line: line.number, column: position - line.from + 1 });
+			this.followDefinitionSymbol({ kind: input.kind, path, line: line.number, column: position - line.from + 1 });
 		};
 		// The References page's activation re-resolves the cursor symbol through the same
 		// live-selection payload the definition page hands over.
@@ -806,10 +825,14 @@ export const bootMethods: ThisType<Workbench> = {
 		const reResolveContext = () => {
 			const view = this.editors.activeView;
 			const input = this.editors.activeInput;
-			if (input?.kind !== 'file' || !view) return;
+			const path = this.symbolFilePathForInput(input);
+			if (!input || !path || !view) {
+				this.followContextSymbol(null);
+				return;
+			}
 			const position = view.state.selection.main.head;
 			const line = view.state.doc.lineAt(position);
-			this.followContextSymbol({ kind: 'file', path: input.path, line: line.number, column: position - line.from + 1 });
+			this.followContextSymbol({ kind: input.kind, path, line: line.number, column: position - line.from + 1 });
 		};
 		this.panel.context.onNeedRoot = reResolveContext;
 		this.panel.context.onPinChange = (pinned) => {
