@@ -22,8 +22,8 @@
 #   GGS_INSTALL_DIR=/tmp/test bash scripts/install-macos.sh   # override the target
 #
 # The dmg's SHA256 is verified against the release's SHA256SUMS before anything
-# is copied. A running instance aborts the install (replacing a live bundle can
-# crash it); quit the app and re-run.
+# is copied. Any running instance of the app (ggs) is stopped automatically
+# before replacing the bundle.
 
 set -eu
 
@@ -82,9 +82,42 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if pgrep -f "/${app_name}.app/Contents/MacOS/" >/dev/null 2>&1; then
-	die "a running instance was found — quit ${app_name} first, then re-run"
-fi
+ggs_running() {
+	pgrep -f "/${app_name}.app/Contents/MacOS/" >/dev/null 2>&1 ||
+		pgrep -x ggs >/dev/null 2>&1
+}
+
+stop_running_ggs() {
+	if ! ggs_running; then
+		return 0
+	fi
+	echo "==> stopping running ${app_name} (ggs) processes"
+	if command -v osascript >/dev/null 2>&1; then
+		osascript -e "if application \"${app_name}\" is running then tell application \"${app_name}\" to quit" >/dev/null 2>&1 || true
+	fi
+	pkill -TERM -f "/${app_name}.app/Contents/MacOS/" >/dev/null 2>&1 || true
+	pkill -TERM -x ggs >/dev/null 2>&1 || true
+
+	i=0
+	while ggs_running && [ "$i" -lt 10 ]; do
+		sleep 0.5
+		i=$((i + 1))
+	done
+
+	if ggs_running; then
+		pkill -KILL -f "/${app_name}.app/Contents/MacOS/" >/dev/null 2>&1 || true
+		pkill -KILL -x ggs >/dev/null 2>&1 || true
+		i=0
+		while ggs_running && [ "$i" -lt 4 ]; do
+			sleep 0.5
+			i=$((i + 1))
+		done
+	fi
+
+	if ggs_running; then
+		die "failed to stop running ${app_name} (ggs) processes — quit it manually and re-run"
+	fi
+}
 
 echo "==> downloading ${dmg} (via curl: no quarantine attribute, ever)"
 curl -fL --retry 3 --retry-delay 2 -C - --progress-bar -o "${tmp}/${dmg}" "${base}/${dmg}" ||
@@ -106,6 +139,8 @@ mount_point=$(hdiutil attach -nobrowse -readonly "${tmp}/${dmg}" 2>/dev/null |
 	awk -F'\t' '$2 ~ /Apple_HFS/ { gsub(/ +$/, "", $3); print $3 }')
 [ -n "$mount_point" ] || die "cannot mount ${dmg}"
 [ -d "${mount_point}/${app_name}.app" ] || die "no ${app_name}.app inside the dmg"
+
+stop_running_ggs
 
 echo "==> installing into ${dest}"
 if [ -e "${dest}/${app_name}.app" ]; then
