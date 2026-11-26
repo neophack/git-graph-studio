@@ -665,22 +665,81 @@ pub fn module_overview_from_store(
 
     if edge_types.calls || edge_types.type_refs || edge_types.base_refs {
         let mut decls = vec![SmallDecls::EMPTY; name_count];
-        store.for_each_file_decl(|fid, name_id, is_callable| {
+        store.for_each_file_decl_vis(|fid, name_id, is_callable, is_private| {
+            if is_private {
+                // File-private C/C++ `static` declarations cannot be called or referenced from other files.
+                return;
+            }
             if let Some(slot) = decls.get_mut(name_id as usize) {
                 slot.record(fid, is_callable);
             }
         });
 
-        // 1. Function/method calls and/or type/non-call symbol references.
-        if edge_types.calls || edge_types.type_refs {
+        // 1a. Function/method calls — backed by AST `call_files_of` (actual call sites only,
+        // never comments, strings, docstrings, or non-call identifiers) + language-family check.
+        if edge_types.calls {
             for (name_id, slot) in decls.iter().enumerate() {
                 let dlen = slot.len as usize;
-                if dlen == 0 || dlen > MAX_DECL_FILES_FOR_SIGNAL {
+                if dlen == 0 || dlen > MAX_DECL_FILES_FOR_SIGNAL || slot.callable_mask == 0 {
                     continue;
                 }
-                let has_call = edge_types.calls && slot.callable_mask != 0;
-                let has_type = edge_types.type_refs && slot.type_mask != 0;
-                if !has_call && !has_type {
+                let Some(name) = store.name_str(name_id) else {
+                    continue;
+                };
+                if name.len() < 2 {
+                    continue;
+                }
+                let Some(callers) = store.call_files_of(name_id) else {
+                    continue;
+                };
+                if file_count >= 20 && callers.len() * 10 > file_count * 6 {
+                    continue;
+                }
+                for &caller_fid in callers {
+                    let Some(&(from_idx, from_internal)) = file_node.get(caller_fid as usize) else {
+                        continue;
+                    };
+                    if from_idx == u32::MAX {
+                        continue;
+                    }
+                    let Some(caller_path) = store.file_path(caller_fid as usize) else {
+                        continue;
+                    };
+                    for i in 0..dlen {
+                        let bit = 1u8 << i;
+                        if (slot.callable_mask & bit) == 0 {
+                            continue;
+                        }
+                        let callee_fid = slot.fids[i];
+                        if caller_fid == callee_fid {
+                            continue;
+                        }
+                        let Some(callee_path) = store.file_path(callee_fid as usize) else {
+                            continue;
+                        };
+                        if !sites::same_lang_family(caller_path, callee_path) {
+                            continue;
+                        }
+                        let Some(&(to_idx, to_internal)) = file_node.get(callee_fid as usize) else {
+                            continue;
+                        };
+                        if to_idx == u32::MAX || from_idx == to_idx || (!from_internal && !to_internal) {
+                            continue;
+                        }
+                        let entry = edge_acc.entry(edge_key(from_idx, to_idx)).or_default();
+                        entry.record_pair(caller_fid, callee_fid);
+                        entry.call_refs += 1;
+                        entry.record_symbol(name_id as u32, 1);
+                    }
+                }
+            }
+        }
+
+        // 1b. Non-callable type/class/struct/constant symbol references (same language family).
+        if edge_types.type_refs {
+            for (name_id, slot) in decls.iter().enumerate() {
+                let dlen = slot.len as usize;
+                if dlen == 0 || dlen > MAX_DECL_FILES_FOR_SIGNAL || slot.type_mask == 0 {
                     continue;
                 }
                 let Some(name) = store.name_str(name_id) else {
@@ -692,7 +751,6 @@ pub fn module_overview_from_store(
                 let Some(refs) = store.ref_files_of(name_id) else {
                     continue;
                 };
-                // Skip ubiquitous tokens that appear in > 60% of a non-trivial repository.
                 if file_count >= 20 && refs.len() * 10 > file_count * 6 {
                     continue;
                 }
@@ -703,15 +761,22 @@ pub fn module_overview_from_store(
                     if from_idx == u32::MAX {
                         continue;
                     }
+                    let Some(caller_path) = store.file_path(caller_fid as usize) else {
+                        continue;
+                    };
                     for i in 0..dlen {
                         let bit = 1u8 << i;
-                        let match_call = edge_types.calls && (slot.callable_mask & bit) != 0;
-                        let match_type = edge_types.type_refs && (slot.type_mask & bit) != 0;
-                        if !match_call && !match_type {
+                        if (slot.type_mask & bit) == 0 {
                             continue;
                         }
                         let callee_fid = slot.fids[i];
                         if caller_fid == callee_fid {
+                            continue;
+                        }
+                        let Some(callee_path) = store.file_path(callee_fid as usize) else {
+                            continue;
+                        };
+                        if !sites::same_lang_family(caller_path, callee_path) {
                             continue;
                         }
                         let Some(&(to_idx, to_internal)) = file_node.get(callee_fid as usize) else {
@@ -722,11 +787,7 @@ pub fn module_overview_from_store(
                         }
                         let entry = edge_acc.entry(edge_key(from_idx, to_idx)).or_default();
                         entry.record_pair(caller_fid, callee_fid);
-                        if match_call {
-                            entry.call_refs += 1;
-                        } else {
-                            entry.type_refs += 1;
-                        }
+                        entry.type_refs += 1;
                         entry.record_symbol(name_id as u32, 1);
                     }
                 }
@@ -754,9 +815,18 @@ pub fn module_overview_from_store(
                 if from_idx == u32::MAX {
                     return;
                 }
+                let Some(derived_path) = store.file_path(derived_fid as usize) else {
+                    return;
+                };
                 for i in 0..dlen {
                     let base_fid = slot.fids[i];
                     if derived_fid == base_fid {
+                        continue;
+                    }
+                    let Some(base_path) = store.file_path(base_fid as usize) else {
+                        continue;
+                    };
+                    if !sites::same_lang_family(derived_path, base_path) {
                         continue;
                     }
                     let Some(&(to_idx, to_internal)) = file_node.get(base_fid as usize) else {
@@ -959,6 +1029,9 @@ pub fn module_overview_with_types(
                 };
                 for &callee_fid in decls {
                     if caller_fid == callee_fid {
+                        continue;
+                    }
+                    if !sites::same_lang_family(&facts.files[caller_fid as usize], &facts.files[callee_fid as usize]) {
                         continue;
                     }
                     let Some(&(to_idx, to_internal)) = file_node.get(callee_fid as usize) else {
@@ -2097,5 +2170,36 @@ mod tests {
             .edges
             .iter()
             .any(|e| e.from == "src/features" && e.to == "src/platform"));
+    }
+
+    #[test]
+    fn c_cpp_and_python_without_real_calls_are_not_linked_in_module_overview() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "c_mod/engine.c",
+            "static int internal_step(int x) { return x + 1; }\nint compute_value(int x) { return internal_step(x); }\n",
+        );
+        write(
+            dir.path(),
+            "cpp_mod/worker.cpp",
+            "// compute_value mentioned in comment only, plus static name internal_step\nint worker_fn(int compute_value) { return compute_value + internal_step(1); }\n",
+        );
+        write(
+            dir.path(),
+            "py_mod/script.py",
+            "def run_script():\n    \"\"\"compute_value() in docstring\"\"\"\n    # compute_value() in comment\n    return compute_value(1)\n",
+        );
+
+        let store = store_of(dir.path());
+        let ov = module_overview_from_store(&store, None, 1, &[], ModuleEdgeTypes::default(), None);
+
+        // Neither cpp_mod (parameter/comment + calling C static) nor py_mod (different language family)
+        // may produce a false call edge to c_mod.
+        assert!(
+            ov.edges.is_empty(),
+            "expected zero false cross-module call edges, got: {:?}",
+            ov.edges
+        );
     }
 }

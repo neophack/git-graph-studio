@@ -99,9 +99,14 @@ abstract class ReportPage<T> implements AnalysisPageView {
 		this.filterInput.type = 'search';
 		this.filterInput.placeholder = t('analysis.page.filter');
 		this.filterInput.setAttribute('aria-label', t('analysis.page.filter'));
+		let filterTimer: ReturnType<typeof setTimeout> | null = null;
 		this.filterInput.addEventListener('input', () => {
-			this.filter = this.filterInput.value.trim().toLowerCase();
-			this.render();
+			if (filterTimer !== null) clearTimeout(filterTimer);
+			filterTimer = setTimeout(() => {
+				filterTimer = null;
+				this.filter = this.filterInput.value.trim().toLowerCase();
+				this.render();
+			}, 100);
 		});
 		const header = el('div', 'an-header', [
 			icon(tool.icon),
@@ -531,9 +536,14 @@ class ModulePage implements AnalysisPageView {
 		this.filterInput.type = 'search';
 		this.filterInput.placeholder = t('analysis.page.filter');
 		this.filterInput.setAttribute('aria-label', t('analysis.page.filter'));
+		let filterTimer: ReturnType<typeof setTimeout> | null = null;
 		this.filterInput.addEventListener('input', () => {
-			this.filter = this.filterInput.value.trim().toLowerCase();
-			this.render();
+			if (filterTimer !== null) clearTimeout(filterTimer);
+			filterTimer = setTimeout(() => {
+				filterTimer = null;
+				this.filter = this.filterInput.value.trim().toLowerCase();
+				this.render();
+			}, 100);
 		});
 		this.filterInput.addEventListener('keydown', (event) => {
 			if (event.key !== 'Enter') return;
@@ -1380,9 +1390,14 @@ class ImportsPage implements AnalysisPageView {
 		this.filterInput.type = 'search';
 		this.filterInput.placeholder = t('analysis.page.filter');
 		this.filterInput.setAttribute('aria-label', t('analysis.page.filter'));
+		let filterTimer: ReturnType<typeof setTimeout> | null = null;
 		this.filterInput.addEventListener('input', () => {
-			this.filter = this.filterInput.value.trim().toLowerCase();
-			this.render();
+			if (filterTimer !== null) clearTimeout(filterTimer);
+			filterTimer = setTimeout(() => {
+				filterTimer = null;
+				this.filter = this.filterInput.value.trim().toLowerCase();
+				this.render();
+			}, 100);
 		});
 		this.body = el('div', 'an-list');
 		container.append(

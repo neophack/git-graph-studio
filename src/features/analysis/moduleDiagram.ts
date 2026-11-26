@@ -560,9 +560,22 @@ export class DiagramView {
 		this.minimapBtn.classList.add('active');
 		this.resetBtn = actionButton('discard', t('analysis.modules.resetLayout'), () => this.resetPositions()) as HTMLButtonElement;
 		this.resetBtn.hidden = true;
+		let exportReset: ReturnType<typeof setTimeout> | null = null;
 		const exportBtn = actionButton('export', t('analysis.modules.exportSvg'), () => {
 			const svg = this.exportSvg();
-			if (svg) void writeText(svg).then(() => {}, () => {});
+			if (!svg) return;
+			void writeText(svg).then(() => {
+				const ic = exportBtn.querySelector('.codicon');
+				if (ic) ic.className = 'codicon codicon-check';
+				exportBtn.classList.add('active');
+				if (exportReset !== null) clearTimeout(exportReset);
+				exportReset = setTimeout(() => {
+					exportReset = null;
+					const iconEl = exportBtn.querySelector('.codicon');
+					if (iconEl) iconEl.className = 'codicon codicon-export';
+					exportBtn.classList.remove('active');
+				}, 1600);
+			}, () => {});
 		});
 
 		this.host.append(el('div', 'an-zoombar', [
@@ -1803,7 +1816,7 @@ export class DiagramView {
 		}
 		if (event.key === '+' || event.key === '=') this.stepZoom(ZOOM_STEP);
 		else if (event.key === '-' || event.key === '_') this.stepZoom(1 / ZOOM_STEP);
-		else if (event.key === '0' || event.key === 'Home') this.fit(true);
+		else if (event.key === '0' || event.key === 'Home' || event.key === 'f' || event.key === 'F') this.fit(true);
 		else if (event.key === 'Escape') this.callbacks.onEscape?.();
 		else if (event.key === 'ArrowLeft') { this.cancelAnimation(); this.panBy(ARROW_PAN, 0); }
 		else if (event.key === 'ArrowRight') { this.cancelAnimation(); this.panBy(-ARROW_PAN, 0); }

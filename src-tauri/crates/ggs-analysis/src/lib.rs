@@ -51,6 +51,7 @@ use rayon::prelude::*;
 use ggs_fs::walk_files;
 use ggs_index::scan::is_symbol_source;
 use ggs_index::symbols::parse::{self, ParsedFile};
+use ggs_index::symbols::sites::{lang_family, same_lang_family};
 
 /// Files per progress batch; also the cancellation checkpoint (the symbol store's rhythm).
 pub const BUILD_BATCH: usize = 256;
@@ -553,20 +554,55 @@ impl AnalysisData {
             .saturating_sub(1) as u32
     }
 
-    /// Every declaration a call site (may) reach: the name index's slice for the
-    /// unambiguous classes, a filtered Vec for the narrowed ones (small, transient —
-    /// one allocation per queried site, never stored).
+    /// Whether a call in `caller_file` can legally reach `target` (same language family,
+    /// and C/C++ `static` file-private declarations stay isolated to their own file).
+    #[inline]
+    fn compatible_target(&self, caller_file: u32, target: DefKey) -> bool {
+        if caller_file == target.0 {
+            return true;
+        }
+        let caller_path = &self.files[caller_file as usize].path;
+        let target_file = &self.files[target.0 as usize];
+        if !same_lang_family(caller_path, &target_file.path) {
+            return false;
+        }
+        let ext = target_file.path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+        if lang_family(ext) == "c_cpp"
+            && !matches!(ext.to_ascii_lowercase().as_str(), "h" | "hpp" | "hh" | "hxx" | "ipp")
+            && !target_file.symbols[target.1 as usize].exported
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Every declaration a call site (may) reach: filtered for language-family and
+    /// C/C++ `static` linkage compatibility.
     fn resolved_targets(&self, call: &Call, file_idx: u32) -> Cow<'_, [DefKey]> {
         let candidates = self.decl_range(call.name);
         match call.class {
-            ResolveClass::Unique | ResolveClass::AllCandidates => Cow::Borrowed(candidates),
+            ResolveClass::Unique | ResolveClass::AllCandidates => {
+                if candidates.iter().all(|&key| self.compatible_target(file_idx, key)) {
+                    Cow::Borrowed(candidates)
+                } else {
+                    Cow::Owned(
+                        candidates
+                            .iter()
+                            .copied()
+                            .filter(|&key| self.compatible_target(file_idx, key))
+                            .collect(),
+                    )
+                }
+            }
             ResolveClass::ByContainer => {
                 let wanted = call.receiver;
                 Cow::Owned(
                     candidates
                         .iter()
                         .copied()
-                        .filter(|&key| self.container_of(key) == wanted)
+                        .filter(|&key| {
+                            self.container_of(key) == wanted && self.compatible_target(file_idx, key)
+                        })
                         .collect(),
                 )
             }
@@ -576,7 +612,9 @@ impl AnalysisData {
                     candidates
                         .iter()
                         .copied()
-                        .filter(|&key| self.container_of(key) == wanted)
+                        .filter(|&key| {
+                            self.container_of(key) == wanted && self.compatible_target(file_idx, key)
+                        })
                         .collect(),
                 )
             }
@@ -585,18 +623,14 @@ impl AnalysisData {
 
     /// How many declarations a call site (may) reach.
     fn resolved_len(&self, call: &Call, file_idx: u32) -> usize {
-        match call.class {
-            ResolveClass::Unique | ResolveClass::AllCandidates => {
-                self.decl_range(call.name).len()
-            }
-            ResolveClass::ByContainer | ResolveClass::SelfType => {
-                self.resolved_targets(call, file_idx).len()
-            }
-        }
+        self.resolved_targets(call, file_idx).len()
     }
 
     /// Whether the call's resolution reaches `target` — O(1) by the stored class.
     fn resolves_to(&self, call: &Call, target: DefKey, file_idx: u32) -> bool {
+        if !self.compatible_target(file_idx, target) {
+            return false;
+        }
         match call.class {
             ResolveClass::Unique => self.decl_range(call.name) == [target],
             ResolveClass::AllCandidates => true,

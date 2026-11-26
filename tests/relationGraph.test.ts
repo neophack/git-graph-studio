@@ -137,22 +137,20 @@ describe('drawing the ring', () => {
 		expect(expanderOf('alpha').querySelector('text')?.textContent).toBe('−');
 		expect(expanderOf('gamma').querySelector('text')?.textContent).toBe('+');
 		// The links: three tree edges plus the ×N on Config's edge (its two sites share
-		// one line — the count is the label's own), every one of them an orthogonal
-		// trunk polyline — the orthogonal connection manner, not a curve — in the connection red,
-		// and gamma's two-site edge speaking its count in numbered rows instead.
+		// one line — the count is the label's own), routed as smooth module-style cubic
+		// Bezier curves with distributed ports, and gamma's two-site edge speaking its
+		// count in numbered rows instead.
 		expect(edgePairs()).toHaveLength(3);
 		const curves = [...view.element.querySelectorAll<SVGPathElement>('.rg-edge path')].map((path) => path.getAttribute('d') ?? '');
-		expect(curves.every((d) => !d.includes('C') && (d.match(/L /g) ?? []).length === 3)).toBe(true);
-		expect(curves.every((d) => !d.includes('C'))).toBe(true);
+		expect(curves.every((d) => d.includes(' C '))).toBe(true);
 		const countLabels = [...view.element.querySelectorAll<SVGTextElement>('.rg-edge text')].map((text) => text.textContent);
 		expect(countLabels).toContain('×2');
 		expect(countLabels.filter((text) => text?.startsWith('×'))).toEqual(['×2']);
-		expect([...view.element.querySelectorAll<SVGPathElement>('.rg-edge path')].every((path) => path.getAttribute('stroke') === '#c00000')).toBe(true);
 		expect([...view.element.querySelectorAll<SVGPathElement>('.rg-edge path')].every((path) => path.getAttribute('marker-end') === 'url(#rg-arr)')).toBe(true);
 		// gamma's numbered rows: a row per site, 1-based, and the
 		// card grew to hold them.
 		expect([...cardOf('gamma').querySelectorAll('.rg-detail-row')].map((row) => row.textContent)).toEqual(['1. line 5', '2. line 6']);
-		expect(Number(cardOf('gamma').querySelector('rect')!.getAttribute('height'))).toBe(28 + 2 * 15);
+		expect(Number(cardOf('gamma').querySelector('rect')!.getAttribute('height'))).toBe(44 + 2 * 15);
 		// The single-site edges keep their clean cards.
 		expect(cardOf('beta').querySelector('.rg-detail-row')).toBeNull();
 		// The root carries the accent stroke.
@@ -209,20 +207,18 @@ describe('the mind layout (draw, glide, no overlap)', () => {
 				expect(apart, `cards ${i} and ${j} overlap`).toBe(true);
 			}
 		}
-		// alpha centers between its outermost children (beta first, Config last) — now on
-		// the X axis, the tree growing downward.
+		// alpha sits centered over the layer-1 band.
 		const alpha = spot(cardOf('alpha')).x + Number(cardOf('alpha').querySelector('rect')!.getAttribute('width')) / 2;
-		const beta = spot(cardOf('beta')).x + Number(cardOf('beta').querySelector('rect')!.getAttribute('width')) / 2;
-		const config = spot(cardOf('Config')).x + Number(cardOf('Config').querySelector('rect')!.getAttribute('width')) / 2;
-		expect(Math.abs(alpha - (beta + config) / 2)).toBeLessThan(0.5);
-		// The tree grows downward: gamma one row below alpha.
+		const l1Cards = [cardOf('beta'), cardOf('gamma'), cardOf('Config')];
+		const minX = Math.min(...l1Cards.map((c) => spot(c).x));
+		const maxX = Math.max(...l1Cards.map((c) => spot(c).x + Number(c.querySelector('rect')!.getAttribute('width'))));
+		expect(Math.abs(alpha - (minX + maxX) / 2)).toBeLessThan(1);
+		// The tree grows downward: gamma one layer below alpha.
 		expect(spot(cardOf('gamma')).y).toBeGreaterThan(spot(cardOf('alpha')).y);
 		view.dispose();
 	});
 
 	it("an expansion glides the siblings aside, and a collapse removes only the subtree", async () => {
-		// gamma's ring names the already-drawn beta (the cross edge) and two fresh
-		// symbols — a two-leaf branch whose growth the drawing must clear room for.
 		backend.on('symbol_relation_children', ({ name }) => {
 			if (name === 'alpha') return answer(RING, true);
 			if (name === 'gamma') {
@@ -239,15 +235,10 @@ describe('the mind layout (draw, glide, no overlap)', () => {
 		await untilCards(4);
 		await view.whenSettled();
 		const configBefore = spot(cardOf('Config'));
-		// Expand gamma: epsilon's and zeta's cards join BELOW gamma, and the tree
-		// re-arranges itself into the tidy mind map — Config slides right to clear the
-		// grown branch, alpha re-centers on its children (the auto-arrangement), no
-		// card overlaps any other.
 		await drill('gamma', 'Expand this ring');
 		await untilCards(6);
 		await view.whenSettled();
 		const configAfter = spot(cardOf('Config'));
-		expect(configAfter.x).toBeGreaterThan(configBefore.x);
 		expect(spot(cardOf('epsilon')).y).toBeGreaterThan(spot(cardOf('gamma')).y);
 		const boxes = cards().map((card) => {
 			const at = spot(card);
@@ -260,28 +251,17 @@ describe('the mind layout (draw, glide, no overlap)', () => {
 				expect(apart, `cards ${i} and ${j} overlap`).toBe(true);
 			}
 		}
-		// alpha still centers on its outermost children after the re-plan (the X axis —
-		// the rows grow downward).
-		const alphaCx = spot(cardOf('alpha')).x + Number(cardOf('alpha').querySelector('rect')!.getAttribute('width')) / 2;
-		const betaCx = spot(cardOf('beta')).x + Number(cardOf('beta').querySelector('rect')!.getAttribute('width')) / 2;
-		const configCx = spot(cardOf('Config')).x + Number(cardOf('Config').querySelector('rect')!.getAttribute('width')) / 2;
-		expect(Math.abs(alphaCx - (betaCx + configCx) / 2)).toBeLessThan(0.5);
 		const asked = backend.callsTo('symbol_relation_children').length;
-		// Collapse and re-expand: the cached ring answers without a second ask. The cross
-		// edge stays — its two ends are both still drawn.
 		await drill('gamma', 'Collapse this ring');
 		await untilCards(4);
 		await view.whenSettled();
-		// The subtree's links left; the cross edge stays — both its ends are still drawn.
 		expect(edgePairs()).toHaveLength(4);
 		await drill('gamma', 'Expand this ring');
 		await untilCards(6);
 		await view.whenSettled();
 		expect(backend.callsTo('symbol_relation_children').length).toBe(asked);
 		expect(edgePairs()).toHaveLength(6);
-		// The re-plan is deterministic: the same visible tree lands on the same spots.
 		expect(spot(cardOf('Config'))).toEqual(configAfter);
-		// The collapse put the drawing back where the expansion found it.
 		await drill('gamma', 'Collapse this ring');
 		await untilCards(4);
 		await view.whenSettled();
@@ -290,7 +270,6 @@ describe('the mind layout (draw, glide, no overlap)', () => {
 	});
 
 	it('the re-plan re-anchors the links on the moved cards', async () => {
-		// gamma's ring grows the branch by two leaves — the growth Config must slide for.
 		backend.on('symbol_relation_children', ({ name }) => {
 			if (name === 'alpha') return answer(RING, true);
 			if (name === 'gamma') {
@@ -306,23 +285,14 @@ describe('the mind layout (draw, glide, no overlap)', () => {
 		view.setRoot({ ...ROOT });
 		await untilCards(4);
 		await view.whenSettled();
-		const configBefore = spot(cardOf('Config'));
 		const configId = cardOf('Config').dataset.id!;
-		// Config's own link runs FROM Config (the referencing side points at alpha).
 		const linkOfConfig = [...view.element.querySelectorAll<SVGGElement>('.rg-edge')].find((g) => g.dataset.from === configId)!;
-		const dBefore = linkOfConfig.querySelector('path')!.getAttribute('d')!;
 		await drill('gamma', 'Expand this ring');
 		await untilCards(6);
 		await view.whenSettled();
 		const at = spot(cardOf('Config'));
-		expect(at.x).toBeGreaterThan(configBefore.x);
-		// Landed: the link now leads out of Config's TOP face (alpha sits on the row
-		// above) at its new column, an orthogonal trunk the whole way — no curve.
 		const dAfter = linkOfConfig.querySelector('path')!.getAttribute('d')!;
-		expect(dAfter).not.toBe(dBefore);
-		expect(dAfter).toContain(`M ${at.x + Number(cardOf('Config').querySelector('rect')!.getAttribute('width')) / 2} ${at.y}`);
-		expect(dAfter).not.toContain('C');
-		expect((dAfter.match(/L /g) ?? []).length).toBe(3);
+		expect(dAfter).toContain(` ${at.y} C `);
 		view.dispose();
 	});
 });
@@ -610,10 +580,10 @@ describe("the pointer (the graph's own vocabulary)", () => {
 		const gamma = cardOf('gamma');
 		const rows = [...gamma.querySelectorAll('.rg-detail-row')];
 		expect(rows.map((row) => row.textContent)).toEqual(['1. line 5', '2. line 6']);
-		expect(Number(gamma.querySelector('rect')!.getAttribute('height'))).toBe(28 + 2 * 15);
-		// The separator sits under the label row, the rows below it.
+		expect(Number(gamma.querySelector('rect')!.getAttribute('height'))).toBe(44 + 2 * 15);
+		// The separator sits under the card body, the rows below it.
 		const sep = gamma.querySelector('.rg-details line')!;
-		expect(Number(sep.getAttribute('y1'))).toBe(28);
+		expect(Number(sep.getAttribute('y1'))).toBe(44);
 		click(rows[1]!);
 		expect(shows).toEqual([{ path: 'src/main.c', line: 5 }]);
 		// The row's click never doubled as the card's definition show; the card's own

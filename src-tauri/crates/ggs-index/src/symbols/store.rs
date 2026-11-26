@@ -108,7 +108,13 @@ const MAGIC: &[u8; 6] = b"GGSIDX";
 /// Format 8 (2026-11-23): the KINDS table added `field` and `constant` (struct/class
 /// fields, enum constants, top-level constants), and the C/C++ queries expanded to index
 /// fields, enumerators, unions, and multi-pointer/array/function-pointer declarations.
-const VERSION: u8 = 8;
+/// Format 9 (2026-11-26): symbols carry a visibility `flags` byte (marking C/C++ `static`
+/// file-private declarations), and the store carries an AST-extracted `call_refs` inverted
+/// index so module-level call graphs only link actual call sites, never comments/strings/vars.
+const VERSION: u8 = 9;
+
+/// Symbol flag bit: file-private declaration (e.g. C/C++ `static` in a `.c`/`.cpp` file).
+const SYM_FLAG_PRIVATE: u8 = 1;
 
 /// The hidden per-project analysis folder (2026-11-21, the owner's direction: add a hidden
 /// code-analysis folder inside the project — the program may delete it, it never enters
@@ -221,6 +227,7 @@ pub const BUILD_BATCH: usize = 256;
 #[derive(Clone, Debug, PartialEq)]
 struct StoredSymbol {
     kind: u8,
+    flags: u8,
     name_id: u32,
     /// The enclosing type's interned name, or [`NO_CONTAINER`].
     container_id: u32,
@@ -238,10 +245,11 @@ struct StoredBases {
     bases: Vec<u32>,
 }
 
-/// One file's build scan: its path, the words it contains, its stored symbols and its
-/// base records — phase 3's per-file output before it lands in the entry.
+/// One file's build scan: its path, the words it contains, the AST call targets it
+/// invokes, its stored symbols and its base records.
 type Scanned = (
     String,
+    Vec<u32>,
     Vec<u32>,
     Vec<StoredSymbol>,
     Vec<StoredBases>,
@@ -249,13 +257,14 @@ type Scanned = (
 
 /// One indexed file: its fingerprint and what it declares. `words` is the transpose of the
 /// occurrence lists — the names this file contains — kept so an update can subtract the
-/// file's contributions before rescanning it.
+/// file's contributions before rescanning it. `call_words` is the transpose of `call_refs`.
 struct FileEntry {
     path: String,
     mtime_ms: u64,
     size: u64,
     symbols: Vec<StoredSymbol>,
     words: Vec<u32>,
+    call_words: Vec<u32>,
     bases: Vec<StoredBases>,
 }
 
@@ -265,11 +274,14 @@ struct Extraction {
     mtime_ms: u64,
     size: u64,
     symbols: Vec<Extracted>,
+    /// Deduplicated callee names from AST call expressions in this file.
+    calls: Vec<String>,
 }
 
 /// One declaration as extracted, names still owned by the file.
 struct Extracted {
     kind: u8,
+    flags: u8,
     name: String,
     container: Option<String>,
     line: u32,
@@ -287,6 +299,9 @@ pub struct SymbolStore {
     /// Per name: the ids of the files containing the word, or `None` when the list is not
     /// trusted to be complete (the name first appeared in an incremental update).
     refs: Vec<Option<Vec<u32>>>,
+    /// Per name: the ids of the files containing an actual AST call site `name(...)`,
+    /// or `None` when untrusted (new name added incrementally).
+    call_refs: Vec<Option<Vec<u32>>>,
     /// The paths whose volume facts on disk may lag the store: every file a batch
     /// re-extracted since the last successful volume write. The dirty-aware save
     /// re-derives exactly these files' records and loads the rest from the volumes
@@ -365,6 +380,7 @@ impl SymbolStore {
             files: Vec::new(),
             names: Vec::new(),
             refs: Vec::new(),
+            call_refs: Vec::new(),
             dirty: HashSet::new(),
         }
     }
@@ -760,6 +776,12 @@ impl SymbolStore {
         self.refs.get(name_id)?.as_deref()
     }
 
+    /// Borrow the trusted AST call-site file-id list for `name_id`, or `None` if untrusted.
+    #[inline]
+    pub fn call_files_of(&self, name_id: usize) -> Option<&[u32]> {
+        self.call_refs.get(name_id)?.as_deref()
+    }
+
     /// Visit every `(file_id, name_id, is_callable)` declaration in file order without
     /// cloning strings or allocating intermediate tables.
     pub fn for_each_file_decl(&self, mut f: impl FnMut(u32, u32, bool)) {
@@ -769,6 +791,52 @@ impl SymbolStore {
                 f(fid, symbol.name_id, Self::is_callable_kind(symbol.kind));
             }
         }
+    }
+
+    /// Visit every `(file_id, name_id, is_callable, is_private)` declaration in file order.
+    pub fn for_each_file_decl_vis(&self, mut f: impl FnMut(u32, u32, bool, bool)) {
+        for (fid, file) in self.files.iter().enumerate() {
+            let fid = fid as u32;
+            for symbol in &file.symbols {
+                f(
+                    fid,
+                    symbol.name_id,
+                    Self::is_callable_kind(symbol.kind),
+                    (symbol.flags & SYM_FLAG_PRIVATE) != 0,
+                );
+            }
+        }
+    }
+
+    /// Returns true if the declaration of `name` in `path` (optionally at/covering `line`)
+    /// is marked file-private (e.g. C/C++ `static` in a `.c`/`.cpp` implementation file).
+    pub fn is_symbol_private(&self, path: &str, name: &str, line: Option<usize>) -> bool {
+        let Ok(fid) = self.files.binary_search_by(|f| f.path.as_str().cmp(path)) else {
+            return false;
+        };
+        let Ok(nid) = self.names.binary_search_by(|n| n.as_str().cmp(name)) else {
+            return false;
+        };
+        let file = &self.files[fid];
+        let mut matched_any = false;
+        let mut all_private = true;
+        for sym in &file.symbols {
+            if sym.name_id != nid as u32 {
+                continue;
+            }
+            if let Some(target_line) = line {
+                if sym.line as usize == target_line
+                    || (sym.line as usize <= target_line && target_line <= sym.end_line as usize)
+                {
+                    return (sym.flags & SYM_FLAG_PRIVATE) != 0;
+                }
+            }
+            matched_any = true;
+            if (sym.flags & SYM_FLAG_PRIVATE) == 0 {
+                all_private = false;
+            }
+        }
+        matched_any && all_private
     }
 
     /// Visit every `(derived_file_id, base_name_id)` inheritance link without cloning.
@@ -954,11 +1022,19 @@ impl SymbolStore {
                         Ok(text) => words_in(&text, &|word| lookup.get(word).copied()),
                         Err(_) => Vec::new(),
                     };
+                    let mut call_words: Vec<u32> = file
+                        .calls
+                        .iter()
+                        .filter_map(|c| lookup.get(c.as_str()).copied())
+                        .collect();
+                    call_words.sort_unstable();
+                    call_words.dedup();
                     let symbols = file
                         .symbols
                         .iter()
                         .map(|symbol| StoredSymbol {
                             kind: symbol.kind,
+                            flags: symbol.flags,
                             name_id: lookup[symbol.name.as_str()],
                             container_id: symbol
                                 .container
@@ -984,7 +1060,7 @@ impl SymbolStore {
                                 .collect(),
                         })
                         .collect();
-                    (file.path.clone(), words, symbols, bases)
+                    (file.path.clone(), words, call_words, symbols, bases)
                 })
                 .collect();
             scanned.append(&mut part);
@@ -995,17 +1071,19 @@ impl SymbolStore {
             files: scanned
                 .into_iter()
                 .zip(extracted.iter())
-                .map(|((path, words, symbols, bases), file)| FileEntry {
+                .map(|((path, words, call_words, symbols, bases), file)| FileEntry {
                     path,
                     mtime_ms: file.mtime_ms,
                     size: file.size,
                     symbols,
                     words,
+                    call_words,
                     bases,
                 })
                 .collect(),
             names,
             refs: Vec::new(),
+            call_refs: Vec::new(),
             dirty: HashSet::new(),
         };
         // The walk is sorted and phase 1 sorted again; the zip above keeps that order.
@@ -1083,7 +1161,7 @@ impl SymbolStore {
         let before_len = self.files.len();
         let known: HashSet<String> = self.files.iter().map(|f| f.path.clone()).collect();
         let added = wanted.iter().any(|p| !known.contains(*p));
-        let SymbolStore { files, refs, .. } = self;
+        let SymbolStore { files, refs, call_refs, .. } = self;
         let mut to_extract: HashSet<String> = HashSet::new();
         let mut dropped: HashSet<String> = HashSet::new();
         let mut changed = false;
@@ -1092,7 +1170,7 @@ impl SymbolStore {
                 continue;
             }
             changed = true;
-            Self::subtract_contributions(refs, files, file);
+            Self::subtract_contributions(refs, call_refs, files, file);
             if stat_of(&Path::new(&root).join(&file.path)).is_some() {
                 to_extract.insert(file.path.clone());
             } else {
@@ -1119,11 +1197,7 @@ impl SymbolStore {
                 dropped.insert(path.clone());
             }
         }
-        // The compacted id of every old id — u32::MAX for the dropped rows. The occurrence
-        // lists still name pre-compaction ids, and renumber_after_edits remaps by current
-        // position, so a kept file whose old id outlives the shrunken table would index out
-        // of bounds there. Rewrite the ids here; a dropped id subtraction somehow left
-        // behind is a reference to a file that no longer exists and goes with it.
+        // The compacted id of every old id — u32::MAX for the dropped rows.
         let mut kept: Vec<FileEntry> = Vec::with_capacity(files.len());
         let mut compact: Vec<u32> = Vec::with_capacity(files.len());
         for file in files.drain(..) {
@@ -1136,6 +1210,12 @@ impl SymbolStore {
         }
         *files = kept;
         for list in refs.iter_mut().flatten() {
+            for id in list.iter_mut() {
+                *id = compact.get(*id as usize).copied().unwrap_or(u32::MAX);
+            }
+            list.retain(|&id| id != u32::MAX);
+        }
+        for list in call_refs.iter_mut().flatten() {
             for id in list.iter_mut() {
                 *id = compact.get(*id as usize).copied().unwrap_or(u32::MAX);
             }
@@ -1166,15 +1246,20 @@ impl SymbolStore {
         }
     }
 
-    /// Remove `file`'s occurrence contributions from the name lists. An associated function
-    /// with explicit field borrows: the caller scans `files` while subtracting into `refs`.
+    /// Remove `file`'s occurrence and call-site contributions from the name lists.
     fn subtract_contributions(
         refs: &mut [Option<Vec<u32>>],
+        call_refs: &mut [Option<Vec<u32>>],
         files: &[FileEntry],
         file: &FileEntry,
     ) {
         for &name in &file.words {
             if let Some(Some(list)) = refs.get_mut(name as usize) {
+                list.retain(|&f| files[f as usize].path != file.path);
+            }
+        }
+        for &name in &file.call_words {
+            if let Some(Some(list)) = call_refs.get_mut(name as usize) {
                 list.retain(|&f| files[f as usize].path != file.path);
             }
         }
@@ -1255,6 +1340,7 @@ impl SymbolStore {
         for name in &fresh {
             self.names.push(name.clone());
             self.refs.push(None); // untrusted until a full build
+            self.call_refs.push(None);
         }
         // The id map is built once the table is complete; sort_names fixes the order after.
         let mut lookup: HashMap<String, u32> = self
@@ -1270,22 +1356,25 @@ impl SymbolStore {
             .enumerate()
             .map(|(id, file)| (file.path.clone(), id as u32))
             .collect();
-        // The refilled rows' occurrence lists: re-sorted and deduplicated in place —
-        // the renumber pass that used to do this for every batch only runs on real
-        // table changes now.
         let mut refilled_lists: Vec<u32> = Vec::new();
+        let mut refilled_call_lists: Vec<u32> = Vec::new();
         for file in upserts {
-            // The occurrence list: one more read of the file (the extraction no longer
-            // carries the word set — the full build stopped holding every file's words);
-            // an unknown word — never a declared name — drops.
             let words = fs::read_to_string(Path::new(&self.root).join(&file.path))
                 .map(|text| words_in(&text, &|word| lookup.get(word).copied()))
                 .unwrap_or_default();
+            let mut call_words: Vec<u32> = file
+                .calls
+                .iter()
+                .filter_map(|c| lookup.get(c.as_str()).copied())
+                .collect();
+            call_words.sort_unstable();
+            call_words.dedup();
             let symbols = file
                 .symbols
                 .iter()
                 .map(|symbol| StoredSymbol {
                     kind: symbol.kind,
+                    flags: symbol.flags,
                     name_id: lookup[symbol.name.as_str()],
                     container_id: symbol
                         .container
@@ -1317,11 +1406,10 @@ impl SymbolStore {
                 size: file.size,
                 symbols,
                 words: words.clone(),
+                call_words: call_words.clone(),
                 bases,
             };
             match positions.get(&entry.path).copied() {
-                // The refill: the row keeps its id (its old occurrence contributions
-                // were subtracted by the caller), the new ones land under the same id.
                 Some(id) => {
                     self.files[id as usize] = entry;
                     for word in &words {
@@ -1330,14 +1418,23 @@ impl SymbolStore {
                             list.push(id);
                         }
                     }
+                    for word in &call_words {
+                        refilled_call_lists.push(*word);
+                        if let Some(Some(list)) = self.call_refs.get_mut(*word as usize) {
+                            list.push(id);
+                        }
+                    }
                 }
-                // A brand-new file: the entry's pre-renumber id is final here —
-                // renumber_after_edits remaps it.
                 None => {
                     let entry_id = self.files.len() as u32;
                     self.files.push(entry);
                     for word in words {
                         if let Some(Some(files)) = self.refs.get_mut(word as usize) {
+                            files.push(entry_id);
+                        }
+                    }
+                    for word in call_words {
+                        if let Some(Some(files)) = self.call_refs.get_mut(word as usize) {
                             files.push(entry_id);
                         }
                     }
@@ -1352,9 +1449,14 @@ impl SymbolStore {
                 list.dedup();
             }
         }
-        // No fresh names — no id moved — and the whole-table re-sort plus its id remap
-        // can skip: the Ctrl+S case was paying O(names log names) string clones and a
-        // full refs rebuild for an identity transform.
+        refilled_call_lists.sort_unstable();
+        refilled_call_lists.dedup();
+        for word in refilled_call_lists {
+            if let Some(Some(list)) = self.call_refs.get_mut(word as usize) {
+                list.sort_unstable();
+                list.dedup();
+            }
+        }
         if !fresh.is_empty() {
             self.sort_names();
         }
@@ -1379,6 +1481,11 @@ impl SymbolStore {
             refs[new_ids[old_id] as usize] = owned;
         }
         self.refs = refs;
+        let mut call_refs = vec![None; self.names.len()];
+        for (old_id, owned) in std::mem::take(&mut self.call_refs).into_iter().enumerate() {
+            call_refs[new_ids[old_id] as usize] = owned;
+        }
+        self.call_refs = call_refs;
         for file in &mut self.files {
             for symbol in &mut file.symbols {
                 symbol.name_id = new_ids[symbol.name_id as usize];
@@ -1396,6 +1503,11 @@ impl SymbolStore {
             }
             file.words.sort_unstable();
             file.words.dedup();
+            for word in &mut file.call_words {
+                *word = new_ids[*word as usize];
+            }
+            file.call_words.sort_unstable();
+            file.call_words.dedup();
         }
     }
 
@@ -1425,14 +1537,29 @@ impl SymbolStore {
                 files.dedup();
             }
         }
+        for name in 0..self.call_refs.len() {
+            if let Some(files) = &mut self.call_refs[name] {
+                for file in files.iter_mut() {
+                    *file = new_ids[*file as usize];
+                }
+                files.sort_unstable();
+                files.dedup();
+            }
+        }
     }
 
-    /// Recompute every occurrence list from the files' `words` (after a full build).
+    /// Recompute every occurrence and call-site list from the files' `words` / `call_words`.
     fn rebuild_refs(&mut self) {
         self.refs = vec![Some(Vec::new()); self.names.len()];
+        self.call_refs = vec![Some(Vec::new()); self.names.len()];
         for (file_id, file) in self.files.iter().enumerate() {
             for &name in &file.words {
                 if let Some(Some(files)) = self.refs.get_mut(name as usize) {
+                    files.push(file_id as u32);
+                }
+            }
+            for &name in &file.call_words {
+                if let Some(Some(files)) = self.call_refs.get_mut(name as usize) {
                     files.push(file_id as u32);
                 }
             }
@@ -1536,6 +1663,7 @@ impl SymbolStore {
             push_u32(&mut trailer, file.symbols.len() as u32);
             for symbol in &file.symbols {
                 trailer.push(symbol.kind);
+                trailer.push(symbol.flags);
                 trailer.extend_from_slice(&symbol.name_id.to_le_bytes());
                 trailer.extend_from_slice(&symbol.container_id.to_le_bytes());
                 trailer.extend_from_slice(&symbol.line.to_le_bytes());
@@ -1552,6 +1680,18 @@ impl SymbolStore {
             }
         }
         for refs in &self.refs {
+            match refs {
+                None => trailer.push(0),
+                Some(files) => {
+                    trailer.push(1);
+                    push_u32(&mut trailer, files.len() as u32);
+                    for &file in files {
+                        trailer.extend_from_slice(&file.to_le_bytes());
+                    }
+                }
+            }
+        }
+        for refs in &self.call_refs {
             match refs {
                 None => trailer.push(0),
                 Some(files) => {
@@ -1665,6 +1805,7 @@ impl SymbolStore {
             let mut parsed = Vec::with_capacity(symbols);
             for _ in 0..symbols {
                 let kind = take(bytes, &mut at, 1)?[0];
+                let flags = take(bytes, &mut at, 1)?[0];
                 let name_id = take_u32(bytes, &mut at)?;
                 let container_id = take_u32(bytes, &mut at)?;
                 let line = take_u32(bytes, &mut at)?;
@@ -1677,6 +1818,7 @@ impl SymbolStore {
                 }
                 parsed.push(StoredSymbol {
                     kind,
+                    flags,
                     name_id,
                     container_id,
                     line,
@@ -1708,6 +1850,7 @@ impl SymbolStore {
                 size,
                 symbols: parsed,
                 words: Vec::new(),
+                call_words: Vec::new(),
                 bases,
             });
         }
@@ -1726,6 +1869,21 @@ impl SymbolStore {
                 _ => return None,
             }
         }
+        let mut call_refs = Vec::with_capacity(name_count);
+        for _ in 0..name_count {
+            match take(bytes, &mut at, 1)?[0] {
+                0 => call_refs.push(None),
+                1 => {
+                    let count = take_u32(bytes, &mut at)? as usize;
+                    let mut list = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        list.push(take_u32(bytes, &mut at)?);
+                    }
+                    call_refs.push(Some(list));
+                }
+                _ => return None,
+            }
+        }
         if at != bytes.len() {
             return None;
         }
@@ -1734,6 +1892,7 @@ impl SymbolStore {
             files,
             names,
             refs,
+            call_refs,
             dirty: HashSet::new(),
         };
         for (name, files_with) in store.refs.iter().enumerate() {
@@ -1742,6 +1901,14 @@ impl SymbolStore {
                     return None;
                 }
                 store.files[file as usize].words.push(name as u32);
+            }
+        }
+        for (name, files_with) in store.call_refs.iter().enumerate() {
+            for &file in files_with.as_deref().unwrap_or(&[]) {
+                if file as usize >= store.files.len() {
+                    return None;
+                }
+                store.files[file as usize].call_words.push(name as u32);
             }
         }
         Some(store)
@@ -1757,6 +1924,7 @@ impl FileEntry {
             size: 0,
             symbols: Vec::new(),
             words: Vec::new(),
+            call_words: Vec::new(),
             bases: Vec::new(),
         }
     }
@@ -1764,19 +1932,25 @@ impl FileEntry {
 
 /* ---------- Extraction and word scanning ---------- */
 
-/// Read one file and extract its declarations and fingerprint. `None` when the file is gone
-/// or not decodable text — the index is best-effort, like the in-memory one before it.
+/// Read one file and extract its declarations, AST call sites, and fingerprint.
 fn extract_file(root: &str, relative: &str) -> Option<Extraction> {
     let path = Path::new(root).join(relative);
     let stat = stat_of(&path)?;
     let text = fs::read_to_string(&path).ok()?;
     let ext = relative.rsplit_once('.')?.1;
+    let ext_lower = ext.to_ascii_lowercase();
+    let is_c_cpp_impl = matches!(ext_lower.as_str(), "c" | "cpp" | "cc" | "cxx" | "c++");
     let parsed = crate::symbols::parse::parse_file(&text, ext);
     let symbols = parsed
         .symbols
         .into_iter()
         .map(|s| Extracted {
             kind: kind_id(s.kind),
+            flags: if is_c_cpp_impl && !s.exported {
+                SYM_FLAG_PRIVATE
+            } else {
+                0
+            },
             name: s.name,
             container: s.container,
             line: s.line as u32,
@@ -1785,11 +1959,15 @@ fn extract_file(root: &str, relative: &str) -> Option<Extraction> {
             bases: s.bases,
         })
         .collect();
+    let mut calls: Vec<String> = parsed.calls.into_iter().map(|c| c.name).collect();
+    calls.sort_unstable();
+    calls.dedup();
     Some(Extraction {
         path: relative.to_owned(),
         mtime_ms: stat.mtime_ms,
         size: stat.size,
         symbols,
+        calls,
     })
 }
 
@@ -1982,8 +2160,8 @@ fn trailer_file_table(spare: &[u8], root: &str) -> Option<Vec<(String, u64, u64)
         let size = take_u64(bytes, &mut at)?;
         let symbols = take_u32(bytes, &mut at)? as usize;
         for _ in 0..symbols {
-            // kind + name_id + container_id + line + column + end_line, walked past
-            take(bytes, &mut at, 21)?;
+            // kind + flags + name_id + container_id + line + column + end_line, walked past
+            take(bytes, &mut at, 22)?;
         }
         let base_records = take_u32(bytes, &mut at)? as usize;
         for _ in 0..base_records {

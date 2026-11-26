@@ -1,9 +1,7 @@
 // The MCP Server page (module 16): how to point an AI client at this repository's
 // `ggs --mcp` bridge — the command line and the stdio configuration snippet with copy
 // buttons, the tool catalogue the bridge answers `tools/list` with, and its recent
-// calls read back from the JSONL log under ~/.ggs/logs/mcp.log. Module 17's Analysis
-// sidebar lists it beside the five analysis tools and opens it as one of the editor
-// pages, so it loads lazily with them.
+// calls read back from the JSONL log under ~/.ggs/logs/mcp.log.
 
 import { claudeMcpStatus, type ClaudeMcpStatus, type McpLogEntry, mcpLog, type McpToolInfo, mcpTools } from '../../platform/ipc/mcp';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
@@ -12,21 +10,25 @@ import { t, tf } from '../../platform/i18n';
 import { actionButton, el, icon } from '../../platform/ui/index';
 import type { AnalysisPageView } from '../analysis/types';
 
-/** The stdio snippet every MCP client understands (ZCode: the `mcp.servers` field of
- *  ~/.zcode/cli/config.json; Claude Desktop / Cursor: the same shape under
- *  `mcpServers`). */
-const CONFIG_SNIPPET = [
-	'{',
-	'  "mcpServers": {',
-	'    "ggs": {',
-	'      "command": "ggs",',
-	'      "args": ["--mcp", "D:\\\\your\\\\project"]',
-	'    }',
-	'  }',
-	'}'
-].join('\n');
+function commandSnippet(folder: string): string {
+	const quoted = /\s/.test(folder) ? `"${folder}"` : folder;
+	return `ggs --mcp ${quoted}`;
+}
 
-const COMMAND_SNIPPET = 'ggs --mcp D:\\your\\project';
+function configSnippet(folder: string): string {
+	return JSON.stringify(
+		{
+			mcpServers: {
+				ggs: {
+					command: 'ggs',
+					args: ['--mcp', folder]
+				}
+			}
+		},
+		null,
+		2
+	);
+}
 
 export class McpPage implements AnalysisPageView {
 	private tools: McpToolInfo[] = [];
@@ -65,8 +67,6 @@ export class McpPage implements AnalysisPageView {
 				mcpLog(),
 				claudeMcpStatus()
 			]);
-			// A defaulting test layer (or a degraded backend) answers null — an empty
-			// catalogue and log, not a render crash.
 			this.tools = tools ?? [];
 			this.log = log ?? [];
 			this.claude = claude;
@@ -77,19 +77,31 @@ export class McpPage implements AnalysisPageView {
 		this.render();
 	}
 
-	/** A copy button that confirms in place; the clipboard plugin's absence (a stripped
-	 *  build) leaves the row as it was instead of throwing. */
+	/** A copy button with crisp temporary checkmark feedback on success. */
 	private copyButton(text: string, label: string): HTMLElement {
+		let resetTimer: ReturnType<typeof setTimeout> | null = null;
 		const button = actionButton('copy', label, () => {
 			void writeText(text).then(
-				() => { button.title = t('mcp.copied'); },
-				() => { /* the clipboard is unavailable — the click still happened */ }
+				() => {
+					button.title = t('mcp.copied');
+					const ic = button.querySelector('.codicon');
+					if (ic) ic.className = 'codicon codicon-check';
+					button.classList.add('active');
+					if (resetTimer !== null) clearTimeout(resetTimer);
+					resetTimer = setTimeout(() => {
+						resetTimer = null;
+						button.title = label;
+						const iconEl = button.querySelector('.codicon');
+						if (iconEl) iconEl.className = 'codicon codicon-copy';
+						button.classList.remove('active');
+					}, 1600);
+				},
+				() => { /* clipboard unavailable */ }
 			);
 		});
 		return button;
 	}
 
-	/** The bridge logs epoch milliseconds; the page shows the user's locale. */
 	private static when(time: number): string {
 		const date = new Date(time);
 		return Number.isFinite(date.getTime()) ? date.toLocaleString() : String(time);
@@ -106,23 +118,27 @@ export class McpPage implements AnalysisPageView {
 			return;
 		}
 
+		const targetFolder = this.claude?.folder || '/path/to/your/project';
+		const cmdText = commandSnippet(targetFolder);
+		const cfgText = configSnippet(targetFolder);
+
 		this.body.appendChild(el('div', 'an-section', [t('mcp.setup')]));
 		const command = el('div', 'an-codebar', [
 			el('span', 'an-codebar-label', [t('mcp.setup.command')]),
-			el('div', 'actions', [this.copyButton(COMMAND_SNIPPET, t('mcp.copy'))])
+			el('div', 'actions', [this.copyButton(cmdText, t('mcp.copy'))])
 		]);
 		command.title = t('mcp.copy');
 		this.body.append(
 			command,
-			el('code', 'an-code', [COMMAND_SNIPPET])
+			el('code', 'an-code', [cmdText])
 		);
 		const config = el('div', 'an-codebar', [
 			el('span', 'an-codebar-label', [t('mcp.setup.config')]),
-			el('div', 'actions', [this.copyButton(CONFIG_SNIPPET, t('mcp.copy'))])
+			el('div', 'actions', [this.copyButton(cfgText, t('mcp.copy'))])
 		]);
 		this.body.append(
 			config,
-			el('code', 'an-code', [CONFIG_SNIPPET]),
+			el('code', 'an-code', [cfgText]),
 			el('div', 'an-empty an-note', [t('mcp.setup.hint')])
 		);
 

@@ -22,6 +22,43 @@ pub struct SiteCall {
     pub column: usize,
 }
 
+/// Canonical language family for cross-file call/reference compatibility.
+/// C and C++ share a family (`c_cpp`) since they interoperate via headers/extern "C",
+/// while Python, Rust, JS/TS, Go, Java, C#, etc. stay isolated so unrelated languages
+/// never produce false call/dependency edges.
+pub fn lang_family(ext: &str) -> &'static str {
+    match ext.to_ascii_lowercase().as_str() {
+        "c" | "h" | "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "ipp" | "c++" | "h++" => "c_cpp",
+        "py" | "pyi" | "pyw" => "python",
+        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" => "js_ts",
+        "rs" => "rust",
+        "go" => "go",
+        "java" => "java",
+        "cs" => "csharp",
+        "rb" => "ruby",
+        "php" => "php",
+        "swift" => "swift",
+        "kt" | "kts" => "kotlin",
+        "lua" => "lua",
+        "zig" => "zig",
+        _ => "other",
+    }
+}
+
+/// Whether two repo-relative file paths belong to the same callable language family.
+#[inline]
+pub fn same_lang_family(path_a: &str, path_b: &str) -> bool {
+    let ext_a = path_a.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    let ext_b = path_b.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    let fa = lang_family(ext_a);
+    let fb = lang_family(ext_b);
+    if fa == "other" && fb == "other" {
+        ext_a.eq_ignore_ascii_case(ext_b)
+    } else {
+        fa == fb
+    }
+}
+
 /// The syntax keywords that are always followed by a `(` without being calls, per
 /// language family — the walk's own suppression table. A name outside its family's
 /// table (a JS method named `match`, say) stays a call site.
@@ -221,7 +258,7 @@ const DECL_KEYWORDS: &[&str] = &["def", "fn", "func", "function", "macro_rules"]
 pub fn call_sites(ext: &str, text: &str, wanted: &dyn Fn(&str) -> bool) -> Vec<SiteCall> {
     let keywords: HashSet<&str> = keywords_of(ext).iter().copied().collect();
     let mut sites_out = Vec::new();
-    let code_mask = mask::mask(text);
+    let code_mask = mask::mask_for_ext(ext, text);
     let mut prev_text: Option<String> = None;
     walk_tokens(text, &code_mask, |tok| {
         let after_decl = prev_text
@@ -412,7 +449,7 @@ fn import_line(ext: &str, code: &str, raw: &str, out: &mut Vec<String>) {
 /// its own little state machine over the lines. Order follows the text.
 pub fn import_spellings(ext: &str, text: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let code_mask = mask::mask(text);
+    let code_mask = mask::mask_for_ext(ext, text);
     let mut go_block = false;
     for (line_no, line_text) in text.lines().enumerate() {
         let code = code_prefix(&code_mask, line_no, line_text);

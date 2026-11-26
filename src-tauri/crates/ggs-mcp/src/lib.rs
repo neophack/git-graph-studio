@@ -45,7 +45,10 @@ use std::collections::BinaryHeap;
 
 
 use ggs_analysis::metrics::{rows_for_file, MetricRow};
-use ggs_analysis::modules::{module_overview_from_store, ModuleEdge, ModuleEdgeTypes};
+use ggs_analysis::modules::{
+    module_overview_from_store, prepare_edge_detail_from_store, prepare_import_scan_plan,
+    scan_edge_detail, scan_import_edges, ModuleEdge, ModuleEdgeTypes,
+};
 use ggs_analysis::security::{scan_file, Finding, Severity};
 use ggs_analysis::{AnalysisData, Direction};
 use ggs_analysis::index::AnalysisIndex;
@@ -277,15 +280,19 @@ impl McpServer {
             "search_text" => self.tool_search_text(&args),
             "index_status" => Ok(self.tool_status()),
             "symbol_context" => self.tool_symbol_context(&args),
+            "symbol_relations" => self.tool_symbol_relations(&args),
             "file_dependencies" => self.tool_file_dependencies(&args),
             "analysis_call_graph" => self.tool_call_graph(&args),
             "analysis_call_path" => self.tool_call_path(&args),
             "analysis_module_graph" => self.tool_module_graph(&args),
+            "analysis_module_edge_detail" => self.tool_module_edge_detail(&args),
             "analysis_metrics" => self.tool_metrics(&args),
             "analysis_dead_code" => self.tool_dead_code(&args),
             "analysis_security" => self.tool_security(&args),
             "analysis_import_graph" => self.tool_import_graph(&args),
             "analysis_import_cycles" => self.tool_import_cycles(&args),
+            "git_status" => self.tool_git_status(),
+            "git_log" => self.tool_git_log(&args),
             other => Err((-32602, format!("unknown tool: {other}"))),
         };
         self.log_call(name, &args, outcome.is_ok(), started.elapsed());
@@ -706,14 +713,19 @@ impl McpServer {
 
     fn tool_status(&self) -> String {
         let status = self.index.status(&self.root);
+        let dir = ggs_index::symbols::store::SymbolStore::index_dir(
+            &self.root,
+            &ggs_base::paths::ggs_home(),
+        );
         format!(
-			"root {root}{n}state {state}{n}indexed files {files}{n}symbols {symbols}{n}index: ~/.ggs/index/",
-			root = self.root,
-			n = '\n',
-			state = serde_json::to_string(&status.state).unwrap_or_default(),
-			files = status.files,
-			symbols = status.symbols
-		)
+            "root {root}{n}state {state}{n}indexed files {files}{n}symbols {symbols}{n}index: {dir}",
+            root = self.root,
+            n = '\n',
+            state = serde_json::to_string(&status.state).unwrap_or_default(),
+            files = status.files,
+            symbols = status.symbols,
+            dir = dir.display()
+        )
     }
 
     /// `read_file`: one repository file's text, optionally a line window (1-based,
@@ -869,14 +881,37 @@ impl McpServer {
             .get("module")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let scope = args
+            .get("scope")
+            .and_then(Value::as_str)
+            .map(|s| s.replace('\\', "/"));
         let depth = args
             .get("depth")
             .and_then(Value::as_u64)
             .unwrap_or(0)
             .min(3) as u8;
+        let edge_types = args
+            .get("edgeTypes")
+            .and_then(|v| serde_json::from_value::<ModuleEdgeTypes>(v.clone()).ok())
+            .unwrap_or_default();
         let (limit, offset) = Self::page_args(args, MODULE_EDGES_LIMIT_DEFAULT);
+        let import_edges = if edge_types.imports {
+            let plan = self.with_store(|store| {
+                prepare_import_scan_plan(store, scope.as_deref(), &[])
+            })?;
+            Some(scan_import_edges(&self.root, &plan))
+        } else {
+            None
+        };
         let overview = self.with_store(|store| {
-            module_overview_from_store(store, None, depth, &[], ModuleEdgeTypes::default(), None)
+            module_overview_from_store(
+                store,
+                scope.as_deref(),
+                depth,
+                &[],
+                edge_types,
+                import_edges.as_deref(),
+            )
         })?;
         if overview.edges.is_empty() {
             return Ok("No cross-module dependencies in the symbol index.".to_owned());
@@ -922,6 +957,197 @@ impl McpServer {
             out.push_str(&Self::more_trailer(edges.len(), offset, shown));
         }
         Ok(out)
+    }
+
+    /// `analysis_module_edge_detail`: exact imports and call sites behind one module
+    /// edge `from → to`, backed by the nine-volume store without cloning it.
+    fn tool_module_edge_detail(&self, args: &Value) -> Result<String, (i64, String)> {
+        let from = Self::arg_str(args, "from")?;
+        let to = Self::arg_str(args, "to")?;
+        let scope = args
+            .get("scope")
+            .and_then(Value::as_str)
+            .map(|s| s.replace('\\', "/"));
+        let depth = args
+            .get("depth")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(3) as u8;
+        let plan = self.with_store(|store| {
+            prepare_edge_detail_from_store(store, &from, &to, scope.as_deref(), depth, &[])
+        })?;
+        let detail = scan_edge_detail(&self.root, &plan);
+        let mut out = format!(
+            "{from} → {to} ({scanned} file(s) scanned, {imps} import(s), {pairs} file pair(s)):",
+            scanned = detail.scanned_files,
+            imps = detail.imports.len(),
+            pairs = detail.file_pairs.len()
+        );
+        if !detail.imports.is_empty() {
+            out.push_str("\nimports:");
+            for imp in detail.imports.iter().take(30) {
+                out.push_str(&format!(
+                    "\n  {} → {}  (\"{}\")",
+                    imp.from_file, imp.to_file, imp.specifier
+                ));
+            }
+        }
+        if !detail.file_pairs.is_empty() {
+            out.push_str("\ncall sites:");
+            for pair in detail.file_pairs.iter().take(20) {
+                out.push_str(&format!(
+                    "\n  {} → {}  [{}]",
+                    pair.from_file,
+                    pair.to_file,
+                    pair.symbols.join(", ")
+                ));
+                for site in pair.sites.iter().take(8) {
+                    let label = match &site.receiver {
+                        Some(r) => format!("{r}.{}", site.symbol),
+                        None => site.symbol.clone(),
+                    };
+                    out.push_str(&format!(
+                        "\n    {label}  at {}:{}",
+                        pair.from_file,
+                        site.line + 1
+                    ));
+                }
+            }
+        }
+        if detail.imports.is_empty() && detail.file_pairs.is_empty() {
+            out.push_str("\nNo concrete import or call sites found on this edge.");
+        }
+        Ok(out)
+    }
+
+    /// `symbol_relations`: query any of the 13 Relation Graph directions over the
+    /// nine-volume store.
+    fn tool_symbol_relations(&self, args: &Value) -> Result<String, (i64, String)> {
+        let name = Self::arg_str(args, "name")?;
+        let direction_str = args
+            .get("direction")
+            .and_then(Value::as_str)
+            .unwrap_or("callers");
+        let kind = RelationKind::parse(direction_str).map_err(|err| (-32602, err))?;
+        let asked_path = args
+            .get("path")
+            .and_then(Value::as_str)
+            .map(|p| p.replace('\\', "/"));
+        let asked_line = args
+            .get("line")
+            .and_then(Value::as_u64)
+            .map(|l| l.saturating_sub(1) as usize);
+        let (limit, offset) = Self::page_args(args, LIST_LIMIT_DEFAULT);
+        self.with_store(|store| {
+            let mut defs = store.lookup(&name);
+            if let Some(wanted) = &asked_path {
+                defs.retain(|d| d.path == *wanted);
+            }
+            let (subj_path, subj_line) = if let Some(def) = defs.first() {
+                (def.path.clone(), asked_line.unwrap_or(def.line))
+            } else {
+                (asked_path.unwrap_or_default(), asked_line.unwrap_or(0))
+            };
+            let answer = match relation_children(&self.root, store, &name, &subj_path, subj_line, kind) {
+                Ok(a) => a,
+                Err(e) => return format!("Relation query failed: {e}"),
+            };
+            if answer.nodes.is_empty() {
+                return format!("No {direction_str} relations found for '{name}'.");
+            }
+            let total = answer.nodes.len();
+            let mut out = format!(
+                "{total}{trunc} {direction_str} relation(s) for '{name}':",
+                trunc = if answer.truncated { "+" } else { "" }
+            );
+            let mut shown = 0usize;
+            for node in answer.nodes.iter().skip(offset).take(limit) {
+                let container = node
+                    .container
+                    .as_deref()
+                    .map(|c| format!("{c}.")) 
+                    .unwrap_or_default();
+                let count = if node.edge_count > 1 {
+                    format!(", {} site(s)", node.edge_count)
+                } else {
+                    String::new()
+                };
+                out.push_str(&format!(
+                    "\n  {kind} {container}{name} — {path}:{line}  ({edge_kind} at {epath}:{eline}{count})",
+                    kind = node.kind,
+                    name = node.name,
+                    path = node.path,
+                    line = node.line + 1,
+                    edge_kind = node.edge_kind,
+                    epath = node.edge_path,
+                    eline = node.edge_line + 1
+                ));
+                shown += 1;
+            }
+            if offset + shown < total {
+                out.push_str(&Self::more_trailer(total, offset, shown));
+            }
+            out
+        })
+    }
+
+    /// `git_status`: concise branch and working-tree status (read-only, bounded).
+    fn tool_git_status(&self) -> Result<String, (i64, String)> {
+        let output = std::process::Command::new("git")
+            .args(["-C", &self.root, "status", "--short", "-b"])
+            .output()
+            .map_err(|e| (-32603, format!("git status failed: {e}")))?;
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            return Ok(format!("Not a git repository or git status failed: {}", err.trim()));
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = text.lines().collect();
+        let cap = 200usize;
+        let mut out = lines.iter().take(cap).copied().collect::<Vec<_>>().join("\n");
+        if lines.len() > cap {
+            out.push_str(&format!("\n… +{} more path(s)", lines.len() - cap));
+        }
+        Ok(out)
+    }
+
+    /// `git_log`: recent commits (read-only, bounded, optional path filter).
+    fn tool_git_log(&self, args: &Value) -> Result<String, (i64, String)> {
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(15)
+            .clamp(1, 50);
+        let path = args
+            .get("path")
+            .and_then(Value::as_str)
+            .map(|p| p.replace('\\', "/")) 
+            .filter(|p| !p.is_empty());
+        let mut cmd = std::process::Command::new("git");
+        cmd.args([
+            "-C",
+            &self.root,
+            "log",
+            &format!("-n{limit}"),
+            "--date=short",
+            "--pretty=format:%h %ad %an — %s",
+        ]);
+        if let Some(p) = &path {
+            cmd.arg("--").arg(p);
+        }
+        let output = cmd
+            .output()
+            .map_err(|e| (-32603, format!("git log failed: {e}")))?;
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            return Ok(format!("git log failed: {}", err.trim()));
+        }
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if text.is_empty() {
+            Ok("No commits found.".to_owned())
+        } else {
+            Ok(text)
+        }
     }
 
     fn tool_call_graph(&self, args: &Value) -> Result<String, (i64, String)> {
@@ -1902,13 +2128,30 @@ fn tool_catalogue() -> Value {
         },
         {
             "name": "analysis_module_graph",
-            "description": "The workspace's cross-file calls as module dependencies, edges ranked by call count (the busiest routes first) with the file pairs that carry them. Optional `module` narrows to that module's edges; `limit`/`offset` page.",
+            "description": "The workspace's cross-file dependencies as a layered module graph (ranked by weight with cycle detection). Supports `scope` drill-down, `depth` (0=auto, 1-3), `module` filter, and `edgeTypes` ({calls, typeRefs, baseRefs, imports}; defaults to calls only).",
             "inputSchema": { "type": "object", "properties": {
                 "module": { "type": "string", "description": "A module (directory) name to narrow to, e.g. \"src\"; the workspace root is \"\"" },
+                "scope": { "type": "string", "description": "Repo-relative directory prefix to drill into" },
                 "depth": { "type": "number", "description": "Directory grouping depth (0 = auto, 1-3)" },
+                "edgeTypes": { "type": "object", "description": "Edge categories to include: { calls, typeRefs, baseRefs, imports }", "properties": {
+                    "calls": { "type": "boolean" },
+                    "typeRefs": { "type": "boolean" },
+                    "baseRefs": { "type": "boolean" },
+                    "imports": { "type": "boolean" }
+                } },
                 "limit": { "type": "number", "description": "Edges per page (1-100, default 25)" },
                 "offset": { "type": "number", "description": "Skip this many edges (paging)" }
             } }
+        },
+        {
+            "name": "analysis_module_edge_detail",
+            "description": "Exact file-level imports and call sites behind a single module dependency edge `from → to`, backed by the nine-volume symbol index.",
+            "inputSchema": { "type": "object", "properties": {
+                "from": { "type": "string", "description": "Source module or file id" },
+                "to": { "type": "string", "description": "Target module or file id" },
+                "scope": { "type": "string", "description": "Active drill-down scope (optional)" },
+                "depth": { "type": "number", "description": "Grouping depth (0 = auto, 1-3)" }
+            }, "required": ["from", "to"] }
         },
         {
             "name": "analysis_metrics",
@@ -1964,11 +2207,36 @@ fn tool_catalogue() -> Value {
             }, "required": ["name"] }
         },
         {
+            "name": "symbol_relations",
+            "description": "Query any of the 13 Relation Graph directions for a symbol over the nine-volume store: calls, callers, callsAndCallers, referencedByFunctions, referencedByFiles, referencedByModules, contains, container, baseClasses, derivedClasses, memberTypes, memberClasses, typesUsed.",
+            "inputSchema": { "type": "object", "properties": {
+                "name": { "type": "string", "description": "The exact symbol name" },
+                "direction": { "type": "string", "description": "Relation direction (default callers)" },
+                "path": { "type": "string", "description": "Repo-relative file path to disambiguate same-named symbols" },
+                "line": { "type": "number", "description": "1-based line number of the symbol declaration" },
+                "limit": { "type": "number", "description": "Rows per page (1-100, default 50)" },
+                "offset": { "type": "number", "description": "Skip this many rows (paging)" }
+            }, "required": ["name"] }
+        },
+        {
             "name": "file_dependencies",
             "description": "One file's import edges, resolved to the workspace files they name — what this file depends on, with the unresolved (package) imports counted beside. The narrow read before analysis_import_graph's whole graph.",
             "inputSchema": { "type": "object", "properties": {
                 "path": { "type": "string", "description": "Repo-relative file path" }
             }, "required": ["path"] }
+        },
+        {
+            "name": "git_status",
+            "description": "Concise read-only git branch and working-tree status (`git status --short -b`, bounded to 200 paths).",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "git_log",
+            "description": "Recent git commits in this repository (read-only, bounded), optionally filtered to a repo-relative file or directory path.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Optional repo-relative file or directory path" },
+                "limit": { "type": "number", "description": "Max commits to return (1-50, default 15)" }
+            } }
         }
     ])
 }
@@ -2298,13 +2566,17 @@ mod tests {
                 "analysis_call_graph",
                 "analysis_call_path",
                 "analysis_module_graph",
+                "analysis_module_edge_detail",
                 "analysis_metrics",
                 "analysis_dead_code",
                 "analysis_security",
                 "analysis_import_graph",
                 "analysis_import_cycles",
                 "symbol_context",
-                "file_dependencies"
+                "symbol_relations",
+                "file_dependencies",
+                "git_status",
+                "git_log"
             ]
         );
     }

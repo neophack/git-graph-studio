@@ -37,7 +37,8 @@ use serde::Serialize;
 
 use crate::scan::read_searchable;
 use crate::symbols::index::scan_references_bounded;
-use crate::symbols::mask::{mask, CodeMask};
+use crate::symbols::mask::{mask_for_ext, CodeMask};
+use crate::symbols::sites::{lang_family, same_lang_family};
 use crate::symbols::store::{FileOutlineRow, SymbolStore};
 use crate::symbols::WorkspaceSymbol;
 
@@ -304,7 +305,7 @@ pub fn relation_children_budgeted(
 ) -> Result<RelationAnswer, String> {
     let budget = Budget::after(budget_ms);
     match kind {
-        RelationKind::RefsTo => refs_to(root, store, name, RingOpts::new(MAX_NODES, true, EdgeFilter::All), &budget),
+        RelationKind::RefsTo => refs_to(root, store, name, path, Some(line), RingOpts::new(MAX_NODES, true, EdgeFilter::All), &budget),
         RelationKind::RefsFrom => refs_from(store, name, path, line, RingOpts::new(MAX_NODES, true, EdgeFilter::All), &budget),
         // A pure store query: no file read, no wall-clock budget to respect.
         RelationKind::Contains => contains_members(store, name, MAX_NODES, true, MemberFilter::All),
@@ -312,7 +313,7 @@ pub fn relation_children_budgeted(
         // the peeks ask the same filtered question, so a node's ring marker never promises
         // a drill the kind answers empty.
         RelationKind::Calls => refs_from(store, name, path, line, RingOpts::new(MAX_NODES, true, EdgeFilter::CallsOnly), &budget),
-        RelationKind::Callers => refs_to(root, store, name, RingOpts::new(MAX_NODES, true, EdgeFilter::CallsOnly), &budget),
+        RelationKind::Callers => refs_to(root, store, name, path, Some(line), RingOpts::new(MAX_NODES, true, EdgeFilter::CallsOnly), &budget),
         // The combined view: the caller ring first, the callee ring merged in — a
         // counterpart met on both sides keeps one node whose count is the pair's total.
         // Caller branches drill as Callers, callee branches as Calls (the node's edge
@@ -322,7 +323,7 @@ pub fn relation_children_budgeted(
         // Referenced by Files / Modules: the same attributed sites keyed
         // by their file; the files are leaves.
         RelationKind::RefByFiles | RelationKind::RefByModules => {
-            refs_by_files(root, store, name, MAX_NODES, &budget)
+            refs_by_files(root, store, name, path, Some(line), MAX_NODES, &budget)
         }
         // The enclosing type, one ring per drill — the walk upward.
         RelationKind::Container => container_chain(store, name, path, line),
@@ -363,6 +364,8 @@ fn refs_to(
     root: &str,
     store: &SymbolStore,
     name: &str,
+    subject_path: &str,
+    subject_line: Option<usize>,
     opts: RingOpts,
     budget: &Budget,
 ) -> Result<RelationAnswer, String> {
@@ -371,6 +374,8 @@ fn refs_to(
         with_flags,
         filter,
     } = opts;
+    let subject_is_private =
+        !subject_path.is_empty() && store.is_symbol_private(subject_path, name, subject_line);
     let narrow = store.files_containing(name);
     let (files, _) = scan_references_bounded(root, name, narrow, SCAN_KEEP, "")?;
     let mut nodes: Vec<RelationNode> = Vec::new();
@@ -386,6 +391,14 @@ fn refs_to(
         if files_seen % BUDGET_FILES_PER_CHECK == 1 && budget.expired() {
             truncated = true;
             break;
+        }
+        if !subject_path.is_empty() {
+            if subject_is_private && file.path != subject_path {
+                continue;
+            }
+            if !same_lang_family(subject_path, &file.path) {
+                continue;
+            }
         }
         // A file the store never indexed contributes no attributable rows.
         let Some(defs) = store.file_symbols(&file.path) else {
@@ -468,7 +481,15 @@ fn refs_to(
                 // chase the whole ring depth-first, one scan per level. The filtered
                 // rings' peeks ask the same filtered question.
                 has_children: with_flags
-                    && has_refs_to_children(root, store, &def.name, opts.bare(), budget),
+                    && has_refs_to_children(
+                        root,
+                        store,
+                        &def.name,
+                        &file.path,
+                        Some(def.line),
+                        opts.bare(),
+                        budget,
+                    ),
             });
             if nodes.len() >= limit {
                 truncated = true;
@@ -510,8 +531,9 @@ fn file_mask<'a>(
     masks
         .entry(path.to_owned())
         .or_insert_with(|| {
+            let ext = path.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
             read_searchable(&Path::new(root).join(path))
-                .map(|(bytes, _)| mask(&String::from_utf8_lossy(&bytes)))
+                .map(|(bytes, _)| mask_for_ext(ext, &String::from_utf8_lossy(&bytes)))
         })
         .as_ref()
 }
@@ -527,13 +549,15 @@ fn has_refs_to_children(
     root: &str,
     store: &SymbolStore,
     name: &str,
+    subject_path: &str,
+    subject_line: Option<usize>,
     peek: RingOpts,
     budget: &Budget,
 ) -> bool {
     match store.files_containing(name) {
         None => true,
         Some(files) if files.len() > PEEK_FILE_CAP => true,
-        Some(_) => refs_to(root, store, name, peek, budget)
+        Some(_) => refs_to(root, store, name, subject_path, subject_line, peek, budget)
             .is_ok_and(|answer| !answer.nodes.is_empty()),
     }
 }
@@ -604,7 +628,8 @@ fn refs_from(
         .map(|(_, ext)| ext)
         .unwrap_or("");
     let locals = crate::symbols::parse::parse_file(&text, ext).locals;
-    let body_mask = mask(&text);
+    let body_mask = mask_for_ext(ext, &text);
+    let is_c_cpp = lang_family(ext) == Some("c_cpp");
     let mut seen: HashSet<&str> = HashSet::new();
     let mut node_of: HashMap<&str, usize> = HashMap::new();
     let mut nodes: Vec<RelationNode> = Vec::new();
@@ -682,19 +707,39 @@ fn refs_from(
                 continue;
             }
             let col_chars = line_text[..start].chars().count();
-            let member_hit = crate::symbols::type_resolve::resolve_member_symbol(
-                store, &text, ext, line_no, col_chars, word,
-            );
+            let before_word = line_text[..start].trim_end();
+            let is_member_access = before_word.ends_with('.') || before_word.ends_with("->");
+            let member_hit: Vec<WorkspaceSymbol> =
+                crate::symbols::type_resolve::resolve_member_symbol(
+                    store, &text, ext, line_no, col_chars, word,
+                )
+                .into_iter()
+                .filter(|sym| same_lang_family(&subject.path, &sym.path))
+                .collect();
             let Some(target) = pick_def(&member_hit)
                 .map(sym_def)
                 .or_else(|| {
                     same_file
                         .iter()
-                        .filter(|def| def.name == word)
+                        .filter(|def| {
+                            def.name == word && (!is_c_cpp || !is_member_access || def.container.is_some())
+                        })
                         .max_by_key(|def| def.end_line > def.line)
                         .map(|row| row_def(&subject.path, row))
                 })
-                .or_else(|| pick_def(&store.lookup(word)).map(sym_def))
+                .or_else(|| {
+                    let global: Vec<WorkspaceSymbol> = store
+                        .lookup(word)
+                        .into_iter()
+                        .filter(|sym| {
+                            same_lang_family(&subject.path, &sym.path)
+                                && (!is_c_cpp || !is_member_access || sym.container.is_some())
+                                && (sym.path == subject.path
+                                    || !store.is_symbol_private(&sym.path, &sym.name, Some(sym.line)))
+                        })
+                        .collect();
+                    pick_def(&global).map(sym_def)
+                })
             else {
                 continue;
             };
@@ -834,7 +879,7 @@ fn calls_and_callers(
     budget: &Budget,
 ) -> Result<RelationAnswer, String> {
     let bare = RingOpts::new(MAX_NODES, false, EdgeFilter::All);
-    let callers = refs_to(root, store, name, bare, budget)?;
+    let callers = refs_to(root, store, name, path, Some(line), bare, budget)?;
     let callees = refs_from(store, name, path, line, bare, budget)?;
     let mut truncated = callers.truncated || callees.truncated;
     let caller_count = callers.nodes.len();
@@ -863,7 +908,15 @@ fn calls_and_callers(
         let caller_side = at < caller_count;
         node.caller_side = Some(caller_side);
         node.has_children = if caller_side {
-            has_refs_to_children(root, store, &node.name, RingOpts::new(1, false, EdgeFilter::All), budget)
+            has_refs_to_children(
+                root,
+                store,
+                &node.name,
+                &node.path,
+                Some(node.line),
+                RingOpts::new(1, false, EdgeFilter::All),
+                budget,
+            )
         } else {
             let target = DefRow {
                 kind: node.kind.clone(),
@@ -896,9 +949,13 @@ fn refs_by_files(
     root: &str,
     store: &SymbolStore,
     name: &str,
+    subject_path: &str,
+    subject_line: Option<usize>,
     limit: usize,
     budget: &Budget,
 ) -> Result<RelationAnswer, String> {
+    let subject_is_private =
+        !subject_path.is_empty() && store.is_symbol_private(subject_path, name, subject_line);
     let narrow = store.files_containing(name);
     let (files, _) = scan_references_bounded(root, name, narrow, SCAN_KEEP, "")?;
     let mut nodes: Vec<RelationNode> = Vec::new();
@@ -914,6 +971,14 @@ fn refs_by_files(
         if files_seen % BUDGET_FILES_PER_CHECK == 1 && budget.expired() {
             truncated = true;
             break;
+        }
+        if !subject_path.is_empty() {
+            if subject_is_private && file.path != subject_path {
+                continue;
+            }
+            if !same_lang_family(subject_path, &file.path) {
+                continue;
+            }
         }
         let Some(defs) = store.file_symbols(&file.path) else {
             continue;

@@ -1,105 +1,319 @@
-/* The Relation Graph's own affordances — the controls riding the section head, the
-   resting hints, and the declaration card. The drawing itself is the view's own SVG
-   board (relationGraph.ts builds it into .rg-stage); the SVG palette lives in
-   relationGraph.ts's themePalette, since the SVG reads attributes, not CSS variables. */
+/* The Relation Graph — module-diagram-inspired layered vector card canvas,
+   dot-grid viewport, O(degree) hover neighborhood highlighting, semantic kind
+   accents, multi-site detail rows, declaration hover card, and Outline list. */
 
-.rg-root { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.rg-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; }
-.rg-controls { display: inline-flex; gap: 2px; align-items: center; }
-.rg-dir {
-	background: none; border: 1px solid transparent; padding: 1px 7px; border-radius: 3px;
-	color: var(--vscode-descriptionForeground); font-size: 11px; white-space: nowrap;
-	display: inline-flex; align-items: center;
+.rg-root {
+	position: relative;
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
 }
-.rg-dir:hover { background: var(--vscode-toolbar-hoverBackground); }
+
+.rg-stage {
+	position: relative;
+	flex: 1;
+	min-height: 0;
+	overflow: hidden;
+	background-color: var(--vscode-editor-background, #1e1e1e);
+	background-image: radial-gradient(circle, rgba(128, 128, 128, 0.2) 1px, transparent 1px);
+	background-size: 20px 20px;
+}
+
+.rg-controls {
+	display: inline-flex;
+	gap: 2px;
+	align-items: center;
+}
+
+.rg-dir {
+	background: none;
+	border: 1px solid transparent;
+	padding: 1px 7px;
+	border-radius: 3px;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+	white-space: nowrap;
+	display: inline-flex;
+	align-items: center;
+	cursor: pointer;
+}
+
+.rg-dir:hover:not(:disabled) {
+	background: var(--vscode-toolbar-hoverBackground);
+	color: var(--vscode-foreground);
+}
+
+.rg-dir:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+
 .rg-dir.active {
 	color: var(--vscode-panelTitle-activeForeground);
 	border-color: var(--vscode-panel-border);
 	background: var(--vscode-toolbar-hoverBackground);
 }
+
 .rg-dir > .codicon { font-size: 14px; }
-/* The relation-type picker: the current kind's name, then the chevron. */
 .rg-kind { gap: 3px; padding-right: 5px; }
 .rg-kind .rg-kind-label { font-weight: 500; }
 .rg-kind > .codicon { font-size: 12px; }
 
-.rg-hint { color: var(--vscode-descriptionForeground); padding: 10px 12px; font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.rg-hint {
+	color: var(--vscode-descriptionForeground);
+	padding: 10px 12px;
+	font-size: 12px;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
 .rg-hint-overlay {
-	position: absolute; inset: 0; z-index: 2; align-items: flex-start;
+	position: absolute;
+	inset: 0;
+	z-index: 2;
+	align-items: flex-start;
 	background: var(--vscode-sideBar-background, var(--vscode-editor-background));
 	pointer-events: none;
 }
 
-/* The board: the wheel zooms at the cursor, the bare surface pans by drag. */
-.rg-board { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; outline: none; }
+/* SVG board */
+.rg-board {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	cursor: grab;
+	touch-action: none;
+	outline: none;
+}
+
 .rg-board.rg-panning { cursor: grabbing; }
-.rg-edge { pointer-events: none; }
-.rg-edge text { pointer-events: none; }
 
-.rg-card { cursor: pointer; }
-.rg-card rect { transition: filter 0.12s ease; }
-.rg-card:hover rect { filter: brightness(1.14); }
-.rg-card.rg-root rect { filter: none; }
-.rg-card.rg-root:hover rect { filter: brightness(1.08); }
+/* Architectural layer guide bands (L0, L1, L2...) */
+.rg-layer-band {
+	fill: rgba(128, 128, 128, 0.045);
+	stroke: rgba(128, 128, 128, 0.14);
+	stroke-width: 1;
+	stroke-dasharray: 4 4;
+	pointer-events: none;
+}
 
-/* The numbered reference rows a multi-site edge draws under its card (the classic
-   IDE's ShowGraphDetails): each is its own click target — the row jumps to that site —
-   the +N more tail is inert. */
+.rg-layer-tag {
+	font-size: 9.5px;
+	font-weight: 600;
+	fill: var(--vscode-descriptionForeground, #888);
+	opacity: 0.65;
+	pointer-events: none;
+	user-select: none;
+}
+
+/* Smooth Bezier edges & pill badges */
+.rg-edge {
+	pointer-events: none;
+	transition: opacity 0.14s ease;
+}
+
+.rg-edge path {
+	transition: stroke 0.14s ease, stroke-width 0.14s ease, opacity 0.14s ease;
+}
+
+.rg-edge-badge rect {
+	stroke-width: 1;
+}
+
+.rg-edge-badge text {
+	font-size: 9.5px;
+	font-weight: 600;
+	pointer-events: none;
+	user-select: none;
+}
+
+/* Module-style vector cards */
+.rg-card {
+	cursor: pointer;
+	transition: opacity 0.14s ease;
+}
+
+.rg-card .rg-card-bg {
+	transition: stroke 0.14s ease, filter 0.14s ease;
+}
+
+.rg-card:hover .rg-card-bg {
+	filter: brightness(1.08);
+}
+
+.rg-card.rg-selected .rg-card-bg {
+	stroke: var(--vscode-focusBorder, #007fd4) !important;
+	stroke-width: 1.8 !important;
+}
+
+.rg-card-title {
+	user-select: none;
+}
+
+.rg-card-sub {
+	user-select: none;
+	opacity: 0.72;
+}
+
+.rg-card-kind-tag {
+	user-select: none;
+	opacity: 0.78;
+}
+
+/* Hover neighborhood tracing (O(degree) dim/highlight) */
+.rg-board.has-hover .rg-card {
+	opacity: 0.28;
+}
+
+.rg-board.has-hover .rg-edge {
+	opacity: 0.16;
+}
+
+.rg-board.has-hover .rg-expander {
+	opacity: 0.35;
+}
+
+.rg-board.has-hover .rg-card.hover-self,
+.rg-board.has-hover .rg-card.hover-in,
+.rg-board.has-hover .rg-card.hover-out {
+	opacity: 1;
+}
+
+.rg-board.has-hover .rg-card.hover-in .rg-card-bg {
+	stroke: #4ec9b0 !important;
+}
+
+.rg-board.has-hover .rg-card.hover-out .rg-card-bg {
+	stroke: #569cd6 !important;
+}
+
+.rg-board.has-hover .rg-edge.hover-in,
+.rg-board.has-hover .rg-edge.hover-out {
+	opacity: 1;
+}
+
+.rg-board.has-hover .rg-edge.hover-in path {
+	stroke: #4ec9b0 !important;
+	stroke-width: 2.1 !important;
+}
+
+.rg-board.has-hover .rg-edge.hover-out path {
+	stroke: #569cd6 !important;
+	stroke-width: 2.1 !important;
+}
+
+/* Numbered reference rows inside multi-site cards */
 .rg-detail-row { cursor: pointer; }
 .rg-detail-row:hover { text-decoration: underline; }
 
-.rg-expander { cursor: pointer; }
-.rg-expander circle { transition: stroke 0.12s ease; }
-.rg-expander:hover circle { stroke: var(--vscode-focusBorder, #0078d4); }
+/* Ring expander button */
+.rg-expander {
+	cursor: pointer;
+	transition: opacity 0.14s ease;
+}
 
-/* A first appearance: the card fades in where the layout put it — the transform rides
-   the attribute (the geometry), so only the opacity animates. */
+.rg-expander circle {
+	transition: stroke 0.12s ease, fill 0.12s ease;
+}
+
+.rg-expander:hover circle {
+	stroke: var(--vscode-focusBorder, #0078d4);
+}
+
 @keyframes rg-enter {
 	from { opacity: 0; }
 }
-.rg-enter { animation: rg-enter 0.22s ease-out; }
+.rg-enter { animation: rg-enter 0.2s ease-out; }
 
-/* The hover's declaration card: the definition's opening lines over its caption, floating
-   over everything — the Relations panel's card, in the graph's own classes. */
+/* Floating declaration hover card */
 .rg-decl {
-	position: fixed; z-index: 200; max-width: 480px; padding: 6px 8px 5px; border-radius: 5px;
+	position: fixed;
+	z-index: 200;
+	max-width: 480px;
+	padding: 6px 8px 5px;
+	border-radius: 6px;
 	background: var(--vscode-editorHoverWidget-background, #252526);
 	color: var(--vscode-editorHoverWidget-foreground, #cccccc);
 	border: 1px solid var(--vscode-editorHoverWidget-border, #454545);
-	box-shadow: 0 2px 8px var(--vscode-widget-shadow); font-size: 12px;
+	box-shadow: 0 4px 14px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35));
+	font-size: 12px;
 }
+
 .rg-decl-code {
-	margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.5;
-	white-space: pre; overflow-x: auto; max-width: 100%;
+	margin: 0;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 12px;
+	line-height: 1.5;
+	white-space: pre;
+	overflow-x: auto;
+	max-width: 100%;
 }
+
 .rg-decl-line { white-space: pre; }
+.rg-decl-meta {
+	margin-top: 4px;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+	white-space: nowrap;
+}
 
-.rg-decl-meta { margin-top: 4px; color: var(--vscode-descriptionForeground); font-size: 11px; white-space: nowrap; }
+/* Outline multi-column view */
+.rg-outline {
+	flex: 1;
+	min-height: 0;
+	overflow: auto;
+}
 
-/* The Outline view — the multi-column list: the sticky column header, the tree rows with
-   their +/- toggles, and the count/file/line columns riding one grid. */
-.rg-outline { flex: 1; min-height: 0; overflow: auto; }
 .rg-ol-head,
 .rg-ol-row {
-	display: grid; grid-template-columns: 18px minmax(110px, 1fr) 44px minmax(80px, 120px) 40px;
-	gap: 6px; align-items: center; white-space: nowrap;
+	display: grid;
+	grid-template-columns: 18px minmax(110px, 1fr) 44px minmax(80px, 120px) 40px;
+	gap: 6px;
+	align-items: center;
+	white-space: nowrap;
 }
+
 .rg-ol-head {
-	position: sticky; top: 0; z-index: 1; padding: 4px 8px 4px 4px;
+	position: sticky;
+	top: 0;
+	z-index: 1;
+	padding: 4px 8px 4px 4px;
 	background: var(--vscode-sideBar-background, var(--vscode-editor-background));
 	border-bottom: 1px solid var(--vscode-panel-border);
-	color: var(--vscode-descriptionForeground); font-size: 11px; font-weight: 600;
+	color: var(--vscode-descriptionForeground);
+	font-size: 11px;
+	font-weight: 600;
 }
+
 .rg-ol-row {
-	height: 22px; padding-right: 8px; cursor: pointer; border-radius: 3px;
-	color: var(--vscode-sideBar-foreground); font-size: 12px;
+	height: 22px;
+	padding-right: 8px;
+	cursor: pointer;
+	border-radius: 3px;
+	color: var(--vscode-sideBar-foreground);
+	font-size: 12px;
 }
+
 .rg-ol-row:hover { background: var(--vscode-list-hoverBackground); }
+
 .rg-ol-twistie {
-	width: 18px; display: inline-flex; justify-content: center; align-items: center;
-	color: var(--vscode-descriptionForeground); font-size: 13px; user-select: none;
+	width: 18px;
+	display: inline-flex;
+	justify-content: center;
+	align-items: center;
+	color: var(--vscode-descriptionForeground);
+	font-size: 13px;
+	user-select: none;
 }
-.rg-ol-toggle { cursor: pointer; font-family: var(--vscode-editor-font-family, monospace); }
+
+.rg-ol-toggle {
+	cursor: pointer;
+	font-family: var(--vscode-editor-font-family, monospace);
+}
+
 .rg-ol-toggle:hover { color: var(--vscode-sideBar-foreground); }
 .rg-ol-name { overflow: hidden; text-overflow: ellipsis; }
 .rg-ol-count, .rg-ol-line { text-align: right; color: var(--vscode-descriptionForeground); font-size: 11px; }

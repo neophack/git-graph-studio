@@ -1,50 +1,16 @@
 // The Relation Graph (module 5) — the Symbol Window's lower half: the symbol under the
-// cursor's ring on an interactive graph, drawn on a hand-written SVG board. The drawing
-// reads as the reference relation window (2026-11-23, the owner's direction: calls carry
-// their line numbers on the graph): the cards joined by **orthogonal trunk
-// links** in the connection red — out of the parent card's facing face, down/across to
-// the shared bus band every sibling edge rides, then into each child's facing face, the
-// V-shaped arrowhead landing on the referenced side (the kind's own direction) — and a
-// **multi-site edge carries its numbered rows** ("1. line 113"): the card
-// grows downward, a separator under the label,
-// then one row per reference site, a click on a row jumping to that site. The layout is
-// still computed fresh on every draw over the visible tree (the owner's earlier
-// direction: the layout re-plans by itself, like a mind map — the drawing always lands
-// on the tidy arrangement), so a ring's expansion or collapse re-plans the whole drawing
-// and the cards **glide** to their new spots — a short rAF tween moves each displaced
-// card and the links redraw from the moving cards every frame. The cards carry one
-// interaction grammar (2026-11-20; 2026-11-23, the owner's direction: a relation click
-// shows the jump in the Definition page, the code page never jumps, and the Definition
-// page's right-click syncs its position onto the code page): a card's plain click shows
-// its jump in the
-// Definition page — the card's symbol, or a numbered row's site on the edge's own file —
-// and the code page stays where it stands, the double click and the card menu's
-// "Open the definition" being the editor's jump; the ring's +/− expander is its own small
-// circle at the branch point, whose click alone drills and collapses (instantly — no
-// deferred merge); a right-click menu drills, re-roots or opens, and resting floats the
-// declaration card, its code colored. The board's viewport is its own: the wheel zooms
-// at the cursor (2026-11-21,
-// the owner's direction: the wheel zooms in and out, it must not scroll the drawing up and
-// down), a background drag pans, and Fit frames the whole drawing. The relation TYPE
-// is a header picker's choice (2026-11-20): the picker lists the thirteen view names —
-// Calls, Callers, Calls and Callers, Referenced by Functions/Files/Modules, Contains,
-// Container, Base/Derived Classes, Member Types/Classes, Types Used — every ring drills
-// by its own kind, the combined view's caller branches drilling as Callers and its callee
-// branches as Calls (the node's edge coordinates name its side), the depth guard allows
-// five levels of cards, the fifth a leaf — a ring cut short at the 64-children cap
-// carries the ⋯, and an empty root ring answers its verdict ("no callers", "no
-// contents", …).
-// Three views land too (2026-11-23, the owner's direction: the windows read as one
-// coherent set): the Outline multi-column list, the vertical graph and the horizontal
-// graph — one key
-// cycles them, the horizontal layout advancing a column per depth with the siblings
-// stacked along Y and the card centered on its children's run. The Outline lists the
-// board's own facts in columns — the name with its Calls/Callers suffix, the reference
-// count, the file, the 1-based line — under the relation type's own header. Beside
-// them: the Back/Forward history over the visited roots, the root category's own
-// default type (SPEC-ui-relation §4.2's ViewRelationRules — functions and variables
-// open under References, other types under Contains, classes under Derived Classes),
-// and Expand Special, which expands a card's subtree an asked number of levels at once.
+// cursor's ring on an interactive, module-diagram-inspired layered SVG board.
+//
+// Layout & routing (upgraded to match moduleDiagram.ts):
+// - Sugiyama-style layered layout (L0, L1, L2...) with multi-pass barycenter crossing
+//   minimization + local adjacent-swap refinement across both tree and cross edges so
+//   connecting curves minimize crossings.
+// - Spatially sorted distributed connection ports on every card + smooth cubic Bezier
+//   curves (with outer-arc routing for same-layer/back/bidirectional edges so lines
+//   never slice through cards).
+// - Crisp vector cards with semantic kind accent bar, file:line subtitle, multi-site
+//   numbered detail rows ("1. line N"), +/− branch expanders, O(degree) hover
+//   neighborhood tracing, dot-grid parallax canvas, keyboard shortcuts, and rAF glide.
 
 import { readFile } from '../../platform/ipc/fs';
 import { symbolLookup, symbolRelationChildren, type RelationKind, type RelationNode } from '../../platform/ipc/symbols';
@@ -58,43 +24,43 @@ import type { DefinitionSubject } from './definitionView';
 
 import './relationGraph.css';
 
-/** What the workbench resolved the symbol under the cursor to (0-based line) — the
- *  graph's root vocabulary, shared with every seeder of it. */
+/** What the workbench resolved the symbol under the cursor to (0-based line). */
 export interface RelationRoot {
 	kind: string;
 	name: string;
-	/** Repo-relative path of the definition - the index's own vocabulary, which the
-	 *  relation backend and every node below the root speak too. */
 	path: string;
 	line: number;
 }
 
-/** One card's label row's height — the detail rows a multi-site edge draws hang below
- *  it, so a card's full box is this plus its rows. */
-const NODE_H = 28;
+/** Base card height: header title row + file:line subtitle row. Multi-site detail rows
+ *  grow downward below a subtle divider. */
+const NODE_H = 44;
+const CARD_RX = 9;
+const HEADER_H = 24;
 
-/** The horizontal gap folded into every band — the sibling pitch on a row and the bus
- *  band's breathing room ride it. */
-const HGAP = 34;
+/** Generous breathing room between cards and layers (mirrors moduleDiagram.ts). */
+const TB_COL_GAP = 28;
+const TB_ROW_GAP = 64;
+const TB_SUBROW_GAP = 24;
+const LR_COL_GAP = 84;
+const LR_ROW_GAP = 22;
+const LR_SUBCOL_GAP = 26;
+const MAX_PER_BAND = 8;
+const PAD_X = 36;
+const PAD_Y = 32;
 
-/** The vertical breathing room around one card — the band's pitch and the trunk bus
- *  band's distance from the facing faces. */
-const VGAP = 16;
-
-/** One numbered reference row's height under the card — the "N. line L" rows hang
- *  beneath a separator under the label (SPEC-ui-relation §2.9). */
 const DETAIL_ROW_H = 15;
-
-/** The numbered rows' left inset inside the card. */
-const DETAIL_X = 9;
-
-/** How deep the graph may drill before a card's ring answers the cap instead — a display
- *  guard: nodes are shown before the guard and the guard blocks expansion, so five levels
- *  of cards stand and the fifth is a leaf (the reference reconstruction's depth > 3). */
+const DETAIL_X = 11;
 const MAX_DEPTH = 4;
 
-/** The relation type set, in its fixed order — the picker's entries and the wire
- *  spellings the backend accepts in every spelling. */
+const EXPANDER_R = 8;
+const EXPANDER_OFF = 13;
+const MOVE_MS = 220;
+const DECL_DELAY = 300;
+const DECL_MAX_LINES = 6;
+const DECL_MAX_CHARS = 400;
+const ARROW_PAN = 48;
+
 const PICKER_KINDS: { kind: RelationKind; label: LocaleKey }[] = [
 	{ kind: 'calls', label: 'relations.kind.calls' },
 	{ kind: 'callers', label: 'relations.kind.callers' },
@@ -111,8 +77,6 @@ const PICKER_KINDS: { kind: RelationKind; label: LocaleKey }[] = [
 	{ kind: 'typesUsed', label: 'relations.kind.typesUsed' }
 ];
 
-/** The empty-ring verdict each kind answers with — the wording the relation window
- *  itself prints (the reference reconstruction's expansion verdicts). */
 const EMPTY_VERDICTS: Partial<Record<RelationKind, LocaleKey>> = {
 	calls: 'relations.empty.calls',
 	callers: 'relations.empty.callers',
@@ -131,13 +95,6 @@ const EMPTY_VERDICTS: Partial<Record<RelationKind, LocaleKey>> = {
 	refsFrom: 'relations.empty.refsFrom'
 };
 
-/** The pointer's rest before the declaration card floats in — the panel tree's timing. */
-const DECL_DELAY = 300;
-
-/* ---------- The three views ---------- */
-
-/** The three views, in their enumeration order — the cycle command walks 1→2→3
- *  (SPEC-ui-relation §1.1's "Outline"/"GraphVertical"/"GraphHorizontal"). */
 export type RelationViewMode = 'outline' | 'graphVertical' | 'graphHorizontal';
 
 const VIEW_MODES: RelationViewMode[] = ['outline', 'graphHorizontal', 'graphVertical'];
@@ -148,16 +105,8 @@ const VIEW_LABELS: Record<RelationViewMode, LocaleKey> = {
 	graphHorizontal: 'relations.view.graphHorizontal'
 };
 
-/** The view mode and the picked type persist across sessions — the graph's own options
- *  store (SPEC-ui-relation §6's `RelationOptions`). */
 const VIEW_KEY = 'relation.viewMode';
 
-/** The ViewRelationRules (SPEC-ui-relation §4.2): the root symbol's category names the
- *  relation type a new root opens under — functions and variables
- *  References, the other types Contents, classes the Inheritance family (ggs's Derived
- *  Classes answers its downward half). Unknown categories answer null: the current type
- *  stays. The rule re-applies only across categories, so roaming between two functions
- *  keeps a manual pick, and crossing to a struct re-opens under its own. */
 function ruleKindFor(symbolKind: string): RelationKind | null {
 	switch (symbolKind) {
 		case 'function':
@@ -180,74 +129,87 @@ function ruleKindFor(symbolKind: string): RelationKind | null {
 	}
 }
 
-/** The branch expander: a small circle at the card's edge, the branch point's own
- *  button — its click alone drills and collapses, the card's own click being the
- *  definition jump. */
-const EXPANDER_R = 8;
-const EXPANDER_OFF = 13;
-
-/** The tween's run — the glide the owner asked for. */
-const MOVE_MS = 220;
-
-/** One graph node: a symbol card and its ring's bookkeeping. The drawn structure is a
- *  strict tree — a ring answer naming a symbol already drawn adds a cross edge instead of
- *  a second card. A collapsed card's descendants stay in the map (their rings come back
- *  without a re-fetch) and simply leave the drawing. */
 interface GraphNode {
 	key: string;
 	kind: string;
 	name: string;
 	container: string | null;
 	path: string;
-	/** 0-based definition line — the click's jump and the re-root's coordinates. */
 	line: number;
 	parentKey: string | null;
-	/** The fetched ring, in answer order — drawn only while `expanded`. */
 	children: string[];
-	/** The edge that produced this node: its site and how many sites it aggregates —
-	 *  the arrow's kind, the ×N label and the numbered rows (the root carries the neutral
-	 *  defaults). The site's file also names the node's side in the combined view: a
-	 *  caller's edge lives in its own file, a callee's in the subject's. */
 	edgePath: string;
 	edgeKind: string;
 	edgeCount: number;
-	/** Every site's 0-based line the edge kept, ascending — the numbered rows a
-	 *  multi-site edge draws under its card. */
 	edgeLines: number[];
 	hasChildren: boolean;
 	expanded: boolean;
 	loaded: boolean;
 	loading: boolean;
-	/** The node's own ring came back cut short — the label's ⋯ keeps saying so. */
 	truncated: boolean;
 }
 
-/** One drawn arrow: `from` references (or contains) `to`, the head lands on `to`. */
 interface GraphEdge {
+	id: string;
 	from: string;
 	to: string;
-	/** `call`, `use`, or `member` (a contains ring's edge) — the wire's classification,
-	 *  kept for the cross-edge bookkeeping; the drawing itself reads one connection
-	 *  red. */
 	kind: string;
-	/** How many reference sites this edge aggregates — 1 for a single site. */
 	count: number;
-	/** The edge's own card carries the numbered rows, so the count is already spoken —
-	 *  the ×N label stands down for it. */
 	hideCount: boolean;
 }
 
-/** A settled spot in world coordinates — the card's top-left and its measured width
- *  and full box height (the labels size their cards; wider names make wider cards, and
- *  a multi-site edge's numbered rows make taller ones). */
 interface LayoutPoint {
 	x: number;
 	y: number;
 	w: number;
 	h: number;
+	layer: number;
 }
 
-/** The identity key: two same-named definitions are different nodes. */
+interface LayerBand {
+	layer: number;
+	start: number;
+	end: number;
+}
+
+interface RoutedLink {
+	d: string;
+	mx: number;
+	my: number;
+}
+
+interface DetailRow {
+	label: string;
+	line: number | null;
+}
+
+interface Scene {
+	nodes: {
+		id: string;
+		label: string;
+		subtitle: string;
+		kind: string;
+		x: number;
+		y: number;
+		w: number;
+		h: number;
+		root: boolean;
+		rows: DetailRow[];
+	}[];
+	expanders: { id: string; for: string; label: string; x: number; y: number }[];
+	edges: GraphEdge[];
+	bands: LayerBand[];
+	canvasW: number;
+	canvasH: number;
+}
+
+interface DeclFragment {
+	kind: string;
+	path: string;
+	line: number;
+	text: string;
+}
+
 function nodeKey(name: string, path: string, line: number): string {
 	return `${name}\u0000${path}\u0000${line}`;
 }
@@ -274,28 +236,14 @@ function fromRelation(node: RelationNode, parentKey: string | null): GraphNode {
 	};
 }
 
-/** One card's label: the drill marker the ring's state carries (+ / −), the container
- *  prefix, the name, and the ⋯ a cut-short ring appends. */
 function relationLabel(node: GraphNode): string {
 	return `${node.container ? `${node.container}·` : ''}${node.name}${node.truncated ? ' ⋯' : ''}`;
 }
 
-/** The ring expander's own label — the tree box's +/− (or ⋯ at the depth cap). */
 function expanderLabel(node: GraphNode): string {
 	return node.truncated && !node.expanded ? '⋯' : node.expanded ? '−' : '+';
 }
 
-/** One numbered reference row under a card: "N. line L", clickable to that site — or
- *  the "+N more" tail when the count outran the kept lines. */
-interface DetailRow {
-	label: string;
-	/** The site's 0-based line; null on the "+N more" tail, which jumps nowhere. */
-	line: number | null;
-}
-
-/** A multi-site edge's numbered rows (SPEC-ui-relation §2.9):
- *  one row per kept site line, a "+N" tail when the count outran them. A single-site
- *  edge answers none — its card stays clean. */
 function detailRows(node: GraphNode): DetailRow[] {
 	if (node.edgeLines.length < 2) return [];
 	const rows: DetailRow[] = node.edgeLines.map((line, index) => ({ label: `${index + 1}. line ${line + 1}`, line }));
@@ -303,109 +251,463 @@ function detailRows(node: GraphNode): DetailRow[] {
 	return rows;
 }
 
-/** One drawn scene: the cards (with their numbered rows) and their branch expanders,
- *  and the arrows between them. */
-interface Scene {
-	nodes: { id: string; label: string; x: number; y: number; w: number; h: number; root: boolean; rows: DetailRow[] }[];
-	expanders: { id: string; for: string; label: string; x: number; y: number }[];
-	edges: { id: string; from: string; to: string; kind: string; count: number; hideCount: boolean }[];
+/* ---------- Crossing-Minimizing Sugiyama Layer Ordering ---------- */
+
+/** Count edge crossings between two adjacent ordered layers. */
+function countPairCrossings(
+	upper: GraphNode[],
+	lower: GraphNode[],
+	adj: Map<string, Set<string>>
+): number {
+	const posLower = new Map<string, number>();
+	lower.forEach((n, i) => posLower.set(n.key, i));
+	const pairs: [number, number][] = [];
+	upper.forEach((u, ui) => {
+		const nbs = adj.get(u.key);
+		if (!nbs) return;
+		for (const v of nbs) {
+			const vi = posLower.get(v);
+			if (vi !== undefined) pairs.push([ui, vi]);
+		}
+	});
+	let crossings = 0;
+	for (let i = 0; i < pairs.length; i++) {
+		const [u1, v1] = pairs[i]!;
+		for (let j = i + 1; j < pairs.length; j++) {
+			const [u2, v2] = pairs[j]!;
+			if ((u1 < u2 && v1 > v2) || (u1 > u2 && v1 < v2)) crossings++;
+		}
+	}
+	return crossings;
 }
 
-/** The declaration card's cargo: the definition's opening lines and where they sit. */
-interface DeclFragment {
-	kind: string;
-	path: string;
-	/** 0-based line the fragment starts on. */
-	line: number;
-	text: string;
+/** Order nodes within each depth layer using multi-pass barycenter sweeps + adjacent-swap
+ *  crossing reduction over BOTH tree edges and cross edges. */
+function orderRelationLayers(
+	visible: GraphNode[],
+	edges: GraphEdge[],
+	depthOf: (key: string) => number
+): { layerKeys: number[]; byLayer: Map<number, GraphNode[]> } {
+	const byLayer = new Map<number, GraphNode[]>();
+	const layerOf = new Map<string, number>();
+	for (const node of visible) {
+		const layer = depthOf(node.key);
+		layerOf.set(node.key, layer);
+		const list = byLayer.get(layer);
+		if (list) list.push(node);
+		else byLayer.set(layer, [node]);
+	}
+	const layerKeys = [...byLayer.keys()].sort((a, b) => a - b);
+
+	// Undirected adjacency between adjacent/different layers for barycenter calculation.
+	const neighbors = new Map<string, Set<string>>();
+	const link = (a: string, b: string) => {
+		if (a === b) return;
+		let sa = neighbors.get(a);
+		if (!sa) { sa = new Set(); neighbors.set(a, sa); }
+		sa.add(b);
+		let sb = neighbors.get(b);
+		if (!sb) { sb = new Set(); neighbors.set(b, sb); }
+		sb.add(a);
+	};
+	for (const e of edges) link(e.from, e.to);
+	// Also keep parent-child structure even when edge direction points upward.
+	for (const n of visible) {
+		if (n.parentKey && layerOf.has(n.parentKey)) link(n.parentKey, n.key);
+	}
+
+	const rankIndex = new Map<string, number>();
+	const refreshIndices = () => {
+		for (const key of layerKeys) {
+			const list = byLayer.get(key)!;
+			for (let i = 0; i < list.length; i++) rankIndex.set(list[i]!.key, i);
+		}
+	};
+	refreshIndices();
+
+	const barycenter = (id: string, targetLayer: number, fallback: number): number => {
+		const nbs = neighbors.get(id);
+		if (!nbs || nbs.size === 0) return fallback;
+		let sum = 0;
+		let count = 0;
+		for (const nb of nbs) {
+			if (layerOf.get(nb) !== targetLayer) continue;
+			const idx = rankIndex.get(nb);
+			if (idx !== undefined) {
+				sum += idx;
+				count++;
+			}
+		}
+		return count > 0 ? sum / count : fallback;
+	};
+
+	// 4 forward + backward barycenter sweeps.
+	for (let pass = 0; pass < 4; pass++) {
+		for (let i = 1; i < layerKeys.length; i++) {
+			const prevLayer = layerKeys[i - 1]!;
+			const list = byLayer.get(layerKeys[i]!)!;
+			const scores = new Map<string, number>();
+			list.forEach((n, idx) => scores.set(n.key, barycenter(n.key, prevLayer, idx)));
+			list.sort((a, b) => (scores.get(a.key)! - scores.get(b.key)!) || a.key.localeCompare(b.key));
+			refreshIndices();
+		}
+		for (let i = layerKeys.length - 2; i >= 0; i--) {
+			const nextLayer = layerKeys[i + 1]!;
+			const list = byLayer.get(layerKeys[i]!)!;
+			const scores = new Map<string, number>();
+			list.forEach((n, idx) => scores.set(n.key, barycenter(n.key, nextLayer, idx)));
+			list.sort((a, b) => (scores.get(a.key)! - scores.get(b.key)!) || a.key.localeCompare(b.key));
+			refreshIndices();
+		}
+	}
+
+	// Local adjacent-swap polish: swap adjacent siblings in a layer whenever it strictly
+	// reduces total crossings with the neighboring layers.
+	for (let i = 1; i < layerKeys.length; i++) {
+		const prev = byLayer.get(layerKeys[i - 1]!)!;
+		const list = byLayer.get(layerKeys[i]!)!;
+		if (list.length < 2 || list.length > 32) continue;
+		const next = i + 1 < layerKeys.length ? byLayer.get(layerKeys[i + 1]!)! : null;
+		let improved = true;
+		for (let iter = 0; iter < 3 && improved; iter++) {
+			improved = false;
+			for (let j = 0; j < list.length - 1; j++) {
+				const before = countPairCrossings(prev, list, neighbors)
+					+ (next ? countPairCrossings(list, next, neighbors) : 0);
+				[list[j], list[j + 1]] = [list[j + 1]!, list[j]!];
+				const after = countPairCrossings(prev, list, neighbors)
+					+ (next ? countPairCrossings(list, next, neighbors) : 0);
+				if (after < before) {
+					improved = true;
+				} else {
+					[list[j], list[j + 1]] = [list[j + 1]!, list[j]!];
+				}
+			}
+		}
+	}
+
+	return { layerKeys, byLayer };
 }
 
-const DECL_MAX_LINES = 6;
-const DECL_MAX_CHARS = 400;
+/** Compute spatially sorted port offsets on each card so edges fan out/in without crossing. */
+function computeRelationPorts(
+	edges: GraphEdge[],
+	layout: Map<string, LayoutPoint>,
+	horizontal: boolean
+): { outOffset: Map<string, number>; inOffset: Map<string, number> } {
+	const outByNode = new Map<string, GraphEdge[]>();
+	const inByNode = new Map<string, GraphEdge[]>();
+	for (const e of edges) {
+		if (!layout.has(e.from) || !layout.has(e.to)) continue;
+		const ol = outByNode.get(e.from);
+		if (ol) ol.push(e);
+		else outByNode.set(e.from, [e]);
+		const il = inByNode.get(e.to);
+		if (il) il.push(e);
+		else inByNode.set(e.to, [e]);
+	}
+
+	const outOffset = new Map<string, number>();
+	const inOffset = new Map<string, number>();
+
+	const assign = (groups: Map<string, GraphEdge[]>, targetMap: Map<string, number>, isOut: boolean) => {
+		for (const [nodeId, list] of groups) {
+			if (list.length <= 1) {
+				if (list.length === 1) targetMap.set(list[0]!.id, 0);
+				continue;
+			}
+			const host = layout.get(nodeId)!;
+			const span = horizontal ? Math.min(host.h, NODE_H) * 0.56 : host.w * 0.62;
+			list.sort((a, b) => {
+				const otherA = layout.get(isOut ? a.to : a.from)!;
+				const otherB = layout.get(isOut ? b.to : b.from)!;
+				const coordA = horizontal ? otherA.y + otherA.h / 2 : otherA.x + otherA.w / 2;
+				const coordB = horizontal ? otherB.y + otherB.h / 2 : otherB.x + otherB.w / 2;
+				return coordA - coordB || a.id.localeCompare(b.id);
+			});
+			const n = list.length;
+			for (let i = 0; i < n; i++) {
+				const ratio = i / (n - 1) - 0.5;
+				targetMap.set(list[i]!.id, ratio * Math.min(span, (n - 1) * 16));
+			}
+		}
+	};
+
+	assign(outByNode, outOffset, true);
+	assign(inByNode, inOffset, false);
+	return { outOffset, inOffset };
+}
+
+/** Route an edge as a smooth cubic Bezier curve with distributed ports and outer-arc
+ *  avoidance for same-layer, reverse, self, and bidirectional edges. */
+function routeRelationEdge(
+	from: LayoutPoint,
+	to: LayoutPoint,
+	horizontal: boolean,
+	outOff: number,
+	inOff: number,
+	isBidirectional: boolean,
+	fromId: string,
+	toId: string
+): RoutedLink {
+	// Self-recursion loop: neat arc on the card's right face.
+	if (fromId === toId) {
+		const sx = from.x + from.w;
+		const sy = from.y + 12;
+		const ex = from.x + from.w;
+		const ey = from.y + Math.min(from.h - 10, NODE_H - 10);
+		const loopX = sx + 34;
+		return {
+			d: `M ${sx} ${sy} C ${loopX} ${sy - 14}, ${loopX} ${ey + 14}, ${ex} ${ey}`,
+			mx: sx + 26,
+			my: (sy + ey) / 2
+		};
+	}
+
+	const fx = from.x + from.w / 2;
+	const fy = from.y + from.h / 2;
+	const tx = to.x + to.w / 2;
+	const ty = to.y + to.h / 2;
+	const biShift = isBidirectional ? (fromId < toId ? -7 : 7) : 0;
+
+	if (!horizontal) {
+		// Vertical (TB) mode
+		if (Math.abs(from.y - to.y) < 12) {
+			// Same-row cross edge: arch cleanly above or below so it never cuts through cards.
+			const archUp = from.x < to.x;
+			const sx = fx + outOff * 0.45 + biShift;
+			const sy = archUp ? from.y : from.y + from.h;
+			const ex = tx + inOff * 0.45 + biShift;
+			const ey = archUp ? to.y : to.y + to.h;
+			const span = Math.abs(ex - sx);
+			const lift = Math.min(68, 24 + span * 0.13) * (archUp ? -1 : 1);
+			const cy = sy + lift;
+			return {
+				d: `M ${sx} ${sy} C ${sx} ${cy}, ${ex} ${cy}, ${ex} ${ey}`,
+				mx: (sx + ex) / 2,
+				my: sy + lift * 0.72
+			};
+		}
+
+		if (from.y < to.y) {
+			// Downward flow: bottom face → top face.
+			const sx = fx + outOff + biShift * 0.5;
+			const sy = from.y + from.h;
+			const ex = tx + inOff + biShift * 0.5;
+			const ey = to.y;
+			const dy = Math.max(24, (ey - sy) * 0.46);
+			const cx1 = sx;
+			const cy1 = sy + dy;
+			const cx2 = ex;
+			const cy2 = ey - dy;
+			return {
+				d: `M ${sx} ${sy} C ${cx1} ${cy1}, ${cx2} ${cy2}, ${ex} ${ey}`,
+				mx: 0.125 * sx + 0.375 * cx1 + 0.375 * cx2 + 0.125 * ex,
+				my: 0.125 * sy + 0.375 * cy1 + 0.375 * cy2 + 0.125 * ey
+			};
+		}
+
+		// Upward flow (callers pointing up to root/parent): top face → bottom face.
+		const sx = fx + outOff + biShift * 0.5;
+		const sy = from.y;
+		const ex = tx + inOff + biShift * 0.5;
+		const ey = to.y + to.h;
+		const dy = Math.max(24, (sy - ey) * 0.46);
+		const cx1 = sx;
+		const cy1 = sy - dy;
+		const cx2 = ex;
+		const cy2 = ey + dy;
+		return {
+			d: `M ${sx} ${sy} C ${cx1} ${cy1}, ${cx2} ${cy2}, ${ex} ${ey}`,
+			mx: 0.125 * sx + 0.375 * cx1 + 0.375 * cx2 + 0.125 * ex,
+			my: 0.125 * sy + 0.375 * cy1 + 0.375 * cy2 + 0.125 * ey
+		};
+	}
+
+	// Horizontal (LR) mode
+	if (Math.abs(from.x - to.x) < 12) {
+		const archLeft = from.y < to.y;
+		const sx = archLeft ? from.x : from.x + from.w;
+		const sy = fy + outOff * 0.45 + biShift;
+		const ex = archLeft ? to.x : to.x + to.w;
+		const ey = ty + inOff * 0.45 + biShift;
+		const span = Math.abs(ey - sy);
+		const lift = Math.min(68, 24 + span * 0.13) * (archLeft ? -1 : 1);
+		const cx = sx + lift;
+		return {
+			d: `M ${sx} ${sy} C ${cx} ${sy}, ${cx} ${ey}, ${ex} ${ey}`,
+			mx: sx + lift * 0.72,
+			my: (sy + ey) / 2
+		};
+	}
+
+	if (from.x < to.x) {
+		const sx = from.x + from.w;
+		const sy = from.y + NODE_H / 2 + outOff + biShift * 0.5;
+		const ex = to.x;
+		const ey = to.y + NODE_H / 2 + inOff + biShift * 0.5;
+		const dx = Math.max(28, (ex - sx) * 0.46);
+		const cx1 = sx + dx;
+		const cy1 = sy;
+		const cx2 = ex - dx;
+		const cy2 = ey;
+		return {
+			d: `M ${sx} ${sy} C ${cx1} ${cy1}, ${cx2} ${cy2}, ${ex} ${ey}`,
+			mx: 0.125 * sx + 0.375 * cx1 + 0.375 * cx2 + 0.125 * ex,
+			my: 0.125 * sy + 0.375 * cy1 + 0.375 * cy2 + 0.125 * ey
+		};
+	}
+
+	const sx = from.x;
+	const sy = from.y + NODE_H / 2 + outOff + biShift * 0.5;
+	const ex = to.x + to.w;
+	const ey = to.y + NODE_H / 2 + inOff + biShift * 0.5;
+	const dx = Math.max(28, (sx - ex) * 0.46);
+	const cx1 = sx - dx;
+	const cy1 = sy;
+	const cx2 = ex + dx;
+	const cy2 = ey;
+	return {
+		d: `M ${sx} ${sy} C ${cx1} ${cy1}, ${cx2} ${cy2}, ${ex} ${ey}`,
+		mx: 0.125 * sx + 0.375 * cx1 + 0.375 * cx2 + 0.125 * ex,
+		my: 0.125 * sy + 0.375 * cy1 + 0.375 * cy2 + 0.125 * ey
+	};
+}
 
 export class RelationGraphView {
-	/** The board: the SVG viewport (wheel zoom at the cursor, background drag pan — the
-	 *  drawing's own affordances, no engine behind them). */
 	readonly element: HTMLElement;
-
-	/** The relation-type picker, the pin and the Fit — the Symbol Window's section head
-	 *  hosts them beside its own label, so the graph costs one row of the sidebar. */
 	readonly controls: HTMLElement;
 
-	/** A definition jump — the line arrives 1-based. The explicit open only: a card's
-	 *  double click and the card menu's "Open the definition". The plain click shows the
-	 *  jump in the Definition page instead (see `onShowDefinition`). */
 	onOpen?: (path: string, line: number) => void;
-
-	/** A plain click's jump, shown in the Definition page — the card's symbol (or the
-	 *  numbered row's site, on its edge's own file) handed over in the page's own
-	 *  vocabulary (2026-11-23, the owner's direction: a relation click shows the jump
-	 *  in the Definition page, the code page never jumps). */
 	onShowDefinition?: (subject: DefinitionSubject) => void;
-
-	/** The pin's toggle — the host re-feeds the cursor's symbol when the pin lifts. */
 	onPinChange?: (pinned: boolean) => void;
-
-	/** The index's repo-relative paths against the workspace: the hook the host wires so
-	 *  the declaration card's file read opens the absolute spelling the backend needs.
-	 *  Unwired, the path passes through as-is. */
 	resolvePath?: (path: string) => string;
 
 	private readonly stage: HTMLElement;
-
-	/** The drawing's own SVG: the world group carries the camera transform, over an edge
-	 *  layer and a card layer (the links under the cards). */
 	private readonly board: SVGSVGElement;
-
 	private readonly world: SVGGElement;
-
+	private readonly bandLayer: SVGGElement;
 	private readonly edgeLayer: SVGGElement;
-
 	private readonly cardLayer: SVGGElement;
-
-	/** The resting/loading/failed note, floating over the board. */
 	private readonly hint: HTMLElement;
 
 	private root: RelationRoot | null = null;
-
 	private kind: RelationKind = 'refsTo';
-
-	/** The root ring came back empty — the kind's own verdict shows beside the root. */
 	private emptyVerdict = false;
-
 	private readonly nodes = new Map<string, GraphNode>();
-
 	private rootKey = '';
-
-	/** Rings that named an already-drawn symbol: the arrow without the second card. */
 	private readonly crossEdges: GraphEdge[] = [];
-
 	private readonly crossSeen = new Set<string>();
-
-	/** The root switch's staleness counter: a setRoot / direction switch drops every
-	 *  answer before it, the in-flight expansions included. */
 	private generation = 0;
-
 	private rootLoading = false;
-
 	private rootFailed = false;
-
-	/** Why the root is empty (the host's note), shown instead of the resting hint. */
 	private rootNote: string | undefined;
-
 	private pinned = false;
+	private selectedKey: string | null = null;
 
-	/** The freshly computed layout: every visible card's world spot, and the branch
-	 *  expanders' centers — replanned on every draw, and the displaced cards glide. */
 	private readonly layout = new Map<string, LayoutPoint>();
-
 	private readonly layoutExp = new Map<string, { x: number; y: number }>();
-
-	/** The drawing's world bounds over the current layout — the camera's fit reads. */
 	private bounds = { minX: 0, minY: 0, maxX: 0, maxY: 0 };
 
-	/** The world bounds over every placed card and branch expander — recomputed after
-	 *  each paint, the incremental fold moves spots in place. */
+	private camX = 0;
+	private camY = 0;
+	private camScale = 1;
+
+	private readonly moves = new Map<string, { fx: number; fy: number; start: number }>();
+	private moveHandle: number | null = null;
+	private settle: (() => void) | null = null;
+
+	private readonly painted = new Map<string, { x: number; y: number }>();
+	private readonly cardEls = new Map<string, SVGGElement>();
+	private readonly edgeEls = new Map<string, SVGGElement>();
+	private readonly edgeEnds = new Map<string, { from: string; to: string }>();
+	private lastOutOffset = new Map<string, number>();
+	private lastInOffset = new Map<string, number>();
+	private lastPairSet = new Set<string>();
+	private outEdgesByNode = new Map<string, GraphEdge[]>();
+	private inEdgesByNode = new Map<string, GraphEdge[]>();
+	private activeHoverEls: SVGElement[] = [];
+
+	private readonly kindButton: HTMLButtonElement;
+	private readonly pinButton: HTMLButtonElement;
+	private readonly viewButton: HTMLButtonElement;
+	private readonly backButton: HTMLButtonElement;
+	private readonly forwardButton: HTMLButtonElement;
+
+	private disposed = false;
+	private viewMode: RelationViewMode = load<RelationViewMode>(VIEW_KEY, 'graphVertical');
+	private readonly outline: HTMLElement;
+	private readonly outlineHead: HTMLElement;
+	private readonly outlineList: HTMLElement;
+
+	private readonly history: { root: RelationRoot; kind: RelationKind }[] = [];
+	private historyAt = -1;
+	private historying = false;
+	private lastCategory = '';
+
+	constructor() {
+		this.stage = el('div', 'rg-stage');
+		this.outlineHead = el('div', 'rg-ol-head');
+		this.outlineList = el('div', 'rg-ol-list');
+		this.outline = el('div', 'rg-outline', [this.outlineHead, this.outlineList]);
+		this.board = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+		this.board.classList.add('rg-board');
+		this.board.setAttribute('tabindex', '0');
+		const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+		this.world = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+		this.bandLayer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+		this.edgeLayer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+		this.cardLayer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+		this.world.append(defs, this.bandLayer, this.edgeLayer, this.cardLayer);
+		this.board.appendChild(this.world);
+		this.hint = el('div', 'rg-hint rg-hint-overlay');
+		this.element = el('div', 'rg-root', [this.stage, this.outline, this.hint]);
+		this.stage.appendChild(this.board);
+		this.applyViewSurface();
+
+		this.board.addEventListener('wheel', this.onWheel, { passive: false });
+		this.board.addEventListener('pointerdown', this.onPointerDown);
+		this.board.addEventListener('keydown', this.onBoardKeyDown);
+
+		this.kindButton = el('button', 'rg-dir rg-kind') as HTMLButtonElement;
+		this.kindButton.addEventListener('click', (event) => this.showKindPicker(event));
+		this.backButton = el('button', 'rg-dir rg-back', [icon('arrow-left')]) as HTMLButtonElement;
+		this.backButton.addEventListener('click', () => this.goHistory(-1));
+		this.forwardButton = el('button', 'rg-dir rg-forward', [icon('arrow-right')]) as HTMLButtonElement;
+		this.forwardButton.addEventListener('click', () => this.goHistory(1));
+		this.viewButton = el('button', 'rg-dir rg-view') as HTMLButtonElement;
+		this.viewButton.addEventListener('click', () => this.cycleView());
+		this.viewButton.addEventListener('contextmenu', (event) => {
+			event.preventDefault();
+			this.showViewPicker(event);
+		});
+		const fit = el('button', 'rg-dir', [icon('screen-full')]);
+		fit.title = t('symbols.graph.fit');
+		fit.addEventListener('click', () => this.fit());
+		this.pinButton = el('button', 'rg-dir rg-pin') as HTMLButtonElement;
+		this.pinButton.addEventListener('click', () => this.togglePin());
+		this.controls = el('div', 'rg-controls', [this.kindButton, this.backButton, this.forwardButton, this.viewButton, this.pinButton, fit]);
+		this.paintControls();
+
+		document.addEventListener('mousedown', this.onDocMouseDown);
+		document.addEventListener('keydown', this.onDocKeyDown);
+		this.render();
+	}
+
+	dispose(): void {
+		this.disposed = true;
+		this.hideDecl();
+		document.removeEventListener('mousedown', this.onDocMouseDown);
+		document.removeEventListener('keydown', this.onDocKeyDown);
+		this.stopMoves();
+	}
+
+	pinRoot(sym: RelationRoot): void {
+		this.pinned = true;
+		this.paintControls();
+		this.setRoot(sym);
+	}
+
 	private computeBounds(): void {
 		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 		const span = (x: number, y: number, w: number, h: number): void => {
@@ -417,138 +719,8 @@ export class RelationGraphView {
 		this.bounds = { minX, minY, maxX, maxY };
 	}
 
-	/** The camera: the world group's translate + scale over the stage's pixels. */
-	private camX = 0;
-
-	private camY = 0;
-
-	private camScale = 1;
-
-	/** The glide: per card a from→to spot and its start time; one rAF loop walks them,
-	 *  redrawing every link from the moving cards each frame. */
-	private readonly moves = new Map<string, { fx: number; fy: number; start: number }>();
-
-	private moveHandle: number | null = null;
-
-	private settle: (() => void) | null = null;
-
-	/** The painted cards' labels and spots — the next glide measures from them. */
-	private readonly painted = new Map<string, { x: number; y: number }>();
-
-	private readonly cardEls = new Map<string, SVGGElement>();
-
-	private readonly edgeEls = new Map<string, SVGGElement>();
-
-	private readonly edgeEnds = new Map<string, { from: string; to: string }>();
-
-	private readonly kindButton: HTMLButtonElement;
-
-	private readonly pinButton: HTMLButtonElement;
-
-	/** The view cycle — one key walks Outline → Graph Vertical → Graph Horizontal, and
-	 *  the context menu picks among the three. */
-	private readonly viewButton: HTMLButtonElement;
-
-	/** The visited roots' history — the header's Back/Forward pair. */
-	private readonly backButton: HTMLButtonElement;
-
-	private readonly forwardButton: HTMLButtonElement;
-
-	private disposed = false;
-
-	/** The active view — the Outline list or one of the two graph layouts. Persisted. */
-	private viewMode: RelationViewMode = load<RelationViewMode>(VIEW_KEY, 'graphVertical');
-
-	/** The Outline list's shell (its sticky column header and its rows). */
-	private readonly outline: HTMLElement;
-
-	private readonly outlineHead: HTMLElement;
-
-	private readonly outlineList: HTMLElement;
-
-	/** The visited roots, newest last, and the cursor into them — Back/Forward replay the
-	 *  entries; a fresh root truncates the forward tail. The cap keeps it a ring over
-	 *  recent visits, never a tape. */
-	private readonly history: { root: RelationRoot; kind: RelationKind }[] = [];
-
-	private historyAt = -1;
-
-	/** Set while a Back/Forward replay drives setRoot, so the replay itself never pushes
-	 *  an entry nor re-applies the category rule. */
-	private historying = false;
-
-	/** The current root's symbol category — the rule re-applies only across categories. */
-	private lastCategory = '';
-
-	constructor() {
-		this.stage = el('div', 'rg-stage');
-		this.outlineHead = el('div', 'rg-ol-head');
-		this.outlineList = el('div', 'rg-ol-list');
-		this.outline = el('div', 'rg-outline', [this.outlineHead, this.outlineList]);
-		this.board = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-		this.board.classList.add('rg-board');
-		const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-		this.world = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-		this.edgeLayer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-		this.cardLayer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-		this.world.append(defs, this.edgeLayer, this.cardLayer);
-		this.board.appendChild(this.world);
-		this.hint = el('div', 'rg-hint rg-hint-overlay');
-		this.element = el('div', 'rg-root', [this.stage, this.outline, this.hint]);
-		this.stage.appendChild(this.board);
-		this.applyViewSurface();
-
-		this.board.addEventListener('wheel', this.onWheel, { passive: false });
-		this.board.addEventListener('pointerdown', this.onPointerDown);
-
-		this.kindButton = el('button', 'rg-dir rg-kind');
-		this.kindButton.addEventListener('click', (event) => this.showKindPicker(event));
-		this.backButton = el('button', 'rg-dir rg-back', [icon('arrow-left')]);
-		this.backButton.addEventListener('click', () => this.goHistory(-1));
-		this.forwardButton = el('button', 'rg-dir rg-forward', [icon('arrow-right')]);
-		this.forwardButton.addEventListener('click', () => this.goHistory(1));
-		this.viewButton = el('button', 'rg-dir rg-view');
-		this.viewButton.addEventListener('click', () => this.cycleView());
-		this.viewButton.addEventListener('contextmenu', (event) => {
-			event.preventDefault();
-			this.showViewPicker(event);
-		});
-		const fit = el('button', 'rg-dir', [icon('screen-full')]);
-		fit.title = t('symbols.graph.fit');
-		fit.addEventListener('click', () => this.fit());
-		this.pinButton = el('button', 'rg-dir rg-pin');
-		this.pinButton.addEventListener('click', () => this.togglePin());
-		this.controls = el('div', 'rg-controls', [this.kindButton, this.backButton, this.forwardButton, this.viewButton, this.pinButton, fit]);
-		this.paintControls();
-
-		document.addEventListener('mousedown', this.onDocMouseDown);
-		document.addEventListener('keydown', this.onDocKeyDown);
-		this.render();
-	}
-
-	/** The host's dispose: the document-level dismissers must not outlive the view. */
-	dispose(): void {
-		this.disposed = true;
-		this.hideDecl();
-		document.removeEventListener('mousedown', this.onDocMouseDown);
-		document.removeEventListener('keydown', this.onDocKeyDown);
-		this.stopMoves();
-	}
-
-	/** Root the graph on an explicit symbol and pin it — the hover card's jump: the
-	 *  cursor-follow must not immediately clobber the symbol the card named. */
-	pinRoot(sym: RelationRoot): void {
-		this.pinned = true;
-		this.paintControls();
-		this.setRoot(sym);
-	}
-
 	/* ---------- Root and direction ---------- */
 
-	/** Swap the root (or clear it, `note` explaining why) and refetch its ring; the
-	 *  relation type survives, every expansion below the root does not. A root of a new
-	 *  category re-opens under the rules' type for it (SPEC-ui-relation §4.2),
-	 *  and the visit joins the Back/Forward history. */
 	setRoot(root: RelationRoot | null, note?: string): void {
 		const same =
 			this.root !== null && root !== null && this.root.name === root.name && this.root.path === root.path && this.root.line === root.line;
@@ -568,8 +740,6 @@ export class RelationGraphView {
 		void this.loadRoot();
 	}
 
-	/** Swap the relation type and refetch: the other type is a different graph. The
-	 *  history's current entry follows, so a Back/Forward replay restores the pick too. */
 	private setKind(kind: RelationKind): void {
 		if (this.kind === kind) return;
 		this.kind = kind;
@@ -578,7 +748,6 @@ export class RelationGraphView {
 		void this.loadRoot();
 	}
 
-	/** The picker: the thirteen relation views, the active one checked. */
 	private showKindPicker(event: MouseEvent): void {
 		const activeKind = this.kind === 'refsTo' ? 'referencedByFunctions' : this.kind;
 		const entries: MenuEntry[] = PICKER_KINDS.map((entry) => ({
@@ -589,25 +758,15 @@ export class RelationGraphView {
 		showContextMenu(event.clientX, event.clientY, entries);
 	}
 
-	/** The ring's drill kind: every ring drills by the graph's own type, except the
-	 *  combined view's branches — a caller keeps drilling as Callers (its edge site
-	 *  lives outside the root's file) and a callee as Calls (the root's body names it). */
 	private ringKind(node: GraphNode): RelationKind {
 		if (this.kind !== 'callsAndCallers') return this.kind;
 		return this.callsSide(node) ? 'calls' : 'callers';
 	}
 
-	/** The combined view's side of one node: a callee's edge site sits in the root's own
-	 *  file (the body that names it); a caller's anywhere else. */
 	private callsSide(node: GraphNode): boolean {
 		return node.edgePath === (this.root?.path ?? '');
 	}
 
-	/** Whether this kind's arrow runs from the child to its parent (the referencing side
-	 *  points at the referenced — refsTo's family, Container's chain upward, the derived
-	 *  classes' `derives from`) or from the parent down (the body's references, the
-	 *  contains rings, the base classes' `extends`). The combined view's branches read
-	 *  the node's own side. */
 	private pointsUp(node: GraphNode): boolean {
 		switch (this.kind) {
 			case 'refsTo':
@@ -629,6 +788,8 @@ export class RelationGraphView {
 		const generation = ++this.generation;
 		const root = this.root;
 		this.hideDecl();
+		this.clearHoverHighlight();
+		this.selectedKey = null;
 		this.nodes.clear();
 		this.layout.clear();
 		this.layoutExp.clear();
@@ -657,8 +818,6 @@ export class RelationGraphView {
 			if (node) {
 				node.hasChildren = (answer?.nodes.length ?? 0) > 0;
 				node.truncated = answer?.truncated === true;
-				// An empty ring answers the kind's own verdict — the relation window's
-				// "no callers", "no contents", … beside the root card.
 				this.emptyVerdict = !node.hasChildren;
 				if (node.hasChildren) {
 					node.expanded = true;
@@ -675,9 +834,6 @@ export class RelationGraphView {
 		this.fit();
 	}
 
-	/** Absorb one ring answer into the graph: new symbols become the node's children, a
-	 *  symbol already drawn becomes a cross edge (the arrow without the second card,
-	 *  pointing the kind's own way). */
 	private absorbRing(node: GraphNode, ring: RelationNode[]): void {
 		node.children = [];
 		for (const entry of ring) {
@@ -689,7 +845,7 @@ export class RelationGraphView {
 				const seen = `${from}\u0000${to}`;
 				if (!this.crossSeen.has(seen)) {
 					this.crossSeen.add(seen);
-					this.crossEdges.push({ from, to, kind: entry.edgeKind || 'member', count: entry.edgeCount, hideCount: false });
+					this.crossEdges.push({ id: seen, from, to, kind: entry.edgeKind || 'member', count: entry.edgeCount, hideCount: false });
 				}
 				continue;
 			}
@@ -726,8 +882,6 @@ export class RelationGraphView {
 		this.paintViewButton();
 	}
 
-	/** Back/Forward ride the visited roots' history — grey once a step would leave the
-	 *  tape. */
 	private paintNavButtons(): void {
 		this.backButton.title = t('relations.back');
 		this.backButton.setAttribute('aria-label', this.backButton.title);
@@ -737,8 +891,6 @@ export class RelationGraphView {
 		this.forwardButton.disabled = this.historyAt >= this.history.length - 1;
 	}
 
-	/** The view button names the view it shows, cycles on click, and its context menu
-	 *  picks among the three directly. */
 	private paintViewButton(): void {
 		this.viewButton.textContent = '';
 		this.viewButton.append(icon(this.viewMode === 'outline' ? 'list-flat' : 'graph'), el('span', 'rg-kind-label', [t(VIEW_LABELS[this.viewMode])]));
@@ -746,9 +898,8 @@ export class RelationGraphView {
 		this.viewButton.setAttribute('aria-label', this.viewButton.title);
 	}
 
-	/* ---------- The three views ---------- */
+	/* ---------- Views ---------- */
 
-	/** The view cycle command: the three-state cycle. */
 	cycleView(): void {
 		const at = VIEW_MODES.indexOf(this.viewMode);
 		this.setViewMode(VIEW_MODES[(at + 1) % VIEW_MODES.length]!);
@@ -761,19 +912,15 @@ export class RelationGraphView {
 		this.applyViewSurface();
 		this.paintControls();
 		this.render();
-		// A view that just came back has a live board again — frame what stands.
 		if (mode !== 'outline') window.requestAnimationFrame(() => this.fit());
 	}
 
-	/** The Outline list and the board swap on the same stage: the hidden one leaves the
-	 *  layout, the hint overlay stays over whichever shows. */
 	private applyViewSurface(): void {
 		const graph = this.viewMode !== 'outline';
 		this.stage.style.display = graph ? '' : 'none';
 		this.outline.style.display = graph ? 'none' : '';
 	}
 
-	/** The view picker: the three views, the active one checked. */
 	private showViewPicker(event: MouseEvent): void {
 		const entries: MenuEntry[] = VIEW_MODES.map((mode) => ({
 			label: t(VIEW_LABELS[mode]),
@@ -783,7 +930,7 @@ export class RelationGraphView {
 		showContextMenu(event.clientX, event.clientY, entries);
 	}
 
-	/* ---------- The visited roots' history ---------- */
+	/* ---------- History ---------- */
 
 	private pushHistory(): void {
 		if (!this.root) return;
@@ -799,8 +946,6 @@ export class RelationGraphView {
 		this.paintNavButtons();
 	}
 
-	/** Back/Forward: replay the neighbour entry's root and type — the replay drives
-	 *  setRoot, whose push and rule re-application stand down for it. */
 	private goHistory(delta: number): void {
 		const at = this.historyAt + delta;
 		const entry = this.history[at];
@@ -824,13 +969,6 @@ export class RelationGraphView {
 
 	/* ---------- Expansion ---------- */
 
-	/** The drill toggles the ring and repaints: the layout re-plans the visible tree
-	 *  (re-planned by itself, like a mind map — the drawing always lands on the tidy
-	 *  arrangement, never a drifted one) and the displaced cards **glide** to their new
-	 *  spots, so the fold reads as the branch opening and the tree closing up — the same
-	 *  drawing, animated; no flash, no camera jump (the owner's directions: a click opens
-	 *  or closes the fold in place, never re-refreshing the whole drawing, and the
-	 *  layout re-plans by itself). */
 	private async toggleExpand(key: string): Promise<void> {
 		const node = this.nodes.get(key);
 		if (!node || node.loading) return;
@@ -845,8 +983,6 @@ export class RelationGraphView {
 			return;
 		}
 		if (this.depthOf(key) >= MAX_DEPTH) {
-			// At the cap the marker stays and the ⋯ answers — the rings exist, the graph
-			// just stops drawing them (re-rooting on the card goes deeper instead).
 			node.loaded = true;
 			node.truncated = true;
 			node.expanded = false;
@@ -871,8 +1007,6 @@ export class RelationGraphView {
 		this.render();
 	}
 
-	/** The visible walk: the root, then every expanded card's children in turn — a
-	 *  collapsed card's descendants stay in the map but leave the drawing. */
 	private visibleNodes(): GraphNode[] {
 		const list: GraphNode[] = [];
 		const collect = (key: string): void => {
@@ -885,7 +1019,6 @@ export class RelationGraphView {
 		return list;
 	}
 
-	/** The card's depth over the tree's parent chain. */
 	private depthOf(key: string): number {
 		let depth = 0;
 		let at = this.nodes.get(key);
@@ -896,193 +1029,213 @@ export class RelationGraphView {
 		return depth;
 	}
 
-	/** A card's drawn children right now. */
-	private drawnChildren(node: GraphNode): GraphNode[] {
-		if (!node.expanded) return [];
-		return node.children.map((key) => this.nodes.get(key)).filter((child): child is GraphNode => child !== undefined);
-	}
-
-	/* ---------- The Plait-manner mind layout ---------- */
+	/* ---------- Module-Style Layered Layout with Crossing Minimization ---------- */
 
 	private visibleEdgeList(): GraphEdge[] {
 		const edges: GraphEdge[] = [];
 		const visible = new Set(this.visibleNodes().map((node) => node.key));
 		for (const node of this.nodes.values()) {
-			// Only a VISIBLE node's ring draws: a fold hides a whole subtree whose members
-			// keep their cached `expanded` state — their arrows must leave with them, or
-			// stray curves would linger over the emptied band.
 			if (!node.expanded || !visible.has(node.key)) continue;
 			for (const key of node.children) {
 				const child = this.nodes.get(key);
 				if (!child) continue;
-				// The kind's own arrow direction: the referencing side points at the
-				// referenced (refsTo's family, Container, Derived Classes) or the subject
-				// points at what it names (refsFrom's family, Contains, Base Classes).
 				const up = this.pointsUp(child);
 				const from = up ? key : node.key;
 				const to = up ? node.key : key;
-				edges.push({ from, to, kind: child.edgeKind, count: child.edgeCount, hideCount: detailRows(child).length > 0 });
+				edges.push({
+					id: `${from}\u0000${to}`,
+					from,
+					to,
+					kind: child.edgeKind,
+					count: child.edgeCount,
+					hideCount: detailRows(child).length > 0
+				});
 			}
 		}
-		// A cross edge stands only while both its ends are drawn — a fold that hides an
-		// endpoint hides its arrow too, or a stray curve would linger over empty space.
 		for (const edge of this.crossEdges) {
 			if (visible.has(edge.from) && visible.has(edge.to)) edges.push(edge);
 		}
 		return edges;
 	}
 
-	/** Build the scene: the visible tree walks the layered layout fresh on
-	 *  every draw — VERTICAL top-down (the owner's direction: the relation graph runs top
-	 *  to bottom —
-	 *  the root's card at the top, every depth its own row, the children of one card
-	 *  packing side by side by their subtree widths, the card centered between its
-	 *  outermost children) or HORIZONTAL left-to-right (the GraphHorizontal layout —
-	 *  every depth its own column advanced by the layer's widest card, the siblings
-	 *  stacking down the Y by their subtree heights, the card centered on its children's
-	 *  run) — so the drawing always lands on the tidy arrangement (the mind map's own
-	 *  self-re-planning layout),
-	 *  and the paint's glide carries the re-planned cards there smoothly. */
+	private cardWidth(node: GraphNode): number {
+		const titleW = estimateLabelWidth(relationLabel(node)) + 34;
+		const subW = estimateLabelWidth(cardSubtitle(node)) * 0.88 + 26;
+		return Math.max(132, Math.min(300, Math.ceil(Math.max(titleW, subW))));
+	}
+
+	private nodeHeight(node: GraphNode): number {
+		return NODE_H + detailRows(node).length * DETAIL_ROW_H;
+	}
+
+	/** Compute module-diagram-style layered positions (TB or LR) with barycenter
+	 *  crossing minimization and balanced sub-band wrapping. */
 	private buildScene(): Scene {
-		const nodes: Scene['nodes'] = [];
-		const expanders: Scene['expanders'] = [];
-		{
-			this.layout.clear();
-			this.layoutExp.clear();
-			const root = this.nodes.get(this.rootKey);
-			if (root) {
-				if (this.viewMode === 'graphHorizontal') this.walkHorizontal(root, 0, this.columnLefts());
-				else this.walkVertical(root, 0, 0);
+		this.layout.clear();
+		this.layoutExp.clear();
+		const visible = this.visibleNodes();
+		const edges = this.visibleEdgeList();
+		const bands: LayerBand[] = [];
+		let canvasW = 360;
+		let canvasH = 240;
+
+		if (visible.length > 0) {
+			const { layerKeys, byLayer } = orderRelationLayers(visible, edges, (k) => this.depthOf(k));
+			const horizontal = this.viewMode === 'graphHorizontal';
+
+			if (!horizontal) {
+				// Top-to-Bottom layered bands (L0, L1, L2...).
+				const rows: {
+					layer: number;
+					items: GraphNode[];
+					widths: number[];
+					maxH: number;
+					rowWidth: number;
+					gapAbove: number;
+					firstInLayer: boolean;
+				}[] = [];
+				let maxRowWidth = 160;
+
+				for (const layer of layerKeys) {
+					const items = byLayer.get(layer)!;
+					const numSubRows = Math.ceil(items.length / MAX_PER_BAND);
+					const cols = Math.min(MAX_PER_BAND, Math.max(1, Math.ceil(items.length / numSubRows)));
+					for (let i = 0; i < items.length; i += cols) {
+						const chunk = items.slice(i, i + cols);
+						const widths = chunk.map((n) => this.cardWidth(n));
+						const maxH = Math.max(...chunk.map((n) => this.nodeHeight(n)));
+						const rowWidth = widths.reduce((a, b) => a + b, 0) + Math.max(0, chunk.length - 1) * TB_COL_GAP;
+						if (rowWidth > maxRowWidth) maxRowWidth = rowWidth;
+						rows.push({
+							layer,
+							items: chunk,
+							widths,
+							maxH,
+							rowWidth,
+							gapAbove: rows.length === 0 ? 0 : i === 0 ? TB_ROW_GAP : TB_SUBROW_GAP,
+							firstInLayer: i === 0
+						});
+					}
+				}
+
+				canvasW = Math.max(360, maxRowWidth + PAD_X * 2);
+				let cursorY = PAD_Y;
+				let activeBand: LayerBand | null = null;
+
+				for (const row of rows) {
+					cursorY += row.gapAbove;
+					if (row.firstInLayer) {
+						if (activeBand) bands.push(activeBand);
+						activeBand = { layer: row.layer, start: cursorY - 12, end: cursorY + row.maxH + 12 };
+					} else if (activeBand) {
+						activeBand.end = cursorY + row.maxH + 12;
+					}
+					let cursorX = (canvasW - row.rowWidth) / 2;
+					row.items.forEach((node, idx) => {
+						const w = row.widths[idx]!;
+						const h = this.nodeHeight(node);
+						this.layout.set(node.key, { x: cursorX, y: cursorY, w, h, layer: row.layer });
+						if (node.hasChildren) {
+							this.layoutExp.set(node.key, { x: cursorX + w / 2, y: cursorY + h + EXPANDER_OFF });
+						}
+						cursorX += w + TB_COL_GAP;
+					});
+					cursorY += row.maxH;
+				}
+				if (activeBand) bands.push(activeBand);
+				canvasH = Math.max(240, cursorY + PAD_Y + 14);
+			} else {
+				// Left-to-Right layered columns (L0, L1, L2...).
+				const cols: {
+					layer: number;
+					items: GraphNode[];
+					heights: number[];
+					maxW: number;
+					colHeight: number;
+					gapLeft: number;
+					firstInLayer: boolean;
+				}[] = [];
+				let maxColHeight = NODE_H;
+
+				for (const layer of layerKeys) {
+					const items = byLayer.get(layer)!;
+					const numSubCols = Math.ceil(items.length / MAX_PER_BAND);
+					const perCol = Math.min(MAX_PER_BAND, Math.max(1, Math.ceil(items.length / numSubCols)));
+					for (let i = 0; i < items.length; i += perCol) {
+						const chunk = items.slice(i, i + perCol);
+						const heights = chunk.map((n) => this.nodeHeight(n));
+						const maxW = Math.max(...chunk.map((n) => this.cardWidth(n)));
+						const colHeight = heights.reduce((a, b) => a + b, 0) + Math.max(0, chunk.length - 1) * LR_ROW_GAP;
+						if (colHeight > maxColHeight) maxColHeight = colHeight;
+						cols.push({
+							layer,
+							items: chunk,
+							heights,
+							maxW,
+							colHeight,
+							gapLeft: cols.length === 0 ? 0 : i === 0 ? LR_COL_GAP : LR_SUBCOL_GAP,
+							firstInLayer: i === 0
+						});
+					}
+				}
+
+				canvasH = Math.max(240, maxColHeight + PAD_Y * 2);
+				let cursorX = PAD_X;
+				let activeBand: LayerBand | null = null;
+
+				for (const col of cols) {
+					cursorX += col.gapLeft;
+					if (col.firstInLayer) {
+						if (activeBand) bands.push(activeBand);
+						activeBand = { layer: col.layer, start: cursorX - 12, end: cursorX + col.maxW + 12 };
+					} else if (activeBand) {
+						activeBand.end = cursorX + col.maxW + 12;
+					}
+					let cursorY = (canvasH - col.colHeight) / 2;
+					col.items.forEach((node, idx) => {
+						const w = this.cardWidth(node);
+						const h = col.heights[idx]!;
+						this.layout.set(node.key, { x: cursorX, y: cursorY, w, h, layer: col.layer });
+						if (node.hasChildren) {
+							this.layoutExp.set(node.key, { x: cursorX + w + EXPANDER_OFF, y: cursorY + NODE_H / 2 });
+						}
+						cursorY += h + LR_ROW_GAP;
+					});
+					cursorX += col.maxW;
+				}
+				if (activeBand) bands.push(activeBand);
+				canvasW = Math.max(360, cursorX + PAD_X + 14);
 			}
 		}
+
 		this.computeBounds();
-		for (const node of this.visibleNodes()) {
+		const nodes: Scene['nodes'] = [];
+		const expanders: Scene['expanders'] = [];
+		for (const node of visible) {
 			const spot = this.layout.get(node.key);
 			if (!spot) continue;
-			nodes.push({ id: node.key, label: relationLabel(node), x: spot.x, y: spot.y, w: spot.w, h: spot.h, root: node.parentKey === null, rows: detailRows(node) });
+			nodes.push({
+				id: node.key,
+				label: relationLabel(node),
+				subtitle: cardSubtitle(node),
+				kind: node.kind,
+				x: spot.x,
+				y: spot.y,
+				w: spot.w,
+				h: spot.h,
+				root: node.parentKey === null,
+				rows: detailRows(node)
+			});
 			if (node.hasChildren) {
 				const exp = this.layoutExp.get(node.key)!;
 				expanders.push({ id: `${node.key}\u0000+`, for: node.key, label: expanderLabel(node), x: exp.x, y: exp.y });
 			}
 		}
-		return {
-			nodes,
-			expanders,
-			edges: this.visibleEdgeList().map((edge) => ({ id: `${edge.from}\u0000${edge.to}`, from: edge.from, to: edge.to, kind: edge.kind, count: edge.count, hideCount: edge.hideCount }))
-		};
+		return { nodes, expanders, edges, bands, canvasW, canvasH };
 	}
 
-	/** A card's width: its label's own, wider names making wider cards (the band advance
-	 *  carries them; both layouts read the same number). */
-	private cardWidth(node: GraphNode): number {
-		return Math.max(96, Math.min(340, estimateLabelWidth(relationLabel(node)) + 24));
-	}
+	/* ---------- Rendering ---------- */
 
-	/** A card's full box height: the label row plus the numbered rows a multi-site edge
-	 *  hangs beneath it. */
-	private nodeHeight(node: GraphNode): number {
-		return NODE_H + detailRows(node).length * DETAIL_ROW_H;
-	}
-
-	/** The vertical walk (the top-down layered layout). */
-	private walkVertical(node: GraphNode, left: number, y: number): number {
-		const w = this.cardWidth(node);
-		const h = this.nodeHeight(node);
-		const kids = this.drawnChildren(node);
-		if (kids.length > 0) {
-			let at = left;
-			let firstCx = 0;
-			let lastCx = 0;
-			kids.forEach((child, index) => {
-				// The child's band starts at this frontier and the next child's band
-				// follows; each band folds the breathing room on both faces.
-				const width = this.walkVertical(child, at, y + h + 2 * VGAP);
-				const spot = this.layout.get(child.key)!;
-				const cx = spot.x + spot.w / 2;
-				if (index === 0) firstCx = cx;
-				lastCx = cx;
-				at += width;
-			});
-			const cx = (firstCx + lastCx) / 2;
-			this.layout.set(node.key, { x: cx - w / 2, y, w, h });
-			if (node.hasChildren) {
-				const spot = this.layout.get(node.key)!;
-				this.layoutExp.set(node.key, { x: spot.x + spot.w / 2, y: spot.y + spot.h + EXPANDER_OFF });
-			}
-			return Math.max(at - left, w + 2 * HGAP);
-		} else {
-			// The leaf's box is its width plus the folded breathing room on both faces;
-			// the card centers in it — the sibling pitch rides the same number.
-			const cx = left + HGAP + w / 2;
-			this.layout.set(node.key, { x: cx - w / 2, y, w, h });
-		}
-		if (node.hasChildren) {
-			const spot = this.layout.get(node.key)!;
-			this.layoutExp.set(node.key, { x: spot.x + spot.w / 2, y: spot.y + spot.h + EXPANDER_OFF });
-		}
-		return w + 2 * HGAP;
-	}
-
-	/** The horizontal walk (the GraphHorizontal layout): every depth its own column —
-	 *  advanced by the layer's widest card — the siblings of one card stacking down the
-	 *  Y, the card centered on its children's run, the branch expander on the card's
-	 *  right face. */
-	private walkHorizontal(node: GraphNode, top: number, lefts: Map<number, number>): number {
-		const w = this.cardWidth(node);
-		const left = lefts.get(this.depthOf(node.key)) ?? 0;
-		const kids = this.drawnChildren(node);
-		if (kids.length > 0) {
-			let at = top;
-			let firstCy = 0;
-			let lastCy = 0;
-			kids.forEach((child, index) => {
-				const height = this.walkHorizontal(child, at, lefts);
-				const spot = this.layout.get(child.key)!;
-				const cy = spot.y + NODE_H / 2;
-				if (index === 0) firstCy = cy;
-				lastCy = cy;
-				at += height;
-			});
-			const cy = (firstCy + lastCy) / 2;
-			this.layout.set(node.key, { x: left, y: cy - NODE_H / 2, w, h: this.nodeHeight(node) });
-			if (node.hasChildren) {
-				const spot = this.layout.get(node.key)!;
-				this.layoutExp.set(node.key, { x: spot.x + spot.w + EXPANDER_OFF, y: spot.y + NODE_H / 2 });
-			}
-			return Math.max(at - top, this.nodeHeight(node) + 2 * VGAP);
-		} else {
-			const cy = top + VGAP + NODE_H / 2;
-			this.layout.set(node.key, { x: left, y: cy - NODE_H / 2, w, h: this.nodeHeight(node) });
-		}
-		if (node.hasChildren) {
-			const spot = this.layout.get(node.key)!;
-			this.layoutExp.set(node.key, { x: spot.x + spot.w + EXPANDER_OFF, y: spot.y + NODE_H / 2 });
-		}
-		return this.nodeHeight(node) + 2 * VGAP;
-	}
-
-	/** The horizontal columns' left edges: one per depth, each advanced by the layer's
-	 *  widest card plus the gap — the layer-thickness advance. */
-	private columnLefts(): Map<number, number> {
-		const widest = new Map<number, number>();
-		for (const node of this.visibleNodes()) {
-			const depth = this.depthOf(node.key);
-			widest.set(depth, Math.max(widest.get(depth) ?? 0, this.cardWidth(node)));
-		}
-		const lefts = new Map<number, number>();
-		let at = 0;
-		for (const depth of [...widest.keys()].sort((a, b) => a - b)) {
-			lefts.set(depth, at);
-			at += (widest.get(depth) ?? 0) + HGAP;
-		}
-		return lefts;
-	}
-
-	/* ---------- Rendering (the SVG board) ---------- */
-
-	/** Repaint the drawing: the layout replans the visible tree, the cards diff in
-	 *  place (new cards fade in, moved cards glide, gone cards leave) and the links
-	 *  redraw over the spots. The empty states (hint branches) clear the board. */
 	private render(): void {
 		this.hint.textContent = '';
 		this.hint.hidden = true;
@@ -1105,22 +1258,15 @@ export class RelationGraphView {
 			return;
 		}
 		if (this.emptyVerdict) {
-			// The root stands alone; the verdict is the kind's own — the wording the
-			// relation window itself answers with.
 			this.hint.appendChild(el('span', undefined, [t(EMPTY_VERDICTS[this.kind] ?? 'relations.empty.refsFrom')]));
 			this.hint.hidden = false;
 		}
-		// The view decides the surface: the Outline list or one of the two graph layouts.
 		if (this.viewMode === 'outline') this.paintOutline();
 		else this.paintBoard(this.buildScene());
 	}
 
-	/* ---------- The Outline view ---------- */
+	/* ---------- Outline View ---------- */
 
-	/** The Outline's columns: the name with its relation suffix, the reference count,
-	 *  the file, the 1-based line — under the relation type's own header
-	 *  (SPEC-ui-relation §1.3). The rows walk the same visible tree the board
-	 *  draws, so the rings' expansion state carries across the views untouched. */
 	private paintOutline(): void {
 		const activeKind = this.kind === 'refsTo' ? 'referencedByFunctions' : this.kind;
 		const current = PICKER_KINDS.find((entry) => entry.kind === activeKind) ?? PICKER_KINDS[0];
@@ -1136,9 +1282,6 @@ export class RelationGraphView {
 		for (const node of this.visibleNodes()) this.outlineList.appendChild(this.outlineRow(node));
 	}
 
-	/** The row's relation suffix: a Calls-family row reads
-	 *  "name Calls", the callers families read "name Callers" (the reference
-	 *  reconstruction's sub_57ACA0; the combined view reads each branch's side). */
 	private branchSuffix(node: GraphNode): string {
 		const kind = node.parentKey === null ? this.kind : this.ringKind(node);
 		if (kind === 'calls') return ` ${t('relations.suffix.calls')}`;
@@ -1169,9 +1312,6 @@ export class RelationGraphView {
 		const line = el('span', 'rg-ol-line', [String(node.line + 1)]);
 		row.append(twist, name, count, file, line);
 		row.title = `${node.path}:${node.line + 1}`;
-		// The row's one click shows the jump in the Definition page — the list's own
-		// activation, the code page left standing; the right-click menu is the graph
-		// card's, its "Open the definition" the editor's jump.
 		row.addEventListener('click', () => this.showInDefinition(node, node.path, node.line));
 		row.addEventListener('contextmenu', (event) => {
 			event.preventDefault();
@@ -1182,25 +1322,42 @@ export class RelationGraphView {
 
 	private clearBoard(): void {
 		this.stopMoves();
+		this.clearHoverHighlight();
 		this.painted.clear();
 		this.bounds = { minX: 0, minY: 0, maxX: 0, maxY: 0 };
-		// The Outline's rows answer the same empty states the board does — both surfaces
-		// clear, whichever of the two shows.
 		this.outlineHead.textContent = '';
 		this.outlineList.textContent = '';
 
+		while (this.bandLayer.firstChild) this.bandLayer.firstChild.remove();
 		for (const g of this.cardEls.values()) g.remove();
 		for (const g of this.edgeEls.values()) g.remove();
 		this.cardEls.clear();
 		this.edgeEls.clear();
 		this.edgeEnds.clear();
+		this.outEdgesByNode.clear();
+		this.inEdgesByNode.clear();
 		this.applyCamera();
 	}
 
 	private paintBoard(scene: Scene): void {
 		const palette = themePalette();
 		this.paintMarkers(palette);
-		// The cards: new ones fade in at their spot, moved ones glide, gone ones leave.
+		this.paintBands(scene);
+
+		// Build adjacency indices for O(degree) hover neighborhood highlighting.
+		this.outEdgesByNode.clear();
+		this.inEdgesByNode.clear();
+		this.lastPairSet = new Set(scene.edges.map((e) => `${e.from}\u0000${e.to}`));
+		for (const e of scene.edges) {
+			const ol = this.outEdgesByNode.get(e.from);
+			if (ol) ol.push(e);
+			else this.outEdgesByNode.set(e.from, [e]);
+			const il = this.inEdgesByNode.get(e.to);
+			if (il) il.push(e);
+			else this.inEdgesByNode.set(e.to, [e]);
+		}
+
+		// Cards: diff in place, new ones fade in, moved ones glide.
 		const seenCards = new Set<string>();
 		for (const node of scene.nodes) {
 			seenCards.add(node.id);
@@ -1210,29 +1367,22 @@ export class RelationGraphView {
 				this.cardEls.set(node.id, g);
 				this.cardLayer.appendChild(g);
 			}
-			const rect = g.querySelector('rect')!;
-			const label = g.querySelector('text')!;
-			if (label.textContent !== node.label) label.textContent = node.label;
-			if (rect.getAttribute('width') !== String(node.w)) {
-				rect.setAttribute('width', String(node.w));
-				label.setAttribute('x', String(node.w / 2));
-			}
-			if (rect.getAttribute('height') !== String(node.h)) rect.setAttribute('height', String(node.h));
-			this.paintCardRows(g, node, palette);
+			this.updateCard(g, node, palette);
 			const prior = this.painted.get(node.id);
 			this.painted.set(node.id, { x: node.x, y: node.y });
 			if (prior && (prior.x !== node.x || prior.y !== node.y)) {
 				this.startMove(node.id, prior.x, prior.y);
 				this.placeCard(g, node.x, node.y);
 			} else if (!prior) {
-				// A first appearance: fade in exactly where it belongs.
 				this.placeCard(g, node.x, node.y);
 				g.classList.add('rg-enter');
-				window.setTimeout(() => g?.classList.remove('rg-enter'), 260);
+				window.setTimeout(() => g?.classList.remove('rg-enter'), 240);
 			}
 			g.classList.toggle('rg-root', node.root);
+			g.classList.toggle('rg-selected', this.selectedKey === node.id);
 		}
-		// The branch expanders ride the same diff.
+
+		// Expanders.
 		const seenExp = new Set<string>();
 		for (const exp of scene.expanders) {
 			seenExp.add(exp.id);
@@ -1252,9 +1402,10 @@ export class RelationGraphView {
 			} else if (!prior) {
 				this.placeCard(g, exp.x, exp.y);
 				g.classList.add('rg-enter');
-				window.setTimeout(() => g?.classList.remove('rg-enter'), 260);
+				window.setTimeout(() => g?.classList.remove('rg-enter'), 240);
 			}
 		}
+
 		for (const [id, g] of this.cardEls) {
 			if (!seenCards.has(id) && !seenExp.has(id)) {
 				g.remove();
@@ -1262,8 +1413,13 @@ export class RelationGraphView {
 				this.painted.delete(id);
 			}
 		}
-		// The links: rebuilt over the spots every draw — the tween's frames refresh them
-		// from the moving cards.
+
+		// Compute spatially sorted port offsets so edges fan out/in without crossing.
+		const horizontal = this.viewMode === 'graphHorizontal';
+		const { outOffset, inOffset } = computeRelationPorts(scene.edges, this.layout, horizontal);
+		this.lastOutOffset = outOffset;
+		this.lastInOffset = inOffset;
+
 		const seenEdges = new Set<string>();
 		for (const edge of scene.edges) {
 			seenEdges.add(edge.id);
@@ -1274,7 +1430,7 @@ export class RelationGraphView {
 				this.edgeLayer.appendChild(g);
 				this.edgeEnds.set(edge.id, { from: edge.from, to: edge.to });
 			}
-			this.paintEdge(g, edge, palette);
+			this.paintEdge(g, edge, palette, outOffset.get(edge.id) ?? 0, inOffset.get(edge.id) ?? 0);
 		}
 		for (const [id, g] of this.edgeEls) {
 			if (!seenEdges.has(id)) {
@@ -1287,50 +1443,167 @@ export class RelationGraphView {
 		if (this.moves.size > 0) this.beginMoves();
 	}
 
-	/** The arrowhead marker — the V-shaped head (three line segments, not
-	 *  a filled wedge), in the connection red, rebuilt each draw: the palette may have
-	 *  flipped with the theme. */
+	/** Subtle L0, L1, L2... architectural layer guide bands matching moduleDiagram.ts. */
+	private paintBands(scene: Scene): void {
+		while (this.bandLayer.firstChild) this.bandLayer.firstChild.remove();
+		if (scene.bands.length < 2) return;
+		const horizontal = this.viewMode === 'graphHorizontal';
+		for (const band of scene.bands) {
+			const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+			rect.classList.add('rg-layer-band');
+			rect.setAttribute('rx', '12');
+			const tag = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+			tag.classList.add('rg-layer-tag');
+			tag.textContent = `L${band.layer}`;
+			if (!horizontal) {
+				rect.setAttribute('x', '12');
+				rect.setAttribute('y', String(band.start));
+				rect.setAttribute('width', String(Math.max(0, scene.canvasW - 24)));
+				rect.setAttribute('height', String(Math.max(0, band.end - band.start)));
+				tag.setAttribute('x', '20');
+				tag.setAttribute('y', String(band.start + 13));
+			} else {
+				rect.setAttribute('x', String(band.start));
+				rect.setAttribute('y', '12');
+				rect.setAttribute('width', String(Math.max(0, band.end - band.start)));
+				rect.setAttribute('height', String(Math.max(0, scene.canvasH - 24)));
+				tag.setAttribute('x', String(band.start + 10));
+				tag.setAttribute('y', '26');
+			}
+			this.bandLayer.append(rect, tag);
+		}
+	}
+
 	private paintMarkers(palette: ReturnType<typeof themePalette>): void {
 		const defs = this.world.querySelector('defs')!;
 		while (defs.firstChild) defs.firstChild.remove();
-		const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
-		marker.setAttribute('id', 'rg-arr');
-		marker.setAttribute('viewBox', '0 0 10 10');
-		marker.setAttribute('refX', '9');
-		marker.setAttribute('refY', '5');
-		marker.setAttribute('markerWidth', '10');
-		marker.setAttribute('markerHeight', '10');
-		marker.setAttribute('markerUnits', 'userSpaceOnUse');
-		marker.setAttribute('orient', 'auto-start-reverse');
-		const head = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-		head.setAttribute('d', 'M1,1 L9,5 L1,9');
-		head.setAttribute('fill', 'none');
-		head.setAttribute('stroke', palette.link);
-		head.setAttribute('stroke-width', '1.4');
-		head.setAttribute('stroke-linecap', 'round');
-		head.setAttribute('stroke-linejoin', 'round');
-		marker.appendChild(head);
-		defs.appendChild(marker);
+		const makeMarker = (id: string, color: string) => {
+			const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+			marker.setAttribute('id', id);
+			marker.setAttribute('viewBox', '0 0 10 10');
+			marker.setAttribute('refX', '8.5');
+			marker.setAttribute('refY', '5');
+			marker.setAttribute('markerWidth', '7');
+			marker.setAttribute('markerHeight', '7');
+			marker.setAttribute('markerUnits', 'userSpaceOnUse');
+			marker.setAttribute('orient', 'auto-start-reverse');
+			const head = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+			head.setAttribute('d', 'M 1 1.6 L 8.8 5 L 1 8.4 L 2.8 5 z');
+			head.setAttribute('fill', color);
+			marker.appendChild(head);
+			return marker;
+		};
+		defs.append(
+			makeMarker('rg-arr', palette.link),
+			makeMarker('rg-arr-in', '#4ec9b0'),
+			makeMarker('rg-arr-out', '#569cd6')
+		);
 	}
 
+	/** Build a module-diagram-style vector card: main rounded shell (`rect` first for
+	 *  geometry queries), subtle header tint, semantic kind accent bar, title (`text` first),
+	 *  file:line subtitle, and detail rows container. */
 	private makeCard(node: Scene['nodes'][number], palette: ReturnType<typeof themePalette>): SVGGElement {
 		const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
 		g.classList.add('rg-card');
 		g.dataset.id = node.id;
+
+		// First <rect>: main card shell (preserves geometry & stroke-width queries).
 		const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+		rect.classList.add('rg-card-bg');
+		rect.setAttribute('x', '0');
+		rect.setAttribute('y', '0');
+		rect.setAttribute('width', String(node.w));
 		rect.setAttribute('height', String(node.h));
-		rect.setAttribute('rx', '7');
+		rect.setAttribute('rx', String(CARD_RX));
+
+		// Subtle header tint path.
+		const header = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+		header.classList.add('rg-card-header');
+		header.setAttribute('fill', node.root ? palette.rootHeader : palette.cardHeader);
+
+		// Semantic accent pill on the left of the header.
+		const accent = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+		accent.classList.add('rg-card-accent');
+		accent.setAttribute('x', '8');
+		accent.setAttribute('y', '6');
+		accent.setAttribute('width', '3.5');
+		accent.setAttribute('height', '12');
+		accent.setAttribute('rx', '1.75');
+		accent.setAttribute('fill', node.root ? palette.rootStroke : kindAccent(node.kind, palette));
+
+		// First <text>: symbol title.
 		const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-		label.setAttribute('text-anchor', 'middle');
+		label.classList.add('rg-card-title');
+		label.setAttribute('x', '17');
+		label.setAttribute('y', String(HEADER_H / 2 + 0.5));
 		label.setAttribute('dominant-baseline', 'central');
-		label.setAttribute('font-size', '11');
+		label.setAttribute('font-size', '11.5');
 		label.setAttribute('font-family', uiFontFamily());
-		label.setAttribute('x', String(node.w / 2));
-		label.setAttribute('y', String(NODE_H / 2));
 		label.textContent = node.label;
+
+		// Second <text>: file:line subtitle.
+		const sub = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+		sub.classList.add('rg-card-sub');
+		sub.setAttribute('x', '11');
+		sub.setAttribute('y', String(HEADER_H + 11));
+		sub.setAttribute('dominant-baseline', 'central');
+		sub.setAttribute('font-size', '9.5');
+		sub.setAttribute('font-family', uiFontFamily());
+		sub.textContent = node.subtitle;
+
 		const details = document.createElementNS('http://www.w3.org/2000/svg', 'g');
 		details.classList.add('rg-details');
-		g.append(rect, label, details);
+
+		g.append(rect, header, accent, label, sub, details);
+
+		g.addEventListener('click', (event) => {
+			if ((event.target as Element).closest('.rg-expander, .rg-detail-row')) return;
+			this.onCardClick(node.id);
+		});
+		g.addEventListener('dblclick', () => {
+			const live = this.nodes.get(nodeIdOf(g));
+			if (live) this.onOpen?.(live.path, live.line + 1);
+		});
+		g.addEventListener('contextmenu', (event) => {
+			event.preventDefault();
+			this.showCardMenu(event.clientX, event.clientY, nodeIdOf(g));
+		});
+		g.addEventListener('pointerenter', (event) => {
+			if ((event.target as Element).closest('.rg-expander')) return;
+			const id = nodeIdOf(g);
+			this.applyHoverHighlight(id);
+			const live = this.nodes.get(id);
+			if (live) this.scheduleDecl(live, event.clientX, event.clientY);
+		});
+		g.addEventListener('pointerleave', () => {
+			this.clearHoverHighlight();
+			if (this.declTimer !== null) {
+				clearTimeout(this.declTimer);
+				this.declTimer = null;
+			}
+		});
+		return g;
+	}
+
+	private updateCard(g: SVGGElement, node: Scene['nodes'][number], palette: ReturnType<typeof themePalette>): void {
+		const rect = g.querySelector('rect.rg-card-bg')!;
+		const header = g.querySelector('path.rg-card-header')!;
+		const accent = g.querySelector('rect.rg-card-accent')!;
+		const label = g.querySelector('text.rg-card-title')!;
+		const sub = g.querySelector('text.rg-card-sub')!;
+
+		if (label.textContent !== node.label) label.textContent = node.label;
+		if (sub.textContent !== node.subtitle) sub.textContent = node.subtitle;
+		rect.setAttribute('width', String(node.w));
+		rect.setAttribute('height', String(node.h));
+		header.setAttribute(
+			'd',
+			`M ${CARD_RX} 0 H ${node.w - CARD_RX} A ${CARD_RX} ${CARD_RX} 0 0 1 ${node.w} ${CARD_RX} V ${HEADER_H} H 0 V ${CARD_RX} A ${CARD_RX} ${CARD_RX} 0 0 1 ${CARD_RX} 0 Z`
+		);
+		header.setAttribute('fill', node.root ? palette.rootHeader : palette.cardHeader);
+		accent.setAttribute('fill', node.root ? palette.rootStroke : kindAccent(node.kind, palette));
+
 		if (node.root) {
 			rect.setAttribute('stroke', palette.rootStroke);
 			rect.setAttribute('stroke-width', '1.5');
@@ -1342,44 +1615,15 @@ export class RelationGraphView {
 			rect.setAttribute('stroke-width', '1');
 			rect.setAttribute('fill', palette.card);
 			label.setAttribute('fill', palette.text);
+			label.setAttribute('font-weight', '500');
 		}
-		g.addEventListener('click', (event) => {
-			// The branch expander and the numbered rows ride inside the card group; their
-			// clicks alone act — never the definition jump.
-			if ((event.target as Element).closest('.rg-expander, .rg-detail-row')) return;
-			this.onCardClick(node.id);
-		});
-		g.addEventListener('dblclick', () => {
-			const node = this.nodes.get(nodeIdOf(g));
-			if (node) this.onOpen?.(node.path, node.line + 1);
-		});
-		g.addEventListener('contextmenu', (event) => {
-			event.preventDefault();
-			this.showCardMenu(event.clientX, event.clientY, nodeIdOf(g));
-		});
-		g.addEventListener('pointerenter', (event) => {
-			if ((event.target as Element).closest('.rg-expander')) return;
-			const node = this.nodes.get(nodeIdOf(g));
-			if (!node) return;
-			this.scheduleDecl(node, event.clientX, event.clientY);
-		});
-		g.addEventListener('pointerleave', () => {
-			if (this.declTimer !== null) {
-				clearTimeout(this.declTimer);
-				this.declTimer = null;
-			}
-		});
-		return g;
+		sub.setAttribute('fill', palette.subText);
+		this.paintCardRows(g, node, palette);
 	}
 
-	/** The numbered rows a multi-site edge draws under its card (SPEC-ui-relation
-	 *  §2.9): a separator under the label, then one "N. line L" row per
-	 *  site, a "+N more" tail when the count outran the kept lines. A row's click jumps
-	 *  to that site — the edge's own file at the row's line — and stops before the card's
-	 *  definition jump. Reconciled by signature, so an unchanged card repaints nothing. */
 	private paintCardRows(g: SVGGElement, node: Scene['nodes'][number], palette: ReturnType<typeof themePalette>): void {
 		const details = g.querySelector('g.rg-details') as SVGGElement;
-		const signature = node.rows.map((row) => row.label).join('\u0000');
+		const signature = `${node.w}\u0001${node.rows.map((row) => row.label).join('\u0000')}`;
 		if (details.dataset['sig'] === signature) return;
 		details.dataset['sig'] = signature;
 		details.textContent = '';
@@ -1407,12 +1651,10 @@ export class RelationGraphView {
 				text.addEventListener('click', (event) => {
 					event.stopPropagation();
 					const live = this.nodes.get(id);
-					// The site's own jump shows in the Definition page too — the edge's
-					// file at the site's line, the code page left standing.
 					if (live) this.showInDefinition(live, live.edgePath, site);
 				});
 			} else {
-				text.setAttribute('fill', palette.cardStroke);
+				text.setAttribute('fill', palette.subText);
 			}
 			details.appendChild(text);
 		});
@@ -1426,11 +1668,12 @@ export class RelationGraphView {
 		circle.setAttribute('r', String(EXPANDER_R));
 		circle.setAttribute('fill', palette.card);
 		circle.setAttribute('stroke', palette.cardStroke);
-		circle.setAttribute('stroke-width', '1');
+		circle.setAttribute('stroke-width', '1.2');
 		const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
 		label.setAttribute('text-anchor', 'middle');
 		label.setAttribute('dominant-baseline', 'central');
-		label.setAttribute('font-size', '12');
+		label.setAttribute('font-size', '11.5');
+		label.setAttribute('font-weight', '600');
 		label.setAttribute('font-family', uiFontFamily());
 		label.setAttribute('fill', palette.text);
 		label.textContent = exp.label;
@@ -1445,130 +1688,121 @@ export class RelationGraphView {
 		return g;
 	}
 
-	private makeEdge(edge: Scene['edges'][number], palette: ReturnType<typeof themePalette>): SVGGElement {
+	private makeEdge(edge: GraphEdge, palette: ReturnType<typeof themePalette>): SVGGElement {
 		const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
 		g.classList.add('rg-edge');
 		g.dataset.from = edge.from;
 		g.dataset.to = edge.to;
 		const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
 		path.setAttribute('fill', 'none');
+		path.setAttribute('stroke-linecap', 'round');
+		path.setAttribute('stroke-linejoin', 'round');
+		const badge = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+		badge.classList.add('rg-edge-badge');
+		const pill = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+		pill.setAttribute('rx', '8');
+		pill.setAttribute('height', '16');
+		pill.setAttribute('y', '-8');
+		pill.setAttribute('fill', palette.badgeBg);
+		pill.setAttribute('stroke', palette.cardStroke);
 		const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
 		label.setAttribute('text-anchor', 'middle');
-		label.setAttribute('font-size', '10');
+		label.setAttribute('y', '3.5');
 		label.setAttribute('font-family', uiFontFamily());
 		label.setAttribute('fill', palette.text);
-		label.setAttribute('stroke', palette.card);
-		label.setAttribute('stroke-width', '3');
-		label.setAttribute('paint-order', 'stroke');
-		g.append(path, label);
+		badge.append(pill, label);
+		g.append(path, badge);
 		return g;
 	}
 
-	/** One link's paint: the connection red, the V arrowhead riding the end, the ×N
-	 *  label on the bus run (standing down when the edge's own card speaks the count in
-	 *  numbered rows), and the orthogonal path itself — the Orthogonal connection
-	 *  (SPEC-ui-relation §2): out of the `from` card's facing face, the mid-band
-	 *  bus every sibling edge shares, into the `to` card's facing face, the head on the
-	 *  referenced side. */
-	private paintEdge(g: SVGGElement, edge: Scene['edges'][number], palette: ReturnType<typeof themePalette>): void {
+	private paintEdge(
+		g: SVGGElement,
+		edge: GraphEdge,
+		palette: ReturnType<typeof themePalette>,
+		outOff: number,
+		inOff: number
+	): void {
 		const from = this.layout.get(edge.from);
 		const to = this.layout.get(edge.to);
-		const path = g.querySelector('path')!;
-		const label = g.querySelector('text')!;
 		if (!from || !to) return;
-		const points = this.linkPoints(from, to);
-		path.setAttribute('d', this.linkPath(points));
+		const path = g.querySelector('path')!;
+		const badge = g.querySelector('g.rg-edge-badge') as SVGGElement;
+		const pill = badge.querySelector('rect')!;
+		const label = badge.querySelector('text')!;
+		const horizontal = this.viewMode === 'graphHorizontal';
+		const bi = this.lastPairSet.has(`${edge.to}\u0000${edge.from}`);
+		const routed = routeRelationEdge(from, to, horizontal, outOff, inOff, bi, edge.from, edge.to);
+		path.setAttribute('d', routed.d);
 		path.setAttribute('stroke', palette.link);
-		path.setAttribute('stroke-width', edge.count > 1 ? '1.8' : '1.3');
-		path.removeAttribute('stroke-dasharray');
+		path.setAttribute('stroke-width', edge.count > 1 ? '1.85' : '1.35');
+		if (edge.kind === 'use') path.setAttribute('stroke-dasharray', '4 3');
+		else path.removeAttribute('stroke-dasharray');
 		path.setAttribute('marker-end', 'url(#rg-arr)');
+
 		const text = !edge.hideCount && edge.count > 1 ? `×${edge.count}` : '';
 		label.textContent = text;
 		if (text) {
-			const [a, b] = points[1]!;
-			const [c, d] = points[2]!;
-			label.setAttribute('x', String((a + c) / 2));
-			label.setAttribute('y', String((b + d) / 2 + 3));
-		}
-	}
-
-	/** The link's four orthogonal corners: out of the `from` card's facing face, the bus
-	 *  turn, the bus's end over the `to` card, and into its facing face — VERTICAL leaves
-	 *  the bottom/top faces and runs the bus along the mid-band between the rows;
-	 *  HORIZONTAL (the GraphHorizontal layout) leaves the right/left faces and runs it
-	 *  between the columns. Sibling edges of one parent share the band, so their runs
-	 *  merge into one trunk line. An edge whose ends share a band (a cross edge
-	 *  between two cards of one row) routes around both instead of through them — under
-	 *  the row (right of the column), entering the near face. */
-	private linkPoints(from: LayoutPoint, to: LayoutPoint): [number, number][] {
-		if (this.viewMode === 'graphHorizontal') {
-			const rightward = to.x + to.w / 2 > from.x + from.w / 2 + 2;
-			const leftward = from.x + from.w / 2 > to.x + to.w / 2 + 2;
-			const exitY = from.y + NODE_H / 2;
-			const enterY = to.y + NODE_H / 2;
-			let exitX: number;
-			let enterX: number;
-			let busX: number;
-			if (rightward) {
-				exitX = from.x + from.w;
-				enterX = to.x;
-				busX = (exitX + enterX) / 2;
-			} else if (leftward) {
-				exitX = from.x;
-				enterX = to.x + to.w;
-				busX = (exitX + enterX) / 2;
-			} else {
-				exitX = from.x + from.w;
-				enterX = to.x + to.w;
-				busX = Math.max(exitX, enterX) + 12;
-			}
-			return [
-				[exitX, exitY],
-				[busX, exitY],
-				[busX, enterY],
-				[enterX, enterY]
-			];
-		}
-		const downward = to.y + to.h / 2 > from.y + from.h / 2 + 2;
-		const upward = from.y + from.h / 2 > to.y + to.h / 2 + 2;
-		const exitX = from.x + from.w / 2;
-		const enterX = to.x + to.w / 2;
-		let exitY: number;
-		let enterY: number;
-		let busY: number;
-		if (downward) {
-			exitY = from.y + from.h;
-			enterY = to.y;
-			busY = (exitY + enterY) / 2;
-		} else if (upward) {
-			exitY = from.y;
-			enterY = to.y + to.h;
-			busY = (exitY + enterY) / 2;
+			const pillW = Math.max(24, text.length * 6.5 + 10);
+			pill.setAttribute('width', String(pillW));
+			pill.setAttribute('x', String(-pillW / 2));
+			pill.setAttribute('fill', palette.badgeBg);
+			pill.setAttribute('stroke', palette.cardStroke);
+			label.setAttribute('fill', palette.text);
+			badge.setAttribute('transform', `translate(${routed.mx}, ${routed.my})`);
+			badge.style.display = '';
 		} else {
-			exitY = from.y + from.h;
-			enterY = to.y + to.h;
-			busY = Math.max(exitY, enterY) + 12;
+			badge.style.display = 'none';
 		}
-		return [
-			[exitX, exitY],
-			[exitX, busY],
-			[enterX, busY],
-			[enterX, enterY]
-		];
 	}
 
-	/** The path string over `linkPoints`: the orthogonal polyline `M … L … L … L …`. */
-	private linkPath(points: [number, number][]): string {
-		return points.map(([x, y], at) => `${at === 0 ? 'M' : 'L'} ${x} ${y}`).join(' ');
+	/* ---------- O(degree) Hover Neighborhood Highlighting ---------- */
+
+	private applyHoverHighlight(nodeId: string): void {
+		this.clearHoverHighlight();
+		const nextActive: SVGElement[] = [];
+		const mark = (elRef: SVGElement | undefined, cls: 'hover-self' | 'hover-in' | 'hover-out') => {
+			if (!elRef) return;
+			elRef.classList.add(cls);
+			nextActive.push(elRef);
+		};
+		mark(this.cardEls.get(nodeId), 'hover-self');
+		for (const e of this.outEdgesByNode.get(nodeId) ?? []) {
+			const eg = this.edgeEls.get(e.id);
+			if (eg) {
+				mark(eg, 'hover-out');
+				eg.querySelector('path')?.setAttribute('marker-end', 'url(#rg-arr-out)');
+			}
+			if (e.to !== nodeId) mark(this.cardEls.get(e.to), 'hover-out');
+		}
+		for (const e of this.inEdgesByNode.get(nodeId) ?? []) {
+			const eg = this.edgeEls.get(e.id);
+			if (eg) {
+				mark(eg, 'hover-in');
+				eg.querySelector('path')?.setAttribute('marker-end', 'url(#rg-arr-in)');
+			}
+			if (e.from !== nodeId) mark(this.cardEls.get(e.from), 'hover-in');
+		}
+		this.activeHoverEls = nextActive;
+		this.board.classList.add('has-hover');
+	}
+
+	private clearHoverHighlight(): void {
+		this.board.classList.remove('has-hover');
+		for (const elRef of this.activeHoverEls) {
+			elRef.classList.remove('hover-self', 'hover-in', 'hover-out');
+			if (elRef.classList.contains('rg-edge')) {
+				elRef.querySelector('path')?.setAttribute('marker-end', 'url(#rg-arr)');
+			}
+		}
+		this.activeHoverEls = [];
 	}
 
 	private placeCard(g: SVGGElement, x: number, y: number): void {
 		g.setAttribute('transform', `translate(${x} ${y})`);
 	}
 
-	/** The glide: the card starts from where it stood and the rAF loop walks it to the
-	 *  spot the layout just gave it — the links redraw from the moving cards every
-	 *  frame, so the arrows stay glued. */
+	/* ---------- Glide Animation ---------- */
+
 	private startMove(id: string, fx: number, fy: number): void {
 		this.moves.set(id, { fx, fy, start: performance.now() });
 	}
@@ -1576,7 +1810,6 @@ export class RelationGraphView {
 	private beginMoves(): void {
 		if (this.moveHandle !== null) return;
 		if (typeof requestAnimationFrame !== 'function') {
-			// No frame clock (a bare harness): the cards already sit at their spots.
 			this.moves.clear();
 			return;
 		}
@@ -1597,21 +1830,28 @@ export class RelationGraphView {
 				this.placeCard(g, x, y);
 				if (p >= 1) this.moves.delete(id);
 			}
-			// The links follow the cards: every drawn arrow repaints over the moving ends.
+			const horizontal = this.viewMode === 'graphHorizontal';
 			for (const [id, g] of this.edgeEls) {
 				const ends = this.edgeEnds.get(id);
 				if (!ends) continue;
 				const from = this.renderedSpot(ends.from);
 				const to = this.renderedSpot(ends.to);
 				if (from && to) {
-					const points = this.linkPoints(from, to);
-					g.querySelector('path')!.setAttribute('d', this.linkPath(points));
-					const label = g.querySelector('text')!;
-					if (label.textContent) {
-						const [a, b] = points[1]!;
-						const [c, d] = points[2]!;
-						label.setAttribute('x', String((a + c) / 2));
-						label.setAttribute('y', String((b + d) / 2 + 3));
+					const bi = this.lastPairSet.has(`${ends.to}\u0000${ends.from}`);
+					const routed = routeRelationEdge(
+						from,
+						to,
+						horizontal,
+						this.lastOutOffset.get(id) ?? 0,
+						this.lastInOffset.get(id) ?? 0,
+						bi,
+						ends.from,
+						ends.to
+					);
+					g.querySelector('path')!.setAttribute('d', routed.d);
+					const badge = g.querySelector('g.rg-edge-badge') as SVGGElement | null;
+					if (badge && badge.style.display !== 'none') {
+						badge.setAttribute('transform', `translate(${routed.mx}, ${routed.my})`);
 					}
 				}
 			}
@@ -1634,8 +1874,6 @@ export class RelationGraphView {
 		this.settle = null;
 	}
 
-	/** A card's spot as the drawing holds it right now — the glide's interpolated one,
-	 *  or the layout's settled one. The links read this so they stay glued. */
 	private renderedSpot(id: string): LayoutPoint | null {
 		const move = this.moves.get(id);
 		const spot = this.layout.get(id);
@@ -1643,13 +1881,11 @@ export class RelationGraphView {
 		if (move) {
 			const p = Math.min(1, (performance.now() - move.start) / MOVE_MS);
 			const e = 1 - Math.pow(1 - p, 3);
-			return { x: move.fx + (spot.x - move.fx) * e, y: move.fy + (spot.y - move.fy) * e, w: spot.w, h: spot.h };
+			return { x: move.fx + (spot.x - move.fx) * e, y: move.fy + (spot.y - move.fy) * e, w: spot.w, h: spot.h, layer: spot.layer };
 		}
 		return spot;
 	}
 
-	/** Resolves once any in-flight glide has landed — the harness and the tests read
-	 *  settled geometry through it. */
 	whenSettled(): Promise<void> {
 		if (this.moves.size === 0) return Promise.resolve();
 		return new Promise<void>((resolve) => {
@@ -1657,19 +1893,48 @@ export class RelationGraphView {
 		});
 	}
 
-	/* ---------- The camera (pan / zoom / fit) ---------- */
+	/* ---------- Camera (pan / zoom / fit / keyboard) ---------- */
 
 	private applyCamera(): void {
 		this.world.setAttribute('transform', `translate(${this.camX} ${this.camY}) scale(${this.camScale})`);
+		const gridStep = Math.max(12, Math.min(40, 20 * this.camScale));
+		this.stage.style.backgroundSize = `${gridStep}px ${gridStep}px`;
+		this.stage.style.backgroundPosition = `${this.camX % gridStep}px ${this.camY % gridStep}px`;
 	}
+
+	private stepZoom(factor: number): void {
+		const width = this.stage.clientWidth || 300;
+		const height = this.stage.clientHeight || 200;
+		const px = width / 2;
+		const py = height / 2;
+		const next = Math.max(0.15, Math.min(3, this.camScale * factor));
+		this.camX = px - ((px - this.camX) / this.camScale) * next;
+		this.camY = py - ((py - this.camY) / this.camScale) * next;
+		this.camScale = next;
+		this.applyCamera();
+	}
+
+	private readonly onBoardKeyDown = (event: KeyboardEvent): void => {
+		if (event.ctrlKey || event.metaKey || event.altKey) return;
+		if (event.key === '+' || event.key === '=') this.stepZoom(1.18);
+		else if (event.key === '-' || event.key === '_') this.stepZoom(1 / 1.18);
+		else if (event.key === '0' || event.key === 'Home' || event.key === 'f' || event.key === 'F') this.fit();
+		else if (event.key === 'ArrowLeft') { this.camX += ARROW_PAN; this.applyCamera(); }
+		else if (event.key === 'ArrowRight') { this.camX -= ARROW_PAN; this.applyCamera(); }
+		else if (event.key === 'ArrowUp') { this.camY += ARROW_PAN; this.applyCamera(); }
+		else if (event.key === 'ArrowDown') { this.camY -= ARROW_PAN; this.applyCamera(); }
+		else if (event.key === 'Escape') {
+			this.hideDecl();
+			if (this.selectedKey) {
+				this.cardEls.get(this.selectedKey)?.classList.remove('rg-selected');
+				this.selectedKey = null;
+			}
+		} else return;
+		event.preventDefault();
+	};
 
 	private readonly onWheel = (event: WheelEvent): void => {
 		event.preventDefault();
-		// The wheel zooms at the cursor (2026-11-21, the owner's direction: the wheel
-		// zooms in and out — the plain wheel used to pan, which read as the page scrolling
-		// up and down): the cursor's point holds still in the viewport while the scale
-		// multiplies around it, every wheel gesture riding the same path — pinch gestures
-		// and ctrl/cmd wheels included. Panning is the background drag's own.
 		const rect = this.board.getBoundingClientRect();
 		const px = event.clientX - rect.left;
 		const py = event.clientY - rect.top;
@@ -1684,11 +1949,8 @@ export class RelationGraphView {
 	private panFrom: { x: number; y: number; camX: number; camY: number } | null = null;
 
 	private readonly onPointerDown = (event: PointerEvent): void => {
-		// The cards and their branch expanders own their clicks: a pan start here would
-		// capture the pointer to the board and the composed click would land on the
-		// board, never on the circle. Only the bare board pans, main button only.
-		if (event.button !== 0) return;
-		if ((event.target as Element).closest('.rg-card, .rg-expander')) return;
+		if (event.button !== 0 && event.button !== 1) return;
+		if (event.button === 0 && (event.target as Element).closest('.rg-card, .rg-expander')) return;
 		this.panFrom = { x: event.clientX, y: event.clientY, camX: this.camX, camY: this.camY };
 		try {
 			this.board.setPointerCapture(event.pointerId);
@@ -1714,8 +1976,6 @@ export class RelationGraphView {
 		this.board.addEventListener('pointercancel', up);
 	};
 
-	/** Fit the whole drawing into the viewport — a new root's opening frame and the Fit
-	 *  button's answer. */
 	fit(): void {
 		const [width, height] = [this.stage.clientWidth, this.stage.clientHeight];
 		const box = this.bounds;
@@ -1723,16 +1983,13 @@ export class RelationGraphView {
 		const spanH = box.maxY - box.minY;
 		if (width === 0 || height === 0 || spanW <= 0 || spanH <= 0) return;
 		const pad = 24;
-		const scale = Math.max(0.15, Math.min(1.4, Math.min((width - pad * 2) / spanW, (height - pad * 2) / spanH)));
+		const scale = Math.max(0.15, Math.min(1.25, Math.min((width - pad * 2) / spanW, (height - pad * 2) / spanH)));
 		this.camScale = scale;
 		this.camX = (width - spanW * scale) / 2 - box.minX * scale;
 		this.camY = (height - spanH * scale) / 2 - box.minY * scale;
 		this.applyCamera();
 	}
 
-	/** The page re-gained a real viewport (the section re-showed, the sash moved): keep
-	 *  the camera unless the drawing no longer fits it — a zoom-to-fit when it outgrew,
-	 *  a re-centre when it slid off. */
 	frame(): void {
 		const width = this.stage.clientWidth;
 		const height = this.stage.clientHeight;
@@ -1741,7 +1998,6 @@ export class RelationGraphView {
 		const spanW = box.maxX - box.minX;
 		const spanH = box.maxY - box.minY;
 		if (spanW <= 0 || spanH <= 0) return;
-		// The viewport's world rect under the current camera.
 		const left = -this.camX / this.camScale;
 		const top = -this.camY / this.camScale;
 		const right = left + width / this.camScale;
@@ -1758,19 +2014,18 @@ export class RelationGraphView {
 		this.applyCamera();
 	}
 
-	/* ---------- The card handlers ---------- */
+	/* ---------- Card Handlers ---------- */
 
 	private onCardClick(key: string): void {
-		// The card's one click shows its definition in the Definition page — the
-		// relation window's own click, the code page left where it stands (2026-11-23,
-		// the owner's direction). The double click and the card menu's entry open the
-		// editor; the expander's own listener drills and stops before this sees it.
+		if (this.selectedKey && this.selectedKey !== key) {
+			this.cardEls.get(this.selectedKey)?.classList.remove('rg-selected');
+		}
+		this.selectedKey = key;
+		this.cardEls.get(key)?.classList.add('rg-selected');
 		const node = this.nodes.get(key);
 		if (node) this.showInDefinition(node, node.path, node.line);
 	}
 
-	/** The Definition page's feed for one node at one of its own lines: the card's
-	 *  definition (its own file) or a numbered row's site (the edge's file). */
 	private showInDefinition(node: GraphNode, path: string, line: number): void {
 		this.onShowDefinition?.({ kind: node.kind, name: node.name, path, line });
 	}
@@ -1795,8 +2050,6 @@ export class RelationGraphView {
 
 	/* ---------- Expand Special ---------- */
 
-	/** Expand Special: ask how many levels ("Number of levels to expand?"), then expand
-	 *  the subtree that deep at once. */
 	private async expandSpecialPrompt(key: string): Promise<void> {
 		const raw = await quickInput({
 			title: t('relations.expandSpecial'),
@@ -1809,9 +2062,6 @@ export class RelationGraphView {
 		await this.expandLevels(key, Math.min(8, Math.round(levels)));
 	}
 
-	/** Expand `levels` more levels under `key`, breadth-first — every frontier card with
-	 *  a ring asks for it once, the depth cap answering its ⋯ as a single drill would. A
-	 *  root switch mid-way (the generation moved) abandons the rest. */
 	async expandLevels(key: string, levels: number): Promise<void> {
 		const generation = this.generation;
 		let frontier = [key];
@@ -1834,7 +2084,7 @@ export class RelationGraphView {
 		this.render();
 	}
 
-	/* ---------- The declaration card ---------- */
+	/* ---------- Declaration Hover Card ---------- */
 
 	private readonly onDocMouseDown = (event: MouseEvent): void => {
 		if (this.declCard && !this.declCard.contains(event.target as Node)) this.hideDecl();
@@ -1845,9 +2095,7 @@ export class RelationGraphView {
 	};
 
 	private declTimer: number | null = null;
-
 	private readonly declCache = new Map<string, Promise<DeclFragment | null>>();
-
 	private declCard: HTMLElement | null = null;
 	private declToken = 0;
 
@@ -1860,12 +2108,6 @@ export class RelationGraphView {
 		}, DECL_DELAY);
 	}
 
-	/** Fetch (or reuse) the declaration fragment of one symbol: the index's definitions for
-	 *  the name pick the node's own file first, then one with a body, then the first; the
-	 *  file's lines from the declaration on fill the fragment, capped. The read opens the
-	 *  path through the host's `resolvePath` (the backend's read_file wants absolute
-	 *  paths, the index speaks repo-relative ones). A fetch that finds nothing answers
-	 *  null and is not kept. */
 	private declFragment(name: string, path: string): Promise<DeclFragment | null> {
 		const key = `${name}|${path}`;
 		const cached = this.declCache.get(key);
@@ -1901,8 +2143,6 @@ export class RelationGraphView {
 		this.declCard?.remove();
 		this.declCard = null;
 		const card = el('div', 'rg-decl');
-		// The declaration's own colors: the shared tokenizer's runs, one row per line —
-		// the hover reads like the editor's code, not like plain text.
 		const code = el('pre', 'rg-decl-code');
 		const ext = extOf(fragment.path);
 		for (const line of fragment.text.split('\n')) {
@@ -1939,39 +2179,98 @@ export class RelationGraphView {
 	}
 }
 
-/** The card group's node id — the data attribute the handlers read back. */
 function nodeIdOf(g: SVGElement): string {
 	return g.dataset.id ?? '';
 }
 
-/** A label's pixel width at the card's 11 px font — the estimate that sizes the cards
- *  (CJK glyphs read full-width, everything else a mean Latin advance). */
+function cardSubtitle(node: GraphNode): string {
+	const file = baseName(node.path);
+	return file ? `${file}:${node.line + 1}` : node.kind;
+}
+
 function estimateLabelWidth(text: string): number {
 	let width = 0;
-	for (const ch of text) width += ch.charCodeAt(0) > 0x2e7f ? 11 : 6.4;
+	for (const ch of text) width += ch.charCodeAt(0) > 0x2e7f ? 11.5 : 6.7;
 	return width;
 }
 
-/** The canvas palette: the SVG reads attributes, not CSS variables, so the colours
- *  cross as literals picked by the workbench theme's kind. The link red is the classic
- *  IDE's connection line color (2026-11-23, the owner's direction: the drawing reads as
- *  the reference relation window's — red trunk lines, V arrowheads). */
+function kindAccent(kind: string, palette: ReturnType<typeof themePalette>): string {
+	switch (kind) {
+		case 'function':
+		case 'method':
+			return palette.accentFn;
+		case 'class':
+		case 'struct':
+		case 'interface':
+		case 'enum':
+		case 'type':
+			return palette.accentType;
+		case 'macro':
+		case 'constant':
+			return palette.accentMacro;
+		case 'file':
+		case 'module':
+			return palette.accentFile;
+		default:
+			return palette.cardStroke;
+	}
+}
+
 function themePalette(): {
 	card: string;
+	cardHeader: string;
 	cardStroke: string;
 	rootCard: string;
+	rootHeader: string;
 	rootStroke: string;
 	rootText: string;
 	text: string;
+	subText: string;
 	link: string;
+	badgeBg: string;
+	accentFn: string;
+	accentType: string;
+	accentMacro: string;
+	accentFile: string;
 } {
 	const dark = document.documentElement.classList.contains('vscode-dark');
 	return dark
-		? { card: '#2c3544', cardStroke: '#454f5e', rootCard: '#2c3544', rootStroke: '#6dd4e9', rootText: '#e8edf5', text: '#e8edf5', link: '#e5534b' }
-		: { card: '#f7f7f7', cardStroke: '#c8c8c8', rootCard: '#f7f7f7', rootStroke: '#006abc', rootText: '#171717', text: '#171717', link: '#c00000' };
+		? {
+			card: '#242b36',
+			cardHeader: '#2c3544',
+			cardStroke: '#3e4a5c',
+			rootCard: '#223042',
+			rootHeader: '#2a3d55',
+			rootStroke: '#4fc1ff',
+			rootText: '#eef4fc',
+			text: '#e2e8f0',
+			subText: '#94a3b8',
+			link: '#7c8ea6',
+			badgeBg: '#1e242e',
+			accentFn: '#569cd6',
+			accentType: '#4ec9b0',
+			accentMacro: '#dcdcaa',
+			accentFile: '#c586c0'
+		}
+		: {
+			card: '#ffffff',
+			cardHeader: '#f3f6fa',
+			cardStroke: '#cfd8e3',
+			rootCard: '#f4f9ff',
+			rootHeader: '#e5f1ff',
+			rootStroke: '#006abc',
+			rootText: '#10243a',
+			text: '#1e293b',
+			subText: '#64748b',
+			link: '#64748b',
+			badgeBg: '#ffffff',
+			accentFn: '#0066b8',
+			accentType: '#0d9488',
+			accentMacro: '#b45309',
+			accentFile: '#7c3aed'
+		};
 }
 
-/** The workbench's UI font, resolved once — the SVG text needs the literal family. */
 function uiFontFamily(): string {
 	try {
 		const family = getComputedStyle(document.body).fontFamily;
@@ -1981,7 +2280,6 @@ function uiFontFamily(): string {
 	}
 }
 
-/** A path's basename over either separator. */
 function baseName(path: string): string {
 	const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
 	return cut === -1 ? path : path.slice(cut + 1);

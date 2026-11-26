@@ -31,8 +31,30 @@ fn starts_char(b: u8) -> bool {
     b & 0xC0 != 0x80
 }
 
-/// Compute the mask of `text`. O(n), one allocation per span and per line.
+/// Whether `ext` uses `#` for line comments (Python, shell, Ruby, YAML, TOML, Make, CMake).
+fn has_hash_comments(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "py" | "pyi" | "pyw" | "sh" | "bash" | "zsh" | "rb" | "yml" | "yaml" | "toml" | "mk" | "cmake"
+    )
+}
+
+/// Whether `ext` supports Python triple-quoted strings (`"""..."""` / `'''...'''`).
+fn is_python_ext(ext: &str) -> bool {
+    matches!(ext.to_ascii_lowercase().as_str(), "py" | "pyi" | "pyw")
+}
+
+/// Compute the mask of `text` using C-family defaults (`//`, `/* */`, `"..."`, `'...'`, `R"(...)"`).
 pub fn mask(text: &str) -> CodeMask {
+    mask_for_ext("", text)
+}
+
+/// Compute the comment/string mask of `text` with language-aware rules for `ext`
+/// (including Python `#` line comments and `"""..."""` / `'''...'''` triple-quoted strings).
+/// O(n), one allocation per span and per line.
+pub fn mask_for_ext(ext: &str, text: &str) -> CodeMask {
+    let hash_comments = has_hash_comments(ext);
+    let python = is_python_ext(ext);
     let bytes = text.as_bytes();
     let len = bytes.len();
     let mut spans: Vec<(usize, usize)> = Vec::new();
@@ -59,9 +81,8 @@ pub fn mask(text: &str) -> CodeMask {
 
     let mut b = 0usize;
     while b < len {
-        // `//` to end of line; the newline itself stays unmasked (the line break is not
-        // the comment's content, and the next line's start must register).
-        if bytes[b] == b'/' && b + 1 < len && bytes[b + 1] == b'/' {
+        // Python / script `#` line comment to end of line.
+        if hash_comments && bytes[b] == b'#' {
             let start = char_pos;
             while b < len && bytes[b] != b'\n' {
                 step(bytes, &mut b, &mut char_pos, &mut line_starts);
@@ -69,8 +90,17 @@ pub fn mask(text: &str) -> CodeMask {
             spans.push((start, char_pos));
             continue;
         }
-        // `/* */` across lines; unterminated runs to end of file.
-        if bytes[b] == b'/' && b + 1 < len && bytes[b + 1] == b'*' {
+        // `//` to end of line (skipped for Python where `//` is floor division).
+        if !python && bytes[b] == b'/' && b + 1 < len && bytes[b + 1] == b'/' {
+            let start = char_pos;
+            while b < len && bytes[b] != b'\n' {
+                step(bytes, &mut b, &mut char_pos, &mut line_starts);
+            }
+            spans.push((start, char_pos));
+            continue;
+        }
+        // `/* */` across lines; unterminated runs to end of file (not in Python).
+        if !python && bytes[b] == b'/' && b + 1 < len && bytes[b + 1] == b'*' {
             let start = char_pos;
             step(bytes, &mut b, &mut char_pos, &mut line_starts);
             step(bytes, &mut b, &mut char_pos, &mut line_starts);
@@ -88,11 +118,43 @@ pub fn mask(text: &str) -> CodeMask {
             spans.push((start, char_pos));
             continue;
         }
+        // Python triple-quoted strings `"""..."""` and `'''...'''` (docstrings and multi-line strings).
+        if python
+            && b + 2 < len
+            && ((bytes[b] == b'"' && bytes[b + 1] == b'"' && bytes[b + 2] == b'"')
+                || (bytes[b] == b'\'' && bytes[b + 1] == b'\'' && bytes[b + 2] == b'\''))
+        {
+            let quote = bytes[b];
+            let start = char_pos;
+            step(bytes, &mut b, &mut char_pos, &mut line_starts);
+            step(bytes, &mut b, &mut char_pos, &mut line_starts);
+            step(bytes, &mut b, &mut char_pos, &mut line_starts);
+            while b < len {
+                if bytes[b] == b'\\' && b + 1 < len {
+                    step(bytes, &mut b, &mut char_pos, &mut line_starts);
+                    step(bytes, &mut b, &mut char_pos, &mut line_starts);
+                    continue;
+                }
+                if b + 2 < len
+                    && bytes[b] == quote
+                    && bytes[b + 1] == quote
+                    && bytes[b + 2] == quote
+                {
+                    step(bytes, &mut b, &mut char_pos, &mut line_starts);
+                    step(bytes, &mut b, &mut char_pos, &mut line_starts);
+                    step(bytes, &mut b, &mut char_pos, &mut line_starts);
+                    break;
+                }
+                step(bytes, &mut b, &mut char_pos, &mut line_starts);
+            }
+            spans.push((start, char_pos));
+            continue;
+        }
         // C++ raw string `R"delim(...)delim"` — recognized when a `(` closes the
         // delimiter within a short prefix and the matching `)delim"` comes back; any
         // other spelling (an identifier `R` beside a quote, no closing arm) degrades to
         // the plain-quote path one character later, which stays tolerant.
-        if (bytes[b] == b'R' || bytes[b] == b'r') && b + 1 < len && bytes[b + 1] == b'"' {
+        if !python && (bytes[b] == b'R' || bytes[b] == b'r') && b + 1 < len && bytes[b + 1] == b'"' {
             if let Some(end) = raw_string_end(bytes, b + 2) {
                 let start = char_pos;
                 while b < end {
@@ -311,5 +373,16 @@ mod tests {
         assert_eq!(m.line_starts, vec![0, 7, 11, 20]);
         assert!(m.is_masked(1, 0) && m.is_masked(2, 0));
         assert!(!m.is_masked(3, 0));
+    }
+
+    #[test]
+    fn python_hash_comments_and_triple_quoted_docstrings_are_masked() {
+        let text = "def foo():\n    \"\"\"\n    calls helper() in docstring\n    \"\"\"\n    # helper() in comment\n    return helper()\n";
+        let m = mask_for_ext("py", text);
+        let hits = offsets_of(text, "helper");
+        assert_eq!(hits.len(), 3);
+        assert!(m.is_masked(hits[0].0, hits[0].1), "docstring mention masks");
+        assert!(m.is_masked(hits[1].0, hits[1].1), "hash comment mention masks");
+        assert!(!m.is_masked(hits[2].0, hits[2].1), "real call stays live");
     }
 }
