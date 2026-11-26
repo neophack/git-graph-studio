@@ -180,17 +180,6 @@ impl VolumeSigReader {
     }
 }
 
-/// Compare a 4-byte folded key against a folded prefix (`prefix` len <= 4).
-fn folded_key_starts_with(key: &[u8; 4], prefix_folded: &[u8]) -> bool {
-    let n = prefix_folded.len().min(4);
-    for i in 0..n {
-        if (key[i] | 0x20) != prefix_folded[i] {
-            return false;
-        }
-    }
-    true
-}
-
 /// Compare a 4-byte folded key lexicographically against a folded prefix (length <= 4).
 fn cmp_key_to_prefix(key: &[u8; 4], prefix_folded: &[u8]) -> std::cmp::Ordering {
     let n = prefix_folded.len().min(4);
@@ -268,10 +257,7 @@ impl PagedIndexReader {
                 if ord == std::cmp::Ordering::Greater {
                     return Some(slots);
                 }
-                if ord == std::cmp::Ordering::Equal
-                    && folded_key_starts_with(&rec.key, &pref)
-                    && seen.insert(rec.slot)
-                {
+                if ord == std::cmp::Ordering::Equal && seen.insert(rec.slot) {
                     slots.push(rec.slot);
                     if slots.len() >= limit {
                         return Some(slots);
@@ -322,16 +308,19 @@ pub fn inspect_volume_stats(dir: &Path) -> VolumeStats {
             total_bytes += meta.len();
         }
     }
-    let sym_records = fs::read(dir.join(SYM_VOL_FILE))
-        .ok()
-        .and_then(|b| VolumeHeader::parse_block(&b))
-        .map(|h| h.count)
-        .unwrap_or(0);
-    let sig_files = fs::read(dir.join(XC_VOL_FILE))
-        .ok()
-        .and_then(|b| VolumeHeader::parse_block(&b))
-        .map(|h| h.count)
-        .unwrap_or(0);
+    let read_header_count = |file: &str| -> u32 {
+        let mut f = match File::open(dir.join(file)) {
+            Ok(f) => f,
+            Err(_) => return 0,
+        };
+        let mut hdr = [0u8; HEADER_BLOCK_SIZE];
+        if f.read_exact(&mut hdr).is_err() {
+            return 0;
+        }
+        VolumeHeader::parse_block(&hdr).map(|h| h.count).unwrap_or(0)
+    };
+    let sym_records = read_header_count(SYM_VOL_FILE);
+    let sig_files = read_header_count(XC_VOL_FILE);
     let xab_pages = fs::read(dir.join(XAD_VOL_FILE))
         .ok()
         .and_then(|b| XdirVolume::parse(&b))

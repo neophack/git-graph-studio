@@ -373,9 +373,13 @@ fn member_declared_type(store: &SymbolStore, container: &str, member: &str) -> O
                 continue;
             }
             let abs = Path::new(store.root()).join(&path);
-            let (bytes, _) = read_searchable(&abs)?;
+            let Some((bytes, _)) = read_searchable(&abs) else {
+                continue;
+            };
             let text = String::from_utf8_lossy(&bytes);
-            let line = text.lines().nth(row.line)?;
+            let Some(line) = text.lines().nth(row.line) else {
+                continue;
+            };
             let mut bindings = HashMap::new();
             parse_colon_bindings(line, &mut bindings);
             parse_type_first_bindings(line, &mut bindings);
@@ -483,6 +487,9 @@ pub fn member_completions(
     col_0based: usize,
     limit: usize,
 ) -> Vec<MemberCompletion> {
+    if limit == 0 {
+        return Vec::new();
+    }
     let Some(line_text) = text.lines().nth(cursor_line) else {
         return Vec::new();
     };

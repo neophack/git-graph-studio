@@ -360,7 +360,7 @@ impl SymbolIndex {
     /// reads. Intersects with the store's trusted occurrence list when both exist.
     pub fn files_containing_code(&self, root: &str, name: &str) -> Option<Vec<String>> {
         let store = self.store(root)?;
-        let (trusted, all_files) = {
+        let (trusted, all_files, dirty) = {
             let guard = store.read().unwrap();
             (
                 guard.files_containing(name),
@@ -369,9 +369,10 @@ impl SymbolIndex {
                     .into_iter()
                     .map(|(p, _)| p)
                     .collect::<Vec<_>>(),
+                guard.has_dirty(),
             )
         };
-        if self.has_pending_save(root) {
+        if dirty || self.has_pending_save(root) {
             return trusted;
         }
         let dir = SymbolStore::index_dir(root, &self.home);

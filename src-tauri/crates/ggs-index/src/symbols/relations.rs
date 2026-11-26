@@ -376,7 +376,11 @@ fn refs_to(
     } = opts;
     let subject_is_private =
         !subject_path.is_empty() && store.is_symbol_private(subject_path, name, subject_line);
-    let narrow = store.files_containing(name);
+    let narrow = if subject_is_private {
+        Some(vec![subject_path.to_owned()])
+    } else {
+        store.files_containing(name)
+    };
     let (files, _) = scan_references_bounded(root, name, narrow, SCAN_KEEP, "")?;
     let mut nodes: Vec<RelationNode> = Vec::new();
     let mut index_of: HashMap<(String, String, String, usize), usize> = HashMap::new();
@@ -956,7 +960,11 @@ fn refs_by_files(
 ) -> Result<RelationAnswer, String> {
     let subject_is_private =
         !subject_path.is_empty() && store.is_symbol_private(subject_path, name, subject_line);
-    let narrow = store.files_containing(name);
+    let narrow = if subject_is_private {
+        Some(vec![subject_path.to_owned()])
+    } else {
+        store.files_containing(name)
+    };
     let (files, _) = scan_references_bounded(root, name, narrow, SCAN_KEEP, "")?;
     let mut nodes: Vec<RelationNode> = Vec::new();
     let mut index_of: HashMap<String, usize> = HashMap::new();

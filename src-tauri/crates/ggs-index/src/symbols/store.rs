@@ -1238,6 +1238,11 @@ impl SymbolStore {
         changed
     }
 
+    /// Whether any file has been modified in memory since the last successful volume write.
+    pub fn has_dirty(&self) -> bool {
+        !self.dirty.is_empty()
+    }
+
     /// Forget the given paths' dirty marks — the drain calls this once the write has
     /// actually landed, so a failed write keeps the store's lagging set intact.
     pub fn clear_dirty(&mut self, paths: &[String]) {
