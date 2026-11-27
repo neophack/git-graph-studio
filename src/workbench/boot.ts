@@ -30,8 +30,9 @@ import { commands } from '../platform/commands';
 import { registerGitCommands } from '../features/scm';
 import { registerZhCnText, t, tf } from '../platform/i18n';
 import { hook } from '../platform/hooks';
-import { openSettingsPanel } from './settingsPanel';
-import { checkForAppUpdate } from './appUpdate';
+// Lazy-loaded on demand so cold startup never parses Settings or Updater UI.
+const loadSettingsPanel = () => import('./settingsPanel');
+const loadAppUpdate = () => import('./appUpdate');
 import { settings, updateSetting } from '../platform/settings';
 import * as state from '../platform/state';
 import { basename, notify, relativeTo, toPosix } from '../platform/ui/index';
@@ -143,7 +144,7 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'workbench.action.lockEditorGroup', title: 'Lock Editor Group', category: 'View', enabled: () => !this.editors.activeGroup.locked, run: () => this.editors.setGroupLock(this.editors.activeGroup, true) });
 		register({ id: 'workbench.action.unlockEditorGroup', title: 'Unlock Editor Group', category: 'View', enabled: () => this.editors.activeGroup.locked, run: () => this.editors.setGroupLock(this.editors.activeGroup, false) });
 		register({ id: 'workbench.action.reopenClosedEditor', title: 'Reopen Closed Editor', category: 'View', keybinding: 'Ctrl+Shift+T', run: () => this.editors.reopenClosed() });
-		register({ id: 'workbench.openSettings', title: 'Settings', category: 'Preferences', keybinding: 'Ctrl+,', run: () => openSettingsPanel() });
+		register({ id: 'workbench.openSettings', title: 'Settings', category: 'Preferences', keybinding: 'Ctrl+,', run: () => void loadSettingsPanel().then((m) => m.openSettingsPanel()) });
 		register({ ...desktopOnly, id: 'workbench.exit', title: 'Exit', category: 'File', keybinding: 'Alt+F4', run: () => getCurrentWindow().close() });
 
 		register({ id: 'editor.undo', title: 'Undo', category: 'Edit', keybinding: 'Ctrl+Z', enabled: hasEditor, run: () => this.editors.runEditorCommand('undo') });
@@ -540,7 +541,7 @@ export const bootMethods: ThisType<Workbench> = {
 		// platform's installer downloaded
 		// through the streaming progress toast, then launched (Windows) or revealed.
 		registerZhCnText({ 'Check for App Updates': '检查应用更新' });
-		register({ id: 'help.checkForUpdates', title: 'Check for App Updates', category: 'Help', run: () => void checkForAppUpdate() });
+		register({ id: 'help.checkForUpdates', title: 'Check for App Updates', category: 'Help', run: () => void loadAppUpdate().then((m) => m.checkForAppUpdate()) });
 		register({ id: 'help.about', title: 'About', category: 'Help', run: () => notify('info', `Git Graph Studio ${__APP_VERSION__} - a standalone workbench whose views arrive as plugins.`) });
 		register({ ...desktopOnly, id: 'help.openDevTools', title: 'Open Developer Tools', category: 'Help', run: () => void openDevtools().catch((e) => console.error('open_devtools failed:', e)) });
 		// Dev builds only (vite strips the branch from the bundle; vitest is excluded so the

@@ -220,8 +220,8 @@ pub fn parse(bytes: &[u8], total_bytes: u64) -> Result<ElfDocument, String> {
     let mut headers: Vec<SectionHeader> = Vec::new();
     let shsize = if wide { 64 } else { 40 };
     let read_header = |i: usize| -> Option<SectionHeader> {
-        let base = shoff as usize + i * shentsize;
-        if base + shsize > bytes.len() {
+        let base = (shoff as usize).checked_add(i.checked_mul(shentsize)?)?;
+        if base.checked_add(shsize)? > bytes.len() {
             return None;
         }
         let kind = at_u32(base + 4)?;
@@ -235,15 +235,24 @@ pub fn parse(bytes: &[u8], total_bytes: u64) -> Result<ElfDocument, String> {
             link: at_u32(if wide { base + 40 } else { base + 24 }).unwrap_or(0),
         })
     };
-    if shoff > 0 && shnum > 0 && shentsize >= shsize {
-        for i in 0..shnum {
+    if shoff > 0 && shentsize >= shsize {
+        // ELF extended section numbering: when shnum == 0, section 0's sh_size holds the true count;
+        // when shstrndx == SHN_XINDEX (0xffff), section 0's sh_link holds the true shstrtab index.
+        let (effective_shnum, effective_shstrndx) = if let Some(sh0) = read_header(0) {
+            let n = if shnum == 0 { (sh0.size as usize).min(65536 * 4) } else { shnum };
+            let strndx = if shstrndx == 0xffff { sh0.link as usize } else { shstrndx };
+            (n, strndx)
+        } else {
+            (shnum, shstrndx)
+        };
+        for i in 0..effective_shnum {
             let Some(h) = read_header(i) else { break };
             headers.push(h);
         }
         // The string table the headers name themselves by (shstrndx), as name → offset
         // map: a fallback for tables a symbol section's link misses.
         let mut names: HashMap<u64, String> = HashMap::new();
-        if let Some(sh) = headers.get(shstrndx) {
+        if let Some(sh) = headers.get(effective_shstrndx) {
             if sh.kind == 3 {
                 let from = sh.offset as usize;
                 let to = sh.offset.saturating_add(sh.size).min(bytes.len() as u64) as usize;

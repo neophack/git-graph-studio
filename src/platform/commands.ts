@@ -18,6 +18,10 @@ export interface Command {
 	keybinding?: string;
 	/** False hides the command from the palette and disables its menu items. */
 	enabled?: () => boolean;
+	/** Optional keybinding context guard (VS Code `keybindings[].when`). When false,
+	 *  the keybinding does not claim the keystroke, letting another command or the
+	 *  focused control handle it. */
+	when?: () => boolean;
 	/** False hides the command from the palette only (its menu entries keep their own
 	 *  enablement) — the manifest `commandPalette` placements' `when` clauses. */
 	paletteHidden?: () => boolean;
@@ -76,21 +80,27 @@ export function effectiveBinding(commandId: string, fallback?: string): string |
 
 /** The command a binding string ("Ctrl+Shift+P", or a chord "Ctrl+K Ctrl+S") runs.
  *  A user rule beats every other command's default (VS Code's precedence), so rebinding
- *  one command onto a key another claims by default still lands on the user's pick. */
+ *  one command onto a key another claims by default still lands on the user's pick.
+ *  Enabled commands whose `when` holds outrank disabled ones sharing the same binding. */
 export function commandForBinding(binding: string): Command | undefined {
 	const wanted = binding.toLowerCase();
-	const answers = (command: Command, key: string | null): boolean => key !== null && key.toLowerCase() === wanted;
+	const answers = (command: Command, key: string | null): boolean =>
+		key !== null && key.toLowerCase() === wanted && (command.when === undefined || command.when());
+	const pickBest = (candidates: Command[]): Command | undefined =>
+		candidates.find((c) => commands.isEnabled(c.id)) ?? candidates[0];
 	if (keybindingResolver) {
-		const user = commands.all().find((command) => {
+		const users = commands.all().filter((command) => {
 			const effective = keybindingResolver!(command.id);
 			return effective !== undefined && effective !== null && answers(command, effective);
 		});
-		if (user) return user;
+		const bestUser = pickBest(users);
+		if (bestUser) return bestUser;
 	}
-	return commands.all().find((command) => {
+	const defaults = commands.all().filter((command) => {
 		const effective = keybindingResolver ? keybindingResolver(command.id) : undefined;
 		return answers(command, (effective === undefined ? command.keybinding : effective) ?? null);
 	});
+	return pickBest(defaults);
 }
 
 export function matchesKeybinding(event: KeyboardEvent, keybinding: string): boolean {
@@ -171,26 +181,50 @@ export class CommandRegistry {
 		};
 	}
 
+	/** Whether any visible command has an effective chord binding starting with `prefix`
+	 *  (e.g. `"Ctrl+K"` or `"Ctrl+Shift+G"`). Lets the workbench support arbitrary chord
+	 *  prefixes from both built-in and extension keybindings instead of hardcoding Ctrl+K. */
+	hasChordPrefix(prefix: string): boolean {
+		const needle = prefix.toLowerCase() + ' ';
+		for (const command of this.commands.values()) {
+			if (!this.visible(command.id)) continue;
+			if (command.when !== undefined && !command.when()) continue;
+			const key = effectiveBinding(command.id, command.keybinding);
+			if (typeof key === 'string' && key.toLowerCase().startsWith(needle)) return true;
+		}
+		return false;
+	}
+
 	/** The command a key event triggers, if any. A user rule beats every other command's
 	 *  DEFAULT binding (VS Code's precedence — rebinding Ctrl+S to Save All must fire), so
-	 *  the resolver's own picks are matched first, the first-registered default wins only
-	 *  among the commands no rule names. Only one visible in the active shell: a remote
-	 *  page never keys the desktop-only opens. */
+	 *  the resolver's own picks are matched first. Within each tier, an enabled command
+	 *  whose `when` clause holds beats a disabled one, so a disabled built-in never swallows
+	 *  an active extension keybinding. */
 	forKeyEvent(event: KeyboardEvent): Command | undefined {
+		let fallback: Command | undefined;
 		if (keybindingResolver) {
 			for (const command of this.commands.values()) {
 				if (!this.visible(command.id)) continue;
+				if (command.when !== undefined && !command.when()) continue;
 				const effective = keybindingResolver(command.id);
-				if (effective !== undefined && effective !== null && matchesKeybinding(event, effective)) return command;
+				if (effective !== undefined && effective !== null && matchesKeybinding(event, effective)) {
+					if (this.isEnabled(command.id)) return command;
+					fallback ??= command;
+				}
 			}
+			if (fallback) return fallback;
 		}
 		for (const command of this.commands.values()) {
 			if (!this.visible(command.id)) continue;
+			if (command.when !== undefined && !command.when()) continue;
 			const effective = keybindingResolver ? keybindingResolver(command.id) : undefined;
 			const key = (effective === undefined ? command.keybinding : effective) ?? null;
-			if (key !== null && matchesKeybinding(event, key)) return command;
+			if (key !== null && matchesKeybinding(event, key)) {
+				if (this.isEnabled(command.id)) return command;
+				fallback ??= command;
+			}
 		}
-		return undefined;
+		return fallback;
 	}
 
 	/** Palette entries: "Category: Title", enabled, not palette-hidden and visible in the

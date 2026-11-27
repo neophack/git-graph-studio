@@ -313,8 +313,21 @@ pub fn sniff(path: &Path) -> Result<Sniffed, String> {
     let mut prefix = vec![0u8; 64 * 1024];
     let read = file.read(&mut prefix).map_err(|e| e.to_string())?;
     prefix.truncate(read);
+    // Handle UTF-8 BOM and UTF-16 LE/BE BOM (Excel "Unicode Text" exports).
     if prefix.starts_with(&[0xEF, 0xBB, 0xBF]) {
         prefix.drain(0..3);
+    } else if prefix.starts_with(&[0xFF, 0xFE]) {
+        let u16s: Vec<u16> = prefix[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        prefix = String::from_utf16_lossy(&u16s).into_bytes();
+    } else if prefix.starts_with(&[0xFE, 0xFF]) {
+        let u16s: Vec<u16> = prefix[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        prefix = String::from_utf16_lossy(&u16s).into_bytes();
     }
     if prefix.is_empty() {
         return Ok(Sniffed {
@@ -323,7 +336,22 @@ pub fn sniff(path: &Path) -> Result<Sniffed, String> {
             names: Vec::new(),
         });
     }
-    let delimiter = sniff_delimiter(&prefix);
+    // Excel's `sep=;` / `sep=,` / `sep=\t` first-line directive explicitly names the delimiter.
+    let mut explicit_delim: Option<u8> = None;
+    if let Some(nl) = prefix.iter().position(|&b| b == b'\n') {
+        let first_line = String::from_utf8_lossy(&prefix[..nl]);
+        let trimmed = first_line.trim();
+        if let Some(rest) = trimmed.strip_prefix("sep=").or_else(|| trimmed.strip_prefix("SEP=")) {
+            if rest.len() == 1 {
+                explicit_delim = Some(rest.as_bytes()[0]);
+                prefix.drain(0..=nl);
+            } else if rest == "\\t" {
+                explicit_delim = Some(b'\t');
+                prefix.drain(0..=nl);
+            }
+        }
+    }
+    let delimiter = explicit_delim.unwrap_or_else(|| sniff_delimiter(&prefix));
     // The first two records over the sniffed delimiter decide the header question and
     // name the columns.
     let mut splitter = RecordSplitter::new(delimiter);

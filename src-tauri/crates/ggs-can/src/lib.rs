@@ -932,6 +932,7 @@ fn epoch_to_systemtime(epoch_s: f64) -> [u16; 8] {
 
 const OBJ_LOG_CONTAINER: u32 = 10;
 const OBJ_CAN_MESSAGE: u32 = 1;
+const OBJ_CAN_ERROR: u32 = 2;
 const OBJ_CAN_MESSAGE2: u32 = 86;
 const OBJ_CAN_ERROR_EXT: u32 = 73;
 const OBJ_CAN_FD_MESSAGE: u32 = 100;
@@ -976,17 +977,18 @@ fn walk_blf_objects(buf: &[u8], sink: &mut dyn FrameSink) {
             break;
         }
         pos = at;
-        let _header_size = u16_at(buf, pos + 4) as usize;
+        let header_size = u16_at(buf, pos + 4) as usize;
         let header_version = u16_at(buf, pos + 6);
         let object_size = u32_at(buf, pos + 8) as usize;
         let object_type = u32_at(buf, pos + 12);
         if object_size == 0 || pos + object_size > buf.len() {
             break;
         }
-        let hsize = if header_version == 2 {
-            24usize
+        let fallback_hsize = if header_version == 2 { 40usize } else { 32usize };
+        let full_header = if header_size >= 32 && header_size <= object_size {
+            header_size
         } else {
-            16usize
+            fallback_hsize
         };
         if let Some((ts, flags)) = object_header(buf, pos, header_version) {
             let t_ns = if flags == 1 {
@@ -994,7 +996,7 @@ fn walk_blf_objects(buf: &[u8], sink: &mut dyn FrameSink) {
             } else {
                 ts
             };
-            let body = pos + 16 + hsize;
+            let body = pos + full_header;
             let end = pos + object_size;
             match object_type {
                 OBJ_CAN_MESSAGE | OBJ_CAN_MESSAGE2 if body + 8 <= end => {
@@ -1023,7 +1025,7 @@ fn walk_blf_objects(buf: &[u8], sink: &mut dyn FrameSink) {
                         mflags & 0x01 != 0,
                     ));
                 }
-                OBJ_CAN_ERROR_EXT if body + 2 <= end => {
+                OBJ_CAN_ERROR | OBJ_CAN_ERROR_EXT if body + 2 <= end => {
                     let mut frame = RawFrame {
                         t_ns,
                         channel: u16_at(buf, body),
@@ -1039,7 +1041,7 @@ fn walk_blf_objects(buf: &[u8], sink: &mut dyn FrameSink) {
                         data: [0; 64],
                         tx: false,
                     };
-                    if body + 20 <= end {
+                    if object_type == OBJ_CAN_ERROR_EXT && body + 20 <= end {
                         frame.dlc = buf[body + 10];
                         frame.id = u32_at(buf, body + 16) & 0x1fff_ffff;
                     }
@@ -1182,24 +1184,28 @@ fn walk_blf_progress<R: Read>(
         if r.read_exact(&mut body).is_err() {
             break;
         }
-        if object_type == OBJ_LOG_CONTAINER {
+        if object_type == OBJ_LOG_CONTAINER && body.len() >= 16 {
             let method = u16_at(&body, 0);
             let payload = &body[16..];
             if method == 0 {
                 walk_blf_objects(payload, sink);
-            } else {
+            } else if method == 2 {
                 // `take` caps the decompressed size: a small corrupt (or crafted)
                 // container cannot expand into an unbounded buffer.
                 let mut plain = Vec::new();
-                if flate2::read::ZlibDecoder::new(payload)
+                let res = flate2::read::ZlibDecoder::new(payload)
                     .take(MAX_BLF_UNCOMPRESSED as u64)
-                    .read_to_end(&mut plain)
-                    .is_ok()
-                {
+                    .read_to_end(&mut plain);
+                if res.is_ok() || !plain.is_empty() {
+                    // Even a truncated tail container from an abrupt logger power-off
+                    // yields valid prefix objects before the cut.
                     walk_blf_objects(&plain, sink);
                 } else {
-                    return Err("BLF container failed to decompress (corrupt log?)".into());
+                    sink.other();
                 }
+            } else {
+                // Tolerate unknown container compression methods without failing the whole log.
+                sink.other();
             }
         } else {
             sink.other();
@@ -2273,7 +2279,9 @@ fn walk_source(
         )?;
         reporter.tick(sink.seen(), bytes, true);
         Ok(result)
-    } else if path.extension().and_then(|e| e.to_str()) == Some("blf") {
+    } else if path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("blf"))
+        && !signature[..read].iter().all(|&b| b == b'\t' || b == b'\r' || b == b'\n' || (0x20..=0x7e).contains(&b))
+    {
         Err("not a BLF file (missing LOGG signature)".into())
     } else {
         let reader = std::io::BufReader::with_capacity(1 << 20, file);

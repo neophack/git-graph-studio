@@ -61,6 +61,10 @@ export class Explorer {
 		return this.rootPaths;
 	}
 	private status: StatusMap = new Map();
+	/** Precomputed highest-priority Git status per ancestor folder (O(1) lookup in decorate()). */
+	private dirStatus = new Map<string, string>();
+	/** O(1) path -> row DOM index to avoid repeated full-tree querySelectorAll scans on large repos. */
+	private readonly rowByPath = new Map<string, HTMLElement>();
 	/** Bumped on setRoot: a listing that started before a folder switch is dropped. */
 	private generation = 0;
 	/** The remotely paged listings (§10.3): dir path -> the entries loaded so far, the
@@ -184,6 +188,8 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		this.rootPath = rootPath;
 		this.generation++;
 		this.status = new Map(); // the old repo's status letters must not decorate the new tree
+		this.dirStatus = new Map();
+		this.rowByPath.clear();
 		this.expanded.clear();
 		this.dirPages.clear(); // the old tree's paging state belongs to the old tree
 		this.clipboard = null; // the clipped entries belonged to the old tree
@@ -200,11 +206,27 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		this.render();
 	}
 
-	/** Apply a fresh working-tree status to every rendered entry. */
+	/** Apply a fresh working-tree status to every rendered entry. Precomputes folder rollup
+	 *  in O(changes * depth) so decorating thousands of folder rows is O(1) per row. */
 	setStatus(status: StatusMap): void {
 		this.status = status;
+		this.dirStatus = new Map();
+		for (const [file, letter] of status) {
+			const rank = letter === '!' ? 3 : (letter === 'M' || letter === 'D' || letter === 'R') ? 2 : 1;
+			const mapped = rank === 3 ? '!' : rank === 2 ? 'M' : 'U';
+			let slash = file.lastIndexOf('/');
+			while (slash > 0) {
+				const dir = file.slice(0, slash);
+				const prev = this.dirStatus.get(dir);
+				if (prev === '!') break;
+				if (prev === undefined || (prev === 'U' && rank >= 2) || (prev === 'M' && rank === 3)) {
+					this.dirStatus.set(dir, mapped);
+				}
+				slash = file.lastIndexOf('/', slash - 1);
+			}
+		}
 		if (!this.rootPath) return;
-		for (const row of this.tree.querySelectorAll<HTMLElement>('.row[data-path]')) {
+		for (const row of this.rowByPath.values()) {
 			this.decorate(row, row.dataset['path']!, row.dataset['dir'] === '1');
 		}
 	}
@@ -310,6 +332,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		this.header.innerHTML = '';
 		this.cancelInlineInputs();
 		this.tree.innerHTML = '';
+		this.rowByPath.clear();
 		this.body.classList.toggle('collapsed', this.collapsed);
 		this.pane.classList.toggle('collapsed', this.collapsed);
 		if (!this.rootPath) {
@@ -470,7 +493,14 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 			next.push(group);
 			recurse.push(this.renderLevel(group, entry.path, depth + 1));
 		}
-		for (const { row, group } of existing.values()) {
+		for (const [removedPath, { row, group }] of existing.entries()) {
+			if (this.rowByPath.get(removedPath) === row) this.rowByPath.delete(removedPath);
+			if (group) {
+				for (const nested of group.querySelectorAll<HTMLElement>('.row[data-path]')) {
+					const p = nested.dataset['path'];
+					if (p && this.rowByPath.get(p) === nested) this.rowByPath.delete(p);
+				}
+			}
 			row.remove();
 			group?.remove();
 		}
@@ -479,7 +509,11 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		// have: `refresh()` (and `whenRendered`) promise the whole tree, not just its top.
 		const unchanged =
 			next.length === parent.children.length && next.every((node, i) => parent.children[i] === node);
-		if (!unchanged) for (const node of next) parent.appendChild(node);
+		if (!unchanged) {
+			const frag = document.createDocumentFragment();
+			for (const node of next) frag.appendChild(node);
+			parent.appendChild(frag);
+		}
 		this.renderLoadMore(parent, dirPath, depth, paging);
 		await Promise.all(recurse);
 	}
@@ -523,6 +557,7 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 	private makeRow(entry: DirEntryInfo, depth: number): HTMLElement {
 		const row = el('div', 'row');
 		row.dataset['path'] = entry.path;
+		this.rowByPath.set(entry.path, row);
 		row.dataset['dir'] = entry.isDir ? '1' : '0';
 		row.dataset['depth'] = String(depth);
 		row.title = entry.path;
@@ -577,16 +612,8 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 		const relative = relativeTo(this.rootPath, path);
 		let letter: string | null = null;
 		if (isDir) {
-			// A folder carries a dot when anything beneath it changed, coloured by the most
-			// significant change (conflicts, then modifications, then new files).
-			let best: string | null = null;
-			for (const [file, status] of this.status) {
-				if (file.startsWith(relative + '/')) {
-					if (status === '!') best = '!';
-					else if (best !== '!' && (status === 'M' || status === 'D' || status === 'R')) best = 'M';
-					else if (best === null) best = 'U';
-				}
-			}
+			// O(1) lookup from precomputed ancestor rollup map.
+			const best = this.dirStatus.get(relative) ?? null;
 			if (best) {
 				row.classList.add(DECORATION_CLASS[best]!);
 				row.appendChild(el('span', 'decoration', ['●']));
@@ -602,8 +629,13 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 	}
 
 	private rowFor(path: string): HTMLElement | null {
+		const cached = this.rowByPath.get(path);
+		if (cached && this.tree.contains(cached)) return cached;
 		for (const row of this.tree.querySelectorAll<HTMLElement>('.row[data-path]')) {
-			if (row.dataset['path'] === path) return row;
+			if (row.dataset['path'] === path) {
+				this.rowByPath.set(path, row);
+				return row;
+			}
 		}
 		return null;
 	}

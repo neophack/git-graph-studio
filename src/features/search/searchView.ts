@@ -824,8 +824,9 @@ export class SearchView {
 	private renderResults(): void {
 		this.focusRow(null);
 		this.groups.clear();
-		this.listInner.innerHTML = '';
-		for (const file of this.results) this.listInner.appendChild(this.renderFileGroup(file));
+		const frag = document.createDocumentFragment();
+		for (const file of this.results) frag.appendChild(this.renderFileGroup(file));
+		this.listInner.replaceChildren(frag);
 	}
 
 	/** One file's subtree, as VS Code's search tree: the header row (twistie, file icon, name,

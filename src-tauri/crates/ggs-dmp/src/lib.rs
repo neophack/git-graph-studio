@@ -155,11 +155,23 @@ pub struct Dump {
     time_date_stamp: u32,
     flags: u64,
     streams: Vec<DirEntry>,
+    /// True when the dump is a Windows Kernel Memory Dump (`PAGEDUMP` 32-bit or `PAGEDU64` 64-bit)
+    /// rather than a user-mode `MDMP` minidump.
+    kernel_dump: Option<KernelDumpMeta>,
+}
+
+#[derive(Debug, Clone)]
+struct KernelDumpMeta {
+    is_64: bool,
+    major_version: u32,
+    minor_version: u32,
+    processors: u8,
+    header_bytes: u64,
 }
 
 impl Dump {
-    /// Opens and parses a minidump. Any structurally wrong byte is an error — a wrong
-    /// magic, an unreadable directory, a directory row pointing past the file.
+    /// Opens and parses a Windows crash dump: user-mode minidump (`MDMP`, classic and
+    /// wide-directory 64-bit) as well as kernel memory dumps (`PAGEDUMP` / `PAGEDU64`).
     pub fn open(path: &Path) -> Result<Dump, String> {
         let file = File::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
         let size = file.metadata().map_err(|e| e.to_string())?.len();
@@ -169,10 +181,32 @@ impl Dump {
             time_date_stamp: 0,
             flags: 0,
             streams: Vec::new(),
+            kernel_dump: None,
         };
-        let head = dump.read_vec_at(0, 32.min(dump.size as usize).max(4))?;
+        let head = dump.read_vec_at(0, 64.min(dump.size as usize).max(4))?;
         if head.len() < 4 {
             return Err(format!("{}: empty file", path.display()));
+        }
+        // Support Windows Kernel Memory Dumps (PAGEDUMP / PAGEDU64) in addition to MDMP.
+        if head.len() >= 8 && (&head[0..8] == b"PAGEDU64" || &head[0..8] == b"PAGEDUMP") {
+            let is_64 = &head[0..8] == b"PAGEDU64";
+            let u32_at = |o: usize| -> u32 {
+                head.get(o..o + 4)
+                    .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            };
+            let major = u32_at(8);
+            let minor = u32_at(12);
+            // NumberProcessors sits at 0x38 in DUMP_HEADER64 and 0x24 in DUMP_HEADER32.
+            let procs = u32_at(if is_64 { 0x38 } else { 0x24 }).min(255) as u8;
+            let header_bytes = if is_64 { 8192u64 } else { 4096u64 }.min(size);
+            dump.kernel_dump = Some(KernelDumpMeta {
+                is_64,
+                major_version: major,
+                minor_version: minor,
+                processors: procs,
+                header_bytes,
+            });
+            return Ok(dump);
         }
         let sig = u32::from_le_bytes([head[0], head[1], head[2], head[3]]);
         if sig != MINIDUMP_SIGNATURE {
@@ -401,6 +435,17 @@ impl Dump {
     /// (count u32 + count × {start u64, size u32, rva u32}). Empty is legal — some
     /// minimal dumps carry no memory at all.
     pub fn regions(&mut self) -> Result<Vec<Region>, String> {
+        if let Some(kd) = &self.kernel_dump {
+            let body = self.size.saturating_sub(kd.header_bytes);
+            if body == 0 {
+                return Ok(Vec::new());
+            }
+            return Ok(vec![Region {
+                va: 0,
+                size: body,
+                file_offset: kd.header_bytes,
+            }]);
+        }
         if let Some(s) = self.stream(9) {
             let raw = self.read_vec_at(s.rva, s.size as usize)?;
             if raw.len() < 16 {
@@ -471,6 +516,15 @@ impl Dump {
     /// The system row: SystemInfo's fixed 56-byte block. An absent stream keeps the
     /// viewer honest with an "unknown" arch rather than a guess.
     fn system_info(&mut self) -> Result<DumpOs, String> {
+        if let Some(kd) = &self.kernel_dump {
+            return Ok(DumpOs {
+                arch: if kd.is_64 { "x64" } else { "x86" }.to_string(),
+                version: format!("{}.{}", kd.major_version, kd.minor_version),
+                build: kd.minor_version,
+                processors: kd.processors,
+                product_type: 0,
+            });
+        }
         let Some(s) = self.stream(7) else {
             return Ok(DumpOs {
                 arch: "unknown".to_string(),
@@ -511,6 +565,13 @@ impl Dump {
 
     /// The well-known MiniDump flag bits, in bit order (MiniDumpWithFullMemory first).
     fn flag_names(&self) -> Vec<String> {
+        if let Some(kd) = &self.kernel_dump {
+            return vec![if kd.is_64 {
+                "KernelDump64 (PAGEDU64)".to_string()
+            } else {
+                "KernelDump32 (PAGEDUMP)".to_string()
+            }];
+        }
         const NAMED: &[(u64, &str)] = &[
             (0x1, "WithDataSegs"),
             (0x2, "WithFullMemory"),

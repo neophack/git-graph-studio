@@ -1703,10 +1703,25 @@ button.ggs-symbol-hover-relations:hover { text-decoration: underline; color: var
 .can-rates { display: flex; gap: 4px; justify-content: flex-end; min-width: 0; }
 .can-rates select { min-width: 0; padding: 1px 4px; font-size: 12px; }
 .can-msg-grid { grid-template-columns: minmax(96px, 1.1fr) 36px 62px minmax(64px, 0.8fr) minmax(92px, 1fr) minmax(72px, 0.8fr) minmax(190px, 1.9fr) minmax(76px, 0.8fr) minmax(64px, 0.7fr); }
-.can-num { text-align: right; }
+.can-num { text-align: right; font-variant-numeric: tabular-nums; }
 .can-left { text-align: left; }
 .can-mono { font-family: var(--vscode-editor-font-family, Consolas, monospace); font-size: var(--vscode-editor-font-size, 13px); }
-.can-load { font-weight: 600; }
+.can-load { font-weight: 600; position: relative; border-radius: 3px; padding: 1px 6px; }
+.can-load-ok { color: var(--vscode-charts-green, #89d185); background: linear-gradient(90deg, color-mix(in srgb, var(--vscode-charts-green, #89d185) 16%, transparent) var(--can-load-pct, 0%), transparent var(--can-load-pct, 0%)); }
+.can-load-warn { color: var(--vscode-charts-yellow, #cca700); background: linear-gradient(90deg, color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 20%, transparent) var(--can-load-pct, 0%), transparent var(--can-load-pct, 0%)); }
+.can-load-high { color: var(--vscode-errorForeground, #f48771); background: linear-gradient(90deg, color-mix(in srgb, var(--vscode-errorForeground, #f48771) 24%, transparent) var(--can-load-pct, 0%), transparent var(--can-load-pct, 0%)); }
+.can-ch-name { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.can-health-pill { flex: none; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
+.can-health-ok { background: color-mix(in srgb, var(--vscode-charts-green, #89d185) 16%, transparent); color: var(--vscode-charts-green, #89d185); border: 1px solid color-mix(in srgb, var(--vscode-charts-green, #89d185) 36%, transparent); }
+.can-health-warn { background: color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 18%, transparent); color: var(--vscode-charts-yellow, #cca700); border: 1px solid color-mix(in srgb, var(--vscode-charts-yellow, #cca700) 40%, transparent); }
+.can-health-err { background: color-mix(in srgb, var(--vscode-errorForeground, #f48771) 18%, transparent); color: var(--vscode-errorForeground, #f48771); border: 1px solid color-mix(in srgb, var(--vscode-errorForeground, #f48771) 42%, transparent); }
+.can-section-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+.can-section-badge { font-size: 10.5px; padding: 0 6px; border-radius: 999px; font-variant-numeric: tabular-nums; background: color-mix(in srgb, var(--vscode-editor-foreground, #ccc) 10%, transparent); color: var(--vscode-descriptionForeground, #999); }
+.can-share-cell { position: relative; border-radius: 3px; padding: 0 4px; background: linear-gradient(270deg, color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 20%, transparent) var(--can-share-pct, 0%), transparent var(--can-share-pct, 0%)); }
+.can-type-fd { color: var(--vscode-charts-yellow, #dcdcaa); font-weight: 600; }
+.can-type-can { color: var(--vscode-descriptionForeground, #999); }
+.can-analysis-copy { height: 20px; padding: 0 6px; font-size: 11px; flex: none; }
+.can-export-csv { flex: none; white-space: nowrap; }
 .can-warn { color: var(--vscode-errorForeground, #f48771); }
 .can-messages { overflow: visible; }
 .can-sort { padding: 0; height: auto; min-width: 0; justify-content: flex-end; text-transform: uppercase; letter-spacing: 0.04em; font-size: 11px; }

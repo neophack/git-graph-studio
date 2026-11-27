@@ -360,6 +360,7 @@ pub fn parse(text: &str) -> Result<DbcDocument, String> {
     let mut by_id: HashMap<u32, usize> = HashMap::new();
     let mut values: Vec<((u32, String), (f64, String))> = Vec::new();
     let mut comments: Vec<((u32, Option<String>), String)> = Vec::new();
+    let mut saw_dbc_keyword = false;
     let mut i = 0;
     let lines: Vec<&str> = text.lines().collect();
     while i < lines.len() {
@@ -384,6 +385,7 @@ pub fn parse(text: &str) -> Result<DbcDocument, String> {
         let rest = &line[kw_end..];
         match kw {
             "VERSION" => {
+                saw_dbc_keyword = true;
                 if let Some(tok) = tokens(rest).first() {
                     version = unescape(tok.trim_matches('"'));
                 }
@@ -392,12 +394,16 @@ pub fn parse(text: &str) -> Result<DbcDocument, String> {
             // every member starts with whitespace); the block ends at the next
             // column-0 line, whatever keyword it carries.
             "NS_" => {
+                saw_dbc_keyword = true;
                 while i < lines.len() && (lines[i].starts_with(' ') || lines[i].starts_with('\t')) {
                     i += 1;
                 }
             }
-            "BS_" => {}
+            "BS_" => {
+                saw_dbc_keyword = true;
+            }
             "BU_" => {
+                saw_dbc_keyword = true;
                 for tok in tokens(rest) {
                     let node = tok.trim_matches(':');
                     if !node.is_empty() {
@@ -406,12 +412,14 @@ pub fn parse(text: &str) -> Result<DbcDocument, String> {
                 }
             }
             "BO_" => {
+                saw_dbc_keyword = true;
                 if let Some(msg) = parse_message_line(rest) {
                     by_id.insert(msg.id, messages.len());
                     messages.push(msg);
                 }
             }
             "SG_" => {
+                saw_dbc_keyword = true;
                 if let Some(last) = messages.last_mut() {
                     if let Some(sig) = parse_signal_line(rest) {
                         last.signals.push(sig);
@@ -419,6 +427,7 @@ pub fn parse(text: &str) -> Result<DbcDocument, String> {
                 }
             }
             "VAL_" => {
+                saw_dbc_keyword = true;
                 let body = rest.trim_end().trim_end_matches(';');
                 let toks = tokens(body);
                 if toks.len() >= 3 {
@@ -437,6 +446,7 @@ pub fn parse(text: &str) -> Result<DbcDocument, String> {
                 }
             }
             "CM_" => {
+                saw_dbc_keyword = true;
                 // `CM_ BO_ <id> "text";` / `CM_ SG_ <id> <sig> "text";` — the text may
                 // span lines. A comment on anything else is collected and dropped, so
                 // its quotes cannot spawn phantom keyword lines.
@@ -459,11 +469,14 @@ pub fn parse(text: &str) -> Result<DbcDocument, String> {
                 // its terminating `;` (multi-line attribute lists), swallow the following
                 // lines until one carries it. Any other unknown line is ignored alone so
                 // it can never swallow subsequent `BO_`/`SG_` definitions.
-                if is_semicolon_directive(kw) && !line.contains(';') {
-                    while i < lines.len() && !lines[i].contains(';') {
+                if is_semicolon_directive(kw) {
+                    saw_dbc_keyword = true;
+                    if !line.contains(';') {
+                        while i < lines.len() && !lines[i].contains(';') {
+                            i += 1;
+                        }
                         i += 1;
                     }
-                    i += 1;
                 }
             }
         }
@@ -488,7 +501,7 @@ pub fn parse(text: &str) -> Result<DbcDocument, String> {
             }
         }
     }
-    if messages.is_empty() {
+    if messages.is_empty() && !saw_dbc_keyword {
         return Err("no BO_ frames found — is this a DBC file?".to_string());
     }
     Ok(DbcDocument { version, nodes, messages })

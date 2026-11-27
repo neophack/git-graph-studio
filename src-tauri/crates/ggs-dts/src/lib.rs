@@ -108,13 +108,32 @@ pub fn parse(bytes: &[u8], total_bytes: u64) -> Result<DtsDocument, String> {
     if bytes.len() >= 4 && u32be(bytes, 0) == Some(FDT_MAGIC) {
         parse_dtb(bytes, total_bytes)
     } else {
-        let text = std::str::from_utf8(bytes).map_err(|_| "not a .dtb blob, and not UTF-8 source text".to_string())?;
-        parse_dts(text, total_bytes)
+        // Tolerate non-UTF-8 comments (e.g. Latin-1/GBK in vendor .dts/.dtsi files) and UTF-8 BOM.
+        let owned;
+        let text = match std::str::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                // Reject obvious binary blobs with NUL bytes, but decode text with legacy encodings lossily.
+                let sample = &bytes[..bytes.len().min(4096)];
+                if sample.contains(&0) {
+                    return Err("not a .dtb blob, and not UTF-8 source text".to_string());
+                }
+                owned = String::from_utf8_lossy(bytes).into_owned();
+                &owned
+            }
+        };
+        parse_dts(text.trim_start_matches('\u{feff}'), total_bytes)
     }
 }
 
 fn parse_dtb(bytes: &[u8], total_bytes: u64) -> Result<DtsDocument, String> {
-    if bytes.len() < 40 {
+    // FDT header size varies by format version: v1..v15 is 28 bytes, v16 is 36 bytes, v17+ is 40 bytes.
+    if bytes.len() < 28 {
+        return Err("truncated .dtb header".to_string());
+    }
+    let version = u32be(bytes, 20).unwrap_or(17);
+    let min_hdr = if version >= 17 { 40 } else if version >= 16 { 36 } else { 28 };
+    if bytes.len() < min_hdr {
         return Err("truncated .dtb header".to_string());
     }
     #[allow(clippy::needless_late_init)]
@@ -122,14 +141,15 @@ fn parse_dtb(bytes: &[u8], total_bytes: u64) -> Result<DtsDocument, String> {
     let struct_off = u32be(bytes, 8).ok_or("truncated .dtb header")? as usize;
     let strings_off = u32be(bytes, 12).ok_or("truncated .dtb header")? as usize;
     let rsvmap_off = u32be(bytes, 16).ok_or("truncated .dtb header")? as usize;
-    let boot_cpuid = u32be(bytes, 28);
-    if totalsize > bytes.len() || struct_off >= bytes.len() || strings_off > bytes.len() {
+    let boot_cpuid = if bytes.len() >= 32 { u32be(bytes, 28) } else { None };
+    if struct_off >= bytes.len() || strings_off > bytes.len() {
         return Err(".dtb header cites offsets past the file's end".to_string());
     }
+    let effective_end = totalsize.min(bytes.len());
     // The memory reservation block: u64 pairs, terminated by a 0,0 pair.
     let mut mem_reserve = Vec::new();
     let mut rsv = rsvmap_off;
-    while rsv + 16 <= bytes.len() {
+    while rsv + 16 <= effective_end {
         let address = u64be(bytes, rsv).unwrap_or(0);
         let size = u64be(bytes, rsv + 8).unwrap_or(0);
         rsv += 16;
@@ -149,10 +169,13 @@ fn parse_dtb(bytes: &[u8], total_bytes: u64) -> Result<DtsDocument, String> {
     let mut nodes = 0usize;
     let mut properties = 0usize;
     let mut p = struct_off;
-    // A stack of (node, depth) the tokens descend and ascend through.
+    // A stack of nodes the tokens descend and ascend through.
     let mut stack: Vec<DtsNode> = Vec::new();
     loop {
         let Some(token) = u32be(bytes, p) else {
+            if nodes > 0 {
+                break;
+            }
             return Err(".dtb structure block ends mid-tree".to_string());
         };
         p += 4;
@@ -160,6 +183,9 @@ fn parse_dtb(bytes: &[u8], total_bytes: u64) -> Result<DtsDocument, String> {
             FDT_NOP => {}
             FDT_BEGIN_NODE => {
                 let Some(end) = bytes[p..].iter().position(|&b| b == 0) else {
+                    if nodes > 0 {
+                        break;
+                    }
                     return Err(".dtb node name runs off the file".to_string());
                 };
                 let name = String::from_utf8_lossy(&bytes[p..p + end]).into_owned();
@@ -177,6 +203,9 @@ fn parse_dtb(bytes: &[u8], total_bytes: u64) -> Result<DtsDocument, String> {
             }
             FDT_END_NODE => {
                 let Some(mut done) = stack.pop() else {
+                    if nodes > 0 {
+                        break;
+                    }
                     return Err(".dtb structure block closes more nodes than it opened".to_string());
                 };
                 properties += done.properties.len();
@@ -192,35 +221,51 @@ fn parse_dtb(bytes: &[u8], total_bytes: u64) -> Result<DtsDocument, String> {
                 let len = u32be(bytes, p).unwrap_or(0) as usize;
                 let nameoff = u32be(bytes, p + 4).unwrap_or(0) as usize;
                 p += 8;
-                let data_end = (p + len).min(bytes.len());
+                let data_end = p.saturating_add(len).min(bytes.len());
                 let value_bytes = bytes.get(p..data_end).unwrap_or(&[]);
-                let name_end = bytes[strings_off..]
-                    .iter()
-                    .position(|&b| b == 0)
-                    .map(|e| strings_off + e)
-                    .unwrap_or(bytes.len());
-                let name_at = (strings_off + nameoff).min(name_end.max(strings_off));
-                let name = String::from_utf8_lossy(
-                    bytes
-                        .get(strings_off + nameoff..name_end.max(strings_off + nameoff))
-                        .unwrap_or(&[]),
-                )
-                .into_owned();
-                let _ = name_at;
+                let name_start = strings_off.saturating_add(nameoff);
+                let name = if name_start < bytes.len() {
+                    let name_end = bytes[name_start..]
+                        .iter()
+                        .position(|&b| b == 0)
+                        .map(|e| name_start + e)
+                        .unwrap_or(bytes.len());
+                    String::from_utf8_lossy(&bytes[name_start..name_end]).into_owned()
+                } else {
+                    String::new()
+                };
                 if let Some(top) = stack.last_mut() {
                     top.properties.push(DtsProperty {
                         name,
                         values: interpret_blob(value_bytes),
                     });
                 }
-                p += len;
+                p = p.saturating_add(len);
                 p = (p + 3) & !3;
             }
             FDT_END => break,
-            other => return Err(format!(".dtb structure block carries unknown token {other}")),
+            other => {
+                if nodes > 0 {
+                    break;
+                }
+                return Err(format!(".dtb structure block carries unknown token {other}"));
+            }
         }
         if p > bytes.len() + 4 {
+            if nodes > 0 {
+                break;
+            }
             return Err(".dtb structure block runs off the file".to_string());
+        }
+    }
+    // Fold any unclosed nodes from a slightly truncated DTB back into root rather than losing them.
+    while let Some(mut done) = stack.pop() {
+        properties += done.properties.len();
+        if let Some(parent) = stack.last_mut() {
+            parent.children.push(done);
+        } else {
+            root.children.append(&mut done.children);
+            root.properties.append(&mut done.properties);
         }
     }
     Ok(DtsDocument {
@@ -467,9 +512,19 @@ pub fn parse_dts(src: &str, total_bytes: u64) -> Result<DtsDocument, String> {
     while i < n {
         match &toks[i] {
             Tok::Punct(';') => i += 1,
-            Tok::Word(w) if w == "/dts-v1/" || w == "/plugin/" => {
+            Tok::Word(w) if w == "/dts-v1/" || w == "/plugin/" || w == "/omit-if-no-ref/" => {
                 i += 1;
                 if toks.get(i) == Some(&Tok::Punct(';')) {
+                    i += 1;
+                }
+            }
+            Tok::Word(w) if w == "/include/" => {
+                // `/include/ "foo.dtsi"` — skip the directive and its filename string.
+                i += 1;
+                while i < n && toks[i] != Tok::Eol && toks[i] != Tok::Punct(';') {
+                    i += 1;
+                }
+                if i < n {
                     i += 1;
                 }
             }
@@ -565,8 +620,14 @@ pub fn parse_dts(src: &str, total_bytes: u64) -> Result<DtsDocument, String> {
                         root.children.push(node);
                     }
                 } else {
-                    // A bare statement at the source's top level is no DTS.
-                    return Err(format!("'{}' sits outside any node — not device tree source", match &toks[i] { Tok::Word(w) => w.clone(), _ => String::new() }));
+                    // Tolerate preprocessor macro invocations or vendor directives at top level
+                    // (e.g. multi-line #define continuations in .dtsi headers) by skipping the line.
+                    while i < n && toks[i] != Tok::Eol && toks[i] != Tok::Punct(';') {
+                        i += 1;
+                    }
+                    if i < n {
+                        i += 1;
+                    }
                 }
             }
             _ => {
@@ -576,9 +637,6 @@ pub fn parse_dts(src: &str, total_bytes: u64) -> Result<DtsDocument, String> {
     }
     for overlay in overlays {
         root.children.push(overlay);
-    }
-    if root.children.is_empty() && root.properties.is_empty() {
-        return Err("no nodes found — is this device tree source?".to_string());
     }
     let (nodes, properties) = count_tree(&root);
     Ok(DtsDocument {

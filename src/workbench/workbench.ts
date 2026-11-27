@@ -1094,6 +1094,32 @@ export class Workbench {
 	declare dispose: () => void ;
 
 	onKeyDown(event: KeyboardEvent): void {
+		const target = event.target instanceof HTMLElement ? event.target : null;
+		const inTerminal = target !== null && target.closest('.terminal-host, .xterm') !== null;
+		const lowerKey = event.key.toLowerCase();
+		// When focus is inside the integrated terminal (including Claude Code CLI / shells),
+		// pass plain Ctrl+<control-key> (without Cmd/Meta, Shift, or Alt) straight to the
+		// PTY so Ctrl+B/C/D/G/J/K/N/O/P/R/T/W/etc. never get hijacked by workbench bindings.
+		// Ctrl+` still toggles the terminal, and Cmd+<key> (macOS) / Ctrl+Shift+<key> stay
+		// available for workbench commands.
+		if (
+			inTerminal &&
+			!this.chordPending &&
+			event.ctrlKey &&
+			!event.metaKey &&
+			!event.shiftKey &&
+			!event.altKey &&
+			lowerKey !== '`' &&
+			(/^[a-z]$/.test(lowerKey) || lowerKey === '[' || lowerKey === ']' || lowerKey === '\\' || lowerKey === '/' || lowerKey === ' ')
+		) {
+			return;
+		}
+		const spellStroke = (e: KeyboardEvent): string => {
+			const key = e.shiftKey ? (UNSHIFTED_GLYPHS[e.key] ?? e.key) : e.key;
+			const named = key.replace(/^Arrow/, '');
+			const spelled = named === ' ' ? 'Space' : named.length === 1 ? named.toUpperCase() : named;
+			return `${e.ctrlKey || e.metaKey ? 'Ctrl+' : ''}${e.shiftKey ? 'Shift+' : ''}${e.altKey ? 'Alt+' : ''}${spelled}`;
+		};
 		if (this.chordPending) {
 			// A modifier going down on its own (the Ctrl of "Ctrl+K Ctrl+S") is not the
 			// chord's second key yet.
@@ -1102,15 +1128,7 @@ export class Workbench {
 			this.chordPending = null;
 			// Escape cancels the chord outright (VS Code's behaviour), not "Ctrl+K Escape".
 			if (event.key === 'Escape') return;
-			// The second key is spelled the way bindings spell keys ("Left", not "ArrowLeft";
-			// the unshifted glyph behind a shifted one), with every modifier, so a user chord
-			// such as "Ctrl+K Alt+Left" resolves like a single-key binding does.
-			const key = event.shiftKey ? (UNSHIFTED_GLYPHS[event.key] ?? event.key) : event.key;
-			const named = key.replace(/^Arrow/, '');
-			// Space first: its key IS a one-character string, so a length check ahead of the
-			// ' ' branch would spell it " " and never match a "Ctrl+K Space" binding.
-			const spelled = named === ' ' ? 'Space' : named.length === 1 ? named.toUpperCase() : named;
-			const full = `${chord} ${event.ctrlKey || event.metaKey ? 'Ctrl+' : ''}${event.shiftKey ? 'Shift+' : ''}${event.altKey ? 'Alt+' : ''}${spelled}`;
+			const full = `${chord} ${spellStroke(event)}`;
 			const command = commandForBinding(full);
 			if (command) {
 				event.preventDefault();
@@ -1118,14 +1136,16 @@ export class Workbench {
 			}
 			return;
 		}
-		if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k' && !event.shiftKey && !event.altKey) {
-			event.preventDefault();
-			this.chordPending = 'Ctrl+K';
-			return;
+		if (!['Control', 'Shift', 'Alt', 'Meta'].includes(event.key) && (event.ctrlKey || event.metaKey || event.altKey)) {
+			const stroke = spellStroke(event);
+			if (stroke === 'Ctrl+K' || (!commands.forKeyEvent(event) && commands.hasChordPrefix(stroke))) {
+				event.preventDefault();
+				this.chordPending = stroke;
+				return;
+			}
 		}
 		// A keydown can arrive with `document` itself as the target (no focused element): it has
 		// no `closest` - and no editor focus either, so a null target is not "in an editor".
-		const target = event.target instanceof HTMLElement ? event.target : null;
 		const inEditor = target !== null && target.closest('.cm-editor, input, textarea') !== null;
 		const command = commands.forKeyEvent(event);
 		if (!command) return;

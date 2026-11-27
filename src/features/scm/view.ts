@@ -570,7 +570,7 @@ export class SourceControlView {
 		this.listInner.style.height = `${this.rows.length * SCM_ROW_HEIGHT}px`;
 		this.content.appendChild(body);
 		this.list.scrollTop = previousScroll;
-		this.renderWindow();
+		this.renderWindow(true);
 		// Every initialised submodule stacks as its own repository section directly below the
 		// main repository's rows, inside the one scrolling list - VS Code's Source Control view
 		// with several repositories open: the sections follow the content above them compactly
@@ -599,26 +599,33 @@ export class SourceControlView {
 
 	declare groupActions: (key: ScmGroup, files: ScmChange[]) => HTMLElement[] ;
 
-	renderWindow(): void {
+	private renderedWindowRange: [number, number] | null = null;
+
+	renderWindow(force = false): void {
 		if (!this.list || !this.listInner) return;
 		const total = this.rows.length;
 		const scrollTop = this.list.scrollTop;
 		const viewport = Math.max(this.list.clientHeight, SCM_ROW_HEIGHT * 30);
 		const first = Math.max(0, Math.floor(scrollTop / SCM_ROW_HEIGHT) - SCM_OVERSCAN);
 		const last = Math.min(total, Math.ceil((scrollTop + viewport) / SCM_ROW_HEIGHT) + SCM_OVERSCAN);
-		this.listInner.innerHTML = '';
+		if (!force && this.renderedWindowRange && this.renderedWindowRange[0] === first && this.renderedWindowRange[1] === last && this.listInner.childElementCount > 0) {
+			return;
+		}
+		this.renderedWindowRange = [first, last];
+		const frag = document.createDocumentFragment();
 		for (let i = first; i < last; i++) {
 			const element = this.rowElement(this.rows[i]!);
 			element.style.top = `${i * SCM_ROW_HEIGHT}px`;
-			this.listInner.appendChild(element);
+			frag.appendChild(element);
 		}
+		this.listInner.replaceChildren(frag);
 	}
 
 	scheduleWindow(): void {
 		if (this.scrollFrame !== null) return;
 		this.scrollFrame = requestAnimationFrame(() => {
 			this.scrollFrame = null;
-			this.renderWindow();
+			this.renderWindow(false);
 		});
 	}
 

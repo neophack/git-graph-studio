@@ -1,43 +1,26 @@
-// The CAN log statistics view a `.blf` or `.asc` trace opens in - CANoe's Statistics
-// window and its graphics window in one dashboard. The backend parses the whole log
-// (`can_log_stats`) and this view renders the result asynchronously, so even a
-// multi-gigabyte trace only paints once the numbers are in.
-//
-// The layout answers the space the view itself gets (canLayout.ts's width watch): wide,
-// it is a resizable dashboard — the left column carries the measurement summary and the
-// channel table, the right column the bus charts (per-channel load and frame rate over
-// time, the payload-length distribution, and the periodic analysis of a clicked
-// identifier), and the messages table spans the full width below; two sashes divide the
-// panes - drag to move, double-click to reset - and the shares persist across sessions.
-// Narrow (under 600 CSS px: the phone's editor page, a thin desktop column), the same
-// content becomes one scrolling column in the mobile design language (git-graph-rs's
-// mobile.css): the toolbar's two rows at phone heights — the command bar over the filter
-// row — the sections as flat inset cards, the
-// channel and identifier tables as two-line rows (the counts one grey meta line), the
-// charts at the compact viewBox so a phone's width keeps them legible, and the sort the
-// wide column headers own riding a ⋯-style bottom sheet from the Messages head. The
-// status bar is the one live region in both: a pulsing chip and a progress bar report the
-// backend walk while it runs, the summary line lands only when the numbers are in.
-//
-// The bus load is CANoe's arithmetic: a frame's arbitration-phase bits at the channel's
-// arbitration bitrate, its data-phase bits (a CAN FD frame after the BRS switch) at its
-// data bitrate, the busy seconds summed over the measurement window. Neither log format
-// records either rate, so each channel row carries its own pair of rate selects beside
-// the load they produce — two channels of one log may well run different rates — and
-// every load figure (table, peak, charts) recomputes live on a change. A filter bar
-// narrows the tables and charts to chosen identifiers and channels.
+// The CAN log statistics & telemetry workbench (`.blf` / `.asc`): redesigned for fast,
+// human-first CAN bus triage. The backend walks the trace asynchronously (`can_log_stats`)
+// while the view paints immediately with live progress, then delivers:
+//   - Instant Bus Health badge (Healthy / High Load / Errors) in the command bar
+//   - One-click quick-filter chips (CAN FD, Classic, Extended, Periodic, Clear)
+//   - Per-channel live arbitration/data bitrate selectors with inline visual load meters
+//   - Top-pinned Periodic & Frame-Loss Analysis card on ID click or ↑/↓ keyboard navigation
+//   - Smart partial re-rendering (ID/chip filters update only the table, never rebuilding SVGs)
+//   - One-click Export CSV of the filtered identifier statistics table
+//   - Full desktop resizable sash layout + compact phone/narrow layout (`canLayout.ts`)
 
 import { Channel } from '../../platform/ipc/core';
 import type { CanChannelStats, CanIdStats, CanIntervals, CanLogStats, CanProgress, LoadBucket } from '../../platform/ipc/can';
 export type { CanChannelStats, CanIdStats, CanFrameFilter, CanIntervals, CanLogCount, CanLogStats, CanProgress, ChannelLoadProfile, ChannelPayloadDist, CycleBin, IntervalPoint, LoadBucket } from '../../platform/ipc/can';
 import { canIntervals, canLogStats, convertCanLog as convertCanLogCmd } from '../../platform/ipc/can';
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { cycleSeriesChart, formatAxisSeconds, histogramChart, multiLineChart, seriesStyle, stackedBars, CAN_CHART_VBW_COMPACT, type ChartSeries } from './canChart';
 import { CanActionSheet, CanLayout, type CanSheetItem } from './canLayout';
 import { t, tf } from '../../platform/i18n';
 import { load as loadState, save as saveState } from '../../platform/state';
-import { basename, el, formatBytes, icon, quickPick } from '../../platform/ui/index';
+import { basename, el, formatBytes, icon, notify, quickPick } from '../../platform/ui/index';
 
 /** The arbitration bitrates a CAN (FD) bus commonly runs at; the load is recomputed on any change. */
 export const CAN_BITRATES = [1_000_000, 800_000, 500_000, 250_000, 125_000, 100_000, 50_000, 33_333, 20_000, 10_000, 5_000] as const;
@@ -57,9 +40,7 @@ export function progressText(progress: CanProgress, verb: string): string {
 	return `${verb}… ${percent.toFixed(0)}%  ·  ${progress.frames.toLocaleString()} frames`;
 }
 
-/** A channel wired to a status-line writer, passed to the backend as `onProgress`. The
- *  raw report rides along, so a caller with a progress bar can fill it without parsing
- *  the text back. */
+/** A channel wired to a status-line writer, passed to the backend as `onProgress`. */
 function progressChannel(verb: string, report: (text: string, progress: CanProgress) => void): Channel<CanProgress> {
 	const channel = new Channel<CanProgress>();
 	channel.onmessage = (progress) => report(progressText(progress, verb), progress);
@@ -89,8 +70,7 @@ export function formatCycle(seconds: number): string {
 
 /** Parse the filter bar's identifier list into inclusive ranges: hex ids or `from-to`
  *  ranges, comma or space separated (`0x100, 1A0-1FF 300`). Returns null when the box is
- *  empty (or nothing in it parses) — the raw view ships the ranges to the backend, which
- *  filters while it browses. */
+ *  empty (or nothing in it parses). */
 export function idFilterRanges(text: string): [number, number][] | null {
 	const terms = text.split(/[\s,;]+/).filter(Boolean);
 	if (!terms.length) return null;
@@ -129,9 +109,14 @@ function formatStart(seconds: number): string {
 	return new Date(seconds * 1000).toLocaleString();
 }
 
+function loadSeverity(pct: number): 'ok' | 'warn' | 'high' {
+	if (pct >= 70) return 'high';
+	if (pct >= 40) return 'warn';
+	return 'ok';
+}
+
 /* ---------- The dashboard's resizable panes ---------- */
 
-/** The pane shares the sashes move, in percent; persisted as one layout blob. */
 interface CanStatsLayout {
 	/** The left column's share of the dashboard's width. */
 	left: number;
@@ -142,10 +127,6 @@ interface CanStatsLayout {
 const DEFAULT_CAN_STATS_LAYOUT: CanStatsLayout = { left: 34, top: 62 };
 const CAN_STATS_LAYOUT_KEY = 'canStats.layout';
 
-/** A drag handle between two panes: ew-resize (vertical sash) or ns-resize (horizontal),
- *  its moves coalesced to one apply per animation frame - the workbench's sash pattern,
- *  here over flexGrow shares the panes carry (the dashboard is not a grid the editor
- *  area's sashes could own). A double-click resets the shares (a drag's end saves them). */
 function paneSash(axis: 'vertical' | 'horizontal', onMove: (sash: HTMLElement, delta: number) => void, onEnd?: () => void, onReset?: () => void): HTMLElement {
 	const sash = el('div', `can-sash ${axis}`);
 	sash.title = t('can.sash.title');
@@ -157,7 +138,6 @@ function paneSash(axis: 'vertical' | 'horizontal', onMove: (sash: HTMLElement, d
 		let applied = 0;
 		let pending = 0;
 		sash.classList.add('active');
-		// The same marker the workbench's sashes set: git refreshes defer to after the drag.
 		document.body.classList.add('resizing');
 		const raf = window.requestAnimationFrame?.bind(window) ?? ((callback: () => void) => window.setTimeout(callback, 16) as unknown as number);
 		const apply = (): void => {
@@ -190,6 +170,18 @@ function paneSash(axis: 'vertical' | 'horizontal', onMove: (sash: HTMLElement, d
 /** The message-table sort keys (the sortable columns of the identifier table). */
 type SortKey = 'count' | 'id' | 'cycle' | 'bytes' | 'jitter';
 
+/** One-click facet filters over the identifier table. */
+type MsgFacet = 'all' | 'fd' | 'classic' | 'ext' | 'periodic';
+
+interface FilteredView {
+	messages: CanIdStats[];
+	channels: CanChannelStats[];
+	totalFrames: number;
+	errorFrames: number;
+	payloadBytes: number;
+	durationS: number;
+}
+
 export class CanLogView {
 	readonly root: HTMLElement;
 	private readonly paneLeft: HTMLElement;
@@ -202,6 +194,7 @@ export class CanLogView {
 	private readonly progressFill: HTMLElement;
 	private readonly progress: HTMLElement;
 	private readonly summaryLine: HTMLElement;
+	private readonly healthBadge: HTMLElement;
 	private readonly overviewBody: HTMLElement;
 	private readonly channelsBody: HTMLElement;
 	private readonly loadBody: HTMLElement;
@@ -209,25 +202,23 @@ export class CanLogView {
 	private readonly payloadBody: HTMLElement;
 	private readonly analysisHost: HTMLElement;
 	private readonly messagesBody: HTMLElement;
+	private readonly messagesCountBadge: HTMLElement;
 	private readonly filterBox: HTMLInputElement;
 	private readonly channelSelect: HTMLSelectElement;
 	private readonly convertButton: HTMLButtonElement;
+	private readonly exportCsvButton: HTMLButtonElement;
+	private readonly clearFilterButton: HTMLButtonElement;
+	private readonly facetButtons = new Map<MsgFacet, HTMLButtonElement>();
 	private stats: CanLogStats | null = null;
-	/** Each channel's rate pair — the channel configuration CANoe reads from its hardware
-	 *  setup, here chosen beside the load it produces. Channels absent from the map run the
-	 *  defaults until their row's selects say otherwise. */
 	private readonly channelRates = new Map<number, { arb: number; data: number }>();
 	private sortKey: SortKey = 'count';
 	private sortAsc = false;
+	private facet: MsgFacet = 'all';
 	private layout: CanStatsLayout = { ...DEFAULT_CAN_STATS_LAYOUT };
-	/** The identifier whose analysis panel is open, if any, and the walk's answer for it -
-	 *  cached so a rate or filter change re-renders the panel without re-walking the log. */
 	private selected: { channel: number; id: number; extended: boolean } | null = null;
 	private intervals: CanIntervals | null = null;
-	/** The wide/narrow watch: `data-compact` on the root, the chart viewBoxes following. */
+	private lastSortedMessages: CanIdStats[] = [];
 	readonly form: CanLayout;
-	/** The narrow form's sheets — the messages table's sort (the wide form sorts by its
-	 *  column headers, which the two-line rows do not carry). */
 	private readonly sheet: CanActionSheet;
 
 	constructor(private path: string) {
@@ -235,30 +226,70 @@ export class CanLogView {
 		this.filterBox.type = 'search';
 		this.filterBox.placeholder = t('can.filter.placeholder');
 		this.filterBox.spellcheck = false;
-		this.filterBox.addEventListener('input', () => this.render());
+		// Typing an ID filter only narrows the Messages table & summary counts — never
+		// rebuilds the three SVG bus charts on every keystroke.
+		this.filterBox.addEventListener('input', () => this.onFilterChanged());
+
 		this.channelSelect = el('select', 'can-channel') as HTMLSelectElement;
 		this.channelSelect.title = t('can.channel');
 		this.channelSelect.setAttribute('aria-label', t('can.channel'));
-		this.channelSelect.addEventListener('change', () => this.render());
+		this.channelSelect.addEventListener('change', () => {
+			this.syncFilterChips();
+			this.render();
+		});
+
+		this.healthBadge = el('span', 'can-health-pill can-health-idle');
+		this.healthBadge.hidden = true;
+
+		this.exportCsvButton = el('button', 'button secondary can-export-csv', [icon('export'), el('span', 'can-btn-label', [' CSV'])]) as HTMLButtonElement;
+		this.exportCsvButton.title = 'Copy filtered CAN ID statistics table as CSV';
+		this.exportCsvButton.disabled = true;
+		this.exportCsvButton.addEventListener('click', () => void this.copyCsv());
+
 		this.convertButton = el('button', 'button secondary can-convert', [icon('save-as'), el('span', 'can-btn-label', [` ${t('can.convert')}`])]) as HTMLButtonElement;
 		this.convertButton.title = t('can.convert.title');
 		this.convertButton.addEventListener('click', () => void this.convert());
-		// The toolbar is two compact rows at every width (the 2026-10-19 redesign): the
-		// command row (the title, Convert — an icon alone on the narrow form) over the
-		// filter row (the identifier box, the channel select). No third row ever appears;
-		// nothing overflows — the title truncates, the filter takes what remains.
+
+		// One-click facet chips for rapid human triage (FD / Classic / Extended / Periodic).
+		const makeFacetChip = (key: MsgFacet, label: string, title: string): HTMLButtonElement => {
+			const chip = el('button', 'can-chip', [label]) as HTMLButtonElement;
+			chip.type = 'button';
+			chip.title = title;
+			chip.addEventListener('click', () => {
+				this.facet = this.facet === key ? 'all' : key;
+				this.onFilterChanged();
+			});
+			this.facetButtons.set(key, chip);
+			return chip;
+		};
+		this.clearFilterButton = el('button', 'can-chip can-chip-clear', [icon('clear-all')]) as HTMLButtonElement;
+		this.clearFilterButton.type = 'button';
+		this.clearFilterButton.title = 'Clear all filters';
+		this.clearFilterButton.disabled = true;
+		this.clearFilterButton.addEventListener('click', () => this.clearFilters());
+
+		const quickFilters = el('div', 'can-quick can-stats-quick', [
+			makeFacetChip('fd', 'FD', 'Show only CAN FD identifiers'),
+			makeFacetChip('classic', 'Classic', 'Show only Classic CAN identifiers'),
+			makeFacetChip('ext', 'Ext', 'Show only 29-bit extended identifiers'),
+			makeFacetChip('periodic', 'Periodic', 'Show only periodic identifiers'),
+			this.clearFilterButton
+		]);
+
 		const toolbar = el('div', 'hex-toolbar can-toolbar', [
 			el('div', 'can-bar can-bar-main', [
 				el('span', 'can-toolbar-title', [icon('pulse'), ` ${t('can.stats.title')} — ${basename(path)}`]),
+				this.healthBadge,
+				this.exportCsvButton,
 				this.convertButton
 			]),
 			el('div', 'can-bar can-bar-filters', [
 				this.filterBox,
-				this.channelSelect
+				this.channelSelect,
+				quickFilters
 			])
 		]);
-		// The dashboard skeleton: the panes and sashes are laid out once; every render
-		// only fills the section bodies, so an open analysis panel or a drag share survives.
+
 		this.overviewBody = el('div', 'can-section-body');
 		this.channelsBody = el('div', 'can-section-body can-section-flush');
 		this.loadBody = el('div', 'can-section-body');
@@ -266,28 +297,39 @@ export class CanLogView {
 		this.payloadBody = el('div', 'can-section-body');
 		this.analysisHost = el('div', 'can-analysis-host');
 		this.messagesBody = el('div', 'can-section-body can-section-flush');
+		this.messagesCountBadge = el('span', 'can-section-badge');
+
 		this.paneLeft = el('div', 'can-pane can-pane-left', [
 			this.section('can-section-overview', 'pulse', t('can.section.overview'), this.overviewBody),
 			this.section('can-section-channels', 'stack', t('can.section.channels'), this.channelsBody)
 		]);
+		// Place analysisHost at the TOP of the right pane so clicking any identifier shows
+		// its cycle/jitter/frame-loss breakdown immediately without scrolling past 3 charts.
 		this.paneRight = el('div', 'can-pane can-pane-right', [
+			this.analysisHost,
 			this.section('can-section-load', 'graph', t('can.section.load'), this.loadBody),
 			this.section('can-section-rate', 'watch', t('can.section.rate'), this.rateBody),
-			this.section('can-section-payload', 'layers', t('can.section.payload'), this.payloadBody),
-			this.analysisHost
+			this.section('can-section-payload', 'layers', t('can.section.payload'), this.payloadBody)
 		]);
-		// The narrow form's table rows are two-line cards without column headers; the sort
-		// the wide headers own rides this head button's sheet instead (CSS hides it wide).
+
 		const sortButton = el('button', 'button secondary can-sort-menu', [icon('sort-precedence')]) as HTMLButtonElement;
 		sortButton.title = t('can.sort.title');
 		sortButton.setAttribute('aria-label', t('can.sort.title'));
 		sortButton.addEventListener('click', () => this.openSortSheet());
-		this.paneMessages = el('div', 'can-pane can-pane-messages', [
-			this.section('can-section-messages', 'table', t('can.section.messages'), this.messagesBody, sortButton)
+
+		const messagesSection = this.section('can-section-messages', 'table', t('can.section.messages'), this.messagesBody, el('span', 'can-section-actions', [this.messagesCountBadge, sortButton]));
+		this.paneMessages = el('div', 'can-pane can-pane-messages', [messagesSection]);
+		this.paneMessages.tabIndex = 0;
+		this.paneMessages.addEventListener('keydown', (event) => this.onMessagesKeyDown(event));
+
+		this.paneTop = el('div', 'can-dash-top', [
+			this.paneLeft,
+			paneSash('vertical', (sash, delta) => this.dragLeft(sash, delta), () => this.saveLayout(), () => this.resetLayout()),
+			this.paneRight
 		]);
-		this.paneTop = el('div', 'can-dash-top', [this.paneLeft, paneSash('vertical', (sash, delta) => this.dragLeft(sash, delta), () => this.saveLayout(), () => this.resetLayout()), this.paneRight]);
 		const hSash = paneSash('horizontal', (sash, delta) => this.dragTop(sash, delta), () => this.saveLayout(), () => this.resetLayout());
 		const body = el('div', 'can-body', [this.paneTop, hSash, this.paneMessages]);
+
 		this.liveDot = el('span', 'can-live-dot');
 		this.liveText = el('span', 'can-live-text', [t('can.live.opening')]);
 		this.live = el('span', 'can-live can-live-parsing', [this.liveDot, this.liveText]);
@@ -295,12 +337,12 @@ export class CanLogView {
 		const status = el('div', 'hex-status can-status', [this.live, this.summaryLine]);
 		this.progressFill = el('i');
 		this.progress = el('div', 'can-progress', [this.progressFill]);
+
 		this.root = el('div', 'can-view can-log-view', [toolbar, body, this.progress, status]);
 		this.sheet = new CanActionSheet(this.root);
 		this.form = new CanLayout(this.root);
 		this.form.onChange(() => {
 			this.sheet.close();
-			// The chart viewBoxes follow the form; the tables' card layouts are CSS's.
 			if (this.stats) this.render();
 		});
 		this.layout = loadState<CanStatsLayout>(CAN_STATS_LAYOUT_KEY, { ...DEFAULT_CAN_STATS_LAYOUT });
@@ -311,14 +353,74 @@ export class CanLogView {
 		void this.load();
 	}
 
-	/** A dashboard section: the compact head (icon, title, optional meta) over the body. */
 	private section(cls: string, iconName: string, title: string, body: HTMLElement, extra?: HTMLElement): HTMLElement {
 		const head = el('div', 'can-section-head', [icon(iconName), el('span', 'can-section-title', [title]), ...(extra ? [extra] : [])]);
 		return el('div', `can-section ${cls}`, [head, body]);
 	}
 
-	/** The narrow form's sort sheet: the keys the wide column headers own, plus the
-	 *  direction — the current key checked, the direction row naming where it points. */
+	private syncFilterChips(): void {
+		for (const [key, chip] of this.facetButtons) {
+			const on = this.facet === key;
+			chip.classList.toggle('can-chip-on', on);
+			chip.setAttribute('aria-pressed', String(on));
+		}
+		const hasFilter = this.filterBox.value.trim() !== '' || (Number(this.channelSelect.value) || 0) !== 0 || this.facet !== 'all';
+		this.clearFilterButton.disabled = !hasFilter;
+	}
+
+	private clearFilters(): void {
+		this.filterBox.value = '';
+		this.facet = 'all';
+		const channelChanged = this.channelSelect.value !== '0' && this.channelSelect.options.length > 0;
+		if (channelChanged) this.channelSelect.value = '0';
+		this.syncFilterChips();
+		if (channelChanged) this.render();
+		else this.onFilterChanged();
+	}
+
+	/** Fast partial update when only the ID box or quick facet chip changes: skips
+	 *  rebuilding the channels table and all 3 SVG bus charts. */
+	private onFilterChanged(): void {
+		this.syncFilterChips();
+		const stats = this.stats;
+		if (!stats || (!stats.totalFrames && !stats.errorFrames)) return;
+		const view = this.filtered()!;
+		this.renderOverview(stats, view);
+		this.renderMessages(view);
+		this.renderSummaryLine(stats, view);
+	}
+
+	/** Keyboard navigation over the identifier table: ↑/↓ moves selection & opens cycle
+	 *  analysis, Escape closes the analysis panel. */
+	private onMessagesKeyDown(event: KeyboardEvent): void {
+		if (!this.lastSortedMessages.length) return;
+		if (event.key === 'Escape' && this.selected) {
+			event.preventDefault();
+			this.clearSelection();
+			return;
+		}
+		if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+		event.preventDefault();
+		const cur = this.selected
+			? this.lastSortedMessages.findIndex((m) => m.channel === this.selected!.channel && m.id === this.selected!.id && m.extended === this.selected!.extended)
+			: -1;
+		const delta = event.key === 'ArrowDown' ? 1 : -1;
+		const nextIdx = cur === -1 ? (delta > 0 ? 0 : this.lastSortedMessages.length - 1) : Math.max(0, Math.min(this.lastSortedMessages.length - 1, cur + delta));
+		const target = this.lastSortedMessages[nextIdx];
+		if (target) {
+			void this.openAnalysis(target);
+			const rowEl = this.messagesBody.querySelectorAll<HTMLElement>('.can-msg-row')[nextIdx];
+			rowEl?.scrollIntoView({ block: 'nearest' });
+		}
+	}
+
+	private clearSelection(): void {
+		this.selected = null;
+		this.intervals = null;
+		this.renderAnalysis();
+		this.messagesBody.querySelectorAll('.can-msg-row.can-selected').forEach((r) => r.classList.remove('can-selected'));
+	}
+
 	private openSortSheet(): void {
 		const labels: Record<SortKey, string> = {
 			count: t('can.msg.count'),
@@ -361,22 +463,18 @@ export class CanLogView {
 		saveState(CAN_STATS_LAYOUT_KEY, this.layout);
 	}
 
-	/** A vertical drag hands share to the left column: the delta is pixels of the sash's
-	 *  parent span, the shares are percents of the pair. */
 	private dragLeft(sash: HTMLElement, delta: number): void {
 		const span = Math.max(1, sash.parentElement?.getBoundingClientRect().width ?? 0);
 		this.layout.left = Math.max(18, Math.min(82, this.layout.left + (delta / span) * 100));
 		this.applyLayout();
 	}
 
-	/** A horizontal drag hands height to the dashboard over the messages table. */
 	private dragTop(sash: HTMLElement, delta: number): void {
 		const span = Math.max(1, sash.parentElement?.getBoundingClientRect().height ?? 0);
 		this.layout.top = Math.max(20, Math.min(85, this.layout.top + (delta / span) * 100));
 		this.applyLayout();
 	}
 
-	/** Double-clicking a sash resets the shares to the defaults and saves them. */
 	private resetLayout(): void {
 		this.layout = { ...DEFAULT_CAN_STATS_LAYOUT };
 		this.applyLayout();
@@ -385,16 +483,13 @@ export class CanLogView {
 
 	/* ---------- The backend walk ---------- */
 
-	/** The backend walks the whole file on its blocking pool (a BLF container by
-	 *  container, an .asc line by line) and reports progress over the channel; the view
-	 *  itself painted the moment the tab opened, and this only fills the numbers in. */
 	private async load(): Promise<void> {
 		try {
 			this.stats = await canLogStats(this.path, progressChannel(t('can.status.parsing'), (text, progress) => {
-					this.liveText.textContent = text;
-					const percent = progress.totalBytes > 0 ? Math.min(100, (progress.bytes / progress.totalBytes) * 100) : 0;
-					this.progressFill.style.width = `${percent.toFixed(1)}%`;
-				}));
+				this.liveText.textContent = text;
+				const percent = progress.totalBytes > 0 ? Math.min(100, (progress.bytes / progress.totalBytes) * 100) : 0;
+				this.progressFill.style.width = `${percent.toFixed(1)}%`;
+			}));
 			this.render();
 		} catch (error) {
 			this.live.classList.remove('can-live-parsing');
@@ -407,19 +502,24 @@ export class CanLogView {
 		}
 	}
 
-	/** The tables narrowed by the filter bar: matching identifiers on the chosen channel. */
-	private filtered(): { messages: CanIdStats[]; channels: CanChannelStats[]; totalFrames: number; errorFrames: number; payloadBytes: number; durationS: number } | null {
+	private filtered(): FilteredView | null {
 		const stats = this.stats;
 		if (!stats) return null;
 		const idOk = parseIdFilter(this.filterBox.value);
 		const channel = Number(this.channelSelect.value) || 0;
-		const messages = stats.messages.filter((m) => (!channel || m.channel === channel) && (!idOk || idOk(m.id)));
+		const messages = stats.messages.filter((m) => {
+			if (channel && m.channel !== channel) return false;
+			if (idOk && !idOk(m.id)) return false;
+			if (this.facet === 'fd' && !m.fd) return false;
+			if (this.facet === 'classic' && m.fd) return false;
+			if (this.facet === 'ext' && !m.extended) return false;
+			if (this.facet === 'periodic' && !(m.avgCycleS > 0)) return false;
+			return true;
+		});
 		const channels = stats.channels.filter((c) => !channel || c.channel === channel);
 		const totalFrames = channels.reduce((a, c) => a + c.frames, 0);
 		const errorFrames = channels.reduce((a, c) => a + c.errorFrames, 0);
 		const payloadBytes = channels.reduce((a, c) => a + c.payloadBytes, 0);
-		// The filter keeps whole channels' traffic (the channel's own window and load are
-		// what they were); the duration stays the widest window still shown.
 		const durationS = channels.length ? Math.max(...channels.map((c) => c.lastS - c.firstS)) : 0;
 		return { messages, channels, totalFrames, errorFrames, payloadBytes, durationS };
 	}
@@ -429,14 +529,14 @@ export class CanLogView {
 		if (!stats) return;
 		if (!stats.totalFrames && !stats.errorFrames) {
 			this.doneLive();
+			this.exportCsvButton.disabled = true;
+			this.healthBadge.hidden = true;
 			for (const paneBody of [this.overviewBody, this.channelsBody, this.loadBody, this.rateBody, this.payloadBody, this.messagesBody]) {
 				paneBody.replaceChildren(el('div', 'can-error', [t('can.noFrames')]));
 			}
 			this.summaryLine.textContent = t('can.noFrames');
 			return;
 		}
-		// The channel filter's options follow the log's own channels once, over an
-		// "All channels" default - without it the select would pin the first channel.
 		if (this.channelSelect.options.length === 0) {
 			const all = el('option', undefined, [t('can.channel.all')]) as HTMLOptionElement;
 			all.value = '0';
@@ -449,12 +549,42 @@ export class CanLogView {
 			this.channelSelect.value = '0';
 		}
 		const view = this.filtered()!;
+		this.exportCsvButton.disabled = false;
 		this.doneLive();
+		this.renderHealthBadge(view);
 		this.renderOverview(stats, view);
 		this.renderChannels(view);
 		this.renderCharts(view);
 		this.renderMessages(view);
 		this.renderAnalysis();
+		this.renderSummaryLine(stats, view);
+	}
+
+	private renderHealthBadge(view: FilteredView): void {
+		let maxLoad = 0;
+		for (const c of view.channels) {
+			const rates = this.ratesOf(c.channel);
+			const dur = Math.max(0, c.lastS - c.firstS);
+			maxLoad = Math.max(maxLoad, busLoad(c.arbBits, c.dataBits, dur, rates.arb, rates.data));
+		}
+		this.healthBadge.hidden = false;
+		this.healthBadge.className = 'can-health-pill';
+		if (view.errorFrames > 0) {
+			this.healthBadge.classList.add('can-health-err');
+			this.healthBadge.textContent = `${view.errorFrames.toLocaleString()} ERR`;
+			this.healthBadge.title = 'Error frames detected on the bus';
+		} else if (maxLoad >= 70) {
+			this.healthBadge.classList.add('can-health-warn');
+			this.healthBadge.textContent = `Load ${maxLoad.toFixed(1)}%`;
+			this.healthBadge.title = 'High bus load (>= 70%)';
+		} else {
+			this.healthBadge.classList.add('can-health-ok');
+			this.healthBadge.textContent = `OK · ${maxLoad.toFixed(1)}%`;
+			this.healthBadge.title = 'Bus load healthy, zero error frames';
+		}
+	}
+
+	private renderSummaryLine(stats: CanLogStats, view: FilteredView): void {
 		const notes: string[] = [];
 		if (stats.messagesTruncated) notes.push(tf('can.status.topShown', stats.messages.length.toLocaleString(), (stats.messages.length + stats.messagesTruncated).toLocaleString()));
 		if (view.messages.length < stats.messages.length) notes.push(tf('can.status.filteredFrom', stats.messages.length.toLocaleString()));
@@ -468,45 +598,50 @@ export class CanLogView {
 		].join('  ·  ');
 	}
 
-	/** The walk is over: the pulsing dot and the progress bar stand down; the chip keeps
-	 *  the frame total as the dashboard's one-line "done" state. */
 	private doneLive(): void {
 		this.live.classList.remove('can-live-parsing');
 		this.progress.classList.add('can-progress-done');
 		this.liveText.textContent = `${this.stats!.totalFrames.toLocaleString()} ${t('can.status.frames')}`;
 	}
 
-	/** The measurement summary: window, duration, totals - the header of CANoe's window. */
-	private renderOverview(stats: CanLogStats, view: NonNullable<ReturnType<CanLogView['filtered']>>): void {
-		const cell = (label: string, value: string) => el('div', 'can-summary-cell', [el('div', 'can-summary-label', [label]), el('div', 'can-summary-value', [value])]);
+	private renderOverview(stats: CanLogStats, view: FilteredView): void {
+		const cell = (label: string, value: string, warn = false) =>
+			el('div', 'can-summary-cell', [
+				el('div', 'can-summary-label', [label]),
+				el('div', `can-summary-value${warn ? ' can-warn' : ''}`, [value])
+			]);
 		this.overviewBody.replaceChildren(el('div', 'can-summary', [
 			cell(t('can.overview.format'), stats.format),
 			cell(t('can.overview.start'), stats.startTimestampS ? formatStart(stats.startTimestampS) : '—'),
 			cell(t('can.overview.duration'), formatDuration(view.durationS)),
 			cell(t('can.overview.frames'), view.totalFrames.toLocaleString()),
-			cell(t('can.overview.errors'), view.errorFrames.toLocaleString()),
+			cell(t('can.overview.errors'), view.errorFrames.toLocaleString(), view.errorFrames > 0),
 			cell(t('can.overview.payload'), formatBytes(view.payloadBytes, { gb: true })),
 			cell(t('can.overview.ids'), view.messages.length.toLocaleString()),
 			cell(t('can.overview.rate'), view.durationS > 0 ? `${(view.totalFrames / view.durationS).toFixed(1)} fr/s` : '—')
 		]));
 	}
 
-	/** One row per channel: counts, the window, the average rate, the channel's own rate
-	 *  pair, and the load they produce - the load columns follow the row's selects live,
-	 *  the peak off the load profile's buckets. */
-	private renderChannels(view: NonNullable<ReturnType<CanLogView['filtered']>>): void {
+	private renderChannels(view: FilteredView): void {
 		const profiles = new Map((this.stats?.loadProfiles ?? []).map((p) => [p.channel, p]));
 		const head = el('div', 'can-table-head can-ch-grid', [t('can.ch.channel'), t('can.ch.frames'), t('can.ch.errors'), t('can.ch.payload'), t('can.ch.duration'), t('can.ch.rate'), t('can.ch.rates'), t('can.ch.load'), t('can.ch.peak')].map((label, i) => el('span', i === 0 ? 'can-left' : 'can-num', [label])));
-		const rows = view.channels.map((c) => {
+		const rows = view.channels.map((c, idx) => {
 			const rates = this.ratesOf(c.channel);
 			const duration = Math.max(0, c.lastS - c.firstS);
 			const load = busLoad(c.arbBits, c.dataBits, duration, rates.arb, rates.data);
 			const buckets = profiles.get(c.channel)?.buckets ?? [];
 			const peak = Math.max(0, ...buckets.map((b) => busLoad(b.arbBits, b.dataBits, b.durS, rates.arb, rates.data)));
-			// The five count cells ride one wrapper: wide it is `display: contents` (the grid
-			// sees the five columns), narrow the card's grey meta line under the channel name.
+			const sev = loadSeverity(load);
+			const peakSev = loadSeverity(peak);
+			const loadCell = el('span', `can-num can-load can-load-${sev}`, [load.toFixed(2) + ' %']);
+			loadCell.style.setProperty('--can-load-pct', `${Math.min(100, load).toFixed(1)}%`);
+			const peakCell = el('span', `can-num can-load can-load-${peakSev}`, [buckets.length ? peak.toFixed(2) + ' %' : '—']);
+			const chLabel = el('span', 'can-left can-ch-name', [
+				el('span', `can-swatch ${seriesStyle(idx)}`),
+				`${t('can.channel')} ${c.channel}`
+			]);
 			const cells = [
-				el('span', 'can-left', [`${t('can.channel')} ${c.channel}`]),
+				chLabel,
 				el('span', 'can-ch-meta', [
 					el('span', 'can-num', [c.frames.toLocaleString()]),
 					el('span', `can-num${c.errorFrames ? ' can-warn' : ''}`, [c.errorFrames.toLocaleString()]),
@@ -518,8 +653,8 @@ export class CanLogView {
 					this.rateSelect(c.channel, 'arb', CAN_BITRATES, rates.arb, t('can.rate.arb.title')),
 					this.rateSelect(c.channel, 'data', CAN_DATA_BITRATES, rates.data, t('can.rate.data.title'))
 				]),
-				el('span', 'can-num can-load', [load.toFixed(2) + ' %']),
-				el('span', 'can-num can-load', [buckets.length ? peak.toFixed(2) + ' %' : '—'])
+				loadCell,
+				peakCell
 			];
 			const row = el('div', 'can-table-row can-ch-grid can-mono', cells);
 			row.title = tf('can.load.bitsTitle', ((c.arbBits + c.dataBits) / 1e6).toFixed(2));
@@ -528,14 +663,10 @@ export class CanLogView {
 		this.channelsBody.replaceChildren(el('div', 'can-channels can-table', [head, ...rows]));
 	}
 
-	/** The channel's rate pair - the row's selects edit the map, every load figure
-	 *  follows, and a channel never named there runs the defaults. */
 	private ratesOf(channel: number): { arb: number; data: number } {
 		return this.channelRates.get(channel) ?? { arb: DEFAULT_CAN_BITRATE, data: DEFAULT_FD_DATA_BITRATE };
 	}
 
-	/** One of a channel row's two rate selects (arbitration, data): choosing a rate
-	 *  re-prices that channel's load and charts alone, without a second backend walk. */
 	private rateSelect(channel: number, key: 'arb' | 'data', rates: readonly number[], value: number, title: string): HTMLSelectElement {
 		const select = el('select', `can-rate can-rate-${key}`) as HTMLSelectElement;
 		select.title = title;
@@ -554,22 +685,13 @@ export class CanLogView {
 		return select;
 	}
 
-	/** The bus charts, one series per shown channel in its palette colour: the load over
-	 *  time (each channel at its own rate pair, the data phase at the data bitrate), the
-	 *  frame rate over time, and the payload length distribution stacked per channel. All
-	 *  three are divisions of the walked numbers, so a rate change redraws them without
-	 *  asking the backend anything. */
-	private renderCharts(view: NonNullable<ReturnType<CanLogView['filtered']>>): void {
+	private renderCharts(view: FilteredView): void {
 		const profiles = new Map((this.stats?.loadProfiles ?? []).map((p) => [p.channel, p]));
 		const dists = new Map((this.stats?.payloadDist ?? []).map((d) => [d.channel, d]));
-		// The narrow form draws at the compact viewBox — the phone's width renders the
-		// strokes and labels at full density instead of half-size.
 		const vbw = this.form.isCompact ? CAN_CHART_VBW_COMPACT : undefined;
 		const seriesOf = (y: (b: LoadBucket, rates: { arb: number; data: number }) => number): ChartSeries[] => view.channels.map((c, i) => ({
 			name: `${t('can.channel')} ${c.channel}`,
 			cls: seriesStyle(i),
-			// xEnd carries the bucket's window, so a hover inside it reads this bucket —
-			// not whichever sample edge happens to sit nearer the cursor.
 			points: (profiles.get(c.channel)?.buckets ?? []).map((b) => ({ x: b.tS, xEnd: b.tS + b.durS, y: y(b, this.ratesOf(c.channel)) }))
 		}));
 		this.loadBody.replaceChildren(
@@ -578,10 +700,6 @@ export class CanLogView {
 		this.rateBody.replaceChildren(
 			multiLineChart(seriesOf((b) => (b.durS > 0 ? b.frames / b.durS : 0)), { xUnit: 's', yUnit: 'fr/s', height: 160, fmtX: formatAxisSeconds, vbw })
 		);
-		// The backend answers one count per payload bin — the same 16 lengths this table
-		// labels, in order — and the chart maps them by index, so the last label ("64")
-		// reads the last bin. A short answer pads with zeros rather than shifting every
-		// column one place left.
 		const payloadSeries: ChartSeries[] = view.channels.map((c, i) => ({
 			name: `${t('can.channel')} ${c.channel}`,
 			cls: seriesStyle(i),
@@ -590,7 +708,6 @@ export class CanLogView {
 		this.payloadBody.replaceChildren(stackedBars([...PAYLOAD_LABELS], payloadSeries, { height: 170, vbw }));
 	}
 
-	/** A column-header sort button: clicking it sorts by that key, clicking again flips. */
 	private sortButton(key: SortKey, label: string): HTMLButtonElement {
 		const button = el('button', `button secondary can-sort${this.sortKey === key ? ' can-sorted' : ''}`,
 			[(this.sortKey === key ? (this.sortAsc ? '↑ ' : '↓ ') : '') + label]) as HTMLButtonElement;
@@ -605,9 +722,7 @@ export class CanLogView {
 		return button;
 	}
 
-	/** The per-identifier table, sorted by the clicked column (busiest first by default).
-	 *  Clicking a row opens that identifier's analysis panel. */
-	private renderMessages(view: NonNullable<ReturnType<CanLogView['filtered']>>): void {
+	private renderMessages(view: FilteredView): void {
 		const messages = [...view.messages].sort((a, b) => {
 			let d = 0;
 			if (this.sortKey === 'count') d = a.count - b.count;
@@ -617,6 +732,12 @@ export class CanLogView {
 			else d = a.payloadBytes - b.payloadBytes;
 			return this.sortAsc ? d : -d;
 		});
+		this.lastSortedMessages = messages;
+		const totalIds = this.stats?.messages.length ?? messages.length;
+		this.messagesCountBadge.textContent = messages.length === totalIds
+			? `${messages.length.toLocaleString()}`
+			: `${messages.length.toLocaleString()} / ${totalIds.toLocaleString()}`;
+
 		const header = el('div', 'can-table-head can-msg-grid', [
 			el('span', 'can-left', [t('can.msg.id')]),
 			el('span', 'can-num', [t('can.msg.ch')]),
@@ -628,42 +749,45 @@ export class CanLogView {
 			this.sortButton('jitter', t('can.msg.jitter')),
 			el('span', 'can-num', [t('can.msg.share')])
 		]);
-		const rows = messages.map((m) => {
+
+		const table = el('div', 'can-messages can-table', [header]);
+		const frag = document.createDocumentFragment();
+		for (const m of messages) {
 			const share = view.totalFrames ? (m.count / view.totalFrames) * 100 : 0;
-			// The seven detail cells ride one wrapper like the channel rows': wide it is
-			// `display: contents`, narrow the card's grey second line under the identifier.
+			const shareCell = el('span', 'can-num can-share-cell', [share.toFixed(share < 1 ? 2 : 1) + ' %']);
+			shareCell.style.setProperty('--can-share-pct', `${Math.min(100, share).toFixed(1)}%`);
+			const typeBadge = el('span', `can-left ${m.fd ? 'can-type-fd' : 'can-type-can'}`, [m.fd ? 'CAN FD' : 'CAN']);
 			const row = el('div', 'can-table-row can-msg-grid can-mono can-msg-row', [
 				el('span', 'can-left', [idHex(m.id, m.extended) + (m.extended ? ' x' : '')]),
 				el('span', 'can-msg-meta', [
 					el('span', 'can-num', [String(m.channel)]),
-					el('span', 'can-left', [m.fd ? 'CAN FD' : 'CAN']),
+					typeBadge,
 					el('span', 'can-num', [m.count.toLocaleString()]),
 					el('span', 'can-num', [`${m.tx.toLocaleString()} / ${m.rx.toLocaleString()}`]),
 					el('span', 'can-num', [formatBytes(m.payloadBytes, { gb: true })]),
 					el('span', 'can-num', [`${formatCycle(m.minCycleS)} / ${formatCycle(m.avgCycleS)} / ${formatCycle(m.maxCycleS)}`]),
 					el('span', 'can-num', [formatCycle(m.stdCycleS)])
 				]),
-				el('span', 'can-num', [share.toFixed(share < 1 ? 2 : 1) + ' %'])
+				shareCell
 			]);
 			row.title = t('can.msg.clickHint');
-			if (this.selected && this.selected.channel === m.channel && this.selected.id === m.id) row.classList.add('can-selected');
+			if (this.selected && this.selected.channel === m.channel && this.selected.id === m.id && this.selected.extended === m.extended) {
+				row.classList.add('can-selected');
+			}
 			row.addEventListener('click', () => void this.openAnalysis(m));
-			return row;
-		});
-		const empty = messages.length ? [] : [el('div', 'can-table-row can-empty', [t('can.msg.empty')])];
-		this.messagesBody.replaceChildren(el('div', 'can-messages can-table', [header, ...rows, ...empty]));
+			frag.appendChild(row);
+		}
+		if (!messages.length) {
+			frag.appendChild(el('div', 'can-table-row can-empty', [t('can.msg.empty')]));
+		}
+		table.appendChild(frag);
+		this.messagesBody.replaceChildren(table);
 	}
 
 	/* ---------- Periodic analysis ---------- */
 
-	/** One identifier's analysis: the cycle statistics, the interval series with its
-	 *  missing frames marked, and the distribution — CANoe's Graphics window. The answer
-	 *  is cached against the selection, so re-renders (a rate change, a filter) redraw
-	 *  the panel instead of re-walking the log. */
 	private async openAnalysis(m: CanIdStats): Promise<void> {
 		this.selected = { channel: m.channel, id: m.id, extended: m.extended };
-		// The repaint applies the new selection's highlight; the tables are already in
-		// memory, so this is a redraw, not a backend round trip.
 		this.renderMessages(this.filtered()!);
 		if (this.intervals && this.intervals.channel === m.channel && this.intervals.id === m.id && this.intervals.extended === m.extended) {
 			this.renderAnalysis();
@@ -680,9 +804,6 @@ export class CanLogView {
 			this.analysisHost.replaceChildren(el('div', 'can-error', [`${t('can.analysis.failed')}: ${String(error)}`]));
 			return;
 		}
-		// A late answer for a selection the user has already moved off is dropped — the
-		// extended flag too: a standard and an extended frame share the numeric id and
-		// are distinct rows (the cache key above compares it).
 		if (!this.selected || this.selected.channel !== m.channel || this.selected.id !== m.id || this.selected.extended !== m.extended) return;
 		this.intervals = intervals;
 		this.renderAnalysis();
@@ -695,10 +816,19 @@ export class CanLogView {
 			return;
 		}
 		const cell = (label: string, value: string, warn = false) => el('div', 'can-summary-cell', [el('div', 'can-summary-label', [label]), el('div', `can-summary-value${warn ? ' can-warn' : ''}`, [value])]);
-		// The frame-loss note pluralises its nouns in English and reorders them in Chinese -
-		// both read their words from the table, the pattern key carries only the order.
 		const frameWord = t(intervals.missedFrames === 1 ? 'can.analysis.frame' : 'can.analysis.frames');
 		const gapWord = t(intervals.missedGaps === 1 ? 'can.analysis.gap' : 'can.analysis.gaps');
+		const copyBtn = el('button', 'button secondary can-analysis-copy', [icon('copy')]) as HTMLButtonElement;
+		copyBtn.title = 'Copy cycle analysis summary';
+		copyBtn.addEventListener('click', () => {
+			const summary = [
+				`ID: ${idHex(intervals.id, intervals.extended)} (Ch ${intervals.channel}${intervals.fd ? ', CAN FD' : ''})`,
+				`Frames: ${intervals.count}`,
+				`Median: ${formatCycle(intervals.medianCycleS)} | Avg: ${formatCycle(intervals.avgCycleS)} | Min/Max: ${formatCycle(intervals.minCycleS)} / ${formatCycle(intervals.maxCycleS)} | Jitter: ${formatCycle(intervals.stdS)}`,
+				`Lost: ${intervals.missedFrames} in ${intervals.missedGaps} gaps`
+			].join('\n');
+			void writeText(summary).then(() => notify('info', `Copied ${idHex(intervals.id, intervals.extended)} analysis`)).catch(() => undefined);
+		});
 		const head = el('div', 'can-section-head', [
 			icon('variable'),
 			el('span', 'can-section-title', [`${idHex(intervals.id, intervals.extended)} — ${t('can.section.analysis')}`]),
@@ -706,6 +836,7 @@ export class CanLogView {
 				? tf('can.analysis.lost', intervals.missedFrames.toLocaleString(), frameWord, intervals.missedGaps.toLocaleString(), gapWord)
 				: t('can.analysis.noLoss')]),
 			el('span', 'hex-toolbar-sep'),
+			copyBtn,
 			el('button', 'button secondary can-analysis-close', [t('can.analysis.close')])
 		]);
 		const panel = el('div', 'can-section can-analysis', [
@@ -721,7 +852,6 @@ export class CanLogView {
 				]),
 				el('div', 'can-chart-block', [
 					el('div', 'can-chart-title', [t('can.chart.cycle')]),
-					// The backend's cycles are seconds; the charts show CANoe's milliseconds.
 					cycleSeriesChart(intervals.points.map((p) => ({ x: p.tS, y: p.cycleS * 1000, missed: p.missed })), intervals.medianCycleS * 1000, 's', 'ms', this.form.isCompact ? CAN_CHART_VBW_COMPACT : undefined),
 				]),
 				el('div', 'can-chart-block', [
@@ -730,19 +860,46 @@ export class CanLogView {
 				])
 			])
 		]);
-		panel.querySelector('.can-analysis-close')!.addEventListener('click', () => {
-			this.selected = null;
-			this.intervals = null;
-			this.renderAnalysis();
-			this.messagesBody.querySelectorAll('.can-msg-row.can-selected').forEach((r) => r.classList.remove('can-selected'));
-		});
+		panel.querySelector('.can-analysis-close')!.addEventListener('click', () => this.clearSelection());
 		this.analysisHost.replaceChildren(panel);
+	}
+
+	/* ---------- Export CSV ---------- */
+
+	private async copyCsv(): Promise<void> {
+		const view = this.filtered();
+		if (!view || !this.lastSortedMessages.length) return;
+		const lines = [
+			'ID,Extended,Channel,Type,Count,Tx,Rx,Bytes,MinCycleMs,AvgCycleMs,MaxCycleMs,JitterMs,SharePct',
+			...this.lastSortedMessages.map((m) => {
+				const share = view.totalFrames ? (m.count / view.totalFrames) * 100 : 0;
+				return [
+					idHex(m.id, m.extended),
+					m.extended ? '1' : '0',
+					m.channel,
+					m.fd ? 'CAN FD' : 'CAN',
+					m.count,
+					m.tx,
+					m.rx,
+					m.payloadBytes,
+					(m.minCycleS * 1000).toFixed(3),
+					(m.avgCycleS * 1000).toFixed(3),
+					(m.maxCycleS * 1000).toFixed(3),
+					(m.stdCycleS * 1000).toFixed(3),
+					share.toFixed(2)
+				].join(',');
+			})
+		];
+		try {
+			await writeText(lines.join('\n'));
+			notify('info', `Copied ${this.lastSortedMessages.length.toLocaleString()} CAN IDs as CSV`);
+		} catch (error) {
+			notify('error', String(error));
+		}
 	}
 
 	/* ---------- Lifecycle ---------- */
 
-	/** The tab is closing: the form's ResizeObserver pins the whole pane's DOM for the
-	 *  page's life until it is disconnected, and the sheet's scrim goes with it. */
 	dispose(): void {
 		this.form.dispose();
 		this.sheet.dispose();
@@ -751,9 +908,6 @@ export class CanLogView {
 
 	/* ---------- Conversion (Save As) ---------- */
 
-	/** Converts the whole log through the shared flow (target picked, save dialog,
-	 *  backend walk with progress on the status line). The result - exported or failed -
-	 *  stays on the chip; it is the last thing that happened to this log. */
 	private async convert(): Promise<void> {
 		this.convertButton.disabled = true;
 		try {
@@ -764,10 +918,7 @@ export class CanLogView {
 	}
 }
 
-/** The Save As conversion, shared by the raw view and the statistics view: pick a target
- *  format (the other format preselected), pick where to save it, and run the backend walk
- *  with its progress reported on the caller's status line. `format` is the source's own
- *  format when the caller knows it; without it the file's extension decides. */
+/** The Save As conversion, shared by the raw view and the statistics view. */
 export async function convertCanLog(path: string, format: 'BLF' | 'ASC' | null, report: (text: string) => void): Promise<void> {
 	const detected = format ?? (/\.blf$/i.test(path) ? 'BLF' : 'ASC');
 	const other = detected === 'BLF' ? 'ASC' : 'BLF';

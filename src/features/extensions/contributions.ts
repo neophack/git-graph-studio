@@ -669,6 +669,7 @@ export function applyContributions(extId: string, contributes: ManifestContribut
 			title: entry.title,
 			category: entry.category,
 			keybinding,
+			when: key?.when ? () => evaluateWhen(extId, key.when) : undefined,
 			enabled: () => canRun(entry.id) && evaluateWhen(extId, entry.enablement),
 			paletteHidden: paletteWhen === undefined ? undefined : () => !evaluateWhen(extId, paletteWhen),
 			run: () => dispatch(entry.id, key?.args === undefined ? undefined : [key.args])
