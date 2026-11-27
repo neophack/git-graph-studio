@@ -502,20 +502,26 @@ impl SymbolIndex {
                             }
                         }
                         let key = (path.to_owned(), sym_name.clone(), line0 as usize);
-                        if !seen.insert(key) {
+                        if seen.contains(&key) {
                             continue;
                         }
+                        // The key only counts as seen once a row actually answered: the
+                        // slot's line comes from the sym-gen scanner and the store's row
+                        // from the parser — a disagreement must leave the name to the
+                        // `matching` fallback below, never swallow it behind a poisoned
+                        // dedup key.
                         if let Some(row) = guard.file_symbols(path).and_then(|rows| {
                             rows.into_iter()
                                 .find(|r| r.line == line0 as usize && r.name == sym_name)
                         }) {
+                            seen.insert(key);
                             boosted.push(WorkspaceSymbol {
                                 path: path.to_owned(),
                                 kind: row.kind.to_owned(),
                                 name: row.name,
                                 container: row.container,
                                 line: row.line,
-                                column: row.column,
+                                column: 0,
                                 end_line: row.end_line,
                             });
                             if boosted.len() >= limit {
@@ -820,34 +826,39 @@ impl SymbolIndex {
         let index = Arc::clone(self);
         let root = root.to_owned();
         std::thread::spawn(move || {
-            let Some(store) = index.resident(&root) else {
-                return;
-            };
-            let changed = {
-                let guard = store.read().unwrap();
-                let fingerprints = guard.fingerprints();
-                drop(guard);
-                // The drift walk stats every known file — O(files), a few hundred
-                // milliseconds on a 20k-file root — and runs with the store's lock
-                // RELEASED, so a symbol query never queues behind it. The batch's own
-                // paths re-extract regardless.
-                let drifted = SymbolStore::drift_of(&root, &fingerprints, &paths);
-                let mut store = store.write().unwrap();
-                // A batch naming nothing the store holds (a non-source write, another app's
-                // churn) ends here: saving unchanged bytes would only put new watcher events
-                // on the tree the watch reports, so the store's own persistence never feeds
-                // the watch.
-                store.apply_drifted(&paths, &drifted)
-            };
-            if changed {
-                index.drain_volume_saves(&root);
-            }
+            let _changed = index.refresh_paths_blocking(&root, &paths);
             if let Some(sink) = sink.as_deref() {
                 if let Ok(payload) = serde_json::to_value(index.status(&root)) {
                     sink.emit(SYMBOL_INDEX_EVENT, payload);
                 }
             }
         });
+    }
+
+    /// Synchronously apply changed/drifted files to the resident store (without spawning
+    /// a background thread) and refresh the status counters. Used by `ggs-mcp` after
+    /// edits/renames so the very next query observes fresh symbols immediately.
+    pub fn refresh_paths_blocking(&self, root: &str, paths: &[String]) -> bool {
+        let Some(store) = self.resident(root) else {
+            return false;
+        };
+        let changed = {
+            let guard = store.read().unwrap();
+            let fingerprints = guard.fingerprints();
+            drop(guard);
+            let drifted = SymbolStore::drift_of(root, &fingerprints, paths);
+            let mut store = store.write().unwrap();
+            let moved = store.apply_drifted(paths, &drifted);
+            if moved {
+                let stats = store.stats();
+                self.note(root, ready_status(&stats));
+            }
+            moved
+        };
+        if changed {
+            self.drain_volume_saves(root);
+        }
+        changed
     }
 
     /// Persist the root's volumes with the store lock released. Each pass snapshots

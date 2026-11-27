@@ -15,8 +15,18 @@ ggs-base.workspace = true
 ggs-fs.workspace = true
 ggs-index.workspace = true
 ggs-analysis.workspace = true
+ggs-can.workspace = true
+ggs-dbc.workspace = true
+ggs-elf.workspace = true
+ggs-dts.workspace = true
+ggs-dmp.workspace = true
+ggs-csv.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[[bin]]
+name = "ggs-mcp"
+path = "src/bin/ggs-mcp.rs"
 
 [dev-dependencies]
 tempfile.workspace = true

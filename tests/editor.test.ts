@@ -197,6 +197,9 @@ describe('editor group', () => {
 	});
 
 	it('the diff panes hover a macro with its #define value, like a text editor', async () => {
+		// The Symbol Hover switch (default off since 2026-11-26) gates the workbench's own
+		// hover; the test's flow turns it on the way the user does.
+		updateSetting('symbolHover', true);
 		backend.on('read_file_at', ({ revision, path }) => ({ contents: `${revision}:${path}\nint n = MAX_LEN;\n`, binary: false, size: 40 }));
 		files({ 'C:\\repo\\a.ts': 'int n = MAX_LEN;\nint m = 0;\n', 'C:\\repo\\inc\\conf.h': '#define MAX_LEN 256\n' });
 		backend.on('symbol_lookup', ({ name }) => {

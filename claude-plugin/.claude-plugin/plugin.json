@@ -1,0 +1,23 @@
+{
+  "name": "ggs",
+  "version": "0.1.22",
+  "description": "Git Graph Studio for Claude Code — persistent semantic code intelligence, conflict-checked atomic refactoring, C/C++ compile context, semantic git diff blast-radius analysis, and native Rust binary senses for CAN/DBC, ELF firmware, Device Trees, Windows minidumps, and large CSV telemetry.",
+  "author": {
+    "name": "Git Graph Studio"
+  },
+  "repository": "https://github.com/neophack/git-graph-studio",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "code-intelligence",
+    "source-insight",
+    "refactoring",
+    "embedded",
+    "automotive",
+    "can",
+    "dbc",
+    "elf",
+    "devicetree",
+    "minidump"
+  ]
+}

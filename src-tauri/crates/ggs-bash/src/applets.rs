@@ -9075,7 +9075,10 @@ fn mb_to_wide(codepage: u32, bytes: &[u8]) -> Result<String, usize> {
     }
 }
 
+/// The non-Windows stand-in: the codepage conversion only ever answers on Windows,
+/// where the real MultiByteToWideChar backs it.
 #[cfg(not(windows))]
+#[allow(dead_code)]
 fn mb_to_wwide(_codepage: u32, _bytes: &[u8]) -> Result<String, usize> {
     Err(0)
 }

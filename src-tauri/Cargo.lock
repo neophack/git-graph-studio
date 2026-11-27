@@ -2142,6 +2142,12 @@ version = "0.0.0"
 dependencies = [
  "ggs-analysis",
  "ggs-base",
+ "ggs-can",
+ "ggs-csv",
+ "ggs-dbc",
+ "ggs-dmp",
+ "ggs-dts",
+ "ggs-elf",
  "ggs-fs",
  "ggs-index",
  "serde",

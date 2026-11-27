@@ -33,6 +33,12 @@
 //! trailer naming the continuation. stderr carries the one startup line; stdout is
 //! protocol only.
 
+#![recursion_limit = "256"]
+
+mod binary;
+mod p0;
+pub mod protocol;
+
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
@@ -110,9 +116,9 @@ const LOG_ROTATE_BYTES: usize = 1_000_000;
 const LOG_KEEP_BYTES: usize = 256_000;
 
 pub struct McpServer {
-    root: String,
-    index: Arc<SymbolIndex>,
-    analysis: Arc<AnalysisIndex>,
+    pub(crate) root: String,
+    pub(crate) index: Arc<SymbolIndex>,
+    pub(crate) analysis: Arc<AnalysisIndex>,
     /// Where this server appends its call log (JSON lines; the MCP page reads it).
     log_path: std::path::PathBuf,
 }
@@ -186,8 +192,23 @@ impl McpServer {
         );
     }
 
+    /// Resolve a repo-relative path safely inside `self.root` (rejecting escapes).
+    pub(crate) fn resolve_repo_path(&self, rel: &str) -> Result<std::path::PathBuf, String> {
+        let root = std::path::Path::new(&self.root)
+            .canonicalize()
+            .map_err(|_| format!("The served folder '{}' is not readable.", self.root))?;
+        let canonical = root
+            .join(rel)
+            .canonicalize()
+            .map_err(|_| format!("No readable file at '{rel}'."))?;
+        if !canonical.starts_with(&root) {
+            return Err("The path escapes the served repository.".to_owned());
+        }
+        Ok(canonical)
+    }
+
     /// The analysis behind the analysis tools, when it has landed.
-    fn analysis_data(&self) -> Result<Arc<Mutex<AnalysisData>>, (i64, String)> {
+    pub(crate) fn analysis_data(&self) -> Result<Arc<Mutex<AnalysisData>>, (i64, String)> {
         self.analysis
             .analysis(&self.root)
             .ok_or((-32603, "the analysis index is still building".to_owned()))
@@ -195,7 +216,7 @@ impl McpServer {
 
     /// The symbol store behind the project volumes, for the store-backed tools: the
     /// same resumed index every symbol query serves from.
-    fn with_store<R>(
+    pub(crate) fn with_store<R>(
         &self,
         query: impl FnOnce(&ggs_index::symbols::store::SymbolStore) -> R,
     ) -> Result<R, (i64, String)> {
@@ -244,13 +265,21 @@ impl McpServer {
                     .pointer("/params/protocolVersion")
                     .and_then(Value::as_str)
                     .unwrap_or(PROTOCOL_VERSION),
-                "capabilities": { "tools": { "listChanged": false } },
+                "capabilities": {
+                    "tools": { "listChanged": false },
+                    "prompts": { "listChanged": false },
+                    "resources": { "subscribe": false, "listChanged": false }
+                },
                 "serverInfo": { "name": "git-graph-studio", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": MCP_INSTRUCTIONS
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tool_catalogue() })),
             "tools/call" => self.call(message.get("params")),
+            "prompts/list" => Ok(json!({ "prompts": protocol::prompts_catalogue() })),
+            "prompts/get" => protocol::prompt_get(message.get("params")),
+            "resources/list" => Ok(json!({ "resources": protocol::resources_catalogue() })),
+            "resources/read" => self.resource_read(message.get("params")),
             other => Err((-32601, format!("method not found: {other}"))),
         };
         Some(match outcome {
@@ -279,6 +308,9 @@ impl McpServer {
             "read_file" => self.tool_read_file(&args),
             "search_text" => self.tool_search_text(&args),
             "index_status" => Ok(self.tool_status()),
+            "index_refresh" => self.tool_index_refresh(&args),
+            "symbol_rename" => self.tool_symbol_rename(&args),
+            "compile_context" => self.tool_compile_context(&args),
             "symbol_context" => self.tool_symbol_context(&args),
             "symbol_relations" => self.tool_symbol_relations(&args),
             "file_dependencies" => self.tool_file_dependencies(&args),
@@ -293,6 +325,20 @@ impl McpServer {
             "analysis_import_cycles" => self.tool_import_cycles(&args),
             "git_status" => self.tool_git_status(),
             "git_log" => self.tool_git_log(&args),
+            "git_diff_impact" => self.tool_git_diff_impact(&args),
+            "git_blame_symbol" => self.tool_git_blame_symbol(&args),
+            "git_commit_detail" => self.tool_git_commit_detail(&args),
+            "can_log_summary" => self.tool_can_log_summary(&args),
+            "can_signal_query" => self.tool_can_signal_query(&args),
+            "dbc_lookup" => self.tool_dbc_lookup(&args),
+            "elf_inspect" => self.tool_elf_inspect(&args),
+            "elf_diff" => self.tool_elf_diff(&args),
+            "dts_inspect" => self.tool_dts_inspect(&args),
+            "dmp_summary" => self.tool_dmp_summary(&args),
+            "csv_profile" => self.tool_csv_profile(&args),
+            "ui_open_location" => self.tool_ui_open_location(&args),
+            "ui_show_relation_graph" => self.tool_ui_show_relation_graph(&args),
+            "ui_open_diff" => self.tool_ui_open_diff(&args),
             other => Err((-32602, format!("unknown tool: {other}"))),
         };
         self.log_call(name, &args, outcome.is_ok(), started.elapsed());
@@ -302,7 +348,7 @@ impl McpServer {
         Ok(json!({ "content": [ { "type": "text", "text": text } ], "isError": false }))
     }
 
-    fn arg_str(args: &Value, key: &str) -> Result<String, (i64, String)> {
+    pub(crate) fn arg_str(args: &Value, key: &str) -> Result<String, (i64, String)> {
         args.get(key)
             .and_then(Value::as_str)
             .map(str::to_owned)
@@ -428,7 +474,7 @@ impl McpServer {
     /// totals, the language and kind mixes, the directories that carry the code, the
     /// hub files and names, the heaviest module edges — each line naming the tool that
     /// drills in next. An AI's cheapest path to the lay of the land.
-    fn tool_overview(&self) -> Result<String, (i64, String)> {
+    pub(crate) fn tool_overview(&self) -> Result<String, (i64, String)> {
         let status = self.index.status(&self.root);
         let files = self.index.files_with_counts(&self.root).unwrap_or_default();
         let mut out = format!(
@@ -711,7 +757,7 @@ impl McpServer {
         Ok(out)
     }
 
-    fn tool_status(&self) -> String {
+    pub(crate) fn tool_status(&self) -> String {
         let status = self.index.status(&self.root);
         let dir = ggs_index::symbols::store::SymbolStore::index_dir(
             &self.root,
@@ -1092,7 +1138,7 @@ impl McpServer {
     }
 
     /// `git_status`: concise branch and working-tree status (read-only, bounded).
-    fn tool_git_status(&self) -> Result<String, (i64, String)> {
+    pub(crate) fn tool_git_status(&self) -> Result<String, (i64, String)> {
         let output = std::process::Command::new("git")
             .args(["-C", &self.root, "status", "--short", "-b"])
             .output()
@@ -2237,6 +2283,159 @@ fn tool_catalogue() -> Value {
                 "path": { "type": "string", "description": "Optional repo-relative file or directory path" },
                 "limit": { "type": "number", "description": "Max commits to return (1-50, default 15)" }
             } }
+        },
+        {
+            "name": "index_refresh",
+            "description": "Synchronously refresh the persistent symbol index and analysis engine after file edits so subsequent queries see fresh symbols immediately. Pass `paths` for targeted refresh, or omit to scan dirty/drifted files.",
+            "inputSchema": { "type": "object", "properties": {
+                "paths": { "type": "array", "items": { "type": "string" }, "description": "Optional list of repo-relative modified file paths" }
+            } }
+        },
+        {
+            "name": "symbol_rename",
+            "description": "Conflict-checked, encoding/BOM/line-ending preserving workspace symbol rename. Defaults to `dryRun: true` (preview); set `dryRun: false` to apply atomically and refresh the index.",
+            "inputSchema": { "type": "object", "properties": {
+                "oldName": { "type": "string", "description": "Current symbol name" },
+                "newName": { "type": "string", "description": "New symbol name" },
+                "dryRun": { "type": "boolean", "description": "Preview only when true (default true)" },
+                "limit": { "type": "number", "description": "Max preview sites to display (1-200, default 80)" }
+            }, "required": ["oldName", "newName"] }
+        },
+        {
+            "name": "compile_context",
+            "description": "Inspect active C/C++ preprocessor macros (`.ggs/conditions.json` + `compile_commands.json`), evaluate inactive `#ifdef`/`#if` line ranges in a file, and/or expand a `#define` macro at a call site.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Optional repo-relative C/C++ file path" },
+                "macroName": { "type": "string", "description": "Optional `#define` macro name to expand" },
+                "callLine": { "type": "string", "description": "Optional invocation line for function-like macro argument substitution" }
+            } }
+        },
+        {
+            "name": "git_diff_impact",
+            "description": "Semantic blast-radius analysis of a git diff: maps changed hunks to touched symbols, upstream callers (call graph), and security findings on changed files.",
+            "inputSchema": { "type": "object", "properties": {
+                "target": { "type": "string", "description": "'working' (default), 'staged', a commit rev, or a rev range like 'main..HEAD'" },
+                "maxDepth": { "type": "number", "description": "Caller blast-radius depth (1-4, default 2)" }
+            } }
+        },
+        {
+            "name": "git_blame_symbol",
+            "description": "Summarize git authorship and recent commits over a symbol's exact declaration-to-end line span.",
+            "inputSchema": { "type": "object", "properties": {
+                "name": { "type": "string", "description": "Exact symbol name" },
+                "path": { "type": "string", "description": "Optional repo-relative file path to disambiguate" }
+            }, "required": ["name"] }
+        },
+        {
+            "name": "git_commit_detail",
+            "description": "Bounded git commit metadata, file stats, and optional unified diff patch.",
+            "inputSchema": { "type": "object", "properties": {
+                "rev": { "type": "string", "description": "Commit hash, tag, or ref (default HEAD)" },
+                "includePatch": { "type": "boolean", "description": "Include unified diff patch (default false)" },
+                "maxLines": { "type": "number", "description": "Max output lines (20-400, default 120)" }
+            } }
+        },
+        {
+            "name": "can_log_summary",
+            "description": "Summarize a `.blf` or `.asc` CAN/CAN-FD trace: duration, total/error frames, per-channel bus load estimate, busiest IDs, and highest-jitter periodic IDs.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Repo-relative path to .blf or .asc log" },
+                "arbBitrate": { "type": "number", "description": "Arbitration bitrate in bps (default 500000)" },
+                "dataBitrate": { "type": "number", "description": "CAN FD data bitrate in bps (default 2000000)" },
+                "sortBy": { "type": "string", "enum": ["count", "jitter", "maxCycle"], "description": "Ranking metric (default count)" },
+                "limit": { "type": "number", "description": "Top IDs to show (1-100, default 20)" }
+            }, "required": ["path"] }
+        },
+        {
+            "name": "can_signal_query",
+            "description": "Decode CAN/CAN-FD frames from a `.blf`/`.asc` trace using a `.dbc` database for a target CAN ID or signal name, returning physical min/max/avg statistics and value transitions.",
+            "inputSchema": { "type": "object", "properties": {
+                "logPath": { "type": "string", "description": "Repo-relative path to .blf or .asc trace" },
+                "dbcPath": { "type": "string", "description": "Repo-relative path to .dbc database" },
+                "id": { "type": "string", "description": "Target CAN ID (hex like '0x123' or decimal)" },
+                "signal": { "type": "string", "description": "Optional signal name substring filter (also resolves ID if `id` is omitted)" },
+                "maxFrames": { "type": "number", "description": "Max frames to decode (10-50000, default 5000)" },
+                "samples": { "type": "number", "description": "Max transitions per signal (1-50, default 15)" }
+            }, "required": ["logPath", "dbcPath"] }
+        },
+        {
+            "name": "dbc_lookup",
+            "description": "Inspect a `.dbc` CAN database: list nodes and messages, or query by hex/decimal ID, message name, or signal name for bit layout, scale/offset/unit, and VAL_ enum tables.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Repo-relative path to .dbc file" },
+                "query": { "type": "string", "description": "Optional CAN ID, message name, or signal name" },
+                "limit": { "type": "number", "description": "Max messages to list (1-100, default 25)" }
+            }, "required": ["path"] }
+        },
+        {
+            "name": "elf_inspect",
+            "description": "Inspect an ELF firmware/object binary: architecture, ROM/RAM footprint, largest sections, needed libraries, and largest symbols (with optional name filter).",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Repo-relative path to ELF binary" },
+                "filter": { "type": "string", "description": "Optional symbol name substring filter" },
+                "limit": { "type": "number", "description": "Top symbols to list (1-100, default 25)" }
+            }, "required": ["path"] }
+        },
+        {
+            "name": "elf_diff",
+            "description": "Compare two ELF binaries to pinpoint ROM/RAM size regressions, section deltas, and top growing/shrinking/new/deleted symbols.",
+            "inputSchema": { "type": "object", "properties": {
+                "beforePath": { "type": "string", "description": "Repo-relative path to baseline ELF binary" },
+                "afterPath": { "type": "string", "description": "Repo-relative path to new ELF binary" },
+                "limit": { "type": "number", "description": "Top symbol deltas to list (1-100, default 20)" }
+            }, "required": ["beforePath", "afterPath"] }
+        },
+        {
+            "name": "dts_inspect",
+            "description": "Parse a Device Tree (`.dts`/`.dtsi`/`.dtb`) and list nodes or search by node name, label, `compatible` string, or property.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Repo-relative path to .dts, .dtsi, or .dtb file" },
+                "query": { "type": "string", "description": "Optional filter matching node path, label, property name, or value (e.g. compatible string)" },
+                "limit": { "type": "number", "description": "Max nodes to show (1-100, default 25)" }
+            }, "required": ["path"] }
+        },
+        {
+            "name": "dmp_summary",
+            "description": "Inspect a Windows minidump (`.dmp`/`.mdmp`): OS/arch/PID/threads/exception flag, memory regions, loaded modules, and optional virtual-address-to-module resolution.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Repo-relative path to .dmp or .mdmp file" },
+                "address": { "type": "string", "description": "Optional hex virtual address (e.g. '0x7ff612345678') to resolve to a loaded module + offset" },
+                "moduleFilter": { "type": "string", "description": "Optional module filename substring filter" },
+                "limit": { "type": "number", "description": "Max modules to list (1-100, default 30)" }
+            }, "required": ["path"] }
+        },
+        {
+            "name": "csv_profile",
+            "description": "Profile a large CSV/TSV telemetry or data file: delimiter, header, row/column counts, numeric column min/max/avg stats, and bounded sample rows.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Repo-relative path to CSV/TSV file" },
+                "sampleRows": { "type": "number", "description": "Sample rows to show (0-30, default 5)" }
+            }, "required": ["path"] }
+        },
+        {
+            "name": "ui_open_location",
+            "description": "Ask the running Git Graph Studio desktop app to open a file at a specific 1-based line and column for human visual inspection.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Repo-relative file path" },
+                "line": { "type": "number", "description": "1-based line number (default 1)" },
+                "column": { "type": "number", "description": "1-based column number (default 1)" }
+            }, "required": ["path"] }
+        },
+        {
+            "name": "ui_show_relation_graph",
+            "description": "Ask the running Git Graph Studio desktop app to visualize a symbol in its interactive Relation Graph canvas.",
+            "inputSchema": { "type": "object", "properties": {
+                "symbol": { "type": "string", "description": "Symbol name to root the Relation Graph on" },
+                "direction": { "type": "string", "description": "Relation direction (default callsAndCallers)" }
+            }, "required": ["symbol"] }
+        },
+        {
+            "name": "ui_open_diff",
+            "description": "Ask the running Git Graph Studio desktop app to open a git diff or side-by-side comparison view.",
+            "inputSchema": { "type": "object", "properties": {
+                "leftPath": { "type": "string", "description": "Repo-relative file path (or left file in a two-file compare)" },
+                "rightPath": { "type": "string", "description": "Optional right file path for side-by-side comparison" }
+            }, "required": ["leftPath"] }
         }
     ])
 }
@@ -2319,33 +2518,26 @@ impl TopRows {
 /// turns the tool catalogue from available to actually used well — written for token
 /// economy: start small, drill down, page deliberately, never ask for a flood.
 const MCP_INSTRUCTIONS: &str = "\
-Git Graph Studio's symbol index and analysis engine over this repository. The index is \
-persistent and already warm — the desktop app shares it — so lookups answer in \
-milliseconds; prefer these tools over reading files blind or grepping.\n\n\
+Git Graph Studio's semantic code index, analysis engine, and binary engineering parsers \
+over this repository. The index is persistent and warm — prefer these tools over \
+reading files blind or grepping.\n\n\
 HOW TO SEE THE PROJECT (cheapest first): `project_overview` draws the whole picture in \
-one small answer — totals, languages, the directories that carry the code, the hub \
-files and names, the heaviest module edges. Drill from there: `directory_tree` \
-(path, depth) walks the hierarchy with per-directory counts, `file_outline` (path) \
-opens one file's declarations, `read_file` (path, startLine) serves an exact line \
-window. Never page a whole workspace when a bounded level answers first.\n\n\
-PAGING: every list tool takes `limit` and `offset`. The header always states the exact \
-total and a truncated answer ends with the offset that reaches the rest — follow it \
-instead of re-counting, and narrow with the path/kind/severity filters before paging \
-far.\n\n\
+one small answer. Drill down via `directory_tree` → `file_outline` → `symbol_context` \
+→ `read_file` (line window). Never page a whole workspace when a bounded level answers.\n\n\
 Suggested workflow:\n\
-- BEFORE editing: `symbol_lookup` / `symbol_references` to map a name's declarations \
-and every use; `analysis_call_graph` (callers/callees) to see the blast radius of a \
-change; `analysis_metrics` (path-scoped) to find the file's hotspots before touching \
-them.\n\
-- Planning a refactor: `analysis_module_graph` for the module dependencies a move \
-would cut across (edges arrive busiest-first), `analysis_import_cycles` for the \
-tangles worth breaking while you are there.\n\
-- AFTER editing: re-run `analysis_metrics` on your changed functions, `\
-analysis_dead_code` for what your change orphaned, `analysis_security` for secrets \
-and dangerous APIs you may have introduced.\n\
-- Navigation beats guessing: `search_symbols` for fuzzy names, `read_file` with a \
-line window to confirm a site before editing it. Resolution is name-based with \
-receiver hints — same-named declarations fan out, so confirm the file before you edit.";
+- BEFORE editing: `symbol_context` / `symbol_references` / `analysis_call_graph` for \
+blast radius; `compile_context` on C/C++ files to check active `#ifdef` branches and \
+macro expansions; `git_blame_symbol` for historical intent.\n\
+- REFACTORING: use `symbol_rename(dryRun=true)` to preview conflicts and sites, then \
+`symbol_rename(dryRun=false)` for atomic, encoding-preserving renames.\n\
+- AFTER editing: call `index_refresh` on modified paths, then `git_diff_impact`, \
+`analysis_dead_code`, and `analysis_security` to self-check regressions.\n\
+- BINARY & SYSTEMS FILES: use `can_log_summary` / `dbc_lookup` / `can_signal_query` for \
+CAN traces (`.blf`/`.asc`/`.dbc`), `elf_inspect` / `elf_diff` for firmware size, \
+`dts_inspect` for Device Trees, `dmp_summary` for Windows minidumps, and `csv_profile` \
+for large CSV/TSV logs.\n\
+- DESKTOP HANDOFF: call `ui_open_location`, `ui_show_relation_graph`, or `ui_open_diff` \
+to open findings directly in Git Graph Studio for fast human visual review.";
 
 /// The `--mcp` entry: read lines from stdin, answer on stdout, log to stderr. Returns the
 /// process exit code (0 once stdin ends).
@@ -2525,7 +2717,7 @@ mod tests {
         assert_eq!(parsed["error"]["code"], -32700);
         let parsed: Value = serde_json::from_str(
             &server
-                .handle_line(r#"{"jsonrpc":"2.0","id":2,"method":"resources/list"}"#)
+                .handle_line(r#"{"jsonrpc":"2.0","id":2,"method":"unknown/method"}"#)
                 .unwrap(),
         )
         .unwrap();
@@ -2576,9 +2768,124 @@ mod tests {
                 "symbol_relations",
                 "file_dependencies",
                 "git_status",
-                "git_log"
+                "git_log",
+                "index_refresh",
+                "symbol_rename",
+                "compile_context",
+                "git_diff_impact",
+                "git_blame_symbol",
+                "git_commit_detail",
+                "can_log_summary",
+                "can_signal_query",
+                "dbc_lookup",
+                "elf_inspect",
+                "elf_diff",
+                "dts_inspect",
+                "dmp_summary",
+                "csv_profile",
+                "ui_open_location",
+                "ui_show_relation_graph",
+                "ui_open_diff"
             ]
         );
+    }
+
+    #[test]
+    fn p0_p1_and_protocol_tools_work_end_to_end() {
+        let (dir, server) = scratch_server();
+
+        // Prompts & Resources
+        let prompts = reply(&server, r#"{"jsonrpc":"2.0","id":10,"method":"prompts/list"}"#);
+        assert!(prompts["result"]["prompts"].as_array().unwrap().len() >= 6);
+        let got_prompt = reply(
+            &server,
+            r#"{"jsonrpc":"2.0","id":11,"method":"prompts/get","params":{"name":"blast-radius","arguments":{"target":"alpha"}}}"#,
+        );
+        assert!(got_prompt["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("alpha"));
+        let resources = reply(&server, r#"{"jsonrpc":"2.0","id":12,"method":"resources/list"}"#);
+        assert!(resources["result"]["resources"].as_array().unwrap().len() >= 3);
+        let ov_res = reply(
+            &server,
+            r#"{"jsonrpc":"2.0","id":13,"method":"resources/read","params":{"uri":"ggs://workspace/overview"}}"#,
+        );
+        assert!(ov_res["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("indexed file(s)"));
+
+        // symbol_rename dryRun & apply + index_refresh
+        let preview = call(
+            &server,
+            "symbol_rename",
+            json!({ "oldName": "orphan", "newName": "renamed_orphan", "dryRun": true }),
+        );
+        assert!(preview.contains("conflicts: none"), "{preview}");
+        let applied = call(
+            &server,
+            "symbol_rename",
+            json!({ "oldName": "orphan", "newName": "renamed_orphan", "dryRun": false }),
+        );
+        assert!(applied.contains("1 occurrence(s) rewritten"), "{applied}");
+        let lookup_new = call(&server, "symbol_lookup", json!({ "name": "renamed_orphan" }));
+        assert!(lookup_new.contains("renamed_orphan"), "{lookup_new}");
+
+        // index_refresh on newly created file
+        std::fs::write(dir.path().join("src/fresh.rs"), "pub fn brand_new_fn() {}\n").unwrap();
+        let refreshed = call(&server, "index_refresh", json!({ "paths": ["src/fresh.rs"] }));
+        assert!(refreshed.contains("Index refreshed"), "{refreshed}");
+        let lookup_fresh = call(&server, "symbol_lookup", json!({ "name": "brand_new_fn" }));
+        assert!(lookup_fresh.contains("brand_new_fn"), "{lookup_fresh}");
+
+        // compile_context with .ggs/conditions.json & macro expansion
+        std::fs::create_dir_all(dir.path().join(".ggs")).unwrap();
+        std::fs::write(
+            dir.path().join(".ggs/conditions.json"),
+            r#"{"macros":{"FEATURE_OFF":null,"FEATURE_ON":1}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("src/cfg.c"),
+            "#define SCALE(x) ((x) * 2)\n#ifdef FEATURE_OFF\nint dead = 1;\n#endif\n",
+        )
+        .unwrap();
+        let _ = call(&server, "index_refresh", json!({ "paths": ["src/cfg.c"] }));
+        let cc = call(
+            &server,
+            "compile_context",
+            json!({ "path": "src/cfg.c", "macroName": "SCALE", "callLine": "int y = SCALE(val);" }),
+        );
+        assert!(cc.contains("lines 3-3"), "{cc}");
+        assert!(cc.contains("((val) * 2)"), "{cc}");
+
+        // P1 Binary & Engineering Senses: DBC, DTS, CSV
+        std::fs::write(
+            dir.path().join("bus.dbc"),
+            "VERSION \"1.0\"\nBU_: ECU1\nBO_ 256 EngineData: 8 ECU1\n SG_ EngineSpeed : 0|16@1+ (0.25,0) [0|8000] \"rpm\" Vector__XXX\n",
+        )
+        .unwrap();
+        let dbc = call(&server, "dbc_lookup", json!({ "path": "bus.dbc", "query": "0x100" }));
+        assert!(dbc.contains("EngineSpeed"), "{dbc}");
+        assert!(dbc.contains("rpm"), "{dbc}");
+
+        std::fs::write(
+            dir.path().join("board.dts"),
+            "/dts-v1/;\n/ {\n    model = \"TestBoard\";\n    uart0: serial@1000 {\n        compatible = \"ns16550a\";\n    };\n};\n",
+        )
+        .unwrap();
+        let dts = call(&server, "dts_inspect", json!({ "path": "board.dts", "query": "ns16550a" }));
+        assert!(dts.contains("serial@1000"), "{dts}");
+
+        std::fs::write(
+            dir.path().join("telemetry.csv"),
+            "t_s,speed,temp\n0.0,10.0,40.5\n0.1,20.0,41.5\n0.2,30.0,42.5\n",
+        )
+        .unwrap();
+        let csv = call(&server, "csv_profile", json!({ "path": "telemetry.csv" }));
+        assert!(csv.contains("speed (numeric)"), "{csv}");
+        assert!(csv.contains("max=30.0000"), "{csv}");
     }
 
     #[test]

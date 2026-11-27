@@ -388,6 +388,49 @@ pub fn read_sym_slot_metrics(dir: &Path) -> Option<HashMap<(u32, u32, String), S
     Some(map)
 }
 
+/// Decode the metrics of just the slots a relation answer asked for — one linear pass
+/// over `project.ggs_sym` keeping only the (file_id, line0, name) triples in `wanted`,
+/// never a whole-volume symbol map. Exact triples only: a same-name slot at another line
+/// is a different symbol and must not donate its numbers.
+pub fn read_wanted_sym_slot_metrics(
+    dir: &Path,
+    wanted: &HashMap<(u32, u32), Vec<String>>,
+) -> Option<HashMap<(u32, u32, String), SymSlotMetrics>> {
+    let bytes = fs::read(dir.join(SYM_VOL_FILE)).ok()?;
+    let header = VolumeHeader::parse_block(bytes.get(..HEADER_BLOCK_SIZE)?)?;
+    if header.magic != MAGIC_SYM || header.rec_size as usize != SYM_REC_SIZE {
+        return None;
+    }
+    let count = header.count as usize;
+    let body = bytes.get(HEADER_BLOCK_SIZE..)?;
+    if body.len() < count.checked_mul(SYM_REC_SIZE)? {
+        return None;
+    }
+    let mut map: HashMap<(u32, u32, String), SymSlotMetrics> = HashMap::new();
+    for i in 0..count {
+        let slot_bytes = &body[i * SYM_REC_SIZE..(i + 1) * SYM_REC_SIZE];
+        let Some(slot) = SymSlot::decode(slot_bytes) else {
+            continue;
+        };
+        if slot.raw108 == 0 && slot.name_tag == 0 {
+            continue;
+        }
+        let Some(names) = wanted.get(&(slot.file_id, slot.line0)) else {
+            continue;
+        };
+        if !names.iter().any(|n| n.as_bytes() == slot.name.as_slice()) {
+            continue;
+        }
+        let key = (
+            slot.file_id,
+            slot.line0,
+            String::from_utf8_lossy(&slot.name).into_owned(),
+        );
+        map.insert(key, SymSlotMetrics::from_slot(&slot));
+    }
+    Some(map)
+}
+
 /// Per-file aggregated metrics decoded directly from `project.ggs_sym` (`raw108`) in one
 /// pass without parsing any source files on disk.
 #[derive(Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]

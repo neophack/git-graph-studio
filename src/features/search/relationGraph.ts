@@ -729,6 +729,14 @@ export class RelationGraphView {
 		this.setRoot(sym);
 	}
 
+	/** The UI bridge's direction request: a `ui_show_relation_graph` command names the
+	 *  relation type it wants the graph rooted with. An unknown spelling keeps the
+	 *  current type. */
+	applyRelationKind(kind: string): void {
+		const entry = PICKER_KINDS.find((candidate) => candidate.kind === kind);
+		if (entry) this.setKind(entry.kind);
+	}
+
 	private computeBounds(): void {
 		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 		const span = (x: number, y: number, w: number, h: number): void => {
@@ -1091,7 +1099,10 @@ export class RelationGraphView {
 			if (!node.expanded || !visible.has(node.key)) continue;
 			for (const key of node.children) {
 				const child = this.nodes.get(key);
-				if (!child) continue;
+				// A child the visible set dropped (the root's side filter hides one
+				// callsAndCallers half) carries no edge: painting it would be wrong and
+				// letting it reach the pair set skews the surviving edges' routing.
+				if (!child || !visible.has(key)) continue;
 				const up = this.pointsUp(child);
 				const from = up ? key : node.key;
 				const to = up ? node.key : key;

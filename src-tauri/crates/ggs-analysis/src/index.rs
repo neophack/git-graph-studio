@@ -390,13 +390,8 @@ impl AnalysisIndex {
         let index = Arc::clone(self);
         let root = root.to_owned();
         std::thread::spawn(move || {
-            let Some(data) = index.data(&root) else {
+            if !index.apply_changes_blocking(&root, &paths) {
                 return;
-            };
-            {
-                let mut data = data.lock().unwrap();
-                data.apply_changes(&paths);
-                index.note(&root, ready_status(&data));
             }
             if let Some(sink) = sink.as_deref() {
                 if let Ok(payload) = serde_json::to_value(index.status(&root)) {
@@ -404,6 +399,17 @@ impl AnalysisIndex {
                 }
             }
         });
+    }
+
+    /// Synchronously apply changed file paths to the resident analysis index.
+    pub fn apply_changes_blocking(&self, root: &str, paths: &[String]) -> bool {
+        let Some(data) = self.data(root) else {
+            return false;
+        };
+        let mut data = data.lock().unwrap();
+        data.apply_changes(paths);
+        self.note(root, ready_status(&data));
+        true
     }
 
     /// The analysis of a root, when one is resident (counts as a use).

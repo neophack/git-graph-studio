@@ -69,7 +69,13 @@
    "ggs-base",
    "ggs-fs",
    "ggs-index",
-   "ggs-analysis"
+   "ggs-analysis",
+   "ggs-can",
+   "ggs-dbc",
+   "ggs-elf",
+   "ggs-dts",
+   "ggs-dmp",
+   "ggs-csv"
   ],
   "ggs-ext": [
    "ggs-base",

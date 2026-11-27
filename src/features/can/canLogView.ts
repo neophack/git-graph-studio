@@ -388,6 +388,9 @@ export class CanLogView {
 		this.renderOverview(stats, view);
 		this.renderMessages(view);
 		this.renderSummaryLine(stats, view);
+		// The health badge reads the same filtered view the summary line does, so a
+		// filter change cannot leave the badge contradicting the numbers beside it.
+		this.renderHealthBadge(view);
 	}
 
 	/** Keyboard navigation over the identifier table: ↑/↓ moves selection & opens cycle

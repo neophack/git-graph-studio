@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ggs": {
+      "command": "ggs",
+      "args": ["--mcp", "${CLAUDE_PROJECT_DIR:-.}"],
+      "env": {}
+    }
+  }
+}

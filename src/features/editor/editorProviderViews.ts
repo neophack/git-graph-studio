@@ -456,6 +456,14 @@ export async function quickInfoFor(source: MacroHoverSource, name: string, curre
 		};
 		defs.sort((a, b) => rank(b) - rank(a));
 	}
+	return buildQuickInfo(source, name, defs, key);
+}
+
+/** The card assembly every lookup path shares: the entries' declaration slices, the
+ *  lead member's preview ring, the reference-file count, the TTL cache. */
+async function buildQuickInfo(source: MacroHoverSource, name: string, defs: WsSymbol[], key: string): Promise<SymbolQuickInfo | null> {
+	const root = source.root();
+	if (!root) return null;
 	// The count rides before the slice: the card reports the definitions past the
 	// rendered cap as +N when the index holds more than it shows.
 	const total = defs.length;
@@ -502,6 +510,26 @@ export async function quickInfoFor(source: MacroHoverSource, name: string, curre
 		refFiles = undefined;
 	}
 	return cacheQuickInfo(key, { name, entries, total: total > entries.length ? total : undefined, refFiles });
+}
+
+/** The receiver-disambiguated answer: a hovered word that follows `.` / `->` / `::` is
+ *  resolved against the receiver's own type chain (the same seam Go-to-Definition
+ *  asks), so the card shows that member's declaration and a same-named global — or a
+ *  same-named local in the enclosing scope — never outranks it. */
+export async function memberQuickInfoFor(source: MacroHoverSource, name: string, line: number, column: number, text: string): Promise<SymbolQuickInfo | null> {
+	if (!source.memberLookup) return null;
+	const root = source.root();
+	const key = `member\u0000${root}\u0000${name}\u0000${text.length}\u0000${line}\u0000${column}`;
+	const cached = quickInfoCache.get(key);
+	if (cached && Date.now() - cached.at < MACRO_LOOKUP_TTL_MS) return cached.info;
+	let defs: WsSymbol[];
+	try {
+		defs = await source.memberLookup(name, line, column, text);
+	} catch {
+		return null;
+	}
+	if (!defs || defs.length === 0) return null;
+	return buildQuickInfo(source, name, defs, key);
 }
 
 /** The scope-local quick info: when the hovered site sits inside a function that
@@ -638,7 +666,21 @@ export function symbolHoverExtension(source: MacroHoverSource): Extension[] {
 			}
 			const hoverLine = view.state.doc.lineAt(range.from);
 			const currentPath = view.state.facet(pathSlot);
-			// The scope answer first: a name declared inside the hovered function is that
+			// The member answer first when the word follows a member operator: the
+			// receiver's own type chain disambiguates it, and neither a same-named global
+			// nor a same-named local may outrank the real member.
+			const before = view.state.sliceDoc(Math.max(0, range.from - 2), range.from);
+			if (source.memberLookup && /[.>:]$/.test(before)) {
+				const memberInfo = await memberQuickInfoFor(source, name, hoverLine.number - 1, range.from - hoverLine.from, view.state.doc.toString());
+				if (memberInfo) {
+					return {
+						pos: range.from,
+						end: range.to,
+						create: (): TooltipView => ({ dom: quickInfoDom(memberInfo, { open }) })
+					};
+				}
+			}
+			// The scope answer next: a name declared inside the hovered function is that
 			// local or parameter — the global index never gets asked, so a same-named
 			// function in another scope cannot outrank it.
 			const scopeInfo = await scopeQuickInfoFor(source, name, hoverLine.number - 1, view.state.doc.toString(), currentPath);

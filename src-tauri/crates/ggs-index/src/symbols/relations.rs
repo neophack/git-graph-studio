@@ -41,7 +41,7 @@ use crate::symbols::mask::{mask_for_ext, CodeMask};
 use crate::symbols::sites::{lang_family, same_lang_family};
 use crate::symbols::store::{FileOutlineRow, SymbolStore};
 use crate::symbols::vol_reader::{
-    read_single_sym_slot_metrics, read_sym_slot_metrics, SymSlotMetrics, XcBloomCache,
+    read_single_sym_slot_metrics, read_wanted_sym_slot_metrics, SymSlotMetrics, XcBloomCache,
 };
 use crate::symbols::WorkspaceSymbol;
 
@@ -153,7 +153,8 @@ impl<'a> VolContext<'a> {
 }
 
 /// Combine two access tags on the same `(caller, subject)` edge: mixing `read` and
-/// `write` upgrades to `readWrite`; `call` stays `call` unless mixed with a write.
+/// `write` upgrades to `readWrite`; `call` stays `call` unless mixed with a write
+/// (the write wins — a caller that both invokes and assigns speaks the assignment).
 fn merge_access(existing: &mut Option<String>, incoming: &str) {
     match existing.as_deref() {
         None => *existing = Some(incoming.to_owned()),
@@ -161,6 +162,7 @@ fn merge_access(existing: &mut Option<String>, incoming: &str) {
         Some("read") if incoming == "write" => *existing = Some("readWrite".to_owned()),
         Some("write") if incoming == "read" => *existing = Some("readWrite".to_owned()),
         Some("read") if incoming == "call" => *existing = Some("call".to_owned()),
+        Some("call") if incoming == "write" => *existing = Some("write".to_owned()),
         _ => {}
     }
 }
@@ -182,7 +184,15 @@ fn narrow_candidate_files(
         return Some(vec![subject_path.to_owned()]);
     }
     let base = if calls_only {
-        store.files_calling(name).or_else(|| store.files_containing(name))
+        // An empty `call_refs` list cannot be told apart from a file set the AST pass
+        // never ran over (a grammar-less language's outline extraction captures no call
+        // sites, yet `rebuild_refs` marks every name trusted) — so an empty list falls
+        // through to the occurrence list. The wider candidate set can only add files the
+        // textual call-site scan then filters, never flip an answer.
+        store
+            .files_calling(name)
+            .filter(|files| !files.is_empty())
+            .or_else(|| store.files_containing(name))
     } else {
         store.files_containing(name)
     };
@@ -408,6 +418,7 @@ pub fn relation_children_budgeted(
     relation_children_budgeted_with_vols(root, store, None, name, path, line, kind, budget_ms)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn relation_children_budgeted_with_vols(
     root: &str,
     store: &SymbolStore,
@@ -456,33 +467,48 @@ pub fn relation_children_budgeted_with_vols(
             .as_ref()
             .map(|d| (d.path.as_str(), d.line))
             .unwrap_or((path, line));
-        if let Some(metrics_map) = read_sym_slot_metrics(v.vol_dir) {
+        // The slots the answer asks metrics for: the root's and every node's exact
+        // (file_id, line, name). The wanted-only volume read never builds a whole-symbol
+        // map, and a same-name slot at another line is a different symbol that must not
+        // donate its numbers.
+        let mut wanted: HashMap<(u32, u32), Vec<String>> = HashMap::new();
+        {
+            let mut want = |fid: u32, line0: u32, slot_name: &str| {
+                let names = wanted.entry((fid, line0)).or_default();
+                if !names.iter().any(|n| n == slot_name) {
+                    names.push(slot_name.to_owned());
+                }
+            };
             if let Some(fid) = store.file_id_of(m_path) {
-                answer.root_metrics = metrics_map
-                    .get(&(fid, m_line as u32, name.to_owned()))
-                    .copied()
-                    .or_else(|| {
-                        metrics_map
-                            .iter()
-                            .find(|((f, _, n), _)| *f == fid && n == name)
-                            .map(|(_, m)| *m)
-                    });
+                want(fid, m_line as u32, name);
             }
-            for node in &mut answer.nodes {
+            for node in &answer.nodes {
                 if let Some(fid) = store.file_id_of(&node.path) {
-                    node.metrics = metrics_map
-                        .get(&(fid, node.line as u32, node.name.clone()))
-                        .copied()
-                        .or_else(|| {
-                            metrics_map
-                                .iter()
-                                .find(|((f, _, n), _)| *f == fid && n == &node.name)
-                                .map(|(_, m)| *m)
-                        });
+                    want(fid, node.line as u32, &node.name);
                 }
             }
-        } else if let Some(fid) = store.file_id_of(m_path) {
-            answer.root_metrics = read_single_sym_slot_metrics(v.vol_dir, fid, m_line as u32, name);
+        }
+        match read_wanted_sym_slot_metrics(v.vol_dir, &wanted) {
+            Some(metrics_map) => {
+                if let Some(fid) = store.file_id_of(m_path) {
+                    answer.root_metrics =
+                        metrics_map.get(&(fid, m_line as u32, name.to_owned())).copied();
+                }
+                for node in &mut answer.nodes {
+                    if let Some(fid) = store.file_id_of(&node.path) {
+                        node.metrics = metrics_map
+                            .get(&(fid, node.line as u32, node.name.clone()))
+                            .copied();
+                    }
+                }
+            }
+            None if !wanted.is_empty() => {
+                if let Some(fid) = store.file_id_of(m_path) {
+                    answer.root_metrics =
+                        read_single_sym_slot_metrics(v.vol_dir, fid, m_line as u32, name);
+                }
+            }
+            None => {}
         }
     }
     Ok(answer)
@@ -513,6 +539,7 @@ fn finish_ring(mut nodes: Vec<RelationNode>) -> Vec<RelationNode> {
 /// merge into the single node — count accumulates, the earliest line stays. A hit inside
 /// the subject's own body survives as the self-edge — the declaration-line skip never
 /// reaches a body line, so recursion stays a child.
+#[allow(clippy::too_many_arguments)]
 fn refs_to(
     root: &str,
     store: &SymbolStore,
@@ -732,6 +759,7 @@ fn file_mask<'a>(
 /// the real answer. A hotter name — a word spread over dozens of files almost certainly
 /// has users — and a list the store does not trust (whose truth would cost a full-tree
 /// scan) answer optimistically.
+#[allow(clippy::too_many_arguments)]
 fn has_refs_to_children(
     root: &str,
     store: &SymbolStore,
@@ -1158,6 +1186,7 @@ fn calls_and_callers(
 /// file, count the file's kept sites, line the earliest. The same attribution discipline
 /// `refs_to` keeps (the declaration lines, the comment/string mask, the intervals), and
 /// the files are leaves: `has_children` is false down the ring.
+#[allow(clippy::too_many_arguments)]
 fn refs_by_files(
     root: &str,
     store: &SymbolStore,

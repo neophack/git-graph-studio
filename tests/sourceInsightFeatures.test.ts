@@ -80,7 +80,7 @@ describe('Area 2: ReferencesView Read/Write/Call/Decl badges and filter pills', 
 		expect(badges).toEqual(['D', 'W', 'R']);
 
 		const writePill = Array.from(view.element.querySelectorAll<HTMLButtonElement>('.refs-access-pill')).find(
-			(b) => b.textContent === 'W'
+			(b) => (b.textContent ?? '').trim().startsWith('W')
 		)!;
 		click(writePill);
 		await flush(6);

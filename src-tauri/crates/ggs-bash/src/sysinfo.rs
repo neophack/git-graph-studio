@@ -11,7 +11,9 @@ use super::exec::{Io, Shell};
 
 /* ---------- df ---------- */
 
-/// One filesystem row: the numbers `df` prints, in bytes.
+/// One filesystem row: the numbers `df` prints, in bytes. The `df_rows` build is the
+/// Windows/Linux shape only — macOS answers through the OS's own `df`.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 struct DfRow {
     filesystem: String,
     kind: String,
@@ -33,8 +35,8 @@ pub fn df(shell: &Shell, io: &Io, args: &[String]) -> super::exec::ExecResult {
     };
     #[cfg(target_os = "macos")]
     {
-        let _ = (human, si, show_type);
-        return passthrough("/bin/df", args);
+        let _ = (human, si, show_type, shell, &paths);
+        passthrough("/bin/df", args)
     }
     #[cfg(any(windows, target_os = "linux"))]
     {
@@ -280,6 +282,7 @@ extern "C" {
 
 /// The GNU column layout: widths computed over header and rows, numbers
 /// right-aligned, the filesystem and the mount point left-aligned.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn format_df_table(rows: &[DfRow], human: bool, si: bool, show_type: bool) -> String {
     let mut table: Vec<Vec<String>> = Vec::new();
     for row in rows {
@@ -356,6 +359,7 @@ fn format_df_table(rows: &[DfRow], human: bool, si: bool, show_type: bool) -> St
 
 /// GNU's `df -h` humanization: powers of 1024 (1000 under `-H`), one decimal below
 /// ten, an integer from ten up, `0` for zero.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn human_bytes(bytes: u64, si: bool) -> String {
     if bytes == 0 {
         return "0".to_owned();
@@ -399,7 +403,7 @@ pub fn free(io: &Io, args: &[String]) -> super::exec::ExecResult {
     #[cfg(target_os = "macos")]
     {
         let _ = unit;
-        return free_macos(io);
+        free_macos(io)
     }
     #[cfg(any(windows, target_os = "linux"))]
     {
@@ -595,7 +599,7 @@ pub fn ps(io: &Io, args: &[String]) -> super::exec::ExecResult {
     #[cfg(target_os = "macos")]
     {
         let _ = io;
-        return passthrough("/bin/ps", args);
+        passthrough("/bin/ps", args)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -742,6 +746,7 @@ fn process_rows() -> Vec<(u32, u32, u32, u32, String, String)> {
 }
 
 /// Microseconds → `m:ss.cc`, the shape MSYS' ps and GNU time print.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn format_cpu_time(micros: u64) -> String {
     let centis = micros / 10_000;
     format!(
@@ -1049,7 +1054,7 @@ pub fn stdin_is_terminal() -> bool {
 }
 
 #[cfg(unix)]
-fn stdin_is_terminal() -> bool {
+pub fn stdin_is_terminal() -> bool {
     extern "C" {
         #[link_name = "isatty"]
         fn libc_isatty(fd: i32) -> i32;
@@ -1058,7 +1063,7 @@ fn stdin_is_terminal() -> bool {
 }
 
 #[cfg(not(any(windows, unix)))]
-fn stdin_is_terminal() -> bool {
+pub fn stdin_is_terminal() -> bool {
     false
 }
 
@@ -1165,7 +1170,7 @@ fn passthrough(program: &str, args: &[String]) -> super::exec::ExecResult {
     let status = std::process::Command::new(program)
         .args(args)
         .status()
-        .map_err(|e| format!("{program}: {e}"))?;
+        .map_err(|e| super::exec::ExecError::Io(format!("{program}: {e}")))?;
     Ok(status.code().unwrap_or(1))
 }
 

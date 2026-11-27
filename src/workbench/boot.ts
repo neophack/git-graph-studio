@@ -24,6 +24,7 @@ import { openPath, openUrl } from '@tauri-apps/plugin-opener';
 import { resolveTerminalPath } from '../features/terminal/links';
 import { setHoverRelationsOpener } from '../features/editor/hoverRelations';
 import { openRenameDialog } from '../features/search';
+import { startMcpBridge } from './mcpBridge';
 import { type AnalysisStatus } from '../features/analysis';
 import type { AnalysisToolId } from '../features/analysis';
 import { commands } from '../platform/commands';
@@ -144,7 +145,7 @@ export const bootMethods: ThisType<Workbench> = {
 		register({ id: 'workbench.action.lockEditorGroup', title: 'Lock Editor Group', category: 'View', enabled: () => !this.editors.activeGroup.locked, run: () => this.editors.setGroupLock(this.editors.activeGroup, true) });
 		register({ id: 'workbench.action.unlockEditorGroup', title: 'Unlock Editor Group', category: 'View', enabled: () => this.editors.activeGroup.locked, run: () => this.editors.setGroupLock(this.editors.activeGroup, false) });
 		register({ id: 'workbench.action.reopenClosedEditor', title: 'Reopen Closed Editor', category: 'View', keybinding: 'Ctrl+Shift+T', run: () => this.editors.reopenClosed() });
-		register({ id: 'workbench.openSettings', title: 'Settings', category: 'Preferences', keybinding: 'Ctrl+,', run: () => void loadSettingsPanel().then((m) => m.openSettingsPanel()) });
+		register({ id: 'workbench.openSettings', title: 'Settings', category: 'Preferences', keybinding: 'Ctrl+,', run: () => loadSettingsPanel().then((m) => m.openSettingsPanel()) });
 		register({ ...desktopOnly, id: 'workbench.exit', title: 'Exit', category: 'File', keybinding: 'Alt+F4', run: () => getCurrentWindow().close() });
 
 		register({ id: 'editor.undo', title: 'Undo', category: 'Edit', keybinding: 'Ctrl+Z', enabled: hasEditor, run: () => this.editors.runEditorCommand('undo') });
@@ -541,7 +542,7 @@ export const bootMethods: ThisType<Workbench> = {
 		// platform's installer downloaded
 		// through the streaming progress toast, then launched (Windows) or revealed.
 		registerZhCnText({ 'Check for App Updates': '检查应用更新' });
-		register({ id: 'help.checkForUpdates', title: 'Check for App Updates', category: 'Help', run: () => void loadAppUpdate().then((m) => m.checkForAppUpdate()) });
+		register({ id: 'help.checkForUpdates', title: 'Check for App Updates', category: 'Help', run: () => loadAppUpdate().then((m) => m.checkForAppUpdate()) });
 		register({ id: 'help.about', title: 'About', category: 'Help', run: () => notify('info', `Git Graph Studio ${__APP_VERSION__} - a standalone workbench whose views arrive as plugins.`) });
 		register({ ...desktopOnly, id: 'help.openDevTools', title: 'Open Developer Tools', category: 'Help', run: () => void openDevtools().catch((e) => console.error('open_devtools failed:', e)) });
 		// Dev builds only (vite strips the branch from the bundle; vitest is excluded so the
@@ -1065,6 +1066,10 @@ export const bootMethods: ThisType<Workbench> = {
 			// late, which the palette and menus pick up on their next render.
 			void this.extensionHost.activateInstalled();
 			void this.recoverBackups();
+			// The MCP UI bridge (module 16): drain `ggs --mcp`'s queued navigation commands
+			// and publish the active editor's context. Off the first-paint burst, after the
+			// wiring pass owns `onActiveChange` (the bridge chains it).
+			startMcpBridge(this);
 		});
 	},
 

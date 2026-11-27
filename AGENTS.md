@@ -1794,13 +1794,27 @@ in-app MCP Server page shows. stderr is logs; stdout is protocol only.
 - Frontend: `src/features/mcp/mcpPage.ts` (the MCP Server page — the connection snippets with copy
   buttons, the tool catalogue, the recent-call log; listed by module 17's tool registry
   as the Analysis sidebar's sixth entry and hosted in its editor pages, loading lazily
-  with them)
+  with them), `src/workbench/mcpBridge.ts` (the Desktop UI Bridge's workbench half: a
+  `whenIdle`-started drain timer empties `~/.ggs/mcp-bridge/ui-commands.jsonl` — the
+  `ui_open_location` / `ui_show_relation_graph` / `ui_open_diff` tools' queue, one JSONL
+  line each, executed by whoever drains it, a hidden window skipping its ticks — and the
+  active editor's file, cursor and selection publish (throttled) into `ui-state.json`,
+  the `ggs://ui/active-editor` resource's answer; the two halves are the
+  `src-tauri/src/mcp.rs` `mcp_drain_ui_commands` / `mcp_publish_ui_state` commands
+  behind `src/platform/ipc/mcp.ts`'s typed wrappers)
 - Backend: the `ggs-mcp` crate (`src-tauri/crates/ggs-mcp/`: the server loop, the tool
   implementations, the handshake, the call log — headless, no tauri; `ggs --mcp` dispatches
   to `ggs_mcp::run` from the composition root, and the MCP Server page's two commands are
-  the `src-tauri/src/mcp.rs` adapters); the index itself is module 5's (the `ggs-index`
+  the `src-tauri/src/mcp.rs` adapters; `protocol.rs` carries the Prompts and Resources
+  surface plus the UI bridge's command vocabulary, `p0.rs` the refresh/rename/
+  compile-context/git-impact tools, `binary.rs` the CAN/DBC/ELF/DTS/DMP/CSV tools, and
+  `src-tauri/crates/ggs-mcp/src/bin/ggs-mcp.rs` the standalone stdio binary the Claude
+  Code plugin's `.mcp.json` points at); the index itself is module 5's (the `ggs-index`
   crate's `symbols::store` / `symbols::index`), the analysis tools sit on module 17's
   engine (the `ggs-analysis` crate)
+- Plugin: `claude-plugin/` (the Claude Code plugin packaging the bridge: the plugin
+  manifest, its `.mcp.json` server entry, six slash commands mirroring the MCP prompts,
+  the PostToolUse index-refresh hook, and the `ggs-engineering-brain` skill)
 - Tests: `mcp.rs`'s `#[cfg(test)]` module (scratch repository over a temp index home);
   the page's vitest lives in `tests/analysis.test.ts` (it rides the analysis suite)
 

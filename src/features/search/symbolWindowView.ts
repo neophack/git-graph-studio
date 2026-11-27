@@ -452,6 +452,12 @@ export class SymbolWindowView {
 		this.graph.pinRoot(sym);
 	}
 
+	/** The UI bridge's direction request: pick the relation type the graph drills with.
+	 *  An unknown spelling keeps the current type (the graph owns the validation). */
+	applyRelationKind(kind: string): void {
+		this.graph.applyRelationKind(kind);
+	}
+
 	/** Whether the Relation Window is actively following the editor cursor position. */
 	isRelationLive(): boolean {
 		return this.visible() && !this.graphCollapsed && !this.graph.isPinned();

@@ -483,6 +483,15 @@ onModuleAnalysis: ((folders: string[]) => void) | null = null;
 			const shouldHaveChildren = entry.isDir && this.expanded.has(entry.path);
 			let group = kept?.group ?? null;
 			if (!shouldHaveChildren) {
+				// The subtree's DOM goes with the group; its rows must leave `rowByPath`
+				// the same way a removed entry's do, or the map grows across every
+				// expand/collapse cycle of a large tree.
+				if (group) {
+					for (const nested of group.querySelectorAll<HTMLElement>('.row[data-path]')) {
+						const p = nested.dataset['path'];
+						if (p && this.rowByPath.get(p) === nested) this.rowByPath.delete(p);
+					}
+				}
 				group?.remove();
 				continue;
 			}

@@ -239,24 +239,51 @@ Finder lists the new declaration. Instances are independent:
 each spawns and owns its own extension backends, and the shared `~/.ggs` user data is
 written atomically so concurrent instances cannot corrupt it.
 
-### MCP server (`ggs --mcp`)
+### MCP server (`ggs --mcp` / standalone `ggs-mcp`) & Claude Code Plugin
 
-`ggs --mcp <repository>` speaks the Model Context Protocol on stdio: an AI assistant's
-bridge to the repository's symbol index — the same persistent database the app's Go to
-Definition, Find References and Symbol Database page use. Five tools: `symbol_lookup`
-(where is this declared), `symbol_references` (every whole-word occurrence as
-`file:line:column`), `symbol_tree` (the per-file outline with per-symbol reference counts,
-narrowable by a `path` prefix), `search_symbols` (name search) and `index_status` — plus the Code Analysis tools:
-`analysis_call_graph`, `analysis_call_path`, `analysis_metrics`, `analysis_dead_code`,
-`analysis_security` and `analysis_import_cycles`. The
-index resumes from `~/.ggs/index/`, so the first start of a big repository is the slow
-one. Configure a client (Claude Desktop, Cline, Cursor, …) with a stdio command entry
-shaped like:
+`ggs --mcp <repository>` (or the standalone `ggs-mcp <repository>` CLI binary) speaks the
+Model Context Protocol on stdio: a persistent semantic brain and binary-engineering sensor
+suite over the repository, sharing the warm nine-volume symbol index under `~/.ggs/index/`.
+It exposes **40 MCP tools**, **6 MCP Prompts** (`blast-radius`, `arch-audit`,
+`safe-rename`, `can-triage`, `firmware-bloat`, `crash-triage`), and **3 MCP Resources**
+(`ggs://workspace/overview`, `ggs://workspace/status`, `ggs://ui/active-editor`):
+
+- **Progressive Code Navigation & Analysis (23 tools)**: `project_overview`,
+  `directory_tree`, `file_outline`, `symbol_lookup`, `symbol_references`, `search_symbols`,
+  `read_file`, `search_text`, `index_status`, `symbol_context`, `symbol_relations` (all 13
+  Relation Graph directions), `file_dependencies`, `analysis_call_graph`,
+  `analysis_call_path`, `analysis_module_graph`, `analysis_module_edge_detail`,
+  `analysis_metrics`, `analysis_dead_code`, `analysis_security`, `analysis_import_graph`,
+  `analysis_import_cycles`, `git_status`, `git_log`.
+- **Semantic Refactoring, Hot Refresh & Git Impact (6 tools)**: `index_refresh`
+  (synchronous incremental refresh after edits), `symbol_rename` (conflict-checked dry-run
+  preview + atomic encoding/BOM-preserving apply), `compile_context` (C/C++ `#ifdef`
+  inactive ranges from `.ggs/conditions.json` + `compile_commands.json` + `#define` macro
+  expansion), `git_diff_impact` (semantic blast radius of working/staged/commit diffs),
+  `git_blame_symbol`, `git_commit_detail`.
+- **Binary & Systems Engineering Senses (8 tools)**: `can_log_summary`, `can_signal_query`,
+  `dbc_lookup` (`.blf`/`.asc`/`.dbc`), `elf_inspect`, `elf_diff` (ROM/RAM size regression),
+  `dts_inspect` (`.dts`/`.dtsi`/`.dtb`), `dmp_summary` (Windows `.dmp`/`.mdmp` + VA-to-module),
+  `csv_profile` (large CSV/TSV stats).
+- **Desktop Workbench Visual Handoff (3 tools)**: `ui_open_location`,
+  `ui_show_relation_graph`, `ui_open_diff` — bridge findings directly into the running Git
+  Graph Studio desktop window.
+
+A complete **Claude Code Plugin** lives in [`claude-plugin/`](claude-plugin/) (`.claude-plugin/plugin.json`,
+`.mcp.json`, `hooks/hooks.json` PostToolUse index-sync hook, 6 slash commands under
+`commands/`, and `skills/ggs-engineering-brain/SKILL.md`). Load it directly in Claude Code
+with:
+
+```sh
+claude --plugin-dir ./claude-plugin
+```
+
+Or configure any MCP client (Claude Desktop, Cline, Cursor, …) with a stdio entry:
 
 ```json
 {
 	"mcpServers": {
-		"ggs": { "command": "ggs", "args": ["--mcp", "C:\\path\\to\\your\\repo"] }
+		"ggs": { "command": "ggs", "args": ["--mcp", "/path/to/your/repo"] }
 	}
 }
 ```

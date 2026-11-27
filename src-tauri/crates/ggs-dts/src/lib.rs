@@ -105,6 +105,9 @@ pub fn open_doc(path: &Path) -> Result<Arc<DtsDocument>, String> {
 
 /// One read for both formats: the magic says which.
 pub fn parse(bytes: &[u8], total_bytes: u64) -> Result<DtsDocument, String> {
+    if bytes.is_empty() {
+        return Err("the file is empty — not a .dtb blob, and not source text".to_string());
+    }
     if bytes.len() >= 4 && u32be(bytes, 0) == Some(FDT_MAGIC) {
         parse_dtb(bytes, total_bytes)
     } else {
@@ -145,7 +148,11 @@ fn parse_dtb(bytes: &[u8], total_bytes: u64) -> Result<DtsDocument, String> {
     if struct_off >= bytes.len() || strings_off > bytes.len() {
         return Err(".dtb header cites offsets past the file's end".to_string());
     }
-    let effective_end = totalsize.min(bytes.len());
+    // A header that lies about its own size is corrupt input, not a truncated file.
+    if totalsize > bytes.len() {
+        return Err(".dtb header cites offsets past the file's end".to_string());
+    }
+    let effective_end = totalsize;
     // The memory reservation block: u64 pairs, terminated by a 0,0 pair.
     let mut mem_reserve = Vec::new();
     let mut rsv = rsvmap_off;
@@ -637,6 +644,11 @@ pub fn parse_dts(src: &str, total_bytes: u64) -> Result<DtsDocument, String> {
     }
     for overlay in overlays {
         root.children.push(overlay);
+    }
+    // Tolerant top-level skipping (preprocessor leftovers, vendor directives) must not
+    // turn plain non-DTS text into an empty valid tree: nothing node-like at all is junk.
+    if root.children.is_empty() && root.properties.is_empty() {
+        return Err("no nodes found — is this device tree source?".to_string());
     }
     let (nodes, properties) = count_tree(&root);
     Ok(DtsDocument {

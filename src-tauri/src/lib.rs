@@ -820,6 +820,8 @@ mod desktop {
                 cmd_analysis::analysis_import_graph,
                 mcp::mcp_log,
                 mcp::mcp_tools,
+                mcp::mcp_drain_ui_commands,
+                mcp::mcp_publish_ui_state,
                 cmd_providers::claude_mcp_status,
                 cmd_search::hex_diff,
                 pty::pty_list,

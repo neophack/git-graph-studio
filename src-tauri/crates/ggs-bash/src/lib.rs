@@ -2519,10 +2519,14 @@ y z w
         let (_, err, status) = run_in(dir.path(), "printf 'a\\x80b' | iconv -f ascii -t utf-8");
         assert_eq!(status, 1);
         assert!(err.contains("illegal input sequence"), "{err}");
-        // cp936/GBK crosses through Win32's own converter now.
-        let (out, _, status) = run_in(dir.path(), "iconv -f utf-8 -t cp936 h.txt");
-        assert_eq!(status, 0);
-        assert_eq!(out, "hello");
+        // cp936/GBK crosses through Win32's own converter now — a Windows answer; the
+        // non-Windows codepage stub refuses the conversion.
+        #[cfg(windows)]
+        {
+            let (out, _, status) = run_in(dir.path(), "iconv -f utf-8 -t cp936 h.txt");
+            assert_eq!(status, 0);
+            assert_eq!(out, "hello");
+        }
         // The dos2unix family.
         run_in(dir.path(), "printf 'a\\r\\nb\\n' > crlf.txt");
         let (_, _, status) = run_in(dir.path(), "dos2unix crlf.txt");

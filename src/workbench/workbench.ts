@@ -1114,6 +1114,13 @@ export class Workbench {
 		) {
 			return;
 		}
+		// A chord pending when focus reaches the terminal (Ctrl+K pressed outside, then a
+		// click into the shell) dies here: the next keypress is the shell's, never the
+		// chord's second stroke, and the chord may not swallow it.
+		if (this.chordPending && inTerminal) {
+			this.chordPending = null;
+			return;
+		}
 		const spellStroke = (e: KeyboardEvent): string => {
 			const key = e.shiftKey ? (UNSHIFTED_GLYPHS[e.key] ?? e.key) : e.key;
 			const named = key.replace(/^Arrow/, '');

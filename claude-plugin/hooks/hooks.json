@@ -1,0 +1,16 @@
+{
+  "description": "Keep Git Graph Studio's symbol index and semantic diff checks synchronized with Claude Code edits.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const j=JSON.parse(d);const p=j.tool_input?.file_path||j.tool_input?.path||'';if(p){console.log(JSON.stringify({additionalContext:'File modified ('+p+'). Call mcp__ggs__index_refresh(paths:[...]) before running symbol_references, git_diff_impact, analysis_dead_code, or analysis_security so the index reflects your edit.'}));}}catch{}});\""
+          }
+        ]
+      }
+    ]
+  }
+}
